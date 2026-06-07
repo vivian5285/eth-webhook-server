@@ -1,49 +1,61 @@
 from flask import Flask, request, jsonify
 from binance_client import BinanceClient
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
 
-# 初始化币安客户端
-client = BinanceClient(
-    api_key=os.getenv("BINANCE_API_KEY"),
-    api_secret=os.getenv("BINANCE_API_SECRET")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
 )
+
+# 多账户配置（目前只有 main，后面可继续添加）
+ACCOUNTS = {
+    "main": {
+        "api_key": os.getenv("BINANCE_API_KEY"),
+        "api_secret": os.getenv("BINANCE_API_SECRET")
+    }
+}
+
+def get_client(account_name="main"):
+    if account_name not in ACCOUNTS:
+        account_name = "main"
+    acc = ACCOUNTS[account_name]
+    return BinanceClient(acc["api_key"], acc["api_secret"])
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"status": "error", "message": "No JSON data received"}), 400
+            return jsonify({"status": "error", "message": "No JSON data"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
+        account = data.get("account", "main")
 
-        print(f"[收到信号] {signal} | Symbol: {symbol}")
+        logging.info(f"[收到信号] {signal} | {symbol} | Account: {account}")
+
+        client = get_client(account)
 
         if signal == "OPEN_LONG":
             result = client.open_position(symbol, "LONG")
-            return jsonify(result)
-
         elif signal == "OPEN_SHORT":
             result = client.open_position(symbol, "SHORT")
-            return jsonify(result)
-
         elif signal == "CLOSE_ALL":
-            result = client.close_all(symbol)
-            return jsonify(result)
-
+            result = client.close_all_positions(symbol)
         else:
-            return jsonify({"status": "error", "message": f"Unknown signal: {signal}"}), 400
+            return jsonify({"status": "error", "message": "Unknown signal"}), 400
+
+        return jsonify(result)
 
     except Exception as e:
-        print(f"[Webhook处理异常] {str(e)}")
+        logging.error(f"[异常] {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000)
