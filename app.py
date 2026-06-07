@@ -3,6 +3,7 @@ from binance_client import BinanceClient
 import os
 import logging
 from dotenv import load_dotenv
+import re
 
 load_dotenv()
 
@@ -13,17 +14,33 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# 多账户配置（目前只有 main，后面可继续添加）
-ACCOUNTS = {
-    "main": {
-        "api_key": os.getenv("BINANCE_API_KEY"),
-        "api_secret": os.getenv("BINANCE_API_SECRET")
-    }
-}
+def load_accounts():
+    """从环境变量动态加载所有账户"""
+    accounts = {}
+    pattern = re.compile(r'^ACCOUNT_([A-Z0-9_]+)_API_KEY$')
+
+    for key, value in os.environ.items():
+        match = pattern.match(key)
+        if match:
+            account_name = match.group(1).lower()
+            secret_key = f"ACCOUNT_{match.group(1)}_API_SECRET"
+            secret = os.getenv(secret_key)
+            if secret:
+                accounts[account_name] = {
+                    "api_key": value,
+                    "api_secret": secret
+                }
+    return accounts
+
+ACCOUNTS = load_accounts()
 
 def get_client(account_name="main"):
+    account_name = account_name.lower()
     if account_name not in ACCOUNTS:
+        logging.warning(f"账户 [{account_name}] 不存在，使用默认 main 账户")
         account_name = "main"
+    if account_name not in ACCOUNTS:
+        raise ValueError("没有可用的账户配置")
     acc = ACCOUNTS[account_name]
     return BinanceClient(acc["api_key"], acc["api_secret"])
 
@@ -58,4 +75,5 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
+    logging.info(f"已加载账户: {list(ACCOUNTS.keys())}")
     app.run(host="0.0.0.0", port=5000)
