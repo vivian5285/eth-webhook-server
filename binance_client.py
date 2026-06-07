@@ -3,12 +3,13 @@ from binance.exceptions import BinanceAPIException
 import logging
 
 class BinanceClient:
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, risk_percent: float = 0.85, max_leverage: float = 3.0):
         self.client = Client(api_key, api_secret)
+        self.risk_percent = risk_percent
+        self.max_leverage = max_leverage
         self.logger = logging.getLogger(__name__)
 
     def get_account_balance(self) -> float:
-        """获取 USDT 可用余额"""
         try:
             balance = self.client.futures_account_balance()
             for b in balance:
@@ -20,7 +21,6 @@ class BinanceClient:
             return 0.0
 
     def get_current_position(self, symbol: str):
-        """查询当前持仓"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
@@ -37,30 +37,23 @@ class BinanceClient:
             self.logger.error(f"[持仓查询错误] {e}")
             return None
 
-    def calculate_position_size(self, symbol: str, risk_percent: float = 0.85, max_leverage: float = 3.0):
-        """根据风险比例计算开仓数量"""
+    def calculate_position_size(self, symbol: str):
         try:
             balance = self.get_account_balance()
             if balance <= 0:
                 return 0
-
             price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
-            risk_amount = balance * (risk_percent / 100)
-
-            # 简单止损距离（可后续替换为 ATR）
+            risk_amount = balance * (self.risk_percent / 100)
             stop_distance = price * 0.015
             raw_qty = risk_amount / stop_distance
-
-            max_by_leverage = (balance * max_leverage) / price
+            max_by_leverage = (balance * self.max_leverage) / price
             final_qty = min(raw_qty, max_by_leverage)
-
             return round(final_qty, 3)
         except Exception as e:
             self.logger.error(f"[仓位计算错误] {e}")
             return 0
 
     def open_position(self, symbol: str, side: str):
-        """开多或开空"""
         try:
             position = self.get_current_position(symbol)
             if position:
@@ -87,7 +80,6 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def close_all_positions(self, symbol: str):
-        """全平当前持仓"""
         try:
             position = self.get_current_position(symbol)
             if not position:
