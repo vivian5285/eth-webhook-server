@@ -1,0 +1,20 @@
+{
+  "main": {
+    "api_key": "你的主账户API_KEY",
+    "api_secret": "你的主账户API_SECRET",
+    "risk_percent": 0.85,
+    "max_leverage": 3.0
+  },
+  "client1": {
+    "api_key": "客户1的API_KEY",
+    "api_secret": "客户1的API_SECRET",
+    "risk_percent": 0.70,
+    "max_leverage": 2.5
+  },
+  "client2": {
+    "api_key": "客户2的API_KEY",
+    "api_secret": "客户2的API_SECRET",
+    "risk_percent": 0.80,
+    "max_leverage": 3.0
+  }
+}
