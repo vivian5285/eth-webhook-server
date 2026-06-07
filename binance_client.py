@@ -21,16 +21,17 @@ class BinanceClient:
             return 0.0
 
     def get_current_position(self, symbol: str):
+        """查询当前持仓（容错版）"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
-                if float(pos['positionAmt']) != 0:
+                if float(pos.get('positionAmt', 0)) != 0:
                     return {
-                        "symbol": pos['symbol'],
-                        "positionAmt": float(pos['positionAmt']),
-                        "entryPrice": float(pos['entryPrice']),
-                        "unRealizedProfit": float(pos['unRealizedProfit']),
-                        "leverage": float(pos['leverage'])
+                        "symbol": pos.get('symbol'),
+                        "positionAmt": float(pos.get('positionAmt', 0)),
+                        "entryPrice": float(pos.get('entryPrice', 0)),
+                        "unRealizedProfit": float(pos.get('unRealizedProfit', 0)),
+                        "leverage": float(pos.get('leverage', 0))
                     }
             return None
         except BinanceAPIException as e:
@@ -80,12 +81,16 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def close_all_positions(self, symbol: str):
+        """全平当前持仓（容错版）"""
         try:
             position = self.get_current_position(symbol)
             if not position:
                 return {"status": "skipped", "reason": "无持仓"}
 
             qty = abs(position['positionAmt'])
+            if qty == 0:
+                return {"status": "skipped", "reason": "仓位为0"}
+
             side = "SELL" if position['positionAmt'] > 0 else "BUY"
 
             order = self.client.futures_create_order(
