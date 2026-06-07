@@ -1,30 +1,26 @@
 from binance.client import Client
-from binance.enums import *
+from binance.exceptions import BinanceAPIException
 import math
+import logging
 
 class BinanceClient:
-    def __init__(self, api_key, api_secret):
+    def __init__(self, api_key: str, api_secret: str):
         self.client = Client(api_key, api_secret)
+        self.logger = logging.getLogger(__name__)
 
-    # ====================== 风控参数 ======================
-    RISK_CONFIG = {
-        "base_risk_percent": 0.90,        # 每笔基础风险比例
-        "max_position_percent": 30,       # 单笔最大持仓占账户权益比例
-        "max_leverage": 3.0,
-        "max_pyramiding": 1,              # 最多允许加仓1次
-    }
-
-    def get_account_balance(self):
-        """查询账户 USDT 余额"""
+    def get_account_balance(self) -> float:
+        """获取 USDT 余额"""
         try:
-            account = self.client.futures_account()
-            balance = float(account['totalWalletBalance'])
-            return balance
-        except Exception as e:
-            print(f"[余额查询错误] {str(e)}")
+            balance = self.client.futures_account_balance()
+            for b in balance:
+                if b['asset'] == 'USDT':
+                    return float(b['balance'])
+            return 0.0
+        except BinanceAPIException as e:
+            self.logger.error(f"[余额查询错误] {e}")
             return 0.0
 
-    def get_current_position(self, symbol):
+    def get_current_position(self, symbol: str):
         """查询当前持仓"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
@@ -38,98 +34,81 @@ class BinanceClient:
                         "leverage": float(pos['leverage'])
                     }
             return None
-        except Exception as e:
-            print(f"[持仓查询错误] {str(e)}")
+        except BinanceAPIException as e:
+            self.logger.error(f"[持仓查询错误] {e}")
             return None
 
-    def calculate_position_size(self, symbol, side, atr_value=None):
-        """
-        根据账户权益动态计算仓位
-        atr_value: 可选，如果传入ATR则使用，否则用固定止损比例
-        """
+    def calculate_position_size(self, symbol: str, side: str, risk_percent: float = 0.85, max_leverage: float = 3.0):
+        """根据风险比例计算仓位"""
         try:
             balance = self.get_account_balance()
             if balance <= 0:
                 return 0
 
-            # 风险金额
-            risk_amount = balance * (self.RISK_CONFIG["base_risk_percent"] / 100)
+            price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
+            risk_amount = balance * (risk_percent / 100)
 
-            # 止损距离（这里简化处理，实际可用ATR）
-            # 假设止损距离为当前价格的 1.5%
-            current_price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
-            stop_distance = current_price * 0.015   # 可根据需要改成 ATR
-
-            if stop_distance <= 0:
-                return 0
-
-            # 计算原始仓位
+            # 简单止损距离（可用 ATR 替换，这里先用固定比例）
+            stop_distance = price * 0.015   # 约 1.5% 止损距离
             raw_qty = risk_amount / stop_distance
 
-            # 最大允许仓位（按 max_position_percent 控制）
-            max_allowed_value = balance * (self.RISK_CONFIG["max_position_percent"] / 100)
-            max_qty = max_allowed_value / current_price
+            # 杠杆和仓位上限控制
+            max_by_leverage = (balance * max_leverage) / price
+            final_qty = min(raw_qty, max_by_leverage)
 
-            final_qty = min(raw_qty, max_qty)
-
-            # 保留合理精度（ETH 一般保留3位）
+            # 保留合理精度
             return round(final_qty, 3)
-
         except Exception as e:
-            print(f"[仓位计算错误] {str(e)}")
+            self.logger.error(f"[仓位计算错误] {e}")
             return 0
 
-    def check_can_open(self, symbol, side):
-        """
-        判断是否允许开仓（包含简单加仓控制）
-        """
-        position = self.get_current_position(symbol)
-        if not position:
-            return True, "首次开仓"
-
-        current_qty = position['positionAmt']
-        is_long = current_qty > 0
-
-        # 同方向判断是否允许加仓
-        if (side == "LONG" and is_long) or (side == "SHORT" and not is_long):
-            # 已持仓同方向，检查是否允许加仓
-            if self.RISK_CONFIG["max_pyramiding"] >= 1:
-                # 这里可以再加条件：是否盈利 + 趋势强势
-                return True, "允许加仓（第2次）"
-            else:
-                return False, "已持仓且不允许加仓"
-
-        # 反方向持仓 → 不允许直接开反向（建议先平再开）
-        return False, "已有反方向持仓，建议先平仓"
-
-    def open_position(self, symbol, side):
-        """
-        带风控的开仓方法
-        side: "LONG" 或 "SHORT"
-        """
-        # 1. 风控检查
-        can_open, reason = self.check_can_open(symbol, side)
-        if not can_open:
-            print(f"[风控拦截] {symbol} {side} 开仓被拒绝: {reason}")
-            return {"status": "blocked", "reason": reason}
-
-        # 2. 计算仓位
-        qty = self.calculate_position_size(symbol, side)
-        if qty <= 0:
-            print(f"[风控拦截] 计算出的仓位为0，无法下单")
-            return {"status": "blocked", "reason": "仓位计算为0"}
-
-        # 3. 下单
+    def open_position(self, symbol: str, side: str):
+        """开多或开空"""
         try:
-            order_side = SIDE_BUY if side == "LONG" else SIDE_SELL
+            position = self.get_current_position(symbol)
+            if position:
+                self.logger.warning(f"[已有持仓] {symbol}，跳过开仓")
+                return {"status": "skipped", "reason": "已有持仓"}
+
+            qty = self.calculate_position_size(symbol, side)
+            if qty <= 0:
+                return {"status": "error", "message": "仓位计算为0"}
+
+            order_side = "BUY" if side == "LONG" else "SELL"
             order = self.client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty
+                type="MARKET",
+                quantity=qty,
+                reduceOnly=False
             )
-            print(f"[开仓成功] {symbol} {side} | 数量: {qty}")
+            self.logger.info(f"[开仓成功] {side} {symbol} Qty: {qty}")
             return {"status": "success", "order": order, "qty": qty}
-        except Exception as e:
-            print(f"[开仓失败] {str(e)}")
+
+        except BinanceAPIException as e:
+            self.logger.error(f"[开仓失败] {e}")
+            return {"status": "error", "message": str(e)}
+
+    def close_all_positions(self, symbol: str):
+        """全平当前持仓"""
+        try:
+            position = self.get_current_position(symbol)
+            if not position:
+                return {"status": "skipped", "reason": "无持仓"}
+
+            qty = abs(position['positionAmt'])
+            side = "SELL" if position['positionAmt'] > 0 else "BUY"
+
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty,
+                reduceOnly=True
+            )
+            self.logger.info(f"[全平成功] {symbol}")
+            return {"status": "success", "order": order}
+
+        except BinanceAPIException as e:
+            self.logger.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
