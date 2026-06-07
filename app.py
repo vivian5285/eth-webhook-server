@@ -2,8 +2,8 @@ from flask import Flask, request, jsonify
 from binance_client import BinanceClient
 import os
 import logging
-from dotenv import load_dotenv
 import re
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -37,10 +37,12 @@ ACCOUNTS = load_accounts()
 def get_client(account_name="main"):
     account_name = account_name.lower()
     if account_name not in ACCOUNTS:
-        logging.warning(f"账户 [{account_name}] 不存在，使用默认 main 账户")
+        logging.warning(f"账户 [{account_name}] 不存在，尝试使用 main 账户")
         account_name = "main"
+
     if account_name not in ACCOUNTS:
-        raise ValueError("没有可用的账户配置")
+        raise ValueError("没有可用的账户配置，请检查 .env 文件")
+
     acc = ACCOUNTS[account_name]
     return BinanceClient(acc["api_key"], acc["api_secret"])
 
@@ -49,13 +51,13 @@ def webhook():
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"status": "error", "message": "No JSON data"}), 400
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
 
-        logging.info(f"[收到信号] {signal} | {symbol} | Account: {account}")
+        logging.info(f"[收到信号] {signal} | Symbol: {symbol} | Account: {account}")
 
         client = get_client(account)
 
@@ -75,5 +77,5 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    logging.info(f"已加载账户: {list(ACCOUNTS.keys())}")
+    logging.info(f"已加载账户列表: {list(ACCOUNTS.keys())}")
     app.run(host="0.0.0.0", port=5000)
