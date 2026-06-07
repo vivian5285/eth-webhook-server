@@ -1,6 +1,5 @@
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-import math
 import logging
 
 class BinanceClient:
@@ -9,7 +8,7 @@ class BinanceClient:
         self.logger = logging.getLogger(__name__)
 
     def get_account_balance(self) -> float:
-        """获取 USDT 余额"""
+        """获取 USDT 可用余额"""
         try:
             balance = self.client.futures_account_balance()
             for b in balance:
@@ -38,8 +37,8 @@ class BinanceClient:
             self.logger.error(f"[持仓查询错误] {e}")
             return None
 
-    def calculate_position_size(self, symbol: str, side: str, risk_percent: float = 0.85, max_leverage: float = 3.0):
-        """根据风险比例计算仓位"""
+    def calculate_position_size(self, symbol: str, risk_percent: float = 0.85, max_leverage: float = 3.0):
+        """根据风险比例计算开仓数量"""
         try:
             balance = self.get_account_balance()
             if balance <= 0:
@@ -48,15 +47,13 @@ class BinanceClient:
             price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
             risk_amount = balance * (risk_percent / 100)
 
-            # 简单止损距离（可用 ATR 替换，这里先用固定比例）
-            stop_distance = price * 0.015   # 约 1.5% 止损距离
+            # 简单止损距离（可后续替换为 ATR）
+            stop_distance = price * 0.015
             raw_qty = risk_amount / stop_distance
 
-            # 杠杆和仓位上限控制
             max_by_leverage = (balance * max_leverage) / price
             final_qty = min(raw_qty, max_by_leverage)
 
-            # 保留合理精度
             return round(final_qty, 3)
         except Exception as e:
             self.logger.error(f"[仓位计算错误] {e}")
@@ -67,10 +64,10 @@ class BinanceClient:
         try:
             position = self.get_current_position(symbol)
             if position:
-                self.logger.warning(f"[已有持仓] {symbol}，跳过开仓")
+                self.logger.warning(f"[跳过开仓] {symbol} 已有持仓")
                 return {"status": "skipped", "reason": "已有持仓"}
 
-            qty = self.calculate_position_size(symbol, side)
+            qty = self.calculate_position_size(symbol)
             if qty <= 0:
                 return {"status": "error", "message": "仓位计算为0"}
 
