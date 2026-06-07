@@ -1,36 +1,44 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import os
-from binance.client import Client
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)  # 允许跨域请求，方便测试
 
-client = Client(
-    os.getenv("BINANCE_API_KEY"),
-    os.getenv("BINANCE_API_SECRET")
-)
+# 获取 Railway 分配的端口，没有则默认 5000
+PORT = int(os.environ.get("PORT", 5000))
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error", "message": "No JSON received"}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
 
-    signal = data.get("signal")
-    symbol = data.get("symbol", "ETHUSDT")
+        signal = data.get("signal")
+        symbol = data.get("symbol", "ETHUSDT")
 
-    print(f"收到信号: {signal}")
+        print(f"[收到信号] {signal} | Symbol: {symbol}")
 
-    if signal == "OPEN_LONG":
-        return jsonify({"status": "success", "action": "OPEN_LONG", "symbol": symbol})
-    elif signal == "OPEN_SHORT":
-        return jsonify({"status": "success", "action": "OPEN_SHORT", "symbol": symbol})
-    elif signal == "CLOSE_ALL":
-        return jsonify({"status": "success", "action": "CLOSE_ALL", "symbol": symbol})
-    else:
-        return jsonify({"status": "error", "message": "Unknown signal"}), 400
+        if signal in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
+            # 这里后面会接入真实交易逻辑
+            return jsonify({
+                "status": "success",
+                "signal": signal,
+                "symbol": symbol,
+                "message": "信号已接收（测试模式）"
+            })
+        else:
+            return jsonify({"status": "error", "message": "Unknown signal"}), 400
+
+    except Exception as e:
+        print(f"[错误] {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    print(f"服务器启动中，监听端口: {PORT}")
+    app.run(host="0.0.0.0", port=PORT)
