@@ -1,22 +1,40 @@
 from flask import Flask, request, jsonify
 from binance_client import BinanceClient
 import os
-from dotenv import load_dotenv
+import json
 import logging
+from dotenv import load_dotenv
 
 load_dotenv()
-
 app = Flask(__name__)
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+def load_accounts():
+    try:
+        with open("accounts.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
 
-if not API_KEY or not API_SECRET:
-    raise ValueError("请在 .env 中配置 BINANCE_API_KEY 和 BINANCE_API_SECRET")
+ACCOUNTS = load_accounts()
 
-client = BinanceClient(API_KEY, API_SECRET)
+def get_client(account_name="main"):
+    account_name = account_name.lower()
+    if account_name in ACCOUNTS:
+        acc = ACCOUNTS[account_name]
+        return BinanceClient(
+            api_key=acc["api_key"],
+            api_secret=acc["api_secret"],
+            risk_percent=acc.get("risk_percent", 0.85),
+            max_leverage=acc.get("max_leverage", 3.0),
+            atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
+            max_position_value_usdt=acc.get("max_position_value_usdt", 5000)
+        )
+    # 单账户兜底
+    return BinanceClient(
+        api_key=os.getenv("BINANCE_API_KEY"),
+        api_secret=os.getenv("BINANCE_API_SECRET")
+    )
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -27,13 +45,17 @@ def webhook():
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
+        account = data.get("account", "main")
+        atr_value = data.get("atr")   # 可选
 
-        logging.info(f"[收到信号] {signal} | {symbol}")
+        logging.info(f"[收到信号] {signal} | {symbol} | Account={account} | ATR={atr_value}")
+
+        client = get_client(account)
 
         if signal == "OPEN_LONG":
-            result = client.open_position(symbol, "LONG")
+            result = client.open_position(symbol, "LONG", atr_value=atr_value)
         elif signal == "OPEN_SHORT":
-            result = client.open_position(symbol, "SHORT")
+            result = client.open_position(symbol, "SHORT", atr_value=atr_value)
         elif signal == "CLOSE_ALL":
             result = client.close_all_positions(symbol)
         else:
