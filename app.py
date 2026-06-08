@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from binance_client import BinanceClient
@@ -21,7 +22,9 @@ logging.basicConfig(
 )
 
 RECENT_SIGNALS = {}
-SIGNAL_DEDUP_SECONDS = 5
+SIGNAL_DEDUP_SECONDS = 10          # 去重时间窗口延长到 10 秒
+MAX_RETRY = 3                      # 最大重试次数
+RETRY_DELAY = 2                    # 重试间隔（秒）
 
 def load_accounts():
     try:
@@ -63,8 +66,21 @@ def is_duplicate_signal(signal: str, symbol: str) -> bool:
     RECENT_SIGNALS[key] = now
     return False
 
+def execute_with_retry(func, *args, **kwargs):
+    """带重试机制的执行函数"""
+    last_exception = None
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            logging.warning(f"[重试 {attempt}/{MAX_RETRY}] 执行失败: {str(e)}")
+            if attempt < MAX_RETRY:
+                time.sleep(RETRY_DELAY)
+    logging.error(f"[重试失败] 已达最大重试次数: {str(last_exception)}")
+    return {"status": "error", "message": str(last_exception)}
+
 def process_signal(data):
-    """异步处理信号"""
     try:
         raw_signal = data.get("signal")
         raw_symbol = data.get("symbol", "ETHUSDT")
@@ -83,9 +99,9 @@ def process_signal(data):
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-            result = client.smart_open_position(symbol, side)
+            result = execute_with_retry(client.smart_open_position, symbol, side)
         elif signal == "CLOSE_ALL":
-            result = client.close_all_positions(symbol)
+            result = execute_with_retry(client.close_all_positions, symbol)
         else:
             logging.warning(f"[未知信号] {signal}")
             return
@@ -102,7 +118,7 @@ def webhook():
         if not data:
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
-        # 立即返回 200，让 TradingView 认为投递成功
+        # 立即返回 200
         threading.Thread(target=process_signal, args=(data,)).start()
         return jsonify({"status": "accepted"}), 200
 
