@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 import os
 import json
 import logging
+import time
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from binance_client import BinanceClient
 
@@ -9,7 +11,18 @@ load_dotenv()
 
 app = Flask(__name__)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("webhook.log"),
+        logging.StreamHandler()
+    ]
+)
+
+# 简单内存去重（可后续改成 Redis）
+RECENT_SIGNALS = {}          # {signal_key: timestamp}
+SIGNAL_DEDUP_SECONDS = 5     # 同一信号 5 秒内去重
 
 def load_accounts():
     try:
@@ -34,41 +47,60 @@ def get_client(account_name="main"):
             max_daily_loss_percent=acc.get("max_daily_loss_percent", 5.0),
             max_consecutive_loss=acc.get("max_consecutive_loss", 3)
         )
-    # 单账户兜底
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
         api_secret=os.getenv("BINANCE_API_SECRET")
     )
+
+def normalize_symbol(symbol: str) -> str:
+    """统一 symbol 格式"""
+    if symbol.endswith('.P'):
+        return symbol[:-2]
+    return symbol.upper()
+
+def is_duplicate_signal(signal: str, symbol: str) -> bool:
+    key = f"{signal}_{symbol}"
+    now = datetime.now()
+    if key in RECENT_SIGNALS:
+        if now - RECENT_SIGNALS[key] < timedelta(seconds=SIGNAL_DEDUP_SECONDS):
+            return True
+    RECENT_SIGNALS[key] = now
+    return False
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json(silent=True)
         if not data:
-            logging.warning("[Webhook] 收到非JSON或空请求")
+            logging.warning("[Webhook] 收到非JSON请求")
             return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
-        signal = data.get("signal")
-        symbol = data.get("symbol", "ETHUSDT")
+        raw_signal = data.get("signal")
+        raw_symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
 
-        logging.info(f"[收到信号] signal={signal}, symbol={symbol}, account={account}")
+        signal = raw_signal
+        symbol = normalize_symbol(raw_symbol)
 
-        if not signal:
-            return jsonify({"status": "error", "message": "Missing signal"}), 400
+        logging.info(f"[收到信号] {signal} | {symbol} | account={account}")
+
+        # 简单去重
+        if is_duplicate_signal(signal, symbol):
+            logging.info(f"[去重跳过] {signal} {symbol}")
+            return jsonify({"status": "skipped", "reason": "duplicate signal"}), 200
 
         client = get_client(account)
 
-        if signal == "OPEN_LONG":
-            result = client.smart_open_position(symbol, "LONG")
-        elif signal == "OPEN_SHORT":
-            result = client.smart_open_position(symbol, "SHORT")
+        if signal in ["OPEN_LONG", "OPEN_SHORT"]:
+            side = "LONG" if signal == "OPEN_LONG" else "SHORT"
+            result = client.smart_open_position(symbol, side)
         elif signal == "CLOSE_ALL":
             result = client.close_all_positions(symbol)
         else:
             logging.warning(f"[未知信号] {signal}")
             return jsonify({"status": "error", "message": "Unknown signal"}), 400
 
+        logging.info(f"[执行结果] {result}")
         return jsonify(result)
 
     except Exception as e:
