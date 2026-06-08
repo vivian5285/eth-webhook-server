@@ -30,25 +30,37 @@ def get_client(account_name="main"):
             atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
             max_position_value_usdt=acc.get("max_position_value_usdt", 5000)
         )
-    # 单账户兜底
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
         api_secret=os.getenv("BINANCE_API_SECRET")
     )
 
+def normalize_symbol(symbol: str) -> str:
+    """处理 ETHUSDT.P 这类带后缀的 symbol"""
+    if symbol.endswith(".P"):
+        return symbol.replace(".P", "")
+    return symbol
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json()
+        # 加强版 JSON 解析（兼容 TradingView 各种 Content-Type）
+        data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+            data = request.form.to_dict() or {}
+
+        logging.info(f"[收到原始数据] {data}")
+
+        if not data:
+            return jsonify({"status": "error", "message": "No data received"}), 400
 
         signal = data.get("signal")
-        symbol = data.get("symbol", "ETHUSDT")
+        raw_symbol = data.get("symbol", "ETHUSDT")
+        symbol = normalize_symbol(raw_symbol)          # ← 关键修复
         account = data.get("account", "main")
-        atr_value = data.get("atr")   # 可选
+        atr_value = data.get("atr")
 
-        logging.info(f"[收到信号] {signal} | {symbol} | Account={account} | ATR={atr_value}")
+        logging.info(f"[解析信号] {signal} | {symbol} | account={account}")
 
         client = get_client(account)
 
@@ -59,12 +71,13 @@ def webhook():
         elif signal == "CLOSE_ALL":
             result = client.close_all_positions(symbol)
         else:
-            return jsonify({"status": "error", "message": "Unknown signal"}), 400
+            logging.warning(f"[未知信号类型] {signal}")
+            return jsonify({"status": "error", "message": f"Unknown signal: {signal}"}), 400
 
         return jsonify(result)
 
     except Exception as e:
-        logging.error(f"[异常] {str(e)}")
+        logging.error(f"[严重异常] {str(e)}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
