@@ -2,6 +2,11 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import logging
 from datetime import datetime, date
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -19,119 +24,44 @@ class BinanceClient:
         self.consecutive_losses = 0
         self.last_trade_date = None
 
-    # ==================== 工具方法 ====================
-    def get_mark_price(self, symbol: str):
-        try:
-            ticker = self.client.futures_mark_price(symbol=symbol)
-            return float(ticker['markPrice'])
-        except Exception as e:
-            logging.error(f"[获取标记价格失败] {e}")
-            return 1680.0
+        # 钉钉加签密钥（已为你填入）
+        self.dingtalk_secret = "SEC17a8188a34e2401dbf0cb29344aa32ddbdaf9db9b0da5b5c328d52f4a55dd91c"
+        self.dingtalk_access_token = "fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
 
-    def get_account_equity(self):
+    # ==================== 钉钉加签发送 ====================
+    def _send_dingtalk(self, message: str):
         try:
-            account = self.client.futures_account()
-            return float(account['totalWalletBalance'])
-        except Exception as e:
-            logging.error(f"[获取账户权益失败] {e}")
-            return 0.0
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f"{timestamp}\n{self.dingtalk_secret}"
+            hmac_code = hmac.new(
+                self.dingtalk_secret.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                digestmod=hashlib.sha256
+            ).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
 
-    def get_current_position(self, symbol: str):
-        try:
-            positions = self.client.futures_position_information(symbol=symbol)
-            for p in positions:
-                amt = float(p['positionAmt'])
-                if amt != 0:
-                    return {
-                        "side": "LONG" if amt > 0 else "SHORT",
-                        "qty": abs(amt),
-                        "entry_price": float(p['entryPrice'])
-                    }
-            return None
-        except Exception as e:
-            logging.error(f"[获取持仓失败] {e}")
-            return None
-
-    # ==================== 风控方法 ====================
-    def get_today_realized_pnl(self, symbol: str = None):
-        try:
-            now = datetime.utcnow()
-            start_time = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-            income = self.client.futures_income_history(
-                symbol=symbol, incomeType="REALIZED_PNL", startTime=start_time, limit=1000
+            url = (
+                f"https://oapi.dingtalk.com/robot/send?"
+                f"access_token={self.dingtalk_access_token}"
+                f"&timestamp={timestamp}&sign={sign}"
             )
-            return sum(float(i['income']) for i in income)
+
+            data = {
+                "msgtype": "text",
+                "text": {"content": f"[交易风控]\n{message}"}
+            }
+
+            import requests
+            resp = requests.post(url, json=data, timeout=5)
+            if resp.status_code == 200 and resp.json().get("errcode") == 0:
+                logging.info("[账户报表] 已成功发送到钉钉（加签模式）")
+            else:
+                logging.error(f"[发送钉钉失败] {resp.text}")
+
         except Exception as e:
-            logging.error(f"[获取今日已实现盈亏失败] {e}")
-            return 0.0
+            logging.error(f"[发送钉钉异常] {e}", exc_info=True)
 
-    def check_daily_loss_limit(self):
-        today_pnl = self.get_today_realized_pnl()
-        equity = self.get_account_equity()
-        if equity <= 0:
-            return False
-        loss_ratio = abs(today_pnl) / equity * 100 if today_pnl < 0 else 0
-        if loss_ratio >= self.daily_loss_limit_percent:
-            logging.warning(f"[每日熔断触发] 今日亏损比例: {loss_ratio:.2f}%")
-            return False
-        return True
-
-    def check_consecutive_losses(self):
-        if self.consecutive_losses >= self.max_consecutive_losses:
-            logging.warning(f"[连续亏损保护触发] 已连续亏损 {self.consecutive_losses} 次")
-            return False
-        return True
-
-    def update_consecutive_losses(self, pnl: float):
-        today = date.today()
-        if self.last_trade_date != today:
-            self.consecutive_losses = 0
-            self.last_trade_date = today
-        if pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
-
-    def check_total_risk(self, symbol: str, side: str, new_qty: float) -> bool:
-        try:
-            equity = self.get_account_equity()
-            if equity <= 0:
-                logging.warning("[总风险检查] 无法获取权益")
-                return False
-
-            current = self.get_current_position(symbol)
-            current_value = 0
-            if current:
-                mark_price = self.get_mark_price(symbol)
-                current_value = current['qty'] * mark_price
-
-            mark_price = self.get_mark_price(symbol)
-            new_value = new_qty * mark_price
-            total_value = current_value + new_value
-
-            MAX_POSITION_RATIO = 0.30
-            MAX_LEVERAGE = 8.0
-
-            position_ratio = total_value / equity if equity > 0 else 0
-            total_leverage = total_value / equity if equity > 0 else 0
-
-            logging.info(f"[总风险检查] 总持仓价值={total_value:.2f}, 权益={equity:.2f}, "
-                         f"占比={position_ratio*100:.2f}%, 杠杆={total_leverage:.2f}x")
-
-            if position_ratio > MAX_POSITION_RATIO:
-                logging.warning(f"[总风险拒绝] 持仓价值占比过高: {position_ratio*100:.2f}%")
-                return False
-
-            if total_leverage > MAX_LEVERAGE:
-                logging.warning(f"[总风险拒绝] 总杠杆过高: {total_leverage:.2f}x")
-                return False
-
-            return True
-        except Exception as e:
-            logging.error(f"[总风险检查异常] {e}")
-            return False
-
-    # ==================== 账户报表（完整版） ====================
+    # ==================== 账户报表 ====================
     def get_account_report(self, symbol: str = "ETHUSDT"):
         try:
             equity = self.get_account_equity()
@@ -231,22 +161,120 @@ class BinanceClient:
 
             message = "\n".join(lines)
             self._send_dingtalk(message)
-            logging.info("[账户报表] 已成功发送到钉钉")
 
         except Exception as e:
             logging.error(f"[发送账户报表到钉钉异常] {e}", exc_info=True)
 
-    def _send_dingtalk(self, message: str):
-        import requests
-        DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
+    # ==================== 其他原有方法（保留） ====================
+    def get_mark_price(self, symbol: str):
         try:
-            data = {
-                "msgtype": "text",
-                "text": {"content": f"[交易风控]\n{message}"}
-            }
-            requests.post(DINGTALK_WEBHOOK, json=data, timeout=5)
+            ticker = self.client.futures_mark_price(symbol=symbol)
+            return float(ticker['markPrice'])
         except Exception as e:
-            logging.error(f"[发送钉钉失败] {e}")
+            logging.error(f"[获取标记价格失败] {e}")
+            return 1680.0
+
+    def get_account_equity(self):
+        try:
+            account = self.client.futures_account()
+            return float(account['totalWalletBalance'])
+        except Exception as e:
+            logging.error(f"[获取账户权益失败] {e}")
+            return 0.0
+
+    def get_current_position(self, symbol: str):
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            for p in positions:
+                amt = float(p['positionAmt'])
+                if amt != 0:
+                    return {
+                        "side": "LONG" if amt > 0 else "SHORT",
+                        "qty": abs(amt),
+                        "entry_price": float(p['entryPrice'])
+                    }
+            return None
+        except Exception as e:
+            logging.error(f"[获取持仓失败] {e}")
+            return None
+
+    def get_today_realized_pnl(self, symbol: str = None):
+        try:
+            now = datetime.utcnow()
+            start_time = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+            income = self.client.futures_income_history(
+                symbol=symbol, incomeType="REALIZED_PNL", startTime=start_time, limit=1000
+            )
+            return sum(float(i['income']) for i in income)
+        except Exception as e:
+            logging.error(f"[获取今日已实现盈亏失败] {e}")
+            return 0.0
+
+    def check_daily_loss_limit(self):
+        today_pnl = self.get_today_realized_pnl()
+        equity = self.get_account_equity()
+        if equity <= 0:
+            return False
+        loss_ratio = abs(today_pnl) / equity * 100 if today_pnl < 0 else 0
+        if loss_ratio >= self.daily_loss_limit_percent:
+            logging.warning(f"[每日熔断触发] 今日亏损比例: {loss_ratio:.2f}%")
+            return False
+        return True
+
+    def check_consecutive_losses(self):
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            logging.warning(f"[连续亏损保护触发] 已连续亏损 {self.consecutive_losses} 次")
+            return False
+        return True
+
+    def update_consecutive_losses(self, pnl: float):
+        today = date.today()
+        if self.last_trade_date != today:
+            self.consecutive_losses = 0
+            self.last_trade_date = today
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+    def check_total_risk(self, symbol: str, side: str, new_qty: float) -> bool:
+        try:
+            equity = self.get_account_equity()
+            if equity <= 0:
+                logging.warning("[总风险检查] 无法获取权益")
+                return False
+
+            current = self.get_current_position(symbol)
+            current_value = 0
+            if current:
+                mark_price = self.get_mark_price(symbol)
+                current_value = current['qty'] * mark_price
+
+            mark_price = self.get_mark_price(symbol)
+            new_value = new_qty * mark_price
+            total_value = current_value + new_value
+
+            MAX_POSITION_RATIO = 0.30
+            MAX_LEVERAGE = 8.0
+
+            position_ratio = total_value / equity if equity > 0 else 0
+            total_leverage = total_value / equity if equity > 0 else 0
+
+            logging.info(f"[总风险检查] 总持仓价值={total_value:.2f}, 权益={equity:.2f}, "
+                         f"占比={position_ratio*100:.2f}%, 杠杆={total_leverage:.2f}x")
+
+            if position_ratio > MAX_POSITION_RATIO:
+                logging.warning(f"[总风险拒绝] 持仓价值占比过高: {position_ratio*100:.2f}%")
+                return False
+
+            if total_leverage > MAX_LEVERAGE:
+                logging.warning(f"[总风险拒绝] 总杠杆过高: {total_leverage:.2f}x")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"[总风险检查异常] {e}")
+            return False
 
     # ==================== 智能开仓与平仓 ====================
     def smart_open_position(self, symbol: str, side: str, requested_qty: float = None,
