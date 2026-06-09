@@ -3,6 +3,7 @@ from binance_client import BinanceClient
 import os
 import json
 import logging
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -11,11 +12,15 @@ load_dotenv()
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+# ==================== 从环境变量读取钉钉地址 ====================
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
+
 def load_accounts():
     try:
         with open("accounts.json", "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception as e:
+        logging.error(f"加载 accounts.json 失败: {e}")
         return {}
 
 ACCOUNTS = load_accounts()
@@ -36,12 +41,18 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
+# ==================== 钉钉推送函数 ====================
 def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "", is_warning: bool = False):
+    if not DINGTALK_WEBHOOK:
+        logging.warning("未配置 DINGTALK_WEBHOOK，跳过钉钉推送")
+        return
+
     emoji = "🚨" if is_warning else "✅"
     try:
         report = client.get_account_report()
     except:
         report = ""
+
     msg = f"""**{emoji} {title}**
 
 **账户**：**{client.client_name}**
@@ -52,14 +63,31 @@ def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "",
 
 **📊 账户快照**
 {report}"""
-    logging.info(f"[钉钉] {title} - {content}")
 
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": title,
+            "text": msg
+        }
+    }
+
+    try:
+        resp = requests.post(DINGTALK_WEBHOOK, json=payload, timeout=5)
+        if resp.status_code == 200 and resp.json().get("errcode") == 0:
+            logging.info(f"[钉钉推送成功] {title}")
+        else:
+            logging.error(f"[钉钉推送失败] {resp.text}")
+    except Exception as e:
+        logging.error(f"[钉钉请求异常] {e}")
+
+# ==================== Webhook 主逻辑 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"status": "error"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
@@ -77,15 +105,13 @@ def webhook():
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             direction = "LONG" if signal == "OPEN_LONG" else "SHORT"
 
-            # === 反向持仓处理 ===
+            # 反向持仓处理
             if signal == "OPEN_LONG" and current_amt < 0:
-                # 当前持空 → 先全平再开多
                 logging.info(f"[反向处理] 当前持空，收到开多信号 → 先全平")
                 client.close_all_positions(symbol)
                 send_pretty_dingtalk(client, "反向全平", "当前持空 → 先平空再开多")
 
             elif signal == "OPEN_SHORT" and current_amt > 0:
-                # 当前持多 → 先全平再开空
                 logging.info(f"[反向处理] 当前持多，收到开空信号 → 先全平")
                 client.close_all_positions(symbol)
                 send_pretty_dingtalk(client, "反向全平", "当前持多 → 先平多再开空")
@@ -161,6 +187,7 @@ def webhook():
         logging.error(f"[Webhook异常] {e}", exc_info=True)
         return jsonify({"status": "error"}), 500
 
+# ==================== 启动服务 ====================
 if __name__ == '__main__':
     logging.info("ETH Webhook 服务已启动...")
     app.run(host='0.0.0.0', port=5000, debug=False)
