@@ -17,10 +17,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ==================== 配置 ====================
-ALLOWED_SIGNALS = {"CLOSE_ALL"}
-IGNORED_SIGNALS_LOG = True
-
 def load_accounts():
     try:
         with open("accounts.json", "r", encoding="utf-8") as f:
@@ -49,7 +45,7 @@ def get_client(account_name="main"):
         api_secret=os.getenv("BINANCE_API_SECRET")
     )
 
-# ==================== 美化钉钉通知（带颜色强调 + 关键数据高亮） ====================
+# ==================== 美化钉钉通知 ====================
 def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
     try:
         report = client.get_account_report()
@@ -83,21 +79,41 @@ def webhook():
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
 
-        # ========== 信号过滤 ==========
-        if signal not in ALLOWED_SIGNALS:
-            if IGNORED_SIGNALS_LOG:
-                logging.info(f"[忽略信号] signal={signal} | symbol={symbol} | account={account}")
-            return jsonify({
-                "status": "ignored",
-                "signal": signal,
-                "reason": "只处理 CLOSE_ALL"
-            }), 200
-        # =================================
-
         client = get_client(account)
-        logging.info(f"[收到信号] {signal} | {symbol} | {account}")
 
+        # ==================== TP1 / TP2 部分止盈信号（只记录，不操作） ====================
+        if signal in ["TP1_HIT", "TP2_HIT", "TP_PARTIAL"]:
+            logging.info(f"[TP部分止盈记录] {signal} | {symbol} | {account}")
+            # 可选：是否发钉钉通知（目前先关闭，保持干净）
+            # send_pretty_dingtalk(client, "TP部分止盈", f"触发 {signal}", f"**币种**：**{symbol}**")
+            return jsonify({
+                "status": "recorded",
+                "signal": signal,
+                "message": "TP1/TP2 已记录，不执行实盘操作"
+            }), 200
+
+        # ==================== CLOSE_ALL（TP3 + 反转保护） ====================
         if signal == "CLOSE_ALL":
+            # 先检查实盘是否有持仓
+            position = client.get_current_position(symbol)
+            position_amt = float(position.get('positionAmt', 0)) if position else 0
+
+            if position_amt == 0:
+                logging.info(f"[跳过全平] {symbol} 当前无持仓")
+                send_pretty_dingtalk(
+                    client=client,
+                    title="跳过全平",
+                    action="当前无持仓，无需操作",
+                    extra_info=f"**币种**：**{symbol}**"
+                )
+                return jsonify({
+                    "status": "skipped",
+                    "reason": "当前无持仓",
+                    "symbol": symbol
+                }), 200
+
+            # 有持仓才执行全平
+            logging.info(f"[执行全平] {symbol} | 持仓数量: {position_amt}")
             result = client.close_all_positions(symbol)
 
             send_pretty_dingtalk(
@@ -114,7 +130,13 @@ def webhook():
                 "result": result
             })
 
-        return jsonify({"status": "error", "message": "Unexpected signal"}), 400
+        # 其他未知信号
+        logging.info(f"[未知信号] signal={signal} | symbol={symbol}")
+        return jsonify({
+            "status": "ignored",
+            "signal": signal,
+            "reason": "未识别的信号"
+        }), 200
 
     except Exception as e:
         logging.error(f"[Webhook异常] {str(e)}", exc_info=True)
