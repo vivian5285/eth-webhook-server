@@ -47,10 +47,8 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = "", 
         report = client.get_account_report()
         if is_warning:
             emoji = "🚨"
-            color_note = "**⚠️ 风控告警**"
         else:
             emoji = "✅" if "完成" in action or "成功" in action else "📝"
-            color_note = ""
 
         msg = f"""**{emoji} {title}**
 
@@ -59,8 +57,6 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = "", 
 **时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 {extra_info}
-
-{color_note}
 
 **📊 账户实时快照**
 {report}
@@ -74,7 +70,6 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = "", 
 def daily_report_scheduler():
     while True:
         now = datetime.now()
-        # 每天 08:00 和 20:00 推送
         if now.hour in [8, 20] and now.minute == 0:
             try:
                 client = get_client("main")
@@ -92,9 +87,8 @@ def daily_report_scheduler():
                 logging.info("[每日日报] 已推送")
             except Exception as e:
                 logging.error(f"每日日报推送失败: {e}")
-        time.sleep(60)  # 每分钟检查一次
+        time.sleep(60)
 
-# 启动日报线程
 threading.Thread(target=daily_report_scheduler, daemon=True).start()
 
 @app.route('/webhook', methods=['POST'])
@@ -111,12 +105,10 @@ def webhook():
 
         client = get_client(account)
 
-        # TP_PARTIAL 只记录
         if signal == "TP_PARTIAL":
             logging.info(f"[TP部分止盈记录] {data.get('reason')} | {symbol}")
             return jsonify({"status": "recorded"}), 200
 
-        # 开仓（带风控）
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "LONG" if signal == "OPEN_LONG" else "SHORT"
             result = client.smart_open_position(symbol, side, atr_value)
@@ -124,18 +116,24 @@ def webhook():
             if result.get("status") == "success":
                 send_pretty_dingtalk(client, "开仓成功", f"开{'多' if side == 'LONG' else '空'}")
             else:
-                # 风控拦截时强制发钉钉告警
+                reason = result.get('reason', '未知原因')
+                warning_msg = f"""**拒绝原因**：{reason}
+
+**当前整体风险占比**：{client._get_total_risk_ratio()*100:.2f}%
+**风控阈值**：{client.max_total_margin_ratio*100:.2f}%
+
+**建议**：请等待仓位风险下降后再尝试开新仓。"""
+
                 send_pretty_dingtalk(
                     client,
-                    "风控拦截",
+                    f"🚨 风控拦截 - {reason}",
                     f"{side} 开仓被拒绝",
-                    extra_info=f"**拒绝原因**：{result.get('reason', '未知')}",
+                    extra_info=warning_msg,
                     is_warning=True
                 )
 
             return jsonify({"status": result.get("status"), "action": signal, "result": result}), 200
 
-        # 全平
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
             if float(position.get('positionAmt', 0)) == 0:
