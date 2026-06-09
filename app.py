@@ -3,6 +3,8 @@ from binance_client import BinanceClient
 import os
 import json
 import logging
+import threading
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -40,10 +42,16 @@ def get_client(account_name="main"):
         api_secret=os.getenv("BINANCE_API_SECRET")
     )
 
-def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
+def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = "", is_warning: bool = False):
     try:
         report = client.get_account_report()
-        emoji = "✅" if "完成" in action or "成功" in action else "⚠️"
+        if is_warning:
+            emoji = "🚨"
+            color_note = "**⚠️ 风控告警**"
+        else:
+            emoji = "✅" if "完成" in action or "成功" in action else "📝"
+            color_note = ""
+
         msg = f"""**{emoji} {title}**
 
 **账户**：**{client.client_name}**
@@ -52,6 +60,8 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
 
 {extra_info}
 
+{color_note}
+
 **📊 账户实时快照**
 {report}
 
@@ -59,6 +69,33 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
         client._send_dingtalk(msg)
     except Exception as e:
         logging.error(f"钉钉发送失败: {e}")
+
+# ==================== 每日固定时间推送完整日报 ====================
+def daily_report_scheduler():
+    while True:
+        now = datetime.now()
+        # 每天 08:00 和 20:00 推送
+        if now.hour in [8, 20] and now.minute == 0:
+            try:
+                client = get_client("main")
+                report = client.get_account_report()
+                msg = f"""**📅 每日账户日报**
+
+**账户**：**{client.client_name}**
+**推送时间**：{now.strftime('%Y-%m-%d %H:%M')}
+
+**📊 账户完整快照**
+{report}
+
+祝交易顺利！"""
+                client._send_dingtalk(msg)
+                logging.info("[每日日报] 已推送")
+            except Exception as e:
+                logging.error(f"每日日报推送失败: {e}")
+        time.sleep(60)  # 每分钟检查一次
+
+# 启动日报线程
+threading.Thread(target=daily_report_scheduler, daemon=True).start()
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -74,10 +111,12 @@ def webhook():
 
         client = get_client(account)
 
+        # TP_PARTIAL 只记录
         if signal == "TP_PARTIAL":
             logging.info(f"[TP部分止盈记录] {data.get('reason')} | {symbol}")
             return jsonify({"status": "recorded"}), 200
 
+        # 开仓（带风控）
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "LONG" if signal == "OPEN_LONG" else "SHORT"
             result = client.smart_open_position(symbol, side, atr_value)
@@ -85,10 +124,18 @@ def webhook():
             if result.get("status") == "success":
                 send_pretty_dingtalk(client, "开仓成功", f"开{'多' if side == 'LONG' else '空'}")
             else:
-                send_pretty_dingtalk(client, "开仓被拦截", f"{side} | {result.get('reason', '')}")
+                # 风控拦截时强制发钉钉告警
+                send_pretty_dingtalk(
+                    client,
+                    "风控拦截",
+                    f"{side} 开仓被拒绝",
+                    extra_info=f"**拒绝原因**：{result.get('reason', '未知')}",
+                    is_warning=True
+                )
 
             return jsonify({"status": result.get("status"), "action": signal, "result": result}), 200
 
+        # 全平
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
             if float(position.get('positionAmt', 0)) == 0:
