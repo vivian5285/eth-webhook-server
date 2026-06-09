@@ -44,7 +44,7 @@ class BinanceClient:
     def calculate_position_size(self, stop_distance: float, symbol: str = "ETHUSDT"):
         """
         根据账户权益分层风控（激进版）：
-        - < 3000U     : 单笔风险约 4.5%（帮助小资金快速滚雪球）
+        - < 3000U     : 单笔风险约 7%（小资金快速滚雪球）
         - 3000~10000U : 单笔风险约 2.0%
         - > 10000U    : 单笔风险约 1.0%（保守）
         """
@@ -54,9 +54,9 @@ class BinanceClient:
 
         # ==================== 分层风险参数 ====================
         if equity < 3000:
-            # 小资金：激进
-            effective_risk_percent = 4.5
-            max_position_value = equity * 7.0     # 允许较高杠杆
+            # 小资金：激进（约7%风险）
+            effective_risk_percent = 7.0
+            max_position_value = equity * 8.0     # 允许更高杠杆
 
         elif equity < 10000:
             # 中等资金
