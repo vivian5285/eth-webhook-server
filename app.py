@@ -64,17 +64,15 @@ def webhook():
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
         reason = data.get("reason", "")
-        entry_price = data.get("entry_price")
-        atr_value = data.get("atr")
 
         client = get_client(account)
 
-        # 开仓（带 entry_price）
+        # 开仓
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             direction = "LONG" if signal == "OPEN_LONG" else "SHORT"
 
-            atr = float(atr_value) if atr_value else 50.0
+            atr = float(data.get("atr", 50))
             stop_distance = atr * 0.92
             qty = client.calculate_position_size(stop_distance, symbol)
 
@@ -84,9 +82,8 @@ def webhook():
 
             try:
                 order = client.client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
-                extra = f"策略开仓参考价: {entry_price}" if entry_price else ""
-                send_pretty_dingtalk(client, f"{direction} 开仓成功", f"下单数量: {qty}", extra)
-                return jsonify({"status": "success", "action": signal, "qty": qty, "entry_price": entry_price}), 200
+                send_pretty_dingtalk(client, f"{direction} 开仓成功", f"下单数量: {qty}")
+                return jsonify({"status": "success", "action": signal, "qty": qty}), 200
             except Exception as e:
                 send_pretty_dingtalk(client, f"{direction} 开仓失败", str(e), is_warning=True)
                 return jsonify({"status": "error"}), 200
@@ -97,7 +94,7 @@ def webhook():
                 return jsonify({"status": "ignored"}), 200
             result = client.close_partial_position(symbol, 0.30)
             if result.get("status") == "success":
-                send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", f"平仓 30%")
+                send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", "平仓 30%")
             return jsonify({"status": result.get("status")}), 200
 
         # 全平
@@ -108,7 +105,7 @@ def webhook():
                     send_pretty_dingtalk(client, "TP3 最终全平", "已全平剩余仓位")
                 return jsonify({"status": "success"}), 200
 
-            # 其他全平（反转等）—— 空仓则静默跳过
+            # 反转等其他全平 —— 空仓则静默跳过
             position = client.get_current_position(symbol)
             if float(position.get("positionAmt", 0)) == 0:
                 logging.info(f"[静默跳过] {symbol} 当前无持仓，忽略 reason={reason}")
