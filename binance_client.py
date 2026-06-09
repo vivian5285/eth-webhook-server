@@ -80,7 +80,6 @@ class BinanceClient:
                 "liquidation_price": 0.0
             }
 
-            # 获取账户余额信息
             try:
                 account = self.client.futures_account()
                 report["wallet_balance"] = round(float(account.get('totalWalletBalance', 0)), 2)
@@ -163,8 +162,9 @@ class BinanceClient:
         self._send_dingtalk(message)
 
     def _send_dingtalk(self, message: str):
-        """发送钉钉消息（请修改成你自己的 webhook 地址）"""
+        """发送钉钉消息"""
         import requests
+        # 已更新为你提供的钉钉机器人地址
         DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
 
         try:
@@ -202,7 +202,6 @@ class BinanceClient:
         safe_qty = requested_qty or (equity * 0.02 / 50)
         final_qty = round(safe_qty, 3)
 
-        # 执行开仓
         try:
             order_side = "BUY" if side == "LONG" else "SELL"
             order = self.client.futures_create_order(
