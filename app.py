@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 def load_accounts():
@@ -33,6 +32,7 @@ def get_client(account_name="main"):
             max_leverage=acc.get("max_leverage", 3.0),
             atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
             max_position_value_usdt=acc.get("max_position_value_usdt", 5000),
+            max_total_margin_ratio=acc.get("max_total_margin_ratio", 0.01),
             client_name=acc.get("client_name", "未知账户")
         )
     return BinanceClient(
@@ -43,7 +43,7 @@ def get_client(account_name="main"):
 def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
     try:
         report = client.get_account_report()
-        emoji = "✅" if "完成" in action or "成功" in action else "📝"
+        emoji = "✅" if "完成" in action or "成功" in action else "⚠️"
         msg = f"""**{emoji} {title}**
 
 **账户**：**{client.client_name}**
@@ -52,8 +52,10 @@ def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
 
 {extra_info}
 
-**📊 账户关键数据**
-{report}"""
+**📊 账户实时快照**
+{report}
+
+操作已完成，风控已执行。"""
         client._send_dingtalk(msg)
     except Exception as e:
         logging.error(f"钉钉发送失败: {e}")
@@ -63,59 +65,50 @@ def webhook():
     try:
         data = request.get_json()
         if not data:
-            logging.warning("收到空请求")
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+            return jsonify({"status": "error"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
-        atr_value = data.get("atr")   # 可选，策略端可以传 ATR 值
+        atr_value = data.get("atr")
 
         client = get_client(account)
 
-        # ==================== TP_PARTIAL（只记录，不执行） ====================
         if signal == "TP_PARTIAL":
-            reason = data.get("reason", "unknown")
-            logging.info(f"[TP部分止盈记录] {reason} | {symbol}")
-            return jsonify({"status": "recorded", "signal": signal, "reason": reason}), 200
+            logging.info(f"[TP部分止盈记录] {data.get('reason')} | {symbol}")
+            return jsonify({"status": "recorded"}), 200
 
-        # ==================== 开仓信号（调用智慧大脑） ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "LONG" if signal == "OPEN_LONG" else "SHORT"
             result = client.smart_open_position(symbol, side, atr_value)
 
             if result.get("status") == "success":
-                send_pretty_dingtalk(client, "开仓执行", f"开{'多' if side == 'LONG' else '空'}")
+                send_pretty_dingtalk(client, "开仓成功", f"开{'多' if side == 'LONG' else '空'}")
             else:
-                logging.warning(f"[开仓被拦截] {symbol} {side} | {result}")
+                send_pretty_dingtalk(client, "开仓被拦截", f"{side} | {result.get('reason', '')}")
 
             return jsonify({"status": result.get("status"), "action": signal, "result": result}), 200
 
-        # ==================== 全平信号 ====================
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
-            position_amt = float(position.get('positionAmt', 0)) if position else 0
-
-            if position_amt == 0:
-                logging.info(f"[跳过全平] {symbol} 当前无持仓")
+            if float(position.get('positionAmt', 0)) == 0:
                 send_pretty_dingtalk(client, "跳过全平", "当前无持仓")
-                return jsonify({"status": "skipped", "reason": "当前无持仓"}), 200
+                return jsonify({"status": "skipped"}), 200
 
             result = client.close_all_positions(symbol)
             send_pretty_dingtalk(client, "全平完成", "TP3 / 反转保护 / 时间止损")
-            return jsonify({"status": "success", "action": "CLOSE_ALL", "result": result}), 200
+            return jsonify({"status": "success", "action": "CLOSE_ALL"}), 200
 
-        # 其他信号
-        logging.info(f"[忽略信号] {signal} | {symbol}")
-        return jsonify({"status": "ignored", "signal": signal}), 200
+        logging.info(f"[忽略信号] {signal}")
+        return jsonify({"status": "ignored"}), 200
 
     except Exception as e:
-        logging.error(f"[Webhook异常] {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logging.error(f"[Webhook异常] {e}", exc_info=True)
+        return jsonify({"status": "error"}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
