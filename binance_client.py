@@ -40,36 +40,36 @@ class BinanceClient:
             logging.error(f"[获取账户权益失败] {e}")
             return 0.0
 
-    # ==================== 智能仓位计算（激进版） ====================
+    # ==================== 智能仓位计算（小资金更激进版） ====================
     def calculate_position_size(self, stop_distance: float, symbol: str = "ETHUSDT"):
         """
-        根据账户权益自动分层风控：
-        - < 3000U     : 激进（risk_mult=1.9），帮助小资金快速滚雪球
-        - 3000~10000U : 中等
-        - > 10000U    : 保守，严格控制保证金占用
+        根据账户权益分层风控（激进版）：
+        - < 3000U     : 单笔风险约 4.5%（帮助小资金快速滚雪球）
+        - 3000~10000U : 单笔风险约 2.0%
+        - > 10000U    : 单笔风险约 1.0%（保守）
         """
         equity = self.get_account_equity()
         if equity <= 0 or stop_distance <= 0:
             return 0.0
 
-        # ==================== 分层参数 ====================
+        # ==================== 分层风险参数 ====================
         if equity < 3000:
-            # 小资金：激进一些
-            risk_mult = 1.9
-            max_position_value = equity * 6.5     # 允许较高杠杆
+            # 小资金：激进
+            effective_risk_percent = 4.5
+            max_position_value = equity * 7.0     # 允许较高杠杆
 
         elif equity < 10000:
             # 中等资金
-            risk_mult = 1.1
+            effective_risk_percent = 2.0
             max_position_value = equity * 4.0
 
         else:
             # 大资金：保守
-            risk_mult = 0.75
+            effective_risk_percent = 1.0
             max_position_value = equity * 2.5
 
         # 计算风险金额
-        risk_amount = equity * (self.risk_percent * risk_mult) / 100
+        risk_amount = equity * effective_risk_percent / 100
         raw_qty = risk_amount / stop_distance
 
         # 按最大仓位价值限制
@@ -81,15 +81,14 @@ class BinanceClient:
 
         final_qty = min(raw_qty, max_qty_by_value)
 
-        # 币安精度处理（ETHUSDT 通常保留3位）
+        # 币安精度处理
         final_qty = max(0.001, round(final_qty, 3))
 
-        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险倍数: {risk_mult:.1f} | 最终仓位: {final_qty}")
+        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 有效风险: {effective_risk_percent}% | 最终仓位: {final_qty}")
         return final_qty
 
-    # ==================== 部分平仓（TP1/TP2/TP3） ====================
+    # ==================== 部分平仓 ====================
     def close_partial_position(self, symbol: str, percent: float):
-        """按当前剩余仓位百分比平仓"""
         try:
             position = self.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
@@ -147,7 +146,7 @@ class BinanceClient:
             logging.error(f"[全平异常] {symbol} - {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 获取账户报表（用于钉钉） ====================
+    # ==================== 获取账户报表 ====================
     def get_account_report(self):
         try:
             equity = self.get_account_equity()
