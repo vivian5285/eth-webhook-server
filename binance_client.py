@@ -25,17 +25,18 @@ class BinanceClient:
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if not positions:
-                return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0}
+                return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0}
             pos = positions[0]
             return {
                 "positionAmt": float(pos.get("positionAmt", 0)),
                 "entryPrice": float(pos.get("entryPrice", 0)),
                 "unrealizedProfit": float(pos.get("unRealizedProfit", 0)),
                 "markPrice": float(pos.get("markPrice", 0)),
+                "leverage": float(pos.get("leverage", 0)),
             }
         except Exception as e:
             logging.error(f"[获取持仓异常] {symbol} - {e}")
-            return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0}
+            return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0}
 
     def close_all_positions(self, symbol: str):
         try:
@@ -43,7 +44,6 @@ class BinanceClient:
             amt = position.get("positionAmt", 0)
             if amt == 0:
                 return {"status": "skipped", "reason": "无持仓"}
-
             side = "SELL" if amt > 0 else "BUY"
             order = self.client.futures_create_order(
                 symbol=symbol, side=side, type="MARKET",
@@ -116,7 +116,6 @@ class BinanceClient:
             logging.error(f"计算仓位失败: {e}")
             return 0
 
-    # ==================== 增强版账户报表（用于钉钉） ====================
     def get_account_report(self):
         try:
             account = self.client.futures_account()
@@ -127,22 +126,26 @@ class BinanceClient:
             risk_ratio = self._get_total_risk_ratio()
 
             positions = self.client.futures_position_information()
-            pos_info = "无持仓"
-            for p in positions:
-                if float(p.get("positionAmt", 0)) != 0:
-                    pos_info = f"{p['symbol']} {p['positionAmt']} @ {p.get('entryPrice', 0)}"
+            position_info = "无持仓"
+            current_leverage = 0
+            for pos in positions:
+                if float(pos.get("positionAmt", 0)) != 0:
+                    current_leverage = float(pos.get("leverage", 0))
+                    position_info = f"{pos['symbol']} {pos['positionAmt']} @ {pos.get('entryPrice', 0)} (杠杆 {current_leverage}x)"
 
             return (
                 f"**权益**：{equity:.2f} USDT\n"
                 f"**钱包余额**：{wallet:.2f} USDT\n"
                 f"**可用保证金**：{available:.2f} USDT\n"
                 f"**未实现盈亏**：{unrealized:.2f} USDT\n"
-                f"**当前持仓**：{pos_info}\n"
-                f"**整体风险占比**：{risk_ratio*100:.2f}%\n"
+                f"**当前持仓**：{position_info}\n"
+                f"**当前杠杆**：{current_leverage}x\n"
+                f"**整体保证金占比**：{risk_ratio*100:.2f}%\n"
                 f"**更新时间**：{datetime.now().strftime('%H:%M:%S')}"
             )
         except Exception as e:
-            return f"报表获取失败: {e}"
+            logging.error(f"获取账户报表失败: {e}")
+            return "账户信息获取失败"
 
     def _send_dingtalk(self, message: str):
         pass
