@@ -14,6 +14,9 @@ class BinanceClient:
         self.max_leverage = max_leverage
         self.client_name = client_name
 
+        # 极低仓位阈值（低于此价值收到 TP1/TP2 时直接全平）
+        self.MIN_POSITION_VALUE_FOR_PARTIAL = 50
+
     # ==================== 获取当前持仓 ====================
     def get_current_position(self, symbol: str = "ETHUSDT"):
         try:
@@ -40,39 +43,25 @@ class BinanceClient:
             logging.error(f"[获取账户权益失败] {e}")
             return 0.0
 
-    # ==================== 智能仓位计算（小资金更激进版） ====================
+    # ==================== 智能仓位计算（小资金激进版） ====================
     def calculate_position_size(self, stop_distance: float, symbol: str = "ETHUSDT"):
-        """
-        根据账户权益分层风控（激进版）：
-        - < 3000U     : 单笔风险约 7%（小资金快速滚雪球）
-        - 3000~10000U : 单笔风险约 2.0%
-        - > 10000U    : 单笔风险约 1.0%（保守）
-        """
         equity = self.get_account_equity()
         if equity <= 0 or stop_distance <= 0:
             return 0.0
 
-        # ==================== 分层风险参数 ====================
         if equity < 3000:
-            # 小资金：激进（约7%风险）
             effective_risk_percent = 7.0
-            max_position_value = equity * 8.0     # 允许更高杠杆
-
+            max_position_value = equity * 8.0
         elif equity < 10000:
-            # 中等资金
             effective_risk_percent = 2.0
             max_position_value = equity * 4.0
-
         else:
-            # 大资金：保守
             effective_risk_percent = 1.0
             max_position_value = equity * 2.5
 
-        # 计算风险金额
         risk_amount = equity * effective_risk_percent / 100
         raw_qty = risk_amount / stop_distance
 
-        # 按最大仓位价值限制
         try:
             price = float(self.client.get_symbol_ticker(symbol=symbol)["price"])
             max_qty_by_value = max_position_value / price
@@ -80,15 +69,17 @@ class BinanceClient:
             max_qty_by_value = raw_qty
 
         final_qty = min(raw_qty, max_qty_by_value)
-
-        # 币安精度处理
         final_qty = max(0.001, round(final_qty, 3))
 
-        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 有效风险: {effective_risk_percent}% | 最终仓位: {final_qty}")
+        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险: {effective_risk_percent}% | 最终仓位: {final_qty}")
         return final_qty
 
-    # ==================== 部分平仓 ====================
+    # ==================== 部分平仓（带智能容错） ====================
     def close_partial_position(self, symbol: str, percent: float):
+        """
+        按当前剩余仓位百分比平仓。
+        如果当前仓位已经很小（< 50U），则直接全平，避免留下灰尘仓位。
+        """
         try:
             position = self.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
@@ -97,6 +88,19 @@ class BinanceClient:
                 logging.info(f"[部分平仓跳过] {symbol} 当前无持仓")
                 return {"status": "skipped", "reason": "无持仓"}
 
+            # 计算当前持仓价值
+            try:
+                price = float(self.client.get_symbol_ticker(symbol=symbol)["price"])
+                position_value = abs(current_amt) * price
+            except:
+                position_value = 99999
+
+            # 智能判断：极低仓位直接全平
+            if position_value < self.MIN_POSITION_VALUE_FOR_PARTIAL:
+                logging.info(f"[智能全平] {symbol} 当前仓位仅 {position_value:.2f}U，收到部分平仓请求，直接全平")
+                return self.close_all_positions(symbol)
+
+            # 正常部分平仓
             close_qty = abs(current_amt) * percent
             close_qty = max(0.001, round(close_qty, 3))
 
