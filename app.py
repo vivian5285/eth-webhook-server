@@ -45,10 +45,7 @@ def get_client(account_name="main"):
 def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = "", is_warning: bool = False):
     try:
         report = client.get_account_report()
-        if is_warning:
-            emoji = "🚨"
-        else:
-            emoji = "✅" if "完成" in action or "成功" in action else "📝"
+        emoji = "🚨" if is_warning else ("✅" if "完成" in action or "成功" in action else "📝")
 
         msg = f"""**{emoji} {title}**
 
@@ -123,14 +120,7 @@ def webhook():
 **风控阈值**：{client.max_total_margin_ratio*100:.2f}%
 
 **建议**：请等待仓位风险下降后再尝试开新仓。"""
-
-                send_pretty_dingtalk(
-                    client,
-                    f"🚨 风控拦截 - {reason}",
-                    f"{side} 开仓被拒绝",
-                    extra_info=warning_msg,
-                    is_warning=True
-                )
+                send_pretty_dingtalk(client, f"🚨 风控拦截 - {reason}", f"{side} 开仓被拒绝", extra_info=warning_msg, is_warning=True)
 
             return jsonify({"status": result.get("status"), "action": signal, "result": result}), 200
 
