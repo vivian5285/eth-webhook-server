@@ -46,12 +46,12 @@ def webhook():
     signal = data.get("signal")
     symbol = data.get("symbol", "ETHUSDT")
     account = data.get("account", "main")
+    qty = data.get("qty")          # 从 Pine 端接收 qty（推荐传）
 
     client = get_client(account)
 
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-        qty = data.get("qty") or 0.5
         result = client.smart_open_position(symbol, side, qty)
         return jsonify(result)
 
