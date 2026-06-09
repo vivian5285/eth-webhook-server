@@ -14,9 +14,8 @@ class BinanceClient:
         self.atr_multiplier_sl = atr_multiplier_sl
         self.max_position_value_usdt = max_position_value_usdt
 
-    # ==================== 账户信息相关 ====================
+    # ==================== 账户与风控相关 ====================
     def get_account_equity(self):
-        """获取账户当前总权益"""
         try:
             account = self.client.futures_account()
             return float(account['totalWalletBalance'])
@@ -25,7 +24,6 @@ class BinanceClient:
             return 0.0
 
     def get_current_position(self, symbol: str):
-        """获取当前持仓"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for p in positions:
@@ -42,22 +40,62 @@ class BinanceClient:
             return None
 
     def get_today_realized_pnl(self, symbol: str = None):
-        """获取今日已实现盈亏"""
         try:
             now = datetime.utcnow()
             start_time = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-
             income = self.client.futures_income_history(
-                symbol=symbol,
-                incomeType="REALIZED_PNL",
-                startTime=start_time,
-                limit=1000
+                symbol=symbol, incomeType="REALIZED_PNL", startTime=start_time, limit=1000
             )
             total_pnl = sum(float(i['income']) for i in income)
             return round(total_pnl, 2)
         except Exception as e:
             logging.error(f"[获取今日已实现盈亏失败] {e}")
             return 0.0
+
+    def check_total_risk(self, symbol: str, side: str, new_qty: float) -> bool:
+        """
+        总风险检查（加强版）
+        返回 True 表示通过风控，False 表示拒绝
+        """
+        try:
+            equity = self.get_account_equity()
+            if equity <= 0:
+                logging.warning("[风控] 无法获取权益，拒绝开仓")
+                return False
+
+            current = self.get_current_position(symbol)
+            current_value = 0
+
+            if current:
+                # 获取当前持仓的标记价格
+                pos_info = self.client.futures_position_information(symbol=symbol)[0]
+                mark_price = float(pos_info['markPrice'])
+                current_value = current['qty'] * mark_price
+
+            # 新仓位预估价值（使用当前 ETH 价格估算，可后续优化为实时价格）
+            estimated_price = 1680
+            new_value = new_qty * estimated_price
+            total_value = current_value + new_value
+
+            # 风控参数（可根据需要调整）
+            MAX_POSITION_RATIO = 0.30          # 单个币种最大持仓价值占权益比例
+            MAX_TOTAL_RISK_RATIO = 0.12        # 总风险敞口上限（示例）
+
+            if total_value > equity * MAX_POSITION_RATIO:
+                logging.warning(f"[风控拒绝] 持仓价值过高: {total_value:.2f} > {equity * MAX_POSITION_RATIO:.2f}")
+                return False
+
+            # 简单杠杆风险检查（总持仓价值 / 权益）
+            total_leverage = total_value / equity if equity > 0 else 0
+            if total_leverage > 8:   # 总杠杆超过8倍拒绝
+                logging.warning(f"[风控拒绝] 总杠杆过高: {total_leverage:.2f}x")
+                return False
+
+            return True
+
+        except Exception as e:
+            logging.error(f"[总风险检查异常] {e}")
+            return False
 
     def get_account_report(self, symbol: str = "ETHUSDT"):
         """生成增强版账户状态报表"""
@@ -128,14 +166,12 @@ class BinanceClient:
 
         lines = [f"【账户状态报表】{report['time']}"]
 
-        # 一、账户概况
         lines.append("\n一、账户概况")
         lines.append(f"总权益: {report['equity']} USDT")
         lines.append(f"钱包余额: {report['wallet_balance']} USDT")
         lines.append(f"可用保证金: {report['available_margin']} USDT")
         lines.append(f"保证金使用率: {report['margin_ratio']}%")
 
-        # 二、当前持仓
         lines.append("\n二、当前持仓")
         if report.get("position"):
             p = report["position"]
@@ -150,7 +186,6 @@ class BinanceClient:
         else:
             lines.append("当前无持仓")
 
-        # 三、今日表现
         lines.append("\n三、今日表现")
         lines.append(f"今日已实现盈亏: {report['today_realized_pnl']} USDT")
         lines.append(f"今日总盈亏（含未实现）: {report['today_total_pnl']} USDT")
@@ -162,26 +197,17 @@ class BinanceClient:
         self._send_dingtalk(message)
 
     def _send_dingtalk(self, message: str):
-        """发送钉钉消息"""
         import requests
-        # 已更新为你提供的钉钉机器人地址
         DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
-
         try:
-            data = {
-                "msgtype": "text",
-                "text": {"content": f"[交易风控]\n{message}"}
-            }
+            data = {"msgtype": "text", "text": {"content": f"[交易风控]\n{message}"}}
             requests.post(DINGTALK_WEBHOOK, json=data, timeout=5)
             logging.info("[账户报表] 已发送到钉钉")
         except Exception as e:
             logging.error(f"[发送钉钉失败] {e}")
 
-    # ==================== 智能开仓与平仓 ====================
+    # ==================== 智能开仓 ====================
     def smart_open_position(self, symbol: str, side: str, requested_qty: float = None):
-        """
-        加强版智能开仓（严格风控 + 推送报表）
-        """
         equity = self.get_account_equity()
         if equity <= 0:
             return {"status": "error", "message": "无法获取账户权益"}
@@ -202,27 +228,25 @@ class BinanceClient:
         safe_qty = requested_qty or (equity * 0.02 / 50)
         final_qty = round(safe_qty, 3)
 
+        # 总风险检查
+        if not self.check_total_risk(symbol, side, final_qty):
+            return {"status": "rejected", "reason": "总风险检查未通过"}
+
         try:
             order_side = "BUY" if side == "LONG" else "SELL"
             order = self.client.futures_create_order(
-                symbol=symbol,
-                side=order_side,
-                type="MARKET",
-                quantity=final_qty,
-                positionSide="BOTH"
+                symbol=symbol, side=order_side, type="MARKET",
+                quantity=final_qty, positionSide="BOTH"
             )
             logging.info(f"[风控通过][开{side}成功] {symbol} | Qty: {final_qty}")
 
-            # 推送账户报表
             self.send_account_report_to_dingtalk(symbol, extra_msg=f"已成功开{side}仓")
-
             return {"status": "success", "order": order, "qty": final_qty}
         except BinanceAPIException as e:
             logging.error(f"[开{side}失败] {e}")
             return {"status": "error", "message": str(e)}
 
     def close_all_positions(self, symbol: str):
-        """全平仓位 + 推送报表"""
         try:
             position = self.get_current_position(symbol)
             if not position:
@@ -232,19 +256,49 @@ class BinanceClient:
             side = "SELL" if position['side'] == "LONG" else "BUY"
 
             order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=qty,
-                reduceOnly=True,
-                positionSide="BOTH"
+                symbol=symbol, side=side, type="MARKET",
+                quantity=qty, reduceOnly=True, positionSide="BOTH"
             )
             logging.info(f"[全平成功] {symbol}")
 
-            # 推送账户报表
             self.send_account_report_to_dingtalk(symbol, extra_msg="已执行全平操作")
-
             return {"status": "success", "order": order}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
+
+    def check_total_risk(self, symbol: str, side: str, new_qty: float) -> bool:
+        """总风险检查加强版"""
+        try:
+            equity = self.get_account_equity()
+            if equity <= 0:
+                return False
+
+            current = self.get_current_position(symbol)
+            current_value = 0
+
+            if current:
+                pos_info = self.client.futures_position_information(symbol=symbol)[0]
+                mark_price = float(pos_info['markPrice'])
+                current_value = current['qty'] * mark_price
+
+            estimated_price = 1680
+            new_value = new_qty * estimated_price
+            total_value = current_value + new_value
+
+            MAX_POSITION_RATIO = 0.30
+            MAX_LEVERAGE = 8
+
+            if total_value > equity * MAX_POSITION_RATIO:
+                logging.warning(f"[风控拒绝] 持仓价值过高")
+                return False
+
+            total_leverage = total_value / equity if equity > 0 else 0
+            if total_leverage > MAX_LEVERAGE:
+                logging.warning(f"[风控拒绝] 总杠杆过高: {total_leverage:.2f}x")
+                return False
+
+            return True
+        except Exception as e:
+            logging.error(f"[总风险检查异常] {e}")
+            return False
