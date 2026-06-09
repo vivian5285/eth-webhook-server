@@ -25,7 +25,7 @@ class BinanceClient:
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if not positions:
-                return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0}
+                return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0, "leverage": 0}
             pos = positions[0]
             return {
                 "positionAmt": float(pos.get("positionAmt", 0)),
@@ -36,7 +36,7 @@ class BinanceClient:
             }
         except Exception as e:
             logging.error(f"[获取持仓异常] {symbol} - {e}")
-            return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0}
+            return {"positionAmt": 0, "entryPrice": 0, "unrealizedProfit": 0, "markPrice": 0, "leverage": 0}
 
     def close_all_positions(self, symbol: str):
         try:
@@ -54,6 +54,21 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[全平失败] {symbol} - {e}")
             return {"status": "error", "message": str(e)}
+
+    def _get_dynamic_risk_params(self):
+        """根据当前权益动态调整风控参数（小资金更激进）"""
+        try:
+            account = self.client.futures_account()
+            equity = float(account.get('totalWalletBalance', 0)) + float(account.get('totalUnrealizedProfit', 0))
+
+            if equity < 3000:
+                return 0.018, 0.04      # 小资金：1.8%风险 + 4%整体保证金
+            elif equity < 10000:
+                return 0.010, 0.025     # 中等资金
+            else:
+                return 0.006, 0.015     # 大资金：稳健
+        except:
+            return self.risk_percent, self.max_total_margin_ratio
 
     def _get_total_risk_ratio(self):
         try:
@@ -73,9 +88,11 @@ class BinanceClient:
 
     def smart_open_position(self, symbol: str, side: str, atr_value: float = None):
         try:
+            dynamic_risk, dynamic_max_ratio = self._get_dynamic_risk_params()
+
             current_risk = self._get_total_risk_ratio()
-            if current_risk > self.max_total_margin_ratio:
-                logging.warning(f"[风控拦截] 当前风险 {current_risk*100:.2f}% > 阈值")
+            if current_risk > dynamic_max_ratio:
+                logging.warning(f"[风控拦截] 当前风险 {current_risk*100:.2f}% > 动态阈值 {dynamic_max_ratio*100:.2f}%")
                 return {"status": "rejected", "reason": f"整体风险过高 ({current_risk*100:.2f}%)"}
 
             position = self.get_current_position(symbol)
@@ -84,7 +101,7 @@ class BinanceClient:
             if (side == "LONG" and current_amt < 0) or (side == "SHORT" and current_amt > 0):
                 self.close_all_positions(symbol)
 
-            qty = self._calculate_safe_position_size(symbol, atr_value)
+            qty = self._calculate_safe_position_size(symbol, atr_value, dynamic_risk)
             if qty <= 0:
                 return {"status": "rejected", "reason": "仓位计算为0"}
 
@@ -98,20 +115,30 @@ class BinanceClient:
             logging.error(f"[开仓异常] {symbol} {side} - {e}")
             return {"status": "error", "message": str(e)}
 
-    def _calculate_safe_position_size(self, symbol: str, atr_value: float = None):
+    def _calculate_safe_position_size(self, symbol: str, atr_value: float = None, dynamic_risk=None):
         try:
             account = self.client.futures_account()
             equity = float(account.get('totalWalletBalance', 0)) + float(account.get('totalUnrealizedProfit', 0))
+            available_margin = float(account.get('availableBalance', 0))
+            price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
+
+            risk_pct = dynamic_risk if dynamic_risk else self.risk_percent
+            risk_amount = equity * risk_pct
+
             if atr_value and atr_value > 0:
                 stop_distance = atr_value * self.atr_multiplier_sl
             else:
-                price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
                 stop_distance = price * 0.008
-            risk_amount = equity * (self.risk_percent / 100)
+
             raw_qty = risk_amount / stop_distance
-            price = float(self.client.futures_symbol_ticker(symbol=symbol)['price'])
-            max_by_value = self.max_position_value_usdt / price
-            return max(1, int(min(raw_qty, max_by_value)))
+            max_qty_by_margin = (available_margin * 0.9) / (price * 0.1)
+            max_qty_by_value = self.max_position_value_usdt / price
+
+            final_qty = min(raw_qty, max_qty_by_margin, max_qty_by_value)
+            final_qty = max(0.001, round(final_qty, 3))
+
+            logging.info(f"[动态仓位计算] {symbol} | 权益: {equity:.2f} | Risk%: {risk_pct*100:.1f}% | Qty: {final_qty}")
+            return final_qty
         except Exception as e:
             logging.error(f"计算仓位失败: {e}")
             return 0
