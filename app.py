@@ -31,6 +31,8 @@ def get_client(account_name="main"):
             api_secret=acc["api_secret"],
             risk_percent=acc.get("risk_percent", 0.85),
             max_leverage=acc.get("max_leverage", 3.0),
+            atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
+            max_position_value_usdt=acc.get("max_position_value_usdt", 5000),
             client_name=acc.get("client_name", "未知账户")
         )
     return BinanceClient(
@@ -61,28 +63,35 @@ def webhook():
     try:
         data = request.get_json()
         if not data:
+            logging.warning("收到空请求")
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
+        atr_value = data.get("atr")   # 可选，策略端可以传 ATR 值
 
         client = get_client(account)
 
-        # ==================== TP_PARTIAL 只记录不执行 ====================
+        # ==================== TP_PARTIAL（只记录，不执行） ====================
         if signal == "TP_PARTIAL":
             reason = data.get("reason", "unknown")
             logging.info(f"[TP部分止盈记录] {reason} | {symbol}")
             return jsonify({"status": "recorded", "signal": signal, "reason": reason}), 200
 
-        # ==================== OPEN_LONG / OPEN_SHORT ====================
+        # ==================== 开仓信号（调用智慧大脑） ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-            result = client.smart_open_position(symbol, side)
-            send_pretty_dingtalk(client, "开仓执行", f"开{'多' if side == 'LONG' else '空'}")
-            return jsonify({"status": "success", "action": signal}), 200
+            result = client.smart_open_position(symbol, side, atr_value)
 
-        # ==================== CLOSE_ALL（TP3 + 反转保护） ====================
+            if result.get("status") == "success":
+                send_pretty_dingtalk(client, "开仓执行", f"开{'多' if side == 'LONG' else '空'}")
+            else:
+                logging.warning(f"[开仓被拦截] {symbol} {side} | {result}")
+
+            return jsonify({"status": result.get("status"), "action": signal, "result": result}), 200
+
+        # ==================== 全平信号 ====================
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
             position_amt = float(position.get('positionAmt', 0)) if position else 0
@@ -94,7 +103,7 @@ def webhook():
 
             result = client.close_all_positions(symbol)
             send_pretty_dingtalk(client, "全平完成", "TP3 / 反转保护 / 时间止损")
-            return jsonify({"status": "success", "action": "CLOSE_ALL"}), 200
+            return jsonify({"status": "success", "action": "CLOSE_ALL", "result": result}), 200
 
         # 其他信号
         logging.info(f"[忽略信号] {signal} | {symbol}")
@@ -106,7 +115,7 @@ def webhook():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
