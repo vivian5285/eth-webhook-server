@@ -46,13 +46,15 @@ def webhook():
     signal = data.get("signal")
     symbol = data.get("symbol", "ETHUSDT")
     account = data.get("account", "main")
-    qty = data.get("qty")          # 从 Pine 端接收 qty（推荐传）
+    qty = data.get("qty")
+    atr = data.get("atr")                    # Pine 传过来的 ATR 值
 
     client = get_client(account)
 
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-        result = client.smart_open_position(symbol, side, qty)
+        # 调用加强版智能开仓（支持 ATR 动态仓位计算）
+        result = client.smart_open_position(symbol, side, requested_qty=qty, atr=atr)
         return jsonify(result)
 
     elif signal == "CLOSE_ALL":
