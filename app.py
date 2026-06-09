@@ -3,18 +3,29 @@ from binance_client import BinanceClient
 import os
 import json
 import logging
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+# ==================== 日志配置 ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def load_accounts():
     try:
         with open("accounts.json", "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception as e:
+        logger.error(f"加载 accounts.json 失败: {e}")
         return {}
 
 ACCOUNTS = load_accounts()
@@ -31,7 +42,6 @@ def get_client(account_name="main"):
             atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
             max_position_value_usdt=acc.get("max_position_value_usdt", 5000)
         )
-    # 单账户兜底
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
         api_secret=os.getenv("BINANCE_API_SECRET")
@@ -39,30 +49,52 @@ def get_client(account_name="main"):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error", "message": "No JSON"}), 400
+    start_time = time.time()
+    
+    try:
+        data = request.get_json()
+        if not data:
+            logger.warning("收到空请求")
+            return jsonify({"status": "error", "message": "No JSON data received"}), 400
 
-    signal = data.get("signal")
-    symbol = data.get("symbol", "ETHUSDT")
-    account = data.get("account", "main")
-    qty = data.get("qty")
-    atr = data.get("atr")                    # Pine 传过来的 ATR 值
+        # 记录请求日志
+        signal = data.get("signal")
+        symbol = data.get("symbol", "ETHUSDT")
+        account = data.get("account", "main")
+        qty = data.get("qty")
+        atr = data.get("atr")
 
-    client = get_client(account)
+        logger.info(f"收到信号 | signal={signal} | symbol={symbol} | account={account} | qty={qty} | atr={atr}")
 
-    if signal in ["OPEN_LONG", "OPEN_SHORT"]:
-        side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-        # 调用加强版智能开仓（支持 ATR 动态仓位计算）
-        result = client.smart_open_position(symbol, side, requested_qty=qty, atr=atr)
-        return jsonify(result)
+        client = get_client(account)
 
-    elif signal == "CLOSE_ALL":
-        result = client.close_all_positions(symbol)
-        return jsonify(result)
+        if signal in ["OPEN_LONG", "OPEN_SHORT"]:
+            side = "LONG" if signal == "OPEN_LONG" else "SHORT"
+            result = client.smart_open_position(symbol, side, requested_qty=qty, atr=atr)
+            
+            logger.info(f"开仓结果 | {result}")
+            return jsonify(result)
 
-    else:
-        return jsonify({"status": "ignored", "message": f"未知信号: {signal}"})
+        elif signal == "CLOSE_ALL":
+            result = client.close_all_positions(symbol)
+            logger.info(f"全平结果 | {result}")
+            return jsonify(result)
+
+        else:
+            logger.warning(f"未知信号类型: {signal}")
+            return jsonify({"status": "ignored", "message": f"未知信号: {signal}"}), 200
+
+    except Exception as e:
+        logger.error(f"Webhook 处理异常: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": "Internal server error",
+            "detail": str(e)
+        }), 500
+
+    finally:
+        duration = round((time.time() - start_time) * 1000, 2)
+        logger.info(f"请求处理完成，耗时: {duration}ms")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
