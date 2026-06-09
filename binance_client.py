@@ -194,47 +194,57 @@ class BinanceClient:
             return None
 
     def send_account_report_to_dingtalk(self, symbol: str = "ETHUSDT", extra_msg: str = ""):
-        report = self.get_account_report(symbol)
-        if not report:
-            return
+        try:
+            report = self.get_account_report(symbol)
+            if not report:
+                logging.warning("[账户报表] get_account_report 返回为空，未发送钉钉")
+                return
 
-        lines = [f"【账户状态报表】{report['time']}"]
+            lines = [f"【账户状态报表】{report['time']}"]
 
-        lines.append("\n一、账户概况")
-        lines.append(f"总权益: {report['equity']} USDT")
-        lines.append(f"钱包余额: {report['wallet_balance']} USDT")
-        lines.append(f"可用保证金: {report['available_margin']} USDT")
-        lines.append(f"保证金使用率: {report['margin_ratio']}%")
+            lines.append("\n一、账户概况")
+            lines.append(f"总权益: {report['equity']} USDT")
+            lines.append(f"钱包余额: {report['wallet_balance']} USDT")
+            lines.append(f"可用保证金: {report['available_margin']} USDT")
+            lines.append(f"保证金使用率: {report['margin_ratio']}%")
 
-        lines.append("\n二、当前持仓")
-        if report.get("position"):
-            p = report["position"]
-            lines.append(f"方向: {p['side']}")
-            lines.append(f"数量: {p['qty']}")
-            lines.append(f"开仓均价: {p['entry_price']}")
-            lines.append(f"标记价格: {p['mark_price']}")
-            lines.append(f"持仓价值: {p['position_value']} USDT")
-            lines.append(f"未实现盈亏: {report['unrealized_pnl']} USDT")
-            lines.append(f"当前杠杆: {report['leverage']}x")
-            lines.append(f"强平价格: {report['liquidation_price']}")
-        else:
-            lines.append("当前无持仓")
+            lines.append("\n二、当前持仓")
+            if report.get("position"):
+                p = report["position"]
+                lines.append(f"方向: {p['side']}")
+                lines.append(f"数量: {p['qty']}")
+                lines.append(f"开仓均价: {p['entry_price']}")
+                lines.append(f"标记价格: {p['mark_price']}")
+                lines.append(f"持仓价值: {p['position_value']} USDT")
+                lines.append(f"未实现盈亏: {report['unrealized_pnl']} USDT")
+                lines.append(f"当前杠杆: {report['leverage']}x")
+                lines.append(f"强平价格: {report['liquidation_price']}")
+            else:
+                lines.append("当前无持仓")
 
-        lines.append("\n三、今日表现")
-        lines.append(f"今日已实现盈亏: {report['today_realized_pnl']} USDT")
-        lines.append(f"今日总盈亏（含未实现）: {report['today_total_pnl']} USDT")
+            lines.append("\n三、今日表现")
+            lines.append(f"今日已实现盈亏: {report['today_realized_pnl']} USDT")
+            lines.append(f"今日总盈亏（含未实现）: {report['today_total_pnl']} USDT")
 
-        if extra_msg:
-            lines.append(f"\n备注: {extra_msg}")
+            if extra_msg:
+                lines.append(f"\n备注: {extra_msg}")
 
-        message = "\n".join(lines)
-        self._send_dingtalk(message)
+            message = "\n".join(lines)
+            self._send_dingtalk(message)
+            logging.info("[账户报表] 已成功发送到钉钉")
+
+        except Exception as e:
+            logging.error(f"[发送账户报表到钉钉异常] {e}", exc_info=True)
 
     def _send_dingtalk(self, message: str):
         import requests
         DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
         try:
-            requests.post(DINGTALK_WEBHOOK, json={"msgtype": "text", "text": {"content": f"[交易风控]\n{message}"}}, timeout=5)
+            data = {
+                "msgtype": "text",
+                "text": {"content": f"[交易风控]\n{message}"}
+            }
+            requests.post(DINGTALK_WEBHOOK, json=data, timeout=5)
         except Exception as e:
             logging.error(f"[发送钉钉失败] {e}")
 
