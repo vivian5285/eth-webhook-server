@@ -3,8 +3,6 @@ from binance_client import BinanceClient
 import os
 import json
 import logging
-import threading
-import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -15,13 +13,10 @@ app = Flask(__name__)
 # ==================== 日志配置 ====================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# ==================== 加载多账户配置 ====================
+# ==================== 加载账户配置 ====================
 def load_accounts():
     try:
         with open("accounts.json", "r", encoding="utf-8") as f:
@@ -42,18 +37,17 @@ def get_client(account_name="main"):
             risk_percent=acc.get("risk_percent", 0.90),
             client_name=acc.get("client_name", "主账户")
         )
-    # 默认使用环境变量
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
         api_secret=os.getenv("BINANCE_API_SECRET"),
         client_name="默认账户"
     )
 
-# ==================== 钉钉通知（美化版） ====================
+# ==================== 钉钉通知 ====================
 def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "", is_warning: bool = False):
     emoji = "🚨" if is_warning else "✅"
     try:
-        report = client.get_account_report() if hasattr(client, "get_account_report") else ""
+        report = client.get_account_report()
     except:
         report = ""
 
@@ -68,84 +62,100 @@ def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "",
 **📊 账户快照**
 {report}"""
 
-    # TODO: 在这里接入你真实的钉钉发送逻辑
-    # 示例：requests.post(DINGTALK_WEBHOOK, json={"msgtype": "markdown", "markdown": {"title": title, "text": msg}})
-    logging.info(f"[钉钉通知] {title} - {content}")
+    # TODO: 替换为你的真实钉钉发送逻辑
+    logging.info(f"[钉钉] {title} - {content}")
 
-# ==================== Webhook 主逻辑 ====================
+# ==================== Webhook 主入口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json()
         if not data:
-            logging.warning("收到空请求")
-            return jsonify({"status": "error", "message": "No JSON data"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
         reason = data.get("reason", "")
+        atr_value = data.get("atr")
 
         client = get_client(account)
-        logging.info(f"收到信号: {signal} | symbol: {symbol} | reason: {reason}")
+        logging.info(f"收到信号 → signal: {signal}, reason: {reason}, atr: {atr_value}")
 
-        # ========== 开仓 ==========
+        # ==================== 开仓（强壮仓位计算） ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
-            side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-            send_pretty_dingtalk(client, f"{side} 开仓信号", f"策略触发 {signal}")
-            return jsonify({"status": "success", "action": signal}), 200
+            side = "BUY" if signal == "OPEN_LONG" else "SELL"
+            direction = "LONG" if signal == "OPEN_LONG" else "SHORT"
 
-        # ========== 部分止盈（TP1 / TP2） ==========
+            atr = float(atr_value) if atr_value else 50.0
+            stop_distance = atr * 0.92  # 与策略 atrMultiplierSL 保持一致
+
+            qty = client.calculate_position_size(stop_distance, symbol)
+
+            if qty <= 0:
+                logging.warning(f"[开仓拒绝] {symbol} 计算仓位为0")
+                send_pretty_dingtalk(client, f"{direction} 开仓失败", "仓位计算为0", is_warning=True)
+                return jsonify({"status": "error", "message": "仓位计算为0"}), 200
+
+            try:
+                order = client.client.futures_create_order(
+                    symbol=symbol,
+                    side=side,
+                    type="MARKET",
+                    quantity=qty
+                )
+                logging.info(f"[{direction} 开仓成功] {symbol} | Qty: {qty}")
+                send_pretty_dingtalk(client, f"{direction} 开仓成功", f"下单数量: {qty}")
+                return jsonify({"status": "success", "action": signal, "qty": qty}), 200
+
+            except Exception as e:
+                logging.error(f"[{direction} 开仓失败] {symbol} - {e}")
+                send_pretty_dingtalk(client, f"{direction} 开仓失败", str(e), is_warning=True)
+                return jsonify({"status": "error", "message": str(e)}), 200
+
+        # ==================== 部分止盈（TP1 / TP2） ====================
         if signal == "TP_PARTIAL":
             if reason not in ["tp1", "tp2"]:
-                logging.info(f"忽略未知 TP_PARTIAL reason: {reason}")
                 return jsonify({"status": "ignored"}), 200
 
             close_percent = 0.30
             result = client.close_partial_position(symbol, close_percent)
 
             if result.get("status") == "success":
-                send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", 
-                                     f"已平仓 {close_percent * 100}%")
+                send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", f"平仓 {close_percent*100}%")
             elif result.get("status") == "skipped":
                 logging.info(f"[TP_PARTIAL 跳过] {symbol} - {result.get('reason')}")
             else:
-                send_pretty_dingtalk(client, f"部分止盈失败 {reason.upper()}", 
-                                     result.get("message", "未知错误"), is_warning=True)
+                send_pretty_dingtalk(client, f"部分止盈失败 {reason.upper()}", result.get("message", ""), is_warning=True)
 
             return jsonify({"status": result.get("status")}), 200
 
-        # ========== 全平处理 ==========
+        # ==================== 全平（TP3 + 反转智能处理） ====================
         if signal == "CLOSE_ALL":
-            # TP3 最终全平（必须执行）
             if reason == "tp3_full_close":
                 result = client.close_all_positions(symbol)
                 if result.get("status") == "success":
-                    send_pretty_dingtalk(client, "TP3 最终全平完成", "已全平剩余仓位")
-                return jsonify({"status": "success", "action": "tp3_full_close"}), 200
+                    send_pretty_dingtalk(client, "TP3 最终全平", "已全平剩余仓位")
+                return jsonify({"status": "success"}), 200
 
-            # 其他全平（反转、时间止损、快速平仓等）—— 智能静默处理
+            # 反转、时间止损等其他全平 → 空仓则静默跳过
             position = client.get_current_position(symbol)
-            current_amt = float(position.get("positionAmt", 0))
-
-            if current_amt == 0:
-                logging.info(f"[静默跳过] {symbol} 当前无持仓，忽略 reason={reason} 的 CLOSE_ALL")
+            if float(position.get("positionAmt", 0)) == 0:
+                logging.info(f"[静默跳过] {symbol} 当前无持仓，忽略 reason={reason}")
                 return jsonify({"status": "skipped", "reason": "position_already_closed"}), 200
 
-            # 有持仓才执行全平
             result = client.close_all_positions(symbol)
             if result.get("status") == "success":
                 send_pretty_dingtalk(client, "全平完成", reason)
-            return jsonify({"status": "success", "action": "CLOSE_ALL"}), 200
+            return jsonify({"status": "success"}), 200
 
-        logging.info(f"未处理信号: {signal}")
         return jsonify({"status": "ignored"}), 200
 
     except Exception as e:
-        logging.error(f"[Webhook 异常] {e}", exc_info=True)
+        logging.error(f"[Webhook异常] {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ==================== 启动 ====================
+# ==================== 启动服务 ====================
 if __name__ == '__main__':
-    logging.info("VPS Webhook 服务启动中...")
+    logging.info("ETH Webhook 服务已启动...")
     app.run(host='0.0.0.0', port=5000, debug=False)
