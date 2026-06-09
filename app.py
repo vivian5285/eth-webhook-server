@@ -3,23 +3,30 @@ from binance_client import BinanceClient
 import os
 import json
 import logging
+from datetime import datetime
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
 
 load_dotenv()
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 信号冷却缓存 ====================
-signal_cooldown = {}
+# ==================== 日志配置 ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+
+# ==================== 配置 ====================
+ALLOWED_SIGNALS = {"CLOSE_ALL"}
+IGNORED_SIGNALS_LOG = True
 
 def load_accounts():
     try:
         with open("accounts.json", "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logging.error(f"[加载 accounts.json 失败] {e}")
+        logging.error(f"加载 accounts.json 失败: {e}")
         return {}
 
 ACCOUNTS = load_accounts()
@@ -33,101 +40,90 @@ def get_client(account_name="main"):
             api_secret=acc["api_secret"],
             risk_percent=acc.get("risk_percent", 0.85),
             max_leverage=acc.get("max_leverage", 3.0),
-            client_name=acc.get("client_name", account_name)
+            atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
+            max_position_value_usdt=acc.get("max_position_value_usdt", 5000),
+            client_name=acc.get("client_name", "未知账户")
         )
-    # 兜底使用环境变量
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
-        api_secret=os.getenv("BINANCE_API_SECRET"),
-        client_name="默认账户"
+        api_secret=os.getenv("BINANCE_API_SECRET")
     )
 
-def is_in_cooldown(signal, symbol, seconds=25):
-    """信号冷却，防止短时间内重复执行"""
-    key = f"{signal}_{symbol}"
-    now = datetime.now()
-    if key in signal_cooldown:
-        if now - signal_cooldown[key] < timedelta(seconds=seconds):
-            return True
-    signal_cooldown[key] = now
-    return False
-
-def send_signal_notification_to_dingtalk(signal: str, symbol: str, extra_info: str = ""):
-    """收到 TradingView 信号时推送钉钉通知"""
+# ==================== 美化钉钉通知（带颜色强调 + 关键数据高亮） ====================
+def send_pretty_dingtalk(client, title: str, action: str, extra_info: str = ""):
     try:
-        signal_map = {
-            "OPEN_LONG": "开多",
-            "OPEN_SHORT": "开空",
-            "CLOSE_ALL": "全平"
-        }
-        signal_cn = signal_map.get(signal, signal)
+        report = client.get_account_report()
+        emoji = "✅" if "完成" in action or "成功" in action else "⚠️"
 
-        message = f"""【收到 TradingView 信号】
-信号类型: {signal_cn}
-交易品种: {symbol}
-额外信息: {extra_info if extra_info else "无"}
-时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+        msg = f"""**{emoji} {title}**
 
-        client = get_client()
-        client._send_dingtalk(message)
-        logging.info(f"[钉钉通知] 已推送信号接收通知: {signal_cn}")
+**账户**：**{client.client_name}**
+**动作**：{action}
+**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+{extra_info}
+
+**📊 账户关键数据**
+{report}
+"""
+        client._send_dingtalk(msg)
     except Exception as e:
-        logging.error(f"[发送信号通知失败] {e}")
+        logging.error(f"发送美化钉钉通知失败: {e}")
 
+# ==================== Webhook 主逻辑 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # ==================== 1. 全面解析 TradingView 信号 ====================
-        data = request.get_json(silent=True)
-
+        data = request.get_json()
         if not data:
-            try:
-                raw_data = request.data.decode('utf-8', errors='ignore').strip()
-                if raw_data:
-                    data = json.loads(raw_data)
-            except:
-                pass
-
-        if not data:
-            data = request.form.to_dict() or {}
-
-        if not data:
-            logging.warning("[Webhook] 收到空数据")
-            return jsonify({"status": "error", "message": "Empty data"}), 400
+            logging.warning("收到空请求")
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
         account = data.get("account", "main")
-        atr = data.get("atr")
 
-        logging.info(f"[Webhook] 收到信号 → {signal} | Symbol: {symbol}")
+        # ========== 信号过滤 ==========
+        if signal not in ALLOWED_SIGNALS:
+            if IGNORED_SIGNALS_LOG:
+                logging.info(f"[忽略信号] signal={signal} | symbol={symbol} | account={account}")
+            return jsonify({
+                "status": "ignored",
+                "signal": signal,
+                "reason": "只处理 CLOSE_ALL"
+            }), 200
+        # =================================
 
-        # ==================== 2. 冷却检查 ====================
-        if is_in_cooldown(signal, symbol, 25):
-            logging.info(f"[冷却] 信号 {signal} 在冷却期，忽略")
-            return jsonify({"status": "ignored", "reason": "cooldown"})
-
-        # ==================== 3. 推送收到信号通知 ====================
-        send_signal_notification_to_dingtalk(signal, symbol, f"ATR: {atr}" if atr else "")
-
-        # ==================== 4. 执行交易 ====================
         client = get_client(account)
+        logging.info(f"[收到信号] {signal} | {symbol} | {account}")
 
-        if signal in ["OPEN_LONG", "OPEN_SHORT"]:
-            side = "LONG" if signal == "OPEN_LONG" else "SHORT"
-            result = client.smart_open_position(symbol, side, atr=atr)
-            return jsonify(result)
-
-        elif signal == "CLOSE_ALL":
+        if signal == "CLOSE_ALL":
             result = client.close_all_positions(symbol)
-            return jsonify(result)
 
-        else:
-            return jsonify({"status": "ignored", "message": f"未知信号: {signal}"})
+            send_pretty_dingtalk(
+                client=client,
+                title="全平完成",
+                action="TP3 / 反转保护 / 时间止损 全平",
+                extra_info=f"**币种**：**{symbol}**"
+            )
+
+            return jsonify({
+                "status": "success",
+                "action": "CLOSE_ALL",
+                "symbol": symbol,
+                "result": result
+            })
+
+        return jsonify({"status": "error", "message": "Unexpected signal"}), 400
 
     except Exception as e:
-        logging.error(f"[Webhook] 处理异常: {e}", exc_info=True)
+        logging.error(f"[Webhook异常] {str(e)}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+# ==================== 健康检查 ====================
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False)
