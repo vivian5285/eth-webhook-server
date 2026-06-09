@@ -44,7 +44,7 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
-# ==================== 钉钉加签 + 美化报表推送 ====================
+# ==================== 钉钉加签 + 美化报表 ====================
 def send_pretty_dingtalk(client, title: str, content: str = "", action_type: str = "normal"):
     if not DINGTALK_WEBHOOK:
         return
@@ -103,7 +103,9 @@ def webhook():
         reason = data.get("reason", "")
 
         client = get_client(account)
+        logging.info(f"收到信号: {signal} | reason: {reason}")
 
+        # ==================== 开仓（反向持仓先平后开） ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             current_pos = client.get_current_position(symbol)
             current_amt = float(current_pos.get("positionAmt", 0))
@@ -133,37 +135,45 @@ def webhook():
             except Exception as e:
                 return jsonify({"status": "error"}), 200
 
+        # ==================== 统一 TP_PARTIAL 处理 ====================
         if signal == "TP_PARTIAL":
-            if reason not in ["tp1", "tp2"]:
+            if reason not in ["tp1", "tp2", "tp3"]:
                 return jsonify({"status": "ignored"}), 200
 
             position = client.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
-            if current_amt == 0:
-                return jsonify({"status": "skipped"}), 200
 
+            if current_amt == 0:
+                return jsonify({"status": "skipped", "reason": "no_position"}), 200
+
+            # 获取当前持仓价值（用于小仓位判断）
             try:
                 price = float(client.client.get_symbol_ticker(symbol=symbol)["price"])
                 position_value = abs(current_amt) * price
             except:
                 position_value = 99999
 
+            # 小仓位智能容错
             if position_value < 50:
                 client.close_all_positions(symbol)
                 send_pretty_dingtalk(client, "小仓位自动全平", f"剩余仓位仅 {position_value:.2f}U，直接全平", "close")
                 return jsonify({"status": "success"}), 200
 
-            result = client.close_partial_position(symbol, 0.30)
-            if result.get("status") == "success":
-                send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", "平仓 30%", "partial")
-            return jsonify({"status": result.get("status")}), 200
-
-        if signal == "CLOSE_ALL":
-            if reason == "tp3_full_close":
+            # 根据 reason 决定平仓比例
+            if reason == "tp3":
+                # TP3 → 100% 全平
                 client.close_all_positions(symbol)
                 send_pretty_dingtalk(client, "TP3 最终全平", "已全平剩余仓位", "close")
-                return jsonify({"status": "success"}), 200
+            else:
+                # TP1 / TP2 → 平 30%
+                result = client.close_partial_position(symbol, 0.30)
+                if result.get("status") == "success":
+                    send_pretty_dingtalk(client, f"部分止盈 {reason.upper()}", "平仓 30%", "partial")
 
+            return jsonify({"status": "success"}), 200
+
+        # ==================== 其他全平信号 ====================
+        if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
             if float(position.get("positionAmt", 0)) == 0:
                 return jsonify({"status": "skipped"}), 200
