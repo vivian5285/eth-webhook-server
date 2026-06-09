@@ -24,7 +24,7 @@ class BinanceClient:
         self.consecutive_losses = 0
         self.last_trade_date = None
 
-        # 钉钉加签密钥（已为你填入）
+        # 钉钉加签配置
         self.dingtalk_secret = "SEC17a8188a34e2401dbf0cb29344aa32ddbdaf9db9b0da5b5c328d52f4a55dd91c"
         self.dingtalk_access_token = "fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
 
@@ -104,7 +104,7 @@ class BinanceClient:
 
                 report.update({
                     "position": {
-                        "side": position['side'],
+                        "side": position['side'],           # 保留英文，显示时再转换
                         "qty": position['qty'],
                         "entry_price": round(entry_price, 2),
                         "mark_price": round(mark_price, 2),
@@ -132,16 +132,19 @@ class BinanceClient:
 
             lines = [f"【账户状态报表】{report['time']}"]
 
-            lines.append("\n一、账户概况")
+            # 一、账户概况
+            lines.append("\n【一、账户概况】")
             lines.append(f"总权益: {report['equity']} USDT")
             lines.append(f"钱包余额: {report['wallet_balance']} USDT")
             lines.append(f"可用保证金: {report['available_margin']} USDT")
             lines.append(f"保证金使用率: {report['margin_ratio']}%")
 
-            lines.append("\n二、当前持仓")
+            # 二、当前持仓（多空已改为中文）
+            lines.append("\n【二、当前持仓】")
             if report.get("position"):
                 p = report["position"]
-                lines.append(f"方向: {p['side']}")
+                side_cn = "多头" if p['side'] == "LONG" else "空头"
+                lines.append(f"方向: {side_cn}")
                 lines.append(f"数量: {p['qty']}")
                 lines.append(f"开仓均价: {p['entry_price']}")
                 lines.append(f"标记价格: {p['mark_price']}")
@@ -152,7 +155,8 @@ class BinanceClient:
             else:
                 lines.append("当前无持仓")
 
-            lines.append("\n三、今日表现")
+            # 三、今日表现
+            lines.append("\n【三、今日表现】")
             lines.append(f"今日已实现盈亏: {report['today_realized_pnl']} USDT")
             lines.append(f"今日总盈亏（含未实现）: {report['today_total_pnl']} USDT")
 
@@ -161,11 +165,12 @@ class BinanceClient:
 
             message = "\n".join(lines)
             self._send_dingtalk(message)
+            logging.info("[账户报表] 已成功发送到钉钉")
 
         except Exception as e:
             logging.error(f"[发送账户报表到钉钉异常] {e}", exc_info=True)
 
-    # ==================== 其他原有方法（保留） ====================
+    # ==================== 工具与风控方法 ====================
     def get_mark_price(self, symbol: str):
         try:
             ticker = self.client.futures_mark_price(symbol=symbol)
@@ -317,7 +322,8 @@ class BinanceClient:
             )
             logging.info(f"[开{side}成功] {symbol} | Qty: {final_qty}")
 
-            self.send_account_report_to_dingtalk(symbol, extra_msg=f"已成功开{side}仓（动态仓位）")
+            side_cn = "多头" if side == "LONG" else "空头"
+            self.send_account_report_to_dingtalk(symbol, extra_msg=f"已成功开{side_cn}仓（动态仓位）")
             return {"status": "success", "order": order, "qty": final_qty}
         except BinanceAPIException as e:
             return {"status": "error", "message": str(e)}
@@ -330,6 +336,7 @@ class BinanceClient:
 
             qty = position['qty']
             side = "SELL" if position['side'] == "LONG" else "BUY"
+            side_cn = "多头" if position['side'] == "LONG" else "空头"
 
             order = self.client.futures_create_order(
                 symbol=symbol, side=side, type="MARKET",
@@ -337,7 +344,7 @@ class BinanceClient:
             )
             logging.info(f"[全平成功] {symbol}")
 
-            self.send_account_report_to_dingtalk(symbol, extra_msg="已执行全平操作")
+            self.send_account_report_to_dingtalk(symbol, extra_msg=f"已执行全平（原{side_cn}）")
             return {"status": "success", "order": order}
         except Exception as e:
             return {"status": "error", "message": str(e)}
