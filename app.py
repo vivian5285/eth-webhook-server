@@ -29,35 +29,51 @@ def get_client(account_name="main"):
             api_secret=acc["api_secret"],
             risk_percent=acc.get("risk_percent", 0.85),
             max_leverage=acc.get("max_leverage", 3.0),
-            atr_multiplier_sl=acc.get("atr_multiplier_sl", 0.92),
-            max_position_value_usdt=acc.get("max_position_value_usdt", 5000),
-            daily_loss_limit_percent=acc.get("daily_loss_limit_percent", 5.0),
-            max_consecutive_losses=acc.get("max_consecutive_losses", 3),
             client_name=acc.get("client_name", account_name)
         )
-    # 兜底使用环境变量
     return BinanceClient(
         api_key=os.getenv("BINANCE_API_KEY"),
         api_secret=os.getenv("BINANCE_API_SECRET"),
         client_name="默认账户"
     )
 
+def send_signal_notification_to_dingtalk(signal: str, symbol: str, extra_info: str = ""):
+    """收到 TradingView 信号时推送通知"""
+    try:
+        signal_map = {
+            "OPEN_LONG": "开多",
+            "OPEN_SHORT": "开空",
+            "CLOSE_ALL": "全平"
+        }
+        signal_cn = signal_map.get(signal, signal)
+
+        message = f"""【收到 TradingView 信号】
+信号类型: {signal_cn}
+交易品种: {symbol}
+额外信息: {extra_info if extra_info else "无"}
+时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+        # 调用 binance_client 里的钉钉发送方法
+        client = get_client()
+        client._send_dingtalk(message)
+        logging.info(f"[钉钉通知] 已推送信号接收通知: {signal_cn}")
+    except Exception as e:
+        logging.error(f"[发送信号通知失败] {e}")
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # 1. 优先尝试解析 JSON
+        # ==================== 1. 全面解析 TradingView 信号 ====================
         data = request.get_json(silent=True)
 
-        # 2. 如果失败，尝试从原始数据中解析 JSON（TradingView 常发 text/plain）
         if not data:
             try:
                 raw_data = request.data.decode('utf-8', errors='ignore').strip()
                 if raw_data:
                     data = json.loads(raw_data)
-            except Exception as e:
-                logging.warning(f"[Webhook] JSON 解析失败: {e}")
+            except:
+                pass
 
-        # 3. 最后尝试 form 表单
         if not data:
             data = request.form.to_dict() or {}
 
@@ -70,8 +86,12 @@ def webhook():
         account = data.get("account", "main")
         atr = data.get("atr")
 
-        logging.info(f"[Webhook] 收到信号 → {signal} | Symbol: {symbol} | Account: {account}")
+        logging.info(f"[Webhook] 收到信号 → {signal} | Symbol: {symbol}")
 
+        # ==================== 2. 立即推送钉钉通知（中文友好版） ====================
+        send_signal_notification_to_dingtalk(signal, symbol, extra_info=f"ATR: {atr}" if atr else "")
+
+        # ==================== 3. 执行交易 ====================
         client = get_client(account)
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
@@ -84,7 +104,6 @@ def webhook():
             return jsonify(result)
 
         else:
-            logging.warning(f"[Webhook] 未知信号: {signal}")
             return jsonify({"status": "ignored", "message": f"未知信号: {signal}"})
 
     except Exception as e:
