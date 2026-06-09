@@ -4,6 +4,11 @@ import os
 import json
 import logging
 import requests
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -12,7 +17,6 @@ load_dotenv()
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 从环境变量读取钉钉地址 ====================
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
 
 def load_accounts():
@@ -41,7 +45,7 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
-# ==================== 钉钉推送函数 ====================
+# ==================== 钉钉加签推送 ====================
 def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "", is_warning: bool = False):
     if not DINGTALK_WEBHOOK:
         logging.warning("未配置 DINGTALK_WEBHOOK，跳过钉钉推送")
@@ -64,6 +68,16 @@ def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "",
 **📊 账户快照**
 {report}"""
 
+    # ==================== 加签处理 ====================
+    timestamp = str(round(time.time() * 1000))
+    secret = "SEC17a8188a34e2401dbf0cb29344aa32ddbdaf9db9b0da5b5c328d52f4a55dd91c"
+
+    string_to_sign = '{}\n{}'.format(timestamp, secret)
+    hmac_code = hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), digestmod=hashlib.sha256).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+
+    signed_webhook = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
+
     payload = {
         "msgtype": "markdown",
         "markdown": {
@@ -73,11 +87,12 @@ def send_pretty_dingtalk(client, title: str, content: str, extra_info: str = "",
     }
 
     try:
-        resp = requests.post(DINGTALK_WEBHOOK, json=payload, timeout=5)
-        if resp.status_code == 200 and resp.json().get("errcode") == 0:
+        resp = requests.post(signed_webhook, json=payload, timeout=5)
+        result = resp.json()
+        if result.get("errcode") == 0:
             logging.info(f"[钉钉推送成功] {title}")
         else:
-            logging.error(f"[钉钉推送失败] {resp.text}")
+            logging.error(f"[钉钉推送失败] {result}")
     except Exception as e:
         logging.error(f"[钉钉请求异常] {e}")
 
