@@ -11,7 +11,7 @@ load_dotenv()
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# 信号冷却缓存
+# ==================== 信号冷却缓存 ====================
 signal_cooldown = {}
 
 def load_accounts():
@@ -25,9 +25,25 @@ def load_accounts():
 ACCOUNTS = load_accounts()
 
 def get_client(account_name="main"):
-    # ... 保持不变 ...
+    account_name = account_name.lower()
+    if account_name in ACCOUNTS:
+        acc = ACCOUNTS[account_name]
+        return BinanceClient(
+            api_key=acc["api_key"],
+            api_secret=acc["api_secret"],
+            risk_percent=acc.get("risk_percent", 0.85),
+            max_leverage=acc.get("max_leverage", 3.0),
+            client_name=acc.get("client_name", account_name)
+        )
+    # 兜底使用环境变量
+    return BinanceClient(
+        api_key=os.getenv("BINANCE_API_KEY"),
+        api_secret=os.getenv("BINANCE_API_SECRET"),
+        client_name="默认账户"
+    )
 
-def is_in_cooldown(signal, symbol, seconds=30):
+def is_in_cooldown(signal, symbol, seconds=25):
+    """信号冷却，防止短时间内重复执行"""
     key = f"{signal}_{symbol}"
     now = datetime.now()
     if key in signal_cooldown:
@@ -36,20 +52,47 @@ def is_in_cooldown(signal, symbol, seconds=30):
     signal_cooldown[key] = now
     return False
 
+def send_signal_notification_to_dingtalk(signal: str, symbol: str, extra_info: str = ""):
+    """收到 TradingView 信号时推送钉钉通知"""
+    try:
+        signal_map = {
+            "OPEN_LONG": "开多",
+            "OPEN_SHORT": "开空",
+            "CLOSE_ALL": "全平"
+        }
+        signal_cn = signal_map.get(signal, signal)
+
+        message = f"""【收到 TradingView 信号】
+信号类型: {signal_cn}
+交易品种: {symbol}
+额外信息: {extra_info if extra_info else "无"}
+时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+
+        client = get_client()
+        client._send_dingtalk(message)
+        logging.info(f"[钉钉通知] 已推送信号接收通知: {signal_cn}")
+    except Exception as e:
+        logging.error(f"[发送信号通知失败] {e}")
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # 全面解析
+        # ==================== 1. 全面解析 TradingView 信号 ====================
         data = request.get_json(silent=True)
-        if not data:
-            try:
-                raw = request.data.decode('utf-8', errors='ignore').strip()
-                if raw:
-                    data = json.loads(raw)
-            except:
-                data = request.form.to_dict() or {}
 
         if not data:
+            try:
+                raw_data = request.data.decode('utf-8', errors='ignore').strip()
+                if raw_data:
+                    data = json.loads(raw_data)
+            except:
+                pass
+
+        if not data:
+            data = request.form.to_dict() or {}
+
+        if not data:
+            logging.warning("[Webhook] 收到空数据")
             return jsonify({"status": "error", "message": "Empty data"}), 400
 
         signal = data.get("signal")
@@ -57,16 +100,17 @@ def webhook():
         account = data.get("account", "main")
         atr = data.get("atr")
 
-        logging.info(f"[Webhook] 收到信号 → {signal} | {symbol}")
+        logging.info(f"[Webhook] 收到信号 → {signal} | Symbol: {symbol}")
 
-        # 冷却检查
+        # ==================== 2. 冷却检查 ====================
         if is_in_cooldown(signal, symbol, 25):
             logging.info(f"[冷却] 信号 {signal} 在冷却期，忽略")
             return jsonify({"status": "ignored", "reason": "cooldown"})
 
-        # 立即推送信号通知
+        # ==================== 3. 推送收到信号通知 ====================
         send_signal_notification_to_dingtalk(signal, symbol, f"ATR: {atr}" if atr else "")
 
+        # ==================== 4. 执行交易 ====================
         client = get_client(account)
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
@@ -82,10 +126,8 @@ def webhook():
             return jsonify({"status": "ignored", "message": f"未知信号: {signal}"})
 
     except Exception as e:
-        logging.error(f"[Webhook 异常] {e}", exc_info=True)
+        logging.error(f"[Webhook] 处理异常: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
-
-# 保持你之前的 send_signal_notification_to_dingtalk 函数 ...
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
