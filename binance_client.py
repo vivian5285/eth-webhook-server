@@ -19,16 +19,15 @@ class BinanceClient:
         self.consecutive_losses = 0
         self.last_trade_date = None
 
-    # ==================== 实时价格获取 ====================
+    # ==================== 工具方法 ====================
     def get_mark_price(self, symbol: str):
         try:
             ticker = self.client.futures_mark_price(symbol=symbol)
             return float(ticker['markPrice'])
         except Exception as e:
             logging.error(f"[获取标记价格失败] {e}")
-            return 1680.0  # 兜底价格
+            return 1680.0
 
-    # ==================== 风控相关 ====================
     def get_account_equity(self):
         try:
             account = self.client.futures_account()
@@ -53,6 +52,7 @@ class BinanceClient:
             logging.error(f"[获取持仓失败] {e}")
             return None
 
+    # ==================== 风控方法 ====================
     def get_today_realized_pnl(self, symbol: str = None):
         try:
             now = datetime.utcnow()
@@ -115,8 +115,8 @@ class BinanceClient:
             position_ratio = total_value / equity if equity > 0 else 0
             total_leverage = total_value / equity if equity > 0 else 0
 
-            logging.info(f"[总风险检查] 总持仓价值: {total_value:.2f}, 权益: {equity:.2f}, "
-                         f"占比: {position_ratio*100:.2f}%, 杠杆: {total_leverage:.2f}x")
+            logging.info(f"[总风险检查] 总持仓价值={total_value:.2f}, 权益={equity:.2f}, "
+                         f"占比={position_ratio*100:.2f}%, 杠杆={total_leverage:.2f}x")
 
             if position_ratio > MAX_POSITION_RATIO:
                 logging.warning(f"[总风险拒绝] 持仓价值占比过高: {position_ratio*100:.2f}%")
@@ -131,15 +131,104 @@ class BinanceClient:
             logging.error(f"[总风险检查异常] {e}")
             return False
 
-    # ==================== 账户报表（已增强） ====================
+    # ==================== 账户报表（完整版） ====================
     def get_account_report(self, symbol: str = "ETHUSDT"):
-        # 保留之前增强版实现（包含今日盈亏、持仓详情等）
-        # 这里为简洁省略，实际使用时请保留你之前版本的 get_account_report 完整代码
-        pass
+        try:
+            equity = self.get_account_equity()
+            position = self.get_current_position(symbol)
+            today_realized = self.get_today_realized_pnl(symbol)
+            mark_price = self.get_mark_price(symbol)
+
+            report = {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "equity": round(equity, 2),
+                "wallet_balance": 0.0,
+                "available_margin": 0.0,
+                "margin_ratio": 0.0,
+                "position": None,
+                "unrealized_pnl": 0.0,
+                "today_realized_pnl": round(today_realized, 2),
+                "today_total_pnl": round(today_realized, 2),
+                "leverage": 0,
+                "liquidation_price": 0.0,
+                "mark_price": round(mark_price, 2)
+            }
+
+            try:
+                account = self.client.futures_account()
+                report["wallet_balance"] = round(float(account.get('totalWalletBalance', 0)), 2)
+                report["available_margin"] = round(float(account.get('availableBalance', 0)), 2)
+            except:
+                pass
+
+            if position:
+                pos_info = self.client.futures_position_information(symbol=symbol)[0]
+                entry_price = float(pos_info['entryPrice'])
+                liquidation_price = float(pos_info['liquidationPrice'])
+                leverage = int(float(pos_info.get('leverage', 0)))
+                unrealized_pnl = float(pos_info['unRealizedProfit'])
+                margin = float(pos_info.get('isolatedMargin', 0)) or 0
+
+                position_value = round(position['qty'] * mark_price, 2)
+                margin_ratio = round((margin / equity * 100), 2) if equity > 0 else 0
+
+                report.update({
+                    "position": {
+                        "side": position['side'],
+                        "qty": position['qty'],
+                        "entry_price": round(entry_price, 2),
+                        "mark_price": round(mark_price, 2),
+                        "position_value": position_value
+                    },
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "today_total_pnl": round(today_realized + unrealized_pnl, 2),
+                    "margin_ratio": margin_ratio,
+                    "leverage": leverage,
+                    "liquidation_price": round(liquidation_price, 2)
+                })
+
+            return report
+
+        except Exception as e:
+            logging.error(f"[生成账户报表失败] {e}")
+            return None
 
     def send_account_report_to_dingtalk(self, symbol: str = "ETHUSDT", extra_msg: str = ""):
-        # 保留之前版本
-        pass
+        report = self.get_account_report(symbol)
+        if not report:
+            return
+
+        lines = [f"【账户状态报表】{report['time']}"]
+
+        lines.append("\n一、账户概况")
+        lines.append(f"总权益: {report['equity']} USDT")
+        lines.append(f"钱包余额: {report['wallet_balance']} USDT")
+        lines.append(f"可用保证金: {report['available_margin']} USDT")
+        lines.append(f"保证金使用率: {report['margin_ratio']}%")
+
+        lines.append("\n二、当前持仓")
+        if report.get("position"):
+            p = report["position"]
+            lines.append(f"方向: {p['side']}")
+            lines.append(f"数量: {p['qty']}")
+            lines.append(f"开仓均价: {p['entry_price']}")
+            lines.append(f"标记价格: {p['mark_price']}")
+            lines.append(f"持仓价值: {p['position_value']} USDT")
+            lines.append(f"未实现盈亏: {report['unrealized_pnl']} USDT")
+            lines.append(f"当前杠杆: {report['leverage']}x")
+            lines.append(f"强平价格: {report['liquidation_price']}")
+        else:
+            lines.append("当前无持仓")
+
+        lines.append("\n三、今日表现")
+        lines.append(f"今日已实现盈亏: {report['today_realized_pnl']} USDT")
+        lines.append(f"今日总盈亏（含未实现）: {report['today_total_pnl']} USDT")
+
+        if extra_msg:
+            lines.append(f"\n备注: {extra_msg}")
+
+        message = "\n".join(lines)
+        self._send_dingtalk(message)
 
     def _send_dingtalk(self, message: str):
         import requests
@@ -149,14 +238,13 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[发送钉钉失败] {e}")
 
-    # ==================== 加强版智能开仓 ====================
+    # ==================== 智能开仓与平仓 ====================
     def smart_open_position(self, symbol: str, side: str, requested_qty: float = None,
                             atr: float = None, atr_multiplier: float = 2.0):
         equity = self.get_account_equity()
         if equity <= 0:
             return {"status": "error", "message": "无法获取账户权益"}
 
-        # 风控检查
         if not self.check_daily_loss_limit():
             return {"status": "rejected", "reason": "每日亏损熔断触发"}
         if not self.check_consecutive_losses():
@@ -168,7 +256,6 @@ class BinanceClient:
         if current and current["side"] != side:
             self.close_all_positions(symbol)
 
-        # 动态仓位计算
         final_qty = 0
         if atr and atr > 0:
             risk_amount = equity * 0.015
