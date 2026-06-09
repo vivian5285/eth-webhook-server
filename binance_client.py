@@ -40,48 +40,56 @@ class BinanceClient:
             logging.error(f"[获取账户权益失败] {e}")
             return 0.0
 
-    # ==================== 智能仓位计算（分层风控） ====================
+    # ==================== 智能仓位计算（激进版） ====================
     def calculate_position_size(self, stop_distance: float, symbol: str = "ETHUSDT"):
         """
-        根据账户权益自动分层计算仓位
-        小资金(<3000)：更保守
-        中资金(3000~10000)：均衡
-        大资金(>10000)：适度激进但有上限
+        根据账户权益自动分层风控：
+        - < 3000U     : 激进（risk_mult=1.9），帮助小资金快速滚雪球
+        - 3000~10000U : 中等
+        - > 10000U    : 保守，严格控制保证金占用
         """
         equity = self.get_account_equity()
         if equity <= 0 or stop_distance <= 0:
-            return 0
+            return 0.0
 
-        # 分层风险系数
+        # ==================== 分层参数 ====================
         if equity < 3000:
-            risk_mult = 0.6          # 小资金更保守
-            max_position_value = 3000
-        elif equity < 10000:
-            risk_mult = 0.85         # 中等资金
-            max_position_value = 8000
-        else:
-            risk_mult = 1.0          # 大资金
-            max_position_value = 15000
+            # 小资金：激进一些
+            risk_mult = 1.9
+            max_position_value = equity * 6.5     # 允许较高杠杆
 
+        elif equity < 10000:
+            # 中等资金
+            risk_mult = 1.1
+            max_position_value = equity * 4.0
+
+        else:
+            # 大资金：保守
+            risk_mult = 0.75
+            max_position_value = equity * 2.5
+
+        # 计算风险金额
         risk_amount = equity * (self.risk_percent * risk_mult) / 100
         raw_qty = risk_amount / stop_distance
 
         # 按最大仓位价值限制
-        price = self.client.get_symbol_ticker(symbol=symbol)["price"]
-        max_qty_by_value = max_position_value / float(price)
+        try:
+            price = float(self.client.get_symbol_ticker(symbol=symbol)["price"])
+            max_qty_by_value = max_position_value / price
+        except:
+            max_qty_by_value = raw_qty
 
         final_qty = min(raw_qty, max_qty_by_value)
 
         # 币安精度处理（ETHUSDT 通常保留3位）
         final_qty = max(0.001, round(final_qty, 3))
+
+        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险倍数: {risk_mult:.1f} | 最终仓位: {final_qty}")
         return final_qty
 
-    # ==================== 部分平仓（TP1/TP2/TP3 智能计算） ====================
+    # ==================== 部分平仓（TP1/TP2/TP3） ====================
     def close_partial_position(self, symbol: str, percent: float):
-        """
-        按当前剩余仓位百分比平仓（智慧大脑核心）
-        percent: 0.3 = 平当前仓位的30%
-        """
+        """按当前剩余仓位百分比平仓"""
         try:
             position = self.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
