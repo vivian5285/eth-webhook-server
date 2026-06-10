@@ -1,4 +1,4 @@
-# app.py（最终升级版）
+# app.py（最终强壮版 - 带详细日志）
 from flask import Flask, request, jsonify
 import threading
 import time
@@ -18,14 +18,15 @@ position_manager = PositionManager()
 def webhook():
     data = request.get_json()
     if not data:
-        return jsonify({"status": "error", "message": "No JSON received"}), 400
+        logging.warning("[Webhook] 收到空请求")
+        return jsonify({"status": "error", "message": "No JSON"}), 400
 
     try:
         process_webhook(data)
         return jsonify({"status": "success"}), 200
     except Exception as e:
-        error_detail = traceback.format_exc()
-        print(f"[CRITICAL ERROR] webhook 处理异常:\n{error_detail}")
+        error_msg = traceback.format_exc()
+        print(f"[CRITICAL] webhook 处理异常:\n{error_msg}")
         send_dingtalk(f"【严重异常】webhook 处理失败: {str(e)}")
         return jsonify({"status": "error"}), 500
 
@@ -37,72 +38,92 @@ def process_webhook(data: dict):
     reason = data.get("reason", "")
     timeframe = data.get("timeframe", "45m")
 
-    print(f"[INFO] 收到信号: {signal} | reason: {reason} | atr: {atr}")
+    print(f"\n[INFO] ========== 收到新信号 ==========")
+    print(f"[INFO] signal: {signal}, symbol: {symbol}, atr: {atr}, reason: {reason}")
 
-    # 轻量辅助判断（只在明显冲突时提醒）
+    # 轻量辅助判断
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         bias = check_simple_bias(client, symbol, timeframe)
         if is_obvious_conflict(signal, bias):
-            send_dingtalk(f"【方向冲突提醒】TV发 {signal}，但当前指标偏 {bias}，建议检查")
+            msg = f"【方向冲突提醒】TV发 {signal}，但当前指标偏 {bias}"
+            print(f"[WARN] {msg}")
+            send_dingtalk(msg)
 
-    # ========== 方向信号：先平当前仓位，再开新仓 ==========
+    # ========== 方向信号处理：先平后开 ==========
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 先全平当前仓位
+            # 1. 检查当前持仓
             current_pos = client.get_current_position(symbol)
-            if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
-                print(f"[INFO] 检测到持仓，先执行全平")
-                client.close_all_positions(symbol)
+            print(f"[DEBUG] 当前持仓查询结果: {current_pos}")
 
-            # 计算仓位数量
+            # 2. 如果有持仓，先全平
+            if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
+                print(f"[INFO] 检测到持仓，执行全平...")
+                close_result = client.close_all_positions(symbol)
+                print(f"[DEBUG] 全平结果: {close_result}")
+                time.sleep(1.5)  # 等待平仓完成
+
+            # 3. 计算仓位数量
             qty = client.calculate_position_size(atr)
+            print(f"[INFO] 计算得到下单数量: {qty}")
+
             if qty <= 0:
-                send_dingtalk(f"【风控拦截】计算得到的下单数量为 {qty}，已拒绝")
+                msg = f"【风控拦截】计算得到的下单数量为 {qty}，已拒绝开仓"
+                print(f"[WARN] {msg}")
+                send_dingtalk(msg)
                 return
 
-            # 开新仓
+            # 4. 执行开仓
             if signal == "OPEN_LONG":
+                print(f"[INFO] 开始执行开多...")
                 order = client.open_long(symbol, qty)
                 if order:
                     entry_price = float(order.get("avgPrice", 0))
                     tp_prices = calculate_tp_prices(entry_price, atr, "long")
                     position_manager.save_position(symbol, entry_price, atr, tp_prices, "long")
 
+                    print(f"[SUCCESS] 开多成功，入场价: {entry_price}")
                     send_dingtalk(f"【开多成功】入场价: {entry_price}\n"
                                   f"TP1: {tp_prices['tp1']} | TP2: {tp_prices['tp2']} | TP3: {tp_prices['tp3']}")
 
             elif signal == "OPEN_SHORT":
+                print(f"[INFO] 开始执行开空...")
                 order = client.open_short(symbol, qty)
                 if order:
                     entry_price = float(order.get("avgPrice", 0))
                     tp_prices = calculate_tp_prices(entry_price, atr, "short")
                     position_manager.save_position(symbol, entry_price, atr, tp_prices, "short")
 
+                    print(f"[SUCCESS] 开空成功，入场价: {entry_price}")
                     send_dingtalk(f"【开空成功】入场价: {entry_price}\n"
                                   f"TP1: {tp_prices['tp1']} | TP2: {tp_prices['tp2']} | TP3: {tp_prices['tp3']}")
 
         except Exception as e:
+            print(f"[ERROR] 开仓过程发生异常: {traceback.format_exc()}")
             send_dingtalk(f"【开仓异常】{str(e)}")
-            print(f"[ERROR] 开仓过程异常: {traceback.format_exc()}")
 
-    # ========== 保护性平仓：只平，不重新开仓 ==========
+    # ========== 保护性平仓：只平不重新开 ==========
     elif signal == "CLOSE_ALL":
         try:
+            print(f"[INFO] 收到保护性平仓信号，原因: {reason}")
             client.close_all_positions(symbol)
             position_manager.clear_position(symbol)
             send_dingtalk(f"【保护性平仓】原因: {reason}，当前已空仓")
         except Exception as e:
+            print(f"[ERROR] 保护性平仓异常: {traceback.format_exc()}")
             send_dingtalk(f"【平仓异常】{str(e)}")
 
+    print(f"[INFO] ========== 信号处理结束 ==========\n")
 
-# 后台 TP123 主动监控线程
+
+# 后台 TP123 主动监控
 def start_tp_monitor():
     while True:
         try:
             active_positions = position_manager.get_all_active_positions()
             for symbol in active_positions:
                 current_price = client.get_current_price(symbol)
-                # TODO: 在 tp_manager.py 中实现具体止盈逻辑
+                # TODO: 实现具体止盈逻辑
                 pass
         except Exception as e:
             print(f"[TP Monitor Error] {e}")
