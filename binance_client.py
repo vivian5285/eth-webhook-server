@@ -1,9 +1,10 @@
-# binance_client.py（需要新增/增强的方法）
-
+# binance_client.py
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-from config import Config
 import logging
+from config import Config
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class BinanceClient:
     def __init__(self):
@@ -50,6 +51,7 @@ class BinanceClient:
                 type="MARKET",
                 quantity=qty
             )
+            logging.info(f"[开多成功] {symbol} | Qty: {qty}")
             return order
         except BinanceAPIException as e:
             logging.error(f"[开多失败] {e}")
@@ -63,23 +65,38 @@ class BinanceClient:
                 type="MARKET",
                 quantity=qty
             )
+            logging.info(f"[开空成功] {symbol} | Qty: {qty}")
             return order
         except BinanceAPIException as e:
             logging.error(f"[开空失败] {e}")
             return None
 
     def calculate_position_size(self, atr: float):
-        # 这里先用简单逻辑，后续可接入你原来的动态风控
-        equity = float(self.client.futures_account()["totalWalletBalance"])
-        risk_amount = equity * Config.BASE_RISK_PERCENT / 100
-        stop_distance = atr * 0.92
-        qty = risk_amount / stop_distance
-        return round(qty, 3)
+        try:
+            if not atr or atr <= 0:
+                logging.warning("[calculate_position_size] ATR 无效，使用默认小数量")
+                return 0.01
+
+            account = self.client.futures_account()
+            equity = float(account["totalWalletBalance"])
+
+            risk_amount = equity * Config.BASE_RISK_PERCENT / 100
+            stop_distance = atr * Config.ATR_MULTIPLIER_SL
+
+            qty = risk_amount / stop_distance
+            qty = max(round(qty, 3), 0.001)
+
+            logging.info(f"[仓位计算] 权益={equity}, ATR={atr}, qty={qty}")
+            return qty
+
+        except Exception as e:
+            logging.error(f"[calculate_position_size 异常] {e}")
+            return 0.01
 
     def get_current_price(self, symbol: str):
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             return float(ticker['price'])
         except Exception as e:
-            logging.error(f"[获取价格失败] {e}")
+            logging.error(f"[获取当前价格失败] {e}")
             return None
