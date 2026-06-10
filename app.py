@@ -44,7 +44,7 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
-# ==================== 钉钉推送（美化版 + 加签） ====================
+# ==================== 钉钉美化推送 ====================
 def send_pretty_dingtalk(client, title: str, content: str = "", action_type: str = "normal"):
     if not DINGTALK_WEBHOOK:
         return
@@ -135,7 +135,7 @@ def webhook():
             except Exception as e:
                 return jsonify({"status": "error"}), 200
 
-        # ==================== TP_PARTIAL 智能处理（抗乱序 + 静默跳过） ====================
+        # ==================== TP_PARTIAL 智能处理 ====================
         if signal == "TP_PARTIAL":
             if reason not in ["tp1", "tp2", "tp3"]:
                 return jsonify({"status": "ignored"}), 200
@@ -143,12 +143,10 @@ def webhook():
             position = client.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
 
-            # 仓位已为0 → 静默忽略（不推钉钉）
             if current_amt == 0:
                 logging.info(f"[TP忽略] reason={reason} | 当前仓位已为0，静默跳过")
                 return jsonify({"status": "skipped", "reason": "position_already_closed"}), 200
 
-            # 小仓位自动全平
             try:
                 price = float(client.client.get_symbol_ticker(symbol=symbol)["price"])
                 position_value = abs(current_amt) * price
@@ -161,7 +159,6 @@ def webhook():
                 send_pretty_dingtalk(client, "小仓位自动全平", f"收到 {reason}，仓位过小直接全平", "close")
                 return jsonify({"status": "success"}), 200
 
-            # 正常处理
             if reason == "tp3":
                 logging.info(f"[TP3 最终止盈] 执行100%全平 | 当前持仓: {current_amt}")
                 client.close_all_positions(symbol)
@@ -173,14 +170,26 @@ def webhook():
 
             return jsonify({"status": "success"}), 200
 
-        # ==================== 其他全平信号 ====================
+        # ==================== CLOSE_ALL（反向风控优先 + 静默跳过） ====================
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
-            if float(position.get("positionAmt", 0)) == 0:
-                return jsonify({"status": "skipped"}), 200
+            current_amt = float(position.get("positionAmt", 0))
+
+            if current_amt == 0:
+                logging.info(f"[反向风控忽略] reason={reason} | 当前仓位已为0，静默跳过")
+                return jsonify({"status": "skipped", "reason": "position_already_closed"}), 200
+
+            # 判断是否为反向风控信号
+            is_reversal = any(keyword in reason for keyword in ["quick_exit", "rsi_exit", "strong_reversal", "reverse"])
+
+            if is_reversal:
+                logging.info(f"[反向风控全平] reason={reason} | 立即执行全平")
+                send_pretty_dingtalk(client, "反向风控全平", reason, "close")
+            else:
+                logging.info(f"[全平信号] reason={reason} | 执行全平")
+                send_pretty_dingtalk(client, "全平完成", reason, "close")
 
             client.close_all_positions(symbol)
-            send_pretty_dingtalk(client, "全平完成", reason, "close")
             return jsonify({"status": "success"}), 200
 
         return jsonify({"status": "ignored"}), 200
