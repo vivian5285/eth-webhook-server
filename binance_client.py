@@ -1,4 +1,4 @@
-# binance_client.py（最终部署版）
+# binance_client.py（最终完整强壮版）
 import os
 import logging
 from binance.client import Client
@@ -27,14 +27,12 @@ class BinanceClient:
         try:
             account = self.client.futures_account()
             equity = float(account.get('totalWalletBalance', 0))
-
             if equity < 3000:
                 risk_percent = 0.07
             elif equity < 10000:
                 risk_percent = 0.025
             else:
                 risk_percent = 0.015
-
             if atr <= 0:
                 return 0.01
             qty = round((equity * risk_percent) / atr, 3)
@@ -45,9 +43,7 @@ class BinanceClient:
 
     def open_long(self, symbol: str, qty: float):
         try:
-            order = self.client.futures_create_order(
-                symbol=symbol, side="BUY", type="MARKET", quantity=qty
-            )
+            order = self.client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
             logging.info(f"[开多成功] {symbol} Qty: {qty}")
             return order
         except BinanceAPIException as e:
@@ -56,9 +52,7 @@ class BinanceClient:
 
     def open_short(self, symbol: str, qty: float):
         try:
-            order = self.client.futures_create_order(
-                symbol=symbol, side="SELL", type="MARKET", quantity=qty
-            )
+            order = self.client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
             logging.info(f"[开空成功] {symbol} Qty: {qty}")
             return order
         except BinanceAPIException as e:
@@ -72,14 +66,38 @@ class BinanceClient:
                 return {"status": "skipped"}
             qty = abs(float(pos["positionAmt"]))
             side = "SELL" if float(pos["positionAmt"]) > 0 else "BUY"
-            self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
-            )
+            self.client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True)
             logging.info(f"[全平成功] {symbol}")
             return {"status": "success"}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error"}
+
+    # ==================== 新增：部分平仓（核心） ====================
+    def close_partial_position(self, symbol: str, percent: float):
+        """
+        按当前持仓比例平仓
+        percent: 0.3 = 平当前仓位的 30%
+        """
+        try:
+            pos = self.get_current_position(symbol)
+            if not pos or float(pos.get("positionAmt", 0)) == 0:
+                return {"status": "skipped", "reason": "无持仓"}
+
+            current_qty = abs(float(pos["positionAmt"]))
+            close_qty = round(current_qty * percent, 3)
+            if close_qty < 0.001:
+                return {"status": "skipped", "reason": "平仓数量过小"}
+
+            side = "SELL" if float(pos["positionAmt"]) > 0 else "BUY"
+            self.client.futures_create_order(
+                symbol=symbol, side=side, type="MARKET", quantity=close_qty, reduceOnly=True
+            )
+            logging.info(f"[部分平仓成功] {symbol} 平 {percent*100}% (数量 {close_qty})")
+            return {"status": "success", "closed_qty": close_qty}
+        except Exception as e:
+            logging.error(f"[部分平仓失败] {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_detailed_report(self) -> dict:
         try:
