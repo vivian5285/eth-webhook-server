@@ -1,4 +1,4 @@
-# app.py（最终完美版）
+# app.py（最终完整版 - 已整合加强版 process_webhook）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -9,7 +9,6 @@ from tp_manager import get_actual_tp_prices
 from dingtalk import send_dingtalk
 from config import Config
 
-# ==================== 日志配置 ====================
 logging.basicConfig(
     level=getattr(logging, Config.LOG_LEVEL),
     format='%(asctime)s [%(levelname)s] %(message)s'
@@ -40,29 +39,38 @@ def process_webhook(data: dict):
     atr = data.get("atr")
     reason = data.get("reason", "")
 
-    logging.info(f"[收到信号] {signal} | {symbol}")
+    logging.info(f"[收到信号] {signal} | Symbol: {symbol} | ATR: {atr}")
+
+    if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
+        logging.warning(f"[未知信号] {signal}，已忽略")
+        return
 
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 先清理已有持仓（无论方向）
+            # === 核心逻辑：无论同反方向，都先全平再开新仓 ===
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
-                logging.info("[风控] 检测到持仓，先全平")
-                client.close_all_positions(symbol)
-                time.sleep(1.5)
+                logging.info(f"[风控] 检测到已有持仓，先执行全平")
+                close_result = client.close_all_positions(symbol)
+                if close_result.get("status") != "success":
+                    logging.error("[风控] 全平失败，放弃本次开仓")
+                    send_dingtalk("风控全平失败", f"信号: {signal}，全平失败，放弃开新仓", is_warning=True)
+                    return
+                time.sleep(1.8)
 
+            # 计算仓位
             qty = client.calculate_position_size(atr)
             if qty <= 0:
-                send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝开仓", is_warning=True)
+                msg = f"计算仓位为 {qty}，已拒绝开仓"
+                logging.warning(f"[风控拦截] {msg}")
+                send_dingtalk("风控拦截", msg, is_warning=True)
                 return
 
-            side_str = "long" if signal == "OPEN_LONG" else "short"
-
             # 执行开仓
+            side_str = "long" if signal == "OPEN_LONG" else "short"
             order = client.open_long(symbol, qty) if signal == "OPEN_LONG" else client.open_short(symbol, qty)
 
             if order:
-                # 获取真实入场价
                 entry_price = float(order.get("avgPrice") or 0)
                 if entry_price == 0:
                     ticker = client.client.futures_symbol_ticker(symbol=symbol)
@@ -73,10 +81,12 @@ def process_webhook(data: dict):
 
                 report = client.get_detailed_report()
                 _send_open_notification(signal.replace("OPEN_", ""), qty, entry_price, tp_prices, report)
+            else:
+                send_dingtalk("开仓失败", f"{signal} 下单失败，请检查日志", is_warning=True)
 
         except Exception as e:
-            logging.error(f"[开仓异常] {e}")
-            send_dingtalk("开仓异常", str(e), is_warning=True)
+            logging.error(f"[开仓过程异常] {e}")
+            send_dingtalk("开仓严重异常", str(e), is_warning=True)
 
     elif signal == "CLOSE_ALL":
         try:
@@ -84,12 +94,7 @@ def process_webhook(data: dict):
             client.close_all_positions(symbol)
             position_manager.clear_position(symbol)
             report = client.get_detailed_report()
-            send_dingtalk(
-                "保护性全平",
-                f"原因: {reason}\n当前已空仓\n"
-                f"总权益: {report.get('total_equity')} USDT | "
-                f"浮盈: {report.get('unrealized_pnl')} USDT"
-            )
+            send_dingtalk("保护性全平", f"原因: {reason}\n当前已空仓")
         except Exception as e:
             logging.error(f"[全平异常] {e}")
             send_dingtalk("全平异常", str(e), is_warning=True)
@@ -134,14 +139,12 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
 if __name__ == "__main__":
     from tp_monitor import TPMonitor
 
-    # ==================== 启动 TP 监控（支持配置参数） ====================
     monitor = TPMonitor(
         symbol=Config.SYMBOL,
         check_interval=Config.TP_CHECK_INTERVAL
     )
     monitor.start()
 
-    logging.info(f"[系统启动] Webhook服务已启动 | 品种: {Config.SYMBOL} | TP检查间隔: {Config.TP_CHECK_INTERVAL}s")
+    logging.info(f"[系统启动] Webhook服务已启动 | 品种: {Config.SYMBOL}")
 
-    # 启动 Flask
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
