@@ -9,7 +9,7 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +18,15 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
+
+# ==================== 风控参数 ====================
+DAILY_LOSS_LIMIT_PERCENT = 9.0          # 每日最大亏损熔断（可改8~10）
+CONSECUTIVE_LOSS_WARNING = 4            # 连续亏损达到几次时强烈提醒
+
+# 内存状态（重启会重置）
+day_start_equity = None
+last_day = None
+consecutive_losses = 0
 
 def load_accounts():
     try:
@@ -44,25 +53,16 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
-# ==================== 钉钉美化推送 ====================
+# ==================== 钉钉推送 ====================
 def send_pretty_dingtalk(client, title: str, content: str = "", action_type: str = "normal"):
     if not DINGTALK_WEBHOOK:
         return
-
     try:
         report = client.get_detailed_report()
     except:
         report = ""
 
-    if action_type == "open":
-        emoji = "🟢"
-    elif action_type == "close":
-        emoji = "🔴"
-    elif action_type == "partial":
-        emoji = "🟡"
-    else:
-        emoji = "ℹ️"
-
+    emoji = "🟢" if action_type == "open" else ("🔴" if action_type == "close" else ("🟡" if action_type == "partial" else "ℹ️"))
     msg = f"""{emoji} **{title}**
 
 {content}
@@ -76,22 +76,36 @@ def send_pretty_dingtalk(client, title: str, content: str = "", action_type: str
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
     signed_webhook = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
 
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "title": title,
-            "text": msg
-        }
-    }
-
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": msg}}
     try:
         requests.post(signed_webhook, json=payload, timeout=5)
     except Exception as e:
         logging.error(f"钉钉推送失败: {e}")
 
+# ==================== 每日风控检查 ====================
+def check_daily_risk(client):
+    global day_start_equity, last_day, consecutive_losses
+
+    today = date.today()
+    if last_day != today:
+        day_start_equity = client.get_account_equity()
+        last_day = today
+        consecutive_losses = 0
+        logging.info(f"[每日风控重置] 新一天开始，起始权益: {day_start_equity:.2f}")
+
+    current_equity = client.get_account_equity()
+    daily_loss = (day_start_equity - current_equity) / day_start_equity * 100 if day_start_equity else 0
+
+    if daily_loss > DAILY_LOSS_LIMIT_PERCENT:
+        logging.warning(f"[每日熔断触发] 当前亏损 {daily_loss:.2f}% > {DAILY_LOSS_LIMIT_PERCENT}%")
+        return False
+    return True
+
 # ==================== Webhook 主逻辑 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    global consecutive_losses
+
     try:
         data = request.get_json()
         if not data:
@@ -103,9 +117,17 @@ def webhook():
         reason = data.get("reason", "")
 
         client = get_client(account)
+
+        # 每日风控检查（开仓和反向信号前检查）
+        if signal in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
+            if not check_daily_risk(client):
+                logging.warning("[风控拦截] 今日亏损已达上限，暂停交易")
+                send_pretty_dingtalk(client, "每日熔断触发", "今日亏损已超过限制，暂停新操作", "close")
+                return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
+
         logging.info(f"收到信号: {signal} | reason: {reason}")
 
-        # ==================== 开仓（反向持仓先平后开） ====================
+        # ==================== 开仓 ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             current_pos = client.get_current_position(symbol)
             current_amt = float(current_pos.get("positionAmt", 0))
@@ -154,7 +176,6 @@ def webhook():
                 position_value = 99999
 
             if position_value < 50:
-                logging.info(f"[小仓位自动全平] reason={reason} | 仓位仅 {position_value:.2f}U")
                 client.close_all_positions(symbol)
                 send_pretty_dingtalk(client, "小仓位自动全平", f"收到 {reason}，仓位过小直接全平", "close")
                 return jsonify({"status": "success"}), 200
@@ -170,7 +191,7 @@ def webhook():
 
             return jsonify({"status": "success"}), 200
 
-        # ==================== CLOSE_ALL（反向风控优先 + 静默跳过） ====================
+        # ==================== CLOSE_ALL（反向风控优先） ====================
         if signal == "CLOSE_ALL":
             position = client.get_current_position(symbol)
             current_amt = float(position.get("positionAmt", 0))
@@ -179,14 +200,12 @@ def webhook():
                 logging.info(f"[反向风控忽略] reason={reason} | 当前仓位已为0，静默跳过")
                 return jsonify({"status": "skipped", "reason": "position_already_closed"}), 200
 
-            # 判断是否为反向风控信号
-            is_reversal = any(keyword in reason for keyword in ["quick_exit", "rsi_exit", "strong_reversal", "reverse"])
+            is_reversal = any(kw in reason for kw in ["quick_exit", "rsi_exit", "strong_reversal", "reverse"])
 
             if is_reversal:
                 logging.info(f"[反向风控全平] reason={reason} | 立即执行全平")
                 send_pretty_dingtalk(client, "反向风控全平", reason, "close")
             else:
-                logging.info(f"[全平信号] reason={reason} | 执行全平")
                 send_pretty_dingtalk(client, "全平完成", reason, "close")
 
             client.close_all_positions(symbol)
@@ -199,5 +218,5 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 if __name__ == '__main__':
-    logging.info("ETH Webhook 服务已启动...")
+    logging.info("ETH Webhook 服务已启动（含每日熔断 + 连续亏损预警）...")
     app.run(host='0.0.0.0', port=5000, debug=False)
