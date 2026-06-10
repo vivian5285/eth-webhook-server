@@ -20,10 +20,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
 
 # ==================== 风控参数 ====================
-DAILY_LOSS_LIMIT_PERCENT = 9.0          # 每日最大亏损熔断（可改8~10）
-CONSECUTIVE_LOSS_WARNING = 4            # 连续亏损达到几次时强烈提醒
+DAILY_LOSS_LIMIT_PERCENT = 8.0          # 每日最大亏损熔断（已改为8%）
+CONSECUTIVE_LOSS_WARNING = 4            # 连续亏损提醒阈值
 
-# 内存状态（重启会重置）
+# 内存状态
 day_start_equity = None
 last_day = None
 consecutive_losses = 0
@@ -53,7 +53,7 @@ def get_client(account_name="main"):
         client_name="默认账户"
     )
 
-# ==================== 钉钉推送 ====================
+# ==================== 钉钉美化推送 ====================
 def send_pretty_dingtalk(client, title: str, content: str = "", action_type: str = "normal"):
     if not DINGTALK_WEBHOOK:
         return
@@ -118,11 +118,11 @@ def webhook():
 
         client = get_client(account)
 
-        # 每日风控检查（开仓和反向信号前检查）
+        # 每日风控检查
         if signal in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
             if not check_daily_risk(client):
                 logging.warning("[风控拦截] 今日亏损已达上限，暂停交易")
-                send_pretty_dingtalk(client, "每日熔断触发", "今日亏损已超过限制，暂停新操作", "close")
+                send_pretty_dingtalk(client, "每日熔断触发", f"今日亏损已超过 {DAILY_LOSS_LIMIT_PERCENT}% 限制，暂停新操作", "close")
                 return jsonify({"status": "blocked", "reason": "daily_loss_limit"}), 200
 
         logging.info(f"收到信号: {signal} | reason: {reason}")
@@ -218,5 +218,5 @@ def webhook():
         return jsonify({"status": "error"}), 500
 
 if __name__ == '__main__':
-    logging.info("ETH Webhook 服务已启动（含每日熔断 + 连续亏损预警）...")
+    logging.info("ETH Webhook 服务已启动（每日熔断 8% + 连续亏损预警）...")
     app.run(host='0.0.0.0', port=5000, debug=False)
