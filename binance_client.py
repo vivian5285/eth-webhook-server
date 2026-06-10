@@ -1,4 +1,4 @@
-# binance_client.py（最终完整优美版）
+# binance_client.py（最终部署版）
 import os
 import logging
 from binance.client import Client
@@ -14,8 +14,6 @@ class BinanceClient:
             api_key=os.getenv("BINANCE_API_KEY"),
             api_secret=os.getenv("BINANCE_API_SECRET")
         )
-
-    # ==================== 持仓与仓位计算 ====================
 
     def get_current_position(self, symbol: str = "ETHUSDT"):
         try:
@@ -45,14 +43,12 @@ class BinanceClient:
             logging.error(f"[仓位计算异常] {e}")
             return 0.01
 
-    # ==================== 开平仓 ====================
-
     def open_long(self, symbol: str, qty: float):
         try:
             order = self.client.futures_create_order(
                 symbol=symbol, side="BUY", type="MARKET", quantity=qty
             )
-            logging.info(f"[开多成功] {symbol} Qty:{qty}")
+            logging.info(f"[开多成功] {symbol} Qty: {qty}")
             return order
         except BinanceAPIException as e:
             logging.error(f"[开多失败] {e}")
@@ -63,7 +59,7 @@ class BinanceClient:
             order = self.client.futures_create_order(
                 symbol=symbol, side="SELL", type="MARKET", quantity=qty
             )
-            logging.info(f"[开空成功] {symbol} Qty:{qty}")
+            logging.info(f"[开空成功] {symbol} Qty: {qty}")
             return order
         except BinanceAPIException as e:
             logging.error(f"[开空失败] {e}")
@@ -84,8 +80,6 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error"}
-
-    # ==================== 详细账户快照（含今日已实现盈亏） ====================
 
     def get_detailed_report(self) -> dict:
         try:
@@ -134,10 +128,7 @@ class BinanceClient:
             now = datetime.utcnow()
             start_time = int((now - timedelta(days=1)).timestamp() * 1000)
             income = self.client.futures_income_history(
-                symbol="ETHUSDT",
-                incomeType="REALIZED_PNL",
-                startTime=start_time,
-                limit=1000
+                symbol="ETHUSDT", incomeType="REALIZED_PNL", startTime=start_time, limit=1000
             )
             return sum(float(i["income"]) for i in income)
         except Exception as e:
