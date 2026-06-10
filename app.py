@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 已整合加强版 process_webhook）
+# app.py（完整更新版 - 支持 TP_PARTIAL 备选模式）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -39,35 +39,26 @@ def process_webhook(data: dict):
     atr = data.get("atr")
     reason = data.get("reason", "")
 
-    logging.info(f"[收到信号] {signal} | Symbol: {symbol} | ATR: {atr}")
+    logging.info(f"[收到信号] {signal} | Symbol: {symbol} | Reason: {reason}")
 
-    if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
+    if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL", "TP_PARTIAL"]:
         logging.warning(f"[未知信号] {signal}，已忽略")
         return
 
+    # ==================== 开仓逻辑 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # === 核心逻辑：无论同反方向，都先全平再开新仓 ===
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
-                logging.info(f"[风控] 检测到已有持仓，先执行全平")
-                close_result = client.close_all_positions(symbol)
-                if close_result.get("status") != "success":
-                    logging.error("[风控] 全平失败，放弃本次开仓")
-                    send_dingtalk("风控全平失败", f"信号: {signal}，全平失败，放弃开新仓", is_warning=True)
-                    return
+                logging.info("[风控] 检测到已有持仓，先全平")
+                client.close_all_positions(symbol)
                 time.sleep(1.8)
 
-            # 计算仓位
             qty = client.calculate_position_size(atr)
             if qty <= 0:
-                msg = f"计算仓位为 {qty}，已拒绝开仓"
-                logging.warning(f"[风控拦截] {msg}")
-                send_dingtalk("风控拦截", msg, is_warning=True)
+                send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝开仓", is_warning=True)
                 return
 
-            # 执行开仓
-            side_str = "long" if signal == "OPEN_LONG" else "short"
             order = client.open_long(symbol, qty) if signal == "OPEN_LONG" else client.open_short(symbol, qty)
 
             if order:
@@ -76,18 +67,19 @@ def process_webhook(data: dict):
                     ticker = client.client.futures_symbol_ticker(symbol=symbol)
                     entry_price = float(ticker["price"])
 
-                tp_prices = get_actual_tp_prices(entry_price, atr, side_str)
-                position_manager.save_position(symbol, entry_price, atr, tp_prices, side_str)
+                tp_prices = get_actual_tp_prices(entry_price, atr, "long" if signal == "OPEN_LONG" else "short")
+                position_manager.save_position(symbol, entry_price, atr, tp_prices, "long" if signal == "OPEN_LONG" else "short")
 
                 report = client.get_detailed_report()
                 _send_open_notification(signal.replace("OPEN_", ""), qty, entry_price, tp_prices, report)
             else:
-                send_dingtalk("开仓失败", f"{signal} 下单失败，请检查日志", is_warning=True)
+                send_dingtalk("开仓失败", f"{signal} 下单失败", is_warning=True)
 
         except Exception as e:
-            logging.error(f"[开仓过程异常] {e}")
+            logging.error(f"[开仓异常] {e}")
             send_dingtalk("开仓严重异常", str(e), is_warning=True)
 
+    # ==================== 全平逻辑 ====================
     elif signal == "CLOSE_ALL":
         try:
             logging.info(f"[保护性全平] 原因: {reason}")
@@ -98,6 +90,33 @@ def process_webhook(data: dict):
         except Exception as e:
             logging.error(f"[全平异常] {e}")
             send_dingtalk("全平异常", str(e), is_warning=True)
+
+    # ==================== TP_PARTIAL 备选逻辑 ====================
+    elif signal == "TP_PARTIAL":
+        try:
+            pos = client.get_current_position(symbol)
+            if not pos or float(pos.get("positionAmt", 0)) == 0:
+                logging.info("[TP_PARTIAL] 当前无持仓，忽略信号")
+                return
+
+            logging.info(f"[执行TP平仓] reason: {reason}")
+
+            if reason == "tp1":
+                client.close_partial_position(symbol, 0.30)
+            elif reason == "tp2":
+                client.close_partial_position(symbol, 0.30)
+            elif reason == "tp3":
+                client.close_partial_position(symbol, 0.40)
+            else:
+                logging.warning(f"[TP_PARTIAL] 未知 reason: {reason}")
+                return
+
+            report = client.get_detailed_report()
+            send_tp_hit_report(reason, 0, report)
+
+        except Exception as e:
+            logging.error(f"[TP_PARTIAL处理异常] {e}")
+            send_dingtalk("TP_PARTIAL处理异常", str(e), is_warning=True)
 
 
 def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
@@ -139,12 +158,10 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
 if __name__ == "__main__":
     from tp_monitor import TPMonitor
 
-    monitor = TPMonitor(
-        symbol=Config.SYMBOL,
-        check_interval=Config.TP_CHECK_INTERVAL
-    )
-    monitor.start()
+    # ==================== 暂时关闭自主 TP 监控（先测试 TV 发送 TP 警报） ====================
+    # monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
+    # monitor.start()
 
-    logging.info(f"[系统启动] Webhook服务已启动 | 品种: {Config.SYMBOL}")
+    logging.info("[系统启动] Webhook服务已启动（TP_PARTIAL 备选模式运行中）")
 
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
