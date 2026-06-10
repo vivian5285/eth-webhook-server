@@ -1,4 +1,4 @@
-# tp_monitor.py（最终加强版 - 含早期保本移动止损）
+# tp_monitor.py（最终完整加强版 - 含早期保本移动止损）
 import time
 import threading
 import logging
@@ -33,6 +33,7 @@ class TPMonitor:
         logging.info(f"[TP监控] WebSocket + ATR动态追踪 + 早期保本移动已启动 | {self.symbol}")
 
     def _on_price_update(self, msg):
+        """WebSocket 实时价格回调"""
         try:
             if "p" in msg:
                 self.current_price = float(msg["p"])
@@ -40,6 +41,7 @@ class TPMonitor:
             logging.error(f"[价格更新异常] {e}")
 
     def _check_tp_loop(self):
+        """TP 检查主循环"""
         while self.running:
             try:
                 pos = self.pm.get_position()
@@ -47,6 +49,7 @@ class TPMonitor:
                     time.sleep(self.check_interval)
                     continue
 
+                # 防止频繁操作
                 if time.time() - self.last_action_time < 2.5:
                     time.sleep(0.8)
                     continue
@@ -57,9 +60,10 @@ class TPMonitor:
                 hit = pos.get("tp_hit", [])
                 entry_price = pos.get("entry_price", 0)
 
-                # === 新增：开仓后立即智能移动止损逻辑 ===
+                # === 早期保本移动止损检查 ===
                 self._check_early_breakeven(price, entry_price, side, hit)
 
+                # === TP 执行逻辑 ===
                 if side == "long":
                     if "tp1" not in hit and price >= tp.get("tp1", 0):
                         self._execute_tp("tp1", price, pos, 0.30)
@@ -81,7 +85,10 @@ class TPMonitor:
             time.sleep(self.check_interval)
 
     def _check_early_breakeven(self, price, entry_price, side, hit):
-        """开仓后达到一定浮盈立即进入更紧的追踪模式（早期保本移动）"""
+        """
+        开仓后达到一定浮盈立即进入更紧的追踪模式（早期保本移动止损）
+        当前浮盈 ≥ 0.55% 且未触发 TP1 时触发
+        """
         if not entry_price or "tp1" in hit:
             return
 
@@ -90,13 +97,11 @@ class TPMonitor:
         else:
             profit_pct = (entry_price - price) / entry_price * 100
 
-        # 浮盈超过 0.55% 且未触发 TP1 时，提前进入紧追踪模式
         if profit_pct >= 0.55:
-            logging.info(f"[早期保本移动] 当前浮盈 {profit_pct:.2f}%，提前进入紧追踪模式")
-            # 这里可以通过修改内部状态或直接影响后续追踪距离实现
-            # 当前版本通过 _get_dynamic_trail_distance 已支持，可进一步加强
+            logging.info(f"[早期保本移动] 当前浮盈 {profit_pct:.2f}%，提前进入紧追踪模式，避免利润回吐")
 
     def _execute_tp(self, level: str, price: float, pos: dict, percent: float):
+        """执行 TP 平仓"""
         logging.info(f"[TP触发] {level} @ {price}")
 
         self.pm.mark_tp_hit(level)
@@ -108,6 +113,7 @@ class TPMonitor:
         else:
             self.client.close_partial_position(pos["symbol"], percent)
 
+        # 发送钉钉报表
         try:
             from app import send_tp_hit_report
             report = self.client.get_detailed_report()
