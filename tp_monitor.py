@@ -1,4 +1,4 @@
-# tp_monitor.py（加强智能版）
+# tp_monitor.py（暂时关闭自主监控版本）
 import time
 import threading
 import logging
@@ -18,8 +18,15 @@ class TPMonitor:
         self.last_action_time = 0
 
     def start(self):
-        if self.running:
-            return
+        # ==================== 暂时关闭自主 TP 监控 ====================
+        # 如需恢复自主监控，请取消下面两行的注释
+        # logging.info(f"[TP监控] WebSocket实时监控已启动 | {self.symbol}")
+        # self._start_websocket_and_loop()
+        logging.info("[TP监控] 自主监控已暂时关闭（当前使用 TV 发送 TP_PARTIAL 模式）")
+        return
+
+    def _start_websocket_and_loop(self):
+        """真正启动 WebSocket 和监控循环（目前已注释）"""
         self.running = True
 
         self.twm = ThreadedWebsocketManager(
@@ -30,7 +37,6 @@ class TPMonitor:
 
         self.twm.start_aggtrade_socket(callback=self._on_price_update, symbol=self.symbol.lower())
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
-        logging.info(f"[TP监控] WebSocket实时监控已启动 | {self.symbol}")
 
     def _on_price_update(self, msg):
         try:
@@ -47,7 +53,6 @@ class TPMonitor:
                     time.sleep(self.check_interval)
                     continue
 
-                # 防止频繁操作
                 if time.time() - self.last_action_time < 3:
                     time.sleep(1)
                     continue
@@ -79,7 +84,6 @@ class TPMonitor:
 
     def _execute_tp(self, level: str, price: float, pos: dict, percent: float):
         logging.info(f"[TP触发] {level} @ {price}，准备平 {percent*100}%")
-
         self.pm.mark_tp_hit(level)
         self.last_action_time = time.time()
 
@@ -87,14 +91,17 @@ class TPMonitor:
             self.client.close_all_positions(pos["symbol"])
             self.pm.clear_position()
         else:
-            result = self.client.close_partial_position(pos["symbol"], percent)
-            if result.get("status") != "success":
-                logging.warning(f"[部分平仓可能失败] {result}")
+            self.client.close_partial_position(pos["symbol"], percent)
 
-        # 发送钉钉报表
         try:
             from app import send_tp_hit_report
             report = self.client.get_detailed_report()
             send_tp_hit_report(level, price, report)
         except Exception as e:
             logging.error(f"[TP报表发送失败] {e}")
+
+    def stop(self):
+        self.running = False
+        if self.twm:
+            self.twm.stop()
+        logging.info("[TP监控] 已停止")
