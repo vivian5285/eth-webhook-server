@@ -1,4 +1,4 @@
-# app.py（完整更新版 - 支持 TP_PARTIAL 备选模式）
+# app.py（最终VPS自主TP版）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -41,11 +41,10 @@ def process_webhook(data: dict):
 
     logging.info(f"[收到信号] {signal} | Symbol: {symbol} | Reason: {reason}")
 
-    if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL", "TP_PARTIAL"]:
+    if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
         logging.warning(f"[未知信号] {signal}，已忽略")
         return
 
-    # ==================== 开仓逻辑 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
             current_pos = client.get_current_position(symbol)
@@ -79,7 +78,6 @@ def process_webhook(data: dict):
             logging.error(f"[开仓异常] {e}")
             send_dingtalk("开仓严重异常", str(e), is_warning=True)
 
-    # ==================== 全平逻辑 ====================
     elif signal == "CLOSE_ALL":
         try:
             logging.info(f"[保护性全平] 原因: {reason}")
@@ -90,33 +88,6 @@ def process_webhook(data: dict):
         except Exception as e:
             logging.error(f"[全平异常] {e}")
             send_dingtalk("全平异常", str(e), is_warning=True)
-
-    # ==================== TP_PARTIAL 备选逻辑 ====================
-    elif signal == "TP_PARTIAL":
-        try:
-            pos = client.get_current_position(symbol)
-            if not pos or float(pos.get("positionAmt", 0)) == 0:
-                logging.info("[TP_PARTIAL] 当前无持仓，忽略信号")
-                return
-
-            logging.info(f"[执行TP平仓] reason: {reason}")
-
-            if reason == "tp1":
-                client.close_partial_position(symbol, 0.30)
-            elif reason == "tp2":
-                client.close_partial_position(symbol, 0.30)
-            elif reason == "tp3":
-                client.close_partial_position(symbol, 0.40)
-            else:
-                logging.warning(f"[TP_PARTIAL] 未知 reason: {reason}")
-                return
-
-            report = client.get_detailed_report()
-            send_tp_hit_report(reason, 0, report)
-
-        except Exception as e:
-            logging.error(f"[TP_PARTIAL处理异常] {e}")
-            send_dingtalk("TP_PARTIAL处理异常", str(e), is_warning=True)
 
 
 def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
@@ -158,10 +129,10 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
 if __name__ == "__main__":
     from tp_monitor import TPMonitor
 
-    # ==================== 暂时关闭自主 TP 监控（先测试 TV 发送 TP 警报） ====================
-    # monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
-    # monitor.start()
+    # ==================== 启动 VPS 自主 TP 监控 ====================
+    monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
+    monitor.start()
 
-    logging.info("[系统启动] Webhook服务已启动（TP_PARTIAL 备选模式运行中）")
+    logging.info("[系统启动] Webhook服务已启动（VPS自主TP模式）")
 
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
