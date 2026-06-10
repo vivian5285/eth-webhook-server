@@ -1,4 +1,4 @@
-# tp_monitor.py（最终加强版 - 中等强度 ATR 动态追踪）
+# tp_monitor.py（最终版 - 支持 ATR 动态追踪止盈）
 import time
 import threading
 import logging
@@ -18,6 +18,7 @@ class TPMonitor:
         self.last_action_time = 0
 
     def start(self):
+        """启动 WebSocket 实时价格监控 + TP 检查"""
         if self.running:
             return
         self.running = True
@@ -27,12 +28,16 @@ class TPMonitor:
             api_secret=self.client.client.API_SECRET
         )
         self.twm.start()
+
+        # 使用 aggTrade 获取实时成交价格（延迟低）
         self.twm.start_aggtrade_socket(callback=self._on_price_update, symbol=self.symbol.lower())
 
+        # 启动 TP 检查主循环
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
         logging.info(f"[TP监控] WebSocket + ATR动态追踪已启动 | {self.symbol}")
 
     def _on_price_update(self, msg):
+        """WebSocket 回调，实时更新最新价格"""
         try:
             if "p" in msg:
                 self.current_price = float(msg["p"])
@@ -40,6 +45,7 @@ class TPMonitor:
             logging.error(f"[价格更新异常] {e}")
 
     def _check_tp_loop(self):
+        """TP 检查主循环"""
         while self.running:
             try:
                 pos = self.pm.get_position()
@@ -47,6 +53,7 @@ class TPMonitor:
                     time.sleep(self.check_interval)
                     continue
 
+                # 防止频繁操作
                 if time.time() - self.last_action_time < 2.5:
                     time.sleep(0.8)
                     continue
@@ -56,53 +63,35 @@ class TPMonitor:
                 side = pos.get("side")
                 hit = pos.get("tp_hit", [])
                 entry_price = pos.get("entry_price", 0)
-                entry_atr = pos.get("entry_atr", atr if 'atr' in pos else 30)
-
-                # 动态计算当前应使用的追踪距离
-                trail_distance = self._get_dynamic_trail_distance(price, entry_price, side, hit, entry_atr)
+                entry_atr = pos.get("entry_atr", 30)
 
                 if side == "long":
                     if "tp1" not in hit and price >= tp.get("tp1", 0):
-                        self._execute_tp("tp1", price, pos, 0.30, trail_distance)
+                        self._execute_tp("tp1", price, pos, 0.30)
                     elif "tp2" not in hit and price >= tp.get("tp2", 0):
-                        self._execute_tp("tp2", price, pos, 0.30, trail_distance)
+                        self._execute_tp("tp2", price, pos, 0.30)
                     elif "tp3" not in hit and price >= tp.get("tp3", 0):
-                        self._execute_tp("tp3", price, pos, 1.0, trail_distance)
+                        self._execute_tp("tp3", price, pos, 1.0)
                 else:
                     if "tp1" not in hit and price <= tp.get("tp1", 999999):
-                        self._execute_tp("tp1", price, pos, 0.30, trail_distance)
+                        self._execute_tp("tp1", price, pos, 0.30)
                     elif "tp2" not in hit and price <= tp.get("tp2", 999999):
-                        self._execute_tp("tp2", price, pos, 0.30, trail_distance)
+                        self._execute_tp("tp2", price, pos, 0.30)
                     elif "tp3" not in hit and price <= tp.get("tp3", 999999):
-                        self._execute_tp("tp3", price, pos, 1.0, trail_distance)
+                        self._execute_tp("tp3", price, pos, 1.0)
 
             except Exception as e:
-                logging.error(f"[TP监控循环异常] {e}")
+                logging.error(f"[TP检查循环异常] {e}")
 
             time.sleep(self.check_interval)
 
-    def _get_dynamic_trail_distance(self, price, entry_price, side, hit, entry_atr):
-        """中等强度 ATR 动态追踪距离计算"""
-        if not entry_price or entry_atr <= 0:
-            return entry_atr * 2.2 if entry_atr > 0 else 40
-
-        if side == "long":
-            profit_pct = (price - entry_price) / entry_price * 100
-        else:
-            profit_pct = (entry_price - price) / entry_price * 100
-
-        # 根据盈利程度和已触发的 TP 动态调整追踪距离
-        if "tp2" in hit or profit_pct > 2.2:
-            multiplier = 1.3          # 激进模式
-        elif "tp1" in hit or profit_pct > 1.0:
-            multiplier = 1.7          # 收紧模式
-        else:
-            multiplier = 2.4          # 正常模式
-
-        return round(entry_atr * multiplier, 2)
-
-    def _execute_tp(self, level: str, price: float, pos: dict, percent: float, trail_distance: float):
-        logging.info(f"[TP触发] {level} @ {price} | 追踪距离: {trail_distance}")
+    def _execute_tp(self, level: str, price: float, pos: dict, percent: float):
+        """
+        执行 TP 平仓
+        - TP1 / TP2：按比例平仓
+        - TP3：全平剩余仓位
+        """
+        logging.info(f"[TP触发] {level} @ {price}")
 
         self.pm.mark_tp_hit(level)
         self.last_action_time = time.time()
@@ -113,6 +102,7 @@ class TPMonitor:
         else:
             self.client.close_partial_position(pos["symbol"], percent)
 
+        # 发送钉钉详细报表
         try:
             from app import send_tp_hit_report
             report = self.client.get_detailed_report()
@@ -121,6 +111,7 @@ class TPMonitor:
             logging.error(f"[TP报表发送失败] {e}")
 
     def stop(self):
+        """停止监控"""
         self.running = False
         if self.twm:
             self.twm.stop()
