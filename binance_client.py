@@ -1,4 +1,4 @@
-# binance_client.py（最终完整强壮版）
+# binance_client.py（最终版）
 import os
 import logging
 from binance.client import Client
@@ -6,7 +6,6 @@ from binance.exceptions import BinanceAPIException
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
 
 class BinanceClient:
     def __init__(self):
@@ -73,31 +72,22 @@ class BinanceClient:
             logging.error(f"[全平失败] {e}")
             return {"status": "error"}
 
-    # ==================== 新增：部分平仓（核心） ====================
     def close_partial_position(self, symbol: str, percent: float):
-        """
-        按当前持仓比例平仓
-        percent: 0.3 = 平当前仓位的 30%
-        """
         try:
             pos = self.get_current_position(symbol)
             if not pos or float(pos.get("positionAmt", 0)) == 0:
-                return {"status": "skipped", "reason": "无持仓"}
-
+                return {"status": "skipped"}
             current_qty = abs(float(pos["positionAmt"]))
             close_qty = round(current_qty * percent, 3)
             if close_qty < 0.001:
-                return {"status": "skipped", "reason": "平仓数量过小"}
-
+                return {"status": "skipped"}
             side = "SELL" if float(pos["positionAmt"]) > 0 else "BUY"
-            self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=close_qty, reduceOnly=True
-            )
-            logging.info(f"[部分平仓成功] {symbol} 平 {percent*100}% (数量 {close_qty})")
+            self.client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=close_qty, reduceOnly=True)
+            logging.info(f"[部分平仓成功] {symbol} 平 {percent*100}%")
             return {"status": "success", "closed_qty": close_qty}
         except Exception as e:
             logging.error(f"[部分平仓失败] {e}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error"}
 
     def get_detailed_report(self) -> dict:
         try:
@@ -145,9 +135,7 @@ class BinanceClient:
         try:
             now = datetime.utcnow()
             start_time = int((now - timedelta(days=1)).timestamp() * 1000)
-            income = self.client.futures_income_history(
-                symbol="ETHUSDT", incomeType="REALIZED_PNL", startTime=start_time, limit=1000
-            )
+            income = self.client.futures_income_history(symbol="ETHUSDT", incomeType="REALIZED_PNL", startTime=start_time, limit=1000)
             return sum(float(i["income"]) for i in income)
         except Exception as e:
             logging.warning(f"[获取今日已实现盈亏失败] {e}")
