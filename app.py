@@ -1,4 +1,4 @@
-# app.py（最终VPS自主TP版 - 已清理干净）
+# app.py（最终完整版 - VPS自主TP模式）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -45,6 +45,7 @@ def process_webhook(data: dict):
         logging.warning(f"[未知信号] {signal}，已忽略")
         return
 
+    # ==================== 开仓 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
             current_pos = client.get_current_position(symbol)
@@ -78,6 +79,7 @@ def process_webhook(data: dict):
             logging.error(f"[开仓异常] {e}")
             send_dingtalk("开仓严重异常", str(e), is_warning=True)
 
+    # ==================== 保护性全平 ====================
     elif signal == "CLOSE_ALL":
         try:
             logging.info(f"[保护性全平] 原因: {reason}")
@@ -126,13 +128,16 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
     send_dingtalk(f"{level.upper()} 止盈触发", msg)
 
 
-if __name__ == "__main__":
+# ==================== 启动 TP 监控（关键：放在模块级别，gunicorn 也能执行） ====================
+try:
     from tp_monitor import TPMonitor
-
-    # ==================== 启动 VPS 自主 TP 监控 ====================
     monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
     monitor.start()
+    logging.info("[系统启动] TP监控已成功启动（ATR动态追踪模式）")
+except Exception as e:
+    logging.error(f"[TP监控启动失败] {e}")
 
-    logging.info("[系统启动] Webhook服务已启动（VPS自主TP + ATR动态追踪模式）")
 
+if __name__ == "__main__":
+    logging.info("[系统启动] Webhook服务已启动（开发模式）")
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
