@@ -1,4 +1,4 @@
-# tp_monitor.py（最终 WebSocket 实时价格版）
+# tp_monitor.py（最终确认版）
 import time
 import threading
 import logging
@@ -7,7 +7,7 @@ from binance_client import BinanceClient
 from position_manager import PositionManager
 
 class TPMonitor:
-    def __init__(self, symbol: str = "ETHUSDT", check_interval: int = 3):
+    def __init__(self, symbol: str = "ETHUSDT", check_interval: int = 5):
         self.symbol = symbol
         self.client = BinanceClient()
         self.pm = PositionManager()
@@ -21,23 +21,25 @@ class TPMonitor:
             return
         self.running = True
 
-        # 启动 WebSocket 实时价格
-        self.twm = ThreadedWebsocketManager(api_key=self.client.client.API_KEY,
-                                            api_secret=self.client.client.API_SECRET)
+        # 启动 WebSocket 实时价格流
+        self.twm = ThreadedWebsocketManager(
+            api_key=self.client.client.API_KEY,
+            api_secret=self.client.client.API_SECRET
+        )
         self.twm.start()
 
-        # 订阅 aggTrade（成交聚合流），获取实时价格
+        # 使用 aggTrade 流获取实时成交价格（延迟更低）
         self.twm.start_aggtrade_socket(
             callback=self._on_price_update,
             symbol=self.symbol.lower()
         )
 
-        # 启动 TP 检查线程
+        # 启动 TP 检查主循环
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
-        logging.info("[TP监控] WebSocket 实时价格监控已启动")
+        logging.info(f"[TP监控] WebSocket 实时价格监控已启动 | 品种: {self.symbol}")
 
     def _on_price_update(self, msg):
-        """WebSocket 回调：实时更新价格"""
+        """WebSocket 回调，实时更新最新价格"""
         try:
             if "p" in msg:
                 self.current_price = float(msg["p"])
@@ -81,8 +83,10 @@ class TPMonitor:
     def _execute_tp_level(self, level: str, price: float, pos: dict, percent: float):
         logging.info(f"[TP触发] {level} @ {price}，准备平 {percent*100}%")
 
+        # 记录已触发状态
         self.pm.mark_tp_hit(level)
 
+        # 执行平仓
         if percent >= 1.0:
             self.client.close_all_positions(pos["symbol"])
             self.pm.clear_position()
