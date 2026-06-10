@@ -1,4 +1,4 @@
-# binance_client.py
+# binance_client.py（最终版）
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import logging
@@ -12,7 +12,7 @@ class BinanceClient:
         self.client = Client(Config.BINANCE_API_KEY, Config.BINANCE_API_SECRET)
 
     def get_current_position(self, symbol: str):
-        """获取当前持仓"""
+        """获取当前持仓信息"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
@@ -47,7 +47,7 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def open_long(self, symbol: str, qty: float):
-        """开多"""
+        """开多单"""
         try:
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -62,7 +62,7 @@ class BinanceClient:
             return None
 
     def open_short(self, symbol: str, qty: float):
-        """开空"""
+        """开空单"""
         try:
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -78,7 +78,7 @@ class BinanceClient:
 
     def calculate_position_size(self, atr: float):
         """
-        分层风控仓位计算
+        分层风控仓位计算（最终版）
         - < 3000 USDT：7% 风险（激进）
         - 3000~10000 USDT：2% 风险
         - > 10000 USDT：1% 风险
@@ -93,14 +93,14 @@ class BinanceClient:
 
             # 分层风险比例
             if equity < 3000:
-                risk_percent = 7.0          # 小资金激进
+                risk_percent = 7.0
             elif equity < 10000:
                 risk_percent = 2.0
             else:
                 risk_percent = 1.0
 
             risk_amount = equity * risk_percent / 100
-            stop_distance = atr * Config.ATR_MULTIPLIER_SL
+            stop_distance = atr * Config.ATR_MULTIPLIER_SL   # ← 使用 Config 中的参数
 
             qty = risk_amount / stop_distance
             qty = max(round(qty, 3), 0.001)
