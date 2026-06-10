@@ -1,7 +1,8 @@
-# app.py（最终完整版 - VPS自主TP模式）
+# app.py（最终完整加强版 - 含仓位一致性核对 + TP监控）
 from flask import Flask, request, jsonify
 import time
 import traceback
+import threading
 import logging
 from binance_client import BinanceClient
 from position_manager import PositionManager
@@ -17,6 +18,39 @@ logging.basicConfig(
 app = Flask(__name__)
 client = BinanceClient()
 position_manager = PositionManager()
+
+# ==================== 全局状态 ====================
+last_signal_direction = None   # 记录最后收到的信号方向（用于仓位一致性核对）
+
+
+def position_consistency_check():
+    """后台线程：定期检查实际持仓方向是否与最后信号一致"""
+    while True:
+        try:
+            time.sleep(45)  # 每45秒检查一次
+
+            pos = client.get_current_position(Config.SYMBOL)
+            if not pos or float(pos.get("positionAmt", 0)) == 0:
+                continue
+
+            actual_side = "long" if float(pos["positionAmt"]) > 0 else "short"
+
+            if last_signal_direction and actual_side != last_signal_direction:
+                logging.warning(f"[仓位不一致告警] 实际持仓: {actual_side}，最后信号: {last_signal_direction}")
+                send_dingtalk(
+                    "仓位不一致告警",
+                    f"实际持仓方向: {actual_side}\n最后信号方向: {last_signal_direction}\n建议手动检查",
+                    is_warning=True
+                )
+                # 可选：自动纠正（谨慎使用，建议先观察）
+                # client.close_all_positions(Config.SYMBOL)
+
+        except Exception as e:
+            logging.error(f"[仓位一致性检查异常] {e}")
+
+
+# ==================== 启动后台线程 ====================
+threading.Thread(target=position_consistency_check, daemon=True).start()
 
 
 @app.route('/webhook', methods=['POST'])
@@ -34,6 +68,8 @@ def webhook():
 
 
 def process_webhook(data: dict):
+    global last_signal_direction
+
     signal = data.get("signal")
     symbol = data.get("symbol", Config.SYMBOL)
     atr = data.get("atr")
@@ -45,7 +81,13 @@ def process_webhook(data: dict):
         logging.warning(f"[未知信号] {signal}，已忽略")
         return
 
-    # ==================== 开仓 ====================
+    # 更新最后信号方向
+    if signal == "OPEN_LONG":
+        last_signal_direction = "long"
+    elif signal == "OPEN_SHORT":
+        last_signal_direction = "short"
+
+    # ==================== 开仓逻辑 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
             current_pos = client.get_current_position(symbol)
@@ -128,12 +170,12 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
     send_dingtalk(f"{level.upper()} 止盈触发", msg)
 
 
-# ==================== 启动 TP 监控（关键：放在模块级别，gunicorn 也能执行） ====================
+# ==================== 启动 TP 监控（模块级别，gunicorn 也能执行） ====================
 try:
     from tp_monitor import TPMonitor
     monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
     monitor.start()
-    logging.info("[系统启动] TP监控已成功启动（ATR动态追踪模式）")
+    logging.info("[系统启动] TP监控已成功启动（ATR动态追踪 + 早期保本移动模式）")
 except Exception as e:
     logging.error(f"[TP监控启动失败] {e}")
 
