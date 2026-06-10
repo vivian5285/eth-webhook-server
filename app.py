@@ -1,4 +1,4 @@
-# app.py（最终完整强壮版 - 可直接复制使用）
+# app.py（最终完美版）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -9,7 +9,11 @@ from tp_manager import get_actual_tp_prices
 from dingtalk import send_dingtalk
 from config import Config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# ==================== 日志配置 ====================
+logging.basicConfig(
+    level=getattr(logging, Config.LOG_LEVEL),
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 
 app = Flask(__name__)
 client = BinanceClient()
@@ -32,7 +36,7 @@ def webhook():
 
 def process_webhook(data: dict):
     signal = data.get("signal")
-    symbol = data.get("symbol", "ETHUSDT")
+    symbol = data.get("symbol", Config.SYMBOL)
     atr = data.get("atr")
     reason = data.get("reason", "")
 
@@ -40,7 +44,7 @@ def process_webhook(data: dict):
 
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 清理反向持仓
+            # 先清理已有持仓（无论方向）
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
                 logging.info("[风控] 检测到持仓，先全平")
@@ -55,13 +59,10 @@ def process_webhook(data: dict):
             side_str = "long" if signal == "OPEN_LONG" else "short"
 
             # 执行开仓
-            if signal == "OPEN_LONG":
-                order = client.open_long(symbol, qty)
-            else:
-                order = client.open_short(symbol, qty)
+            order = client.open_long(symbol, qty) if signal == "OPEN_LONG" else client.open_short(symbol, qty)
 
             if order:
-                # === 可靠获取入场价 ===
+                # 获取真实入场价
                 entry_price = float(order.get("avgPrice") or 0)
                 if entry_price == 0:
                     ticker = client.client.futures_symbol_ticker(symbol=symbol)
@@ -95,7 +96,6 @@ def process_webhook(data: dict):
 
 
 def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
-    """开仓成功美化推送"""
     msg = (
         f"**下单数量**: {qty}\n"
         f"**入场价**: {entry_price}\n"
@@ -113,7 +113,6 @@ def _send_open_notification(direction: str, qty: float, entry_price: float, tp_p
 
 
 def send_tp_hit_report(level: str, close_price: float, report: dict = None):
-    """TP触发后发送详细报表"""
     if report is None:
         report = client.get_detailed_report()
 
@@ -135,9 +134,14 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
 if __name__ == "__main__":
     from tp_monitor import TPMonitor
 
-    # 启动 TP 监控线程（智慧大脑核心）
-    monitor = TPMonitor(check_interval=8)
+    # ==================== 启动 TP 监控（支持配置参数） ====================
+    monitor = TPMonitor(
+        symbol=Config.SYMBOL,
+        check_interval=Config.TP_CHECK_INTERVAL
+    )
     monitor.start()
 
-    # 启动 Flask 服务
-    app.run(host="0.0.0.0", port=5000)
+    logging.info(f"[系统启动] Webhook服务已启动 | 品种: {Config.SYMBOL} | TP检查间隔: {Config.TP_CHECK_INTERVAL}s")
+
+    # 启动 Flask
+    app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
