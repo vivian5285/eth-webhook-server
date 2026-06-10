@@ -1,4 +1,4 @@
-# app.py（最终完整优美版）
+# app.py（最终完整版 - 包含监控启动）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -39,7 +39,6 @@ def process_webhook(data: dict):
 
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 清理反向持仓
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
                 logging.info("[风控] 检测到持仓，先全平")
@@ -56,7 +55,6 @@ def process_webhook(data: dict):
                 if order:
                     entry_price = float(order.get("avgPrice", 0))
                     tp_prices = get_actual_tp_prices(entry_price, atr, "long")
-
                     position_manager.save_position(symbol, entry_price, atr, tp_prices, "long")
 
                     report = client.get_detailed_report()
@@ -67,7 +65,6 @@ def process_webhook(data: dict):
                 if order:
                     entry_price = float(order.get("avgPrice", 0))
                     tp_prices = get_actual_tp_prices(entry_price, atr, "short")
-
                     position_manager.save_position(symbol, entry_price, atr, tp_prices, "short")
 
                     report = client.get_detailed_report()
@@ -95,7 +92,6 @@ def process_webhook(data: dict):
 
 
 def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
-    """开仓成功推送（包含真实 TP 价格）"""
     msg = (
         f"**下单数量**: {qty}\n"
         f"**入场价**: {entry_price}\n"
@@ -112,9 +108,8 @@ def _send_open_notification(direction: str, qty: float, entry_price: float, tp_p
     send_dingtalk(f"{direction} 开仓成功", msg)
 
 
-# ==================== TP触发后发送详细日报（供 tp_monitor.py 调用） ====================
+# ==================== TP触发后发送详细日报（供 tp_monitor 调用） ====================
 def send_tp_hit_report(level: str, close_price: float, report: dict = None):
-    """TP123 被触发后发送详细报表"""
     if report is None:
         report = client.get_detailed_report()
 
@@ -134,4 +129,11 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=Config.DEBUG)
+    from tp_monitor import TPMonitor
+
+    # 启动 TP 监控线程（智慧大脑）
+    monitor = TPMonitor(check_interval=8)
+    monitor.start()
+
+    # 启动 Flask 服务
+    app.run(host="0.0.0.0", port=5000)
