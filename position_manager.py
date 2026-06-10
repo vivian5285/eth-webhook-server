@@ -1,4 +1,4 @@
-# position_manager.py（最终版）
+# position_manager.py（已加强 - 支持保存 ATR）
 import json
 import os
 import logging
@@ -28,6 +28,7 @@ class PositionManager:
             "symbol": symbol,
             "side": side.lower(),
             "entry_price": round(entry_price, 2),
+            "entry_atr": round(atr, 2),           # 新增：保存开仓时的 ATR
             "atr": atr,
             "tp_prices": {
                 "tp1": round(tp_prices["tp1"], 2),
@@ -39,7 +40,7 @@ class PositionManager:
             "tp_hit": []
         }
         self._save_position()
-        logging.info(f"[持仓保存成功] {symbol} {side}")
+        logging.info(f"[持仓保存成功] {symbol} {side} | ATR: {atr}")
 
     def get_position(self):
         return self.position if self.position.get("status") == "open" else None
