@@ -1,4 +1,4 @@
-# app.py（最终VPS自主TP版）
+# app.py（最终VPS自主TP版 - 已清理干净）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -133,6 +133,6 @@ if __name__ == "__main__":
     monitor = TPMonitor(symbol=Config.SYMBOL, check_interval=Config.TP_CHECK_INTERVAL)
     monitor.start()
 
-    logging.info("[系统启动] Webhook服务已启动（VPS自主TP模式）")
+    logging.info("[系统启动] Webhook服务已启动（VPS自主TP + ATR动态追踪模式）")
 
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
