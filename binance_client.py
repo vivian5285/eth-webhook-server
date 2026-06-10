@@ -6,11 +6,13 @@ from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+
 class BinanceClient:
     def __init__(self):
         self.client = Client(Config.BINANCE_API_KEY, Config.BINANCE_API_SECRET)
 
     def get_current_position(self, symbol: str):
+        """获取当前持仓"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
@@ -22,6 +24,7 @@ class BinanceClient:
             return None
 
     def close_all_positions(self, symbol: str):
+        """全平当前仓位"""
         try:
             position = self.get_current_position(symbol)
             if not position:
@@ -44,6 +47,7 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def open_long(self, symbol: str, qty: float):
+        """开多"""
         try:
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -58,6 +62,7 @@ class BinanceClient:
             return None
 
     def open_short(self, symbol: str, qty: float):
+        """开空"""
         try:
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -72,6 +77,12 @@ class BinanceClient:
             return None
 
     def calculate_position_size(self, atr: float):
+        """
+        分层风控仓位计算
+        - < 3000 USDT：7% 风险（激进）
+        - 3000~10000 USDT：2% 风险
+        - > 10000 USDT：1% 风险
+        """
         try:
             if not atr or atr <= 0:
                 logging.warning("[calculate_position_size] ATR 无效，使用默认小数量")
@@ -80,13 +91,21 @@ class BinanceClient:
             account = self.client.futures_account()
             equity = float(account["totalWalletBalance"])
 
-            risk_amount = equity * Config.BASE_RISK_PERCENT / 100
+            # 分层风险比例
+            if equity < 3000:
+                risk_percent = 7.0          # 小资金激进
+            elif equity < 10000:
+                risk_percent = 2.0
+            else:
+                risk_percent = 1.0
+
+            risk_amount = equity * risk_percent / 100
             stop_distance = atr * Config.ATR_MULTIPLIER_SL
 
             qty = risk_amount / stop_distance
             qty = max(round(qty, 3), 0.001)
 
-            logging.info(f"[仓位计算] 权益={equity}, ATR={atr}, qty={qty}")
+            logging.info(f"[仓位计算] 权益={equity:.2f} USDT | 风险比例={risk_percent}% | ATR={atr} | qty={qty}")
             return qty
 
         except Exception as e:
@@ -94,6 +113,7 @@ class BinanceClient:
             return 0.01
 
     def get_current_price(self, symbol: str):
+        """获取当前标记价格"""
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             return float(ticker['price'])
