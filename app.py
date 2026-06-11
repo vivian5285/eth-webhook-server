@@ -1,18 +1,16 @@
-# app.py（最终完整版 - 带详细 /status 接口）
+# app.py - 最终优化版（含美化钉钉推送）
+
 from flask import Flask, request, jsonify
 import os
 import re
 import json
 import logging
-import traceback
 from datetime import datetime
 from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
 from daily_report_scheduler import daily_report_scheduler
-from tp_monitor import tp_monitor
-from position_manager import position_manager
 
 load_dotenv()
 
@@ -20,6 +18,7 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 binance_client = BinanceClient()
+
 
 def extract_json_from_text(text: str):
     try:
@@ -30,6 +29,7 @@ def extract_json_from_text(text: str):
         pass
     return None
 
+
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
     try:
         balance_info = binance_client.get_account_balance()
@@ -38,12 +38,10 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         equity = balance_info.get("totalWalletBalance", 200)
         risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
         stop_distance_percent = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
-
         risk_amount = equity * risk_percent
         ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
         current_price = float(ticker["price"])
         stop_distance = current_price * stop_distance_percent
-
         if stop_distance <= 0:
             return 0.05
         return round(risk_amount / stop_distance, 3)
@@ -51,50 +49,6 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         logging.error(f"[仓位计算异常] {e}")
         return 0.05
 
-# ==================== 报告函数 ====================
-
-def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1, tp2, tp3):
-    try:
-        balance = binance_client.get_account_balance() or {}
-        equity = balance.get("totalWalletBalance", 0)
-        available = balance.get("availableBalance", 0)
-
-        title = "✅ 开仓成功"
-        content = (
-            f"**信号类型**：{signal}\n"
-            f"**币种**：{symbol}\n"
-            f"**下单数量**：{qty}\n"
-            f"**开仓均价**：{entry_price}\n\n"
-            f"**🎯 止盈目标（预估）**\n"
-            f"- TP1：{tp1}\n"
-            f"- TP2：{tp2}\n"
-            f"- TP3：{tp3}\n\n"
-            f"**💰 账户快照**\n"
-            f"- 账户权益：{equity:.2f} USDT\n"
-            f"- 可用余额：{available:.2f} USDT\n\n"
-            f"**⏰ 时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        binance_client._send_dingtalk(title, content)
-    except Exception as e:
-        logging.error(f"[开仓报告发送失败] {e}")
-
-def send_beautiful_close_report(reason: str, symbol: str):
-    try:
-        balance = binance_client.get_account_balance() or {}
-        equity = balance.get("totalWalletBalance", 0)
-        title = "📉 平仓成功"
-        content = (
-            f"**平仓原因**：{reason}\n"
-            f"**币种**：{symbol}\n\n"
-            f"**💰 账户快照**\n"
-            f"- 账户权益：{equity:.2f} USDT\n\n"
-            f"**⏰ 时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        binance_client._send_dingtalk(title, content)
-    except Exception as e:
-        logging.error(f"[平仓报告发送失败] {e}")
-
-# ==================== Webhook ====================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -104,37 +58,49 @@ def webhook():
             return jsonify({"status": "error", "message": "无法解析信号"}), 400
 
         signal = data.get("signal")
+        symbol = data.get("symbol", "ETHUSDT")
+
         if not signal:
             return jsonify({"status": "error", "message": "缺少 signal 字段"}), 400
 
         logging.info(f"[Webhook] 收到信号 → {signal}")
+
+        # 使用 supervisor 处理信号（智能平仓 + 开仓逻辑）
         result = supervisor.handle_new_signal(signal)
 
         if result.get("status") == "ready_to_open":
-            try:
-                qty = calculate_position_size()
-                if qty <= 0:
-                    return jsonify({"status": "error", "message": "仓位计算无效"}), 400
+            qty = calculate_position_size(symbol)
+            if qty <= 0:
+                return jsonify({"status": "error", "message": "仓位计算无效"}), 400
 
-                order_side = "BUY" if signal == "OPEN_LONG" else "SELL"
-                order = binance_client.client.futures_create_order(
-                    symbol="ETHUSDT",
-                    side=order_side,
-                    type="MARKET",
-                    quantity=qty
-                )
+            side = "BUY" if signal == "OPEN_LONG" else "SELL"
+            order = binance_client.place_market_order(symbol, side, qty)
 
+            if order:
                 entry_price = float(order.get('avgPrice', 0)) or float(
-                    binance_client.client.futures_symbol_ticker(symbol="ETHUSDT")["price"]
+                    binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                logging.info(f"[下单成功] {signal} {qty} 张 @ {entry_price}")
-                supervisor.notify_open_success(signal, qty, entry_price, 0, 0, 0)
-                return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
+                # ========== 关键：调用美化开仓推送 ==========
+                binance_client.send_position_open_report(
+                    signal=signal,
+                    qty=qty,
+                    entry_price=entry_price,
+                    tp1=entry_price * 1.0128,   # 可根据实际 ATR 调整
+                    tp2=entry_price * 1.025,
+                    tp3=entry_price * 1.036,
+                    risk_percent=float(os.getenv("RISK_PERCENT", 0.01))
+                )
 
-            except Exception as order_err:
-                logging.error(f"[下单执行失败] {order_err}")
-                return jsonify({"status": "error", "message": str(order_err)}), 500
+                logging.info(f"[开仓成功] {signal} {qty} 张 @ {entry_price}")
+                return jsonify({
+                    "status": "success",
+                    "signal": signal,
+                    "qty": qty,
+                    "entry_price": entry_price
+                }), 200
+            else:
+                return jsonify({"status": "error", "message": "下单失败"}), 500
 
         return jsonify(result), 200
 
@@ -142,46 +108,30 @@ def webhook():
         logging.error(f"[Webhook 异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ==================== 增强版 /status 接口 ====================
 
 @app.route('/status', methods=['GET'])
 def status():
-    """系统详细状态接口（带错误捕获）"""
-    result = {
-        "status": "running",
-        "timestamp": datetime.now().isoformat(),
-        "supervisor_websocket": False,
-        "tp_monitor_websocket": False,
-        "current_position": None,
-        "last_error": None
-    }
-
     try:
-        # 检查 supervisor WebSocket
-        if hasattr(supervisor, 'twm') and supervisor.twm is not None:
-            result["supervisor_websocket"] = True
+        sup_ok = hasattr(supervisor, 'twm') and supervisor.twm is not None
+        balance = binance_client.get_account_balance()
+        position = binance_client.get_current_position()
 
-        # 检查 tp_monitor WebSocket
-        if hasattr(tp_monitor, 'is_running') and tp_monitor.is_running:
-            result["tp_monitor_websocket"] = True
-
-        # 获取当前持仓
-        try:
-            pos = position_manager.get_current_position()
-            if pos:
-                result["current_position"] = pos
-        except Exception as pos_err:
-            result["last_error"] = f"获取持仓失败: {str(pos_err)}"
-
-        return jsonify(result)
-
+        return jsonify({
+            "status": "running",
+            "supervisor_websocket": sup_ok,
+            "current_position": position,
+            "account_balance": balance,
+            "timestamp": datetime.now().isoformat()
+        })
     except Exception as e:
-        result["status"] = "error"
-        result["last_error"] = str(e)
-        result["traceback"] = traceback.format_exc()
-        return jsonify(result), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 已启动（增强版 /status 接口） ===")
+    logging.info("=== ETH Webhook Server 已启动 ===")
     daily_report_scheduler.start()
     app.run(host="0.0.0.0", port=5000)
