@@ -1,3 +1,5 @@
+# app.py - 最终干净稳定版
+
 from flask import Flask, request, jsonify
 import os
 import re
@@ -35,9 +37,9 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         equity = balance_info.get("totalWalletBalance", 0)
 
         if equity < 3000:
-            risk_percent = 0.075
+            risk_percent = 0.075          # 小资金：7.5%
         elif equity < 10000:
-            risk_percent = 0.03
+            risk_percent = 0.03           # 中资金：3%
         else:
             risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
 
@@ -80,11 +82,15 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
+                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
+                # 设置止盈目标（关键）
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
+
+                # 发送开仓美化报告
                 binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
 
                 return jsonify({"status": "success", "qty": qty}), 200
