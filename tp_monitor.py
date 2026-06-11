@@ -1,9 +1,10 @@
-# tp_monitor.py - 真正执行止盈版（强壮优化）
+# tp_monitor.py - 完整更新版（主动执行止盈 + 通知智慧层）
 
 import logging
 import threading
 from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
+from position_supervisor import supervisor   # 引入智慧层
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -88,29 +89,32 @@ class TPMonitor:
 
                 current_qty = abs(position["positionAmt"])
 
-                # TP3 全平（优先判断）
+                # ==================== TP3 全平 ====================
                 if self.tp3 and close_price >= self.tp3 and not self.tp3_triggered:
-                    logging.info(f"[TP监控] 触发 TP3 全平 → 价格 {close_price}")
+                    logging.info(f"[TP监控] 触发 TP3 全平 → 当前价 {close_price}")
                     result = binance_client.close_all_positions(self.symbol)
                     if result.get("status") == "success":
-                        binance_client.send_tp_trigger_report("TP3", 1.0, 0)
+                        # 通知智慧层，由智慧层核实后统一发报告
+                        supervisor.notify_tp_hit("TP3", 1.0, 0)
                         self.tp3_triggered = True
                         self.clear_tp_levels()
 
-                # TP2 平剩余仓位约30%
+                # ==================== TP2 平剩余约30% ====================
                 elif self.tp2 and close_price >= self.tp2 and not self.tp2_triggered:
-                    logging.info(f"[TP监控] 触发 TP2 → 价格 {close_price}")
+                    logging.info(f"[TP监控] 触发 TP2 → 当前价 {close_price}")
                     result = binance_client.close_partial_position(self.symbol, 0.3)
                     if result.get("status") == "success":
-                        binance_client.send_tp_trigger_report("TP2", 0.3, current_qty * 0.7)
+                        remaining = current_qty * 0.7
+                        supervisor.notify_tp_hit("TP2", 0.3, remaining)
                         self.tp2_triggered = True
 
-                # TP1 平30%
+                # ==================== TP1 平30% ====================
                 elif self.tp1 and close_price >= self.tp1 and not self.tp1_triggered:
-                    logging.info(f"[TP监控] 触发 TP1 → 价格 {close_price}")
+                    logging.info(f"[TP监控] 触发 TP1 → 当前价 {close_price}")
                     result = binance_client.close_partial_position(self.symbol, 0.3)
                     if result.get("status") == "success":
-                        binance_client.send_tp_trigger_report("TP1", 0.3, current_qty * 0.7)
+                        remaining = current_qty * 0.7
+                        supervisor.notify_tp_hit("TP1", 0.3, remaining)
                         self.tp1_triggered = True
 
         except Exception as e:
