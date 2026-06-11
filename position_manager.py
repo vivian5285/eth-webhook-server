@@ -1,102 +1,99 @@
-# position_manager.py（最终完整加强版）
+# position_manager.py（完整最终版）
 import json
 import os
 import logging
+import threading
 from datetime import datetime
 
 class PositionManager:
     def __init__(self, file_path: str = "current_position.json"):
         self.file_path = file_path
-        self.position = self._load_position()
+        self.lock = threading.Lock()
+        self._ensure_file_exists()
 
-    def _load_position(self):
-        """从文件加载持仓状态"""
-        if os.path.exists(self.file_path):
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    logging.info("[PositionManager] 已加载持仓状态")
-                    return data
-            except Exception as e:
-                logging.error(f"[PositionManager] 加载持仓失败: {e}")
-        return self._get_empty_position()
+    def _ensure_file_exists(self):
+        if not os.path.exists(self.file_path):
+            self._save(self._default_state())
 
-    def _get_empty_position(self):
-        """返回空持仓模板"""
+    def _load(self):
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"[PositionManager] 加载状态失败: {e}")
+            return self._default_state()
+
+    def _save(self, data: dict):
+        try:
+            data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"[PositionManager] 保存状态失败: {e}")
+
+    def _default_state(self):
         return {
             "side": "NONE",
             "symbol": "ETHUSDT",
-            "qty": 0,
+            "qty": 0.0,
             "avg_price": 0.0,
-            "tp_levels": {
-                "tp1": 0,
-                "tp2": 0,
-                "tp3": 0
-            },
-            "tp_hit": {
-                "tp1": False,
-                "tp2": False,
-                "tp3": False
-            },
+            "tp_levels": {"tp1": 0.0, "tp2": 0.0, "tp3": 0.0},
+            "tp_hit": {"tp1": False, "tp2": False, "tp3": False},
             "last_update": None
         }
 
-    def _save_position(self):
-        """保存持仓状态到文件"""
-        try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                json.dump(self.position, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logging.error(f"[PositionManager] 保存持仓失败: {e}")
+    def get_current_position(self):
+        """获取当前持仓（如果没有持仓返回 None）"""
+        with self.lock:
+            data = self._load()
+            if data.get("side") == "NONE" or data.get("qty", 0) == 0:
+                return None
+            return data
 
     def update_position(self, side: str, symbol: str, qty: float, avg_price: float,
-                        tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        """
-        更新持仓信息（开仓成功后调用）
-        """
-        self.position = {
-            "side": side.upper(),
-            "symbol": symbol,
-            "qty": qty,
-            "avg_price": avg_price,
-            "tp_levels": {
-                "tp1": tp1,
-                "tp2": tp2,
-                "tp3": tp3
-            },
-            "tp_hit": {
-                "tp1": False,
-                "tp2": False,
-                "tp3": False
-            },
-            "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        self._save_position()
-        logging.info(f"[PositionManager] 持仓已更新: {side} {qty} @ {avg_price}")
+                        tp1: float = 0.0, tp2: float = 0.0, tp3: float = 0.0):
+        """更新持仓信息（开仓或 WS 更新时调用）"""
+        with self.lock:
+            data = self._load()
+            data.update({
+                "side": side,
+                "symbol": symbol,
+                "qty": qty,
+                "avg_price": avg_price,
+                "tp_levels": {"tp1": tp1, "tp2": tp2, "tp3": tp3},
+                "tp_hit": {"tp1": False, "tp2": False, "tp3": False}
+            })
+            self._save(data)
+            logging.info(f"[PositionManager] 持仓已更新: {side} {qty} @ {avg_price}")
 
     def mark_tp_hit(self, level: str):
-        """标记某个TP已触发"""
-        if level in self.position.get("tp_hit", {}):
-            self.position["tp_hit"][level] = True
-            self._save_position()
-            logging.info(f"[PositionManager] {level.upper()} 已标记为已触发")
-
-    def get_current_position(self):
-        """获取当前持仓（无持仓时返回 None）"""
-        if self.position.get("side") == "NONE" or self.position.get("qty", 0) == 0:
-            return None
-        return self.position.copy()
+        """标记某个 TP 级别已触发（供 tp_monitor 调用）"""
+        with self.lock:
+            data = self._load()
+            if level in ["tp1", "tp2", "tp3"]:
+                data["tp_hit"][level] = True
+                self._save(data)
+                logging.info(f"[PositionManager] {level.upper()} 已标记为已触发")
 
     def clear_position(self):
-        """清空持仓（全平时调用）"""
-        self.position = self._get_empty_position()
-        self._save_position()
-        logging.info("[PositionManager] 持仓已清空")
+        """清空持仓状态（全平或重置时调用）"""
+        with self.lock:
+            data = self._default_state()
+            self._save(data)
+            logging.info("[PositionManager] 持仓已清空")
 
-    def get_tp_levels(self):
-        """获取当前TP价格"""
-        return self.position.get("tp_levels", {"tp1": 0, "tp2": 0, "tp3": 0})
+    def update_tp_levels(self, tp1: float = None, tp2: float = None, tp3: float = None):
+        """更新 TP 价格（可选，用于动态调整）"""
+        with self.lock:
+            data = self._load()
+            if tp1 is not None:
+                data["tp_levels"]["tp1"] = tp1
+            if tp2 is not None:
+                data["tp_levels"]["tp2"] = tp2
+            if tp3 is not None:
+                data["tp_levels"]["tp3"] = tp3
+            self._save(data)
 
-    def is_tp_hit(self, level: str) -> bool:
-        """检查某个TP是否已触发"""
-        return self.position.get("tp_hit", {}).get(level, False)
+
+# 全局实例
+position_manager = PositionManager()
