@@ -1,4 +1,4 @@
-# app.py - 最终完整版（已集成 set_tp_levels）
+# app.py - 最终完整版（已解决 TP + 全平推送 + set_tp_levels）
 
 from flask import Flask, request, jsonify
 import os
@@ -75,14 +75,19 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
+                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # 关键：设置止盈目标
+                # 关键：设置给 tp_monitor
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+                # 推送开仓报告
+                binance_client.send_position_open_report(
+                    signal=signal, qty=qty, entry_price=entry_price,
+                    tp1=tp1, tp2=tp2, tp3=tp3
+                )
 
                 logging.info(f"[开仓成功] {signal} {qty} 张")
                 return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
