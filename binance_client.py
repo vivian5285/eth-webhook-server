@@ -1,4 +1,4 @@
-# binance_client.py（最终更新版 - 适配监督层架构）
+# binance_client.py（完整最终版 - 适配 User Data Stream 监督层）
 import os
 import logging
 import time
@@ -18,12 +18,12 @@ class BinanceClient:
             raise ValueError("BINANCE_API_KEY 或 BINANCE_API_SECRET 未设置")
 
         self.client = Client(self.api_key, self.api_secret)
-        logging.info("[BinanceClient] 初始化完成")
+        logging.info("[BinanceClient] 初始化完成（执行层）")
 
     # ==================== 核心执行方法 ====================
 
     def get_current_position(self, symbol: str = "ETHUSDT"):
-        """获取当前持仓（监督层会频繁调用）"""
+        """获取当前持仓（监督层和 TP 监控会调用）"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
@@ -59,7 +59,7 @@ class BinanceClient:
             return None
 
     def futures_create_order(self, **kwargs):
-        """下单（执行层只负责执行）"""
+        """执行下单（仅执行，不做决策）"""
         try:
             order = self.client.futures_create_order(**kwargs)
             logging.info(f"[下单成功] {order.get('side')} {order.get('origQty')} @ {order.get('avgPrice')}")
@@ -91,7 +91,7 @@ class BinanceClient:
             logging.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 监督层专用方法 ====================
+    # ==================== 监督层专用辅助方法 ====================
 
     def get_account_snapshot(self):
         """获取详细账户快照（供监督层生成报告使用）"""
