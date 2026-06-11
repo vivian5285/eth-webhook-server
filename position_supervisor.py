@@ -1,8 +1,9 @@
 # position_supervisor.py
-# 监督核查层（系统大脑 + 最高权限）
+# 监督核查层（系统大脑 + 最高权限） - User Data Stream WebSocket 版本
 import logging
 import time
 import threading
+from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
 from position_manager import PositionManager
 
@@ -11,34 +12,67 @@ position_manager = PositionManager()
 
 class PositionSupervisor:
     def __init__(self):
-        self.desired_side = None          # 最新信号期望的方向
+        self.desired_side = None
         self.last_signal = None
         self.consecutive_failure_count = 0
-        self.max_failures = 3             # 连续失败3次自动暂停
+        self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
 
-        # 启动后台刷新线程（每4秒）
-        self.refresh_thread = threading.Thread(target=self._background_refresh_loop, daemon=True)
-        self.refresh_thread.start()
-        logging.info("[监督层] 后台刷新线程已启动（每4秒查询币安真实持仓）")
+        # WebSocket 管理器（用于 User Data Stream）
+        self.twm = ThreadedWebsocketManager(
+            api_key=binance_client.api_key,
+            api_secret=binance_client.api_secret
+        )
 
-    def _background_refresh_loop(self):
-        while True:
-            try:
-                if not self.is_paused:
-                    self._reconcile_position()
-            except Exception as e:
-                logging.error(f"[监督层后台刷新异常] {e}")
-            time.sleep(4)
+        # 启动 User Data Stream（账户更新推送）
+        self._start_user_data_stream()
 
-    def _reconcile_position(self):
-        """后台定期核查并纠错"""
-        with self.lock:
-            real_pos = binance_client.get_current_position("ETHUSDT")
-            if self.desired_side and real_pos and real_pos.get("side") != self.desired_side:
-                logging.warning(f"[监督层后台] 持仓偏差 → 期望:{self.desired_side}，实际:{real_pos.get('side')}，尝试主动纠错")
-                self._force_correct_position()
+        logging.info("[监督层] 已升级为 User Data Stream WebSocket 模式（账户实时更新推送）")
+
+    def _start_user_data_stream(self):
+        """启动账户更新 WebSocket"""
+        self.twm.start()
+        self.twm.start_user_socket(callback=self._on_account_update)
+        logging.info("[监督层] User Data Stream 已启动，监听账户更新")
+
+    def _on_account_update(self, msg):
+        """处理账户更新推送"""
+        try:
+            if msg.get('e') != 'ACCOUNT_UPDATE':
+                return
+
+            # 解析持仓信息
+            positions = msg.get('a', {}).get('P', [])
+            current_real_side = None
+            current_real_qty = 0.0
+
+            for pos in positions:
+                if pos.get('s') == 'ETHUSDT' and float(pos.get('pa', 0)) != 0:
+                    current_real_side = "long" if float(pos['pa']) > 0 else "short"
+                    current_real_qty = abs(float(pos['pa']))
+                    break
+
+            with self.lock:
+                # 更新本地状态
+                if current_real_side:
+                    position_manager.update_position(
+                        current_real_side,
+                        "ETHUSDT",
+                        current_real_qty,
+                        float(pos.get('ep', 0)) if 'ep' in pos else 0.0,
+                        0, 0, 0
+                    )
+                else:
+                    position_manager.clear_position()
+
+                # 如果有期望方向且实际方向不一致，则触发纠错
+                if self.desired_side and current_real_side and current_real_side != self.desired_side:
+                    logging.warning(f"[监督层 WS] 持仓偏差 → 期望:{self.desired_side}，实际:{current_real_side}，触发主动纠错")
+                    self._force_correct_position()
+
+        except Exception as e:
+            logging.error(f"[监督层 WebSocket 处理异常] {e}")
 
     def handle_new_signal(self, signal: str):
         """Webhook 收到信号后的统一入口（最高权限）"""
@@ -74,7 +108,6 @@ class PositionSupervisor:
             position_manager.clear_position()
             time.sleep(2.5)
 
-            # 二次确认是否真的平干净
             current_pos = binance_client.get_current_position("ETHUSDT")
             if current_pos:
                 self._handle_correction_failure("平仓后仍存在持仓")
@@ -84,7 +117,6 @@ class PositionSupervisor:
         return {"status": "ready_to_open", "signal": signal}
 
     def _handle_correction_failure(self, reason: str):
-        """连续纠错失败保护机制"""
         self.consecutive_failure_count += 1
         logging.error(f"[监督层] 纠错失败 ({self.consecutive_failure_count}/{self.max_failures}) - {reason}")
 
@@ -94,7 +126,6 @@ class PositionSupervisor:
             self._send_pause_alert(reason)
 
     def _send_pause_alert(self, reason: str):
-        """暂停告警（仅监督层可调用）"""
         try:
             from app import send_beautiful_close_report
             send_beautiful_close_report(f"【严重告警】系统已暂停 - {reason}", "ETHUSDT")
@@ -110,10 +141,6 @@ class PositionSupervisor:
         return result
 
     def notify_open_success(self, signal: str, qty: float, entry_price: float, tp1, tp2, tp3):
-        """
-        开仓成功后由执行层调用
-        监督层负责最终核实真实持仓 + 刷新状态 + 推送报告
-        """
         with self.lock:
             time.sleep(2.0)
             real_pos = binance_client.get_current_position("ETHUSDT")
@@ -129,14 +156,9 @@ class PositionSupervisor:
                 self._handle_correction_failure("开仓后实盘未对齐")
 
     def notify_tp_hit(self, level: str, closed_qty: float, avg_price: float):
-        """
-        TP 被触发后由 tp_monitor 调用
-        监督层负责最终核实真实持仓 + 刷新状态 + 决定是否推送报告
-        """
         with self.lock:
             logging.info(f"[监督层] 收到 TP 触发通知: {level.upper()}, 平仓数量: {closed_qty}")
 
-            # 重新查询真实持仓
             real_pos = binance_client.get_current_position("ETHUSDT")
 
             if real_pos:
@@ -150,7 +172,6 @@ class PositionSupervisor:
             else:
                 position_manager.clear_position()
 
-            # TP3 全平后可推送报告（TP1/TP2 默认只记录）
             if level == "tp3":
                 try:
                     from app import send_beautiful_close_report
@@ -162,5 +183,5 @@ class PositionSupervisor:
             logging.info(f"[监督层] TP {level.upper()} 处理完成，实盘状态已刷新")
 
 
-# 全局单例（供 app.py 和 tp_monitor.py 调用）
+# 全局单例
 supervisor = PositionSupervisor()
