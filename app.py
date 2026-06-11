@@ -1,4 +1,4 @@
-# app.py - 最终完整版（2026-06-12）
+# app.py - 最终完整版（含动态仓位计算）
 
 from flask import Flask, request, jsonify
 import os
@@ -35,13 +35,29 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
     try:
         balance_info = binance_client.get_account_balance()
         equity = balance_info.get("totalWalletBalance", 200)
-        risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
+
+        # ==================== 按资金规模动态调整风险比例 ====================
+        if equity < 3000:
+            risk_percent = 0.075          # 小资金（<3000U）：7.5%（适合230U左右）
+        elif equity < 10000:
+            risk_percent = 0.03           # 中资金：3%
+        else:
+            risk_percent = float(os.getenv("RISK_PERCENT", 0.01))  # 大资金：使用.env配置
+
         stop_distance_percent = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
         risk_amount = equity * risk_percent
         current_price = float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
         stop_distance = current_price * stop_distance_percent
-        return round(risk_amount / stop_distance, 3) if stop_distance > 0 else 0.05
-    except:
+
+        if stop_distance <= 0:
+            return 0.05
+
+        qty = round(risk_amount / stop_distance, 3)
+        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险比例: {risk_percent*100:.1f}% | 开仓数量: {qty}")
+        return qty
+
+    except Exception as e:
+        logging.error(f"[仓位计算异常] {e}")
         return 0.05
 
 
@@ -81,10 +97,10 @@ def webhook():
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # 关键：主动设置止盈目标给 tp_monitor
+                # 设置止盈目标给 tp_monitor
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 调用加强版开仓报告（含保证金比例、杠杆等）
+                # 发送加强版开仓报告
                 binance_client.send_position_open_report(
                     signal=signal,
                     qty=qty,
