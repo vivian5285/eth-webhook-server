@@ -1,9 +1,9 @@
-# tp_monitor.py（完整最终版 - 适配监督层）
+# tp_monitor.py（完整最终版 - 适配 User Data Stream 监督层）
 import logging
 from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
 from position_manager import PositionManager
-from position_supervisor import supervisor   # 引入监督层
+from position_supervisor import supervisor   # 引入最新监督层
 
 binance_client = BinanceClient()
 position_manager = PositionManager()
@@ -21,14 +21,14 @@ class TPMonitor:
         if self.is_running:
             return
         self.twm.start()
-        # 使用 kline stream 监控价格（也可改成 user data stream 更高效）
+        # 使用 kline stream 实时监控价格（1分钟足够用于TP判断）
         self.twm.start_kline_socket(
             callback=self._on_kline_message,
             symbol=self.symbol,
             interval='1m'
         )
         self.is_running = True
-        logging.info("[TP监控] WebSocket 监控已启动")
+        logging.info("[TP监控] WebSocket 价格监控已启动")
 
     def _on_kline_message(self, msg):
         try:
@@ -92,6 +92,7 @@ class TPMonitor:
 
             side = "SELL" if current_pos["side"] == "long" else "BUY"
 
+            # 执行市价减仓
             order = binance_client.client.futures_create_order(
                 symbol=symbol,
                 side=side,
@@ -107,7 +108,7 @@ class TPMonitor:
             if level == "tp3":
                 position_manager.clear_position()
 
-            # 通知监督层（由监督层最终核实并决定是否推送报告）
+            # 通知监督层（由监督层最终核实真实持仓并决定是否推送报告）
             supervisor.notify_tp_hit(level, close_qty, current_pos.get("avg_price", 0))
 
         except Exception as e:
