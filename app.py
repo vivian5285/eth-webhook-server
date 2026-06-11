@@ -1,10 +1,11 @@
-# app.py（最终完整版 - 已加强持仓实时同步）
+# app.py（最终完整版 - 含后台定时持仓同步）
 from flask import Flask, request, jsonify
 import os
 import re
 import json
 import time
 import logging
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -30,6 +31,7 @@ TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
+POSITION_SYNC_INTERVAL = 45  # 每45秒同步一次持仓
 
 def extract_json_from_text(text: str):
     try:
@@ -135,21 +137,51 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-def place_market_order(signal: str, symbol: str):
+def sync_position_from_binance():
+    """后台定时同步币安真实持仓到本地"""
     try:
-        # 【加强】每次都优先从币安实时查询持仓（作为权威来源）
-        real_position = binance_client.get_current_position(symbol)
+        real_pos = binance_client.get_current_position("ETHUSDT")
+        local_pos = position_manager.get_current_position()
 
-        # 如果币安真实无持仓，但本地有记录，则强制清空本地状态
-        if not real_position:
-            if position_manager.get_current_position():
-                logging.info("[持仓同步] 币安无持仓，本地有旧记录，强制清空")
+        if real_pos:
+            # 币安有持仓
+            if not local_pos or local_pos.get("side") != real_pos["side"]:
+                logging.info(f"[后台同步] 检测到币安持仓变化，更新本地状态: {real_pos['side']}")
+                position_manager.update_position(
+                    real_pos["side"],
+                    real_pos["symbol"],
+                    real_pos["qty"],
+                    real_pos["avg_price"],
+                    0, 0, 0  # TP 价格由开仓时重新计算
+                )
+        else:
+            # 币安无持仓
+            if local_pos:
+                logging.info("[后台同步] 币安无持仓，清空本地状态")
                 position_manager.clear_position()
 
-        current_pos = real_position
+    except Exception as e:
+        logging.error(f"[后台持仓同步异常] {e}")
+
+def start_position_sync_thread():
+    """启动后台持仓同步线程"""
+    def _run():
+        while True:
+            sync_position_from_binance()
+            time.sleep(POSITION_SYNC_INTERVAL)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    logging.info(f"[后台同步] 持仓同步线程已启动，每 {POSITION_SYNC_INTERVAL} 秒执行一次")
+
+def place_market_order(signal: str, symbol: str):
+    try:
+        # 每次开仓前先强制同步一次最新持仓
+        sync_position_from_binance()
+
+        current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
-        # 有持仓 → 先全平
         if current_pos:
             logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先平后开")
 
@@ -160,14 +192,12 @@ def place_market_order(signal: str, symbol: str):
             position_manager.clear_position()
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
 
-            # 平仓后等待 + 二次确认
             time.sleep(2.0)
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
+                logging.error("[持仓处理] 平仓后仍存在持仓，终止流程")
                 return {"status": "error", "message": "平仓后仍存在持仓"}
 
-        # 方向验证（只警告）
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续下单")
             binance_client._send_dingtalk(
@@ -176,7 +206,6 @@ def place_market_order(signal: str, symbol: str):
                 is_warning=True
             )
 
-        # 开新仓
         qty = calculate_position_size(symbol)
         if qty <= 0:
             return {"status": "error", "message": "仓位计算无效"}
@@ -191,7 +220,6 @@ def place_market_order(signal: str, symbol: str):
 
         entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-        # 计算 TP
         try:
             klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
             highs = [float(k[2]) for k in klines]
@@ -249,4 +277,5 @@ def webhook():
 
 if __name__ == "__main__":
     logging.info("=== ETH Webhook Server 启动 ===")
+    start_position_sync_thread()   # 启动后台持仓同步
     app.run(host="0.0.0.0", port=5000)
