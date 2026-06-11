@@ -1,4 +1,4 @@
-# app.py（最终完整强壮版 - 已加强开仓和TP通知）
+# app.py（最终完整强壮版）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -20,6 +20,7 @@ app = Flask(__name__)
 client = BinanceClient()
 position_manager = PositionManager()
 
+# 从持久化文件加载最后信号方向
 last_signal_direction = position_manager.get_last_signal_direction()
 
 
@@ -249,8 +250,8 @@ def _send_open_notification(direction: str, qty: float, entry_price: float, tp_p
     send_dingtalk(f"{dir_cn} 单开仓成功", msg)
 
 
-# ==================== 加强版 TP 通知（含本次止盈金额） ====================
-def send_tp_hit_report(level: str, close_price: float, report: dict = None):
+# ==================== 加强版 TP 通知（支持传入真实止盈金额） ====================
+def send_tp_hit_report(level: str, close_price: float, profit_amount: float = None, report: dict = None):
     if report is None:
         report = client.get_detailed_report()
 
@@ -261,25 +262,12 @@ def send_tp_hit_report(level: str, close_price: float, report: dict = None):
     }
     level_cn = level_map.get(level.lower(), level.upper())
 
-    # 尝试估算本次止盈金额
-    profit_amount = "N/A"
-    try:
-        pos = position_manager.get_position()
-        if pos and pos.get("entry_price"):
-            entry_price = float(pos["entry_price"])
-            side = pos.get("side", "long")
-            # 这里简化估算，实际数量需要从持仓信息获取，暂时用近似值
-            if side == "long":
-                profit_amount = round((close_price - entry_price) * 0.3, 2)  # 简化计算
-            else:
-                profit_amount = round((entry_price - close_price) * 0.3, 2)
-    except:
-        pass
+    profit_str = f"{profit_amount:.2f} USDT" if profit_amount is not None else "N/A（计算失败）"
 
     msg = (
         f"**🎯 {level_cn} 已触发**\n\n"
         f"**成交价格**：{close_price}\n"
-        f"**本次止盈金额（估算）**：{profit_amount} USDT\n\n"
+        f"**本次止盈金额**：{profit_str}\n\n"
         f"**📊 平仓后账户快照**\n"
         f"总权益：{report.get('total_equity', 'N/A')} USDT\n"
         f"钱包余额：{report.get('wallet_balance', 'N/A')} USDT\n"
