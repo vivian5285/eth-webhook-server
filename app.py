@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 含后台定时持仓同步）
+# app.py（最终完整加强版）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -31,7 +31,7 @@ TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
-POSITION_SYNC_INTERVAL = 45  # 每45秒同步一次持仓
+POSITION_SYNC_INTERVAL = 45
 
 def extract_json_from_text(text: str):
     try:
@@ -138,47 +138,38 @@ def send_beautiful_close_report(reason: str, symbol: str):
         logging.error(f"[平仓报告发送失败] {e}")
 
 def sync_position_from_binance():
-    """后台定时同步币安真实持仓到本地"""
     try:
         real_pos = binance_client.get_current_position("ETHUSDT")
         local_pos = position_manager.get_current_position()
 
         if real_pos:
-            # 币安有持仓
-            if not local_pos or local_pos.get("side") != real_pos["side"]:
-                logging.info(f"[后台同步] 检测到币安持仓变化，更新本地状态: {real_pos['side']}")
+            need_update = (
+                not local_pos or
+                local_pos.get("side") != real_pos["side"] or
+                abs(local_pos.get("qty", 0) - real_pos["qty"]) > 0.001
+            )
+            if need_update:
                 position_manager.update_position(
-                    real_pos["side"],
-                    real_pos["symbol"],
-                    real_pos["qty"],
-                    real_pos["avg_price"],
-                    0, 0, 0  # TP 价格由开仓时重新计算
+                    real_pos["side"], real_pos["symbol"], real_pos["qty"],
+                    real_pos["avg_price"], 0, 0, 0
                 )
         else:
-            # 币安无持仓
             if local_pos:
-                logging.info("[后台同步] 币安无持仓，清空本地状态")
                 position_manager.clear_position()
-
     except Exception as e:
         logging.error(f"[后台持仓同步异常] {e}")
 
 def start_position_sync_thread():
-    """启动后台持仓同步线程"""
     def _run():
         while True:
             sync_position_from_binance()
             time.sleep(POSITION_SYNC_INTERVAL)
-
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     logging.info(f"[后台同步] 持仓同步线程已启动，每 {POSITION_SYNC_INTERVAL} 秒执行一次")
 
 def place_market_order(signal: str, symbol: str):
     try:
-        # 每次开仓前先强制同步一次最新持仓
-        sync_position_from_binance()
-
         current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
@@ -195,8 +186,8 @@ def place_market_order(signal: str, symbol: str):
             time.sleep(2.0)
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.error("[持仓处理] 平仓后仍存在持仓，终止流程")
-                return {"status": "error", "message": "平仓后仍存在持仓"}
+                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
+                return {"status": "error", "message": "平仓后仍存在持仓，无法开新仓"}
 
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续下单")
@@ -206,48 +197,54 @@ def place_market_order(signal: str, symbol: str):
                 is_warning=True
             )
 
-        qty = calculate_position_size(symbol)
-        if qty <= 0:
-            return {"status": "error", "message": "仓位计算无效"}
-
-        order_side = "BUY" if signal == "OPEN_LONG" else "SELL"
-        order = binance_client.client.futures_create_order(
-            symbol=symbol,
-            side=order_side,
-            type="MARKET",
-            quantity=qty
-        )
-
-        entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
-
+        # ==================== 开新仓（严格包裹） ====================
         try:
-            klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
-            highs = [float(k[2]) for k in klines]
-            lows = [float(k[3]) for k in klines]
-            closes = [float(k[4]) for k in klines]
-            tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
-            atr = sum(tr_list) / len(tr_list)
-        except:
-            atr = 8.0
+            qty = calculate_position_size(symbol)
+            if qty <= 0:
+                return {"status": "error", "message": "仓位计算无效"}
 
-        if signal == "OPEN_LONG":
-            tp1 = round(entry_price + atr * 1.28, 2)
-            tp2 = round(entry_price + atr * 2.5, 2)
-            tp3 = round(entry_price + atr * 3.6, 2)
-        else:
-            tp1 = round(entry_price - atr * 1.28, 2)
-            tp2 = round(entry_price - atr * 2.5, 2)
-            tp3 = round(entry_price - atr * 3.6, 2)
+            order_side = "BUY" if signal == "OPEN_LONG" else "SELL"
+            order = binance_client.client.futures_create_order(
+                symbol=symbol,
+                side=order_side,
+                type="MARKET",
+                quantity=qty
+            )
 
-        logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
+            entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-        position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
-        send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
+            try:
+                klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
+                highs = [float(k[2]) for k in klines]
+                lows = [float(k[3]) for k in klines]
+                closes = [float(k[4]) for k in klines]
+                tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
+                atr = sum(tr_list) / len(tr_list)
+            except:
+                atr = 8.0
 
-        return {"status": "success", "side": signal, "qty": qty, "order": order}
+            if signal == "OPEN_LONG":
+                tp1 = round(entry_price + atr * 1.28, 2)
+                tp2 = round(entry_price + atr * 2.5, 2)
+                tp3 = round(entry_price + atr * 3.6, 2)
+            else:
+                tp1 = round(entry_price - atr * 1.28, 2)
+                tp2 = round(entry_price - atr * 2.5, 2)
+                tp3 = round(entry_price - atr * 3.6, 2)
+
+            logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
+
+            position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
+            send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
+
+            return {"status": "success", "side": signal, "qty": qty, "order": order}
+
+        except Exception as open_err:
+            logging.error(f"[开新仓失败] {signal} {symbol} | {open_err}")
+            return {"status": "error", "message": f"开新仓失败: {str(open_err)}"}
 
     except Exception as e:
-        logging.error(f"[下单失败] {signal} {symbol} | {e}")
+        logging.error(f"[下单整体失败] {signal} {symbol} | {e}")
         return {"status": "error", "message": str(e)}
 
 @app.route('/webhook', methods=['POST'])
@@ -277,5 +274,5 @@ def webhook():
 
 if __name__ == "__main__":
     logging.info("=== ETH Webhook Server 启动 ===")
-    start_position_sync_thread()   # 启动后台持仓同步
+    start_position_sync_thread()
     app.run(host="0.0.0.0", port=5000)
