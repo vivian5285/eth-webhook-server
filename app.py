@@ -1,4 +1,4 @@
-# app.py（最终加强版 - 4场景万无一失）
+# app.py（最终版 - 实盘确认后才推送钉钉）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -170,28 +170,23 @@ def place_market_order(signal: str, symbol: str):
         sync_position_from_binance()
         current_pos = binance_client.get_current_position(symbol)
 
-        # ==================== CLOSE_ALL：只平，不开 ====================
+        # CLOSE_ALL：只平，不开
         if signal == "CLOSE_ALL":
             if current_pos:
                 result = binance_client.close_all_positions(symbol)
                 if result.get("status") == "success":
                     position_manager.clear_position()
+                    # 全平后再次同步并推送
+                    sync_position_from_binance()
                     send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
                 return result
             return {"status": "skipped", "message": "当前无持仓"}
 
-        # ==================== OPEN_LONG / OPEN_SHORT：统一先平后开 ====================
         side = "long" if signal == "OPEN_LONG" else "short"
 
-        # ========== 场景处理开始 ==========
+        # ========== 统一先平后开 ==========
         if current_pos:
-            # 场景2、3、4：有持仓 → 立即全平
-            if current_pos["side"] == "long" and signal == "OPEN_LONG":
-                logging.info("[场景2] 有多 → 立即全平后再开多（同方向）")
-            elif current_pos["side"] == "long" and signal == "OPEN_SHORT":
-                logging.info("[场景3] 有多 → 立即全平后开空（反方向）")
-            elif current_pos["side"] == "short" and signal == "OPEN_LONG":
-                logging.info("[场景4] 有空 → 立即全平后开多（反方向）")
+            logging.info(f"[先平后开] 当前持有 {current_pos['side']}，收到 {signal}，先全平再开新仓")
 
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") != "success":
@@ -204,12 +199,8 @@ def place_market_order(signal: str, symbol: str):
             time.sleep(2.5)
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.error("[持仓处理] 平仓后仍存在持仓，终止流程")
+                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
                 return {"status": "error", "message": "平仓后仍存在持仓"}
-
-        else:
-            # 场景1：无持仓 → 开多
-            logging.info("[场景1] 无持仓 → 开多")
 
         # 方向验证（只警告）
         if not confirm_direction(symbol, side):
@@ -251,21 +242,24 @@ def place_market_order(signal: str, symbol: str):
                 tp2 = round(entry_price - atr * 2.5, 2)
                 tp3 = round(entry_price - atr * 3.6, 2)
 
-            logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
+            logging.info(f"[开仓API返回成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
 
-            # 开新仓后再次验证真实持仓
-            time.sleep(1.5)
+            # 【关键】开新仓后强制等待 + 再次查询真实持仓
+            time.sleep(2.0)
             new_pos = binance_client.get_current_position(symbol)
 
-            if not new_pos or new_pos.get("side") != side:
-                logging.error(f"[持仓验证失败] 开新仓后未检测到 {side} 持仓")
-                return {"status": "error", "message": f"开新仓后未检测到 {side} 持仓"}
+            # 只有真实持仓方向和数量都正确，才认为开仓成功
+            if new_pos and new_pos.get("side") == side and abs(new_pos.get("qty", 0) - qty) < 0.01:
+                logging.info(f"[实盘确认成功] {signal} 持仓已确认，方向和数量一致")
 
-            # 确认成功后才更新和报告
-            position_manager.update_position(side, symbol, qty, entry_price, tp1, tp2, tp3)
-            send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
+                position_manager.update_position(side, symbol, qty, entry_price, tp1, tp2, tp3)
+                sync_position_from_binance()  # 最后再同步一次
+                send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
 
-            return {"status": "success", "side": signal, "qty": qty, "order": order}
+                return {"status": "success", "side": signal, "qty": qty, "order": order}
+            else:
+                logging.error(f"[实盘确认失败] 开新仓后未检测到正确 {side} 持仓")
+                return {"status": "error", "message": f"开新仓后实盘未确认到 {side} 持仓"}
 
         except Exception as open_err:
             logging.error(f"[开新仓失败] {signal} {symbol} | {open_err}")
