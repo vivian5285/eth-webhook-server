@@ -1,4 +1,4 @@
-# app.py - 符合智慧层架构的最终版
+# app.py - 最终统一版（CLOSE_ALL 走智慧层公开方法）
 
 from flask import Flask, request, jsonify
 import os
@@ -67,7 +67,6 @@ def webhook():
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
-        # 统一交给智慧层处理
         result = supervisor.handle_new_signal(signal)
 
         if result.get("status") == "ready_to_open":
@@ -88,8 +87,6 @@ def webhook():
                 tp3 = round(entry_price * 1.036, 2)
 
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
-
-                # 通知智慧层开仓成功（由 supervisor 决定是否推送报告）
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
                 return jsonify({"status": "success", "qty": qty}), 200
@@ -97,8 +94,8 @@ def webhook():
                 return jsonify({"status": "error"}), 500
 
         elif signal == "CLOSE_ALL":
-            # 全平也交给 supervisor 处理（更符合智慧层架构）
-            close_result = supervisor._execute_close_all()   # 直接调用 supervisor 的全平方法
+            # 改用智慧层公开方法
+            close_result = supervisor.execute_close_all_with_report()
             return close_result
 
         return jsonify(result), 200
