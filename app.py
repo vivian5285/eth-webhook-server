@@ -1,4 +1,4 @@
-# app.py（已全面修复 TP 计算 + 反向开仓逻辑）
+# app.py（最终完整版 - 已修复 Invalid interval + TP计算问题）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -26,7 +26,8 @@ tp_monitor.start()
 daily_scheduler = DailyReportScheduler(binance_client, report_time="00:05")
 daily_scheduler.start()
 
-TIMEFRAME = "45m"
+# ==================== 配置（已修复为有效周期） ====================
+TIMEFRAME = "30m"                    # ← 已改为有效周期（推荐）
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
@@ -94,7 +95,6 @@ def confirm_direction(symbol: str, side: str) -> bool:
         logging.error(f"[方向验证异常] {e}")
         return True
 
-# ==================== 加强版开仓报告（接收已计算好的 TP 价格） ====================
 def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1: float, tp2: float, tp3: float):
     try:
         balance = binance_client.get_account_balance() or {}
@@ -136,13 +136,11 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-# ==================== 核心下单逻辑（已全面修复） ====================
 def place_market_order(signal: str, symbol: str):
     try:
         current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
-        # 1. 有持仓就先全平
         if current_pos:
             logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先全平再开新仓")
             close_result = binance_client.close_all_positions(symbol)
@@ -152,13 +150,11 @@ def place_market_order(signal: str, symbol: str):
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
             time.sleep(1.5)
 
-        # 2. 方向二次验证
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}")
             binance_client._send_dingtalk("🔴 方向二次验证未通过", f"**信号**：{signal}\n**币种**：{symbol}", is_warning=True)
             return {"status": "blocked", "reason": "方向验证未通过"}
 
-        # 3. 开新仓
         qty = calculate_position_size(symbol)
         if qty <= 0:
             return {"status": "error", "message": "仓位计算无效"}
@@ -171,19 +167,18 @@ def place_market_order(signal: str, symbol: str):
             quantity=qty
         )
 
-        # 获取真实开仓均价
         entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-        # 4. 获取 ATR 并计算 TP 价格
+        # 获取 ATR 并计算 TP
         try:
-            klines = binance_client.client.get_klines(symbol=symbol, interval="45m", limit=20)
+            klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
             highs = [float(k[2]) for k in klines]
             lows = [float(k[3]) for k in klines]
             closes = [float(k[4]) for k in klines]
             tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
             atr = sum(tr_list) / len(tr_list)
         except:
-            atr = 8.0  # 兜底
+            atr = 8.0
 
         if signal == "OPEN_LONG":
             tp1 = round(entry_price + atr * 1.28, 2)
@@ -194,12 +189,9 @@ def place_market_order(signal: str, symbol: str):
             tp2 = round(entry_price - atr * 2.5, 2)
             tp3 = round(entry_price - atr * 3.6, 2)
 
-        logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price} | TP1={tp1}")
+        logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
 
-        # 5. 更新 PositionManager（关键！）
         position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
-
-        # 6. 发送美化报告（传入正确 TP 价格）
         send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
 
         return {"status": "success", "side": signal, "qty": qty, "order": order}
@@ -208,7 +200,6 @@ def place_market_order(signal: str, symbol: str):
         logging.error(f"[下单失败] {signal} {symbol} | {e}")
         return {"status": "error", "message": str(e)}
 
-# ==================== Webhook ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
