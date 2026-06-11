@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# check_full_system.py - 完整系统健康检查（含 systemd + journalctl）
+# check_full_system.py - 完整系统健康检查（systemd + journalctl 优化版）
 
 import subprocess
 import socket
 import json
 import os
-import re
 from datetime import datetime
 
-def run_command(cmd, timeout=10):
+def run_command(cmd, timeout=15):
     try:
         result = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
@@ -25,8 +24,7 @@ def check_service_status():
     else:
         print(f"❌ 服务状态异常: {stdout or stderr}")
 
-    # 显示最近状态
-    stdout, _, _ = run_command("systemctl status eth-webhook.service --no-pager | head -n 8")
+    stdout, _, _ = run_command("systemctl status eth-webhook.service --no-pager | head -n 10")
     print(stdout)
 
 def check_port(port=5000):
@@ -74,23 +72,41 @@ def check_position_file():
 
 def check_websocket_logs():
     print("\n[5] WebSocket 状态检查（journalctl）")
-    cmd = 'journalctl -u eth-webhook.service --since "15 minutes ago" --no-pager | grep -E "User Data Stream|WebSocket|启动|已启动|TP监控"'
+
+    # 优先尝试获取服务上次启动时间
+    start_time_cmd = "systemctl show eth-webhook.service --property=ActiveEnterTimestamp --value"
+    start_time, _, _ = run_command(start_time_cmd)
+
+    if start_time and "N/A" not in start_time:
+        since_param = f'--since "{start_time}"'
+        print(f"   检测到服务启动时间，使用自重启以来的日志")
+    else:
+        since_param = '--since "30 minutes ago"'
+        print(f"   使用最近 30 分钟日志")
+
+    cmd = f'journalctl -u eth-webhook.service {since_param} --no-pager -q | grep -E "User Data Stream|WebSocket|已启动|TP监控|启动"'
     stdout, stderr, code = run_command(cmd)
-    
-    if "User Data Stream 已启动" in stdout:
+
+    found_user_stream = "User Data Stream" in stdout or "已启动" in stdout
+    found_tp_monitor = "WebSocket" in stdout or "TP监控" in stdout
+
+    if found_user_stream:
         print("✅ [监督层] User Data Stream WebSocket 已启动")
     else:
-        print("⚠️  未在最近15分钟日志中找到 User Data Stream 启动记录")
+        print("⚠️  未在日志中找到 User Data Stream 启动记录（可能时间窗口仍不够或权限问题）")
 
-    if "WebSocket 价格监控已启动" in stdout or "TP监控" in stdout:
+    if found_tp_monitor:
         print("✅ [TP监控] 价格监控 WebSocket 已启动")
     else:
-        print("⚠️  未在最近15分钟日志中找到 TP 监控启动记录")
+        print("⚠️  未在日志中找到 TP 监控启动记录")
 
-    # 显示最近相关日志片段
+    # 输出最近相关日志片段（最多 800 字符）
     if stdout:
         print("\n最近相关日志片段：")
-        print(stdout[-1500:] if len(stdout) > 1500 else stdout)
+        print(stdout[-800:] if len(stdout) > 800 else stdout)
+    else:
+        print("   （未找到匹配的 WebSocket 启动日志，建议手动执行下面命令确认）")
+        print(f'   journalctl -u eth-webhook.service {since_param} --no-pager | grep -E "User Data Stream|WebSocket"')
 
 def check_dingtalk():
     print("\n[6] 钉钉连通性测试（可选）")
@@ -105,10 +121,10 @@ def check_dingtalk():
             print(f"❌ 钉钉发送失败: {e}")
 
 def main():
-    print("=" * 65)
-    print("🚀 ETH 量化交易系统 - 完整健康检查（systemd + 日志版）")
+    print("=" * 70)
+    print("🚀 ETH 量化交易系统 - 完整健康检查（systemd + journalctl 优化版）")
     print(f"检查时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
+    print("=" * 70)
 
     check_service_status()
     check_port()
@@ -117,9 +133,10 @@ def main():
     check_websocket_logs()
     check_dingtalk()
 
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 70)
     print("检查完成！重点关注 WebSocket 启动日志和 systemd 状态。")
-    print("=" * 65)
+    print("如仍有疑问，可手动执行 journalctl 命令进一步排查。")
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()
