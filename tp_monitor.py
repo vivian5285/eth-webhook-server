@@ -1,4 +1,4 @@
-# tp_monitor.py（最终加强版 - 解决 WebSocket 重启问题）
+# tp_monitor.py（最终完整激进版 - 支持手动加仓完全重置TP）
 import time
 import threading
 import logging
@@ -16,19 +16,18 @@ class TPMonitor:
         self.running = False
         self.twm = None
         self.last_action_time = 0
+        self.last_qty = 0
 
     def start(self):
         if self.running:
             return
         self.running = True
 
-        # 先尝试停止旧的连接（防止重启时冲突）
         if self.twm:
             try:
                 self.twm.stop()
             except:
                 pass
-            self.twm = None
 
         self.twm = ThreadedWebsocketManager(
             api_key=self.client.client.API_KEY,
@@ -39,30 +38,14 @@ class TPMonitor:
             self.twm.start()
             self.twm.start_aggtrade_socket(callback=self._on_price_update, symbol=self.symbol.lower())
         except Exception as e:
-            logging.error(f"[WebSocket启动失败] {e}，将在5秒后重试...")
-            time.sleep(5)
-            # 简单重试一次
-            try:
-                self.twm.start()
-                self.twm.start_aggtrade_socket(callback=self._on_price_update, symbol=self.symbol.lower())
-            except Exception as e2:
-                logging.error(f"[WebSocket重试仍然失败] {e2}")
+            logging.error(f"[WebSocket启动异常] {e}")
 
-        # 检测历史持仓
         existing_pos = self.pm.get_position()
         if existing_pos:
-            atr_info = existing_pos.get('entry_atr') or existing_pos.get('atr') or "未知"
-            logging.info(
-                f"[TP监控] 检测到历史持仓，恢复监控 | "
-                f"方向: {existing_pos.get('side')} | "
-                f"入场价: {existing_pos.get('entry_price')} | "
-                f"ATR: {atr_info}"
-            )
-        else:
-            logging.info("[TP监控] 无历史持仓，正常启动监控")
+            logging.info(f"[TP监控] 检测到历史持仓，恢复监控")
 
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
-        logging.info(f"[TP监控] WebSocket + ATR动态追踪 + 早期保本移动已启动 | {self.symbol}")
+        logging.info(f"[TP监控] 激进版智能TP监控已启动 | {self.symbol}")
 
     def _on_price_update(self, msg):
         try:
@@ -74,47 +57,151 @@ class TPMonitor:
     def _check_tp_loop(self):
         while self.running:
             try:
-                pos = self.pm.get_position()
-                if not pos or self.current_price is None:
+                real_pos = self.client.get_current_position(self.symbol)
+                cached_pos = self.pm.get_position()
+
+                # 手动全平检测
+                if not real_pos and cached_pos:
+                    self._send_manual_action_report("手动全平", cached_pos, "检测到手动全平，系统已清理TP缓存")
+                    self.pm.clear_position()
                     time.sleep(self.check_interval)
                     continue
 
-                if time.time() - self.last_action_time < 2.5:
-                    time.sleep(0.8)
-                    continue
+                if real_pos:
+                    current_qty = abs(float(real_pos["positionAmt"]))
+                    entry_price = float(real_pos.get("entryPrice", 0))
+                    side = "long" if float(real_pos["positionAmt"]) > 0 else "short"
 
-                price = self.current_price
-                tp = pos.get("tp_prices", {})
-                side = pos.get("side")
-                hit = pos.get("tp_hit", [])
-                entry_price = pos.get("entry_price", 0)
+                    # 检测手动加减仓
+                    if self.last_qty > 0 and abs(current_qty - self.last_qty) > max(self.last_qty * 0.05, 0.01):
+                        self._handle_manual_position_change(cached_pos, real_pos, current_qty, self.last_qty)
 
-                self._check_early_breakeven(price, entry_price, side, hit)
+                    self.last_qty = current_qty
 
-                if side == "long":
-                    if "tp1" not in hit and price >= tp.get("tp1", 0):
-                        self._execute_tp("tp1", price, pos, 0.30)
-                    elif "tp2" not in hit and price >= tp.get("tp2", 0):
-                        self._execute_tp("tp2", price, pos, 0.30)
-                    elif "tp3" not in hit and price >= tp.get("tp3", 0):
-                        self._execute_tp("tp3", price, pos, 1.0)
-                else:
-                    if "tp1" not in hit and price <= tp.get("tp1", 999999):
-                        self._execute_tp("tp1", price, pos, 0.30)
-                    elif "tp2" not in hit and price <= tp.get("tp2", 999999):
-                        self._execute_tp("tp2", price, pos, 0.30)
-                    elif "tp3" not in hit and price <= tp.get("tp3", 999999):
-                        self._execute_tp("tp3", price, pos, 1.0)
+                    if not cached_pos:
+                        time.sleep(self.check_interval)
+                        continue
+
+                    if self.current_price is None or time.time() - self.last_action_time < 2.5:
+                        time.sleep(0.8)
+                        continue
+
+                    price = self.current_price
+                    tp = cached_pos.get("tp_prices", {})
+                    hit = cached_pos.get("tp_hit", [])
+
+                    self._check_early_breakeven(price, entry_price, side, hit)
+
+                    # 执行分批止盈
+                    if side == "long":
+                        if "tp1" not in hit and price >= tp.get("tp1", 0):
+                            self._execute_tp("tp1", price, cached_pos, 0.30)
+                        elif "tp2" not in hit and price >= tp.get("tp2", 0):
+                            self._execute_tp("tp2", price, cached_pos, 0.30)
+                        elif "tp3" not in hit and price >= tp.get("tp3", 0):
+                            self._execute_tp("tp3", price, cached_pos, 1.0)
+                    else:
+                        if "tp1" not in hit and price <= tp.get("tp1", 999999):
+                            self._execute_tp("tp1", price, cached_pos, 0.30)
+                        elif "tp2" not in hit and price <= tp.get("tp2", 999999):
+                            self._execute_tp("tp2", price, cached_pos, 0.30)
+                        elif "tp3" not in hit and price <= tp.get("tp3", 999999):
+                            self._execute_tp("tp3", price, cached_pos, 1.0)
 
             except Exception as e:
                 logging.error(f"[TP检查循环异常] {e}")
 
             time.sleep(self.check_interval)
 
+    def _handle_manual_position_change(self, cached_pos, real_pos, current_qty, last_qty):
+        change_qty = current_qty - last_qty
+        new_entry_price = float(real_pos.get("entryPrice", 0))
+
+        if change_qty > 0:
+            # 手动加仓 → 完全重置TP
+            logging.info(f"[手动加仓] 检测到加仓 {change_qty}，系统将完全重置TP")
+            self._recalculate_tp_after_add(cached_pos, real_pos, new_entry_price)
+            self._send_manual_action_report_with_tp_comparison("手动加仓", cached_pos, new_entry_price, change_qty)
+        else:
+            # 手动减仓
+            logging.info(f"[手动减仓] 检测到减仓 {abs(change_qty)}")
+            self._send_manual_action_report(
+                "手动减仓", cached_pos,
+                f"检测到手动减仓 {abs(change_qty)}，系统将继续按当前剩余仓位执行30/30/100%止盈计划"
+            )
+
+    def _recalculate_tp_after_add(self, cached_pos, real_pos, new_entry_price):
+        """手动加仓后完全重置TP"""
+        atr = cached_pos.get("atr") or cached_pos.get("entry_atr") or 30
+        is_long = float(real_pos["positionAmt"]) > 0
+
+        if is_long:
+            new_tp1 = new_entry_price + (atr * 1.28)
+            new_tp2 = new_entry_price + (atr * 2.5)
+            new_tp3 = new_entry_price + (atr * 3.6)
+        else:
+            new_tp1 = new_entry_price - (atr * 1.28)
+            new_tp2 = new_entry_price - (atr * 2.5)
+            new_tp3 = new_entry_price - (atr * 3.6)
+
+        cached_pos["entry_price"] = round(new_entry_price, 2)
+        cached_pos["tp_prices"] = {
+            "tp1": round(new_tp1, 2),
+            "tp2": round(new_tp2, 2),
+            "tp3": round(new_tp3, 2)
+        }
+        cached_pos["tp_hit"] = []  # 完全重置已触发记录
+
+        self.pm.position = cached_pos
+        self.pm._save_position()
+
+        logging.info(f"[TP完全重置完成] 新入场价: {new_entry_price} | 新TP1: {new_tp1} | 新TP2: {new_tp2} | 新TP3: {new_tp3}")
+
+    def _send_manual_action_report_with_tp_comparison(self, action_type: str, old_pos: dict, new_entry_price: float, change_qty: float):
+        """加仓后推送新旧TP对比"""
+        try:
+            from app import send_dingtalk
+
+            old_tp = old_pos.get("tp_prices", {})
+            old_entry = old_pos.get("entry_price", 0)
+            atr = old_pos.get("atr", 30)
+
+            msg = (
+                f"**🚀 手动加仓识别 - 系统已完全重置TP**\n\n"
+                f"**加仓数量**：{change_qty}\n"
+                f"**新平均入场价**：{new_entry_price}\n\n"
+                f"**旧TP设置**（加仓前）\n"
+                f"• 入场价：{old_entry}\n"
+                f"• TP1：{old_tp.get('tp1')}\n"
+                f"• TP2：{old_tp.get('tp2')}\n"
+                f"• TP3：{old_tp.get('tp3')}\n\n"
+                f"**新TP设置**（系统重新计算后）\n"
+                f"• 入场价：{new_entry_price}\n"
+                f"• TP1：{round(new_entry_price + (atr * 1.28), 2)}\n"
+                f"• TP2：{round(new_entry_price + (atr * 2.5), 2)}\n"
+                f"• TP3：{round(new_entry_price + (atr * 3.6), 2)}\n\n"
+                f"系统已清空已触发记录，将按新TP继续执行30/30/100%铁律。"
+            )
+            send_dingtalk("手动加仓 - TP已重置", msg)
+        except Exception as e:
+            logging.error(f"[加仓TP对比推送失败] {e}")
+
+    def _send_manual_action_report(self, action_type: str, pos: dict, analysis: str):
+        try:
+            from app import send_dingtalk
+            msg = (
+                f"**⚠️ 手动干预识别 - {action_type}**\n\n"
+                f"**分析**：{analysis}\n\n"
+                f"**当前持仓**：方向 {pos.get('side')} | 入场价 {pos.get('entry_price')}\n"
+                f"系统将继续按铁律执行分批止盈。"
+            )
+            send_dingtalk(f"手动{action_type}识别", msg)
+        except Exception as e:
+            logging.error(f"[手动干预推送失败] {e}")
+
     def _check_early_breakeven(self, price, entry_price, side, hit):
         if not entry_price or "tp1" in hit:
             return
-
         if side == "long":
             profit_pct = (price - entry_price) / entry_price * 100
         else:
@@ -125,17 +212,15 @@ class TPMonitor:
 
     def _execute_tp(self, level: str, price: float, pos: dict, percent: float):
         logging.info(f"[TP触发] {level} @ {price}")
-
         self.pm.mark_tp_hit(level)
         self.last_action_time = time.time()
 
         entry_price = float(pos.get("entry_price", 0))
         side = pos.get("side", "long")
 
-        # 计算真实止盈金额
         profit_amount = None
         try:
-            current_pos = self.client.get_current_position(pos["symbol"])
+            current_pos = self.client.get_current_position(self.symbol)
             if current_pos:
                 current_qty = abs(float(current_pos["positionAmt"]))
                 close_qty = current_qty * percent if percent < 1.0 else current_qty
@@ -143,14 +228,14 @@ class TPMonitor:
                     profit_amount = (price - entry_price) * close_qty
                 else:
                     profit_amount = (entry_price - price) * close_qty
-        except Exception as e:
-            logging.error(f"[止盈金额计算失败] {e}")
+        except:
+            pass
 
         if percent >= 1.0:
-            self.client.close_all_positions(pos["symbol"])
+            self.client.close_all_positions(self.symbol)
             self.pm.clear_position()
         else:
-            self.client.close_partial_position(pos["symbol"], percent)
+            self.client.close_partial_position(self.symbol, percent)
 
         try:
             from app import send_tp_hit_report
