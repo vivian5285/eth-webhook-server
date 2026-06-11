@@ -34,20 +34,14 @@ def extract_json_from_text(text: str):
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
     try:
         balance_info = binance_client.get_account_balance()
-        if not balance_info:
-            return 0.05
         equity = balance_info.get("totalWalletBalance", 200)
         risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
         stop_distance_percent = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
         risk_amount = equity * risk_percent
-        ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
-        current_price = float(ticker["price"])
+        current_price = float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
         stop_distance = current_price * stop_distance_percent
-        if stop_distance <= 0:
-            return 0.05
-        return round(risk_amount / stop_distance, 3)
-    except Exception as e:
-        logging.error(f"[仓位计算异常] {e}")
+        return round(risk_amount / stop_distance, 3) if stop_distance > 0 else 0.05
+    except:
         return 0.05
 
 
@@ -62,13 +56,12 @@ def webhook():
         symbol = data.get("symbol", "ETHUSDT")
 
         if not signal:
-            return jsonify({"status": "error", "message": "缺少 signal 字段"}), 400
+            return jsonify({"status": "error", "message": "缺少 signal"}), 400
 
         logging.info(f"[Webhook] 收到信号 → {signal}")
 
         result = supervisor.handle_new_signal(signal)
 
-        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -82,40 +75,25 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # ========== 关键：主动设置止盈目标给 tp_monitor ==========
+                # 关键：设置止盈目标
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 调用美化开仓推送
-                binance_client.send_position_open_report(
-                    signal=signal,
-                    qty=qty,
-                    entry_price=entry_price,
-                    tp1=tp1,
-                    tp2=tp2,
-                    tp3=tp3
-                )
+                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
 
-                logging.info(f"[开仓成功] {signal} {qty} 张 @ {entry_price}")
-                return jsonify({
-                    "status": "success",
-                    "signal": signal,
-                    "qty": qty,
-                    "entry_price": entry_price
-                }), 200
-            else:
-                return jsonify({"status": "error", "message": "下单失败"}), 500
+                logging.info(f"[开仓成功] {signal} {qty} 张")
+                return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
 
-        # ==================== 全平处理 ====================
+            return jsonify({"status": "error", "message": "下单失败"}), 500
+
         elif signal == "CLOSE_ALL":
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") == "success":
                 binance_client.send_close_all_report("收到 CLOSE_ALL 信号")
-                tp_monitor.clear_tp_levels()   # 全平后清空止盈目标
+                tp_monitor.clear_tp_levels()
             return close_result
 
         return jsonify(result), 200
@@ -128,23 +106,15 @@ def webhook():
 @app.route('/status', methods=['GET'])
 def status():
     try:
-        sup_ok = hasattr(supervisor, 'twm') and supervisor.twm is not None
-        balance = binance_client.get_account_balance()
-        position = binance_client.get_current_position()
-
         return jsonify({
             "status": "running",
-            "supervisor_websocket": sup_ok,
-            "current_position": position,
-            "account_balance": balance,
+            "supervisor_websocket": hasattr(supervisor, 'twm') and supervisor.twm is not None,
+            "current_position": binance_client.get_current_position(),
+            "account_balance": binance_client.get_account_balance(),
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
