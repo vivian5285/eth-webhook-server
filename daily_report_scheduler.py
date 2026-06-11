@@ -1,103 +1,84 @@
-# daily_report_scheduler.py（优化最终版）
+# daily_report_scheduler.py - 每日报告加强版
+
+import os
 import logging
-import threading
+import schedule
 import time
 from datetime import datetime, timedelta
 from binance_client import BinanceClient
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
 binance_client = BinanceClient()
 
-class DailyReportScheduler:
-    def __init__(self, send_time: str = "00:00"):
-        """
-        send_time: 每天发送报告的时间，格式 "HH:MM"（默认 00:00 HKT）
-        """
-        self.send_time = send_time
-        self.thread = None
-        self.running = False
 
-    def _get_today_realized_pnl(self):
-        """获取今日已实现盈亏"""
-        try:
-            now = datetime.now()
-            start_time = int((now - timedelta(days=1)).timestamp() * 1000)  # 昨天到现在
-            income_history = binance_client.client.futures_income_history(
-                incomeType="REALIZED_PNL",
-                startTime=start_time,
-                limit=1000
-            )
-            total_pnl = sum(float(item['income']) for item in income_history)
-            return round(total_pnl, 2)
-        except Exception as e:
-            logging.error(f"[日报] 获取今日已实现盈亏失败: {e}")
-            return 0.0
-
-    def _get_current_snapshot(self):
-        """获取当前账户快照"""
-        try:
-            balance = binance_client.get_account_balance() or {}
-            position = binance_client.get_current_position("ETHUSDT")
-            return {
-                "equity": balance.get("totalWalletBalance", 0),
-                "available": balance.get("availableBalance", 0),
-                "position": position
-            }
-        except Exception as e:
-            logging.error(f"[日报] 获取账户快照失败: {e}")
-            return {}
-
-    def _send_daily_report(self):
-        """发送每日报告"""
-        try:
-            today_pnl = self._get_today_realized_pnl()
-            snapshot = self._get_current_snapshot()
-            position = snapshot.get("position")
-
-            position_text = "无持仓"
-            if position:
-                position_text = f"{position['side'].upper()} {position['qty']} 张 @ {position['avg_price']}"
-
-            title = "📊 每日交易报告"
-            content = (
-                f"**日期**：{datetime.now().strftime('%Y-%m-%d')}\n\n"
-                f"**💰 今日已实现盈亏**：{today_pnl} USDT\n\n"
-                f"**📈 当前账户状态**\n"
-                f"- 账户权益：{snapshot.get('equity', 0):.2f} USDT\n"
-                f"- 可用余额：{snapshot.get('available', 0):.2f} USDT\n"
-                f"- 当前持仓：{position_text}\n\n"
-                f"**⏰ 生成时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
-            binance_client._send_dingtalk(title, content)
-            logging.info("[日报] 每日报告已发送")
-
-        except Exception as e:
-            logging.error(f"[日报] 发送失败: {e}")
-
-    def _run(self):
-        """后台循环检查是否到达发送时间"""
-        while self.running:
-            now = datetime.now().strftime("%H:%M")
-            if now == self.send_time:
-                self._send_daily_report()
-                # 避免同一分钟重复发送
-                time.sleep(60)
-            time.sleep(30)  # 每30秒检查一次
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-        logging.info(f"[日报] 每日报告调度器已启动（每天 {self.send_time} 发送）")
-
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=5)
-        logging.info("[日报] 每日报告调度器已停止")
+def get_today_realized_pnl():
+    """获取今日已实现盈亏"""
+    try:
+        income = binance_client.client.futures_income_history(
+            incomeType="REALIZED_PNL",
+            startTime=int((datetime.now() - timedelta(days=1)).timestamp() * 1000)
+        )
+        total_pnl = sum(float(item['income']) for item in income if item.get('income'))
+        return round(total_pnl, 2)
+    except Exception as e:
+        logging.error(f"[获取今日已实现盈亏失败] {e}")
+        return 0.0
 
 
-# 全局实例（默认每天 00:00 发送）
-daily_report_scheduler = DailyReportScheduler(send_time="00:00")
+def send_daily_report():
+    """发送每日报告"""
+    try:
+        acc = binance_client.get_detailed_account_info()
+        position = binance_client.get_current_position()
+        today_pnl = get_today_realized_pnl()
+
+        # 当前持仓状态
+        if position and position.get("positionAmt", 0) != 0:
+            pos_text = f"{position['side'].upper()} {abs(position['positionAmt'])} 张 @ {position['entryPrice']:.2f}"
+        else:
+            pos_text = "无持仓"
+
+        text = f"""### 📊 ETH 每日账户报告
+
+**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+💰 **账户概览**
+- 账户权益：{acc.get('totalWalletBalance', 0):.2f} USDT
+- 可用余额：{acc.get('availableBalance', 0):.2f} USDT
+- 未实现盈亏：{acc.get('totalUnrealizedProfit', 0):+.2f} USDT
+- 今日已实现盈亏：{today_pnl:+.2f} USDT
+
+📈 **风险指标**
+- 保证金比例：{acc.get('marginRatio', 0)*100:.2f}%
+- 当前杠杆：{acc.get('currentLeverage', 0)}x
+- 维持保证金：{acc.get('maintMargin', 0):.2f} USDT
+
+📍 **当前持仓**
+{pos_text}
+
+⏰ 报告生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+
+        binance_client._send_dingtalk_markdown("每日账户报告", text)
+        logging.info("[每日报告] 已发送")
+
+    except Exception as e:
+        logging.error(f"[每日报告发送失败] {e}")
+
+
+def start():
+    """启动每日定时报告（默认每天 08:00 发送，可修改）"""
+    schedule.every().day.at("08:00").do(send_daily_report)
+    logging.info("[每日报告] 定时任务已启动，每天 08:00 发送")
+
+    # 也可以手动测试一次
+    # send_daily_report()
+
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    start()
