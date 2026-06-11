@@ -1,4 +1,4 @@
-# tp_monitor.py（最终完整加强版 - 含早期保本移动止损）
+# tp_monitor.py（最终完整强壮版 - 含重启恢复能力）
 import time
 import threading
 import logging
@@ -28,6 +28,18 @@ class TPMonitor:
         )
         self.twm.start()
         self.twm.start_aggtrade_socket(callback=self._on_price_update, symbol=self.symbol.lower())
+
+        # ==================== 重启恢复检测 ====================
+        existing_pos = self.pm.get_position()
+        if existing_pos:
+            logging.info(
+                f"[TP监控] 检测到历史持仓，恢复监控 | "
+                f"方向: {existing_pos.get('side')} | "
+                f"入场价: {existing_pos.get('entry_price')} | "
+                f"ATR: {existing_pos.get('entry_atr')}"
+            )
+        else:
+            logging.info("[TP监控] 无历史持仓，正常启动监控")
 
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
         logging.info(f"[TP监控] WebSocket + ATR动态追踪 + 早期保本移动已启动 | {self.symbol}")
@@ -60,10 +72,10 @@ class TPMonitor:
                 hit = pos.get("tp_hit", [])
                 entry_price = pos.get("entry_price", 0)
 
-                # === 早期保本移动止损检查 ===
+                # 早期保本移动检查
                 self._check_early_breakeven(price, entry_price, side, hit)
 
-                # === TP 执行逻辑 ===
+                # TP 执行
                 if side == "long":
                     if "tp1" not in hit and price >= tp.get("tp1", 0):
                         self._execute_tp("tp1", price, pos, 0.30)
