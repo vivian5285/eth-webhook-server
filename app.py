@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 2026-06-11）
+# app.py（最终完整加强版 - 2026-06-11）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -136,24 +136,33 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-# ==================== 核心下单逻辑（已全面修复） ====================
+# ==================== 核心下单逻辑（已加强） ====================
 def place_market_order(signal: str, symbol: str):
     try:
-        # 1. 强制从币安实时获取最新持仓
         current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
-        # 2. 有持仓就先全平再开
+        # 有持仓 → 先全平
         if current_pos:
-            logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先全平再开新仓")
+            logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，开始先平后开流程")
+
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") != "success":
                 return {"status": "error", "message": "全平失败"}
+
             position_manager.clear_position()
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
-            time.sleep(1.5)
 
-        # 3. 方向验证（只警告，不拦截）
+            # 【关键加强】平仓后等待 + 二次确认
+            time.sleep(2.0)
+            current_pos = binance_client.get_current_position(symbol)
+            if current_pos:
+                logging.error("[持仓处理] 平仓后仍检测到持仓，终止流程")
+                return {"status": "error", "message": "平仓后仍存在持仓，无法安全开新仓"}
+
+            logging.info("[持仓处理] 平仓确认完成，准备开新仓")
+
+        # 方向验证（只警告，不拦截）
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续执行下单")
             binance_client._send_dingtalk(
@@ -162,7 +171,7 @@ def place_market_order(signal: str, symbol: str):
                 is_warning=True
             )
 
-        # 4. 计算仓位并开单
+        # 开新仓
         qty = calculate_position_size(symbol)
         if qty <= 0:
             return {"status": "error", "message": "仓位计算无效"}
@@ -177,7 +186,7 @@ def place_market_order(signal: str, symbol: str):
 
         entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-        # 计算 TP（使用真实 ATR）
+        # 计算 TP
         try:
             klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
             highs = [float(k[2]) for k in klines]
@@ -199,10 +208,7 @@ def place_market_order(signal: str, symbol: str):
 
         logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
 
-        # 更新 PositionManager
         position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
-
-        # 发送美化报告
         send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
 
         return {"status": "success", "side": signal, "qty": qty, "order": order}
