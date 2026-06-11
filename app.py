@@ -1,10 +1,11 @@
-# app.py（最终版 - 立即下单 + 异步二次验证 + 智能钉钉提醒）
+# app.py（完整优美版 - 含美化开仓日报）
 from flask import Flask, request, jsonify
 import os
 import re
 import json
 import threading
 import logging
+from datetime import datetime
 from dotenv import load_dotenv
 from binance_client import BinanceClient
 from tp_monitor import TPMonitor
@@ -52,7 +53,6 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         logging.error(f"[仓位计算异常] {e}")
         return 0.05
 
-# ==================== 简单方向二次验证 ====================
 def confirm_direction(symbol: str, side: str) -> bool:
     if not CONFIRMATION_ENABLED:
         return True
@@ -60,7 +60,6 @@ def confirm_direction(symbol: str, side: str) -> bool:
         klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=50)
         closes = [float(k[4]) for k in klines]
         volumes = [float(k[5]) for k in klines]
-
         if len(closes) < 30:
             return True
 
@@ -77,34 +76,59 @@ def confirm_direction(symbol: str, side: str) -> bool:
         signal_line = ema(macd, 9)
 
         macd_ok = (macd[-1] > signal_line[-1]) if side == "long" else (macd[-1] < signal_line[-1])
-
         vol_ma = sum(volumes[-20:]) / 20
         vol_ok = volumes[-1] > vol_ma * 0.85
-
-        confirmed = macd_ok and vol_ok
-        logging.info(f"[二次验证] {symbol} {side} | MACD确认={macd_ok} | 成交量确认={vol_ok} | 结果={confirmed}")
-        return confirmed
-
+        return macd_ok and vol_ok
     except Exception as e:
         logging.error(f"[二次验证异常] {e}")
         return True
 
-# ==================== 后台二次验证 + 智能钉钉提醒 ====================
+def send_beautiful_open_report(signal: str, symbol: str, qty: float):
+    """美化开仓成功钉钉日报"""
+    try:
+        balance_info = binance_client.get_account_balance() or {}
+        equity = balance_info.get("totalWalletBalance", 0)
+        available = balance_info.get("availableBalance", 0)
+        risk_amount = equity * RISK_PERCENT
+
+        title = "✅ 开仓成功"
+        content = (
+            f"**信号类型**：{signal}\n"
+            f"**币种**：{symbol}\n"
+            f"**时间周期**：{TIMEFRAME}\n"
+            f"**下单数量**：{qty}\n\n"
+            f"**📊 风控信息**\n"
+            f"- 风险比例：{RISK_PERCENT * 100}%\n"
+            f"- 预计止损距离：{STOP_DISTANCE_PERCENT * 100}%\n"
+            f"- 预估最大亏损：{risk_amount:.2f} USDT\n\n"
+            f"**💰 账户快照**\n"
+            f"- 账户权益：{equity:.2f} USDT\n"
+            f"- 可用余额：{available:.2f} USDT\n\n"
+            f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"> 如有疑问请及时人工复核"
+        )
+        binance_client._send_dingtalk(title, content)
+        logging.info(f"[开仓日报] 已推送美化钉钉: {signal} {symbol}")
+    except Exception as e:
+        logging.error(f"[开仓日报发送失败] {e}")
+
 def background_direction_check(symbol: str, signal: str):
     side = "long" if signal == "OPEN_LONG" else "short"
     confirmed = confirm_direction(symbol, side)
 
     if not confirmed:
-        # 方向不一致时才推送钉钉提醒
         try:
-            msg = f"⚠️ 方向二次验证未通过\n信号: {signal}\n币种: {symbol}\n时间周期: {TIMEFRAME}\n建议人工复核交易方向"
-            # 这里调用你已有的钉钉发送函数（如果没有可先用 print 替代）
-            logging.warning(f"[方向不一致告警] {msg}")
-            # binance_client.send_dingtalk_warning(msg)   # 如有此方法可取消注释
+            title = "🔴 方向二次验证未通过"
+            content = (
+                f"**交易信号**：{signal}\n"
+                f"**币种**：{symbol}\n"
+                f"**时间周期**：{TIMEFRAME}\n\n"
+                f"**验证结果**：MACD + 成交量方向与信号不一致\n\n"
+                f"⚠️ 建议立即人工复核当前行情方向！"
+            )
+            binance_client._send_dingtalk(title, content, is_warning=True)
         except Exception as e:
-            logging.error(f"[钉钉方向告警发送失败] {e}")
-    else:
-        logging.info(f"[二次验证通过] {signal} {symbol} 方向一致，无需额外提醒")
+            logging.error(f"[方向告警发送失败] {e}")
 
 def place_market_order(signal: str, symbol: str):
     try:
@@ -126,7 +150,10 @@ def place_market_order(signal: str, symbol: str):
         )
         logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty}")
 
-        # 下单成功后，异步启动二次验证（不阻塞）
+        # 发送美化开仓日报
+        send_beautiful_open_report(signal, symbol, qty)
+
+        # 异步二次验证
         threading.Thread(
             target=background_direction_check,
             args=(symbol, signal),
@@ -157,7 +184,6 @@ def webhook():
         logging.info(f"[Webhook] 收到信号 → {signal} | {symbol} | Timeframe={TIMEFRAME}")
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
-            # 立即下单（不等待二次验证）
             result = place_market_order(signal, symbol)
             return jsonify(result), 200
 
