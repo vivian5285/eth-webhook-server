@@ -1,5 +1,6 @@
-# app.py（最终版 - 动态风险仓位计算）
+# app.py（最终完整版 - 支持 .env 配置风险参数）
 from flask import Flask, request, jsonify
+import os
 import logging
 from dotenv import load_dotenv
 from binance_client import BinanceClient
@@ -16,61 +17,49 @@ position_manager = PositionManager()
 tp_monitor = TPMonitor()
 tp_monitor.start()
 
-# ==================== 动态仓位计算（按风险百分比） ====================
-def calculate_position_size(
-    symbol: str = "ETHUSDT",
-    risk_percent: float = 0.01,        # 默认风险 1%
-    stop_distance_percent: float = 0.008  # 默认止损距离 0.8%
-) -> float:
-    """
-    按风险百分比计算仓位大小
-    risk_percent: 每笔交易愿意承受的最大亏损占账户权益的比例（例如 0.01 = 1%）
-    stop_distance_percent: 止损距离（当前价格的百分比）
-    """
+# ==================== 从 .env 读取风险参数 ====================
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
+STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
+
+def calculate_position_size(symbol: str = "ETHUSDT") -> float:
+    """按风险百分比动态计算仓位"""
     try:
         balance_info = binance_client.get_account_balance()
         if not balance_info:
-            logging.warning("[仓位计算] 获取余额失败，使用默认数量 0.05")
+            logging.warning("[仓位计算] 获取余额失败，使用默认数量")
             return 0.05
 
         equity = balance_info.get("totalWalletBalance", 200)
-        risk_amount = equity * risk_percent
+        risk_amount = equity * RISK_PERCENT
 
-        # 获取当前价格
         ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
         current_price = float(ticker["price"])
 
-        # 计算止损距离（USDT）
-        stop_distance = current_price * stop_distance_percent
-
+        stop_distance = current_price * STOP_DISTANCE_PERCENT
         if stop_distance <= 0:
             return 0.05
 
-        # 计算仓位数量
         qty = risk_amount / stop_distance
         qty = round(qty, 3)
 
-        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险比例: {risk_percent*100}% | "
-                     f"止损距离: {stop_distance_percent*100}% | 计算数量: {qty}")
+        logging.info(f"[仓位计算] 权益={equity:.2f}U | 风险比例={RISK_PERCENT*100}% | "
+                     f"止损距离={STOP_DISTANCE_PERCENT*100}% | 计算数量={qty}")
         return qty
 
     except Exception as e:
         logging.error(f"[仓位计算异常] {e}")
-        return 0.05  # 异常时使用保守默认值
+        return 0.05
 
 
 def place_market_order(signal: str, symbol: str):
     """真实下单 + 动态仓位"""
     try:
-        # 风控：检查是否已有持仓
         current_pos = binance_client.get_current_position(symbol)
         if current_pos:
             logging.warning(f"[风控拦截] 已存在 {symbol} 持仓，拒绝重复开 {signal}")
             return {"status": "skipped", "reason": "已有持仓"}
 
-        # 动态计算仓位
         qty = calculate_position_size(symbol)
-
         if qty <= 0:
             return {"status": "error", "message": "计算出的仓位数量无效"}
 
@@ -137,3 +126,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+PYEOF
