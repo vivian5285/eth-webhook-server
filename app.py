@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 已优化每日日报）
+# app.py（已全面修复 TP 计算 + 反向开仓逻辑）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -94,28 +94,12 @@ def confirm_direction(symbol: str, side: str) -> bool:
         logging.error(f"[方向验证异常] {e}")
         return True
 
-def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float = None):
+# ==================== 加强版开仓报告（接收已计算好的 TP 价格） ====================
+def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1: float, tp2: float, tp3: float):
     try:
         balance = binance_client.get_account_balance() or {}
         equity = balance.get("totalWalletBalance", 0)
         available = balance.get("availableBalance", 0)
-
-        if entry_price is None:
-            try:
-                ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
-                entry_price = float(ticker["price"])
-            except:
-                entry_price = 0
-
-        default_atr = 8.0
-        if signal == "OPEN_LONG":
-            tp1 = round(entry_price + default_atr * 1.28, 2)
-            tp2 = round(entry_price + default_atr * 2.5, 2)
-            tp3 = round(entry_price + default_atr * 3.6, 2)
-        else:
-            tp1 = round(entry_price - default_atr * 1.28, 2)
-            tp2 = round(entry_price - default_atr * 2.5, 2)
-            tp3 = round(entry_price - default_atr * 3.6, 2)
 
         title = "✅ 开仓成功"
         content = (
@@ -152,11 +136,13 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
+# ==================== 核心下单逻辑（已全面修复） ====================
 def place_market_order(signal: str, symbol: str):
     try:
         current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
+        # 1. 有持仓就先全平
         if current_pos:
             logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先全平再开新仓")
             close_result = binance_client.close_all_positions(symbol)
@@ -164,29 +150,65 @@ def place_market_order(signal: str, symbol: str):
                 return {"status": "error", "message": "全平失败"}
             position_manager.clear_position()
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
-            time.sleep(1.2)
+            time.sleep(1.5)
 
+        # 2. 方向二次验证
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}")
             binance_client._send_dingtalk("🔴 方向二次验证未通过", f"**信号**：{signal}\n**币种**：{symbol}", is_warning=True)
             return {"status": "blocked", "reason": "方向验证未通过"}
 
+        # 3. 开新仓
         qty = calculate_position_size(symbol)
         if qty <= 0:
             return {"status": "error", "message": "仓位计算无效"}
 
         order_side = "BUY" if signal == "OPEN_LONG" else "SELL"
-        order = binance_client.client.futures_create_order(symbol=symbol, side=order_side, type="MARKET", quantity=qty)
+        order = binance_client.client.futures_create_order(
+            symbol=symbol,
+            side=order_side,
+            type="MARKET",
+            quantity=qty
+        )
 
-        logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty}")
-        entry_price = float(order.get('avgPrice', 0)) or 0
-        send_beautiful_open_report(signal, symbol, qty, entry_price=entry_price)
+        # 获取真实开仓均价
+        entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
+
+        # 4. 获取 ATR 并计算 TP 价格
+        try:
+            klines = binance_client.client.get_klines(symbol=symbol, interval="45m", limit=20)
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
+            closes = [float(k[4]) for k in klines]
+            tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
+            atr = sum(tr_list) / len(tr_list)
+        except:
+            atr = 8.0  # 兜底
+
+        if signal == "OPEN_LONG":
+            tp1 = round(entry_price + atr * 1.28, 2)
+            tp2 = round(entry_price + atr * 2.5, 2)
+            tp3 = round(entry_price + atr * 3.6, 2)
+        else:
+            tp1 = round(entry_price - atr * 1.28, 2)
+            tp2 = round(entry_price - atr * 2.5, 2)
+            tp3 = round(entry_price - atr * 3.6, 2)
+
+        logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price} | TP1={tp1}")
+
+        # 5. 更新 PositionManager（关键！）
+        position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
+
+        # 6. 发送美化报告（传入正确 TP 价格）
+        send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
 
         return {"status": "success", "side": signal, "qty": qty, "order": order}
+
     except Exception as e:
         logging.error(f"[下单失败] {signal} {symbol} | {e}")
         return {"status": "error", "message": str(e)}
 
+# ==================== Webhook ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
