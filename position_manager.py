@@ -11,7 +11,7 @@ class PositionManager:
         self.position = self._load_position()
 
     def _load_position(self):
-        """加载当前持仓信息（包含 last_signal_direction）"""
+        """加载当前持仓信息"""
         if os.path.exists(POSITION_FILE):
             try:
                 with open(POSITION_FILE, "r", encoding="utf-8") as f:
@@ -30,12 +30,12 @@ class PositionManager:
 
     # ==================== 持仓管理 ====================
     def save_position(self, symbol: str, entry_price: float, atr: float, tp_prices: dict, side: str):
-        """保存新开仓信息"""
+        """保存新开仓信息（包含 entry_atr）"""
         self.position = {
             "symbol": symbol,
             "side": side.lower(),
             "entry_price": round(entry_price, 2),
-            "entry_atr": round(atr, 2),
+            "entry_atr": round(atr, 2) if atr else None,   # 确保 ATR 一定被保存
             "atr": atr,
             "tp_prices": {
                 "tp1": round(tp_prices["tp1"], 2),
