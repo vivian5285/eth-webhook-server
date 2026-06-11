@@ -24,7 +24,7 @@ class TPMonitor:
         self.running = True
         self.twm.start()
         self._start_websocket()
-        logging.info("[TP监控] 已启动 WebSocket 监控")
+        logging.info("[TP监控] WebSocket 监控已启动")
 
     def _start_websocket(self):
         self.ws = self.twm.start_kline_socket(
@@ -33,8 +33,8 @@ class TPMonitor:
             interval='45m'
         )
 
-    def _reconnect(self):
-        logging.warning("[TP监控] WebSocket 断开，正在重连...")
+    def _reconnect_websocket(self):
+        logging.warning("[TP监控] WebSocket 断开，尝试重连...")
         try:
             if self.ws:
                 self.twm.stop_socket(self.ws)
@@ -44,7 +44,7 @@ class TPMonitor:
         except Exception as e:
             logging.error(f"[TP监控重连失败] {e}")
             time.sleep(10)
-            self._reconnect()
+            self._reconnect_websocket()
 
     def _on_price_update(self, msg):
         try:
@@ -67,7 +67,7 @@ class TPMonitor:
             elif side == 'SHORT' and close_price <= tp_levels.get('tp1', 999999):
                 self._execute_tp('tp1', close_price, position)
 
-            # 可在此处扩展 TP2 / TP3 检查 + 追踪止盈逻辑
+            # TODO: 可在此扩展 TP2 / TP3 检查 + 自适应追踪止盈逻辑
 
         except Exception as e:
             logging.error(f"[TP监控回调异常] {e}")
@@ -82,7 +82,7 @@ class TPMonitor:
             elif adx > 20:
                 return base_atr * 2.0
             else:
-                return base_atr * 2.6   # 弱势，留空间
+                return base_atr * 2.6   # 弱势，留更多空间
         except:
             return base_atr * 2.2
 
@@ -98,7 +98,7 @@ class TPMonitor:
             )
 
             if result.get('status') == 'success':
-                logging.info(f"[TP执行成功] {level.upper()} | 价格: {current_price}")
+                logging.info(f"[TP执行成功] {level.upper()} | 当前价: {current_price}")
                 self.position_manager.mark_tp_hit(level)
 
                 # 发送钉钉通知
@@ -112,7 +112,7 @@ class TPMonitor:
                     )
                 )
             else:
-                logging.warning(f"[TP执行失败] {level} | {result.get('message')}")
+                logging.warning(f"[TP执行失败] {level} | {result.get('message', '')}")
 
         except Exception as e:
             logging.error(f"[执行TP异常] {level} | {e}")
