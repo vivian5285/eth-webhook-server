@@ -1,9 +1,7 @@
-# tp_monitor.py - 最终优化版（含美化 TP 触发推送）
+# tp_monitor.py - 更可靠版本（2026-06-11）
 
 import os
-import time
 import logging
-from datetime import datetime
 from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
 
@@ -18,104 +16,106 @@ class TPMonitor:
             api_secret=os.getenv("BINANCE_API_SECRET")
         )
         self.is_running = False
-        self.current_symbol = "ETHUSDT"
-        self.tp_levels = {}          # 存储当前持仓的 TP 价格
-        self.last_position_amt = 0
+        self.symbol = "ETHUSDT"
+
+        # 止盈目标（由外部主动设置）
+        self.tp1 = None
+        self.tp2 = None
+        self.tp3 = None
+        self.tp_triggered = {"TP1": False, "TP2": False, "TP3": False}
 
     def start(self):
         if self.is_running:
             return
         self.twm.start()
         self.twm.start_kline_socket(
-            callback=self._handle_kline,
-            symbol=self.current_symbol,
+            callback=self._on_kline,
+            symbol=self.symbol,
             interval='1m'
         )
         self.is_running = True
-        logging.info("[TPMonitor] WebSocket 价格监控已启动")
+        logging.info("[TPMonitor] 价格监控已启动（更可靠模式）")
 
     def stop(self):
         if self.twm:
             self.twm.stop()
         self.is_running = False
-        logging.info("[TPMonitor] WebSocket 价格监控已停止")
+        logging.info("[TPMonitor] 价格监控已停止")
 
-    def _handle_kline(self, msg):
-        """处理 K 线数据，检查是否触发 TP"""
+    def set_tp_levels(self, tp1: float, tp2: float, tp3: float):
+        """外部主动设置本次开仓的止盈价格（推荐调用方式）"""
+        self.tp1 = tp1
+        self.tp2 = tp2
+        self.tp3 = tp3
+        self.tp_triggered = {"TP1": False, "TP2": False, "TP3": False}
+        logging.info(f"[TPMonitor] 已设置止盈目标 → TP1:{tp1}, TP2:{tp2}, TP3:{tp3}")
+
+    def clear_tp_levels(self):
+        """清空止盈目标（仓位归零时调用）"""
+        self.tp1 = self.tp2 = self.tp3 = None
+        self.tp_triggered = {"TP1": False, "TP2": False, "TP3": False}
+        logging.info("[TPMonitor] 止盈目标已清空")
+
+    def _on_kline(self, msg):
         try:
             if msg.get('e') != 'kline':
                 return
 
-            kline = msg['k']
-            close_price = float(kline['c'])
-            position = self.client.get_current_position(self.current_symbol)
+            close_price = float(msg['k']['c'])
+            position = self.client.get_current_position(self.symbol)
 
+            # 没有持仓时清空止盈目标
             if not position or position['positionAmt'] == 0:
-                self.tp_levels = {}
+                if self.tp1 is not None:
+                    self.clear_tp_levels()
                 return
 
-            # 如果是新仓位，初始化 TP 价格（这里简化处理，实际可从 supervisor 获取）
-            if self.last_position_amt == 0:
-                entry_price = position['entryPrice']
-                self.tp_levels = {
-                    'TP1': entry_price * 1.0128,
-                    'TP2': entry_price * 1.025,
-                    'TP3': entry_price * 1.036
-                }
-                logging.info(f"[TPMonitor] 新仓位 TP 目标已设置: {self.tp_levels}")
-
-            self.last_position_amt = position['positionAmt']
-
-            # 检查是否触发 TP
+            # 检查是否触发止盈
             self._check_tp_levels(close_price, position)
 
         except Exception as e:
-            logging.error(f"[TPMonitor] 处理 K 线异常: {e}")
+            logging.error(f"[TPMonitor] K线处理异常: {e}")
 
     def _check_tp_levels(self, current_price: float, position: dict):
-        """检查当前价格是否触发 TP"""
-        if not self.tp_levels:
+        if not self.tp1:
             return
 
         is_long = position['positionAmt'] > 0
 
-        for tp_name, tp_price in list(self.tp_levels.items()):
-            triggered = False
+        # TP1
+        if not self.tp_triggered["TP1"] and self.tp1:
+            if (is_long and current_price >= self.tp1) or (not is_long and current_price <= self.tp1):
+                self._execute_tp("TP1", 0.30, position)
 
-            if is_long and current_price >= tp_price:
-                triggered = True
-            elif not is_long and current_price <= tp_price:
-                triggered = True
+        # TP2
+        if not self.tp_triggered["TP2"] and self.tp2:
+            if (is_long and current_price >= self.tp2) or (not is_long and current_price <= self.tp2):
+                self._execute_tp("TP2", 0.30, position)
 
-            if triggered:
-                self._execute_tp(tp_name, position)
-                # 触发后移除该 TP，避免重复执行
-                if tp_name in self.tp_levels:
-                    del self.tp_levels[tp_name]
+        # TP3（剩余全平）
+        if not self.tp_triggered["TP3"] and self.tp3:
+            if (is_long and current_price >= self.tp3) or (not is_long and current_price <= self.tp3):
+                self._execute_tp("TP3", 1.0, position)
 
-    def _execute_tp(self, tp_name: str, position: dict):
-        """执行 TP 平仓 + 发送美化钉钉通知"""
+    def _execute_tp(self, level: str, percent: float, position: dict):
         try:
-            close_percent = 0.30 if tp_name in ['TP1', 'TP2'] else 1.0   # TP3 全平
-
-            result = self.client.close_partial_position(self.current_symbol, close_percent)
-
+            result = self.client.close_partial_position(self.symbol, percent)
             if result.get("status") == "success":
-                remaining_qty = abs(position['positionAmt']) * (1 - close_percent)
+                self.tp_triggered[level] = True
+                remaining = abs(position['positionAmt']) * (1 - percent)
 
-                # ========== 关键：调用美化 TP 触发推送 ==========
-                self.client.send_tp_trigger_report(
-                    tp_level=tp_name,
-                    close_percent=close_percent,
-                    remaining_qty=round(remaining_qty, 3)
-                )
+                # 调用美化推送
+                self.client.send_tp_trigger_report(level, percent, round(remaining, 3))
 
-                logging.info(f"[TP触发] {tp_name} 已执行，平仓比例 {close_percent*100:.0f}%")
+                logging.info(f"[TP执行成功] {level} 已平 {percent*100:.0f}%")
+
+                # TP3 全平后清空目标
+                if level == "TP3":
+                    self.clear_tp_levels()
             else:
-                logging.warning(f"[TP执行失败] {tp_name} - {result}")
-
+                logging.warning(f"[TP执行失败] {level} - {result}")
         except Exception as e:
-            logging.error(f"[执行 TP 异常] {tp_name}: {e}")
+            logging.error(f"[执行TP异常] {level}: {e}")
 
 
 # 全局实例
