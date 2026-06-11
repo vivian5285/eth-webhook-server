@@ -1,4 +1,4 @@
-# app.py - 最终完整优化版（2026-06-11）
+# app.py - 最终完整版（已集成 set_tp_levels）
 
 from flask import Flask, request, jsonify
 import os
@@ -66,10 +66,9 @@ def webhook():
 
         logging.info(f"[Webhook] 收到信号 → {signal}")
 
-        # 交给 supervisor 处理（核心逻辑：先平后开）
         result = supervisor.handle_new_signal(signal)
 
-        # ==================== 开仓信号处理 ====================
+        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -83,10 +82,13 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 计算止盈价格（使用固定比例）
+                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
+
+                # ========== 关键：主动设置止盈目标给 tp_monitor ==========
+                tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
                 # 调用美化开仓推送
                 binance_client.send_position_open_report(
@@ -108,12 +110,12 @@ def webhook():
             else:
                 return jsonify({"status": "error", "message": "下单失败"}), 500
 
-        # ==================== 全平信号处理 ====================
+        # ==================== 全平处理 ====================
         elif signal == "CLOSE_ALL":
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") == "success":
                 binance_client.send_close_all_report("收到 CLOSE_ALL 信号")
-                logging.info("[全平成功] 已推送美化报告")
+                tp_monitor.clear_tp_levels()   # 全平后清空止盈目标
             return close_result
 
         return jsonify(result), 200
