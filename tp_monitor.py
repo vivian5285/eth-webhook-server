@@ -1,4 +1,4 @@
-# tp_monitor.py（最终完整激进版 - 支持手动加仓完全重置TP）
+# tp_monitor.py（最终完整激进版 - 已适配 position_manager 公开方法）
 import time
 import threading
 import logging
@@ -131,7 +131,7 @@ class TPMonitor:
             )
 
     def _recalculate_tp_after_add(self, cached_pos, real_pos, new_entry_price):
-        """手动加仓后完全重置TP"""
+        """手动加仓后完全重置TP（调用公开方法）"""
         atr = cached_pos.get("atr") or cached_pos.get("entry_atr") or 30
         is_long = float(real_pos["positionAmt"]) > 0
 
@@ -144,18 +144,14 @@ class TPMonitor:
             new_tp2 = new_entry_price - (atr * 2.5)
             new_tp3 = new_entry_price - (atr * 3.6)
 
-        cached_pos["entry_price"] = round(new_entry_price, 2)
-        cached_pos["tp_prices"] = {
-            "tp1": round(new_tp1, 2),
-            "tp2": round(new_tp2, 2),
-            "tp3": round(new_tp3, 2)
+        new_tp_prices = {
+            "tp1": new_tp1,
+            "tp2": new_tp2,
+            "tp3": new_tp3
         }
-        cached_pos["tp_hit"] = []  # 完全重置已触发记录
 
-        self.pm.position = cached_pos
-        self.pm._save_position()
-
-        logging.info(f"[TP完全重置完成] 新入场价: {new_entry_price} | 新TP1: {new_tp1} | 新TP2: {new_tp2} | 新TP3: {new_tp3}")
+        # 使用 position_manager 的公开方法更新
+        self.pm.update_position_after_manual_change(new_entry_price, new_tp_prices)
 
     def _send_manual_action_report_with_tp_comparison(self, action_type: str, old_pos: dict, new_entry_price: float, change_qty: float):
         """加仓后推送新旧TP对比"""
