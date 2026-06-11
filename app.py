@@ -1,4 +1,4 @@
-# app.py - 最终完整稳定版（含全平钉钉保证推送）
+# app.py - 符合智慧层架构的最终版
 
 from flask import Flask, request, jsonify
 import os
@@ -67,9 +67,9 @@ def webhook():
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
+        # 统一交给智慧层处理
         result = supervisor.handle_new_signal(signal)
 
-        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -89,42 +89,22 @@ def webhook():
 
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 发送开仓报告
-                try:
-                    binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-                except Exception as e:
-                    logging.error(f"[开仓报告发送失败] {e}")
+                # 通知智慧层开仓成功（由 supervisor 决定是否推送报告）
+                supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
                 return jsonify({"status": "success", "qty": qty}), 200
             else:
                 return jsonify({"status": "error"}), 500
 
-        # ==================== 全平处理（加强版，保证发送钉钉） ====================
         elif signal == "CLOSE_ALL":
-            logging.info("[Webhook] 收到 CLOSE_ALL 信号，开始执行全平")
-            close_result = binance_client.close_all_positions(symbol)
-
-            # 无论平仓是否成功，都尝试发送钉钉报告
-            try:
-                reason = "收到 CLOSE_ALL 信号"
-                if close_result.get("status") != "success":
-                    reason = f"全平失败: {close_result.get('message', '未知错误')}"
-                binance_client.send_close_all_report(reason)
-            except Exception as e:
-                logging.error(f"[全平报告发送失败] {e}")
-
-            # 清除止盈目标
-            try:
-                tp_monitor.clear_tp_levels()
-            except Exception as e:
-                logging.error(f"[清除止盈目标失败] {e}")
-
+            # 全平也交给 supervisor 处理（更符合智慧层架构）
+            close_result = supervisor._execute_close_all()   # 直接调用 supervisor 的全平方法
             return close_result
 
         return jsonify(result), 200
 
     except Exception as e:
-        logging.error(f"[Webhook 严重异常] {e}")
+        logging.error(f"[Webhook 异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
