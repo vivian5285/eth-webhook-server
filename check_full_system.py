@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# check_full_system.py - 升级版（优先调用 /status 接口判断 WebSocket 状态）
+# check_full_system.py - 最终版（/status + journalctl 双重检查）
 
 import subprocess
 import socket
@@ -8,7 +8,7 @@ import os
 import requests
 from datetime import datetime
 
-def run_command(cmd, timeout=10):
+def run_command(cmd, timeout=12):
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return result.stdout.strip(), result.stderr.strip(), result.returncode
@@ -56,45 +56,70 @@ def check_position_file():
     else:
         print("❌ current_position.json 不存在")
 
-def check_status_endpoint():
-    """通过 /status 接口检查 supervisor 和 tp_monitor WebSocket 状态"""
-    print("\n[5] WebSocket 初始化状态检查（通过 /status 接口）")
+def check_status_api():
+    """优先通过 /status 接口检查 WebSocket 状态"""
+    print("\n[5] WebSocket 状态检查（优先使用 /status 接口）")
     try:
         resp = requests.get("http://127.0.0.1:5000/status", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             print("✅ /status 接口响应正常")
 
-            supervisor_ok = data.get("supervisor_websocket", False)
+            sup_ok = data.get("supervisor_websocket", False)
             tp_ok = data.get("tp_monitor_websocket", False)
 
-            if supervisor_ok:
-                print("✅ [监督层] User Data Stream WebSocket 已初始化")
-            else:
-                print("❌ [监督层] User Data Stream WebSocket 未初始化")
+            print(f"   [监督层] WebSocket: {'✅ 已初始化' if sup_ok else '❌ 未初始化'}")
+            print(f"   [TP监控] WebSocket: {'✅ 已初始化' if tp_ok else '❌ 未初始化'}")
 
-            if tp_ok:
-                print("✅ [TP监控] 价格监控 WebSocket 已初始化")
-            else:
-                print("❌ [TP监控] 价格监控 WebSocket 未初始化")
+            if data.get("last_error"):
+                print(f"   ⚠️  检测到错误: {data['last_error']}")
 
-            # 显示当前持仓（如果有）
             pos = data.get("current_position")
             if pos:
                 print(f"   当前持仓: {pos.get('side')} {pos.get('qty')} 张")
             else:
                 print("   当前无持仓")
 
+            return True  # /status 成功
         else:
-            print(f"❌ /status 接口返回异常状态码: {resp.status_code}")
-
+            print(f"⚠️  /status 接口返回异常状态码: {resp.status_code}")
+            return False
     except requests.exceptions.ConnectionError:
-        print("❌ 无法连接到 /status 接口（服务可能未完全启动或端口问题）")
+        print("⚠️  无法连接到 /status 接口（服务可能未完全启动）")
+        return False
     except Exception as e:
-        print(f"❌ 调用 /status 接口失败: {e}")
+        print(f"⚠️  调用 /status 接口失败: {e}")
+        return False
+
+def check_websocket_logs():
+    """journalctl 作为补充检查"""
+    print("\n[6] WebSocket 日志补充检查（journalctl）")
+
+    # 尝试使用服务启动时间
+    start_time, _, _ = run_command(
+        "systemctl show eth-webhook.service --property=ActiveEnterTimestamp --value"
+    )
+
+    if start_time and "N/A" not in start_time:
+        since = f'--since "{start_time}"'
+    else:
+        since = '--since "30 minutes ago"'
+
+    cmd = f'journalctl -u eth-webhook.service {since} --no-pager -q | grep -E "User Data Stream|WebSocket|已启动|TP监控"'
+    stdout, _, _ = run_command(cmd)
+
+    if "User Data Stream" in stdout or "已启动" in stdout:
+        print("✅ journalctl 中检测到 User Data Stream 启动记录")
+    else:
+        print("⚠️  journalctl 未找到 User Data Stream 启动记录")
+
+    if "WebSocket" in stdout or "TP监控" in stdout:
+        print("✅ journalctl 中检测到 TP 监控启动记录")
+    else:
+        print("⚠️  journalctl 未找到 TP 监控启动记录")
 
 def check_dingtalk():
-    print("\n[6] 钉钉测试（可选）")
+    print("\n[7] 钉钉测试（可选）")
     choice = input("发送测试消息？(y/n): ").strip().lower()
     if choice == 'y':
         try:
@@ -105,21 +130,25 @@ def check_dingtalk():
             print(f"❌ 发送失败: {e}")
 
 def main():
-    print("=" * 70)
-    print("🚀 ETH 量化交易系统健康检查（升级版 - 优先使用 /status 接口）")
+    print("=" * 75)
+    print("🚀 ETH 量化交易系统 - 最终健康检查（/status + journalctl 双重模式）")
     print(f"检查时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 70)
+    print("=" * 75)
 
     check_service_status()
     check_port()
     check_binance()
     check_position_file()
-    check_status_endpoint()      # 核心：通过接口判断 WebSocket 状态
+
+    status_ok = check_status_api()          # 优先使用 /status
+    if not status_ok:
+        check_websocket_logs()              # /status 失败时才做 journalctl 检查
+
     check_dingtalk()
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 75)
     print("检查完成！")
-    print("=" * 70)
+    print("=" * 75)
 
 if __name__ == "__main__":
     main()
