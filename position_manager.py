@@ -1,4 +1,4 @@
-# position_manager.py（最终完整强壮版）
+# position_manager.py（最终完整版 - 带公开更新方法）
 import json
 import os
 import logging
@@ -30,12 +30,12 @@ class PositionManager:
 
     # ==================== 持仓管理 ====================
     def save_position(self, symbol: str, entry_price: float, atr: float, tp_prices: dict, side: str):
-        """保存新开仓信息（包含 entry_atr）"""
+        """保存新开仓信息"""
         self.position = {
             "symbol": symbol,
             "side": side.lower(),
             "entry_price": round(entry_price, 2),
-            "entry_atr": round(atr, 2) if atr else None,   # 确保 ATR 一定被保存
+            "entry_atr": round(atr, 2) if atr else None,
             "atr": atr,
             "tp_prices": {
                 "tp1": round(tp_prices["tp1"], 2),
@@ -45,7 +45,7 @@ class PositionManager:
             "open_time": datetime.now().isoformat(),
             "status": "open",
             "tp_hit": [],
-            "last_signal_direction": self.position.get("last_signal_direction")  # 保留原有方向
+            "last_signal_direction": self.position.get("last_signal_direction")
         }
         self._save_position()
         logging.info(f"[持仓保存成功] {symbol} {side} | 入场价: {entry_price} | ATR: {atr}")
@@ -74,6 +74,26 @@ class PositionManager:
             self._save_position()
             logging.info(f"[TP已触发标记] {level}")
 
+    # ==================== 新增：手动加仓后更新持仓（公开方法） ====================
+    def update_position_after_manual_change(self, new_entry_price: float, new_tp_prices: dict):
+        """
+        手动加仓后更新持仓信息并完全重置TP
+        推荐在 tp_monitor.py 中调用此方法
+        """
+        if self.position.get("status") != "open":
+            logging.warning("[持仓更新] 当前无持仓，无法执行手动加仓更新")
+            return
+
+        self.position["entry_price"] = round(new_entry_price, 2)
+        self.position["tp_prices"] = {
+            "tp1": round(new_tp_prices["tp1"], 2),
+            "tp2": round(new_tp_prices["tp2"], 2),
+            "tp3": round(new_tp_prices["tp3"], 2)
+        }
+        self.position["tp_hit"] = []  # 重置已触发记录
+        self._save_position()
+        logging.info("[持仓更新] 手动加仓后已重新计算并保存新TP")
+
     # ==================== last_signal_direction 持久化 ====================
     def save_last_signal_direction(self, direction: str):
         """保存最后收到的 TV 信号方向（持久化）"""
@@ -88,7 +108,7 @@ class PositionManager:
         return self.position.get("last_signal_direction")
 
     def clear_last_signal_direction(self):
-        """清除 last_signal_direction（可选使用）"""
+        """清除 last_signal_direction"""
         if "last_signal_direction" in self.position:
             del self.position["last_signal_direction"]
             self._save_position()
