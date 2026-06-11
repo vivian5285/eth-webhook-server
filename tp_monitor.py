@@ -1,4 +1,4 @@
-# tp_monitor.py（最终完整激进版 - 已适配 position_manager 公开方法）
+# tp_monitor.py（最终完整优化版）
 import time
 import threading
 import logging
@@ -45,7 +45,7 @@ class TPMonitor:
             logging.info(f"[TP监控] 检测到历史持仓，恢复监控")
 
         threading.Thread(target=self._check_tp_loop, daemon=True).start()
-        logging.info(f"[TP监控] 激进版智能TP监控已启动 | {self.symbol}")
+        logging.info(f"[TP监控] 智能TP监控已启动（支持手动干预优化版） | {self.symbol}")
 
     def _on_price_update(self, msg):
         try:
@@ -60,9 +60,10 @@ class TPMonitor:
                 real_pos = self.client.get_current_position(self.symbol)
                 cached_pos = self.pm.get_position()
 
-                # 手动全平检测
+                # ==================== 手动全平检测 ====================
                 if not real_pos and cached_pos:
-                    self._send_manual_action_report("手动全平", cached_pos, "检测到手动全平，系统已清理TP缓存")
+                    logging.warning("[TP监控] 检测到手动全平，清理本地缓存")
+                    self._send_manual_full_close_report(cached_pos)
                     self.pm.clear_position()
                     time.sleep(self.check_interval)
                     continue
@@ -131,7 +132,7 @@ class TPMonitor:
             )
 
     def _recalculate_tp_after_add(self, cached_pos, real_pos, new_entry_price):
-        """手动加仓后完全重置TP（调用公开方法）"""
+        """手动加仓后完全重置TP"""
         atr = cached_pos.get("atr") or cached_pos.get("entry_atr") or 30
         is_long = float(real_pos["positionAmt"]) > 0
 
@@ -150,8 +151,24 @@ class TPMonitor:
             "tp3": new_tp3
         }
 
-        # 使用 position_manager 的公开方法更新
         self.pm.update_position_after_manual_change(new_entry_price, new_tp_prices)
+
+    def _send_manual_full_close_report(self, pos: dict):
+        """手动全平专用推送（优化文案）"""
+        try:
+            from app import send_dingtalk
+            msg = (
+                f"**⚠️ 手动全平识别**\n\n"
+                f"**分析**：检测到你手动全平了仓位，系统已自动清理TP缓存。\n\n"
+                f"**原持仓信息**：\n"
+                f"方向：{pos.get('side')}\n"
+                f"入场价：{pos.get('entry_price')}\n\n"
+                f"**当前状态**：账户已无持仓，TP缓存已清理。\n"
+                f"系统将保持干净状态，等待下一个 TradingView 信号到来后重新建立持仓和TP计划。"
+            )
+            send_dingtalk("手动全平识别", msg)
+        except Exception as e:
+            logging.error(f"[手动全平推送失败] {e}")
 
     def _send_manual_action_report_with_tp_comparison(self, action_type: str, old_pos: dict, new_entry_price: float, change_qty: float):
         """加仓后推送新旧TP对比"""
