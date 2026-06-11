@@ -1,4 +1,4 @@
-# app.py - 最终完整版（已解决 TP + 全平推送 + set_tp_levels）
+# app.py - 最终完整版（2026-06-12）
 
 from flask import Flask, request, jsonify
 import os
@@ -56,12 +56,13 @@ def webhook():
         symbol = data.get("symbol", "ETHUSDT")
 
         if not signal:
-            return jsonify({"status": "error", "message": "缺少 signal"}), 400
+            return jsonify({"status": "error", "message": "缺少 signal 字段"}), 400
 
         logging.info(f"[Webhook] 收到信号 → {signal}")
 
         result = supervisor.handle_new_signal(signal)
 
+        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -80,20 +81,30 @@ def webhook():
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # 关键：设置给 tp_monitor
+                # 关键：主动设置止盈目标给 tp_monitor
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 推送开仓报告
+                # 调用加强版开仓报告（含保证金比例、杠杆等）
                 binance_client.send_position_open_report(
-                    signal=signal, qty=qty, entry_price=entry_price,
-                    tp1=tp1, tp2=tp2, tp3=tp3
+                    signal=signal,
+                    qty=qty,
+                    entry_price=entry_price,
+                    tp1=tp1,
+                    tp2=tp2,
+                    tp3=tp3
                 )
 
-                logging.info(f"[开仓成功] {signal} {qty} 张")
-                return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
+                logging.info(f"[开仓成功] {signal} {qty} 张 @ {entry_price}")
+                return jsonify({
+                    "status": "success",
+                    "signal": signal,
+                    "qty": qty,
+                    "entry_price": entry_price
+                }), 200
+            else:
+                return jsonify({"status": "error", "message": "下单失败"}), 500
 
-            return jsonify({"status": "error", "message": "下单失败"}), 500
-
+        # ==================== 全平处理 ====================
         elif signal == "CLOSE_ALL":
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") == "success":
@@ -119,7 +130,11 @@ def status():
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 
 if __name__ == "__main__":
