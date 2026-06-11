@@ -1,4 +1,4 @@
-# position_supervisor.py - 最终统一版（含公开全平方法）
+# position_supervisor.py - 最终完整加强版
 
 import logging
 import time
@@ -22,25 +22,34 @@ class PositionSupervisor:
         self._start_user_data_stream()
 
     def _start_user_data_stream(self):
-        try:
-            self.twm = ThreadedWebsocketManager(
-                api_key=binance_client.api_key,
-                api_secret=binance_client.api_secret
-            )
-            self.twm.start()
-            self.twm.start_user_socket(callback=self._on_account_update)
-            logging.info("[监督层] User Data Stream 已启动")
-        except Exception as e:
-            logging.error(f"[监督层] WebSocket 启动失败: {e}")
+        with self.lock:
+            if self.twm:
+                logging.warning("[监督层] WebSocket 已在运行中")
+                return
+            try:
+                self.twm = ThreadedWebsocketManager(
+                    api_key=binance_client.api_key,
+                    api_secret=binance_client.api_secret
+                )
+                self.twm.start()
+                self.twm.start_user_socket(callback=self._on_account_update)
+                logging.info("[监督层] User Data Stream WebSocket 已启动")
+            except Exception as e:
+                logging.error(f"[监督层] WebSocket 启动失败: {e}")
 
     def stop(self):
-        if self.twm:
+        with self.lock:
+            if not self.twm:
+                return
             try:
                 self.twm.stop()
+                self.twm = None
+                logging.info("[监督层] WebSocket 已停止")
             except Exception as e:
                 logging.error(f"[监督层] WebSocket 停止异常: {e}")
 
     def _on_account_update(self, msg):
+        # 可扩展实时持仓同步
         pass
 
     def handle_new_signal(self, signal: str):
@@ -71,7 +80,6 @@ class PositionSupervisor:
         """智慧层统一处理全平 + 实盘核查 + 发送钉钉报告"""
         return self._execute_close_all(verified=True)
 
-    # ==================== 内部全平逻辑 ====================
     def _execute_close_all(self, verified: bool = True):
         close_result = binance_client.close_all_positions("ETHUSDT")
 
@@ -86,7 +94,6 @@ class PositionSupervisor:
             else:
                 logging.warning("[监督层] 全平后仍存在持仓，建议人工检查")
         else:
-            # 内部先平再开的场景，不发报告
             pass
 
         position_manager.clear_position()
