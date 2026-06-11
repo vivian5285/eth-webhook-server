@@ -1,4 +1,4 @@
-# app.py（最终完整优美版 - 开仓/平仓美化钉钉日报 + 异步二次验证）
+# app.py（最终完整优美版 - 开仓/平仓/TP分批止盈全美化）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -107,7 +107,6 @@ def send_beautiful_open_report(signal: str, symbol: str, qty: float):
             f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         binance_client._send_dingtalk(title, content)
-        logging.info(f"[开仓日报] 已推送: {signal} {symbol}")
     except Exception as e:
         logging.error(f"[开仓日报发送失败] {e}")
 
@@ -129,9 +128,43 @@ def send_beautiful_close_report(reason: str, symbol: str, qty: float = 0):
             f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         binance_client._send_dingtalk(title, content)
-        logging.info(f"[平仓日报] 已推送: {reason} {symbol}")
     except Exception as e:
         logging.error(f"[平仓日报发送失败] {e}")
+
+# ==================== 美化 TP 分批止盈触发钉钉日报 ====================
+def send_beautiful_tp_report(reason: str, symbol: str):
+    try:
+        balance_info = binance_client.get_account_balance() or {}
+        equity = balance_info.get("totalWalletBalance", 0)
+        available = balance_info.get("availableBalance", 0)
+
+        # 根据 reason 决定标题和描述
+        if "tp1" in reason.lower():
+            level = "TP1（第一止盈）"
+            percent = "30%"
+        elif "tp2" in reason.lower():
+            level = "TP2（第二止盈）"
+            percent = "30%"
+        elif "tp3" in reason.lower():
+            level = "TP3（最终止盈）"
+            percent = "40%"
+        else:
+            level = reason
+            percent = "部分"
+
+        title = "💰 分批止盈触发"
+        content = (
+            f"**触发级别**：{level}\n"
+            f"**币种**：{symbol}\n"
+            f"**平仓比例**：{percent}\n\n"
+            f"**💰 账户快照**\n"
+            f"- 账户权益：{equity:.2f} USDT\n"
+            f"- 可用余额：{available:.2f} USDT\n\n"
+            f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        binance_client._send_dingtalk(title, content)
+    except Exception as e:
+        logging.error(f"[TP日报发送失败] {e}")
 
 # ==================== 后台二次验证 ====================
 def background_direction_check(symbol: str, signal: str):
@@ -172,10 +205,8 @@ def place_market_order(signal: str, symbol: str):
         )
         logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty}")
 
-        # 发送美化开仓日报
         send_beautiful_open_report(signal, symbol, qty)
 
-        # 异步二次验证
         threading.Thread(
             target=background_direction_check,
             args=(symbol, signal),
@@ -202,6 +233,7 @@ def webhook():
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
+        reason = data.get("reason", "")
 
         logging.info(f"[Webhook] 收到信号 → {signal} | {symbol} | Timeframe={TIMEFRAME}")
 
@@ -213,14 +245,12 @@ def webhook():
             result = binance_client.close_all_positions(symbol)
             if result.get("status") == "success":
                 position_manager.clear_position()
-                # 发送美化平仓日报
                 send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
             return jsonify(result), 200
 
         elif signal == "TP_PARTIAL":
-            logging.info(f"[TP_PARTIAL] {data.get('reason', '')}")
-            # TP_PARTIAL 主要由 TPMonitor 处理，这里可按需补充
-            return jsonify({"status": "ignored"}), 200
+            send_beautiful_tp_report(reason, symbol)
+            return jsonify({"status": "success"}), 200
 
         else:
             return jsonify({"status": "ignored"}), 200
