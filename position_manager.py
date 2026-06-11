@@ -1,4 +1,4 @@
-# position_manager.py（最终版 - 支持保存 entry_atr）
+# position_manager.py（最终完整版 - 支持 last_signal_direction 持久化）
 import json
 import os
 import logging
@@ -11,7 +11,7 @@ class PositionManager:
         self.position = self._load_position()
 
     def _load_position(self):
-        """加载当前持仓信息"""
+        """加载当前持仓信息（包括 last_signal_direction）"""
         if os.path.exists(POSITION_FILE):
             try:
                 with open(POSITION_FILE, "r", encoding="utf-8") as f:
@@ -28,16 +28,14 @@ class PositionManager:
         except Exception as e:
             logging.error(f"[持仓文件保存失败] {e}")
 
+    # ==================== 持仓相关方法 ====================
     def save_position(self, symbol: str, entry_price: float, atr: float, tp_prices: dict, side: str):
-        """
-        保存新开仓信息
-        :param atr: 开仓时的 ATR（用于 VPS 动态追踪止盈）
-        """
+        """保存新开仓信息"""
         self.position = {
             "symbol": symbol,
             "side": side.lower(),
             "entry_price": round(entry_price, 2),
-            "entry_atr": round(atr, 2),                    # 新增：保存开仓 ATR，用于动态追踪
+            "entry_atr": round(atr, 2),
             "atr": atr,
             "tp_prices": {
                 "tp1": round(tp_prices["tp1"], 2),
@@ -46,7 +44,8 @@ class PositionManager:
             },
             "open_time": datetime.now().isoformat(),
             "status": "open",
-            "tp_hit": []
+            "tp_hit": [],
+            "last_signal_direction": self.position.get("last_signal_direction")  # 保留原有方向
         }
         self._save_position()
         logging.info(f"[持仓保存成功] {symbol} {side} | 入场价: {entry_price} | ATR: {atr}")
@@ -58,8 +57,11 @@ class PositionManager:
         return None
 
     def clear_position(self):
-        """清空持仓记录"""
+        """清空持仓记录（保留 last_signal_direction）"""
+        last_dir = self.position.get("last_signal_direction")
         self.position = {"status": "closed"}
+        if last_dir:
+            self.position["last_signal_direction"] = last_dir
         self._save_position()
         logging.info("[持仓已清空]")
 
@@ -71,3 +73,23 @@ class PositionManager:
             self.position["tp_hit"].append(level)
             self._save_position()
             logging.info(f"[TP已触发标记] {level}")
+
+    # ==================== last_signal_direction 持久化 ====================
+    def save_last_signal_direction(self, direction: str):
+        """保存最后收到的 TV 信号方向（持久化）"""
+        if "last_signal_direction" not in self.position:
+            self.position = {"status": "closed"}
+        self.position["last_signal_direction"] = direction
+        self._save_position()
+        logging.info(f"[持久化成功] last_signal_direction 已更新为: {direction}")
+
+    def get_last_signal_direction(self):
+        """获取最后收到的 TV 信号方向"""
+        return self.position.get("last_signal_direction")
+
+    def clear_last_signal_direction(self):
+        """清除 last_signal_direction（可选使用）"""
+        if "last_signal_direction" in self.position:
+            del self.position["last_signal_direction"]
+            self._save_position()
+            logging.info("[持久化] last_signal_direction 已清除")
