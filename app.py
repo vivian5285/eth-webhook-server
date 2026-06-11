@@ -1,4 +1,4 @@
-# app.py（最终完整加强版 - 2026-06-11）
+# app.py（最终完整版 - 已加强持仓实时同步）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -26,7 +26,6 @@ tp_monitor.start()
 daily_scheduler = DailyReportScheduler(binance_client, report_time="00:05")
 daily_scheduler.start()
 
-# ==================== 配置 ====================
 TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
@@ -136,15 +135,23 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-# ==================== 核心下单逻辑（已加强） ====================
 def place_market_order(signal: str, symbol: str):
     try:
-        current_pos = binance_client.get_current_position(symbol)
+        # 【加强】每次都优先从币安实时查询持仓（作为权威来源）
+        real_position = binance_client.get_current_position(symbol)
+
+        # 如果币安真实无持仓，但本地有记录，则强制清空本地状态
+        if not real_position:
+            if position_manager.get_current_position():
+                logging.info("[持仓同步] 币安无持仓，本地有旧记录，强制清空")
+                position_manager.clear_position()
+
+        current_pos = real_position
         side = "long" if signal == "OPEN_LONG" else "short"
 
         # 有持仓 → 先全平
         if current_pos:
-            logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，开始先平后开流程")
+            logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先平后开")
 
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") != "success":
@@ -153,18 +160,16 @@ def place_market_order(signal: str, symbol: str):
             position_manager.clear_position()
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
 
-            # 【关键加强】平仓后等待 + 二次确认
+            # 平仓后等待 + 二次确认
             time.sleep(2.0)
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.error("[持仓处理] 平仓后仍检测到持仓，终止流程")
-                return {"status": "error", "message": "平仓后仍存在持仓，无法安全开新仓"}
+                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
+                return {"status": "error", "message": "平仓后仍存在持仓"}
 
-            logging.info("[持仓处理] 平仓确认完成，准备开新仓")
-
-        # 方向验证（只警告，不拦截）
+        # 方向验证（只警告）
         if not confirm_direction(symbol, side):
-            logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续执行下单")
+            logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续下单")
             binance_client._send_dingtalk(
                 "🔴 方向二次验证未通过（已继续下单）",
                 f"**信号**：{signal}\n**币种**：{symbol}\n已按策略继续执行下单",
@@ -217,7 +222,6 @@ def place_market_order(signal: str, symbol: str):
         logging.error(f"[下单失败] {signal} {symbol} | {e}")
         return {"status": "error", "message": str(e)}
 
-# ==================== Webhook 接口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
