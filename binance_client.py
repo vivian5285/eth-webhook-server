@@ -1,4 +1,4 @@
-# binance_client.py - 最终完整版
+# binance_client.py - 最终完整加强版（含详细账户信息）
 
 import os
 import time
@@ -28,6 +28,8 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
+    # ==================== 账户信息（加强版） ====================
+
     def get_account_balance(self):
         try:
             account = self.client.futures_account()
@@ -39,6 +41,36 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[获取账户余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0, "totalUnrealizedProfit": 0}
+
+    def get_detailed_account_info(self):
+        """获取更详细的账户信息（保证金比例、杠杆等）"""
+        try:
+            account = self.client.futures_account()
+            position = self.get_current_position()
+
+            info = {
+                "totalWalletBalance": float(account.get("totalWalletBalance", 0)),
+                "availableBalance": float(account.get("availableBalance", 0)),
+                "totalUnrealizedProfit": float(account.get("totalUnrealizedProfit", 0)),
+                "marginRatio": float(account.get("marginRatio", 0)),           # 保证金比例
+                "maintMargin": float(account.get("maintMargin", 0)),           # 维持保证金
+                "initialMargin": float(account.get("initialMargin", 0)),       # 初始保证金
+                "maxWithdrawAmount": float(account.get("maxWithdrawAmount", 0)),
+            }
+
+            if position:
+                info["currentLeverage"] = position.get("leverage", 0)
+                info["currentSide"] = position.get("side", "")
+                info["positionAmt"] = position.get("positionAmt", 0)
+            else:
+                info["currentLeverage"] = 0
+                info["currentSide"] = "无持仓"
+                info["positionAmt"] = 0
+
+            return info
+        except Exception as e:
+            logging.error(f"[获取详细账户信息失败] {e}")
+            return {}
 
     def get_current_position(self, symbol: str = "ETHUSDT"):
         try:
@@ -58,6 +90,8 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[获取持仓失败] {e}")
             return None
+
+    # ==================== 下单与平仓 ====================
 
     def place_market_order(self, symbol: str, side: str, quantity: float):
         try:
@@ -120,7 +154,7 @@ class BinanceClient:
             logging.error(f"[部分平仓失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 钉钉美化推送 ====================
+    # ==================== 钉钉美化推送（加强版） ====================
 
     def _send_dingtalk_markdown(self, title: str, markdown_text: str):
         try:
@@ -148,10 +182,11 @@ class BinanceClient:
     def send_position_open_report(self, signal: str, qty: float, entry_price: float,
                                   tp1: float = 0, tp2: float = 0, tp3: float = 0):
         direction = "开多 🟢" if signal == "OPEN_LONG" else "开空 🔴"
-
         if tp1 == 0: tp1 = round(entry_price * 1.0128, 2)
         if tp2 == 0: tp2 = round(entry_price * 1.025, 2)
         if tp3 == 0: tp3 = round(entry_price * 1.036, 2)
+
+        acc = self.get_detailed_account_info()
 
         text = f"""### {direction} 成功
 
@@ -163,34 +198,35 @@ class BinanceClient:
 - 止盈2：{tp2:.2f} USDT
 - 止盈3：{tp3:.2f} USDT
 
-💰 **账户权益**：{self.get_account_balance().get('totalWalletBalance', 0):.2f} USDT
+💰 **账户详情**
+- 账户权益：{acc.get('totalWalletBalance', 0):.2f} USDT
+- 可用余额：{acc.get('availableBalance', 0):.2f} USDT
+- 保证金比例：{acc.get('marginRatio', 0)*100:.2f}%
+- 当前杠杆：{acc.get('currentLeverage', 0)}x
 
 ⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
         self._send_dingtalk_markdown("开仓通知", text)
 
-    def send_position_close_report(self, reason: str, exit_price: float = 0, pnl: float = 0):
-        text = f"""### 📉 平仓完成
+    def send_close_all_report(self, reason: str = "手动全平"):
+        acc = self.get_detailed_account_info()
+        text = f"""### 🔴 全平完成
 
-**原因**：{reason}  
-**平仓价**：{exit_price:.2f} USDT  
-**盈亏**：{pnl:+.2f} USDT
+**原因**：{reason}
+
+💰 **账户详情**
+- 账户权益：{acc.get('totalWalletBalance', 0):.2f} USDT
+- 可用余额：{acc.get('availableBalance', 0):.2f} USDT
+- 保证金比例：{acc.get('marginRatio', 0)*100:.2f}%
 
 ⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
-        self._send_dingtalk_markdown("平仓通知", text)
+        self._send_dingtalk_markdown("全平通知", text)
 
     def send_tp_trigger_report(self, tp_level: str, close_percent: float, remaining_qty: float):
         text = f"""### 🎯 {tp_level} 触发
 
 **平仓比例**：{close_percent*100:.0f}%  
-**剩余仓位**：{remaining_qty} 张
+**剩余仓位**：{remaining_qty} 张  
+**触发原因**：价格达到 {tp_level} 止盈位
 
 ⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
         self._send_dingtalk_markdown(f"{tp_level} 止盈通知", text)
-
-    def send_close_all_report(self, reason: str = "手动全平"):
-        text = f"""### 🔴 全平完成
-
-**原因**：{reason}
-
-⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
-        self._send_dingtalk_markdown("全平通知", text)
