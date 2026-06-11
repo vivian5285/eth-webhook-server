@@ -1,52 +1,34 @@
-# tp_monitor.py（最终完整更新版）
-import threading
-import time
+# tp_monitor.py（最终更新版 - 适配监督层）
 import logging
+import time
 from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
 from position_manager import PositionManager
+from position_supervisor import supervisor   # ← 引入监督层
+
+binance_client = BinanceClient()
+position_manager = PositionManager()
 
 class TPMonitor:
     def __init__(self):
-        self.client = BinanceClient()
-        self.position_manager = PositionManager()
-        self.twm = ThreadedWebsocketManager(
-            api_key=self.client.api_key, 
-            api_secret=self.client.api_secret
-        )
+        self.twm = ThreadedWebsocketManager(api_key=binance_client.api_key, 
+                                            api_secret=binance_client.api_secret)
         self.symbol = "ETHUSDT"
-        self.running = False
-        self.ws = None
+        self.is_running = False
 
     def start(self):
-        if self.running:
+        if self.is_running:
             return
-        self.running = True
         self.twm.start()
-        self._start_websocket()
+        self.twm.start_kline_socket(
+            callback=self._on_kline_message,
+            symbol=self.symbol,
+            interval='1m'   # 1分钟K线足够用于TP监控
+        )
+        self.is_running = True
         logging.info("[TP监控] WebSocket 监控已启动")
 
-    def _start_websocket(self):
-        self.ws = self.twm.start_kline_socket(
-            callback=self._on_price_update,
-            symbol=self.symbol,
-            interval='30m'          # ← 已改为有效周期
-        )
-
-    def _reconnect_websocket(self):
-        logging.warning("[TP监控] WebSocket 断开，尝试重连...")
-        try:
-            if self.ws:
-                self.twm.stop_socket(self.ws)
-            time.sleep(3)
-            self._start_websocket()
-            logging.info("[TP监控] WebSocket 重连成功")
-        except Exception as e:
-            logging.error(f"[TP监控重连失败] {e}")
-            time.sleep(10)
-            self._reconnect_websocket()
-
-    def _on_price_update(self, msg):
+    def _on_kline_message(self, msg):
         try:
             if msg.get('e') != 'kline':
                 return
@@ -54,69 +36,97 @@ class TPMonitor:
             kline = msg['k']
             close_price = float(kline['c'])
 
-            position = self.position_manager.get_current_position()
-            if not position or position.get('side') == 'NONE':
+            current_pos = position_manager.get_current_position()
+            if not current_pos:
                 return
 
-            side = position['side']
-            tp_levels = position.get('tp_levels', {})
+            side = current_pos.get("side")
+            tp_levels = current_pos.get("tp_levels", {})
 
-            # TP1 检查
-            if side == 'LONG' and close_price >= tp_levels.get('tp1', 0):
-                self._execute_tp('tp1', close_price, position)
-            elif side == 'SHORT' and close_price <= tp_levels.get('tp1', 999999):
-                self._execute_tp('tp1', close_price, position)
+            if not tp_levels:
+                return
 
-            # TODO: 可在此扩展 TP2 / TP3 检查 + 自适应追踪止盈
+            # 检查是否触发 TP
+            triggered = False
+            hit_level = None
+
+            if side == "long":
+                if close_price >= tp_levels.get("tp1", 0) and not current_pos.get("tp_hit", {}).get("tp1"):
+                    hit_level = "tp1"
+                    triggered = True
+                elif close_price >= tp_levels.get("tp2", 0) and not current_pos.get("tp_hit", {}).get("tp2"):
+                    hit_level = "tp2"
+                    triggered = True
+                elif close_price >= tp_levels.get("tp3", 0) and not current_pos.get("tp_hit", {}).get("tp3"):
+                    hit_level = "tp3"
+                    triggered = True
+
+            elif side == "short":
+                if close_price <= tp_levels.get("tp1", 999999) and not current_pos.get("tp_hit", {}).get("tp1"):
+                    hit_level = "tp1"
+                    triggered = True
+                elif close_price <= tp_levels.get("tp2", 999999) and not current_pos.get("tp_hit", {}).get("tp2"):
+                    hit_level = "tp2"
+                    triggered = True
+                elif close_price <= tp_levels.get("tp3", 999999) and not current_pos.get("tp_hit", {}).get("tp3"):
+                    hit_level = "tp3"
+                    triggered = True
+
+            if triggered and hit_level:
+                self._execute_tp(hit_level, current_pos)
 
         except Exception as e:
-            logging.error(f"[TP监控回调异常] {e}")
+            logging.error(f"[TP监控消息处理异常] {e}")
 
-    def _get_adaptive_trail_distance(self, base_atr: float) -> float:
-        """自适应追踪距离"""
+    def _execute_tp(self, level: str, current_pos: dict):
         try:
-            adx = 22  # 可后续接入真实 ADX 计算
-            if adx > 28:
-                return base_atr * 1.6
-            elif adx > 20:
-                return base_atr * 2.0
+            symbol = current_pos["symbol"]
+            total_qty = current_pos["qty"]
+
+            # 根据不同 TP 级别决定平仓比例
+            if level == "tp1":
+                close_percent = 0.30
+            elif level == "tp2":
+                close_percent = 0.30
+            elif level == "tp3":
+                close_percent = 1.0   # TP3 全平
             else:
-                return base_atr * 2.6
-        except:
-            return base_atr * 2.2
+                return
 
-    def _execute_tp(self, level: str, current_price: float, position: dict):
-        """执行分批止盈"""
-        try:
-            percent_map = {'tp1': 0.30, 'tp2': 0.30, 'tp3': 1.0}
-            close_percent = percent_map.get(level, 0.3)
+            close_qty = round(total_qty * close_percent, 3)
+            if close_qty <= 0:
+                return
 
-            result = self.client.close_partial_position(
-                symbol=self.symbol,
-                percent=close_percent
+            side = "SELL" if current_pos["side"] == "long" else "BUY"
+
+            order = binance_client.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=close_qty,
+                reduceOnly=True
             )
 
-            if result.get('status') == 'success':
-                logging.info(f"[TP执行成功] {level.upper()} | 当前价: {current_price}")
-                self.position_manager.mark_tp_hit(level)
+            logging.info(f"[TP执行成功] {level.upper()} 平仓 {close_qty}")
 
-                self.client._send_dingtalk(
-                    title=f"💰 {level.upper()} 分批止盈触发",
-                    content=(
-                        f"**币种**：{self.symbol}\n"
-                        f"**触发价格**：{current_price}\n"
-                        f"**平仓比例**：{int(close_percent * 100)}%\n"
-                        f"**执行时间**：{time.strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                )
-            else:
-                logging.warning(f"[TP执行失败] {level} | {result.get('message', '')}")
+            # 更新本地状态
+            position_manager.mark_tp_hit(level)
+
+            if level == "tp3":
+                position_manager.clear_position()
+
+            # 通知监督层（由监督层决定是否推送报告）
+            supervisor.notify_tp_hit(level, close_qty, current_pos.get("avg_price", 0))
 
         except Exception as e:
-            logging.error(f"[执行TP异常] {level} | {e}")
+            logging.error(f"[TP执行失败] level={level} | {e}")
 
     def stop(self):
-        self.running = False
         if self.twm:
             self.twm.stop()
+        self.is_running = False
         logging.info("[TP监控] 已停止")
+
+
+# 全局实例
+tp_monitor = TPMonitor()
