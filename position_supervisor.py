@@ -1,4 +1,4 @@
-# position_supervisor.py - 最终完整加强版
+# position_supervisor.py - 保留智慧层逻辑 + 加强 WebSocket 稳定性版
 
 import logging
 import time
@@ -19,12 +19,13 @@ class PositionSupervisor:
         self.is_paused = False
         self.lock = threading.Lock()
         self.twm = None
-        self._start_user_data_stream()
+        # 改为按需启动，不在 __init__ 强制启动
+        # self._start_user_data_stream()
 
     def _start_user_data_stream(self):
         with self.lock:
             if self.twm:
-                logging.warning("[监督层] WebSocket 已在运行中")
+                logging.warning("[监督层] WebSocket 已在运行，跳过重复启动")
                 return
             try:
                 self.twm = ThreadedWebsocketManager(
@@ -33,7 +34,7 @@ class PositionSupervisor:
                 )
                 self.twm.start()
                 self.twm.start_user_socket(callback=self._on_account_update)
-                logging.info("[监督层] User Data Stream WebSocket 已启动")
+                logging.info("[监督层] User Data Stream 已启动")
             except Exception as e:
                 logging.error(f"[监督层] WebSocket 启动失败: {e}")
 
@@ -49,7 +50,6 @@ class PositionSupervisor:
                 logging.error(f"[监督层] WebSocket 停止异常: {e}")
 
     def _on_account_update(self, msg):
-        # 可扩展实时持仓同步
         pass
 
     def handle_new_signal(self, signal: str):
@@ -75,9 +75,7 @@ class PositionSupervisor:
             time.sleep(2.5)
         return {"status": "ready_to_open", "signal": signal}
 
-    # ==================== 公开方法：全平 + 核实 + 发报告 ====================
     def execute_close_all_with_report(self):
-        """智慧层统一处理全平 + 实盘核查 + 发送钉钉报告"""
         return self._execute_close_all(verified=True)
 
     def _execute_close_all(self, verified: bool = True):
@@ -92,7 +90,7 @@ class PositionSupervisor:
                 except Exception as e:
                     logging.error(f"[监督层] 全平报告发送失败: {e}")
             else:
-                logging.warning("[监督层] 全平后仍存在持仓，建议人工检查")
+                logging.warning("[监督层] 全平后仍存在持仓")
         else:
             pass
 
@@ -112,7 +110,7 @@ class PositionSupervisor:
             except Exception as e:
                 logging.error(f"[监督层] 开仓报告发送失败: {e}")
         else:
-            logging.warning(f"[监督层] 开仓核实失败，实盘持仓与预期不符")
+            logging.warning(f"[监督层] 开仓核实失败")
 
     def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
         time.sleep(1.5)
@@ -125,5 +123,4 @@ class PositionSupervisor:
             logging.error(f"[监督层] TP报告发送失败: {e}")
 
 
-# 全局单例
 supervisor = PositionSupervisor()
