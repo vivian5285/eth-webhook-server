@@ -1,10 +1,10 @@
-# tp_monitor.py - 对应最新 supervisor 版本
+# tp_monitor.py - 临时禁用 WebSocket 启动版
 
 import logging
 import threading
 from binance import ThreadedWebsocketManager
 from binance_client import BinanceClient
-from position_supervisor import supervisor   # 引入智慧层
+from position_supervisor import supervisor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -25,25 +25,28 @@ class TPMonitor:
 
     def start(self):
         with self.lock:
-            if self.is_running:
-                logging.warning("[TP监控] 已在运行中")
-                return
-            try:
-                self.twm = ThreadedWebsocketManager(
-                    api_key=binance_client.api_key,
-                    api_secret=binance_client.api_secret
-                )
-                self.twm.start()
-                self.twm.start_kline_socket(
-                    callback=self._on_kline,
-                    symbol=self.symbol,
-                    interval='1m'
-                )
-                self.is_running = True
-                logging.info("[TP监控] WebSocket 已启动")
-            except Exception as e:
-                logging.error(f"[TP监控] 启动失败: {e}")
-                self.is_running = False
+            # ==================== 已临时禁用 WebSocket 启动 ====================
+            logging.warning("[TP监控] WebSocket 启动已临时禁用（稳定模式）")
+            # 下面是原来的启动代码，已注释
+            # if self.is_running:
+            #     logging.warning("[TP监控] 已在运行中")
+            #     return
+            # try:
+            #     self.twm = ThreadedWebsocketManager(
+            #         api_key=binance_client.api_key,
+            #         api_secret=binance_client.api_secret
+            #     )
+            #     self.twm.start()
+            #     self.twm.start_kline_socket(
+            #         callback=self._on_kline,
+            #         symbol=self.symbol,
+            #         interval='1m'
+            #     )
+            #     self.is_running = True
+            #     logging.info("[TP监控] WebSocket 已启动")
+            # except Exception as e:
+            #     logging.error(f"[TP监控] 启动失败: {e}")
+            #     self.is_running = False
 
     def stop(self):
         with self.lock:
@@ -73,6 +76,7 @@ class TPMonitor:
             logging.info("[TP监控] 已清除止盈目标")
 
     def _on_kline(self, msg):
+        # 即使不启动 WebSocket，这个方法也保留（以后可手动开启时使用）
         try:
             if msg.get('e') != 'kline':
                 return
