@@ -1,5 +1,3 @@
-# app.py - 最终完整版（含动态仓位计算）
-
 from flask import Flask, request, jsonify
 import os
 import re
@@ -34,15 +32,14 @@ def extract_json_from_text(text: str):
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
     try:
         balance_info = binance_client.get_account_balance()
-        equity = balance_info.get("totalWalletBalance", 200)
+        equity = balance_info.get("totalWalletBalance", 0)
 
-        # ==================== 按资金规模动态调整风险比例 ====================
         if equity < 3000:
-            risk_percent = 0.075          # 小资金（<3000U）：7.5%（适合230U左右）
+            risk_percent = 0.075
         elif equity < 10000:
-            risk_percent = 0.03           # 中资金：3%
+            risk_percent = 0.03
         else:
-            risk_percent = float(os.getenv("RISK_PERCENT", 0.01))  # 大资金：使用.env配置
+            risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
 
         stop_distance_percent = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
         risk_amount = equity * risk_percent
@@ -52,10 +49,7 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         if stop_distance <= 0:
             return 0.05
 
-        qty = round(risk_amount / stop_distance, 3)
-        logging.info(f"[仓位计算] 权益: {equity:.2f}U | 风险比例: {risk_percent*100:.1f}% | 开仓数量: {qty}")
-        return qty
-
+        return round(risk_amount / stop_distance, 3)
     except Exception as e:
         logging.error(f"[仓位计算异常] {e}")
         return 0.05
@@ -71,14 +65,8 @@ def webhook():
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
-        if not signal:
-            return jsonify({"status": "error", "message": "缺少 signal 字段"}), 400
-
-        logging.info(f"[Webhook] 收到信号 → {signal}")
-
         result = supervisor.handle_new_signal(signal)
 
-        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -92,35 +80,17 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # 设置止盈目标给 tp_monitor
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
+                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
 
-                # 发送加强版开仓报告
-                binance_client.send_position_open_report(
-                    signal=signal,
-                    qty=qty,
-                    entry_price=entry_price,
-                    tp1=tp1,
-                    tp2=tp2,
-                    tp3=tp3
-                )
-
-                logging.info(f"[开仓成功] {signal} {qty} 张 @ {entry_price}")
-                return jsonify({
-                    "status": "success",
-                    "signal": signal,
-                    "qty": qty,
-                    "entry_price": entry_price
-                }), 200
+                return jsonify({"status": "success", "qty": qty}), 200
             else:
-                return jsonify({"status": "error", "message": "下单失败"}), 500
+                return jsonify({"status": "error"}), 500
 
-        # ==================== 全平处理 ====================
         elif signal == "CLOSE_ALL":
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") == "success":
@@ -140,17 +110,10 @@ def status():
     try:
         return jsonify({
             "status": "running",
-            "supervisor_websocket": hasattr(supervisor, 'twm') and supervisor.twm is not None,
-            "current_position": binance_client.get_current_position(),
-            "account_balance": binance_client.get_account_balance(),
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
