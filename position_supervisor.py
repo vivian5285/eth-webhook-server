@@ -1,4 +1,4 @@
-# position_supervisor.py - 最终优化版（2026-06-11）
+# position_supervisor.py - 最终干净版（2026-06-12）
 
 import logging
 import time
@@ -33,7 +33,7 @@ class PositionSupervisor:
         logging.info("[监督层] User Data Stream 已启动，实时监听账户变化")
 
     def _on_account_update(self, msg):
-        """处理账户更新（可根据需要扩展，目前保持基础逻辑）"""
+        """处理账户更新推送（可按需扩展）"""
         try:
             if msg.get('e') != 'ACCOUNT_UPDATE':
                 return
@@ -64,11 +64,10 @@ class PositionSupervisor:
     def _enforce_close_then_open(self, signal: str):
         """
         核心逻辑：无论同方向还是反方向，一律先全平 → 再开新仓
-        （已按用户要求实现：持有多收到OPEN_LONG也必须先平再开）
         """
         current_pos = binance_client.get_current_position("ETHUSDT")
 
-        # 1. 如果当前有持仓，先强制全平
+        # 如果当前有持仓，先强制全平
         if current_pos and current_pos.get("positionAmt", 0) != 0:
             logging.info(f"[监督层] 检测到持仓 {current_pos.get('side')}，执行强制全平")
             close_result = binance_client.close_all_positions("ETHUSDT")
@@ -77,7 +76,6 @@ class PositionSupervisor:
                 self._handle_failure("平仓失败")
                 return close_result
 
-            # 等待并二次确认仓位是否真的清空
             time.sleep(2.5)
             current_pos = binance_client.get_current_position("ETHUSDT")
             if current_pos and current_pos.get("positionAmt", 0) != 0:
@@ -87,13 +85,12 @@ class PositionSupervisor:
             position_manager.clear_position()
             logging.info("[监督层] 仓位已成功清理，准备开新仓")
 
-        # 2. 返回 ready_to_open，由 app.py 执行开仓
         return {"status": "ready_to_open", "signal": signal}
 
     def notify_open_success(self, signal: str, qty: float, entry_price: float,
                             tp1: float = 0, tp2: float = 0, tp3: float = 0):
         """
-        开仓成功后进行核实，确认实盘方向正确后再推送美化钉钉报告
+        开仓成功后核实并推送美化报告
         """
         with self.lock:
             time.sleep(2.0)
@@ -101,10 +98,10 @@ class PositionSupervisor:
             desired = "long" if signal == "OPEN_LONG" else "short"
 
             if real_pos and real_pos.get("side") == desired:
-                logging.info(f"[监督层] {signal} 实盘持仓已对齐，推送美化报告")
+                logging.info(f"[监督层] {signal} 实盘持仓已对齐，推送报告")
                 self.consecutive_failure_count = 0
 
-                # 使用新版美化推送
+                # 调用 binance_client 里的新报告方法
                 binance_client.send_position_open_report(
                     signal=signal,
                     qty=qty,
@@ -118,7 +115,7 @@ class PositionSupervisor:
                 self._handle_failure("开仓后实盘未对齐")
 
     def notify_tp_hit(self, level: str, closed_qty: float, avg_price: float):
-        """TP触发后的处理"""
+        """TP 触发后的处理"""
         with self.lock:
             logging.info(f"[监督层] TP触发: {level.upper()}, 平仓数量: {closed_qty}")
             real_pos = binance_client.get_current_position("ETHUSDT")
@@ -131,13 +128,9 @@ class PositionSupervisor:
             else:
                 position_manager.clear_position()
 
-            # TP3 全平可额外推送平仓报告
+            # TP3 全平可额外推送平仓报告（可选）
             if level.lower() == "tp3":
-                binance_client.send_position_close_report(
-                    reason="TP3 最终止盈",
-                    exit_price=avg_price,
-                    pnl=0  # 可后续扩展计算实际盈亏
-                )
+                binance_client.send_close_all_report("TP3 最终止盈")
 
             self.consecutive_failure_count = 0
 
