@@ -1,16 +1,20 @@
-# app.py（最终完整强壮版）
+# app.py（最终完整强壮版 - 包含二次验证 + 一致性自动纠正）
 from flask import Flask, request, jsonify
 import time
 import traceback
 import threading
 import logging
+import pandas as pd
 from binance_client import BinanceClient
 from position_manager import PositionManager
 from tp_manager import get_actual_tp_prices
 from dingtalk import send_dingtalk
 from config import Config
 
-logging.basicConfig(level=getattr(logging, Config.LOG_LEVEL), format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(
+    level=getattr(logging, Config.LOG_LEVEL),
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 
 app = Flask(__name__)
 client = BinanceClient()
@@ -19,12 +23,12 @@ position_manager = PositionManager()
 last_signal_direction = None
 
 
+# ==================== 仓位一致性自动检查 + 纠正 ====================
 def position_consistency_check():
-    """后台线程：每40秒检查仓位是否与最新TV信号一致，不一致则自动纠正"""
     global last_signal_direction
     while True:
         try:
-            time.sleep(40)
+            time.sleep(40)  # 每40秒检查一次
             if not last_signal_direction:
                 continue
 
@@ -36,9 +40,11 @@ def position_consistency_check():
 
             if actual_side != last_signal_direction:
                 logging.warning(f"[仓位不一致] 实际: {actual_side}，TV最新: {last_signal_direction}，准备自动纠正")
-                send_dingtalk("仓位不一致自动纠正", 
-                              f"实际持仓: {actual_side}\nTV最新信号: {last_signal_direction}\n系统将先全平再按TV信号重开",
-                              is_warning=True)
+                send_dingtalk(
+                    "仓位不一致自动纠正",
+                    f"实际持仓方向: {actual_side}\nTV最新信号: {last_signal_direction}\n系统将先全平再按TV信号重新开仓",
+                    is_warning=True
+                )
 
                 client.close_all_positions(Config.SYMBOL)
                 time.sleep(1.5)
@@ -58,6 +64,91 @@ def position_consistency_check():
 threading.Thread(target=position_consistency_check, daemon=True).start()
 
 
+# ==================== 加强版二次验证 ====================
+def secondary_verification(signal: str, timeframe: str, symbol: str = "ETHUSDT"):
+    try:
+        klines = client.client.futures_klines(symbol=symbol, interval=timeframe, limit=60)
+        df = pd.DataFrame(klines, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
+
+        df['close'] = pd.to_numeric(df['close'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        df['volume'] = pd.to_numeric(df['volume'])
+
+        # EMA
+        df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+
+        # MACD
+        df['macd'] = df['ema12'] - df['ema26']
+        df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
+
+        # RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        # KDJ
+        low_min = df['low'].rolling(14).min()
+        high_max = df['high'].rolling(14).max()
+        df['k'] = 100 * ((df['close'] - low_min) / (high_max - low_min))
+        df['d'] = df['k'].rolling(3).mean()
+
+        # 量能
+        df['vol_ma'] = df['volume'].rolling(20).mean()
+        volume_ok = df['volume'].iloc[-1] > df['vol_ma'].iloc[-1] * 1.1
+
+        latest = df.iloc[-1]
+        score = 0
+        reasons = []
+
+        # EMA
+        if latest['close'] > latest['ema26']:
+            score += 1; reasons.append("EMA多头")
+        else:
+            score -= 1; reasons.append("EMA空头")
+
+        # MACD
+        if latest['macd'] > latest['signal_line']:
+            score += 1; reasons.append("MACD金叉")
+        else:
+            score -= 1; reasons.append("MACD死叉")
+
+        # RSI
+        if latest['rsi'] > 55:
+            score += 1; reasons.append("RSI偏强")
+        elif latest['rsi'] < 45:
+            score -= 1; reasons.append("RSI偏弱")
+
+        # KDJ
+        if latest['k'] > latest['d'] and latest['k'] > 50:
+            score += 1; reasons.append("KDJ向上")
+        elif latest['k'] < latest['d'] and latest['k'] < 50:
+            score -= 1; reasons.append("KDJ向下")
+
+        # 量能
+        if volume_ok:
+            score += 1; reasons.append("量能放大")
+
+        trend = "long" if score >= 2 else ("short" if score <= -2 else "neutral")
+
+        return {
+            "trend": trend,
+            "score": round(score, 1),
+            "reason": " | ".join(reasons)
+        }
+    except Exception as e:
+        logging.error(f"[二次验证异常] {e}")
+        return {"trend": "neutral", "score": 0, "reason": "验证失败"}
+
+
+# ==================== Webhook 主逻辑 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -90,10 +181,10 @@ def process_webhook(data: dict):
     elif signal == "OPEN_SHORT":
         last_signal_direction = "short"
 
-    # ==================== 开仓逻辑（含二次验证 + 先平再开） ====================
+    # ==================== 开仓 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 1. 先全平再开（无论同反方向）
+            # 1. 先全平再开（核心逻辑）
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
                 logging.info("[风控] 检测到仓位，先全平再开")
@@ -101,30 +192,30 @@ def process_webhook(data: dict):
                 time.sleep(1.8)
 
             # 2. 加强版二次验证
-            try:
-                verification = secondary_verification(signal, timeframe, symbol)
-                if verification["trend"] not in ["neutral", None]:
-                    expected = "long" if signal == "OPEN_LONG" else "short"
-                    if verification["trend"] != expected:
-                        send_dingtalk(
-                            "二次验证告警 - 多指标方向不一致",
-                            f"TV信号: {signal}\n多指标判断: {verification['trend']} (得分: {verification['score']})\n依据: {verification['reason']}\n已执行TV信号，建议人工复核 {timeframe} 图表",
-                            is_warning=True
-                        )
-            except Exception as e:
-                logging.error(f"[二次验证异常] {e}")
+            verification = secondary_verification(signal, timeframe, symbol)
+            if verification["trend"] not in ["neutral", None]:
+                expected = "long" if signal == "OPEN_LONG" else "short"
+                if verification["trend"] != expected:
+                    send_dingtalk(
+                        "二次验证告警 - 多指标方向不一致",
+                        f"TV信号: {signal}\n多指标判断: {verification['trend']} (得分: {verification['score']})\n依据: {verification['reason']}\n已执行TV信号，建议人工复核 {timeframe} 图表",
+                        is_warning=True
+                    )
 
             # 3. 动态仓位（资金差异化）
             qty = client.calculate_position_size(atr)
             if qty <= 0:
-                send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝", is_warning=True)
+                send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝开仓", is_warning=True)
                 return
 
             # 4. 下单
             order = client.open_long(symbol, qty) if signal == "OPEN_LONG" else client.open_short(symbol, qty)
 
             if order:
-                entry_price = float(order.get("avgPrice") or 0) or float(client.client.futures_symbol_ticker(symbol=symbol)["price"])
+                entry_price = float(order.get("avgPrice") or 0)
+                if entry_price == 0:
+                    entry_price = client.get_current_price(symbol)
+
                 tp_prices = get_actual_tp_prices(entry_price, atr, "long" if signal == "OPEN_LONG" else "short")
                 position_manager.save_position(symbol, entry_price, atr, tp_prices, "long" if signal == "OPEN_LONG" else "short")
 
@@ -149,21 +240,39 @@ def process_webhook(data: dict):
             send_dingtalk("全平异常", str(e), is_warning=True)
 
 
-def secondary_verification(signal: str, timeframe: str, symbol: str):
-    # 这里使用你之前提供的加强版 secondary_verification 函数
-    # （为节省篇幅，假设已添加在文件顶部）
-    # 如需我单独再给你一次这个函数，请告诉我
-    pass
+def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
+    msg = (
+        f"**下单数量**: {qty}\n"
+        f"**入场价**: {entry_price}\n"
+        f"**TP1**: {tp_prices['tp1']} | **TP2**: {tp_prices['tp2']} | **TP3**: {tp_prices['tp3']}\n\n"
+        f"**账户快照**\n"
+        f"总权益: {report.get('total_equity', 'N/A')} USDT\n"
+        f"钱包余额: {report.get('wallet_balance', 'N/A')} USDT\n"
+        f"可用保证金: {report.get('available_margin', 'N/A')} USDT\n"
+        f"维持保证金: {report.get('maintenance_margin', 'N/A')} USDT\n"
+        f"当前持仓: {report.get('position', 'N/A')}\n"
+        f"浮盈: {report.get('unrealized_pnl', 'N/A')} USDT\n"
+        f"杠杆: {report.get('leverage', 'N/A')}x"
+    )
+    send_dingtalk(f"{direction} 开仓成功", msg)
 
 
-def _send_open_notification(direction, qty, entry_price, tp_prices, report):
-    # 省略，保持你之前的版本即可
-    pass
-
-
-def send_tp_hit_report(level, close_price, report=None):
-    # 省略，保持你之前的版本即可
-    pass
+def send_tp_hit_report(level: str, close_price: float, report: dict = None):
+    if report is None:
+        report = client.get_detailed_report()
+    msg = (
+        f"**{level.upper()} 被触发**\n"
+        f"成交价格: {close_price}\n\n"
+        f"**账户快照（平仓后）**\n"
+        f"总权益: {report.get('total_equity', 'N/A')} USDT\n"
+        f"钱包余额: {report.get('wallet_balance', 'N/A')} USDT\n"
+        f"可用保证金: {report.get('available_margin', 'N/A')} USDT\n"
+        f"维持保证金: {report.get('maintenance_margin', 'N/A')} USDT\n"
+        f"当前持仓: {report.get('position', 'N/A')}\n"
+        f"浮盈: {report.get('unrealized_pnl', 'N/A')} USDT\n"
+        f"今日已实现盈亏: {report.get('today_realized_pnl', 'N/A')} USDT"
+    )
+    send_dingtalk(f"{level.upper()} 止盈触发", msg)
 
 
 # ==================== 启动 TP 监控 ====================
@@ -177,4 +286,5 @@ except Exception as e:
 
 
 if __name__ == "__main__":
+    logging.info("[系统启动] Webhook服务已启动（最终强壮版）")
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
