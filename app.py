@@ -1,4 +1,4 @@
-# app.py（最终完整强壮版 - 包含二次验证 + 一致性自动纠正）
+# app.py（最终完整强壮版 - 含 last_signal_direction 持久化 + 自动纠正）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -20,16 +20,19 @@ app = Flask(__name__)
 client = BinanceClient()
 position_manager = PositionManager()
 
-last_signal_direction = None
+# ==================== 从持久化文件中加载最后信号方向 ====================
+last_signal_direction = position_manager.get_last_signal_direction()
 
 
-# ==================== 仓位一致性自动检查 + 纠正 ====================
+# ==================== 仓位一致性自动检查 + 自动纠正 ====================
 def position_consistency_check():
     global last_signal_direction
     while True:
         try:
             time.sleep(40)  # 每40秒检查一次
-            if not last_signal_direction:
+
+            current_last_dir = position_manager.get_last_signal_direction() or last_signal_direction
+            if not current_last_dir:
                 continue
 
             pos = client.get_current_position(Config.SYMBOL)
@@ -38,11 +41,12 @@ def position_consistency_check():
 
             actual_side = "long" if float(pos["positionAmt"]) > 0 else "short"
 
-            if actual_side != last_signal_direction:
-                logging.warning(f"[仓位不一致] 实际: {actual_side}，TV最新: {last_signal_direction}，准备自动纠正")
+            if actual_side != current_last_dir:
+                logging.warning(f"[仓位不一致] 实际持仓: {actual_side}，TV最新信号: {current_last_dir}，准备自动纠正")
+
                 send_dingtalk(
                     "仓位不一致自动纠正",
-                    f"实际持仓方向: {actual_side}\nTV最新信号: {last_signal_direction}\n系统将先全平再按TV信号重新开仓",
+                    f"实际持仓方向: {actual_side}\nTV最新信号: {current_last_dir}\n系统将先全平再按TV信号重新开仓",
                     is_warning=True
                 )
 
@@ -51,12 +55,14 @@ def position_consistency_check():
 
                 atr = 30
                 qty = client.calculate_position_size(atr)
-                if last_signal_direction == "long":
+
+                if current_last_dir == "long":
                     client.open_long(Config.SYMBOL, qty)
                 else:
                     client.open_short(Config.SYMBOL, qty)
 
-                logging.info(f"[自动纠正完成] 已按 {last_signal_direction} 重开仓位")
+                logging.info(f"[自动纠正完成] 已按 {current_last_dir} 重开仓位")
+
         except Exception as e:
             logging.error(f"[一致性检查异常] {e}")
 
@@ -108,31 +114,26 @@ def secondary_verification(signal: str, timeframe: str, symbol: str = "ETHUSDT")
         score = 0
         reasons = []
 
-        # EMA
         if latest['close'] > latest['ema26']:
             score += 1; reasons.append("EMA多头")
         else:
             score -= 1; reasons.append("EMA空头")
 
-        # MACD
         if latest['macd'] > latest['signal_line']:
             score += 1; reasons.append("MACD金叉")
         else:
             score -= 1; reasons.append("MACD死叉")
 
-        # RSI
         if latest['rsi'] > 55:
             score += 1; reasons.append("RSI偏强")
         elif latest['rsi'] < 45:
             score -= 1; reasons.append("RSI偏弱")
 
-        # KDJ
         if latest['k'] > latest['d'] and latest['k'] > 50:
             score += 1; reasons.append("KDJ向上")
         elif latest['k'] < latest['d'] and latest['k'] < 50:
             score -= 1; reasons.append("KDJ向下")
 
-        # 量能
         if volume_ok:
             score += 1; reasons.append("量能放大")
 
@@ -148,7 +149,7 @@ def secondary_verification(signal: str, timeframe: str, symbol: str = "ETHUSDT")
         return {"trend": "neutral", "score": 0, "reason": "验证失败"}
 
 
-# ==================== Webhook 主逻辑 ====================
+# ==================== Webhook 处理 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -176,18 +177,21 @@ def process_webhook(data: dict):
     if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
         return
 
+    # 更新并持久化 last_signal_direction
     if signal == "OPEN_LONG":
         last_signal_direction = "long"
+        position_manager.save_last_signal_direction("long")
     elif signal == "OPEN_SHORT":
         last_signal_direction = "short"
+        position_manager.save_last_signal_direction("short")
 
-    # ==================== 开仓 ====================
+    # ==================== 开仓逻辑 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 1. 先全平再开（核心逻辑）
+            # 1. 先全平再开（核心策略）
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
-                logging.info("[风控] 检测到仓位，先全平再开")
+                logging.info("[风控] 检测到已有持仓，先全平再开")
                 client.close_all_positions(symbol)
                 time.sleep(1.8)
 
@@ -202,7 +206,7 @@ def process_webhook(data: dict):
                         is_warning=True
                     )
 
-            # 3. 动态仓位（资金差异化）
+            # 3. 动态仓位计算（资金差异化）
             qty = client.calculate_position_size(atr)
             if qty <= 0:
                 send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝开仓", is_warning=True)
@@ -260,6 +264,7 @@ def _send_open_notification(direction: str, qty: float, entry_price: float, tp_p
 def send_tp_hit_report(level: str, close_price: float, report: dict = None):
     if report is None:
         report = client.get_detailed_report()
+
     msg = (
         f"**{level.upper()} 被触发**\n"
         f"成交价格: {close_price}\n\n"
