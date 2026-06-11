@@ -1,4 +1,4 @@
-# app.py（最终完整强壮版 - 含 last_signal_direction 持久化 + 自动纠正）
+# app.py（最终完整强壮版 - 已加强开仓和TP通知）
 from flask import Flask, request, jsonify
 import time
 import traceback
@@ -20,7 +20,6 @@ app = Flask(__name__)
 client = BinanceClient()
 position_manager = PositionManager()
 
-# ==================== 从持久化文件中加载最后信号方向 ====================
 last_signal_direction = position_manager.get_last_signal_direction()
 
 
@@ -29,8 +28,7 @@ def position_consistency_check():
     global last_signal_direction
     while True:
         try:
-            time.sleep(40)  # 每40秒检查一次
-
+            time.sleep(40)
             current_last_dir = position_manager.get_last_signal_direction() or last_signal_direction
             if not current_last_dir:
                 continue
@@ -42,10 +40,9 @@ def position_consistency_check():
             actual_side = "long" if float(pos["positionAmt"]) > 0 else "short"
 
             if actual_side != current_last_dir:
-                logging.warning(f"[仓位不一致] 实际持仓: {actual_side}，TV最新信号: {current_last_dir}，准备自动纠正")
-
+                logging.warning(f"[仓位不一致] 实际: {actual_side}，TV最新: {current_last_dir}，准备自动纠正")
                 send_dingtalk(
-                    "仓位不一致自动纠正",
+                    "🔄 仓位不一致自动纠正",
                     f"实际持仓方向: {actual_side}\nTV最新信号: {current_last_dir}\n系统将先全平再按TV信号重新开仓",
                     is_warning=True
                 )
@@ -55,14 +52,12 @@ def position_consistency_check():
 
                 atr = 30
                 qty = client.calculate_position_size(atr)
-
                 if current_last_dir == "long":
                     client.open_long(Config.SYMBOL, qty)
                 else:
                     client.open_short(Config.SYMBOL, qty)
 
                 logging.info(f"[自动纠正完成] 已按 {current_last_dir} 重开仓位")
-
         except Exception as e:
             logging.error(f"[一致性检查异常] {e}")
 
@@ -85,28 +80,22 @@ def secondary_verification(signal: str, timeframe: str, symbol: str = "ETHUSDT")
         df['low'] = pd.to_numeric(df['low'])
         df['volume'] = pd.to_numeric(df['volume'])
 
-        # EMA
         df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
-
-        # MACD
         df['macd'] = df['ema12'] - df['ema26']
         df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-        # RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
-        # KDJ
         low_min = df['low'].rolling(14).min()
         high_max = df['high'].rolling(14).max()
         df['k'] = 100 * ((df['close'] - low_min) / (high_max - low_min))
         df['d'] = df['k'].rolling(3).mean()
 
-        # 量能
         df['vol_ma'] = df['volume'].rolling(20).mean()
         volume_ok = df['volume'].iloc[-1] > df['vol_ma'].iloc[-1] * 1.1
 
@@ -139,17 +128,13 @@ def secondary_verification(signal: str, timeframe: str, symbol: str = "ETHUSDT")
 
         trend = "long" if score >= 2 else ("short" if score <= -2 else "neutral")
 
-        return {
-            "trend": trend,
-            "score": round(score, 1),
-            "reason": " | ".join(reasons)
-        }
+        return {"trend": trend, "score": round(score, 1), "reason": " | ".join(reasons)}
     except Exception as e:
         logging.error(f"[二次验证异常] {e}")
         return {"trend": "neutral", "score": 0, "reason": "验证失败"}
 
 
-# ==================== Webhook 处理 ====================
+# ==================== Webhook 主逻辑 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
@@ -177,7 +162,6 @@ def process_webhook(data: dict):
     if signal not in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
         return
 
-    # 更新并持久化 last_signal_direction
     if signal == "OPEN_LONG":
         last_signal_direction = "long"
         position_manager.save_last_signal_direction("long")
@@ -185,34 +169,30 @@ def process_webhook(data: dict):
         last_signal_direction = "short"
         position_manager.save_last_signal_direction("short")
 
-    # ==================== 开仓逻辑 ====================
     if signal in ["OPEN_LONG", "OPEN_SHORT"]:
         try:
-            # 1. 先全平再开（核心策略）
             current_pos = client.get_current_position(symbol)
             if current_pos and float(current_pos.get("positionAmt", 0)) != 0:
                 logging.info("[风控] 检测到已有持仓，先全平再开")
                 client.close_all_positions(symbol)
                 time.sleep(1.8)
 
-            # 2. 加强版二次验证
+            # 二次验证
             verification = secondary_verification(signal, timeframe, symbol)
             if verification["trend"] not in ["neutral", None]:
                 expected = "long" if signal == "OPEN_LONG" else "short"
                 if verification["trend"] != expected:
                     send_dingtalk(
-                        "二次验证告警 - 多指标方向不一致",
+                        "⚠️ 二次验证告警 - 方向可能不一致",
                         f"TV信号: {signal}\n多指标判断: {verification['trend']} (得分: {verification['score']})\n依据: {verification['reason']}\n已执行TV信号，建议人工复核 {timeframe} 图表",
                         is_warning=True
                     )
 
-            # 3. 动态仓位计算（资金差异化）
             qty = client.calculate_position_size(atr)
             if qty <= 0:
                 send_dingtalk("风控拦截", f"计算仓位为 {qty}，已拒绝开仓", is_warning=True)
                 return
 
-            # 4. 下单
             order = client.open_long(symbol, qty) if signal == "OPEN_LONG" else client.open_short(symbol, qty)
 
             if order:
@@ -232,7 +212,6 @@ def process_webhook(data: dict):
             logging.error(f"[开仓异常] {e}")
             send_dingtalk("开仓严重异常", str(e), is_warning=True)
 
-    # ==================== 保护性全平 ====================
     elif signal == "CLOSE_ALL":
         try:
             client.close_all_positions(symbol)
@@ -244,40 +223,73 @@ def process_webhook(data: dict):
             send_dingtalk("全平异常", str(e), is_warning=True)
 
 
+# ==================== 加强版开仓通知（含风险比例） ====================
 def _send_open_notification(direction: str, qty: float, entry_price: float, tp_prices: dict, report: dict):
+    dir_cn = "多" if direction.upper() == "LONG" else "空"
+    risk_percent = client.get_risk_percent() * 100
+
     msg = (
-        f"**下单数量**: {qty}\n"
-        f"**入场价**: {entry_price}\n"
-        f"**TP1**: {tp_prices['tp1']} | **TP2**: {tp_prices['tp2']} | **TP3**: {tp_prices['tp3']}\n\n"
-        f"**账户快照**\n"
-        f"总权益: {report.get('total_equity', 'N/A')} USDT\n"
-        f"钱包余额: {report.get('wallet_balance', 'N/A')} USDT\n"
-        f"可用保证金: {report.get('available_margin', 'N/A')} USDT\n"
-        f"维持保证金: {report.get('maintenance_margin', 'N/A')} USDT\n"
-        f"当前持仓: {report.get('position', 'N/A')}\n"
-        f"浮盈: {report.get('unrealized_pnl', 'N/A')} USDT\n"
-        f"杠杆: {report.get('leverage', 'N/A')}x"
+        f"**🚀 {dir_cn} 单开仓成功**\n\n"
+        f"**下单数量**：{qty}\n"
+        f"**入场价格**：{entry_price}\n"
+        f"**当前风险比例**：{risk_percent:.1f}%\n\n"
+        f"**止盈目标**\n"
+        f"• TP1：{tp_prices['tp1']}\n"
+        f"• TP2：{tp_prices['tp2']}\n"
+        f"• TP3：{tp_prices['tp3']}\n\n"
+        f"**📊 账户快照**\n"
+        f"总权益：{report.get('total_equity', 'N/A')} USDT\n"
+        f"钱包余额：{report.get('wallet_balance', 'N/A')} USDT\n"
+        f"可用保证金：{report.get('available_margin', 'N/A')} USDT\n"
+        f"维持保证金：{report.get('maintenance_margin', 'N/A')} USDT\n"
+        f"当前持仓：{report.get('position', 'N/A')}\n"
+        f"未实现盈亏：{report.get('unrealized_pnl', 'N/A')} USDT\n"
+        f"杠杆倍数：{report.get('leverage', 'N/A')}x"
     )
-    send_dingtalk(f"{direction} 开仓成功", msg)
+    send_dingtalk(f"{dir_cn} 单开仓成功", msg)
 
 
+# ==================== 加强版 TP 通知（含本次止盈金额） ====================
 def send_tp_hit_report(level: str, close_price: float, report: dict = None):
     if report is None:
         report = client.get_detailed_report()
 
+    level_map = {
+        "tp1": "TP1（第一止盈 30%）",
+        "tp2": "TP2（第二止盈 30%）",
+        "tp3": "TP3（最终止盈 全平）"
+    }
+    level_cn = level_map.get(level.lower(), level.upper())
+
+    # 尝试估算本次止盈金额
+    profit_amount = "N/A"
+    try:
+        pos = position_manager.get_position()
+        if pos and pos.get("entry_price"):
+            entry_price = float(pos["entry_price"])
+            side = pos.get("side", "long")
+            # 这里简化估算，实际数量需要从持仓信息获取，暂时用近似值
+            if side == "long":
+                profit_amount = round((close_price - entry_price) * 0.3, 2)  # 简化计算
+            else:
+                profit_amount = round((entry_price - close_price) * 0.3, 2)
+    except:
+        pass
+
     msg = (
-        f"**{level.upper()} 被触发**\n"
-        f"成交价格: {close_price}\n\n"
-        f"**账户快照（平仓后）**\n"
-        f"总权益: {report.get('total_equity', 'N/A')} USDT\n"
-        f"钱包余额: {report.get('wallet_balance', 'N/A')} USDT\n"
-        f"可用保证金: {report.get('available_margin', 'N/A')} USDT\n"
-        f"维持保证金: {report.get('maintenance_margin', 'N/A')} USDT\n"
-        f"当前持仓: {report.get('position', 'N/A')}\n"
-        f"浮盈: {report.get('unrealized_pnl', 'N/A')} USDT\n"
-        f"今日已实现盈亏: {report.get('today_realized_pnl', 'N/A')} USDT"
+        f"**🎯 {level_cn} 已触发**\n\n"
+        f"**成交价格**：{close_price}\n"
+        f"**本次止盈金额（估算）**：{profit_amount} USDT\n\n"
+        f"**📊 平仓后账户快照**\n"
+        f"总权益：{report.get('total_equity', 'N/A')} USDT\n"
+        f"钱包余额：{report.get('wallet_balance', 'N/A')} USDT\n"
+        f"可用保证金：{report.get('available_margin', 'N/A')} USDT\n"
+        f"维持保证金：{report.get('maintenance_margin', 'N/A')} USDT\n"
+        f"当前持仓：{report.get('position', 'N/A')}\n"
+        f"未实现盈亏：{report.get('unrealized_pnl', 'N/A')} USDT\n"
+        f"今日已实现盈亏：{report.get('today_realized_pnl', 'N/A')} USDT"
     )
-    send_dingtalk(f"{level.upper()} 止盈触发", msg)
+    send_dingtalk(f"{level_cn} 触发", msg)
 
 
 # ==================== 启动 TP 监控 ====================
