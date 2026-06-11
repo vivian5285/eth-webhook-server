@@ -1,4 +1,4 @@
-# tp_monitor.py（最终完整加强版）
+# tp_monitor.py（最终完整更新版）
 import threading
 import time
 import logging
@@ -30,7 +30,7 @@ class TPMonitor:
         self.ws = self.twm.start_kline_socket(
             callback=self._on_price_update,
             symbol=self.symbol,
-            interval='45m'
+            interval='30m'          # ← 已改为有效周期
         )
 
     def _reconnect_websocket(self):
@@ -67,22 +67,21 @@ class TPMonitor:
             elif side == 'SHORT' and close_price <= tp_levels.get('tp1', 999999):
                 self._execute_tp('tp1', close_price, position)
 
-            # TODO: 可在此扩展 TP2 / TP3 检查 + 自适应追踪止盈逻辑
+            # TODO: 可在此扩展 TP2 / TP3 检查 + 自适应追踪止盈
 
         except Exception as e:
             logging.error(f"[TP监控回调异常] {e}")
 
     def _get_adaptive_trail_distance(self, base_atr: float) -> float:
-        """自适应追踪距离（可根据 ADX 动态调整）"""
+        """自适应追踪距离"""
         try:
-            # 这里可接入真实 ADX 计算，当前简化处理
-            adx = 22
+            adx = 22  # 可后续接入真实 ADX 计算
             if adx > 28:
-                return base_atr * 1.6   # 强趋势，保护利润
+                return base_atr * 1.6
             elif adx > 20:
                 return base_atr * 2.0
             else:
-                return base_atr * 2.6   # 弱势，留更多空间
+                return base_atr * 2.6
         except:
             return base_atr * 2.2
 
@@ -101,7 +100,6 @@ class TPMonitor:
                 logging.info(f"[TP执行成功] {level.upper()} | 当前价: {current_price}")
                 self.position_manager.mark_tp_hit(level)
 
-                # 发送钉钉通知
                 self.client._send_dingtalk(
                     title=f"💰 {level.upper()} 分批止盈触发",
                     content=(
