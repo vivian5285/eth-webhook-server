@@ -1,4 +1,4 @@
-# app.py - 最终完整版（已加入 tp_monitor 启动）
+# app.py - 最终完整版（2026-06-11 更新）
 
 from flask import Flask, request, jsonify
 import os
@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from binance_client import BinanceClient
 from position_supervisor import supervisor
 from daily_report_scheduler import daily_report_scheduler
-from tp_monitor import tp_monitor          # ← 新增导入
+from tp_monitor import tp_monitor
 
 load_dotenv()
 
@@ -81,14 +81,14 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 调用美化开仓推送
+                # ==================== 关键修复：正确计算 TP ====================
                 binance_client.send_position_open_report(
                     signal=signal,
                     qty=qty,
                     entry_price=entry_price,
-                    tp1=entry_price * 1.0128,
-                    tp2=entry_price * 1.025,
-                    tp3=entry_price * 1.036,
+                    tp1=round(entry_price * 1.0128, 2),
+                    tp2=round(entry_price * 1.025, 2),
+                    tp3=round(entry_price * 1.036, 2),
                     risk_percent=float(os.getenv("RISK_PERCENT", 0.01))
                 )
 
@@ -134,5 +134,5 @@ def status():
 if __name__ == "__main__":
     logging.info("=== ETH Webhook Server 已启动 ===")
     daily_report_scheduler.start()
-    tp_monitor.start()                    # ← 已添加启动 TP 监控
+    tp_monitor.start()
     app.run(host="0.0.0.0", port=5000)
