@@ -1,4 +1,4 @@
-# app.py（完整最终版 - 已集成每日报告调度器）
+# app.py（完整版 - 已添加 /status 接口）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
-from daily_report_scheduler import daily_report_scheduler   # 新增
+from daily_report_scheduler import daily_report_scheduler
+from tp_monitor import tp_monitor   # 用于状态检查
 
 load_dotenv()
 
@@ -48,7 +49,7 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         logging.error(f"[仓位计算异常] {e}")
         return 0.05
 
-# ==================== 报告函数（供监督层和调度器调用） ====================
+# ==================== 报告函数 ====================
 
 def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1, tp2, tp3):
     try:
@@ -91,7 +92,7 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-# ==================== Webhook 入口 ====================
+# ==================== Webhook ====================
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -127,8 +128,8 @@ def webhook():
                 )
 
                 logging.info(f"[下单成功] {signal} {qty} 张 @ {entry_price}")
-
                 supervisor.notify_open_success(signal, qty, entry_price, 0, 0, 0)
+
                 return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
 
             except Exception as order_err:
@@ -141,9 +142,37 @@ def webhook():
         logging.error(f"[Webhook 异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ==================== 状态检查接口（新增） ====================
+
+@app.route('/status', methods=['GET'])
+def status():
+    """系统状态检查接口，供 check_full_system.py 调用"""
+    try:
+        # 检查 supervisor WebSocket 是否已启动
+        supervisor_ws_running = hasattr(supervisor, 'twm') and supervisor.twm is not None
+
+        # 检查 tp_monitor 是否已启动
+        tp_monitor_running = hasattr(tp_monitor, 'is_running') and tp_monitor.is_running
+
+        current_pos = position_manager.get_current_position() if 'position_manager' in globals() else None
+
+        return jsonify({
+            "status": "running",
+            "service": "eth-webhook",
+            "supervisor_websocket": supervisor_ws_running,
+            "tp_monitor_websocket": tp_monitor_running,
+            "current_position": current_pos,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 已启动（User Data Stream + 每日报告模式） ===")
+    logging.info("=== ETH Webhook Server 已启动（User Data Stream + /status 接口） ===")
     
     # 启动每日报告调度器
     daily_report_scheduler.start()
