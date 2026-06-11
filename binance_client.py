@@ -1,4 +1,4 @@
-# binance_client.py - 最终优化版（含美化钉钉推送）
+# binance_client.py - 最终完整优化版（2026-06-11）
 
 import os
 import time
@@ -14,7 +14,6 @@ from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
@@ -29,7 +28,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 核心交易方法 ====================
+    # ==================== 账户与持仓查询 ====================
 
     def get_account_balance(self):
         try:
@@ -48,17 +47,21 @@ class BinanceClient:
             positions = self.client.futures_position_information(symbol=symbol)
             if positions:
                 pos = positions[0]
-                return {
-                    "symbol": pos["symbol"],
-                    "positionAmt": float(pos["positionAmt"]),
-                    "entryPrice": float(pos["entryPrice"]),
-                    "unRealizedProfit": float(pos["unRealizedProfit"]),
-                    "leverage": int(pos.get("leverage", 3))
-                }
+                if float(pos.get("positionAmt", 0)) != 0:
+                    return {
+                        "symbol": pos["symbol"],
+                        "side": "long" if float(pos["positionAmt"]) > 0 else "short",
+                        "positionAmt": float(pos["positionAmt"]),
+                        "entryPrice": float(pos["entryPrice"]),
+                        "unRealizedProfit": float(pos.get("unRealizedProfit", 0)),
+                        "leverage": int(pos.get("leverage", 3))
+                    }
             return None
         except Exception as e:
             logging.error(f"[获取持仓失败] {e}")
             return None
+
+    # ==================== 下单与平仓 ====================
 
     def place_market_order(self, symbol: str, side: str, quantity: float):
         try:
@@ -69,11 +72,35 @@ class BinanceClient:
                 quantity=quantity,
                 positionSide="BOTH"
             )
-            logging.info(f"[市价单下单成功] {side} {quantity} {symbol}")
+            logging.info(f"[市价单成功] {side} {quantity} {symbol}")
             return order
         except BinanceAPIException as e:
-            logging.error(f"[市价单下单失败] {e}")
+            logging.error(f"[市价单失败] {e}")
             return None
+
+    def close_all_positions(self, symbol: str = "ETHUSDT"):
+        """强制全平当前持仓（供 supervisor 调用）"""
+        try:
+            position = self.get_current_position(symbol)
+            if not position or position["positionAmt"] == 0:
+                return {"status": "success", "message": "无持仓"}
+
+            qty = abs(position["positionAmt"])
+            side = "SELL" if position["positionAmt"] > 0 else "BUY"
+
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty,
+                reduceOnly=True,
+                positionSide="BOTH"
+            )
+            logging.info(f"[全平成功] {symbol} {qty} 张")
+            return {"status": "success", "order": order}
+        except Exception as e:
+            logging.error(f"[全平失败] {e}")
+            return {"status": "error", "message": str(e)}
 
     def close_partial_position(self, symbol: str, percent: float):
         try:
@@ -98,7 +125,7 @@ class BinanceClient:
             logging.error(f"[部分平仓失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 钉钉美化推送（核心优化） ====================
+    # ==================== 钉钉美化推送 ====================
 
     def _send_dingtalk_markdown(self, title: str, markdown_text: str):
         try:
@@ -117,10 +144,7 @@ class BinanceClient:
 
             data = {
                 "msgtype": "markdown",
-                "markdown": {
-                    "title": title,
-                    "text": markdown_text
-                }
+                "markdown": {"title": title, "text": markdown_text}
             }
             requests.post(url, json=data, timeout=5)
             logging.info(f"[钉钉推送成功] {title}")
@@ -140,7 +164,7 @@ class BinanceClient:
 
 🎯 **止盈目标（预估）**
 - TP1：{tp1:.2f} USDT
-- TP2：{tp2:.2f} USDT  
+- TP2：{tp2:.2f} USDT
 - TP3：{tp3:.2f} USDT
 
 💰 **账户快照**
@@ -172,9 +196,3 @@ class BinanceClient:
 
 ⏰ **时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         self._send_dingtalk_markdown(f"{tp_level} 触发通知", text)
-
-
-# ==================== 便捷函数 ====================
-
-def get_binance_client():
-    return BinanceClient()
