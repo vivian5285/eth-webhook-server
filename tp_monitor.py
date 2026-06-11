@@ -1,4 +1,4 @@
-# tp_monitor.py - 强壮优化版
+# tp_monitor.py - 真正执行止盈版（强壮优化）
 
 import logging
 import threading
@@ -18,13 +18,15 @@ class TPMonitor:
         self.tp3 = None
         self.symbol = "ETHUSDT"
         self.lock = threading.Lock()
+        self.tp1_triggered = False
+        self.tp2_triggered = False
+        self.tp3_triggered = False
 
     def start(self):
         with self.lock:
             if self.is_running:
-                logging.warning("[TP监控] 已经在运行中，跳过重复启动")
+                logging.warning("[TP监控] 已在运行中")
                 return
-
             try:
                 self.twm = ThreadedWebsocketManager(
                     api_key=binance_client.api_key,
@@ -37,32 +39,35 @@ class TPMonitor:
                     interval='1m'
                 )
                 self.is_running = True
-                logging.info("[TP监控] WebSocket 已启动（1分钟K线监控）")
+                logging.info("[TP监控] WebSocket 已启动（1分钟K线 + 主动止盈执行）")
             except Exception as e:
                 logging.error(f"[TP监控] 启动失败: {e}")
                 self.is_running = False
 
     def stop(self):
         with self.lock:
-            if not self.is_running or not self.twm:
-                return
-            try:
-                self.twm.stop()
-                self.is_running = False
-                logging.info("[TP监控] WebSocket 已停止")
-            except Exception as e:
-                logging.error(f"[TP监控] 停止异常: {e}")
+            if self.twm:
+                try:
+                    self.twm.stop()
+                    self.is_running = False
+                    logging.info("[TP监控] WebSocket 已停止")
+                except Exception as e:
+                    logging.error(f"[TP监控] 停止异常: {e}")
 
     def set_tp_levels(self, tp1, tp2, tp3):
         with self.lock:
             self.tp1 = tp1
             self.tp2 = tp2
             self.tp3 = tp3
-            logging.info(f"[TP监控] 已设置止盈目标: TP1={tp1}, TP2={tp2}, TP3={tp3}")
+            self.tp1_triggered = False
+            self.tp2_triggered = False
+            self.tp3_triggered = False
+            logging.info(f"[TP监控] 已设置止盈目标 → TP1:{tp1}, TP2:{tp2}, TP3:{tp3}")
 
     def clear_tp_levels(self):
         with self.lock:
             self.tp1 = self.tp2 = self.tp3 = None
+            self.tp1_triggered = self.tp2_triggered = self.tp3_triggered = False
             logging.info("[TP监控] 已清除止盈目标")
 
     def _on_kline(self, msg):
@@ -73,17 +78,40 @@ class TPMonitor:
             kline = msg['k']
             close_price = float(kline['c'])
 
-            if not any([self.tp1, self.tp2, self.tp3]):
-                return
+            with self.lock:
+                if not any([self.tp1, self.tp2, self.tp3]):
+                    return
 
-            # 这里可以后续扩展实际的止盈判断逻辑
-            # 当前先只做日志记录
-            if self.tp3 and close_price >= self.tp3:
-                logging.info(f"[TP监控] 价格达到 TP3: {close_price}")
-            elif self.tp2 and close_price >= self.tp2:
-                logging.info(f"[TP监控] 价格达到 TP2: {close_price}")
-            elif self.tp1 and close_price >= self.tp1:
-                logging.info(f"[TP监控] 价格达到 TP1: {close_price}")
+                position = binance_client.get_current_position(self.symbol)
+                if not position or position["positionAmt"] == 0:
+                    return
+
+                current_qty = abs(position["positionAmt"])
+
+                # TP3 全平（优先判断）
+                if self.tp3 and close_price >= self.tp3 and not self.tp3_triggered:
+                    logging.info(f"[TP监控] 触发 TP3 全平 → 价格 {close_price}")
+                    result = binance_client.close_all_positions(self.symbol)
+                    if result.get("status") == "success":
+                        binance_client.send_tp_trigger_report("TP3", 1.0, 0)
+                        self.tp3_triggered = True
+                        self.clear_tp_levels()
+
+                # TP2 平剩余仓位约30%
+                elif self.tp2 and close_price >= self.tp2 and not self.tp2_triggered:
+                    logging.info(f"[TP监控] 触发 TP2 → 价格 {close_price}")
+                    result = binance_client.close_partial_position(self.symbol, 0.3)
+                    if result.get("status") == "success":
+                        binance_client.send_tp_trigger_report("TP2", 0.3, current_qty * 0.7)
+                        self.tp2_triggered = True
+
+                # TP1 平30%
+                elif self.tp1 and close_price >= self.tp1 and not self.tp1_triggered:
+                    logging.info(f"[TP监控] 触发 TP1 → 价格 {close_price}")
+                    result = binance_client.close_partial_position(self.symbol, 0.3)
+                    if result.get("status") == "success":
+                        binance_client.send_tp_trigger_report("TP1", 0.3, current_qty * 0.7)
+                        self.tp1_triggered = True
 
         except Exception as e:
             logging.error(f"[TP监控] K线处理异常: {e}")
