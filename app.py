@@ -1,4 +1,4 @@
-# app.py（最终版 - 实盘确认后才推送钉钉）
+# app.py（修改后版本 - 报告权限已收归监督层）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from binance_client import BinanceClient
 from tp_monitor import TPMonitor
 from position_manager import PositionManager
-from daily_report_scheduler import DailyReportScheduler
+from position_supervisor import supervisor   # ← 引入监督层
 
 load_dotenv()
 
@@ -24,14 +24,10 @@ position_manager = PositionManager()
 tp_monitor = TPMonitor()
 tp_monitor.start()
 
-daily_scheduler = DailyReportScheduler(binance_client, report_time="00:05")
-daily_scheduler.start()
-
 TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
-POSITION_SYNC_INTERVAL = 30
 
 def extract_json_from_text(text: str):
     try:
@@ -90,13 +86,12 @@ def confirm_direction(symbol: str, side: str) -> bool:
         vol_ok = volumes[-1] > vol_ma * 1.1
 
         confirmed = ema_trend_ok and macd_ok and vol_ok
-        logging.info(f"[方向验证] {symbol} {side} | 结果={confirmed}")
         return confirmed
     except Exception as e:
         logging.error(f"[方向验证异常] {e}")
         return True
 
-def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1: float, tp2: float, tp3: float):
+def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1, tp2, tp3):
     try:
         balance = binance_client.get_account_balance() or {}
         equity = balance.get("totalWalletBalance", 0)
@@ -137,138 +132,6 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-def sync_position_from_binance():
-    try:
-        real_pos = binance_client.get_current_position("ETHUSDT")
-        local_pos = position_manager.get_current_position()
-
-        if real_pos:
-            if (not local_pos or
-                local_pos.get("side") != real_pos["side"] or
-                abs(local_pos.get("qty", 0) - real_pos.get("qty", 0)) > 0.001):
-                position_manager.update_position(
-                    real_pos["side"], real_pos["symbol"], real_pos["qty"],
-                    real_pos["avg_price"], 0, 0, 0
-                )
-        else:
-            if local_pos:
-                position_manager.clear_position()
-    except Exception as e:
-        logging.error(f"[后台持仓同步异常] {e}")
-
-def start_position_sync_thread():
-    def _run():
-        logging.info("[后台同步] 持仓同步线程启动")
-        while True:
-            sync_position_from_binance()
-            time.sleep(POSITION_SYNC_INTERVAL)
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
-def place_market_order(signal: str, symbol: str):
-    try:
-        sync_position_from_binance()
-        current_pos = binance_client.get_current_position(symbol)
-
-        # CLOSE_ALL：只平，不开
-        if signal == "CLOSE_ALL":
-            if current_pos:
-                result = binance_client.close_all_positions(symbol)
-                if result.get("status") == "success":
-                    position_manager.clear_position()
-                    # 全平后再次同步并推送
-                    sync_position_from_binance()
-                    send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
-                return result
-            return {"status": "skipped", "message": "当前无持仓"}
-
-        side = "long" if signal == "OPEN_LONG" else "short"
-
-        # ========== 统一先平后开 ==========
-        if current_pos:
-            logging.info(f"[先平后开] 当前持有 {current_pos['side']}，收到 {signal}，先全平再开新仓")
-
-            close_result = binance_client.close_all_positions(symbol)
-            if close_result.get("status") != "success":
-                return {"status": "error", "message": "全平失败"}
-
-            position_manager.clear_position()
-            send_beautiful_close_report("先平后开（新信号触发）", symbol)
-
-            # 平仓后强制确认
-            time.sleep(2.5)
-            current_pos = binance_client.get_current_position(symbol)
-            if current_pos:
-                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
-                return {"status": "error", "message": "平仓后仍存在持仓"}
-
-        # 方向验证（只警告）
-        if not confirm_direction(symbol, side):
-            logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续下单")
-
-        # 开新仓
-        try:
-            qty = calculate_position_size(symbol)
-            if qty <= 0:
-                return {"status": "error", "message": "仓位计算无效"}
-
-            order_side = "BUY" if signal == "OPEN_LONG" else "SELL"
-            order = binance_client.client.futures_create_order(
-                symbol=symbol,
-                side=order_side,
-                type="MARKET",
-                quantity=qty
-            )
-
-            entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
-
-            # 计算 TP
-            try:
-                klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
-                highs = [float(k[2]) for k in klines]
-                lows = [float(k[3]) for k in klines]
-                closes = [float(k[4]) for k in klines]
-                tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
-                atr = sum(tr_list) / len(tr_list)
-            except:
-                atr = 8.0
-
-            if signal == "OPEN_LONG":
-                tp1 = round(entry_price + atr * 1.28, 2)
-                tp2 = round(entry_price + atr * 2.5, 2)
-                tp3 = round(entry_price + atr * 3.6, 2)
-            else:
-                tp1 = round(entry_price - atr * 1.28, 2)
-                tp2 = round(entry_price - atr * 2.5, 2)
-                tp3 = round(entry_price - atr * 3.6, 2)
-
-            logging.info(f"[开仓API返回成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
-
-            # 【关键】开新仓后强制等待 + 再次查询真实持仓
-            time.sleep(2.0)
-            new_pos = binance_client.get_current_position(symbol)
-
-            # 只有真实持仓方向和数量都正确，才认为开仓成功
-            if new_pos and new_pos.get("side") == side and abs(new_pos.get("qty", 0) - qty) < 0.01:
-                logging.info(f"[实盘确认成功] {signal} 持仓已确认，方向和数量一致")
-
-                position_manager.update_position(side, symbol, qty, entry_price, tp1, tp2, tp3)
-                sync_position_from_binance()  # 最后再同步一次
-                send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
-
-                return {"status": "success", "side": signal, "qty": qty, "order": order}
-            else:
-                logging.error(f"[实盘确认失败] 开新仓后未检测到正确 {side} 持仓")
-                return {"status": "error", "message": f"开新仓后实盘未确认到 {side} 持仓"}
-
-        except Exception as open_err:
-            logging.error(f"[开新仓失败] {signal} {symbol} | {open_err}")
-            return {"status": "error", "message": f"开新仓失败: {str(open_err)}"}
-
-    except Exception as e:
-        logging.error(f"[下单整体失败] {signal} {symbol} | {e}")
-        return {"status": "error", "message": str(e)}
-
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -277,18 +140,17 @@ def webhook():
             return jsonify({"status": "error", "message": "无法解析信号"}), 400
 
         signal = data.get("signal")
-        symbol = data.get("symbol", "ETHUSDT")
-        logging.info(f"[Webhook] 收到信号 → {signal} | {symbol}")
+        logging.info(f"[Webhook] 收到信号 → {signal}")
 
-        if signal in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
-            return jsonify(place_market_order(signal, symbol)), 200
-        else:
-            return jsonify({"status": "ignored"}), 200
+        # 只转发给监督层
+        result = supervisor.handle_new_signal(signal)
+        return jsonify(result), 200
+
     except Exception as e:
         logging.error(f"[Webhook异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 启动 ===")
-    start_position_sync_thread()
+    logging.info("=== ETH Webhook Server 启动（监督层已接管） ===")
     app.run(host="0.0.0.0", port=5000)
