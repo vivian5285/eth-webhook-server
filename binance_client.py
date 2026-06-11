@@ -74,7 +74,7 @@ class BinanceClient:
             logging.error(f"[仓位计算异常] {e}")
             return 1
 
-    # ==================== 交易方法 ====================
+    # ==================== 基础交易方法 ====================
     def get_current_price(self, symbol: str = "ETHUSDT") -> float:
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
