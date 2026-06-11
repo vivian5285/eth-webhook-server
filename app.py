@@ -1,4 +1,4 @@
-# app.py（完整优美版 - 含美化开仓日报）
+# app.py（最终完整优美版 - 开仓/平仓美化钉钉日报 + 异步二次验证）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -83,8 +83,8 @@ def confirm_direction(symbol: str, side: str) -> bool:
         logging.error(f"[二次验证异常] {e}")
         return True
 
+# ==================== 美化开仓成功钉钉日报 ====================
 def send_beautiful_open_report(signal: str, symbol: str, qty: float):
-    """美化开仓成功钉钉日报"""
     try:
         balance_info = binance_client.get_account_balance() or {}
         equity = balance_info.get("totalWalletBalance", 0)
@@ -104,14 +104,36 @@ def send_beautiful_open_report(signal: str, symbol: str, qty: float):
             f"**💰 账户快照**\n"
             f"- 账户权益：{equity:.2f} USDT\n"
             f"- 可用余额：{available:.2f} USDT\n\n"
-            f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"> 如有疑问请及时人工复核"
+            f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         binance_client._send_dingtalk(title, content)
-        logging.info(f"[开仓日报] 已推送美化钉钉: {signal} {symbol}")
+        logging.info(f"[开仓日报] 已推送: {signal} {symbol}")
     except Exception as e:
         logging.error(f"[开仓日报发送失败] {e}")
 
+# ==================== 美化平仓成功钉钉日报 ====================
+def send_beautiful_close_report(reason: str, symbol: str, qty: float = 0):
+    try:
+        balance_info = binance_client.get_account_balance() or {}
+        equity = balance_info.get("totalWalletBalance", 0)
+        available = balance_info.get("availableBalance", 0)
+
+        title = "📉 平仓成功"
+        content = (
+            f"**平仓原因**：{reason}\n"
+            f"**币种**：{symbol}\n"
+            f"**平仓数量**：{qty if qty > 0 else '全部'}\n\n"
+            f"**💰 账户快照**\n"
+            f"- 账户权益：{equity:.2f} USDT\n"
+            f"- 可用余额：{available:.2f} USDT\n\n"
+            f"**⏰ 执行时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        binance_client._send_dingtalk(title, content)
+        logging.info(f"[平仓日报] 已推送: {reason} {symbol}")
+    except Exception as e:
+        logging.error(f"[平仓日报发送失败] {e}")
+
+# ==================== 后台二次验证 ====================
 def background_direction_check(symbol: str, signal: str):
     side = "long" if signal == "OPEN_LONG" else "short"
     confirmed = confirm_direction(symbol, side)
@@ -191,10 +213,13 @@ def webhook():
             result = binance_client.close_all_positions(symbol)
             if result.get("status") == "success":
                 position_manager.clear_position()
+                # 发送美化平仓日报
+                send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
             return jsonify(result), 200
 
         elif signal == "TP_PARTIAL":
             logging.info(f"[TP_PARTIAL] {data.get('reason', '')}")
+            # TP_PARTIAL 主要由 TPMonitor 处理，这里可按需补充
             return jsonify({"status": "ignored"}), 200
 
         else:
