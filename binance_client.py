@@ -1,4 +1,4 @@
-# binance_client.py - 最终完整加强版（含详细账户信息）
+# binance_client.py - 最终加强版
 
 import os
 import time
@@ -28,7 +28,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 账户信息（加强版） ====================
+    # ==================== 账户信息 ====================
 
     def get_account_balance(self):
         try:
@@ -43,7 +43,7 @@ class BinanceClient:
             return {"totalWalletBalance": 0, "availableBalance": 0, "totalUnrealizedProfit": 0}
 
     def get_detailed_account_info(self):
-        """获取更详细的账户信息（保证金比例、杠杆等）"""
+        """获取详细账户信息（含保证金比例、杠杆等）"""
         try:
             account = self.client.futures_account()
             position = self.get_current_position()
@@ -52,9 +52,9 @@ class BinanceClient:
                 "totalWalletBalance": float(account.get("totalWalletBalance", 0)),
                 "availableBalance": float(account.get("availableBalance", 0)),
                 "totalUnrealizedProfit": float(account.get("totalUnrealizedProfit", 0)),
-                "marginRatio": float(account.get("marginRatio", 0)),           # 保证金比例
-                "maintMargin": float(account.get("maintMargin", 0)),           # 维持保证金
-                "initialMargin": float(account.get("initialMargin", 0)),       # 初始保证金
+                "marginRatio": float(account.get("marginRatio", 0)),
+                "maintMargin": float(account.get("maintMargin", 0)),
+                "initialMargin": float(account.get("initialMargin", 0)),
                 "maxWithdrawAmount": float(account.get("maxWithdrawAmount", 0)),
             }
 
@@ -154,7 +154,7 @@ class BinanceClient:
             logging.error(f"[部分平仓失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 钉钉美化推送（加强版） ====================
+    # ==================== 钉钉美化报告（加强版） ====================
 
     def _send_dingtalk_markdown(self, title: str, markdown_text: str):
         try:
