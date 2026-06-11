@@ -1,66 +1,133 @@
-# position_supervisor.py（强监督 + 主动纠错版）
+# position_supervisor.py
 import logging
 import time
+import threading
+from datetime import datetime
 from binance_client import BinanceClient
 from position_manager import PositionManager
 
 binance_client = BinanceClient()
 position_manager = PositionManager()
 
-def enforce_signal_policy(signal: str, symbol: str = "ETHUSDT"):
-    """
-    监督层核心函数（最高权限）
-    - 任何方向信号都必须先平后开
-    - 检测到执行偏差时主动纠错
-    - 只有实盘完全对齐后才返回成功
-    """
-    try:
-        current_pos = binance_client.get_current_position(symbol)
-        desired_side = "long" if signal == "OPEN_LONG" else "short"
+class PositionSupervisor:
+    def __init__(self):
+        self.desired_side = None          # 最新信号期望的方向
+        self.last_signal = None
+        self.consecutive_failure_count = 0
+        self.max_failures = 3             # 连续失败3次就暂停
+        self.is_paused = False
+        self.lock = threading.Lock()
 
-        logging.info(f"[监督层] 收到信号 {signal}，当前持仓: {current_pos['side'] if current_pos else '无'}")
+        # 启动后台高频刷新线程（4秒）
+        self.refresh_thread = threading.Thread(target=self._background_refresh_loop, daemon=True)
+        self.refresh_thread.start()
+        logging.info("[监督层] 后台刷新线程已启动（每4秒）")
 
-        # 1. 有持仓（无论同反方向）→ 必须先全平
+    def _background_refresh_loop(self):
+        while True:
+            try:
+                if not self.is_paused:
+                    self._reconcile_position()
+            except Exception as e:
+                logging.error(f"[监督层后台刷新异常] {e}")
+            time.sleep(4)  # 严格4秒
+
+    def _reconcile_position(self):
+        """后台对齐检查"""
+        with self.lock:
+            real_pos = binance_client.get_current_position("ETHUSDT")
+
+            if self.desired_side and real_pos and real_pos.get("side") != self.desired_side:
+                logging.warning(f"[监督层后台] 发现偏差：期望 {self.desired_side}，实际 {real_pos.get('side')}，尝试主动纠错")
+                self._force_correct_position()
+
+    def handle_new_signal(self, signal: str):
+        """Webhook 收到新信号后调用这里（最高权限入口）"""
+        with self.lock:
+            if self.is_paused:
+                logging.warning("[监督层] 当前处于暂停状态，忽略新信号")
+                return {"status": "paused"}
+
+            self.last_signal = signal
+
+            if signal in ["OPEN_LONG", "OPEN_SHORT"]:
+                self.desired_side = "long" if signal == "OPEN_LONG" else "short"
+                logging.info(f"[监督层] 收到新信号 {signal}，期望方向更新为 {self.desired_side}")
+                return self._enforce_close_then_open(signal)
+
+            elif signal == "CLOSE_ALL":
+                self.desired_side = None
+                return self._execute_close_all()
+
+            return {"status": "ignored"}
+
+    def _enforce_close_then_open(self, signal: str):
+        """核心策略：无论同反方向，一律先平后开"""
+        current_pos = binance_client.get_current_position("ETHUSDT")
+
+        # 有持仓 → 强制全平
         if current_pos:
-            logging.info(f"[监督层] 检测到持仓 {current_pos['side']}，执行强制全平")
-            close_result = binance_client.close_all_positions(symbol)
+            logging.info(f"[监督层] 当前有 {current_pos['side']} 仓，执行强制全平")
+            close_result = binance_client.close_all_positions("ETHUSDT")
             if close_result.get("status") != "success":
-                return {"status": "error", "message": "监督层强制平仓失败"}
+                self._handle_correction_failure("平仓失败")
+                return close_result
 
             position_manager.clear_position()
             time.sleep(2.5)
 
-            # 再次确认是否真的平干净
-            current_pos = binance_client.get_current_position(symbol)
+            # 再次确认
+            current_pos = binance_client.get_current_position("ETHUSDT")
             if current_pos:
-                logging.error("[监督层] 平仓后仍存在持仓，主动纠错失败")
-                return {"status": "error", "message": "平仓后仍存在持仓，纠错失败"}
+                self._handle_correction_failure("平仓后仍存在持仓")
+                return {"status": "error", "message": "平仓后仍存在持仓"}
 
-        # 2. 平仓成功后，开新仓（根据最新信号）
-        logging.info(f"[监督层] 仓位已清理，执行开新仓: {signal}")
-        return {"status": "ready_to_open", "desired_side": desired_side, "signal": signal}
+        # 平仓成功，准备开新仓
+        logging.info(f"[监督层] 仓位已清理，准备开新仓: {signal}")
+        return {"status": "ready_to_open", "signal": signal}
 
-    except Exception as e:
-        logging.error(f"[监督层异常] {e}")
-        return {"status": "error", "message": str(e)}
+    def _handle_correction_failure(self, reason: str):
+        """连续纠错失败保护机制"""
+        self.consecutive_failure_count += 1
+        logging.error(f"[监督层] 纠错失败 ({self.consecutive_failure_count}/{self.max_failures}) - {reason}")
 
+        if self.consecutive_failure_count >= self.max_failures:
+            self.is_paused = True
+            logging.critical("[监督层] 连续纠错失败达到上限，系统已暂停交易！")
+            self._send_pause_alert(reason)
 
-def verify_and_correct_after_open(signal: str, symbol: str):
-    """
-    开仓后进行最终验证 + 主动纠错
-    如果实盘和信号不一致，尝试再次修正
-    """
-    time.sleep(2.0)
-    real_pos = binance_client.get_current_position(symbol)
-    desired_side = "long" if signal == "OPEN_LONG" else "short"
+    def _send_pause_alert(self, reason: str):
+        """暂停告警"""
+        try:
+            from app import send_beautiful_close_report  # 仅监督层可调用
+            send_beautiful_close_report(f"【严重告警】系统已暂停 - {reason}", "ETHUSDT")
+        except Exception as e:
+            logging.error(f"[暂停告警发送失败] {e}")
 
-    if real_pos and real_pos.get("side") == desired_side:
-        logging.info(f"[监督层验证] {signal} 执行成功，实盘持仓已对齐")
-        position_manager.update_position(
-            desired_side, symbol, real_pos["qty"], real_pos["avg_price"], 0, 0, 0
-        )
-        return {"status": "success", "real_position": real_pos}
-    else:
-        logging.warning(f"[监督层验证] {signal} 执行后实盘未对齐，尝试主动纠错...")
-        # 这里可以加重试逻辑或告警
-        return {"status": "mismatch", "real_position": real_pos}
+    def _execute_close_all(self):
+        result = binance_client.close_all_positions("ETHUSDT")
+        if result.get("status") == "success":
+            position_manager.clear_position()
+            self.desired_side = None
+            self.consecutive_failure_count = 0
+        return result
+
+    def notify_open_success(self, signal: str, qty: float, entry_price: float, tp1, tp2, tp3):
+        """开仓成功后由执行层调用，监督层负责最终确认和报告"""
+        with self.lock:
+            time.sleep(2.0)
+            real_pos = binance_client.get_current_position("ETHUSDT")
+            desired = "long" if signal == "OPEN_LONG" else "short"
+
+            if real_pos and real_pos.get("side") == desired:
+                logging.info("[监督层] 实盘持仓已对齐，允许推送钉钉报告")
+                self.consecutive_failure_count = 0  # 重置失败计数
+                # 只有这里能触发开仓报告
+                from app import send_beautiful_open_report
+                send_beautiful_open_report(signal, "ETHUSDT", qty, entry_price, tp1, tp2, tp3)
+            else:
+                logging.warning("[监督层] 开仓后实盘未对齐，不推送报告，等待下次对齐")
+                self._handle_correction_failure("开仓后实盘未对齐")
+
+# 全局单例
+supervisor = PositionSupervisor()
