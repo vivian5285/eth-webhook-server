@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 后台同步大幅加强）
+# app.py（最终加强版 - 4场景万无一失）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -31,7 +31,7 @@ TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
-POSITION_SYNC_INTERVAL = 30  # 每30秒同步一次（更频繁）
+POSITION_SYNC_INTERVAL = 30
 
 def extract_json_from_text(text: str):
     try:
@@ -137,32 +137,22 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
-# ==================== 后台持仓同步（大幅加强版） ====================
 def sync_position_from_binance():
     try:
         real_pos = binance_client.get_current_position("ETHUSDT")
         local_pos = position_manager.get_current_position()
 
         if real_pos:
-            # 币安有持仓，强制更新本地（以币安为准）
             if (not local_pos or
                 local_pos.get("side") != real_pos["side"] or
                 abs(local_pos.get("qty", 0) - real_pos.get("qty", 0)) > 0.001):
-
-                logging.info(f"[后台同步] 币安持仓变化 → 更新本地: {real_pos['side']}")
                 position_manager.update_position(
-                    real_pos["side"],
-                    real_pos["symbol"],
-                    real_pos["qty"],
-                    real_pos["avg_price"],
-                    0, 0, 0
+                    real_pos["side"], real_pos["symbol"], real_pos["qty"],
+                    real_pos["avg_price"], 0, 0, 0
                 )
         else:
-            # 币安无持仓，清空本地
             if local_pos:
-                logging.info("[后台同步] 币安无持仓 → 清空本地状态")
                 position_manager.clear_position()
-
     except Exception as e:
         logging.error(f"[后台持仓同步异常] {e}")
 
@@ -172,20 +162,36 @@ def start_position_sync_thread():
         while True:
             sync_position_from_binance()
             time.sleep(POSITION_SYNC_INTERVAL)
-
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
 def place_market_order(signal: str, symbol: str):
     try:
-        # 开仓前先同步一次最新持仓
         sync_position_from_binance()
-
         current_pos = binance_client.get_current_position(symbol)
+
+        # ==================== CLOSE_ALL：只平，不开 ====================
+        if signal == "CLOSE_ALL":
+            if current_pos:
+                result = binance_client.close_all_positions(symbol)
+                if result.get("status") == "success":
+                    position_manager.clear_position()
+                    send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
+                return result
+            return {"status": "skipped", "message": "当前无持仓"}
+
+        # ==================== OPEN_LONG / OPEN_SHORT：统一先平后开 ====================
         side = "long" if signal == "OPEN_LONG" else "short"
 
+        # ========== 场景处理开始 ==========
         if current_pos:
-            logging.info(f"[持仓处理] 当前持有 {current_pos['side']}，收到 {signal}，执行先平后开")
+            # 场景2、3、4：有持仓 → 立即全平
+            if current_pos["side"] == "long" and signal == "OPEN_LONG":
+                logging.info("[场景2] 有多 → 立即全平后再开多（同方向）")
+            elif current_pos["side"] == "long" and signal == "OPEN_SHORT":
+                logging.info("[场景3] 有多 → 立即全平后开空（反方向）")
+            elif current_pos["side"] == "short" and signal == "OPEN_LONG":
+                logging.info("[场景4] 有空 → 立即全平后开多（反方向）")
 
             close_result = binance_client.close_all_positions(symbol)
             if close_result.get("status") != "success":
@@ -194,19 +200,20 @@ def place_market_order(signal: str, symbol: str):
             position_manager.clear_position()
             send_beautiful_close_report("先平后开（新信号触发）", symbol)
 
-            time.sleep(2.0)
+            # 平仓后强制确认
+            time.sleep(2.5)
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.error("[持仓处理] 平仓后仍存在持仓，终止开新仓")
-                return {"status": "error", "message": "平仓后仍存在持仓，无法开新仓"}
+                logging.error("[持仓处理] 平仓后仍存在持仓，终止流程")
+                return {"status": "error", "message": "平仓后仍存在持仓"}
 
+        else:
+            # 场景1：无持仓 → 开多
+            logging.info("[场景1] 无持仓 → 开多")
+
+        # 方向验证（只警告）
         if not confirm_direction(symbol, side):
             logging.warning(f"[方向验证未通过] {signal}，仅发送警告，继续下单")
-            binance_client._send_dingtalk(
-                "🔴 方向二次验证未通过（已继续下单）",
-                f"**信号**：{signal}\n**币种**：{symbol}\n已按策略继续执行下单",
-                is_warning=True
-            )
 
         # 开新仓
         try:
@@ -224,6 +231,7 @@ def place_market_order(signal: str, symbol: str):
 
             entry_price = float(order.get('avgPrice', 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
 
+            # 计算 TP
             try:
                 klines = binance_client.client.get_klines(symbol=symbol, interval=TIMEFRAME, limit=20)
                 highs = [float(k[2]) for k in klines]
@@ -245,7 +253,16 @@ def place_market_order(signal: str, symbol: str):
 
             logging.info(f"[开仓成功] {signal} {symbol} | Qty={qty} | Entry={entry_price}")
 
-            position_manager.update_position(signal.replace("OPEN_", ""), symbol, qty, entry_price, tp1, tp2, tp3)
+            # 开新仓后再次验证真实持仓
+            time.sleep(1.5)
+            new_pos = binance_client.get_current_position(symbol)
+
+            if not new_pos or new_pos.get("side") != side:
+                logging.error(f"[持仓验证失败] 开新仓后未检测到 {side} 持仓")
+                return {"status": "error", "message": f"开新仓后未检测到 {side} 持仓"}
+
+            # 确认成功后才更新和报告
+            position_manager.update_position(side, symbol, qty, entry_price, tp1, tp2, tp3)
             send_beautiful_open_report(signal, symbol, qty, entry_price, tp1, tp2, tp3)
 
             return {"status": "success", "side": signal, "qty": qty, "order": order}
@@ -269,14 +286,8 @@ def webhook():
         symbol = data.get("symbol", "ETHUSDT")
         logging.info(f"[Webhook] 收到信号 → {signal} | {symbol}")
 
-        if signal in ["OPEN_LONG", "OPEN_SHORT"]:
+        if signal in ["OPEN_LONG", "OPEN_SHORT", "CLOSE_ALL"]:
             return jsonify(place_market_order(signal, symbol)), 200
-        elif signal == "CLOSE_ALL":
-            result = binance_client.close_all_positions(symbol)
-            if result.get("status") == "success":
-                position_manager.clear_position()
-                send_beautiful_close_report("手动全平 / CLOSE_ALL", symbol)
-            return jsonify(result), 200
         else:
             return jsonify({"status": "ignored"}), 200
     except Exception as e:
