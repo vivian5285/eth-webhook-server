@@ -22,13 +22,22 @@ class PositionManager:
         return self._get_empty_position()
 
     def _get_empty_position(self):
+        """返回空持仓模板"""
         return {
             "side": "NONE",
             "symbol": "ETHUSDT",
             "qty": 0,
             "avg_price": 0.0,
-            "tp_levels": {"tp1": 0, "tp2": 0, "tp3": 0},
-            "tp_hit": {"tp1": False, "tp2": False, "tp3": False},
+            "tp_levels": {
+                "tp1": 0,
+                "tp2": 0,
+                "tp3": 0
+            },
+            "tp_hit": {
+                "tp1": False,
+                "tp2": False,
+                "tp3": False
+            },
             "last_update": None
         }
 
@@ -40,9 +49,11 @@ class PositionManager:
         except Exception as e:
             logging.error(f"[PositionManager] 保存持仓失败: {e}")
 
-    def update_position(self, side: str, symbol: str, qty: float, avg_price: float, 
+    def update_position(self, side: str, symbol: str, qty: float, avg_price: float,
                         tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        """更新持仓信息（开仓时调用）"""
+        """
+        更新持仓信息（开仓成功后调用）
+        """
         self.position = {
             "side": side.upper(),
             "symbol": symbol,
@@ -53,7 +64,11 @@ class PositionManager:
                 "tp2": tp2,
                 "tp3": tp3
             },
-            "tp_hit": {"tp1": False, "tp2": False, "tp3": False},
+            "tp_hit": {
+                "tp1": False,
+                "tp2": False,
+                "tp3": False
+            },
             "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         self._save_position()
@@ -67,7 +82,7 @@ class PositionManager:
             logging.info(f"[PositionManager] {level.upper()} 已标记为已触发")
 
     def get_current_position(self):
-        """获取当前持仓"""
+        """获取当前持仓（无持仓时返回 None）"""
         if self.position.get("side") == "NONE" or self.position.get("qty", 0) == 0:
             return None
         return self.position.copy()
@@ -78,10 +93,10 @@ class PositionManager:
         self._save_position()
         logging.info("[PositionManager] 持仓已清空")
 
-    def is_tp_hit(self, level: str) -> bool:
-        """检查某个TP是否已触发"""
-        return self.position.get("tp_hit", {}).get(level, False)
-
     def get_tp_levels(self):
         """获取当前TP价格"""
         return self.position.get("tp_levels", {"tp1": 0, "tp2": 0, "tp3": 0})
+
+    def is_tp_hit(self, level: str) -> bool:
+        """检查某个TP是否已触发"""
+        return self.position.get("tp_hit", {}).get(level, False)
