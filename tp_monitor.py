@@ -1,4 +1,4 @@
-# tp_monitor.py - 完整更新版（主动执行止盈 + 通知智慧层）
+# tp_monitor.py - 最终完整更新版（主动执行止盈 + 通知智慧层）
 
 import logging
 import threading
@@ -94,7 +94,7 @@ class TPMonitor:
                     logging.info(f"[TP监控] 触发 TP3 全平 → 当前价 {close_price}")
                     result = binance_client.close_all_positions(self.symbol)
                     if result.get("status") == "success":
-                        # 通知智慧层，由智慧层核实后统一发报告
+                        # 通知智慧层，由智慧层核实实盘后统一发报告
                         supervisor.notify_tp_hit("TP3", 1.0, 0)
                         self.tp3_triggered = True
                         self.clear_tp_levels()
