@@ -1,4 +1,4 @@
-# binance_client.py - 最终完整优化版（2026-06-11）
+# binance_client.py - 最终完整版
 
 import os
 import time
@@ -27,8 +27,6 @@ class BinanceClient:
 
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
-
-    # ==================== 账户与持仓查询 ====================
 
     def get_account_balance(self):
         try:
@@ -61,8 +59,6 @@ class BinanceClient:
             logging.error(f"[获取持仓失败] {e}")
             return None
 
-    # ==================== 下单与平仓 ====================
-
     def place_market_order(self, symbol: str, side: str, quantity: float):
         try:
             order = self.client.futures_create_order(
@@ -79,7 +75,6 @@ class BinanceClient:
             return None
 
     def close_all_positions(self, symbol: str = "ETHUSDT"):
-        """强制全平当前持仓（供 supervisor 调用）"""
         try:
             position = self.get_current_position(symbol)
             if not position or position["positionAmt"] == 0:
@@ -96,7 +91,7 @@ class BinanceClient:
                 reduceOnly=True,
                 positionSide="BOTH"
             )
-            logging.info(f"[全平成功] {symbol} {qty} 张")
+            logging.info(f"[全平成功] {symbol}")
             return {"status": "success", "order": order}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
@@ -119,7 +114,7 @@ class BinanceClient:
                 reduceOnly=True,
                 positionSide="BOTH"
             )
-            logging.info(f"[部分平仓成功] {percent*100:.0f}% {symbol}")
+            logging.info(f"[部分平仓成功] {percent*100:.0f}%")
             return {"status": "success", "order": order}
         except Exception as e:
             logging.error(f"[部分平仓失败] {e}")
@@ -147,52 +142,55 @@ class BinanceClient:
                 "markdown": {"title": title, "text": markdown_text}
             }
             requests.post(url, json=data, timeout=5)
-            logging.info(f"[钉钉推送成功] {title}")
         except Exception as e:
             logging.error(f"[钉钉发送失败] {e}")
 
     def send_position_open_report(self, signal: str, qty: float, entry_price: float,
-                                  tp1: float = 0, tp2: float = 0, tp3: float = 0,
-                                  risk_percent: float = 0.01):
-        direction = "做多 🟢" if signal == "OPEN_LONG" else "做空 🔴"
-        text = f"""### {direction} 开仓成功
+                                  tp1: float = 0, tp2: float = 0, tp3: float = 0):
+        direction = "开多 🟢" if signal == "OPEN_LONG" else "开空 🔴"
 
-**信号类型**：{signal}  
-**币种**：ETHUSDT  
-**下单数量**：{qty} 张  
-**开仓均价**：{entry_price:.2f} USDT
+        if tp1 == 0: tp1 = round(entry_price * 1.0128, 2)
+        if tp2 == 0: tp2 = round(entry_price * 1.025, 2)
+        if tp3 == 0: tp3 = round(entry_price * 1.036, 2)
 
-🎯 **止盈目标（预估）**
-- TP1：{tp1:.2f} USDT
-- TP2：{tp2:.2f} USDT
-- TP3：{tp3:.2f} USDT
+        text = f"""### {direction} 成功
 
-💰 **账户快照**
-- 风险比例：{risk_percent * 100:.1f}%
-- 账户权益：{self.get_account_balance().get('totalWalletBalance', 0):.2f} USDT
+**数量**：{qty} 张  
+**开仓价**：{entry_price:.2f} USDT
 
-⏰ **时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+🎯 **止盈目标**
+- 止盈1：{tp1:.2f} USDT
+- 止盈2：{tp2:.2f} USDT
+- 止盈3：{tp3:.2f} USDT
+
+💰 **账户权益**：{self.get_account_balance().get('totalWalletBalance', 0):.2f} USDT
+
+⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
         self._send_dingtalk_markdown("开仓通知", text)
 
-    def send_position_close_report(self, reason: str, exit_price: float, pnl: float, duration_minutes: int = 0):
-        pnl_emoji = "💰" if pnl >= 0 else "📉"
-        text = f"""### {pnl_emoji} 平仓完成
+    def send_position_close_report(self, reason: str, exit_price: float = 0, pnl: float = 0):
+        text = f"""### 📉 平仓完成
 
-**平仓原因**：{reason}  
-**平仓价格**：{exit_price:.2f} USDT  
-**持仓时长**：{duration_minutes} 分钟
-
+**原因**：{reason}  
+**平仓价**：{exit_price:.2f} USDT  
 **盈亏**：{pnl:+.2f} USDT
 
-⏰ **时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
         self._send_dingtalk_markdown("平仓通知", text)
 
     def send_tp_trigger_report(self, tp_level: str, close_percent: float, remaining_qty: float):
         text = f"""### 🎯 {tp_level} 触发
 
-**止盈档位**：{tp_level}  
-**平仓比例**：{close_percent * 100:.0f}%  
+**平仓比例**：{close_percent*100:.0f}%  
 **剩余仓位**：{remaining_qty} 张
 
-⏰ **时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
-        self._send_dingtalk_markdown(f"{tp_level} 触发通知", text)
+⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
+        self._send_dingtalk_markdown(f"{tp_level} 止盈通知", text)
+
+    def send_close_all_report(self, reason: str = "手动全平"):
+        text = f"""### 🔴 全平完成
+
+**原因**：{reason}
+
+⏰ {datetime.now().strftime('%m-%d %H:%M:%S')}"""
+        self._send_dingtalk_markdown("全平通知", text)
