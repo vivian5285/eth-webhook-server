@@ -1,4 +1,4 @@
-# app.py（完整最终版 - 适配 User Data Stream 监督层）
+# app.py（完整最终版 - 已集成每日报告调度器）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -8,7 +8,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from binance_client import BinanceClient
-from position_supervisor import supervisor   # 引入监督层
+from position_supervisor import supervisor
+from daily_report_scheduler import daily_report_scheduler   # 新增
 
 load_dotenv()
 
@@ -27,7 +28,6 @@ def extract_json_from_text(text: str):
     return None
 
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
-    """根据风险比例计算下单数量"""
     try:
         balance_info = binance_client.get_account_balance()
         if not balance_info:
@@ -48,7 +48,7 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         logging.error(f"[仓位计算异常] {e}")
         return 0.05
 
-# ==================== 报告函数（仅供监督层调用） ====================
+# ==================== 报告函数（供监督层和调度器调用） ====================
 
 def send_beautiful_open_report(signal: str, symbol: str, qty: float, entry_price: float, tp1, tp2, tp3):
     try:
@@ -106,10 +106,8 @@ def webhook():
 
         logging.info(f"[Webhook] 收到信号 → {signal}")
 
-        # 转发给监督层处理
         result = supervisor.handle_new_signal(signal)
 
-        # 如果监督层返回 ready_to_open，则由 app.py 执行实际下单
         if result.get("status") == "ready_to_open":
             try:
                 qty = calculate_position_size()
@@ -130,9 +128,7 @@ def webhook():
 
                 logging.info(f"[下单成功] {signal} {qty} 张 @ {entry_price}")
 
-                # 通知监督层进行最终核实和报告
                 supervisor.notify_open_success(signal, qty, entry_price, 0, 0, 0)
-
                 return jsonify({"status": "success", "signal": signal, "qty": qty}), 200
 
             except Exception as order_err:
@@ -147,5 +143,9 @@ def webhook():
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 已启动（User Data Stream 监督层模式） ===")
+    logging.info("=== ETH Webhook Server 已启动（User Data Stream + 每日报告模式） ===")
+    
+    # 启动每日报告调度器
+    daily_report_scheduler.start()
+    
     app.run(host="0.0.0.0", port=5000)
