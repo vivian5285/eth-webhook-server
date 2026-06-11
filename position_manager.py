@@ -1,4 +1,4 @@
-# position_manager.py（最终完整版 - 支持 last_signal_direction 持久化）
+# position_manager.py（最终完整强壮版）
 import json
 import os
 import logging
@@ -11,7 +11,7 @@ class PositionManager:
         self.position = self._load_position()
 
     def _load_position(self):
-        """加载当前持仓信息（包括 last_signal_direction）"""
+        """加载当前持仓信息（包含 last_signal_direction）"""
         if os.path.exists(POSITION_FILE):
             try:
                 with open(POSITION_FILE, "r", encoding="utf-8") as f:
@@ -28,7 +28,7 @@ class PositionManager:
         except Exception as e:
             logging.error(f"[持仓文件保存失败] {e}")
 
-    # ==================== 持仓相关方法 ====================
+    # ==================== 持仓管理 ====================
     def save_position(self, symbol: str, entry_price: float, atr: float, tp_prices: dict, side: str):
         """保存新开仓信息"""
         self.position = {
@@ -77,7 +77,7 @@ class PositionManager:
     # ==================== last_signal_direction 持久化 ====================
     def save_last_signal_direction(self, direction: str):
         """保存最后收到的 TV 信号方向（持久化）"""
-        if "last_signal_direction" not in self.position:
+        if self.position.get("status") != "open":
             self.position = {"status": "closed"}
         self.position["last_signal_direction"] = direction
         self._save_position()
