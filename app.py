@@ -1,4 +1,4 @@
-# app.py - 最终干净稳定版
+# app.py - 最终完整稳定版（含全平钉钉保证推送）
 
 from flask import Flask, request, jsonify
 import os
@@ -37,9 +37,9 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         equity = balance_info.get("totalWalletBalance", 0)
 
         if equity < 3000:
-            risk_percent = 0.075          # 小资金：7.5%
+            risk_percent = 0.075
         elif equity < 10000:
-            risk_percent = 0.03           # 中资金：3%
+            risk_percent = 0.03
         else:
             risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
 
@@ -69,6 +69,7 @@ def webhook():
 
         result = supervisor.handle_new_signal(signal)
 
+        # ==================== 开仓处理 ====================
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
             if qty <= 0:
@@ -82,32 +83,48 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 计算止盈价格
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
 
-                # 设置止盈目标（关键）
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 发送开仓美化报告
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+                # 发送开仓报告
+                try:
+                    binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+                except Exception as e:
+                    logging.error(f"[开仓报告发送失败] {e}")
 
                 return jsonify({"status": "success", "qty": qty}), 200
             else:
                 return jsonify({"status": "error"}), 500
 
+        # ==================== 全平处理（加强版，保证发送钉钉） ====================
         elif signal == "CLOSE_ALL":
+            logging.info("[Webhook] 收到 CLOSE_ALL 信号，开始执行全平")
             close_result = binance_client.close_all_positions(symbol)
-            if close_result.get("status") == "success":
-                binance_client.send_close_all_report("收到 CLOSE_ALL 信号")
+
+            # 无论平仓是否成功，都尝试发送钉钉报告
+            try:
+                reason = "收到 CLOSE_ALL 信号"
+                if close_result.get("status") != "success":
+                    reason = f"全平失败: {close_result.get('message', '未知错误')}"
+                binance_client.send_close_all_report(reason)
+            except Exception as e:
+                logging.error(f"[全平报告发送失败] {e}")
+
+            # 清除止盈目标
+            try:
                 tp_monitor.clear_tp_levels()
+            except Exception as e:
+                logging.error(f"[清除止盈目标失败] {e}")
+
             return close_result
 
         return jsonify(result), 200
 
     except Exception as e:
-        logging.error(f"[Webhook 异常] {e}")
+        logging.error(f"[Webhook 严重异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
