@@ -1,4 +1,4 @@
-# tp_monitor.py（最终完整强壮版 - 含重启恢复能力）
+# tp_monitor.py（最终完整强壮版）
 import time
 import threading
 import logging
@@ -113,23 +113,42 @@ class TPMonitor:
             logging.info(f"[早期保本移动] 当前浮盈 {profit_pct:.2f}%，提前进入紧追踪模式，避免利润回吐")
 
     def _execute_tp(self, level: str, price: float, pos: dict, percent: float):
-        """执行 TP 平仓"""
+        """执行 TP 平仓，并计算真实止盈金额"""
         logging.info(f"[TP触发] {level} @ {price}")
 
         self.pm.mark_tp_hit(level)
         self.last_action_time = time.time()
 
+        entry_price = float(pos.get("entry_price", 0))
+        side = pos.get("side", "long")
+
+        # ==================== 计算真实止盈金额 ====================
+        profit_amount = None
+        try:
+            current_pos = self.client.get_current_position(pos["symbol"])
+            if current_pos:
+                current_qty = abs(float(current_pos["positionAmt"]))
+                close_qty = current_qty * percent if percent < 1.0 else current_qty
+
+                if side == "long":
+                    profit_amount = (price - entry_price) * close_qty
+                else:
+                    profit_amount = (entry_price - price) * close_qty
+        except Exception as e:
+            logging.error(f"[止盈金额计算失败] {e}")
+
+        # 执行平仓
         if percent >= 1.0:
             self.client.close_all_positions(pos["symbol"])
             self.pm.clear_position()
         else:
             self.client.close_partial_position(pos["symbol"], percent)
 
-        # 发送钉钉报表
+        # 发送钉钉报表（传入真实止盈金额）
         try:
             from app import send_tp_hit_report
             report = self.client.get_detailed_report()
-            send_tp_hit_report(level, price, report)
+            send_tp_hit_report(level, price, profit_amount=profit_amount, report=report)
         except Exception as e:
             logging.error(f"[TP报表发送失败] {e}")
 
