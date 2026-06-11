@@ -1,4 +1,4 @@
-# position_supervisor.py - 智慧层加强版（真实核查后才发钉钉）
+# position_supervisor.py - 最终统一版（含公开全平方法）
 
 import logging
 import time
@@ -41,7 +41,6 @@ class PositionSupervisor:
                 logging.error(f"[监督层] WebSocket 停止异常: {e}")
 
     def _on_account_update(self, msg):
-        # 可扩展实时同步逻辑
         pass
 
     def handle_new_signal(self, signal: str):
@@ -56,34 +55,23 @@ class PositionSupervisor:
 
             elif signal == "CLOSE_ALL":
                 self.desired_side = None
-                return self._execute_close_all(verified=True)
+                return self.execute_close_all_with_report()
 
             return {"status": "ignored"}
 
     def _enforce_close_then_open(self, signal: str):
         current_pos = binance_client.get_current_position("ETHUSDT")
         if current_pos and current_pos.get("positionAmt", 0) != 0:
-            self._execute_close_all(verified=False)  # 先平，不发报告
+            self._execute_close_all(verified=False)
             time.sleep(2.5)
-
         return {"status": "ready_to_open", "signal": signal}
 
-    # ==================== 开仓成功通知（核查后发报告） ====================
-    def notify_open_success(self, signal: str, qty: float, entry_price: float,
-                            tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        time.sleep(2.0)  # 等待实盘生效
-        real_pos = binance_client.get_current_position("ETHUSDT")
+    # ==================== 公开方法：全平 + 核实 + 发报告 ====================
+    def execute_close_all_with_report(self):
+        """智慧层统一处理全平 + 实盘核查 + 发送钉钉报告"""
+        return self._execute_close_all(verified=True)
 
-        if real_pos and real_pos.get("side") == ("long" if signal == "OPEN_LONG" else "short"):
-            logging.info(f"[监督层] 开仓核实成功 → {signal}")
-            try:
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-            except Exception as e:
-                logging.error(f"[监督层] 开仓报告发送失败: {e}")
-        else:
-            logging.warning(f"[监督层] 开仓核实失败，实盘持仓与预期不符")
-
-    # ==================== 全平执行（可选择是否核查后发报告） ====================
+    # ==================== 内部全平逻辑 ====================
     def _execute_close_all(self, verified: bool = True):
         close_result = binance_client.close_all_positions("ETHUSDT")
 
@@ -98,21 +86,32 @@ class PositionSupervisor:
             else:
                 logging.warning("[监督层] 全平后仍存在持仓，建议人工检查")
         else:
-            # 不需要发报告的场景（如内部先平再开）
+            # 内部先平再开的场景，不发报告
             pass
 
         position_manager.clear_position()
         self.consecutive_failure_count = 0
         return close_result
 
-    def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
-        """TP触发后由 tp_monitor 调用，智慧层核查后发报告"""
-        time.sleep(1.5)
+    def notify_open_success(self, signal: str, qty: float, entry_price: float,
+                            tp1: float = 0, tp2: float = 0, tp3: float = 0):
+        time.sleep(2.0)
         real_pos = binance_client.get_current_position("ETHUSDT")
 
+        if real_pos and real_pos.get("side") == ("long" if signal == "OPEN_LONG" else "short"):
+            logging.info(f"[监督层] 开仓核实成功 → {signal}")
+            try:
+                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+            except Exception as e:
+                logging.error(f"[监督层] 开仓报告发送失败: {e}")
+        else:
+            logging.warning(f"[监督层] 开仓核实失败，实盘持仓与预期不符")
+
+    def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
+        time.sleep(1.5)
         try:
             if level.upper() == "TP3":
-                binance_client.send_close_all_report(f"TP3 触发全平（剩余仓位已确认平掉）")
+                binance_client.send_close_all_report(f"TP3 触发全平（实盘已确认）")
             else:
                 binance_client.send_tp_trigger_report(level, closed_qty, remaining_qty)
         except Exception as e:
