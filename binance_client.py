@@ -1,130 +1,165 @@
-# binance_client.py（最终完整强壮版）
+# binance_client.py（最终优化完整版）
+import os
+import json
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
 import logging
-import math
+from datetime import datetime
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
 class BinanceClient:
-    def __init__(self, 
-                 api_key: str = None, 
-                 api_secret: str = None,
-                 risk_percent: float = 0.03,
-                 max_leverage: float = 3.0,
-                 atr_multiplier_sl: float = 0.92,
-                 max_position_value_usdt: float = 50000):
-        
-        self.client = Client(api_key, api_secret)
-        self.risk_percent = risk_percent
-        self.max_leverage = max_leverage
-        self.atr_multiplier_sl = atr_multiplier_sl
-        self.max_position_value_usdt = max_position_value_usdt
-        
-        logging.info("[BinanceClient] 初始化完成")
+    def __init__(self, api_key=None, api_secret=None, account_name="main"):
+        self.account_name = account_name.lower()
 
-    # ==================== 资金规模差异化风险管理 ====================
-    def get_risk_percent(self) -> float:
-        """
-        根据当前账户权益自动判断资金规模，返回对应风险比例
-        - 小资金（< 3000U）：7%
-        - 中资金（3000~10000U）：4.5%
-        - 大资金（> 10000U）：2.5%
-        """
+        # 1. 优先使用传入参数
+        if api_key and api_secret:
+            self.api_key = api_key
+            self.api_secret = api_secret
+        else:
+            # 2. 从环境变量加载
+            self.api_key = os.getenv("BINANCE_API_KEY")
+            self.api_secret = os.getenv("BINANCE_API_SECRET")
+
+            # 3. 如果环境变量没有，再尝试 accounts.json
+            if not self.api_key or not self.api_secret:
+                self._load_from_accounts_json()
+
+        if not self.api_key or not self.api_secret:
+            logging.error("[BinanceClient] API Key/Secret 未找到！请设置环境变量或 accounts.json")
+            raise ValueError("Binance API credentials are required")
+
+        self.client = Client(self.api_key, self.api_secret)
+        logging.info(f"[BinanceClient] 初始化完成 | Account: {self.account_name}")
+
+        # 风控参数
+        self.risk_percent = 0.90
+        self.max_leverage = 3.0
+
+    def _load_from_accounts_json(self):
+        """从 accounts.json 加载（兼容旧逻辑）"""
         try:
-            account = self.client.futures_account()
-            total_equity = float(account.get("totalWalletBalance", 0)) + float(account.get("totalUnrealizedProfit", 0))
-
-            if total_equity < 3000:
-                risk = 0.07          # 小资金：快速滚仓
-            elif total_equity < 10000:
-                risk = 0.045         # 中资金
-            else:
-                risk = 0.025         # 大资金：保守
-
-            logging.info(f"[资金规模判断] 当前权益 ≈ {total_equity:.2f}U → 风险比例: {risk*100}%")
-            return risk
-
+            if os.path.exists("accounts.json"):
+                with open("accounts.json", "r", encoding="utf-8") as f:
+                    accounts = json.load(f)
+                    if self.account_name in accounts:
+                        acc = accounts[self.account_name]
+                        self.api_key = acc.get("api_key")
+                        self.api_secret = acc.get("api_secret")
+                        self.risk_percent = acc.get("risk_percent", 0.90)
+                        self.max_leverage = acc.get("max_leverage", 3.0)
+                        logging.info(f"[BinanceClient] 从 accounts.json 加载账户: {self.account_name}")
         except Exception as e:
-            logging.error(f"[获取资金规模失败] 使用默认 3% | 错误: {e}")
-            return 0.03
+            logging.error(f"[accounts.json 加载失败] {e}")
 
-    # ==================== 动态仓位计算 ====================
-    def calculate_position_size(self, atr: float = None) -> float:
-        """根据当前资金规模动态计算下单数量"""
-        try:
-            if atr is None or atr <= 0:
-                atr = 30
-
-            risk_percent = self.get_risk_percent()
-            account = self.client.futures_account()
-            equity = float(account.get("totalWalletBalance", 0)) + float(account.get("totalUnrealizedProfit", 0))
-
-            risk_amount = equity * risk_percent
-            stop_distance = atr * self.atr_multiplier_sl or (atr * 0.92)
-
-            raw_qty = risk_amount / stop_distance
-            current_price = self.get_current_price()
-            max_allowed_qty = (equity * self.max_leverage) / current_price
-
-            final_qty = max(math.floor(min(raw_qty, max_allowed_qty)), 1)
-
-            logging.info(f"[动态仓位计算] 权益: {equity:.2f}U | 风险: {risk_percent*100}% | 下单数量: {final_qty}")
-            return final_qty
-
-        except Exception as e:
-            logging.error(f"[仓位计算异常] {e}")
-            return 1
-
-    # ==================== 基础交易方法 ====================
-    def get_current_price(self, symbol: str = "ETHUSDT") -> float:
-        try:
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
-        except Exception as e:
-            logging.error(f"[获取价格失败] {e}")
-            return 0.0
-
-    def get_current_position(self, symbol: str = "ETHUSDT"):
+    # ==================== 持仓与账户相关 ====================
+    def get_current_position(self, symbol="ETHUSDT"):
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             for pos in positions:
-                if float(pos["positionAmt"]) != 0:
+                if float(pos['positionAmt']) != 0:
                     return pos
             return None
-        except Exception as e:
+        except BinanceAPIException as e:
             logging.error(f"[获取持仓失败] {e}")
             return None
 
-    def open_long(self, symbol: str, quantity: float):
+    def get_account_balance(self):
         try:
-            order = self.client.futures_create_order(
-                symbol=symbol,
-                side="BUY",
-                type="MARKET",
-                quantity=quantity,
-                positionSide="BOTH"
-            )
-            logging.info(f"[开多成功] {symbol} | Qty: {quantity}")
-            return order
-        except BinanceAPIException as e:
-            logging.error(f"[开多失败] {e}")
+            account = self.client.futures_account()
+            return {
+                "totalWalletBalance": float(account.get("totalWalletBalance", 0)),
+                "availableBalance": float(account.get("availableBalance", 0)),
+                "totalUnrealizedProfit": float(account.get("totalUnrealizedProfit", 0))
+            }
+        except Exception as e:
+            logging.error(f"[获取账户余额失败] {e}")
             return None
 
-    def open_short(self, symbol: str, quantity: float):
+    def get_detailed_report(self, symbol="ETHUSDT"):
+        """获取详细账户快照（用于钉钉推送）"""
         try:
-            order = self.client.futures_create_order(
-                symbol=symbol,
-                side="SELL",
-                type="MARKET",
-                quantity=quantity,
-                positionSide="BOTH"
-            )
-            logging.info(f"[开空成功] {symbol} | Qty: {quantity}")
-            return order
-        except BinanceAPIException as e:
-            logging.error(f"[开空失败] {e}")
+            balance = self.get_account_balance()
+            position = self.get_current_position(symbol)
+            if not balance:
+                return None
+
+            report = {
+                "total_equity": balance["totalWalletBalance"],
+                "available_balance": balance["availableBalance"],
+                "unrealized_pnl": balance["totalUnrealizedProfit"],
+                "has_position": position is not None
+            }
+
+            if position:
+                report.update({
+                    "side": "多" if float(position["positionAmt"]) > 0 else "空",
+                    "position_amt": float(position["positionAmt"]),
+                    "entry_price": float(position["entryPrice"]),
+                    "unrealized_profit": float(position["unRealizedProfit"]),
+                    "leverage": position.get("leverage", "N/A")
+                })
+            return report
+        except Exception as e:
+            logging.error(f"[获取详细报表失败] {e}")
             return None
 
-    def close_all_positions(self, symbol: str):
+    # ==================== 下单与风控 ====================
+    def calculate_position_size(self, entry_price, stop_price, symbol="ETHUSDT"):
+        """动态仓位计算（小资金激进）"""
+        try:
+            balance = self.get_account_balance()
+            if not balance:
+                return 0.01
+
+            equity = balance["totalWalletBalance"]
+            risk_amount = equity * (self.risk_percent / 100)
+
+            stop_distance = abs(entry_price - stop_price)
+            if stop_distance == 0:
+                return 0.01
+
+            qty = risk_amount / stop_distance
+
+            # 小资金放大利率
+            if equity < 3000:
+                qty *= 1.8
+            elif equity < 10000:
+                qty *= 1.2
+
+            return max(round(qty, 3), 0.01)
+        except Exception as e:
+            logging.error(f"[仓位计算失败] {e}")
+            return 0.01
+
+    def close_partial_position(self, symbol, percent):
+        """按比例平仓"""
+        try:
+            position = self.get_current_position(symbol)
+            if not position:
+                return {"status": "skipped", "reason": "无持仓"}
+
+            qty = abs(float(position["positionAmt"])) * percent
+            side = "SELL" if float(position["positionAmt"]) > 0 else "BUY"
+
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=round(qty, 3),
+                reduceOnly=True
+            )
+            return {"status": "success", "order": order}
+        except Exception as e:
+            logging.error(f"[部分平仓失败] {e}")
+            return {"status": "error", "message": str(e)}
+
+    def close_all_positions(self, symbol):
         try:
             position = self.get_current_position(symbol)
             if not position:
@@ -138,48 +173,39 @@ class BinanceClient:
                 side=side,
                 type="MARKET",
                 quantity=qty,
-                reduceOnly=True,
-                positionSide="BOTH"
+                reduceOnly=True
             )
-            logging.info(f"[全平成功] {symbol}")
             return {"status": "success", "order": order}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    def get_detailed_report(self, symbol: str = "ETHUSDT"):
-        """获取详细账户快照（用于钉钉推送）"""
+    # ==================== 钉钉推送（支持加签） ====================
+    def send_dingtalk(self, title, content, is_warning=False):
         try:
-            account = self.client.futures_account()
-            position = self.get_current_position(symbol)
+            webhook = os.getenv("DINGTALK_WEBHOOK")
+            secret = os.getenv("DINGTALK_SECRET")
 
-            report = {
-                "total_equity": round(float(account.get("totalWalletBalance", 0)) + float(account.get("totalUnrealizedProfit", 0)), 2),
-                "wallet_balance": round(float(account.get("totalWalletBalance", 0)), 2),
-                "available_margin": round(float(account.get("availableBalance", 0)), 2),
-                "maintenance_margin": round(float(account.get("totalMaintenanceMargin", 0)), 2),
-                "unrealized_pnl": round(float(account.get("totalUnrealizedProfit", 0)), 2),
-                "position": "无持仓",
-                "leverage": "N/A"
+            if not webhook:
+                logging.warning("未配置钉钉Webhook，跳过推送")
+                return
+
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f'{timestamp}\n{secret}'
+            hmac_code = hmac.new(secret.encode(), string_to_sign.encode(), digestmod=hashlib.sha256).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+
+            url = f"{webhook}&timestamp={timestamp}&sign={sign}"
+
+            import requests
+            data = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": title,
+                    "text": content
+                }
             }
-
-            if position:
-                report.update({
-                    "position": f"{position['positionSide']} {abs(float(position['positionAmt']))}",
-                    "leverage": position.get("leverage", "N/A"),
-                    "entry_price": position.get("entryPrice", "N/A"),
-                    "unrealized_pnl": round(float(position.get("unRealizedProfit", 0)), 2)
-                })
-
-            return report
+            requests.post(url, json=data, timeout=5)
+            logging.info(f"[钉钉推送成功] {title}")
         except Exception as e:
-            logging.error(f"[获取账户报表失败] {e}")
-            return {"error": str(e)}
-
-    def get_account_balance(self):
-        try:
-            account = self.client.futures_account()
-            return float(account.get("totalWalletBalance", 0))
-        except Exception as e:
-            logging.error(f"[获取余额失败] {e}")
-            return 0.0
+            logging.error(f"[钉钉推送失败] {e}")
