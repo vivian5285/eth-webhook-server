@@ -1,4 +1,4 @@
-# app.py（最终完整加强版）
+# app.py（最终完整版 - 后台同步大幅加强）
 from flask import Flask, request, jsonify
 import os
 import re
@@ -31,7 +31,7 @@ TIMEFRAME = "30m"
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.01))
 STOP_DISTANCE_PERCENT = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
 CONFIRMATION_ENABLED = True
-POSITION_SYNC_INTERVAL = 45
+POSITION_SYNC_INTERVAL = 30  # 每30秒同步一次（更频繁）
 
 def extract_json_from_text(text: str):
     try:
@@ -137,39 +137,50 @@ def send_beautiful_close_report(reason: str, symbol: str):
     except Exception as e:
         logging.error(f"[平仓报告发送失败] {e}")
 
+# ==================== 后台持仓同步（大幅加强版） ====================
 def sync_position_from_binance():
     try:
         real_pos = binance_client.get_current_position("ETHUSDT")
         local_pos = position_manager.get_current_position()
 
         if real_pos:
-            need_update = (
-                not local_pos or
+            # 币安有持仓，强制更新本地（以币安为准）
+            if (not local_pos or
                 local_pos.get("side") != real_pos["side"] or
-                abs(local_pos.get("qty", 0) - real_pos["qty"]) > 0.001
-            )
-            if need_update:
+                abs(local_pos.get("qty", 0) - real_pos.get("qty", 0)) > 0.001):
+
+                logging.info(f"[后台同步] 币安持仓变化 → 更新本地: {real_pos['side']}")
                 position_manager.update_position(
-                    real_pos["side"], real_pos["symbol"], real_pos["qty"],
-                    real_pos["avg_price"], 0, 0, 0
+                    real_pos["side"],
+                    real_pos["symbol"],
+                    real_pos["qty"],
+                    real_pos["avg_price"],
+                    0, 0, 0
                 )
         else:
+            # 币安无持仓，清空本地
             if local_pos:
+                logging.info("[后台同步] 币安无持仓 → 清空本地状态")
                 position_manager.clear_position()
+
     except Exception as e:
         logging.error(f"[后台持仓同步异常] {e}")
 
 def start_position_sync_thread():
     def _run():
+        logging.info("[后台同步] 持仓同步线程启动")
         while True:
             sync_position_from_binance()
             time.sleep(POSITION_SYNC_INTERVAL)
+
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    logging.info(f"[后台同步] 持仓同步线程已启动，每 {POSITION_SYNC_INTERVAL} 秒执行一次")
 
 def place_market_order(signal: str, symbol: str):
     try:
+        # 开仓前先同步一次最新持仓
+        sync_position_from_binance()
+
         current_pos = binance_client.get_current_position(symbol)
         side = "long" if signal == "OPEN_LONG" else "short"
 
@@ -197,7 +208,7 @@ def place_market_order(signal: str, symbol: str):
                 is_warning=True
             )
 
-        # ==================== 开新仓（严格包裹） ====================
+        # 开新仓
         try:
             qty = calculate_position_size(symbol)
             if qty <= 0:
