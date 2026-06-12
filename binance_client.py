@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（统一20%资金模式）
+# binance_client.py - 最终稳定版（支持返回真实 Binance 错误）
 
 import os
 import time
@@ -27,8 +27,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 基础交易方法 ====================
-
+    # ==================== 关键改进：支持返回真实错误 ====================
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
             order = self.client.futures_create_order(
@@ -40,8 +39,11 @@ class BinanceClient:
             logging.info(f"[市价单成功] {side} {symbol} Qty:{qty}")
             return order
         except BinanceAPIException as e:
-            logging.error(f"[市价单失败] {e}")
-            return None
+            logging.error(f"[市价单失败] Binance真实错误: {e}")
+            return {"status": "error", "message": str(e)}   # 返回真实错误
+        except Exception as e:
+            logging.error(f"[市价单失败] 未知错误: {e}")
+            return {"status": "error", "message": str(e)}
 
     def close_all_positions(self, symbol: str):
         try:
@@ -134,16 +136,12 @@ class BinanceClient:
             # 统一使用账户总资金的 20% 作为持仓价值
             position_value = equity * 0.20
 
-            # 计算理论下单数量
             raw_qty = position_value / price
-
-            # 最大杠杆限制（最多使用 3 倍杠杆）
             max_qty_by_leverage = (equity * 3.0) / price
 
             final_qty = min(raw_qty, max_qty_by_leverage)
             final_qty = round(max(final_qty, 0.001), 4)
 
-            # 最小名义价值保护
             min_notional = 15
             if final_qty * price < min_notional:
                 final_qty = round(min_notional / price, 4)
