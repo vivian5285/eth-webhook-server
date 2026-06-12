@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 含 TP 监控启动 - 2026-06-12）
+# app.py（最终完整版 - 2026-06-13）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
-from position_manager import PositionManager
-from tp_monitor import tp_monitor          # ← 导入 TP 监控模块
+from position_manager import position_manager
+from tp_monitor import tp_monitor
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ==================== 初始化客户端 ====================
+# ==================== 初始化 ====================
 binance_client = BinanceClient(
     api_key=os.getenv("BINANCE_API_KEY"),
     api_secret=os.getenv("BINANCE_API_SECRET"),
@@ -29,11 +29,8 @@ binance_client = BinanceClient(
     max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
 )
 
-position_manager = PositionManager()
-
-# ==================== 后台信号处理函数 ====================
+# ==================== 后台信号处理 ====================
 def handle_signal_in_background(data):
-    """后台异步处理 TradingView 信号（不阻塞 webhook 返回）"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
@@ -42,8 +39,9 @@ def handle_signal_in_background(data):
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             is_long = signal == "OPEN_LONG"
+            direction = "多" if is_long else "空"
 
-            # 1. 先平后开
+            # 先平后开
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
                 logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先执行全平")
@@ -51,7 +49,7 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # 2. 动态计算仓位（80% × 5倍）
+            # 动态仓位计算（80% × 5倍）
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
@@ -65,7 +63,7 @@ def handle_signal_in_background(data):
 
             side = "BUY" if is_long else "SELL"
 
-            # 3. 下单
+            # 下单
             order = binance_client.place_market_order(symbol, side, qty)
             logging.info(f"[下单成功] {order}")
 
@@ -74,7 +72,7 @@ def handle_signal_in_background(data):
                 ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
                 entry_price = float(ticker['price'])
 
-            # 4. 发送开仓报告（含 TP 计算）
+            # 计算 TP 并通知监督层
             tp_result = binance_client.send_position_open_report(
                 signal=signal,
                 symbol=symbol,
@@ -83,7 +81,6 @@ def handle_signal_in_background(data):
                 is_long=is_long
             )
 
-            # 5. 通知监督层
             if tp_result:
                 supervisor.notify_open_success(
                     signal=signal,
@@ -137,11 +134,9 @@ def status():
 
 # ==================== 启动入口 ====================
 if __name__ == "__main__":
-    # ====================== 启动 TP 监控 ======================
-    # tp_monitor 会以守护线程方式运行，持续监控 TP1/TP2/TP3
-    # 并在检测到人工加减仓时自动与实盘对账
+    # 启动 TP 监控
     tp_monitor.start()
     logging.info("[启动] TP监控模块已启动")
 
-    # 启动 Flask Webhook 服务
+    # 启动 Flask 服务
     app.run(host="0.0.0.0", port=5000, debug=False)
