@@ -1,4 +1,4 @@
-# position_supervisor.py（最终完整版 - 2026-06-13）
+# position_supervisor.py（最终优化版 - 钉钉排版已统一优化）
 import logging
 import threading
 import os
@@ -10,7 +10,6 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 初始化 ====================
 binance_client = BinanceClient(
     api_key=os.getenv("BINANCE_API_KEY"),
     api_secret=os.getenv("BINANCE_API_SECRET"),
@@ -34,25 +33,20 @@ class PositionSupervisor:
                 is_long = signal == "OPEN_LONG"
                 direction = "多" if is_long else "空"
 
-                # 重新计算 TP（使用 ATR，更准确）
                 atr = binance_client._get_atr(symbol) or (entry_price * 0.008)
 
                 tp1 = round(entry_price + atr * 1.05 if is_long else entry_price - atr * 1.05, 2)
                 tp2 = round(entry_price + atr * 1.85 if is_long else entry_price - atr * 1.85, 2)
                 tp3 = round(entry_price + atr * 2.55 if is_long else entry_price - atr * 2.55, 2)
 
-                # 更新仓位管理器
                 position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
                     symbol=symbol,
                     qty=qty,
                     avg_price=entry_price,
-                    tp1=tp1,
-                    tp2=tp2,
-                    tp3=tp3
+                    tp1=tp1, tp2=tp2, tp3=tp3
                 )
 
-                # 由监督层统一发送开仓报告（避免重复发送）
                 binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
@@ -79,9 +73,25 @@ class PositionSupervisor:
                 else:
                     position_manager.clear_position()
 
-                if level == "3":
-                    msg = f"✅ **TP3 最终止盈完成**\n平仓数量: {closed_qty} 张\n均价: {avg_price}"
-                    binance_client._send_dingtalk(msg)
+                # ==================== 优化后的 TP 触发钉钉排版 ====================
+                if level == "1":
+                    emoji = "🟡"
+                    title = "TP1 第一止盈"
+                elif level == "2":
+                    emoji = "🟠"
+                    title = "TP2 第二止盈"
+                else:
+                    emoji = "🟢"
+                    title = "TP3 最终止盈"
+
+                msg = (
+                    f"{emoji} **{title} 触发**\n\n"
+                    f"平仓数量: {closed_qty} 张\n"
+                    f"成交均价: {avg_price} USDT\n\n"
+                    f"系统已自动执行分批止盈。"
+                )
+
+                binance_client._send_dingtalk(msg)
 
                 self.consecutive_failure_count = 0
 
@@ -94,7 +104,13 @@ class PositionSupervisor:
                 logging.info(f"[监督层] 全平完成，原因: {reason}")
                 position_manager.clear_position()
 
-                msg = f"⚠️ **全平完成**\n原因: {reason}"
+                # ==================== 优化后的全平钉钉排版 ====================
+                msg = (
+                    f"⚠️ **全平完成**\n\n"
+                    f"触发原因: {reason}\n\n"
+                    f"系统已执行全平操作，当前无持仓。"
+                )
+
                 binance_client._send_dingtalk(msg)
 
             except Exception as e:
