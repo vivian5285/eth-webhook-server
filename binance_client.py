@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（支持返回真实 Binance 错误）
+# binance_client.py - 最终稳定版（已修复精度问题）
 
 import os
 import time
@@ -27,7 +27,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 关键改进：支持返回真实错误 ====================
+    # ==================== 下单方法（支持返回真实错误） ====================
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
             order = self.client.futures_create_order(
@@ -40,7 +40,7 @@ class BinanceClient:
             return order
         except BinanceAPIException as e:
             logging.error(f"[市价单失败] Binance真实错误: {e}")
-            return {"status": "error", "message": str(e)}   # 返回真实错误
+            return {"status": "error", "message": str(e)}
         except Exception as e:
             logging.error(f"[市价单失败] 未知错误: {e}")
             return {"status": "error", "message": str(e)}
@@ -121,11 +121,10 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 仓位计算（统一20%资金模式） ====================
-
+    # ==================== 仓位计算（统一20% + 精度修复） ====================
     def calculate_position_size(self, symbol: str = "ETHUSDT") -> float:
         """
-        仓位计算（统一使用账户总资金的20%作为持仓价值）
+        仓位计算（统一使用账户总资金的20% + 强制3位小数）
         """
         try:
             balance = self.get_account_balance()
@@ -137,14 +136,21 @@ class BinanceClient:
             position_value = equity * 0.20
 
             raw_qty = position_value / price
+
+            # ==================== 关键修复：ETHUSDT 必须保留3位小数 ====================
+            final_qty = round(raw_qty, 3)
+
+            # 最大杠杆限制
             max_qty_by_leverage = (equity * 3.0) / price
+            final_qty = min(final_qty, max_qty_by_leverage)
 
-            final_qty = min(raw_qty, max_qty_by_leverage)
-            final_qty = round(max(final_qty, 0.001), 4)
+            # 最小数量保护
+            final_qty = max(final_qty, 0.001)
 
+            # 最小名义价值保护
             min_notional = 15
             if final_qty * price < min_notional:
-                final_qty = round(min_notional / price, 4)
+                final_qty = round(min_notional / price, 3)
 
             logging.info(
                 f"[仓位计算] 权益:{equity:.2f}U | 持仓比例:20% | "
@@ -154,7 +160,7 @@ class BinanceClient:
 
         except Exception as e:
             logging.error(f"[仓位计算异常] {e}")
-            return 0.01
+            return 0.001
 
     # ==================== 钉钉报告方法 ====================
 
