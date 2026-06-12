@@ -1,4 +1,4 @@
-# tp_monitor.py（最终版 - 支持基于初始仓位的 30%/30%/40%）
+# tp_monitor.py（最终完整版 - 逻辑已检查优化）
 import logging
 import time
 import threading
@@ -53,7 +53,6 @@ class TPMonitor:
 
         position = position_manager.get_position()
         if not position or position.get("qty", 0) <= 0:
-            # 仓位已平，清理状态
             self.initial_qty = None
             self.tp1_done = False
             self.tp2_done = False
@@ -98,12 +97,10 @@ class TPMonitor:
             self._reset_state()
 
         elif hit_tp2 and not self.tp2_done:
-            # TP2：平初始仓位的 30%
             target_close = round(self.initial_qty * 0.30, 3)
             self._execute_fixed_qty(target_close, "2", current_price, symbol)
 
         elif hit_tp1 and not self.tp1_done:
-            # TP1：平初始仓位的 30%
             target_close = round(self.initial_qty * 0.30, 3)
             self._execute_fixed_qty(target_close, "1", current_price, symbol)
 
