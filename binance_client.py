@@ -1,4 +1,4 @@
-# binance_client.py - 完整稳定更新版
+# binance_client.py - 完整稳定更新版（加强全平可靠性）
 
 import os
 import time
@@ -44,15 +44,19 @@ class BinanceClient:
             return None
 
     def close_all_positions(self, symbol: str):
-        """优化后的全平方法（更快、更稳定）"""
+        """
+        全平方法（已加强可靠性和日志）
+        """
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
-                logging.info("[全平] 当前无持仓，跳过")
+                logging.info("[全平] 当前无持仓，跳过全平")
                 return {"status": "skipped", "reason": "无持仓"}
 
             qty = abs(position["positionAmt"])
             side = "SELL" if position["positionAmt"] > 0 else "BUY"
+
+            logging.info(f"[全平] 开始执行全平 {symbol}，方向: {side}，数量: {qty}")
 
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -61,10 +65,15 @@ class BinanceClient:
                 quantity=qty,
                 reduceOnly=True
             )
-            logging.info(f"[全平成功] {symbol} 已平 {qty}")
+
+            logging.info(f"[全平成功] {symbol} 已成功平仓 {qty}")
             return {"status": "success", "order": order}
+
+        except BinanceAPIException as e:
+            logging.error(f"[全平失败 - Binance异常] {e}")
+            return {"status": "error", "message": str(e)}
         except Exception as e:
-            logging.error(f"[全平失败] {e}")
+            logging.error(f"[全平失败 - 未知异常] {e}")
             return {"status": "error", "message": str(e)}
 
     def close_partial_position(self, symbol: str, percent: float):
@@ -149,7 +158,7 @@ class BinanceClient:
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
 
-            # 空单止盈价格修正（防止传入加法计算的值）
+            # 空单止盈价格修正
             if not is_long:
                 tp1 = round(entry_price - abs(tp1 - entry_price), 2) if tp1 > entry_price else tp1
                 tp2 = round(entry_price - abs(tp2 - entry_price), 2) if tp2 > entry_price else tp2
