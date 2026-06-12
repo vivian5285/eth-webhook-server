@@ -1,4 +1,4 @@
-# binance_client.py - 最终最稳健版（全仓5倍 + 强精度保护）
+# binance_client.py - 最终稳定版（80%资金 × 5倍模式）
 
 import os
 import time
@@ -121,10 +121,10 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 全仓5倍模式（强精度保护） ====================
+    # ==================== 80%资金 × 5倍模式 ====================
     def calculate_position_size(self, symbol: str = "ETHUSDT") -> float:
         """
-        全仓5倍模式 + 强精度保护（推荐使用）
+        80%资金 × 5倍杠杆模式（推荐当前使用）
         """
         try:
             balance = self.get_account_balance()
@@ -132,31 +132,31 @@ class BinanceClient:
 
             price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-            # 全仓5倍模式
+            # ==================== 核心逻辑：80% × 5倍 ====================
+            usable_equity = equity * 0.80          # 只用总资金的80%
             target_leverage = 5.0
-            position_value = equity * target_leverage
+            position_value = usable_equity * target_leverage
 
             raw_qty = position_value / price
 
-            # ==================== 强精度保护 ====================
-            step = 0.001  # ETHUSDT 数量步长
+            # 强精度保护
+            step = 0.001
             final_qty = math.floor(raw_qty / step) * step
             final_qty = round(final_qty, 3)
 
             # 最大杠杆限制
-            max_qty_by_leverage = (equity * target_leverage) / price
+            max_qty_by_leverage = (usable_equity * target_leverage) / price
             final_qty = min(final_qty, max_qty_by_leverage)
 
             final_qty = max(final_qty, 0.001)
 
-            # 最小名义价值保护
             min_notional = 15
             if final_qty * price < min_notional:
                 final_qty = math.floor((min_notional / price) / step) * step
                 final_qty = round(final_qty, 3)
 
             logging.info(
-                f"[仓位计算] 全仓5倍模式 | 权益:{equity:.2f}U | "
+                f"[仓位计算] 80%资金×5倍模式 | 权益:{equity:.2f}U | "
                 f"目标持仓价值:{position_value:.2f}U | 下单数量:{final_qty}"
             )
             return final_qty
