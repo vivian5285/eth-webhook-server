@@ -1,4 +1,4 @@
-# binance_client.py - 空单止盈价格已修复版
+# binance_client.py - 完整稳定更新版
 
 import os
 import time
@@ -27,26 +27,67 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 基础功能（省略不变部分） ====================
+    # ==================== 基础下单与仓位 ====================
+
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
-            order = self.client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=qty)
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty
+            )
+            logging.info(f"[市价单成功] {side} {symbol} Qty:{qty}")
             return order
-        except Exception as e:
+        except BinanceAPIException as e:
             logging.error(f"[市价单失败] {e}")
             return None
 
     def close_all_positions(self, symbol: str):
+        """优化后的全平方法（更快、更稳定）"""
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
+                logging.info("[全平] 当前无持仓，跳过")
                 return {"status": "skipped", "reason": "无持仓"}
+
             qty = abs(position["positionAmt"])
             side = "SELL" if position["positionAmt"] > 0 else "BUY"
-            self.client.futures_create_order(symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True)
-            return {"status": "success"}
+
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty,
+                reduceOnly=True
+            )
+            logging.info(f"[全平成功] {symbol} 已平 {qty}")
+            return {"status": "success", "order": order}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
+            return {"status": "error", "message": str(e)}
+
+    def close_partial_position(self, symbol: str, percent: float):
+        try:
+            position = self.get_current_position(symbol)
+            if not position or position.get("positionAmt", 0) == 0:
+                return {"status": "skipped"}
+
+            total_qty = abs(position["positionAmt"])
+            close_qty = round(total_qty * percent, 4)
+            side = "SELL" if position["positionAmt"] > 0 else "BUY"
+
+            self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=close_qty,
+                reduceOnly=True
+            )
+            logging.info(f"[部分平仓成功] {symbol} 平 {close_qty}")
+            return {"status": "success", "closed_qty": close_qty}
+        except Exception as e:
+            logging.error(f"[部分平仓失败] {e}")
             return {"status": "error"}
 
     def get_current_position(self, symbol: str):
@@ -76,20 +117,29 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 钉钉报告（已修复空单止盈价格） ====================
+    # ==================== 钉钉加签 + 报告 ====================
 
     def _send_dingtalk(self, title: str, content: str):
         if not DINGTALK_WEBHOOK:
+            logging.error("[钉钉] DINGTALK_WEBHOOK 未配置")
             return
         try:
             timestamp = str(round(time.time() * 1000))
             string_to_sign = f"{timestamp}\n{DINGTALK_SECRET}"
-            hmac_code = hmac.new(DINGTALK_SECRET.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+            hmac_code = hmac.new(
+                DINGTALK_SECRET.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                digestmod=hashlib.sha256
+            ).digest()
             sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
             url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
 
-            data = {"msgtype": "markdown", "markdown": {"title": title, "text": content}}
-            requests.post(url, json=data, timeout=6)
+            data = {
+                "msgtype": "markdown",
+                "markdown": {"title": title, "text": content}
+            }
+            resp = requests.post(url, json=data, timeout=6)
+            logging.info(f"[钉钉] 发送完成，状态码: {resp.status_code}")
         except Exception as e:
             logging.error(f"[钉钉] 发送异常: {e}")
 
@@ -99,9 +149,8 @@ class BinanceClient:
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
 
-            # ==================== 关键修复：空单止盈用减法 ====================
-            if not is_long:  # 空单
-                # 如果传入的 tp 是加法算出来的，这里重新按减法算
+            # 空单止盈价格修正（防止传入加法计算的值）
+            if not is_long:
                 tp1 = round(entry_price - abs(tp1 - entry_price), 2) if tp1 > entry_price else tp1
                 tp2 = round(entry_price - abs(tp2 - entry_price), 2) if tp2 > entry_price else tp2
                 tp3 = round(entry_price - abs(tp3 - entry_price), 2) if tp3 > entry_price else tp3
