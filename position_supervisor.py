@@ -1,16 +1,22 @@
 # position_supervisor.py（最终完整版 - 2026-06-12）
 import logging
 import threading
+import os
+from dotenv import load_dotenv
 from binance_client import BinanceClient
-from position_manager import PositionManager
+from position_manager import position_manager
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+# ==================== 正确初始化 Binance Client ====================
 binance_client = BinanceClient(
-    api_key=...,          # 从 .env 或 config 读取
-    api_secret=...
+    api_key=os.getenv("BINANCE_API_KEY"),
+    api_secret=os.getenv("BINANCE_API_SECRET"),
+    risk_percent=float(os.getenv("RISK_PERCENT", 0.85)),
+    max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
 )
-position_manager = PositionManager()
 
 
 class PositionSupervisor:
@@ -20,10 +26,9 @@ class PositionSupervisor:
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
-
         logging.info("[监督层] PositionSupervisor 初始化完成")
 
-    # ==================== 开仓成功通知（监督层核心） ====================
+    # ==================== 开仓成功通知 ====================
     def notify_open_success(self, signal: str, symbol: str, qty: float, 
                             entry_price: float, tp1: float, tp2: float, tp3: float):
         with self.lock:
@@ -31,14 +36,12 @@ class PositionSupervisor:
                 is_long = signal == "OPEN_LONG"
                 direction = "多" if is_long else "空"
 
-                # 1. 核实实盘持仓
+                # 与实盘对账
                 real_position = binance_client.get_current_position(symbol)
-                if not real_position:
-                    logging.warning("[监督层] 开仓后未检测到实盘持仓，暂不推送钉钉")
-                    self._handle_correction_failure("开仓后未持仓")
-                    return
+                if real_position:
+                    position_manager.reconcile(real_position)
 
-                # 2. 更新仓位管理器
+                # 更新本地仓位管理器
                 position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
                     symbol=symbol,
@@ -49,7 +52,7 @@ class PositionSupervisor:
                     tp3=tp3
                 )
 
-                # 3. 由 binance_client 发送钉钉报告（已包含收紧后的 TP）
+                # 发送钉钉报告（由 binance_client 内部处理）
                 binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
@@ -60,11 +63,11 @@ class PositionSupervisor:
 
                 self.last_signal = signal
                 self.consecutive_failure_count = 0
-                logging.info(f"[监督层] {direction} 开仓报告已推送")
+                logging.info(f"[监督层] {direction} 开仓成功通知已处理")
 
             except Exception as e:
-                logging.error(f"[监督层] notify_open_success 异常: {e}")
-                self._handle_correction_failure(str(e))
+                logging.error(f"[监督层] notify_open_success 异常: {e}", exc_info=True)
+                self._handle_failure(str(e))
 
     # ==================== TP 触发通知 ====================
     def notify_tp_hit(self, level: str, closed_qty: float, avg_price: float):
@@ -72,19 +75,12 @@ class PositionSupervisor:
             try:
                 logging.info(f"[监督层] TP{level} 触发，平仓数量: {closed_qty}")
 
-                # 刷新实盘持仓状态
                 real_pos = binance_client.get_current_position("ETHUSDT")
                 if real_pos:
-                    position_manager.update_position(
-                        side=real_pos["side"],
-                        symbol=real_pos["symbol"],
-                        qty=real_pos["qty"],
-                        avg_price=real_pos["avg_price"]
-                    )
+                    position_manager.reconcile(real_pos)
                 else:
                     position_manager.clear_position()
 
-                # TP3 全平后可额外推送
                 if level == "3":
                     msg = f"✅ **TP3 最终止盈完成**\n平仓数量: {closed_qty} 张\n均价: {avg_price}"
                     binance_client._send_dingtalk(msg)
@@ -92,23 +88,23 @@ class PositionSupervisor:
                 self.consecutive_failure_count = 0
 
             except Exception as e:
-                logging.error(f"[监督层] notify_tp_hit 异常: {e}")
+                logging.error(f"[监督层] notify_tp_hit 异常: {e}", exc_info=True)
 
     # ==================== 全平通知 ====================
     def notify_close_all(self, reason: str):
         with self.lock:
             try:
-                logging.info(f"[监督层] 收到全平指令，原因: {reason}")
+                logging.info(f"[监督层] 全平完成，原因: {reason}")
                 position_manager.clear_position()
 
                 msg = f"⚠️ **全平完成**\n原因: {reason}"
                 binance_client._send_dingtalk(msg)
 
             except Exception as e:
-                logging.error(f"[监督层] notify_close_all 异常: {e}")
+                logging.error(f"[监督层] notify_close_all 异常: {e}", exc_info=True)
 
-    # ==================== 内部辅助 ====================
-    def _handle_correction_failure(self, reason: str):
+    # ==================== 内部辅助方法 ====================
+    def _handle_failure(self, reason: str):
         self.consecutive_failure_count += 1
         logging.warning(f"[监督层] 连续失败 {self.consecutive_failure_count} 次: {reason}")
 
