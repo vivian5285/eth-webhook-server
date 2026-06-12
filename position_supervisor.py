@@ -1,4 +1,4 @@
-# position_supervisor.py - 强壮全平优化版
+# position_supervisor.py - 最终强壮全平版
 
 import logging
 import time
@@ -44,31 +44,31 @@ class PositionSupervisor:
         return {"status": "ready_to_open", "signal": signal}
 
     def execute_close_all_with_report(self):
-        """优化后的全平流程：快速响应 + 尽量发报告"""
         current_time = time.time()
         with self.lock:
             if current_time - self.last_close_report_time < 5:
-                return {"status": "ignored", "reason": "duplicate"}
-
+                return {"status": "ignored", "reason": "duplicate_close"}
             self.last_close_report_time = current_time
 
-        # 1. 快速执行平仓（最关键）
-        close_result = binance_client.close_all_positions("ETHUSDT")
-
-        # 2. 平完后快速返回响应（避免超时）
-        #    报告放到稍后发送（或用线程异步发送）
-        def send_report_later():
+        # 执行全平（带简单重试）
+        close_result = None
+        for attempt in range(2):  # 最多尝试2次
+            close_result = binance_client.close_all_positions("ETHUSDT")
+            if close_result.get("status") in ["success", "skipped"]:
+                break
+            logging.warning(f"[监督层] 全平第 {attempt+1} 次失败，准备重试...")
             time.sleep(1.5)
-            try:
-                if close_result.get("status") in ["success", "skipped"]:
-                    binance_client.send_close_all_report("收到 CLOSE_ALL 信号，全平已确认")
-                else:
-                    binance_client.send_close_all_report(f"全平完成，状态: {close_result.get('status')}")
-            except Exception as e:
-                logging.error(f"[监督层] 延迟发送全平报告失败: {e}")
 
-        # 用线程异步发送报告，避免阻塞响应
-        threading.Thread(target=send_report_later, daemon=True).start()
+        # 异步发送报告（不阻塞响应）
+        def delayed_report():
+            time.sleep(1.0)
+            try:
+                status = close_result.get("status", "unknown")
+                binance_client.send_close_all_report(f"收到 CLOSE_ALL，全平状态: {status}")
+            except Exception as e:
+                logging.error(f"[监督层] 全平报告发送失败: {e}")
+
+        threading.Thread(target=delayed_report, daemon=True).start()
 
         position_manager.clear_position()
         return close_result
@@ -80,7 +80,7 @@ class PositionSupervisor:
         try:
             binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
         except Exception as e:
-            logging.error(f"[监督层] 开仓报告发送异常: {e}")
+            logging.error(f"[监督层] 开仓报告异常: {e}")
 
     def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
         try:
