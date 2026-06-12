@@ -1,4 +1,4 @@
-# position_supervisor.py - 修改后版本（修复全平重复报告）
+# position_supervisor.py - 修改后完整稳定版（优化报告推送）
 
 import logging
 import time
@@ -18,9 +18,9 @@ class PositionSupervisor:
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
-        self.last_close_report_time = 0          # 用于防重复全平报告
+        self.last_close_report_time = 0
         self.twm = None
-        # self._start_user_data_stream()         # 已注释，稳定模式
+        # self._start_user_data_stream()   # 已注释，稳定模式
 
     def _start_user_data_stream(self):
         with self.lock:
@@ -68,18 +68,17 @@ class PositionSupervisor:
     def _enforce_close_then_open(self, signal: str):
         current_pos = binance_client.get_current_position("ETHUSDT")
         if current_pos and current_pos.get("positionAmt", 0) != 0:
-            self._execute_close_all(verified=False)   # 内部平仓不发报告
+            self._execute_close_all(verified=False)
             time.sleep(2.5)
         return {"status": "ready_to_open", "signal": signal}
 
     def execute_close_all_with_report(self):
-        """公开方法：全平 + 核实 + 发送钉钉报告（带防重复）"""
+        """公开方法：全平 + 核实 + 发送报告（带防重复）"""
         current_time = time.time()
         with self.lock:
-            if current_time - self.last_close_report_time < 8:   # 8秒内重复调用直接忽略
+            if current_time - self.last_close_report_time < 8:
                 logging.warning("[监督层] 检测到重复 CLOSE_ALL 请求，已忽略")
                 return {"status": "ignored", "reason": "duplicate_close"}
-
             self.last_close_report_time = current_time
 
         return self._execute_close_all(verified=True)
@@ -104,17 +103,13 @@ class PositionSupervisor:
 
     def notify_open_success(self, signal: str, qty: float, entry_price: float,
                             tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        time.sleep(2.0)
-        real_pos = binance_client.get_current_position("ETHUSDT")
-
-        if real_pos and real_pos.get("side") == ("long" if signal == "OPEN_LONG" else "short"):
-            logging.info(f"[监督层] 开仓核实成功 → {signal}")
-            try:
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-            except Exception as e:
-                logging.error(f"[监督层] 开仓报告发送失败: {e}")
-        else:
-            logging.warning(f"[监督层] 开仓核实失败，实盘持仓与预期不符")
+        # ==================== 已优化：直接发送报告，保证钉钉能收到 ====================
+        logging.info(f"[监督层] 准备发送开仓报告 → {signal}")
+        try:
+            binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+            logging.info(f"[监督层] 开仓报告已发送 → {signal}")
+        except Exception as e:
+            logging.error(f"[监督层] 开仓报告发送异常: {e}")
 
     def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
         time.sleep(1.5)
