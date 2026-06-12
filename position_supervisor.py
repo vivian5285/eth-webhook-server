@@ -9,9 +9,11 @@ class PositionSupervisor:
     def __init__(self):
         self.last_signal = None
 
+    # ==================== 正常交易流程报告 ====================
+
     def notify_open_success(self, signal: str, qty: float, entry_price: float,
                             tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        """开仓成功后调用（由执行层触发）"""
+        """开仓成功后由执行层调用"""
         logging.info(f"[监督层] 收到开仓成功通知 → {signal}")
         try:
             binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
@@ -41,12 +43,14 @@ class PositionSupervisor:
         except Exception as e:
             logging.error(f"[监督层] 发送止盈报告失败: {e}")
 
+    # ==================== 人工干预报告 ====================
+
     def notify_manual_close(self):
         """检测到手动全平时调用"""
         logging.info("[监督层] 检测到手动全平")
         try:
             binance_client.send_close_all_report("手动全平操作，状态已同步")
-            logging.info("[监督层] 手动全平报告已发送")
+            logging.info("[监督层] 手动全平报告已发送至钉钉")
         except Exception as e:
             logging.error(f"[监督层] 发送手动全平报告失败: {e}")
 
@@ -63,14 +67,19 @@ class PositionSupervisor:
 
 系统已自动同步状态并更新止盈目标（如适用）。"""
             binance_client._send_dingtalk(f"{action_text} 同步", content)
-            logging.info(f"[监督层] {action_text} 报告已发送")
+            logging.info(f"[监督层] {action_text} 报告已发送至钉钉")
         except Exception as e:
             logging.error(f"[监督层] 发送人工干预报告失败: {e}")
 
+    # ==================== 最高权限扩展方法 ====================
+
     def force_align_position(self, expected_signal: str):
-        """最高权限方法：实盘与信号不一致时强制对齐（预留）"""
+        """
+        最高权限方法：当实盘持仓与最新信号严重不一致时调用
+        （目前为预留方法，可在此扩展强制对齐逻辑）
+        """
         logging.warning(f"[监督层] 触发强制对齐，期望信号: {expected_signal}")
-        # TODO: 可在此扩展强制平仓或反向开仓逻辑
+        # TODO: 可在此实现强制平仓或反向开仓逻辑
         pass
 
 
