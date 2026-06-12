@@ -1,4 +1,4 @@
-# app.py - 最终稳定版（小资金优化 + 实盘友好）
+# app.py - 最终稳定版（统一20%资金模式）
 
 from flask import Flask, request, jsonify
 import logging
@@ -37,14 +37,14 @@ def webhook():
             is_long = signal == "OPEN_LONG"
             side = "BUY" if is_long else "SELL"
 
-            # 1. 如果已有持仓，先全平（支持反手 / 同向重开）
+            # 1. 如果已有持仓，先全平（支持反手）
             current_pos = binance_client.get_current_position(symbol)
             if current_pos and current_pos.get("positionAmt", 0) != 0:
                 logging.info("[执行层] 检测到已有持仓，先执行全平")
                 binance_client.close_all_positions(symbol)
                 position_manager.clear_position()
 
-            # 2. 动态计算仓位（已优化小资金，贴近7.5%手感）
+            # 2. 动态计算仓位（统一使用账户总资金的20%）
             qty = binance_client.calculate_position_size(symbol=symbol)
 
             if qty < 0.001:
