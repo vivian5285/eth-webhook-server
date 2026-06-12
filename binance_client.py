@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（小资金优化加强版）
+# binance_client.py - 最终稳定版（风险金额兜底 + 贴近7.5%手感）
 
 import os
 import time
@@ -119,20 +119,18 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 动态仓位计算（小资金优化版） ====================
+    # ==================== 动态仓位计算（风险金额兜底 + 贴近7.5%手感） ====================
 
     def calculate_position_size(self, symbol: str = "ETHUSDT", atr_value: float = None) -> float:
         """
-        动态仓位计算（针对小资金优化）
-        < 3000U → 8%
-        3000~10000U → 6%
-        >= 10000U → 4%
+        动态仓位计算（优雅 + 贴近7.5%手感版）
+        小资金优先使用接近7.5%的风险金额兜底，保证能正常下单且手感舒服
         """
         try:
             balance = self.get_account_balance()
             equity = balance.get("totalWalletBalance", 0)
 
-            # 分层风险比例
+            # 1. 基础风险比例（分层）
             if equity < 3000:
                 risk_percent = 0.08
             elif equity < 10000:
@@ -140,34 +138,40 @@ class BinanceClient:
             else:
                 risk_percent = 0.04
 
-            # ATR 处理（优先使用外部传入，否则简单兜底）
+            # 2. 计算基础风险金额
+            base_risk_amount = equity * risk_percent
+
+            # 3. 小资金兜底：尽量贴近你之前喜欢的 7.5% 手感
+            if equity < 3000:
+                risk_75_percent = equity * 0.075
+                # 小资金最多兜底到 25U 风险，避免过度激进
+                risk_amount = max(base_risk_amount, min(risk_75_percent, 25))
+            else:
+                risk_amount = base_risk_amount
+
+            # 4. ATR 和止损距离处理
             if atr_value is None or atr_value <= 0:
                 klines = self.client.futures_klines(symbol=symbol, interval="5m", limit=20)
                 close_price = float(klines[-1][4])
-                atr_value = close_price * 0.012   # 约1.2%波动率兜底
+                atr_value = close_price * 0.012
 
-            stop_distance = max(atr_value * 0.92, 4)   # 最小止损距离保护
+            stop_distance = max(atr_value * 0.92, 5)
 
-            risk_amount = equity * risk_percent
+            # 5. 计算最终下单数量
             raw_qty = risk_amount / stop_distance
-
-            # 当前价格
             price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
-
-            # 最大杠杆限制
             max_qty_by_leverage = (equity * 3.0) / price
 
-            # 最终数量
             final_qty = min(raw_qty, max_qty_by_leverage)
             final_qty = round(max(final_qty, 0.001), 4)
 
-            # 最小名义价值保护（重要！避免小资金下单失败）
-            min_notional = 10
+            # 6. 最小名义价值保护
+            min_notional = 15
             if final_qty * price < min_notional:
                 final_qty = round(min_notional / price, 4)
 
             logging.info(
-                f"[仓位计算] 权益:{equity:.2f}U | 风险:{risk_percent*100:.0f}% | "
+                f"[仓位计算] 权益:{equity:.2f}U | 实际风险金额:{risk_amount:.2f}U | "
                 f"下单数量:{final_qty} | 名义价值:{final_qty * price:.2f}U"
             )
             return final_qty
