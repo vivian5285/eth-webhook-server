@@ -1,4 +1,4 @@
-# binance_client.py（最终完整版 - 含 close_all_positions）
+# binance_client.py（最终完整版 - 2026-06-12）
 import logging
 import time
 import hmac
@@ -50,6 +50,37 @@ class BinanceClient:
             logging.error(f"[ATR获取失败] {e}")
             return 28.0
 
+    # ==================== 动态仓位计算（80% × 5倍） ====================
+    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
+        """
+        按总资金的80% × 指定杠杆计算仓位
+        """
+        try:
+            account = self.client.futures_account()
+            total_equity = float(account['totalWalletBalance'])
+
+            usable_equity = total_equity * equity_ratio
+            position_value = usable_equity * leverage
+
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            price = float(ticker['price'])
+
+            raw_qty = position_value / price
+
+            # ETHUSDT 步长对齐（最小0.001）
+            step_size = 0.001
+            final_qty = math.floor(raw_qty / step_size) * step_size
+            final_qty = round(final_qty, 3)
+
+            logging.info(f"[仓位计算] 权益={total_equity:.2f} | 可用={usable_equity:.2f} | "
+                         f"名义价值={position_value:.2f} | 数量={final_qty}")
+
+            return final_qty
+
+        except Exception as e:
+            logging.error(f"[仓位计算失败] {e}")
+            return 0.3  # 兜底小数量
+
     # ==================== 钉钉加签发送 ====================
     def _send_dingtalk(self, message):
         try:
@@ -86,7 +117,7 @@ class BinanceClient:
         try:
             atr = self._get_atr(symbol=symbol, interval="1h")
 
-            # 1H 收紧版
+            # 1H 收紧版 TP
             tp1 = entry_price + (atr * 1.05) if is_long else entry_price - (atr * 1.05)
             tp2 = entry_price + (atr * 1.85) if is_long else entry_price - (atr * 1.85)
             tp3 = entry_price + (atr * 2.55) if is_long else entry_price - (atr * 2.55)
@@ -122,7 +153,7 @@ class BinanceClient:
             logging.error(f"[发送开仓报告失败] {e}")
             return None
 
-    # ==================== 全平仓位（已补全） ====================
+    # ==================== 全平仓位 ====================
     def close_all_positions(self, symbol: str = "ETHUSDT"):
         try:
             position = self.get_current_position(symbol)
@@ -195,7 +226,5 @@ class BinanceClient:
             return 0.0
 
 
-# ==================== 测试用 ====================
 if __name__ == "__main__":
-    # 测试代码（可选）
     pass
