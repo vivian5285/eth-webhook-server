@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版
+# binance_client.py - 最终稳定版（含动态分层仓位计算）
 
 import os
 import time
@@ -67,7 +67,6 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def close_partial_position(self, symbol: str, percent: float):
-        """按比例平仓"""
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
@@ -120,6 +119,55 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
+    # ==================== 动态仓位计算（分层风控） ====================
+
+    def calculate_position_size(self, symbol: str = "ETHUSDT", atr_value: float = None) -> float:
+        """
+        动态仓位计算（分层风险控制）
+        < 3000U → 8%
+        3000~10000U → 6%
+        >= 10000U → 4%
+        """
+        try:
+            balance = self.get_account_balance()
+            equity = balance.get("totalWalletBalance", 0)
+
+            # 分层风险比例
+            if equity < 3000:
+                risk_percent = 0.08
+            elif equity < 10000:
+                risk_percent = 0.06
+            else:
+                risk_percent = 0.04
+
+            # ATR 处理
+            if atr_value is None or atr_value <= 0:
+                klines = self.client.futures_klines(symbol=symbol, interval="5m", limit=20)
+                atr_value = float(klines[-1][4]) * 0.015  # 简单兜底
+
+            stop_distance = atr_value * 0.92
+            if stop_distance <= 0:
+                stop_distance = 8
+
+            risk_amount = equity * risk_percent
+            raw_qty = risk_amount / stop_distance
+
+            price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
+            max_qty_by_leverage = (equity * 3.0) / price
+
+            final_qty = min(raw_qty, max_qty_by_leverage)
+            final_qty = round(max(final_qty, 0.001), 4)
+
+            logging.info(
+                f"[仓位计算] 权益: {equity:.2f}U | 风险比例: {risk_percent*100:.0f}% | "
+                f"最终下单数量: {final_qty}"
+            )
+            return final_qty
+
+        except Exception as e:
+            logging.error(f"[仓位计算异常] {e}")
+            return 0.01
+
     # ==================== 钉钉报告方法 ====================
 
     def _send_dingtalk(self, title: str, content: str):
@@ -160,7 +208,6 @@ class BinanceClient:
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
 
-            # 空单止盈价格保护
             if not is_long:
                 tp1 = round(entry_price - abs(tp1 - entry_price), 2) if tp1 > entry_price else tp1
                 tp2 = round(entry_price - abs(tp2 - entry_price), 2) if tp2 > entry_price else tp2
