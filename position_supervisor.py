@@ -1,4 +1,4 @@
-# position_supervisor.py - 优化全平版（推荐使用）
+# position_supervisor.py - 强壮全平优化版
 
 import logging
 import time
@@ -40,29 +40,35 @@ class PositionSupervisor:
         current_pos = binance_client.get_current_position("ETHUSDT")
         if current_pos and current_pos.get("positionAmt", 0) != 0:
             self._execute_close_all(verified=False)
-            time.sleep(2.0)
+            time.sleep(1.8)
         return {"status": "ready_to_open", "signal": signal}
 
     def execute_close_all_with_report(self):
-        """全平 + 必须发送报告"""
+        """优化后的全平流程：快速响应 + 尽量发报告"""
         current_time = time.time()
         with self.lock:
             if current_time - self.last_close_report_time < 5:
-                return {"status": "ignored", "reason": "duplicate_close"}
+                return {"status": "ignored", "reason": "duplicate"}
+
             self.last_close_report_time = current_time
 
-        # 执行全平
+        # 1. 快速执行平仓（最关键）
         close_result = binance_client.close_all_positions("ETHUSDT")
 
-        # 全平后发送报告（无论成功与否都尽量通知）
-        time.sleep(1.2)
-        try:
-            if close_result.get("status") == "success":
-                binance_client.send_close_all_report("收到 CLOSE_ALL 信号，全平成功")
-            else:
-                binance_client.send_close_all_report(f"全平尝试完成，状态: {close_result.get('status')}")
-        except Exception as e:
-            logging.error(f"[监督层] 全平报告发送失败: {e}")
+        # 2. 平完后快速返回响应（避免超时）
+        #    报告放到稍后发送（或用线程异步发送）
+        def send_report_later():
+            time.sleep(1.5)
+            try:
+                if close_result.get("status") in ["success", "skipped"]:
+                    binance_client.send_close_all_report("收到 CLOSE_ALL 信号，全平已确认")
+                else:
+                    binance_client.send_close_all_report(f"全平完成，状态: {close_result.get('status')}")
+            except Exception as e:
+                logging.error(f"[监督层] 延迟发送全平报告失败: {e}")
+
+        # 用线程异步发送报告，避免阻塞响应
+        threading.Thread(target=send_report_later, daemon=True).start()
 
         position_manager.clear_position()
         return close_result
@@ -71,15 +77,8 @@ class PositionSupervisor:
                             tp1: float = 0, tp2: float = 0, tp3: float = 0):
         logging.info(f"[监督层] notify_open_success 被调用 → {signal}")
         time.sleep(1.5)
-
         try:
-            real_pos = binance_client.get_current_position("ETHUSDT")
-            expected_side = "long" if signal == "OPEN_LONG" else "short"
-
-            if real_pos and real_pos.get("side") == expected_side:
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-            else:
-                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+            binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
         except Exception as e:
             logging.error(f"[监督层] 开仓报告发送异常: {e}")
 
