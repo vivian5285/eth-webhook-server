@@ -1,4 +1,4 @@
-# tp_monitor.py - 临时禁用 WebSocket 启动版
+# tp_monitor.py - 完整稳定版（已注释 WebSocket 自动启动）
 
 import logging
 import threading
@@ -76,7 +76,6 @@ class TPMonitor:
             logging.info("[TP监控] 已清除止盈目标")
 
     def _on_kline(self, msg):
-        # 即使不启动 WebSocket，这个方法也保留（以后可手动开启时使用）
         try:
             if msg.get('e') != 'kline':
                 return
