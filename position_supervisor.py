@@ -10,7 +10,7 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 正确初始化 BinanceClient ====================
+# ==================== 初始化 ====================
 binance_client = BinanceClient(
     api_key=os.getenv("BINANCE_API_KEY"),
     api_secret=os.getenv("BINANCE_API_SECRET"),
@@ -28,17 +28,20 @@ class PositionSupervisor:
         self.lock = threading.Lock()
         logging.info("[监督层] PositionSupervisor 初始化完成")
 
-    def notify_open_success(self, signal: str, symbol: str, qty: float, 
-                            entry_price: float, tp1: float, tp2: float, tp3: float):
+    def notify_open_success(self, signal: str, symbol: str, qty: float, entry_price: float):
         with self.lock:
             try:
                 is_long = signal == "OPEN_LONG"
                 direction = "多" if is_long else "空"
 
-                real_position = binance_client.get_current_position(symbol)
-                if real_position:
-                    position_manager.reconcile(real_position)
+                # 重新计算 TP（使用 ATR，更准确）
+                atr = binance_client._get_atr(symbol) or (entry_price * 0.008)
 
+                tp1 = round(entry_price + atr * 1.05 if is_long else entry_price - atr * 1.05, 2)
+                tp2 = round(entry_price + atr * 1.85 if is_long else entry_price - atr * 1.85, 2)
+                tp3 = round(entry_price + atr * 2.55 if is_long else entry_price - atr * 2.55, 2)
+
+                # 更新仓位管理器
                 position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
                     symbol=symbol,
@@ -49,6 +52,7 @@ class PositionSupervisor:
                     tp3=tp3
                 )
 
+                # 由监督层统一发送开仓报告（避免重复发送）
                 binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
