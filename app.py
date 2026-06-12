@@ -1,4 +1,4 @@
-# app.py - 最终稳定版（统一20%资金模式）
+# app.py - 最终稳定版（带真实 Binance 错误返回）
 
 from flask import Flask, request, jsonify
 import logging
@@ -44,7 +44,7 @@ def webhook():
                 binance_client.close_all_positions(symbol)
                 position_manager.clear_position()
 
-            # 2. 动态计算仓位（统一使用账户总资金的20%）
+            # 2. 动态计算仓位（统一20%资金模式）
             qty = binance_client.calculate_position_size(symbol=symbol)
 
             if qty < 0.001:
@@ -57,18 +57,23 @@ def webhook():
             # 3. 执行市价开仓
             order = binance_client.place_market_order(symbol, side, qty)
 
+            # ==================== 关键改进：返回真实 Binance 错误 ====================
+            if order and isinstance(order, dict) and order.get("status") == "error":
+                error_msg = order.get("message", "未知错误")
+                logging.error(f"[执行层] 下单失败，Binance真实错误: {error_msg}")
+                return jsonify({"status": "error", "message": error_msg}), 500
+
             if order:
                 entry_price = float(order.get('avgPrice', 0)) or float(
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 4. 计算止盈价格（供 tp_monitor 使用）
+                # 计算止盈价格
                 atr_value = float(binance_client.client.futures_klines(symbol=symbol, interval="5m", limit=20)[-1][4]) * 0.015
                 tp1 = entry_price + (atr_value * 1.28) if is_long else entry_price - (atr_value * 1.28)
                 tp2 = entry_price + (atr_value * 2.5) if is_long else entry_price - (atr_value * 2.5)
                 tp3 = entry_price + (atr_value * 3.6) if is_long else entry_price - (atr_value * 3.6)
 
-                # 5. 更新状态管理器
                 position_manager.update_position(
                     side="long" if is_long else "short",
                     entry_price=entry_price,
@@ -78,10 +83,7 @@ def webhook():
                     tp3=tp3
                 )
 
-                # 6. 设置 TP 监控目标
                 tp_monitor.set_tp_levels(tp1, tp2, tp3, entry_price, is_long)
-
-                # 7. 通知智慧层
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
                 logging.info(f"[执行层] {signal} 成功 | 数量:{qty} | 入场价:{entry_price}")
@@ -90,24 +92,17 @@ def webhook():
                     "status": "success",
                     "signal": signal,
                     "qty": qty,
-                    "entry_price": entry_price,
-                    "tp1": round(tp1, 2),
-                    "tp2": round(tp2, 2),
-                    "tp3": round(tp3, 2)
+                    "entry_price": entry_price
                 }), 200
             else:
-                return jsonify({"status": "error", "message": "下单失败（交易所返回空）"}), 500
+                return jsonify({"status": "error", "message": "下单失败（未知原因）"}), 500
 
         # ==================== 全平处理 ====================
         elif signal == "CLOSE_ALL":
             result = binance_client.close_all_positions(symbol)
-
             position_manager.clear_position()
             tp_monitor.reset_tp()
-
             supervisor.notify_close_all(result)
-
-            logging.info("[执行层] 全平完成")
             return jsonify(result), 200
 
         else:
