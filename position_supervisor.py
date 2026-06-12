@@ -1,4 +1,4 @@
-# position_supervisor.py - 完整最终版（智慧层）
+# position_supervisor.py - 完整最终版（智慧层 + 清晰止盈报告）
 
 import logging
 from binance_client import BinanceClient
@@ -32,14 +32,37 @@ class PositionSupervisor:
             logging.error(f"[监督层] 发送全平报告失败: {e}")
 
     def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
-        """系统止盈触发后调用"""
+        """系统止盈触发后调用（优化清晰版）"""
         logging.info(f"[监督层] 系统止盈触发: {level.upper()}")
+
         try:
             if level == "tp3":
-                binance_client.send_close_all_report("TP3 触发全平完成")
+                # TP3 最终止盈
+                content = f"""### ✅ TP3 最终止盈触发
+
+**触发级别**: TP3（最终止盈）  
+**本次平仓数量**: {closed_qty} 张  
+**剩余仓位**: 已全部平完
+
+系统已完成最终止盈。"""
+                binance_client.send_close_all_report("TP3 最终止盈完成")
+
             else:
+                # TP1 或 TP2 部分止盈
+                content = f"""### ✅ {level.upper()} 止盈触发
+
+**触发级别**: {level.upper()}  
+**本次平仓数量**: {closed_qty} 张  
+**剩余仓位**: {remaining_qty} 张
+
+系统将继续监控后续止盈目标。"""
+
                 binance_client.send_tp_trigger_report(level, closed_qty, remaining_qty)
+
+            # 发送优化后的报告
+            binance_client._send_dingtalk(f"{level.upper()} 止盈触发", content)
             logging.info(f"[监督层] {level.upper()} 止盈报告已发送")
+
         except Exception as e:
             logging.error(f"[监督层] 发送止盈报告失败: {e}")
 
