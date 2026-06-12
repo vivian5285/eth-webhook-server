@@ -24,9 +24,9 @@ binance_client = BinanceClient(
 
 position_manager = PositionManager()
 
-# ==================== 后台处理函数 ====================
+# ==================== 后台异步处理函数 ====================
 def handle_signal_in_background(data):
-    """后台异步处理信号（不阻塞 webhook 返回）"""
+    """后台处理信号（快速响应 TradingView）"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
@@ -36,53 +36,62 @@ def handle_signal_in_background(data):
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             is_long = signal == "OPEN_LONG"
 
-            # 1. 先平当前仓位（先平后开逻辑）
+            # ========== 先平后开逻辑 ==========
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.info(f"[后台处理] 检测到已有仓位，先执行全平")
-                binance_client.close_all_positions(symbol)  # 你需要确保 binance_client 有这个方法
+                logging.info(f"[后台处理] 检测到已有 {current_pos['side']} 仓位，先执行全平")
+                close_result = binance_client.close_all_positions(symbol)
+                if close_result.get("status") != "success":
+                    logging.warning(f"[后台处理] 全平未成功: {close_result}")
 
-            # 2. 开新仓（这里简化示例，实际可调用你之前的开仓逻辑）
-            # TODO: 把你原来的开仓数量计算 + 下单逻辑放在这里
-            # 示例：直接用固定数量测试（生产环境请替换为动态计算）
-            qty = 0.5   # ← 临时测试值，实际请替换为你的 calc_qty 逻辑
+            # ========== 开新仓 ==========
+            # TODO: 这里替换为你真正的动态仓位计算逻辑
+            qty = 0.5   # 临时测试值，生产环境请替换为你的 calc_qty 逻辑
             side = "BUY" if is_long else "SELL"
 
-            order = binance_client.place_market_order(symbol, side, qty)
-            if order:
-                entry_price = float(order.get("avgPrice", 0)) or binance_client.get_current_price(symbol)
+            try:
+                order = binance_client.place_market_order(symbol, side, qty)
 
-                # 3. 计算 TP（使用 binance_client 里的收紧版逻辑）
-                tp_result = binance_client.send_position_open_report(
-                    signal=signal,
-                    symbol=symbol,
-                    qty=qty,
-                    entry_price=entry_price,
-                    is_long=is_long
-                )
+                if order:
+                    entry_price = float(order.get("avgPrice", 0)) or 0
+                    if entry_price == 0:
+                        # 兜底获取当前价格
+                        ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
+                        entry_price = float(ticker['price'])
 
-                if tp_result:
-                    # 4. 通知监督层（由监督层最终确认并发送钉钉）
-                    supervisor.notify_open_success(
+                    # 计算 TP 并发送报告（已收紧版）
+                    tp_result = binance_client.send_position_open_report(
                         signal=signal,
                         symbol=symbol,
                         qty=qty,
                         entry_price=entry_price,
-                        tp1=tp_result["tp1"],
-                        tp2=tp_result["tp2"],
-                        tp3=tp_result["tp3"]
+                        is_long=is_long
                     )
+
+                    if tp_result:
+                        # 通知监督层
+                        supervisor.notify_open_success(
+                            signal=signal,
+                            symbol=symbol,
+                            qty=qty,
+                            entry_price=entry_price,
+                            tp1=tp_result["tp1"],
+                            tp2=tp_result["tp2"],
+                            tp3=tp_result["tp3"]
+                        )
+            except Exception as order_err:
+                logging.error(f"[开仓失败] {order_err}")
 
         elif signal == "CLOSE_ALL":
             logging.info("[后台处理] 执行全平")
-            binance_client.close_all_positions(symbol)
-            supervisor.notify_close_all(data.get("reason", "manual_close"))
+            close_result = binance_client.close_all_positions(symbol)
+            supervisor.notify_close_all(data.get("reason", "manual_or_protection"))
 
     except Exception as e:
         logging.error(f"[后台处理异常] {e}")
 
 
-# ==================== Webhook 路由（快速响应） ====================
+# ==================== Webhook 路由（快速响应 TradingView） ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -90,10 +99,10 @@ def webhook():
         if not data:
             return jsonify({"status": "error", "message": "无效的JSON"}), 400
 
-        # 关键优化：立即返回 200，避免 TradingView 超时
+        # 立即返回 200，避免 TradingView 超时
         threading.Thread(target=handle_signal_in_background, args=(data,)).start()
 
-        logging.info(f"[Webhook] 已接收信号并快速返回: {data.get('signal')}")
+        logging.info(f"[Webhook] 已快速返回: {data.get('signal')}")
         return jsonify({"status": "accepted"}), 200
 
     except Exception as e:
@@ -106,10 +115,9 @@ def webhook():
 def status():
     return jsonify({
         "status": "running",
-        "message": "Webhook 服务正常"
+        "message": "Webhook 服务正常运行"
     })
 
 
 if __name__ == "__main__":
-    # 生产环境建议用 gunicorn 启动
     app.run(host="0.0.0.0", port=5000, debug=False)
