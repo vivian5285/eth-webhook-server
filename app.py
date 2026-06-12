@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from binance_client import BinanceClient
 from position_supervisor import supervisor
 from position_manager import PositionManager
-from tp_monitor import tp_monitor   # ← 新增导入
+from tp_monitor import tp_monitor          # ← 导入 TP 监控模块
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# ==================== 初始化 ====================
+# ==================== 初始化客户端 ====================
 binance_client = BinanceClient(
     api_key=os.getenv("BINANCE_API_KEY"),
     api_secret=os.getenv("BINANCE_API_SECRET"),
@@ -31,25 +31,23 @@ binance_client = BinanceClient(
 
 position_manager = PositionManager()
 
-# ==================== 后台异步处理函数 ====================
+# ==================== 后台信号处理函数 ====================
 def handle_signal_in_background(data):
-    """后台处理信号（带详细日志）"""
+    """后台异步处理 TradingView 信号（不阻塞 webhook 返回）"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
-        logging.info(f"========== [后台处理] 开始处理信号: {signal} | 币种: {symbol} ==========")
+        logging.info(f"========== [后台处理] 开始处理信号: {signal} ==========")
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             is_long = signal == "OPEN_LONG"
-            direction = "多" if is_long else "空"
 
             # 1. 先平后开
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
-                logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，数量: {current_pos['qty']}")
-                close_result = binance_client.close_all_positions(symbol)
-                logging.info(f"[先平后开] 全平结果: {close_result}")
+                logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先执行全平")
+                binance_client.close_all_positions(symbol)
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
@@ -59,76 +57,66 @@ def handle_signal_in_background(data):
                 leverage=5.0,
                 equity_ratio=0.80
             )
-            logging.info(f"[仓位计算] 最终下单数量: {qty}")
+            logging.info(f"[仓位计算] 本次下单数量: {qty}")
 
             if qty <= 0:
-                logging.error("[仓位计算] 计算出的数量 <= 0，跳过开仓")
+                logging.error("[仓位计算] 数量计算失败，跳过开仓")
                 return
 
             side = "BUY" if is_long else "SELL"
 
             # 3. 下单
-            logging.info(f"[下单] 准备下 {direction} 单 | 方向: {side} | 数量: {qty}")
-            try:
-                order = binance_client.place_market_order(symbol, side, qty)
-                logging.info(f"[下单成功] 订单信息: {order}")
+            order = binance_client.place_market_order(symbol, side, qty)
+            logging.info(f"[下单成功] {order}")
 
-                entry_price = float(order.get("avgPrice", 0)) or 0
-                if entry_price == 0:
-                    ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
-                    entry_price = float(ticker['price'])
-                    logging.info(f"[下单] 使用当前市价作为开仓价: {entry_price}")
+            entry_price = float(order.get("avgPrice", 0)) or 0
+            if entry_price == 0:
+                ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
+                entry_price = float(ticker['price'])
 
-                # 4. 计算 TP 并通知监督层
-                tp_result = binance_client.send_position_open_report(
+            # 4. 发送开仓报告（含 TP 计算）
+            tp_result = binance_client.send_position_open_report(
+                signal=signal,
+                symbol=symbol,
+                qty=qty,
+                entry_price=entry_price,
+                is_long=is_long
+            )
+
+            # 5. 通知监督层
+            if tp_result:
+                supervisor.notify_open_success(
                     signal=signal,
                     symbol=symbol,
                     qty=qty,
                     entry_price=entry_price,
-                    is_long=is_long
+                    tp1=tp_result["tp1"],
+                    tp2=tp_result["tp2"],
+                    tp3=tp_result["tp3"]
                 )
-                logging.info(f"[TP计算] TP1={tp_result.get('tp1')}, TP2={tp_result.get('tp2')}, TP3={tp_result.get('tp3')}")
-
-                if tp_result:
-                    supervisor.notify_open_success(
-                        signal=signal,
-                        symbol=symbol,
-                        qty=qty,
-                        entry_price=entry_price,
-                        tp1=tp_result["tp1"],
-                        tp2=tp_result["tp2"],
-                        tp3=tp_result["tp3"]
-                    )
-                    logging.info("[监督层] 已通知开仓成功")
-
-            except Exception as order_err:
-                logging.error(f"[下单失败] {order_err}", exc_info=True)
 
         elif signal == "CLOSE_ALL":
-            logging.info("[全平] 收到 CLOSE_ALL 信号，开始执行全平")
-            close_result = binance_client.close_all_positions(symbol)
-            logging.info(f"[全平结果] {close_result}")
+            logging.info("[全平] 执行全平操作")
+            binance_client.close_all_positions(symbol)
             supervisor.notify_close_all(data.get("reason", "manual_or_protection"))
-            logging.info("[监督层] 已通知全平完成")
 
-        logging.info(f"========== [后台处理] 信号 {signal} 处理结束 ==========")
+        logging.info(f"========== [后台处理] 信号 {signal} 处理完成 ==========")
 
     except Exception as e:
         logging.error(f"[后台处理异常] {e}", exc_info=True)
 
 
-# ==================== Webhook 路由 ====================
+# ==================== Webhook 接口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         data = request.get_json()
         if not data:
-            logging.warning("[Webhook] 收到无效JSON")
-            return jsonify({"status": "error", "message": "无效的JSON"}), 400
+            return jsonify({"status": "error", "message": "无效JSON"}), 400
 
-        logging.info(f"[Webhook] 收到信号: {data.get('signal')} | 原始数据: {data}")
+        logging.info(f"[Webhook] 收到信号: {data.get('signal')}")
 
-        # 立即返回 200
+        # 立即返回 200，避免 TradingView 超时
         threading.Thread(target=handle_signal_in_background, args=(data,)).start()
 
         return jsonify({"status": "accepted"}), 200
@@ -143,15 +131,17 @@ def webhook():
 def status():
     return jsonify({
         "status": "running",
-        "message": "Webhook 服务正常运行（详细日志 + TP监控版）"
+        "message": "Webhook + TP监控 服务正常运行"
     })
 
 
 # ==================== 启动入口 ====================
 if __name__ == "__main__":
-    # 启动 TP 监控（后台线程）
+    # ====================== 启动 TP 监控 ======================
+    # tp_monitor 会以守护线程方式运行，持续监控 TP1/TP2/TP3
+    # 并在检测到人工加减仓时自动与实盘对账
     tp_monitor.start()
-    logging.info("[启动] TP监控已启动")
+    logging.info("[启动] TP监控模块已启动")
 
-    # 启动 Flask 服务
+    # 启动 Flask Webhook 服务
     app.run(host="0.0.0.0", port=5000, debug=False)
