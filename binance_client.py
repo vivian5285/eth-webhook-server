@@ -1,4 +1,4 @@
-# binance_client.py（最终完整版 - 2026-06-12）
+# binance_client.py（最终完整版 - 含 close_all_positions）
 import logging
 import time
 import hmac
@@ -12,7 +12,7 @@ import math
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 钉钉配置（已加签） ====================
+# ==================== 钉钉配置 ====================
 DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
 DINGTALK_SECRET = "SEC17a8188a34e2401dbf0cb29344aa32ddbdaf9db9b0da5b5c328d52f4a55dd91c"
 
@@ -50,9 +50,8 @@ class BinanceClient:
             logging.error(f"[ATR获取失败] {e}")
             return 28.0
 
-    # ==================== 钉钉加签发送（完整版） ====================
-    def _send_dingtalk(self, message, is_warning=False):
-        """带加签的钉钉发送"""
+    # ==================== 钉钉加签发送 ====================
+    def _send_dingtalk(self, message):
         try:
             timestamp = str(round(time.time() * 1000))
             secret_enc = DINGTALK_SECRET.encode('utf-8')
@@ -87,7 +86,7 @@ class BinanceClient:
         try:
             atr = self._get_atr(symbol=symbol, interval="1h")
 
-            # ========== 1H 收紧版 TP123 ==========
+            # 1H 收紧版
             tp1 = entry_price + (atr * 1.05) if is_long else entry_price - (atr * 1.05)
             tp2 = entry_price + (atr * 1.85) if is_long else entry_price - (atr * 1.85)
             tp3 = entry_price + (atr * 2.55) if is_long else entry_price - (atr * 2.55)
@@ -114,31 +113,41 @@ class BinanceClient:
 • 账户权益: {self.get_account_balance()} USDT
 • 可用余额: {self.get_available_balance()} USDT"""
 
-            # 由监督层统一调用发送（这里只负责生成内容）
             self._send_dingtalk(msg)
-            
             logging.info(f"[TP计算] {direction} TP1={tp1}, TP2={tp2}, TP3={tp3}")
+
             return {"tp1": tp1, "tp2": tp2, "tp3": tp3, "entry_price": entry_price}
 
         except Exception as e:
             logging.error(f"[发送开仓报告失败] {e}")
             return None
 
-    # ==================== 其他方法 ====================
-    def get_account_balance(self):
+    # ==================== 全平仓位（已补全） ====================
+    def close_all_positions(self, symbol: str = "ETHUSDT"):
         try:
-            account = self.client.futures_account()
-            return round(float(account['totalWalletBalance']), 2)
-        except:
-            return 0.0
+            position = self.get_current_position(symbol)
+            if not position:
+                logging.info(f"[全平] {symbol} 当前无持仓")
+                return {"status": "skipped", "reason": "无持仓"}
 
-    def get_available_balance(self):
-        try:
-            account = self.client.futures_account()
-            return round(float(account['availableBalance']), 2)
-        except:
-            return 0.0
+            qty = position['qty']
+            side = "SELL" if position['side'] == "LONG" else "BUY"
 
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=qty,
+                reduceOnly=True
+            )
+            logging.info(f"[全平成功] {symbol} 平仓数量: {qty}")
+            return {"status": "success", "order": order}
+
+        except BinanceAPIException as e:
+            logging.error(f"[全平失败] {e}")
+            return {"status": "error", "message": str(e)}
+
+    # ==================== 其他常用方法 ====================
     def get_current_position(self, symbol="ETHUSDT"):
         try:
             positions = self.client.futures_position_information(symbol=symbol)
@@ -171,5 +180,22 @@ class BinanceClient:
             logging.error(f"[市价单失败] {e}")
             raise e
 
-    # close_partial_position、close_all_positions 等方法保持原有逻辑
-    # ...
+    def get_account_balance(self):
+        try:
+            account = self.client.futures_account()
+            return round(float(account['totalWalletBalance']), 2)
+        except:
+            return 0.0
+
+    def get_available_balance(self):
+        try:
+            account = self.client.futures_account()
+            return round(float(account['availableBalance']), 2)
+        except:
+            return 0.0
+
+
+# ==================== 测试用 ====================
+if __name__ == "__main__":
+    # 测试代码（可选）
+    pass
