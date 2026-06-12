@@ -1,16 +1,12 @@
-# app.py - 完整干净版（推荐使用）
+# app.py - 简化执行层版本（推荐）
 
 from flask import Flask, request, jsonify
-import os
-import re
-import json
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
-from tp_monitor import tp_monitor
 
 load_dotenv()
 
@@ -20,36 +16,35 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 binance_client = BinanceClient()
 
 
-def extract_json_from_text(text: str):
-    try:
-        match = re.search(r'\{.*\}', text)
-        if match:
-            return json.loads(match.group())
-    except:
-        pass
-    return None
-
-
-def calculate_position_size(symbol: str = "ETHUSDT") -> float:
-    # 固定小仓位测试（0.04 ETH）
+def calculate_position_size() -> float:
+    # 测试阶段固定小仓位
     return 0.04
 
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(silent=True) or extract_json_from_text(request.get_data(as_text=True))
+        data = request.get_json()
         if not data:
-            return jsonify({"status": "error", "message": "无法解析信号"}), 400
+            return jsonify({"status": "error", "message": "无效的JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
-        result = supervisor.handle_new_signal(signal)
-
-        if result.get("status") == "ready_to_open":
-            qty = calculate_position_size(symbol)
+        if signal in ["OPEN_LONG", "OPEN_SHORT"]:
+            # ========== 执行层：立即执行 ==========
+            qty = calculate_position_size()
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
+
+            # 1. 先检查当前是否有持仓
+            current_pos = binance_client.get_current_position(symbol)
+
+            # 2. 如果有持仓（无论同向还是反向），先平掉
+            if current_pos and current_pos.get("positionAmt", 0) != 0:
+                logging.info(f"[执行层] 检测到已有持仓，先执行全平")
+                binance_client.close_all_positions(symbol)
+
+            # 3. 再开新仓
             order = binance_client.place_market_order(symbol, side, qty)
 
             if order:
@@ -57,41 +52,46 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 设置止盈目标（仅用于记录和报告）
-                tp1 = round(entry_price * 1.0128, 2)
-                tp2 = round(entry_price * 1.025, 2)
-                tp3 = round(entry_price * 1.036, 2)
-                tp_monitor.set_tp_levels(tp1, tp2, tp3)
+                # 4. 快速返回响应
+                result = {
+                    "status": "success",
+                    "signal": signal,
+                    "qty": qty,
+                    "entry_price": entry_price
+                }
 
-                # 通知监督层（由监督层负责核查后发送钉钉报告）
-                supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
+                # 5. 事后通知监督层进行核查 + 发报告（不阻塞主流程）
+                supervisor.notify_open_success(signal, qty, entry_price)
 
-                return jsonify({"status": "success", "qty": qty}), 200
+                return jsonify(result), 200
             else:
-                return jsonify({"status": "error"}), 500
+                return jsonify({"status": "error", "message": "下单失败"}), 500
 
         elif signal == "CLOSE_ALL":
-            close_result = supervisor.execute_close_all_with_report()
-            return close_result
+            # ========== 执行层：直接全平 ==========
+            result = binance_client.close_all_positions(symbol)
 
-        return jsonify(result), 200
+            # 通知监督层发送全平报告
+            supervisor.notify_close_all(result)
+
+            return jsonify(result), 200
+
+        else:
+            return jsonify({"status": "error", "message": "未知信号"}), 400
 
     except Exception as e:
-        logging.error(f"[Webhook 异常] {e}")
+        logging.error(f"[Webhook异常] {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
 def status():
-    try:
-        return jsonify({
-            "status": "running",
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({
+        "status": "running",
+        "timestamp": datetime.now().isoformat()
+    })
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 已启动（干净版） ===")
+    logging.info("=== ETH Webhook Server (简化执行层) 已启动 ===")
     app.run(host="0.0.0.0", port=5000)
