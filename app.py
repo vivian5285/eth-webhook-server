@@ -1,4 +1,4 @@
-# app.py - 完整集成版
+# app.py - 完整集成版（PositionManager + TP监控 + 持久化）
 
 from flask import Flask, request, jsonify
 import logging
@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from binance_client import BinanceClient
 from position_supervisor import supervisor
 from tp_monitor import tp_monitor
+from position_manager import position_manager
 
 load_dotenv()
 
@@ -16,23 +17,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 binance_client = BinanceClient()
 
-# 启动TP监控
+# 启动TP后台监控
 tp_monitor.start()
 
 
 def calculate_position_size() -> float:
+    """测试阶段固定小仓位"""
     return 0.04
 
 
 def calculate_tp_prices(entry_price: float, is_long: bool):
+    """收紧后的止盈计算（更早落袋为安）"""
     if is_long:
-        tp1 = round(entry_price * 1.006, 2)
-        tp2 = round(entry_price * 1.012, 2)
-        tp3 = round(entry_price * 1.020, 2)
+        tp1 = round(entry_price * 1.006, 2)   # +0.6%
+        tp2 = round(entry_price * 1.012, 2)   # +1.2%
+        tp3 = round(entry_price * 1.020, 2)   # +2.0%
     else:
-        tp1 = round(entry_price * 0.994, 2)
-        tp2 = round(entry_price * 0.988, 2)
-        tp3 = round(entry_price * 0.980, 2)
+        tp1 = round(entry_price * 0.994, 2)   # -0.6%
+        tp2 = round(entry_price * 0.988, 2)   # -1.2%
+        tp3 = round(entry_price * 0.980, 2)   # -2.0%
     return tp1, tp2, tp3
 
 
@@ -41,56 +44,97 @@ def webhook():
     try:
         data = request.get_json()
         if not data:
-            return jsonify({"status": "error"}), 400
+            return jsonify({"status": "error", "message": "无效的JSON"}), 400
 
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
+        # ==================== 开仓信号 ====================
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             qty = calculate_position_size()
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             is_long = signal == "OPEN_LONG"
 
-            # 平掉旧仓位
+            # 1. 如果当前有持仓，先平掉
             current_pos = binance_client.get_current_position(symbol)
             if current_pos and current_pos.get("positionAmt", 0) != 0:
+                logging.info("[执行层] 检测到已有持仓，先执行全平")
                 binance_client.close_all_positions(symbol)
+                position_manager.clear_position()
 
+            # 2. 执行开新仓
             order = binance_client.place_market_order(symbol, side, qty)
 
             if order:
                 entry_price = float(order.get('avgPrice', 0)) or float(
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
+
+                # 3. 计算止盈价格
                 tp1, tp2, tp3 = calculate_tp_prices(entry_price, is_long)
 
-                # 注册止盈目标给监控器
+                # 4. 更新持久化状态
+                position_manager.update_position(
+                    side="long" if is_long else "short",
+                    entry_price=entry_price,
+                    qty=qty,
+                    tp1=tp1,
+                    tp2=tp2,
+                    tp3=tp3
+                )
+
+                # 5. 设置TP监控目标
                 tp_monitor.set_tp_levels(tp1, tp2, tp3, entry_price, is_long)
 
+                # 6. 通知监督层
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
-                return jsonify({"status": "success", "entry_price": entry_price}), 200
-            else:
-                return jsonify({"status": "error"}), 500
+                logging.info(f"[执行层] {signal} 成功 | 入场价: {entry_price} | TP1: {tp1}, TP2: {tp2}, TP3: {tp3}")
 
+                return jsonify({
+                    "status": "success",
+                    "signal": signal,
+                    "qty": qty,
+                    "entry_price": entry_price,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "tp3": tp3
+                }), 200
+            else:
+                return jsonify({"status": "error", "message": "下单失败"}), 500
+
+        # ==================== 全平信号 ====================
         elif signal == "CLOSE_ALL":
             result = binance_client.close_all_positions(symbol)
-            tp_monitor._reset_tp()  # 清空止盈目标
+
+            # 清空状态
+            position_manager.clear_position()
+            tp_monitor._reset_tp()   # 清空止盈目标
+
+            # 通知监督层
             supervisor.notify_close_all(result)
+
+            logging.info("[执行层] 全平完成")
             return jsonify(result), 200
 
-        return jsonify({"status": "error"}), 400
+        else:
+            return jsonify({"status": "error", "message": "未知信号类型"}), 400
 
     except Exception as e:
         logging.error(f"[Webhook异常] {e}")
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({"status": "running"})
+    state = position_manager.get_current_state()
+    return jsonify({
+        "status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "current_position": state
+    })
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server (完整TP监控版) 已启动 ===")
+    logging.info("=== ETH Webhook Server (完整版 - PositionManager + TP监控) 已启动 ===")
     app.run(host="0.0.0.0", port=5000)
