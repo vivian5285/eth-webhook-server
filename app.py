@@ -1,4 +1,4 @@
-# app.py - 最终稳定版（带真实 Binance 错误返回）
+# app.py - 最终稳定版（已适配精度修复 + 真实错误返回）
 
 from flask import Flask, request, jsonify
 import logging
@@ -44,7 +44,7 @@ def webhook():
                 binance_client.close_all_positions(symbol)
                 position_manager.clear_position()
 
-            # 2. 动态计算仓位（统一20%资金模式）
+            # 2. 动态计算仓位（已修复精度）
             qty = binance_client.calculate_position_size(symbol=symbol)
 
             if qty < 0.001:
@@ -57,7 +57,7 @@ def webhook():
             # 3. 执行市价开仓
             order = binance_client.place_market_order(symbol, side, qty)
 
-            # ==================== 关键改进：返回真实 Binance 错误 ====================
+            # ==================== 返回真实 Binance 错误 ====================
             if order and isinstance(order, dict) and order.get("status") == "error":
                 error_msg = order.get("message", "未知错误")
                 logging.error(f"[执行层] 下单失败，Binance真实错误: {error_msg}")
