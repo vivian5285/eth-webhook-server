@@ -1,6 +1,11 @@
-# binance_client.py - 加强日志完整稳定版
+# binance_client.py - 已修复钉钉加签完整版
 
 import os
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
 import logging
 import requests
 from binance import Client
@@ -12,6 +17,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET")   # 加签密钥
 
 
 class BinanceClient:
@@ -21,15 +27,12 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 基础功能（保持原有） ====================
+    # ==================== 基础功能 ====================
 
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
             order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=qty
+                symbol=symbol, side=side, type="MARKET", quantity=qty
             )
             logging.info(f"[市价单成功] {side} {symbol} Qty:{qty}")
             return order
@@ -41,24 +44,18 @@ class BinanceClient:
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
-                logging.info("[全平] 当前无持仓，跳过")
                 return {"status": "skipped", "reason": "无持仓"}
 
             qty = abs(position["positionAmt"])
             side = "SELL" if position["positionAmt"] > 0 else "BUY"
 
-            order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=qty,
-                reduceOnly=True
+            self.client.futures_create_order(
+                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
             )
-            logging.info(f"[全平成功] {symbol}")
             return {"status": "success"}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error"}
 
     def close_partial_position(self, symbol: str, percent: float):
         try:
@@ -71,13 +68,8 @@ class BinanceClient:
             side = "SELL" if position["positionAmt"] > 0 else "BUY"
 
             self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=close_qty,
-                reduceOnly=True
+                symbol=symbol, side=side, type="MARKET", quantity=close_qty, reduceOnly=True
             )
-            logging.info(f"[部分平仓成功] {symbol} 平 {close_qty}")
             return {"status": "success", "closed_qty": close_qty}
         except Exception as e:
             logging.error(f"[部分平仓失败] {e}")
@@ -110,32 +102,37 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 钉钉报告（加强日志版） ====================
+    # ==================== 钉钉加签发送（核心修复） ====================
 
     def _send_dingtalk(self, title: str, content: str):
-        logging.info(f"[钉钉] 准备发送 → {title}")
-
         if not DINGTALK_WEBHOOK:
-            logging.error("[钉钉] DINGTALK_WEBHOOK 为空，无法发送")
+            logging.error("[钉钉] DINGTALK_WEBHOOK 未配置")
             return
 
         try:
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f"{timestamp}\n{DINGTALK_SECRET}"
+            hmac_code = hmac.new(
+                DINGTALK_SECRET.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                digestmod=hashlib.sha256
+            ).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+
+            url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
+
             data = {
                 "msgtype": "markdown",
-                "markdown": {
-                    "title": title,
-                    "text": content
-                }
+                "markdown": {"title": title, "text": content}
             }
-            resp = requests.post(DINGTALK_WEBHOOK, json=data, timeout=6)
+
+            resp = requests.post(url, json=data, timeout=6)
             logging.info(f"[钉钉] 发送完成，状态码: {resp.status_code}")
         except Exception as e:
             logging.error(f"[钉钉] 发送异常: {e}")
 
     def send_position_open_report(self, signal: str, qty: float, entry_price: float,
                                   tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        logging.info(f"[报告] 进入 send_position_open_report → {signal}")
-
         try:
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
@@ -155,13 +152,11 @@ class BinanceClient:
 - 账户权益: {balance['totalWalletBalance']} USDT
 - 可用余额: {balance['availableBalance']} USDT
 """
-
             self._send_dingtalk(f"{signal} 成功", content)
         except Exception as e:
             logging.error(f"[报告] send_position_open_report 异常: {e}")
 
     def send_close_all_report(self, reason: str = ""):
-        logging.info(f"[报告] 进入 send_close_all_report，原因: {reason}")
         try:
             balance = self.get_account_balance()
             content = f"""### 🔴 全平完成
@@ -177,7 +172,6 @@ class BinanceClient:
             logging.error(f"[报告] send_close_all_report 异常: {e}")
 
     def send_tp_trigger_report(self, level: str, closed_qty: float, remaining_qty: float):
-        logging.info(f"[报告] 进入 send_tp_trigger_report → {level}")
         try:
             content = f"""### 🟡 {level.upper()} 触发
 
