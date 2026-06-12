@@ -29,7 +29,7 @@ binance_client = BinanceClient(
     max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
 )
 
-# ==================== 后台信号处理 ====================
+# ==================== 后台信号处理函数 ====================
 def handle_signal_in_background(data):
     try:
         signal = data.get("signal")
