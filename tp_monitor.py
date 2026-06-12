@@ -23,7 +23,7 @@ class TPMonitor:
         self.check_interval = check_interval
         self.running = False
         self.thread = None
-        self.initial_qty = None
+        self.initial_qty = None          # 记录初始开仓数量
         self.tp1_done = False
         self.tp2_done = False
 
@@ -53,6 +53,7 @@ class TPMonitor:
 
         position = position_manager.get_position()
         if not position or position.get("qty", 0) <= 0:
+            # 仓位已平，清理状态
             self.initial_qty = None
             self.tp1_done = False
             self.tp2_done = False
@@ -66,8 +67,10 @@ class TPMonitor:
         tp3 = position.get("tp3")
 
         if not all([tp1, tp2, tp3]):
+            logging.warning("[TP监控] TP价格不完整，跳过检查")
             return
 
+        # 第一次检测到仓位时记录初始数量
         if self.initial_qty is None:
             self.initial_qty = current_qty
             self.tp1_done = False
@@ -95,20 +98,26 @@ class TPMonitor:
             self._reset_state()
 
         elif hit_tp2 and not self.tp2_done:
+            # TP2：平初始仓位的 30%
             target_close = round(self.initial_qty * 0.30, 3)
             self._execute_fixed_qty(target_close, "2", current_price, symbol)
 
         elif hit_tp1 and not self.tp1_done:
+            # TP1：平初始仓位的 30%
             target_close = round(self.initial_qty * 0.30, 3)
             self._execute_fixed_qty(target_close, "1", current_price, symbol)
 
     def _execute_fixed_qty(self, close_qty, level, current_price, symbol):
         if close_qty < 0.001:
             return
-        logging.info(f"[TP监控] TP{level} 触发 → 平 {close_qty} 张（基于初始仓位）")
+
+        logging.info(f"[TP监控] TP{level} 触发 → 平 {close_qty} 张（基于初始仓位 30%）")
+
         result = binance_client.close_partial_position(symbol, close_qty)
         if result.get("status") == "success":
+            logging.info(f"[TP监控] TP{level} 平仓成功")
             supervisor.notify_tp_hit(level, close_qty, current_price)
+
             if level == "1":
                 self.tp1_done = True
             elif level == "2":
@@ -120,4 +129,5 @@ class TPMonitor:
         self.tp2_done = False
 
 
+# 全局单例
 tp_monitor = TPMonitor(check_interval=6)
