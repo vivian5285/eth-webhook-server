@@ -1,4 +1,4 @@
-# app.py - 完整更新后版本（带临时钉钉测试代码）
+# app.py - 完整干净版（推荐使用）
 
 from flask import Flask, request, jsonify
 import os
@@ -31,7 +31,7 @@ def extract_json_from_text(text: str):
 
 
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
-    # 固定小仓位测试版（0.04 ETH）
+    # 固定小仓位测试（0.04 ETH）
     return 0.04
 
 
@@ -57,23 +57,14 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 设置止盈目标
+                # 设置止盈目标（仅用于记录和报告）
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 正常调用
+                # 通知监督层（由监督层负责核查后发送钉钉报告）
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
-
-                # ==================== 临时测试代码（直接发钉钉） ====================
-                try:
-                    logging.info("[临时测试] 准备直接调用 send_position_open_report")
-                    binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-                    logging.info("[临时测试] 直接发送报告成功")
-                except Exception as e:
-                    logging.error(f"[临时测试] 直接发送报告失败: {e}")
-                # ================================================================
 
                 return jsonify({"status": "success", "qty": qty}), 200
             else:
@@ -102,5 +93,5 @@ def status():
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server 已启动（带临时测试代码） ===")
+    logging.info("=== ETH Webhook Server 已启动（干净版） ===")
     app.run(host="0.0.0.0", port=5000)
