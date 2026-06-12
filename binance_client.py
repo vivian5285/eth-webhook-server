@@ -1,4 +1,4 @@
-# binance_client.py（最终完整版 - 2026-06-13）
+# binance_client.py（最终优化版 - 钉钉排版已优化）
 import os
 import time
 import hmac
@@ -27,8 +27,8 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 仓位计算（80% × 5倍） ====================
-    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
+    # ==================== 仓位计算（20% 本金 × 5倍） ====================
+    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.20):
         try:
             account = self.client.futures_account()
             total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
@@ -36,14 +36,10 @@ class BinanceClient:
             usable_equity = total_equity * equity_ratio
             position_value = usable_equity * leverage
 
-            # 获取当前价格
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             current_price = float(ticker['price'])
 
-            # 计算原始数量
             raw_qty = position_value / current_price
-
-            # ETHUSDT 最小下单单位为 0.001
             final_qty = math.floor(raw_qty / 0.001) * 0.001
 
             logging.info(f"[仓位计算] 权益: {total_equity:.2f} | 可用: {usable_equity:.2f} | 下单数量: {final_qty}")
@@ -136,14 +132,11 @@ class BinanceClient:
             logging.error(f"[获取权益失败] {e}")
             return 0.0
 
-    # ==================== 开仓时计算 TP 并发送报告 ====================
+    # ==================== 开仓报告（优化排版） ====================
     def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
         try:
-            atr = self._get_atr(symbol)
-            if not atr:
-                atr = entry_price * 0.008  # 兜底 ATR
+            atr = self._get_atr(symbol) or (entry_price * 0.008)
 
-            # 收紧后的 TP 倍数
             tp1_mult = 1.05
             tp2_mult = 1.85
             tp3_mult = 2.55
@@ -157,10 +150,21 @@ class BinanceClient:
                 tp2 = round(entry_price - atr * tp2_mult, 2)
                 tp3 = round(entry_price - atr * tp3_mult, 2)
 
+            direction = "开多" if is_long else "开空"
+            emoji = "🟢" if is_long else "🔴"
+
+            # ==================== 优化后的钉钉排版 ====================
             msg = (
-                f"{'🟢' if is_long else '🔴'} **{signal}** | {symbol}\n"
-                f"数量: {qty} | 开仓价: {entry_price}\n"
-                f"TP1: {tp1} | TP2: {tp2} | TP3: {tp3}"
+                f"{emoji} **{direction} 成功** | {symbol}\n\n"
+                f"数量: {qty} 张\n"
+                f"开仓价: {entry_price} USDT\n\n"
+                f"止盈目标:\n"
+                f"• 止盈1: {tp1} USDT\n"
+                f"• 止盈2: {tp2} USDT\n"
+                f"• 止盈3: {tp3} USDT\n\n"
+                f"账户详情:\n"
+                f"• 账户权益: {self.get_account_balance():.2f} USDT\n"
+                f"• 可用余额: {self._get_available_balance():.2f} USDT"
             )
 
             self._send_dingtalk(msg)
@@ -169,6 +173,13 @@ class BinanceClient:
         except Exception as e:
             logging.error(f"[发送开仓报告失败] {e}")
             return None
+
+    def _get_available_balance(self):
+        try:
+            account = self.client.futures_account()
+            return float(account.get('availableBalance', 0))
+        except:
+            return 0.0
 
     # ==================== 获取 ATR ====================
     def _get_atr(self, symbol, interval="1h", limit=14):
@@ -212,5 +223,5 @@ class BinanceClient:
             logging.error(f"[钉钉发送失败] {e}")
 
 
-# 全局实例（可选）
+# 全局实例
 binance_client = None
