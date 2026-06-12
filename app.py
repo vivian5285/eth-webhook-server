@@ -1,4 +1,4 @@
-# app.py - 固定小仓位测试版（先跑通流程）
+# app.py - 完整更新后版本（带临时钉钉测试代码）
 
 from flask import Flask, request, jsonify
 import os
@@ -31,8 +31,7 @@ def extract_json_from_text(text: str):
 
 
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
-    # ==================== 临时固定小仓位（测试用） ====================
-    # 先用 0.04 ETH 跑通流程，确认没问题后再改回动态 7.5% 计算
+    # 固定小仓位测试版（0.04 ETH）
     return 0.04
 
 
@@ -50,7 +49,6 @@ def webhook():
 
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
-
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             order = binance_client.place_market_order(symbol, side, qty)
 
@@ -59,13 +57,23 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 设置止盈目标（即使不启动监控也保留）
+                # 设置止盈目标
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
+                # 正常调用
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
+
+                # ==================== 临时测试代码（直接发钉钉） ====================
+                try:
+                    logging.info("[临时测试] 准备直接调用 send_position_open_report")
+                    binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+                    logging.info("[临时测试] 直接发送报告成功")
+                except Exception as e:
+                    logging.error(f"[临时测试] 直接发送报告失败: {e}")
+                # ================================================================
 
                 return jsonify({"status": "success", "qty": qty}), 200
             else:
@@ -94,6 +102,5 @@ def status():
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server (固定小仓位测试版) 已启动 ===")
-    # tp_monitor.start()   # 已注释，稳定模式
+    logging.info("=== ETH Webhook Server 已启动（带临时测试代码） ===")
     app.run(host="0.0.0.0", port=5000)
