@@ -1,4 +1,4 @@
-# tp_monitor.py - 完整稳定版（已注释 WebSocket 自动启动）
+# tp_monitor.py - 对应稳定测试版（已注释 WebSocket 自动启动）
 
 import logging
 import threading
@@ -25,7 +25,7 @@ class TPMonitor:
 
     def start(self):
         with self.lock:
-            # ==================== 已临时禁用 WebSocket 启动 ====================
+            # ==================== 已临时禁用 WebSocket 启动（稳定模式） ====================
             logging.warning("[TP监控] WebSocket 启动已临时禁用（稳定模式）")
             # 下面是原来的启动代码，已注释
             # if self.is_running:
