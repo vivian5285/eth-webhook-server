@@ -1,4 +1,4 @@
-# position_supervisor.py（最终完整版 - 2026-06-12）
+# position_supervisor.py（最终完整版 - 2026-06-13）
 import logging
 import threading
 import os
@@ -10,7 +10,7 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 正确初始化 Binance Client ====================
+# ==================== 正确初始化 BinanceClient ====================
 binance_client = BinanceClient(
     api_key=os.getenv("BINANCE_API_KEY"),
     api_secret=os.getenv("BINANCE_API_SECRET"),
@@ -28,7 +28,6 @@ class PositionSupervisor:
         self.lock = threading.Lock()
         logging.info("[监督层] PositionSupervisor 初始化完成")
 
-    # ==================== 开仓成功通知 ====================
     def notify_open_success(self, signal: str, symbol: str, qty: float, 
                             entry_price: float, tp1: float, tp2: float, tp3: float):
         with self.lock:
@@ -36,12 +35,10 @@ class PositionSupervisor:
                 is_long = signal == "OPEN_LONG"
                 direction = "多" if is_long else "空"
 
-                # 与实盘对账
                 real_position = binance_client.get_current_position(symbol)
                 if real_position:
                     position_manager.reconcile(real_position)
 
-                # 更新本地仓位管理器
                 position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
                     symbol=symbol,
@@ -52,7 +49,6 @@ class PositionSupervisor:
                     tp3=tp3
                 )
 
-                # 发送钉钉报告（由 binance_client 内部处理）
                 binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
@@ -67,9 +63,7 @@ class PositionSupervisor:
 
             except Exception as e:
                 logging.error(f"[监督层] notify_open_success 异常: {e}", exc_info=True)
-                self._handle_failure(str(e))
 
-    # ==================== TP 触发通知 ====================
     def notify_tp_hit(self, level: str, closed_qty: float, avg_price: float):
         with self.lock:
             try:
@@ -90,7 +84,6 @@ class PositionSupervisor:
             except Exception as e:
                 logging.error(f"[监督层] notify_tp_hit 异常: {e}", exc_info=True)
 
-    # ==================== 全平通知 ====================
     def notify_close_all(self, reason: str):
         with self.lock:
             try:
@@ -103,21 +96,6 @@ class PositionSupervisor:
             except Exception as e:
                 logging.error(f"[监督层] notify_close_all 异常: {e}", exc_info=True)
 
-    # ==================== 内部辅助方法 ====================
-    def _handle_failure(self, reason: str):
-        self.consecutive_failure_count += 1
-        logging.warning(f"[监督层] 连续失败 {self.consecutive_failure_count} 次: {reason}")
 
-        if self.consecutive_failure_count >= self.max_failures:
-            self.is_paused = True
-            logging.error("[监督层] 已达到最大失败次数，暂停交易")
-            binance_client._send_dingtalk("🚨 **监督层告警**\n连续失败次数过多，系统已暂停交易，请人工检查！")
-
-    def reset(self):
-        self.consecutive_failure_count = 0
-        self.is_paused = False
-        logging.info("[监督层] 状态已重置")
-
-
-# ==================== 全局单例 ====================
+# 全局单例
 supervisor = PositionSupervisor()
