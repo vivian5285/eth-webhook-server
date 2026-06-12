@@ -1,4 +1,4 @@
-# app.py - 最终稳定版（已适配精度修复 + 真实错误返回）
+# app.py - 最终稳定版（全仓5倍模式适配版）
 
 from flask import Flask, request, jsonify
 import logging
@@ -44,7 +44,7 @@ def webhook():
                 binance_client.close_all_positions(symbol)
                 position_manager.clear_position()
 
-            # 2. 动态计算仓位（已修复精度）
+            # 2. 动态计算仓位（全仓5倍模式）
             qty = binance_client.calculate_position_size(symbol=symbol)
 
             if qty < 0.001:
