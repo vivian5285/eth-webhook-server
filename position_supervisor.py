@@ -1,4 +1,4 @@
-# position_supervisor.py - 注释 WebSocket 启动版（临时稳定使用）
+# position_supervisor.py - 完整稳定版（已注释 WebSocket 自动启动）
 
 import logging
 import time
@@ -19,8 +19,8 @@ class PositionSupervisor:
         self.is_paused = False
         self.lock = threading.Lock()
         self.twm = None
-        # ==================== 已注释 WebSocket 自动启动 ====================
-        # self._start_user_data_stream()   # 临时注释，防止启动时卡死 worker
+        # ==================== 已注释 WebSocket 自动启动（防止卡死） ====================
+        # self._start_user_data_stream()
 
     def _start_user_data_stream(self):
         with self.lock:
@@ -76,7 +76,7 @@ class PositionSupervisor:
         return {"status": "ready_to_open", "signal": signal}
 
     def execute_close_all_with_report(self):
-        """公开方法：全平 + 核实 + 发报告"""
+        """公开方法：全平 + 实盘核查 + 发送钉钉报告"""
         return self._execute_close_all(verified=True)
 
     def _execute_close_all(self, verified: bool = True):
