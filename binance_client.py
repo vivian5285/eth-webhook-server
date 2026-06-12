@@ -1,168 +1,81 @@
-# binance_client.py（最终完整版 - 2026-06-12）
-import logging
+# binance_client.py（最终完整版 - 2026-06-13）
+import os
 import time
 import hmac
 import hashlib
 import base64
 import urllib.parse
-import requests
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+import logging
 import math
+from binance import Client
+from binance.exceptions import BinanceAPIException
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# ==================== 钉钉配置 ====================
-DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=fddb9885a4e26dc6ba519d7cf9e7fe90ff9c400ecbe7fc783123c22d0d2007ed"
-DINGTALK_SECRET = "SEC17a8188a34e2401dbf0cb29344aa32ddbdaf9db9b0da5b5c328d52f4a55dd91c"
-
 
 class BinanceClient:
-    def __init__(self, api_key, api_secret, 
-                 risk_percent=0.85, 
-                 max_leverage=5.0,
-                 atr_multiplier_sl=0.92):
-        self.client = Client(api_key, api_secret)
-        self.api_key = api_key
-        self.api_secret = api_secret
+    def __init__(self, api_key=None, api_secret=None, 
+                 risk_percent=0.85, max_leverage=5.0):
+        self.api_key = api_key or os.getenv("BINANCE_API_KEY")
+        self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET")
         self.risk_percent = risk_percent
         self.max_leverage = max_leverage
-        self.atr_multiplier_sl = atr_multiplier_sl
 
-    # ==================== ATR 获取 ====================
-    def _get_atr(self, symbol="ETHUSDT", interval="1h", limit=14):
-        try:
-            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-            highs = [float(k[2]) for k in klines]
-            lows = [float(k[3]) for k in klines]
-            closes = [float(k[4]) for k in klines]
+        if not self.api_key or not self.api_secret:
+            raise ValueError("API Key 和 Secret 不能为空")
 
-            tr_list = []
-            for i in range(1, len(klines)):
-                tr = max(highs[i] - lows[i],
-                         abs(highs[i] - closes[i-1]),
-                         abs(lows[i] - closes[i-1]))
-                tr_list.append(tr)
+        self.client = Client(self.api_key, self.api_secret)
+        logging.info("[BinanceClient] 初始化成功")
 
-            atr = sum(tr_list[-14:]) / 14 if len(tr_list) >= 14 else sum(tr_list) / len(tr_list)
-            return round(atr, 2)
-        except Exception as e:
-            logging.error(f"[ATR获取失败] {e}")
-            return 28.0
-
-    # ==================== 动态仓位计算（80% × 5倍） ====================
+    # ==================== 仓位计算（80% × 5倍） ====================
     def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
-        """
-        按总资金的80% × 指定杠杆计算仓位
-        """
         try:
             account = self.client.futures_account()
-            total_equity = float(account['totalWalletBalance'])
+            total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
 
             usable_equity = total_equity * equity_ratio
             position_value = usable_equity * leverage
 
+            # 获取当前价格
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            price = float(ticker['price'])
+            current_price = float(ticker['price'])
 
-            raw_qty = position_value / price
+            # 计算原始数量
+            raw_qty = position_value / current_price
 
-            # ETHUSDT 步长对齐（最小0.001）
-            step_size = 0.001
-            final_qty = math.floor(raw_qty / step_size) * step_size
-            final_qty = round(final_qty, 3)
+            # ETHUSDT 最小下单单位为 0.001
+            final_qty = math.floor(raw_qty / 0.001) * 0.001
 
-            logging.info(f"[仓位计算] 权益={total_equity:.2f} | 可用={usable_equity:.2f} | "
-                         f"名义价值={position_value:.2f} | 数量={final_qty}")
-
-            return final_qty
+            logging.info(f"[仓位计算] 权益: {total_equity:.2f} | 可用: {usable_equity:.2f} | 下单数量: {final_qty}")
+            return round(final_qty, 3)
 
         except Exception as e:
-            logging.error(f"[仓位计算失败] {e}")
-            return 0.3  # 兜底小数量
+            logging.error(f"[仓位计算] 失败: {e}")
+            return 0.0
 
-    # ==================== 钉钉加签发送 ====================
-    def _send_dingtalk(self, message):
+    # ==================== 下单 ====================
+    def place_market_order(self, symbol, side, quantity):
         try:
-            timestamp = str(round(time.time() * 1000))
-            secret_enc = DINGTALK_SECRET.encode('utf-8')
-            string_to_sign = f'{timestamp}\n{DINGTALK_SECRET}'
-            string_to_sign_enc = string_to_sign.encode('utf-8')
-            hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
-            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type="MARKET",
+                quantity=quantity
+            )
+            return order
+        except BinanceAPIException as e:
+            logging.error(f"[下单失败] {e}")
+            raise
 
-            url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
-
-            data = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "title": "量化交易通知",
-                    "text": message
-                }
-            }
-
-            resp = requests.post(url, json=data, timeout=10)
-            result = resp.json()
-
-            if result.get("errcode") == 0:
-                logging.info("[钉钉] 发送成功")
-            else:
-                logging.error(f"[钉钉] 发送失败: {result}")
-
-        except Exception as e:
-            logging.error(f"[钉钉发送异常] {e}")
-
-    # ==================== 开仓后 TP 计算 + 报告（已收紧） ====================
-    def send_position_open_report(self, signal, symbol, qty, entry_price, is_long=True):
-        try:
-            atr = self._get_atr(symbol=symbol, interval="1h")
-
-            # 1H 收紧版 TP
-            tp1 = entry_price + (atr * 1.05) if is_long else entry_price - (atr * 1.05)
-            tp2 = entry_price + (atr * 1.85) if is_long else entry_price - (atr * 1.85)
-            tp3 = entry_price + (atr * 2.55) if is_long else entry_price - (atr * 2.55)
-
-            tp1 = round(tp1, 2)
-            tp2 = round(tp2, 2)
-            tp3 = round(tp3, 2)
-            entry_price = round(entry_price, 2)
-
-            direction = "开多" if is_long else "开空"
-            emoji = "🟢" if is_long else "🔴"
-
-            msg = f"""{emoji} **{direction} 成功**
-
-**数量**: {qty} 张  
-**开仓价**: {entry_price} USDT
-
-**止盈目标**
-• 止盈1: {tp1} USDT
-• 止盈2: {tp2} USDT
-• 止盈3: {tp3} USDT
-
-**账户详情**
-• 账户权益: {self.get_account_balance()} USDT
-• 可用余额: {self.get_available_balance()} USDT"""
-
-            self._send_dingtalk(msg)
-            logging.info(f"[TP计算] {direction} TP1={tp1}, TP2={tp2}, TP3={tp3}")
-
-            return {"tp1": tp1, "tp2": tp2, "tp3": tp3, "entry_price": entry_price}
-
-        except Exception as e:
-            logging.error(f"[发送开仓报告失败] {e}")
-            return None
-
-    # ==================== 全平仓位 ====================
-    def close_all_positions(self, symbol: str = "ETHUSDT"):
+    # ==================== 全平 ====================
+    def close_all_positions(self, symbol):
         try:
             position = self.get_current_position(symbol)
-            if not position:
-                logging.info(f"[全平] {symbol} 当前无持仓")
+            if not position or float(position['positionAmt']) == 0:
                 return {"status": "skipped", "reason": "无持仓"}
 
-            qty = position['qty']
-            side = "SELL" if position['side'] == "LONG" else "BUY"
+            qty = abs(float(position['positionAmt']))
+            side = "SELL" if float(position['positionAmt']) > 0 else "BUY"
 
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -171,60 +84,133 @@ class BinanceClient:
                 quantity=qty,
                 reduceOnly=True
             )
-            logging.info(f"[全平成功] {symbol} 平仓数量: {qty}")
+            logging.info(f"[全平成功] {symbol} | Qty: {qty}")
             return {"status": "success", "order": order}
-
-        except BinanceAPIException as e:
+        except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
 
-    # ==================== 其他常用方法 ====================
-    def get_current_position(self, symbol="ETHUSDT"):
+    # ==================== 部分平仓 ====================
+    def close_partial_position(self, symbol, quantity):
         try:
-            positions = self.client.futures_position_information(symbol=symbol)
-            for pos in positions:
-                if float(pos['positionAmt']) != 0:
-                    return {
-                        "symbol": pos['symbol'],
-                        "side": "LONG" if float(pos['positionAmt']) > 0 else "SHORT",
-                        "qty": abs(float(pos['positionAmt'])),
-                        "avg_price": float(pos['entryPrice']),
-                        "unrealized_pnl": float(pos['unRealizedProfit'])
-                    }
-            return None
-        except Exception as e:
-            logging.error(f"[获取持仓失败] {e}")
-            return None
+            position = self.get_current_position(symbol)
+            if not position:
+                return {"status": "error", "message": "无持仓"}
 
-    def place_market_order(self, symbol, side, quantity, reduce_only=False):
-        try:
+            current_qty = abs(float(position['positionAmt']))
+            if quantity > current_qty:
+                quantity = current_qty
+
+            side = "SELL" if float(position['positionAmt']) > 0 else "BUY"
+
             order = self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
                 quantity=quantity,
-                reduceOnly=reduce_only
+                reduceOnly=True
             )
-            logging.info(f"[市价单成功] {symbol} {side} Qty:{quantity}")
-            return order
-        except BinanceAPIException as e:
-            logging.error(f"[市价单失败] {e}")
-            raise e
+            return {"status": "success", "order": order}
+        except Exception as e:
+            logging.error(f"[部分平仓失败] {e}")
+            return {"status": "error", "message": str(e)}
 
+    # ==================== 获取当前持仓 ====================
+    def get_current_position(self, symbol):
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            for pos in positions:
+                if float(pos['positionAmt']) != 0:
+                    return pos
+            return None
+        except Exception as e:
+            logging.error(f"[获取持仓失败] {e}")
+            return None
+
+    # ==================== 获取账户权益 ====================
     def get_account_balance(self):
         try:
             account = self.client.futures_account()
-            return round(float(account['totalWalletBalance']), 2)
-        except:
+            return float(account['totalWalletBalance'])
+        except Exception as e:
+            logging.error(f"[获取权益失败] {e}")
             return 0.0
 
-    def get_available_balance(self):
+    # ==================== 开仓时计算 TP 并发送报告 ====================
+    def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
         try:
-            account = self.client.futures_account()
-            return round(float(account['availableBalance']), 2)
-        except:
-            return 0.0
+            atr = self._get_atr(symbol)
+            if not atr:
+                atr = entry_price * 0.008  # 兜底 ATR
+
+            # 收紧后的 TP 倍数
+            tp1_mult = 1.05
+            tp2_mult = 1.85
+            tp3_mult = 2.55
+
+            if is_long:
+                tp1 = round(entry_price + atr * tp1_mult, 2)
+                tp2 = round(entry_price + atr * tp2_mult, 2)
+                tp3 = round(entry_price + atr * tp3_mult, 2)
+            else:
+                tp1 = round(entry_price - atr * tp1_mult, 2)
+                tp2 = round(entry_price - atr * tp2_mult, 2)
+                tp3 = round(entry_price - atr * tp3_mult, 2)
+
+            msg = (
+                f"{'🟢' if is_long else '🔴'} **{signal}** | {symbol}\n"
+                f"数量: {qty} | 开仓价: {entry_price}\n"
+                f"TP1: {tp1} | TP2: {tp2} | TP3: {tp3}"
+            )
+
+            self._send_dingtalk(msg)
+            return {"tp1": tp1, "tp2": tp2, "tp3": tp3}
+
+        except Exception as e:
+            logging.error(f"[发送开仓报告失败] {e}")
+            return None
+
+    # ==================== 获取 ATR ====================
+    def _get_atr(self, symbol, interval="1h", limit=14):
+        try:
+            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+            tr_list = []
+            for i in range(1, len(klines)):
+                high = float(klines[i][2])
+                low = float(klines[i][3])
+                prev_close = float(klines[i-1][4])
+                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                tr_list.append(tr)
+            return sum(tr_list) / len(tr_list) if tr_list else None
+        except Exception as e:
+            logging.error(f"[获取 ATR 失败] {e}")
+            return None
+
+    # ==================== 钉钉通知（带加签） ====================
+    def _send_dingtalk(self, text):
+        try:
+            webhook = os.getenv("DINGTALK_WEBHOOK")
+            secret = os.getenv("DINGTALK_SECRET")
+
+            if not webhook or not secret:
+                logging.warning("[钉钉] 未配置 Webhook 或 Secret，跳过发送")
+                return
+
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f'{timestamp}\n{secret}'
+            hmac_code = hmac.new(secret.encode(), string_to_sign.encode(), digestmod=hashlib.sha256).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+
+            url = f"{webhook}&timestamp={timestamp}&sign={sign}"
+
+            import requests
+            data = {"msgtype": "text", "text": {"content": text}}
+            resp = requests.post(url, json=data, timeout=5)
+            logging.info(f"[钉钉] 发送结果: {resp.text}")
+
+        except Exception as e:
+            logging.error(f"[钉钉发送失败] {e}")
 
 
-if __name__ == "__main__":
-    pass
+# 全局实例（可选）
+binance_client = None
