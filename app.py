@@ -40,34 +40,46 @@ def handle_signal_in_background(data):
             # 先平后开
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
+                logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先执行全平")
                 binance_client.close_all_positions(symbol)
+            else:
+                logging.info("[先平后开] 当前无持仓，直接开新仓")
 
+            # 动态仓位计算（80% × 5倍）
             qty = binance_client.calculate_position_size(
-                symbol=symbol, leverage=5.0, equity_ratio=0.80
+                symbol=symbol,
+                leverage=5.0,
+                equity_ratio=0.80
+            )
+            logging.info(f"[仓位计算] 本次下单数量: {qty}")
+
+            if qty <= 0:
+                logging.error("[仓位计算] 数量计算失败，跳过开仓")
+                return
+
+            side = "BUY" if is_long else "SELL"
+
+            # 下单
+            order = binance_client.place_market_order(symbol, side, qty)
+            logging.info(f"[下单成功] {order}")
+
+            entry_price = float(order.get("avgPrice", 0)) or 0
+            if entry_price == 0:
+                ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
+                entry_price = float(ticker['price'])
+
+            # 只通知监督层，由监督层统一计算 TP 并发送钉钉（避免重复发送）
+            supervisor.notify_open_success(
+                signal=signal,
+                symbol=symbol,
+                qty=qty,
+                entry_price=entry_price
             )
 
-            if qty > 0:
-                side = "BUY" if is_long else "SELL"
-                order = binance_client.place_market_order(symbol, side, qty)
-                entry_price = float(order.get("avgPrice", 0)) or float(
-                    binance_client.client.futures_symbol_ticker(symbol=symbol)['price']
-                )
-
-                tp_result = binance_client.send_position_open_report(
-                    signal=signal, symbol=symbol, qty=qty,
-                    entry_price=entry_price, is_long=is_long
-                )
-
-                if tp_result:
-                    supervisor.notify_open_success(
-                        signal=signal, symbol=symbol, qty=qty,
-                        entry_price=entry_price,
-                        tp1=tp_result["tp1"], tp2=tp_result["tp2"], tp3=tp_result["tp3"]
-                    )
-
         elif signal == "CLOSE_ALL":
+            logging.info("[全平] 执行全平操作")
             binance_client.close_all_positions(symbol)
-            supervisor.notify_close_all(data.get("reason", "manual"))
+            supervisor.notify_close_all(data.get("reason", "manual_or_protection"))
 
         logging.info(f"========== [后台处理] 信号 {signal} 处理完成 ==========")
 
@@ -75,22 +87,36 @@ def handle_signal_in_background(data):
         logging.error(f"[后台处理异常] {e}", exc_info=True)
 
 
+# ==================== Webhook 接口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error"}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "无效JSON"}), 400
 
-    threading.Thread(target=handle_signal_in_background, args=(data,)).start()
-    return jsonify({"status": "accepted"}), 200
+        logging.info(f"[Webhook] 收到信号: {data.get('signal')}")
+
+        # 立即返回 200，避免 TradingView 超时
+        threading.Thread(target=handle_signal_in_background, args=(data,)).start()
+
+        return jsonify({"status": "accepted"}), 200
+
+    except Exception as e:
+        logging.error(f"[Webhook 异常] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ==================== 健康检查 ====================
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({"status": "running"})
+    return jsonify({
+        "status": "running",
+        "message": "Webhook + TP监控 服务正常运行"
+    })
 
 
-# ==================== 模块级别启动 TP 监控（关键修复） ====================
+# ==================== 模块级别启动 TP 监控 ====================
 tp_monitor.start()
 logging.info("[启动] TP监控模块已启动（Gunicorn 兼容）")
 
