@@ -1,4 +1,4 @@
-# binance_client.py - 完整最终加强版
+# binance_client.py - 完整最终版
 
 import os
 import time
@@ -67,7 +67,7 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def close_partial_position(self, symbol: str, percent: float):
-        """按比例平仓"""
+        """按比例平仓（支持 reduceOnly）"""
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
@@ -145,6 +145,9 @@ class BinanceClient:
 
             resp = requests.post(url, json=data, timeout=8)
             logging.info(f"[钉钉] 发送完成 | 状态码: {resp.status_code} | 标题: {title}")
+
+            if resp.status_code != 200:
+                logging.warning(f"[钉钉] 发送异常响应: {resp.text}")
 
         except Exception as e:
             logging.error(f"[钉钉] 发送失败: {e}")
