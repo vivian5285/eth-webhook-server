@@ -1,4 +1,4 @@
-# app.py（最终完整版 - 2026-06-13）
+# app.py（最终版 - 已降低仓位到 20%）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -45,11 +45,11 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # 动态仓位计算（80% × 5倍）
+            # ==================== 已调低仓位 ====================
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
-                equity_ratio=0.80
+                equity_ratio=0.20          # ← 已改为 20% 本金
             )
             logging.info(f"[仓位计算] 本次下单数量: {qty}")
 
@@ -68,7 +68,7 @@ def handle_signal_in_background(data):
                 ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
                 entry_price = float(ticker['price'])
 
-            # 只通知监督层，由监督层统一计算 TP 并发送钉钉（避免重复发送）
+            # 通知监督层（由监督层统一发送开仓钉钉）
             supervisor.notify_open_success(
                 signal=signal,
                 symbol=symbol,
@@ -87,7 +87,6 @@ def handle_signal_in_background(data):
         logging.error(f"[后台处理异常] {e}", exc_info=True)
 
 
-# ==================== Webhook 接口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -97,9 +96,7 @@ def webhook():
 
         logging.info(f"[Webhook] 收到信号: {data.get('signal')}")
 
-        # 立即返回 200，避免 TradingView 超时
         threading.Thread(target=handle_signal_in_background, args=(data,)).start()
-
         return jsonify({"status": "accepted"}), 200
 
     except Exception as e:
@@ -107,16 +104,12 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ==================== 健康检查 ====================
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({
-        "status": "running",
-        "message": "Webhook + TP监控 服务正常运行"
-    })
+    return jsonify({"status": "running"})
 
 
-# ==================== 模块级别启动 TP 监控 ====================
+# ==================== 启动 TP 监控 ====================
 tp_monitor.start()
 logging.info("[启动] TP监控模块已启动（Gunicorn 兼容）")
 
