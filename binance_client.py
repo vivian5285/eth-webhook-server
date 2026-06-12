@@ -1,4 +1,4 @@
-# binance_client.py - 完整最终版
+# binance_client.py - 最终稳定版
 
 import os
 import time
@@ -67,7 +67,7 @@ class BinanceClient:
             return {"status": "error", "message": str(e)}
 
     def close_partial_position(self, symbol: str, percent: float):
-        """按比例平仓（支持 reduceOnly）"""
+        """按比例平仓"""
         try:
             position = self.get_current_position(symbol)
             if not position or position.get("positionAmt", 0) == 0:
@@ -87,7 +87,7 @@ class BinanceClient:
                 quantity=close_qty,
                 reduceOnly=True
             )
-            logging.info(f"[部分平仓成功] {symbol} 平 {close_qty} (占比 {percent*100}%)")
+            logging.info(f"[部分平仓成功] {symbol} 平 {close_qty}")
             return {"status": "success", "closed_qty": close_qty}
         except Exception as e:
             logging.error(f"[部分平仓失败] {e}")
@@ -120,7 +120,7 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 钉钉报告方法（已加强） ====================
+    # ==================== 钉钉报告方法 ====================
 
     def _send_dingtalk(self, title: str, content: str):
         if not DINGTALK_WEBHOOK:
@@ -160,13 +160,12 @@ class BinanceClient:
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
 
-            # 空单止盈价格保护修正
+            # 空单止盈价格保护
             if not is_long:
                 tp1 = round(entry_price - abs(tp1 - entry_price), 2) if tp1 > entry_price else tp1
                 tp2 = round(entry_price - abs(tp2 - entry_price), 2) if tp2 > entry_price else tp2
                 tp3 = round(entry_price - abs(tp3 - entry_price), 2) if tp3 > entry_price else tp3
 
-            # 获取余额（带保护）
             try:
                 balance = self.get_account_balance()
                 total_balance = balance.get("totalWalletBalance", 0)
@@ -222,8 +221,8 @@ class BinanceClient:
             content = f"""### ✅ 系统止盈触发
 
 **触发级别**: {level.upper()}  
-**本次平仓数量**: {closed_qty}  
-**剩余仓位**: {remaining_qty}
+**本次平仓数量**: {closed_qty} 张  
+**剩余仓位**: {remaining_qty} 张
 """
             self._send_dingtalk(f"止盈 {level.upper()} 触发", content)
             logging.info(f"[报告] {level} 止盈报告已发送")
