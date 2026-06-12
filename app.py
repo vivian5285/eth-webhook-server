@@ -1,4 +1,4 @@
-# app.py - 当前稳定版（已注释 WebSocket 自动启动）
+# app.py - 固定小仓位测试版（先跑通流程）
 
 from flask import Flask, request, jsonify
 import os
@@ -31,29 +31,9 @@ def extract_json_from_text(text: str):
 
 
 def calculate_position_size(symbol: str = "ETHUSDT") -> float:
-    try:
-        balance_info = binance_client.get_account_balance()
-        equity = balance_info.get("totalWalletBalance", 0)
-
-        if equity < 3000:
-            risk_percent = 0.075   # 你要求的 7.5%
-        elif equity < 10000:
-            risk_percent = 0.03
-        else:
-            risk_percent = float(os.getenv("RISK_PERCENT", 0.01))
-
-        stop_distance_percent = float(os.getenv("STOP_DISTANCE_PERCENT", 0.008))
-        risk_amount = equity * risk_percent
-        current_price = float(binance_client.client.futures_symbol_ticker(symbol=symbol)["price"])
-        stop_distance = current_price * stop_distance_percent
-
-        if stop_distance <= 0:
-            return 0.05
-
-        return round(risk_amount / stop_distance, 3)
-    except Exception as e:
-        logging.error(f"[仓位计算异常] {e}")
-        return 0.04
+    # ==================== 临时固定小仓位（测试用） ====================
+    # 先用 0.04 ETH 跑通流程，确认没问题后再改回动态 7.5% 计算
+    return 0.04
 
 
 @app.route('/webhook', methods=['POST'])
@@ -70,8 +50,6 @@ def webhook():
 
         if result.get("status") == "ready_to_open":
             qty = calculate_position_size(symbol)
-            if qty <= 0:
-                return jsonify({"status": "error", "message": "仓位计算无效"}), 400
 
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             order = binance_client.place_market_order(symbol, side, qty)
@@ -81,6 +59,7 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
+                # 设置止盈目标（即使不启动监控也保留）
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
@@ -115,6 +94,6 @@ def status():
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server (稳定版) 已启动 ===")
-    # tp_monitor.start()           # 已注释，防止卡死
+    logging.info("=== ETH Webhook Server (固定小仓位测试版) 已启动 ===")
+    # tp_monitor.start()   # 已注释，稳定模式
     app.run(host="0.0.0.0", port=5000)
