@@ -1,4 +1,4 @@
-# position_supervisor.py - 对应稳定测试版（已注释 WebSocket 自动启动）
+# position_supervisor.py - 修改后版本（修复全平重复报告）
 
 import logging
 import time
@@ -18,14 +18,13 @@ class PositionSupervisor:
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
+        self.last_close_report_time = 0          # 用于防重复全平报告
         self.twm = None
-        # ==================== 已注释 WebSocket 自动启动（稳定模式） ====================
-        # self._start_user_data_stream()
+        # self._start_user_data_stream()         # 已注释，稳定模式
 
     def _start_user_data_stream(self):
         with self.lock:
             if self.twm:
-                logging.warning("[监督层] WebSocket 已在运行中")
                 return
             try:
                 self.twm = ThreadedWebsocketManager(
@@ -40,14 +39,12 @@ class PositionSupervisor:
 
     def stop(self):
         with self.lock:
-            if not self.twm:
-                return
-            try:
-                self.twm.stop()
-                self.twm = None
-                logging.info("[监督层] WebSocket 已停止")
-            except Exception as e:
-                logging.error(f"[监督层] WebSocket 停止异常: {e}")
+            if self.twm:
+                try:
+                    self.twm.stop()
+                    self.twm = None
+                except Exception as e:
+                    logging.error(f"[监督层] WebSocket 停止异常: {e}")
 
     def _on_account_update(self, msg):
         pass
@@ -71,19 +68,27 @@ class PositionSupervisor:
     def _enforce_close_then_open(self, signal: str):
         current_pos = binance_client.get_current_position("ETHUSDT")
         if current_pos and current_pos.get("positionAmt", 0) != 0:
-            self._execute_close_all(verified=False)
+            self._execute_close_all(verified=False)   # 内部平仓不发报告
             time.sleep(2.5)
         return {"status": "ready_to_open", "signal": signal}
 
     def execute_close_all_with_report(self):
-        """公开方法：全平 + 实盘核查 + 发送钉钉报告"""
+        """公开方法：全平 + 核实 + 发送钉钉报告（带防重复）"""
+        current_time = time.time()
+        with self.lock:
+            if current_time - self.last_close_report_time < 8:   # 8秒内重复调用直接忽略
+                logging.warning("[监督层] 检测到重复 CLOSE_ALL 请求，已忽略")
+                return {"status": "ignored", "reason": "duplicate_close"}
+
+            self.last_close_report_time = current_time
+
         return self._execute_close_all(verified=True)
 
     def _execute_close_all(self, verified: bool = True):
         close_result = binance_client.close_all_positions("ETHUSDT")
 
         if verified:
-            time.sleep(1.5)
+            time.sleep(1.8)
             real_pos = binance_client.get_current_position("ETHUSDT")
             if not real_pos or real_pos.get("positionAmt", 0) == 0:
                 try:
@@ -91,9 +96,7 @@ class PositionSupervisor:
                 except Exception as e:
                     logging.error(f"[监督层] 全平报告发送失败: {e}")
             else:
-                logging.warning("[监督层] 全平后仍存在持仓，建议人工检查")
-        else:
-            pass
+                logging.warning("[监督层] 全平后仍存在持仓")
 
         position_manager.clear_position()
         self.consecutive_failure_count = 0
