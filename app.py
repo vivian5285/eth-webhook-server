@@ -1,4 +1,4 @@
-# app.py（详细日志版 - 2026-06-12）
+# app.py（最终完整版 - 含 TP 监控启动 - 2026-06-12）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from binance_client import BinanceClient
 from position_supervisor import supervisor
 from position_manager import PositionManager
+from tp_monitor import tp_monitor   # ← 新增导入
 
 load_dotenv()
 
@@ -17,9 +18,7 @@ app = Flask(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 
 # ==================== 初始化 ====================
@@ -45,7 +44,7 @@ def handle_signal_in_background(data):
             is_long = signal == "OPEN_LONG"
             direction = "多" if is_long else "空"
 
-            # 1. 检查当前持仓
+            # 1. 先平后开
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
                 logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，数量: {current_pos['qty']}")
@@ -54,7 +53,7 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # 2. 动态计算仓位
+            # 2. 动态计算仓位（80% × 5倍）
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
@@ -80,7 +79,7 @@ def handle_signal_in_background(data):
                     entry_price = float(ticker['price'])
                     logging.info(f"[下单] 使用当前市价作为开仓价: {entry_price}")
 
-                # 4. 计算 TP 并发送报告
+                # 4. 计算 TP 并通知监督层
                 tp_result = binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
@@ -90,7 +89,6 @@ def handle_signal_in_background(data):
                 )
                 logging.info(f"[TP计算] TP1={tp_result.get('tp1')}, TP2={tp_result.get('tp2')}, TP3={tp_result.get('tp3')}")
 
-                # 5. 通知监督层
                 if tp_result:
                     supervisor.notify_open_success(
                         signal=signal,
@@ -145,9 +143,15 @@ def webhook():
 def status():
     return jsonify({
         "status": "running",
-        "message": "Webhook 服务正常运行（详细日志版）"
+        "message": "Webhook 服务正常运行（详细日志 + TP监控版）"
     })
 
 
+# ==================== 启动入口 ====================
 if __name__ == "__main__":
+    # 启动 TP 监控（后台线程）
+    tp_monitor.start()
+    logging.info("[启动] TP监控已启动")
+
+    # 启动 Flask 服务
     app.run(host="0.0.0.0", port=5000, debug=False)
