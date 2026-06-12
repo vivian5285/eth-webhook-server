@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（含动态分层仓位计算）
+# binance_client.py - 最终稳定版（小资金优化加强版）
 
 import os
 import time
@@ -119,11 +119,11 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 动态仓位计算（分层风控） ====================
+    # ==================== 动态仓位计算（小资金优化版） ====================
 
     def calculate_position_size(self, symbol: str = "ETHUSDT", atr_value: float = None) -> float:
         """
-        动态仓位计算（分层风险控制）
+        动态仓位计算（针对小资金优化）
         < 3000U → 8%
         3000~10000U → 6%
         >= 10000U → 4%
@@ -140,27 +140,35 @@ class BinanceClient:
             else:
                 risk_percent = 0.04
 
-            # ATR 处理
+            # ATR 处理（优先使用外部传入，否则简单兜底）
             if atr_value is None or atr_value <= 0:
                 klines = self.client.futures_klines(symbol=symbol, interval="5m", limit=20)
-                atr_value = float(klines[-1][4]) * 0.015  # 简单兜底
+                close_price = float(klines[-1][4])
+                atr_value = close_price * 0.012   # 约1.2%波动率兜底
 
-            stop_distance = atr_value * 0.92
-            if stop_distance <= 0:
-                stop_distance = 8
+            stop_distance = max(atr_value * 0.92, 4)   # 最小止损距离保护
 
             risk_amount = equity * risk_percent
             raw_qty = risk_amount / stop_distance
 
+            # 当前价格
             price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
+
+            # 最大杠杆限制
             max_qty_by_leverage = (equity * 3.0) / price
 
+            # 最终数量
             final_qty = min(raw_qty, max_qty_by_leverage)
             final_qty = round(max(final_qty, 0.001), 4)
 
+            # 最小名义价值保护（重要！避免小资金下单失败）
+            min_notional = 10
+            if final_qty * price < min_notional:
+                final_qty = round(min_notional / price, 4)
+
             logging.info(
-                f"[仓位计算] 权益: {equity:.2f}U | 风险比例: {risk_percent*100:.0f}% | "
-                f"最终下单数量: {final_qty}"
+                f"[仓位计算] 权益:{equity:.2f}U | 风险:{risk_percent*100:.0f}% | "
+                f"下单数量:{final_qty} | 名义价值:{final_qty * price:.2f}U"
             )
             return final_qty
 
