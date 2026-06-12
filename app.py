@@ -1,4 +1,4 @@
-# app.py - 临时稳定版（注释掉自动启动 WebSocket 相关）
+# app.py - 当前稳定版（已注释 WebSocket 自动启动）
 
 from flask import Flask, request, jsonify
 import os
@@ -36,7 +36,7 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         equity = balance_info.get("totalWalletBalance", 0)
 
         if equity < 3000:
-            risk_percent = 0.075
+            risk_percent = 0.075   # 你要求的 7.5%
         elif equity < 10000:
             risk_percent = 0.03
         else:
@@ -53,7 +53,7 @@ def calculate_position_size(symbol: str = "ETHUSDT") -> float:
         return round(risk_amount / stop_distance, 3)
     except Exception as e:
         logging.error(f"[仓位计算异常] {e}")
-        return 0.05
+        return 0.04
 
 
 @app.route('/webhook', methods=['POST'])
@@ -66,7 +66,6 @@ def webhook():
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
 
-        # 交给智慧层处理
         result = supervisor.handle_new_signal(signal)
 
         if result.get("status") == "ready_to_open":
@@ -82,13 +81,11 @@ def webhook():
                     binance_client.client.futures_symbol_ticker(symbol=symbol)["price"]
                 )
 
-                # 设置止盈目标（即使不启动监控线程，设置也没问题）
                 tp1 = round(entry_price * 1.0128, 2)
                 tp2 = round(entry_price * 1.025, 2)
                 tp3 = round(entry_price * 1.036, 2)
                 tp_monitor.set_tp_levels(tp1, tp2, tp3)
 
-                # 通知智慧层
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
                 return jsonify({"status": "success", "qty": qty}), 200
@@ -119,9 +116,5 @@ def status():
 
 if __name__ == "__main__":
     logging.info("=== ETH Webhook Server (稳定版) 已启动 ===")
-    
-    # ==================== 已注释自动启动 ====================
-    # daily_report_scheduler.start()   # 临时注释
-    # tp_monitor.start()               # 临时注释，防止 WebSocket 导致卡死
-
+    # tp_monitor.start()           # 已注释，防止卡死
     app.run(host="0.0.0.0", port=5000)
