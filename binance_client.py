@@ -1,12 +1,7 @@
-# binance_client.py - 完整更新后版本（修复空单止盈价格 + 优化报告）
+# binance_client.py - 修复后完整稳定版
 
 import os
-import time
 import logging
-import hmac
-import hashlib
-import base64
-import urllib.parse
 import requests
 from binance import Client
 from binance.exceptions import BinanceAPIException
@@ -17,7 +12,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK")
-DINGTALK_SECRET = os.getenv("DINGTALK_SECRET")  # 加签密钥（如果有）
 
 
 class BinanceClient:
@@ -27,7 +21,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 基础下单与仓位 ====================
+    # ==================== 基础功能 ====================
 
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
@@ -37,7 +31,7 @@ class BinanceClient:
                 type="MARKET",
                 quantity=qty
             )
-            logging.info(f"[市价单成功] {side} {symbol} Qty: {qty}")
+            logging.info(f"[市价单成功] {side} {symbol} Qty:{qty}")
             return order
         except BinanceAPIException as e:
             logging.error(f"[市价单失败] {e}")
@@ -59,8 +53,7 @@ class BinanceClient:
                 quantity=qty,
                 reduceOnly=True
             )
-            logging.info(f"[全平成功] {symbol}")
-            return {"status": "success", "order": order}
+            return {"status": "success"}
         except Exception as e:
             logging.error(f"[全平失败] {e}")
             return {"status": "error", "message": str(e)}
@@ -73,11 +66,9 @@ class BinanceClient:
 
             total_qty = abs(position["positionAmt"])
             close_qty = round(total_qty * percent, 4)
-            if close_qty <= 0:
-                return {"status": "skipped"}
-
             side = "SELL" if position["positionAmt"] > 0 else "BUY"
-            order = self.client.futures_create_order(
+
+            self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
@@ -87,7 +78,7 @@ class BinanceClient:
             return {"status": "success", "closed_qty": close_qty}
         except Exception as e:
             logging.error(f"[部分平仓失败] {e}")
-            return {"status": "error", "message": str(e)}
+            return {"status": "error"}
 
     def get_current_position(self, symbol: str):
         try:
@@ -98,8 +89,7 @@ class BinanceClient:
                         "side": "long" if float(p["positionAmt"]) > 0 else "short",
                         "symbol": p["symbol"],
                         "positionAmt": float(p["positionAmt"]),
-                        "avg_price": float(p["entryPrice"]),
-                        "unrealizedProfit": float(p["unRealizedProfit"])
+                        "avg_price": float(p["entryPrice"])
                     }
             return None
         except Exception as e:
@@ -111,72 +101,79 @@ class BinanceClient:
             account = self.client.futures_account()
             return {
                 "totalWalletBalance": float(account.get("totalWalletBalance", 0)),
-                "availableBalance": float(account.get("availableBalance", 0)),
-                "totalUnrealizedProfit": float(account.get("totalUnrealizedProfit", 0))
+                "availableBalance": float(account.get("availableBalance", 0))
             }
         except Exception as e:
-            logging.error(f"[获取账户余额失败] {e}")
+            logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 钉钉报告（已修复空单止盈价格） ====================
+    # ==================== 钉钉报告（已修复健壮性） ====================
 
-    def _send_dingtalk(self, title: str, content: str, is_warning: bool = False):
+    def _send_dingtalk(self, title: str, content: str):
         if not DINGTALK_WEBHOOK:
-            logging.warning("未配置钉钉Webhook，跳过推送")
+            logging.warning("[钉钉] 未配置 Webhook，跳过推送")
             return
-
         try:
             data = {
                 "msgtype": "markdown",
-                "markdown": {
-                    "title": title,
-                    "text": content
-                }
+                "markdown": {"title": title, "text": content}
             }
-            requests.post(DINGTALK_WEBHOOK, json=data, timeout=5)
-            logging.info(f"[钉钉推送] {title}")
+            requests.post(DINGTALK_WEBHOOK, json=data, timeout=6)
+            logging.info(f"[钉钉推送成功] {title}")
         except Exception as e:
             logging.error(f"[钉钉推送失败] {e}")
 
     def send_position_open_report(self, signal: str, qty: float, entry_price: float,
                                   tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        is_long = signal == "OPEN_LONG"
-        direction = "开多" if is_long else "开空"
-        color = "🟢" if is_long else "🔴"
+        try:
+            is_long = signal == "OPEN_LONG"
+            direction = "开多 🟢" if is_long else "开空 🔴"
+            balance = self.get_account_balance()
 
-        content = f"""### {color} {direction} 成功
+            content = f"""### {direction} 成功
+
 **数量**: {qty} 张  
 **开仓价**: {entry_price} USDT
 
 **止盈目标**
 - 止盈1: {tp1} USDT
-- 止盈2: {tp2} USDT
+- 止盈2: {tp2} USDT  
 - 止盈3: {tp3} USDT
 
 **账户详情**
-- 账户权益: {self.get_account_balance().get('totalWalletBalance', 0)} USDT
-- 可用余额: {self.get_account_balance().get('availableBalance', 0)} USDT
+- 账户权益: {balance['totalWalletBalance']} USDT
+- 可用余额: {balance['availableBalance']} USDT
 """
 
-        self._send_dingtalk(f"{direction}成功", content)
+            self._send_dingtalk(f"{signal} 成功", content)
+        except Exception as e:
+            logging.error(f"[发送开仓报告异常] {e}")
 
-    def send_close_all_report(self, reason: str = "收到全平信号"):
-        balance = self.get_account_balance()
-        content = f"""### 🔴 全平完成
+    def send_close_all_report(self, reason: str = ""):
+        try:
+            balance = self.get_account_balance()
+            content = f"""### 🔴 全平完成
+
 **原因**: {reason}
 
 **账户详情**
-- 账户权益: {balance.get('totalWalletBalance', 0)} USDT
-- 可用余额: {balance.get('availableBalance', 0)} USDT
+- 账户权益: {balance['totalWalletBalance']} USDT
+- 可用余额: {balance['availableBalance']} USDT
 """
-        self._send_dingtalk("全平完成", content)
+            self._send_dingtalk("全平完成", content)
+        except Exception as e:
+            logging.error(f"[发送全平报告异常] {e}")
 
     def send_tp_trigger_report(self, level: str, closed_qty: float, remaining_qty: float):
-        content = f"""### 🟡 {level.upper()} 触发
+        try:
+            content = f"""### 🟡 {level.upper()} 触发
+
 **平仓数量**: {closed_qty}  
 **剩余数量**: {remaining_qty}
 """
-        self._send_dingtalk(f"{level.upper()} 止盈触发", content)
+            self._send_dingtalk(f"{level.upper()} 止盈", content)
+        except Exception as e:
+            logging.error(f"[发送TP报告异常] {e}")
 
 
 # 全局实例
