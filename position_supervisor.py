@@ -1,4 +1,4 @@
-# position_supervisor.py - 完整稳定版（已注释 WebSocket 自动启动）
+# position_supervisor.py - 对应稳定测试版（已注释 WebSocket 自动启动）
 
 import logging
 import time
@@ -19,7 +19,7 @@ class PositionSupervisor:
         self.is_paused = False
         self.lock = threading.Lock()
         self.twm = None
-        # ==================== 已注释 WebSocket 自动启动（防止卡死） ====================
+        # ==================== 已注释 WebSocket 自动启动（稳定模式） ====================
         # self._start_user_data_stream()
 
     def _start_user_data_stream(self):
