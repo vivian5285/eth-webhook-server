@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（全仓5倍模式）
+# binance_client.py - 最终最稳健版（全仓5倍 + 强精度保护）
 
 import os
 import time
@@ -7,6 +7,7 @@ import hashlib
 import base64
 import urllib.parse
 import logging
+import math
 import requests
 from binance import Client
 from binance.exceptions import BinanceAPIException
@@ -120,10 +121,10 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 全仓5倍模式 ====================
+    # ==================== 全仓5倍模式（强精度保护） ====================
     def calculate_position_size(self, symbol: str = "ETHUSDT") -> float:
         """
-        全仓5倍模式（账户权益 × 5倍杠杆）
+        全仓5倍模式 + 强精度保护（推荐使用）
         """
         try:
             balance = self.get_account_balance()
@@ -131,24 +132,28 @@ class BinanceClient:
 
             price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-            # 全仓5倍核心逻辑
+            # 全仓5倍模式
             target_leverage = 5.0
             position_value = equity * target_leverage
 
             raw_qty = position_value / price
 
-            # ETHUSDT 强制保留3位小数
-            final_qty = round(raw_qty, 3)
+            # ==================== 强精度保护 ====================
+            step = 0.001  # ETHUSDT 数量步长
+            final_qty = math.floor(raw_qty / step) * step
+            final_qty = round(final_qty, 3)
 
-            # 最大杠杆限制（放开到5倍）
+            # 最大杠杆限制
             max_qty_by_leverage = (equity * target_leverage) / price
             final_qty = min(final_qty, max_qty_by_leverage)
 
             final_qty = max(final_qty, 0.001)
 
+            # 最小名义价值保护
             min_notional = 15
             if final_qty * price < min_notional:
-                final_qty = round(min_notional / price, 3)
+                final_qty = math.floor((min_notional / price) / step) * step
+                final_qty = round(final_qty, 3)
 
             logging.info(
                 f"[仓位计算] 全仓5倍模式 | 权益:{equity:.2f}U | "
