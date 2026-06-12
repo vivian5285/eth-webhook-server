@@ -1,13 +1,14 @@
-# tp_monitor.py - 最终完整版（含人工干预智能处理 + 监督层报告）
+# tp_monitor.py - 完整最终版（已修复导入 + 支持人工干预）
 
 import logging
 import time
 import threading
 from binance_client import BinanceClient
-from position_manager import position_manager
+from position_manager import PositionManager
 from position_supervisor import supervisor
 
 binance_client = BinanceClient()
+position_manager = PositionManager()   # 实例化
 
 class TPMonitor:
     def __init__(self):
@@ -34,7 +35,7 @@ class TPMonitor:
         # 1. 获取同步前的状态
         state_before = position_manager.get_current_state()
 
-        # 2. 获取交易所实时持仓并同步（内部会处理状态更新）
+        # 2. 获取交易所实时持仓并同步
         real_pos = binance_client.get_current_position("ETHUSDT")
         position_manager.sync_with_exchange(real_pos)
 
@@ -44,7 +45,7 @@ class TPMonitor:
         # 4. 检测并处理人工干预
         self._handle_manual_intervention(state_before, state_after, real_pos)
 
-        # 5. 如果没有持仓或没有止盈目标，则跳过TP检查
+        # 5. 如果没有持仓或没有设置止盈目标，则跳过
         if not state_after.get("has_position") or state_after.get("tp1", 0) == 0:
             return
 
@@ -61,34 +62,44 @@ class TPMonitor:
         tp2 = state_after["tp2"]
         tp3 = state_after["tp3"]
 
-        # 多单逻辑
+        # ==================== 多单逻辑 ====================
         if is_long:
             if current_price >= tp3:
                 binance_client.close_all_positions("ETHUSDT")
                 supervisor.notify_tp_hit("tp3", remaining_qty, 0)
                 position_manager.clear_position()
+                logging.info("[TP监控] TP3 触发，全平完成")
+
             elif current_price >= tp2:
                 binance_client.close_partial_position("ETHUSDT", 0.5)
                 supervisor.notify_tp_hit("tp2", remaining_qty * 0.5, remaining_qty * 0.5)
+                logging.info(f"[TP监控] TP2 触发，平剩余仓位 50%")
+
             elif current_price >= tp1:
                 binance_client.close_partial_position("ETHUSDT", 0.3)
                 supervisor.notify_tp_hit("tp1", remaining_qty * 0.3, remaining_qty * 0.7)
+                logging.info(f"[TP监控] TP1 触发，平剩余仓位 30%")
 
-        # 空单逻辑
+        # ==================== 空单逻辑 ====================
         else:
             if current_price <= tp3:
                 binance_client.close_all_positions("ETHUSDT")
                 supervisor.notify_tp_hit("tp3", remaining_qty, 0)
                 position_manager.clear_position()
+                logging.info("[TP监控] TP3 触发，全平完成")
+
             elif current_price <= tp2:
                 binance_client.close_partial_position("ETHUSDT", 0.5)
                 supervisor.notify_tp_hit("tp2", remaining_qty * 0.5, remaining_qty * 0.5)
+                logging.info(f"[TP监控] TP2 触发，平剩余仓位 50%")
+
             elif current_price <= tp1:
                 binance_client.close_partial_position("ETHUSDT", 0.3)
                 supervisor.notify_tp_hit("tp1", remaining_qty * 0.3, remaining_qty * 0.7)
+                logging.info(f"[TP监控] TP1 触发，平剩余仓位 30%")
 
     def _handle_manual_intervention(self, state_before: dict, state_after: dict, real_pos: dict):
-        """检测并处理人工干预"""
+        """检测并处理人工干预，并通知监督层"""
         before_has = state_before.get("has_position", False)
         after_has = state_after.get("has_position", False)
 
