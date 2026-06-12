@@ -1,4 +1,4 @@
-# binance_client.py - 最终稳定版（已修复精度问题）
+# binance_client.py - 最终稳定版（全仓5倍模式）
 
 import os
 import time
@@ -27,7 +27,6 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 下单方法（支持返回真实错误） ====================
     def place_market_order(self, symbol: str, side: str, qty: float):
         try:
             order = self.client.futures_create_order(
@@ -121,10 +120,10 @@ class BinanceClient:
             logging.error(f"[获取余额失败] {e}")
             return {"totalWalletBalance": 0, "availableBalance": 0}
 
-    # ==================== 仓位计算（统一20% + 精度修复） ====================
+    # ==================== 全仓5倍模式 ====================
     def calculate_position_size(self, symbol: str = "ETHUSDT") -> float:
         """
-        仓位计算（统一使用账户总资金的20% + 强制3位小数）
+        全仓5倍模式（账户权益 × 5倍杠杆）
         """
         try:
             balance = self.get_account_balance()
@@ -132,29 +131,28 @@ class BinanceClient:
 
             price = float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
 
-            # 统一使用账户总资金的 20% 作为持仓价值
-            position_value = equity * 0.20
+            # 全仓5倍核心逻辑
+            target_leverage = 5.0
+            position_value = equity * target_leverage
 
             raw_qty = position_value / price
 
-            # ==================== 关键修复：ETHUSDT 必须保留3位小数 ====================
+            # ETHUSDT 强制保留3位小数
             final_qty = round(raw_qty, 3)
 
-            # 最大杠杆限制
-            max_qty_by_leverage = (equity * 3.0) / price
+            # 最大杠杆限制（放开到5倍）
+            max_qty_by_leverage = (equity * target_leverage) / price
             final_qty = min(final_qty, max_qty_by_leverage)
 
-            # 最小数量保护
             final_qty = max(final_qty, 0.001)
 
-            # 最小名义价值保护
             min_notional = 15
             if final_qty * price < min_notional:
                 final_qty = round(min_notional / price, 3)
 
             logging.info(
-                f"[仓位计算] 权益:{equity:.2f}U | 持仓比例:20% | "
-                f"持仓价值:{position_value:.2f}U | 下单数量:{final_qty}"
+                f"[仓位计算] 全仓5倍模式 | 权益:{equity:.2f}U | "
+                f"目标持仓价值:{position_value:.2f}U | 下单数量:{final_qty}"
             )
             return final_qty
 
@@ -162,7 +160,7 @@ class BinanceClient:
             logging.error(f"[仓位计算异常] {e}")
             return 0.001
 
-    # ==================== 钉钉报告方法 ====================
+    # ==================== 钉钉报告（TP价格保留2位小数） ====================
 
     def _send_dingtalk(self, title: str, content: str):
         if not DINGTALK_WEBHOOK:
@@ -201,6 +199,11 @@ class BinanceClient:
 
             is_long = signal == "OPEN_LONG"
             direction = "开多 🟢" if is_long else "开空 🔴"
+
+            # TP价格保留2位小数
+            tp1 = round(tp1, 2)
+            tp2 = round(tp2, 2)
+            tp3 = round(tp3, 2)
 
             if not is_long:
                 tp1 = round(entry_price - abs(tp1 - entry_price), 2) if tp1 > entry_price else tp1
