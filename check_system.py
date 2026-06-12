@@ -1,111 +1,97 @@
 #!/usr/bin/env python3
-# check_system.py - 系统健康检查脚本
-
-import socket
-import json
+# check_system.py - 一键系统检查脚本（已修复 BinanceClient 初始化问题）
+import subprocess
+import requests
 import os
-import logging
+import sys
 from datetime import datetime
+from dotenv import load_dotenv
 from binance_client import BinanceClient
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+load_dotenv()
 
-binance_client = BinanceClient()
+SERVICE_NAME = "eth-webhook.service"
+STATUS_URL = "http://127.0.0.1:5000/status"
 
-def check_port(port=5000):
-    """检查端口是否在监听"""
+def run_command(cmd):
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(3)
-            result = s.connect_ex(('127.0.0.1', port))
-            return result == 0
-    except:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except Exception as e:
+        return "", str(e), 1
+
+def check_service_status():
+    print("\n[1] 检查 systemd 服务状态...")
+    stdout, _, _ = run_command(f"systemctl is-active {SERVICE_NAME}")
+    if stdout == "active":
+        print("✅ 服务正在运行")
+        return True
+    else:
+        print(f"❌ 服务未正常运行，当前状态: {stdout}")
         return False
 
-def check_binance_api():
-    """检查 Binance API 是否正常"""
-    try:
-        balance = binance_client.get_account_balance()
-        if balance and balance.get("totalWalletBalance"):
-            return True, balance
-        return False, None
-    except Exception as e:
-        return False, str(e)
+def check_recent_logs():
+    print("\n[2] 检查最近关键日志（含 ERROR）...")
+    cmd = f"journalctl -u {SERVICE_NAME} -n 40 --no-pager | grep -E 'ERROR|Exception|失败|异常|TP监控|InvalidHeader'"
+    stdout, _, _ = run_command(cmd)
+    if stdout:
+        print("⚠️  发现以下关键日志：")
+        print(stdout[:2000])  # 限制长度
+    else:
+        print("✅ 最近日志中未发现明显 ERROR")
 
-def check_position_file():
-    """检查持仓状态文件"""
+def check_status_endpoint():
+    print("\n[3] 检查 Webhook /status 接口...")
     try:
-        if os.path.exists("current_position.json"):
-            with open("current_position.json", "r") as f:
-                data = json.load(f)
-            return True, data
-        return False, None
+        resp = requests.get(STATUS_URL, timeout=5)
+        if resp.status_code == 200 and "running" in resp.text:
+            print("✅ /status 接口正常")
+            return True
+        else:
+            print(f"❌ 接口返回异常: {resp.status_code}")
+            return False
     except Exception as e:
-        return False, str(e)
+        print(f"❌ 无法访问接口: {e}")
+        return False
 
-def check_dingtalk():
-    """简单测试钉钉连通性（发送测试消息）"""
+def check_tp_monitor():
+    print("\n[4] 检查 TP 监控是否启动...")
+    stdout, _, _ = run_command(f"journalctl -u {SERVICE_NAME} --since '3 minutes ago' --no-pager | grep -E 'TP监控已启动|tp_monitor'")
+    if stdout:
+        print("✅ TP监控已启动")
+    else:
+        print("⚠️  未检测到 TP监控 启动日志")
+
+def check_binance_client():
+    print("\n[5] 检查 BinanceClient 初始化...")
     try:
-        test_title = "🛠️ 系统自检测试"
-        test_content = f"系统健康检查 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        binance_client._send_dingtalk(test_title, test_content)
+        client = BinanceClient(
+            api_key=os.getenv("BINANCE_API_KEY"),
+            api_secret=os.getenv("BINANCE_API_SECRET")
+        )
+        balance = client.get_account_balance()
+        print(f"✅ BinanceClient 初始化成功，当前权益: {balance} USDT")
         return True
     except Exception as e:
-        return False, str(e)
+        print(f"❌ BinanceClient 初始化失败: {e}")
+        return False
 
 def main():
     print("=" * 60)
-    print("🚀 ETH 量化交易系统健康检查")
-    print(f"检查时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"量化交易系统自检脚本 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # 1. 检查服务端口
-    print("\n[1] 检查 Flask 服务端口 (5000)")
-    if check_port(5000):
-        print("✅ 端口 5000 正在监听，服务正常运行")
-    else:
-        print("❌ 端口 5000 未监听，请检查服务是否启动")
-
-    # 2. 检查 Binance API
-    print("\n[2] 检查 Binance API 连通性")
-    success, result = check_binance_api()
-    if success:
-        print(f"✅ Binance API 正常")
-        print(f"   账户权益: {result.get('totalWalletBalance', 0)} USDT")
-        print(f"   可用余额: {result.get('availableBalance', 0)} USDT")
-    else:
-        print(f"❌ Binance API 异常: {result}")
-
-    # 3. 检查持仓状态文件
-    print("\n[3] 检查持仓状态文件")
-    success, data = check_position_file()
-    if success:
-        print("✅ current_position.json 存在")
-        if data.get("side") != "NONE" and data.get("qty", 0) > 0:
-            print(f"   当前持仓: {data['side']} {data['qty']} 张 @ {data['avg_price']}")
-        else:
-            print("   当前无持仓")
-    else:
-        print(f"❌ 持仓文件异常: {data}")
-
-    # 4. 检查 WebSocket 状态（通过日志提示）
-    print("\n[4] WebSocket 状态检查")
-    print("   请手动查看日志确认以下信息：")
-    print("   - [监督层] User Data Stream 已启动")
-    print("   - [TP监控] WebSocket 价格监控已启动")
-
-    # 5. 可选：测试钉钉
-    print("\n[5] 钉钉连通性测试（可选）")
-    choice = input("是否发送测试消息到钉钉？(y/n): ").strip().lower()
-    if choice == 'y':
-        success = check_dingtalk()
-        if success:
-            print("✅ 钉钉测试消息已发送，请查看群内消息")
-        else:
-            print("❌ 钉钉发送失败")
+    service_ok = check_service_status()
+    check_recent_logs()
+    endpoint_ok = check_status_endpoint()
+    check_tp_monitor()
+    binance_ok = check_binance_client()
 
     print("\n" + "=" * 60)
-    print("检查完成！如有 ❌ 请根据提示排查。")
+    if service_ok and endpoint_ok and binance_ok:
+        print("🎉 系统整体状态良好！")
+    else:
+        print("⚠️  系统存在问题，请根据上方提示排查")
     print("=" * 60)
 
 if __name__ == "__main__":
