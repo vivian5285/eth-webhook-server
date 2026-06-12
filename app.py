@@ -44,13 +44,15 @@ def webhook():
                 binance_client.close_all_positions(symbol)
                 position_manager.clear_position()
 
-            # 2. 动态计算仓位（小资金已优化）
+            # 2. 动态计算仓位（已优化小资金，贴近7.5%手感）
             qty = binance_client.calculate_position_size(symbol=symbol)
 
             if qty < 0.001:
                 msg = f"仓位计算过小或失败 (qty={qty})"
                 logging.warning(f"[执行层] {msg}")
                 return jsonify({"status": "error", "message": msg}), 400
+
+            logging.info(f"[执行层] 准备下单 {signal} | 数量: {qty}")
 
             # 3. 执行市价开仓
             order = binance_client.place_market_order(symbol, side, qty)
@@ -66,7 +68,7 @@ def webhook():
                 tp2 = entry_price + (atr_value * 2.5) if is_long else entry_price - (atr_value * 2.5)
                 tp3 = entry_price + (atr_value * 3.6) if is_long else entry_price - (atr_value * 3.6)
 
-                # 5. 更新状态
+                # 5. 更新状态管理器
                 position_manager.update_position(
                     side="long" if is_long else "short",
                     entry_price=entry_price,
@@ -76,7 +78,7 @@ def webhook():
                     tp3=tp3
                 )
 
-                # 6. 设置 TP 监控
+                # 6. 设置 TP 监控目标
                 tp_monitor.set_tp_levels(tp1, tp2, tp3, entry_price, is_long)
 
                 # 7. 通知智慧层
