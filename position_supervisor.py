@@ -1,4 +1,4 @@
-# position_supervisor.py - 最终稳健完整版（强烈推荐使用）
+# position_supervisor.py - 加强版（监督层最终权威 + 实盘核查后发报告）
 
 import logging
 import time
@@ -24,16 +24,14 @@ class PositionSupervisor:
             if self.is_paused:
                 return {"status": "paused"}
             self.last_signal = signal
-            logging.info(f"[监督层] 收到新信号: {signal}")
+            logging.info(f"[监督层] 收到信号: {signal}")
 
             if signal in ["OPEN_LONG", "OPEN_SHORT"]:
                 self.desired_side = "long" if signal == "OPEN_LONG" else "short"
                 return self._enforce_close_then_open(signal)
-
             elif signal == "CLOSE_ALL":
                 self.desired_side = None
                 return self.execute_close_all_with_report()
-
             return {"status": "ignored"}
 
     def _enforce_close_then_open(self, signal: str):
@@ -47,42 +45,52 @@ class PositionSupervisor:
         current_time = time.time()
         with self.lock:
             if current_time - self.last_close_report_time < 8:
-                return {"status": "ignored", "reason": "duplicate_close"}
+                return {"status": "ignored", "reason": "duplicate"}
             self.last_close_report_time = current_time
         return self._execute_close_all(verified=True)
 
     def _execute_close_all(self, verified: bool = True):
         close_result = binance_client.close_all_positions("ETHUSDT")
-
         if verified:
             time.sleep(1.8)
             try:
                 binance_client.send_close_all_report("收到 CLOSE_ALL 信号，全平已确认")
             except Exception as e:
                 logging.error(f"[监督层] 全平报告发送异常: {e}")
-
         position_manager.clear_position()
         self.consecutive_failure_count = 0
         return close_result
 
     def notify_open_success(self, signal: str, qty: float, entry_price: float,
                             tp1: float = 0, tp2: float = 0, tp3: float = 0):
-        # ==================== 第一行就打日志 ====================
-        logging.info(f"[监督层] notify_open_success 被调用 → {signal}, qty={qty}, entry={entry_price}")
+        logging.info(f"[监督层] notify_open_success 被调用 → {signal}")
+
+        # 等待一小段时间让实盘更新
+        time.sleep(2.0)
 
         try:
-            binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
-            logging.info(f"[监督层] 开仓报告发送成功 → {signal}")
+            # 实盘核查
+            real_pos = binance_client.get_current_position("ETHUSDT")
+            expected_side = "long" if signal == "OPEN_LONG" else "short"
+
+            if real_pos and real_pos.get("side") == expected_side:
+                logging.info(f"[监督层] 实盘核查通过 → {signal}")
+                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+            else:
+                logging.warning(f"[监督层] 实盘核查未通过，尝试兜底发送报告")
+                # 兜底发送（即使核查失败也尽量通知）
+                binance_client.send_position_open_report(signal, qty, entry_price, tp1, tp2, tp3)
+
         except Exception as e:
-            logging.error(f"[监督层] 开仓报告发送失败，具体错误: {e}")
-            # 兜底尝试
+            logging.error(f"[监督层] notify_open_success 异常: {e}")
+            # 最后兜底
             try:
                 binance_client._send_dingtalk(
                     f"{signal} 成功（兜底）",
                     f"数量: {qty} 张\n开仓价: {entry_price}"
                 )
-            except Exception as e2:
-                logging.error(f"[监督层] 兜底报告也失败: {e2}")
+            except:
+                pass
 
     def notify_tp_hit(self, level: str, closed_qty: float, remaining_qty: float):
         try:
@@ -91,7 +99,7 @@ class PositionSupervisor:
             else:
                 binance_client.send_tp_trigger_report(level, closed_qty, remaining_qty)
         except Exception as e:
-            logging.error(f"[监督层] TP报告发送失败: {e}")
+            logging.error(f"[监督层] TP报告异常: {e}")
 
 
 # 全局单例
