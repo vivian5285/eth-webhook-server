@@ -1,4 +1,4 @@
-# app.py - 完整最终版（配套最新 tp_monitor + position_manager）
+# app.py - 完整最终版（配套最新 position_manager + tp_monitor + supervisor）
 
 from flask import Flask, request, jsonify
 import logging
@@ -18,25 +18,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 binance_client = BinanceClient()
 position_manager = PositionManager()
 
-# 启动TP后台监控
+# 启动 TP 后台监控
 tp_monitor.start()
 
 
 def calculate_position_size() -> float:
-    """测试阶段固定小仓位"""
+    """测试阶段使用固定小仓位"""
     return 0.04
 
 
 def calculate_tp_prices(entry_price: float, is_long: bool):
-    """收紧后的止盈计算"""
+    """收紧后的止盈计算（落袋为安）"""
     if is_long:
-        tp1 = round(entry_price * 1.006, 2)   # +0.6%
-        tp2 = round(entry_price * 1.012, 2)   # +1.2%
-        tp3 = round(entry_price * 1.020, 2)   # +2.0%
+        tp1 = round(entry_price * 1.005, 2)   # +0.5%
+        tp2 = round(entry_price * 1.010, 2)   # +1.0%
+        tp3 = round(entry_price * 1.018, 2)   # +1.8%
     else:
-        tp1 = round(entry_price * 0.994, 2)   # -0.6%
-        tp2 = round(entry_price * 0.988, 2)   # -1.2%
-        tp3 = round(entry_price * 0.980, 2)   # -2.0%
+        tp1 = round(entry_price * 0.995, 2)   # -0.5%
+        tp2 = round(entry_price * 0.990, 2)   # -1.0%
+        tp3 = round(entry_price * 0.982, 2)   # -1.8%
     return tp1, tp2, tp3
 
 
@@ -56,7 +56,7 @@ def webhook():
             side = "BUY" if signal == "OPEN_LONG" else "SELL"
             is_long = signal == "OPEN_LONG"
 
-            # 1. 如果当前有持仓，先平掉
+            # 1. 如果当前已有持仓，先平掉（支持反手）
             current_pos = binance_client.get_current_position(symbol)
             if current_pos and current_pos.get("positionAmt", 0) != 0:
                 logging.info("[执行层] 检测到已有持仓，先执行全平")
@@ -74,7 +74,7 @@ def webhook():
                 # 3. 计算止盈价格
                 tp1, tp2, tp3 = calculate_tp_prices(entry_price, is_long)
 
-                # 4. 更新持久化状态
+                # 4. 更新持久化状态（会自动记录 initial_qty）
                 position_manager.update_position(
                     side="long" if is_long else "short",
                     entry_price=entry_price,
@@ -84,10 +84,10 @@ def webhook():
                     tp3=tp3
                 )
 
-                # 5. 设置TP监控目标
+                # 5. 设置 TP 监控目标
                 tp_monitor.set_tp_levels(tp1, tp2, tp3, entry_price, is_long)
 
-                # 6. 通知监督层
+                # 6. 通知智慧层
                 supervisor.notify_open_success(signal, qty, entry_price, tp1, tp2, tp3)
 
                 logging.info(f"[执行层] {signal} 成功 | 入场价: {entry_price}")
@@ -110,7 +110,7 @@ def webhook():
 
             # 清空状态
             position_manager.clear_position()
-            tp_monitor._reset_tp()
+            tp_monitor.reset_tp()
 
             supervisor.notify_close_all(result)
 
@@ -136,5 +136,5 @@ def status():
 
 
 if __name__ == "__main__":
-    logging.info("=== ETH Webhook Server (完整最终版) 已启动 ===")
+    logging.info("=== ETH Webhook Server (最终版) 已启动 ===")
     app.run(host="0.0.0.0", port=5000)
