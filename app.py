@@ -1,7 +1,6 @@
-# app.py（最终优化版 - P0修复）
+# app.py（最终版 - 已适配 get_binance_client）
 from flask import Flask, request, jsonify
 import logging
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -18,6 +17,7 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 binance_client = get_binance_client()
 
+
 def handle_signal_in_background(data):
     try:
         signal = data.get("signal")
@@ -29,8 +29,6 @@ def handle_signal_in_background(data):
 
             if current_pos:
                 binance_client.close_all_positions(symbol)
-            else:
-                logging.info("[先平后开] 当前无持仓")
 
             qty = binance_client.calculate_position_size(symbol=symbol, leverage=5.0, equity_ratio=0.80)
             if qty <= 0:
@@ -38,7 +36,9 @@ def handle_signal_in_background(data):
 
             side = "BUY" if is_long else "SELL"
             order = binance_client.place_market_order(symbol, side, qty)
-            entry_price = float(order.get("avgPrice", 0)) or float(binance_client.client.futures_symbol_ticker(symbol=symbol)['price'])
+            entry_price = float(order.get("avgPrice", 0)) or float(
+                binance_client.client.futures_symbol_ticker(symbol=symbol)['price']
+            )
 
             supervisor.notify_open_success(signal=signal, symbol=symbol, qty=qty, entry_price=entry_price)
 
@@ -64,7 +64,6 @@ def status():
     return jsonify({"status": "running"})
 
 
-# ==================== 关键修复：后台线程启动 TP 监控 ====================
 if __name__ == "__main__":
     try:
         monitor_thread = threading.Thread(target=tp_monitor.start, daemon=True)
