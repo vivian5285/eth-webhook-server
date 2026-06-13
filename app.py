@@ -1,4 +1,4 @@
-# app.py（最终优化版 - 更快响应 TV 信号）
+# app.py（完整更新版 - 配合 40-40-20 + 自动保本）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -21,7 +21,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# ==================== 线程池（比每次新建线程更高效） ====================
+# 线程池（提升响应速度）
 executor = ThreadPoolExecutor(max_workers=4)
 
 binance_client = BinanceClient(
@@ -31,9 +31,9 @@ binance_client = BinanceClient(
     max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
 )
 
-# ==================== 后台信号处理函数 ====================
+
 def handle_signal_in_background(data):
-    start_time = time.time()
+    """后台处理信号"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
@@ -51,7 +51,7 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # 仓位计算（80% 本金 × 5倍）
+            # 计算仓位（80% 本金 × 5倍）
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
@@ -74,7 +74,7 @@ def handle_signal_in_background(data):
                 ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
                 entry_price = float(ticker['price'])
 
-            # 通知监督层
+            # 通知监督层（内部会调用 binance_client.send_position_open_report 更新 position_manager）
             supervisor.notify_open_success(
                 signal=signal,
                 symbol=symbol,
@@ -87,8 +87,7 @@ def handle_signal_in_background(data):
             binance_client.close_all_positions(symbol)
             supervisor.notify_close_all(data.get("reason", "manual_or_protection"))
 
-        elapsed = time.time() - start_time
-        logging.info(f"========== [后台处理] 信号 {signal} 处理完成，耗时 {elapsed:.2f}s ==========")
+        logging.info(f"========== [后台处理] 信号 {signal} 处理完成 ==========")
 
     except Exception as e:
         logging.error(f"[后台处理异常] {e}", exc_info=True)
@@ -96,22 +95,20 @@ def handle_signal_in_background(data):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    receive_time = time.time()
     try:
         data = request.get_json()
         if not data:
             return jsonify({"status": "error", "message": "无效JSON"}), 400
 
         signal = data.get("signal")
-        logging.info(f"[Webhook] 收到信号: {signal} | 接收时间: {time.strftime('%H:%M:%S')}")
+        logging.info(f"[Webhook] 收到信号: {signal}")
 
-        # 立即返回 200，然后后台处理
+        # 立即返回 200，后台处理
         executor.submit(handle_signal_in_background, data)
 
         return jsonify({
             "status": "accepted",
-            "signal": signal,
-            "receive_time": time.strftime('%H:%M:%S')
+            "signal": signal
         }), 200
 
     except Exception as e:
@@ -126,7 +123,7 @@ def status():
 
 # ==================== 启动 TP 监控 ====================
 tp_monitor.start()
-logging.info("[启动] TP监控模块已启动（4H 适配 + 追踪止盈 + 快速响应）")
+logging.info("[启动] TP监控模块已启动（支持 40-40-20 + TP1后自动保本）")
 
 
 if __name__ == "__main__":
