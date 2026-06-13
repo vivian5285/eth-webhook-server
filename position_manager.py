@@ -1,7 +1,8 @@
-# position_manager.py（最终推荐版 - 智能 reconcile + 支持 stop_loss）
+# position_manager.py（完整最终版 - 已接入 Config）
 import logging
 from datetime import datetime
 from binance_client import get_binance_client
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -37,7 +38,7 @@ class PositionManager:
 
     def reconcile(self, real_position):
         """
-        智能 reconcile：
+        智能 reconcile（已使用 Config）：
         - 减仓：只更新数量，保留 TP 和 stop_loss（保护保本损）
         - 加仓或恢复：激进重算 TP，清空 stop_loss
         """
@@ -52,7 +53,7 @@ class PositionManager:
         symbol = real_position.get('symbol', 'ETHUSDT')
 
         if not self.position:
-            # VPS 重启恢复
+            # VPS 重启后恢复 → 激进重算
             self._aggressive_recalculate(real_side, symbol, real_qty, real_entry)
             return
 
@@ -60,31 +61,33 @@ class PositionManager:
         memory_side = self.position.get("side")
 
         qty_diff_ratio = abs(real_qty - memory_qty) / memory_qty if memory_qty > 0 else 1.0
-        is_significant = qty_diff_ratio > 0.15 or real_side != memory_side
+        is_significant = qty_diff_ratio > Config.RECONCILE_THRESHOLD or real_side != memory_side
 
         if not is_significant:
+            # 小幅变化，只更新数量
             self.position["qty"] = round(real_qty, 3)
             return
 
         if real_qty < memory_qty and real_side == memory_side:
-            # 减仓：保留 stop_loss
+            # === 减仓场景（手动部分平仓或 TP 部分成交）===
             self.position["qty"] = round(real_qty, 3)
             logging.info("[Reconcile] 检测到减仓，仅更新数量，保留原有 TP 和 stop_loss")
         else:
-            # 加仓或恢复：激进重算
+            # === 加仓 或 方向变化 或 恢复 ===
             self._aggressive_recalculate(real_side, symbol, real_qty, real_entry)
 
     def _aggressive_recalculate(self, side, symbol, qty, entry_price):
+        """激进重算 TP（加仓或恢复时使用）"""
         atr = binance_client._get_atr(symbol) or (entry_price * 0.035)
 
         if side == "LONG":
-            tp1 = round(entry_price + atr * 1.0, 2)
-            tp2 = round(entry_price + atr * 2.0, 2)
-            tp3 = round(entry_price + atr * 3.0, 2)
+            tp1 = round(entry_price + atr * Config.TP_ATR_MULTIPLIERS[0], 2)
+            tp2 = round(entry_price + atr * Config.TP_ATR_MULTIPLIERS[1], 2)
+            tp3 = round(entry_price + atr * Config.TP_ATR_MULTIPLIERS[2], 2)
         else:
-            tp1 = round(entry_price - atr * 1.0, 2)
-            tp2 = round(entry_price - atr * 2.0, 2)
-            tp3 = round(entry_price - atr * 3.0, 2)
+            tp1 = round(entry_price - atr * Config.TP_ATR_MULTIPLIERS[0], 2)
+            tp2 = round(entry_price - atr * Config.TP_ATR_MULTIPLIERS[1], 2)
+            tp3 = round(entry_price - atr * Config.TP_ATR_MULTIPLIERS[2], 2)
 
         self.update_position(
             side=side, symbol=symbol, qty=qty, avg_price=entry_price,
@@ -93,4 +96,5 @@ class PositionManager:
         logging.warning("[Reconcile] 激进重算 TP 完成")
 
 
+# 全局实例
 position_manager = PositionManager()
