@@ -1,4 +1,4 @@
-# app.py（完整最终版）
+# app.py（完整最终版 - 集成实时 WebSocket TP监控）
 from flask import Flask, request, jsonify
 import logging
 import os
@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
-from tp_monitor import tp_monitor
+from tp_monitor import tp_monitor   # 实时 WebSocket 版本
 
 load_dotenv()
 
@@ -40,7 +40,7 @@ def handle_signal_in_background(data):
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             is_long = signal == "OPEN_LONG"
 
-            # 先平后开
+            # 先平后开逻辑
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
                 logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先执行全平")
@@ -48,7 +48,7 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # 计算仓位（80% 本金 × 5倍）
+            # 计算仓位
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
@@ -71,7 +71,7 @@ def handle_signal_in_background(data):
                 ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
                 entry_price = float(ticker['price'])
 
-            # 通知监督层（内部会更新 position_manager 并发送钉钉）
+            # 通知监督层（内部更新 position_manager 并发送钉钉）
             supervisor.notify_open_success(
                 signal=signal,
                 symbol=symbol,
@@ -100,7 +100,7 @@ def webhook():
         signal = data.get("signal")
         logging.info(f"[Webhook] 收到信号: {signal}")
 
-        # 立即返回 200，后台异步处理（快速响应优化）
+        # 立即返回 200，后台异步处理（快速响应）
         executor.submit(handle_signal_in_background, data)
 
         return jsonify({
@@ -118,9 +118,9 @@ def status():
     return jsonify({"status": "running"})
 
 
-# ==================== 启动 TP 监控 ====================
+# ==================== 启动实时 TP 监控（WebSocket 模式） ====================
 tp_monitor.start()
-logging.info("[启动] TP监控模块已启动（40-40-20 + TP1后自动保本）")
+logging.info("[启动] TP监控模块已启动（WebSocket 实时模式 + 40-40-20 + 自动保本）")
 
 
 if __name__ == "__main__":
