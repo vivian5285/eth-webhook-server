@@ -1,4 +1,4 @@
-# app.py（最终版 - 已降低仓位到 20%）
+# app.py（最终完整版 - 仓位已改为 80% 本金 × 5倍）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -45,11 +45,11 @@ def handle_signal_in_background(data):
             else:
                 logging.info("[先平后开] 当前无持仓，直接开新仓")
 
-            # ==================== 已调低仓位 ====================
+            # ==================== 仓位计算（已改为 80% 本金 × 5倍） ====================
             qty = binance_client.calculate_position_size(
                 symbol=symbol,
                 leverage=5.0,
-                equity_ratio=0.20          # ← 已改为 20% 本金
+                equity_ratio=0.80          # ← 已更新为 80%
             )
             logging.info(f"[仓位计算] 本次下单数量: {qty}")
 
@@ -111,7 +111,7 @@ def status():
 
 # ==================== 启动 TP 监控 ====================
 tp_monitor.start()
-logging.info("[启动] TP监控模块已启动（Gunicorn 兼容）")
+logging.info("[启动] TP监控模块已启动（Gunicorn 兼容 + 4H 适配 + 追踪止盈）")
 
 
 if __name__ == "__main__":
