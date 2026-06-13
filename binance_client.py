@@ -1,4 +1,4 @@
-# binance_client.py（完整更新版 - TP倍数已调整为 1.0/2.0/3.0）
+# binance_client.py（完整最终版 - TP倍数已调整为 1.0/2.0/3.0）
 import os
 import time
 import hmac
