@@ -1,4 +1,4 @@
-# tp_monitor.py（完整最终版 - 已接入 Config）
+# tp_monitor.py（最终完整版 - 已彻底移除 binance_client 未初始化检查）
 import time
 import logging
 from binance_client import get_binance_client
@@ -22,7 +22,7 @@ class TPMonitor:
             logging.warning("[TPMonitor] 已经在运行中")
             return
         self.running = True
-        logging.info("[TPMonitor] TP监控已启动（最终版 - 已使用 Config）")
+        logging.info("[TPMonitor] TP监控已启动（最终版）")
         while self.running:
             try:
                 self._check_and_execute()
@@ -72,7 +72,7 @@ class TPMonitor:
                 self._reset_state()
                 return
 
-        # ==================== TP1 执行（使用 Config） ====================
+        # ==================== TP1 执行（40%） ====================
         if not self.tp1_hit and tp1 is not None:
             if (is_long and current_price >= tp1) or (not is_long and current_price <= tp1):
                 logging.info(f"[TP1触发] 价格到达 {tp1}，准备平仓 {Config.TP_CLOSE_RATIOS[0]*100}%")
@@ -93,7 +93,7 @@ class TPMonitor:
                     )
                 self.tp1_hit = True
 
-        # ==================== TP2 执行（使用 Config） ====================
+        # ==================== TP2 执行（40%） ====================
         if self.tp1_hit and not self.tp2_hit and tp2 is not None:
             if (is_long and current_price >= tp2) or (not is_long and current_price <= tp2):
                 logging.info(f"[TP2触发] 价格到达 {tp2}，准备平仓 {Config.TP_CLOSE_RATIOS[1]*100}%")
@@ -110,7 +110,7 @@ class TPMonitor:
                     )
                 self.tp2_hit = True
 
-        # ==================== TP3 执行（剩余仓位） ====================
+        # ==================== TP3 执行（剩余20%） ====================
         if tp3 is not None:
             if (is_long and current_price >= tp3) or (not is_long and current_price <= tp3):
                 logging.info(f"[TP3触发] 价格到达 {tp3}，平仓剩余仓位")
