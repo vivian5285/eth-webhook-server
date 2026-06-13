@@ -1,15 +1,26 @@
-# app.py（完整最终健壮版）
+# app.py（最终推荐版 - 初始化顺序优化）
 from flask import Flask, request, jsonify
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
+# ==================== 1. 最早加载环境变量 ====================
+load_dotenv()
+
+# ==================== 2. 提前创建 binance_client（关键优化） ====================
 from binance_client import BinanceClient
+
+binance_client = BinanceClient(
+    api_key=os.getenv("BINANCE_API_KEY"),
+    api_secret=os.getenv("BINANCE_API_SECRET"),
+    risk_percent=float(os.getenv("RISK_PERCENT", 0.85)),
+    max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
+)
+
+# ==================== 3. 再导入其他依赖模块 ====================
 from position_supervisor import supervisor
 from tp_monitor import tp_monitor
-
-load_dotenv()
 
 app = Flask(__name__)
 
@@ -19,13 +30,6 @@ logging.basicConfig(
 )
 
 executor = ThreadPoolExecutor(max_workers=4)
-
-binance_client = BinanceClient(
-    api_key=os.getenv("BINANCE_API_KEY"),
-    api_secret=os.getenv("BINANCE_API_SECRET"),
-    risk_percent=float(os.getenv("RISK_PERCENT", 0.85)),
-    max_leverage=float(os.getenv("MAX_LEVERAGE", 5.0))
-)
 
 
 def handle_signal_in_background(data):
@@ -102,12 +106,12 @@ def status():
     return jsonify({"status": "running"})
 
 
-# ==================== 安全启动 TP 监控（关键修复） ====================
+# ==================== 4. 安全启动 TP 监控 ====================
 try:
     tp_monitor.start()
     logging.info("[启动] TP监控模块已启动（WebSocket 实时模式）")
 except Exception as e:
-    logging.error(f"[TP监控启动异常，已跳过，不影响主服务] {e}", exc_info=True)
+    logging.error(f"[TP监控启动异常，已跳过] {e}", exc_info=True)
 
 
 if __name__ == "__main__":
