@@ -1,4 +1,4 @@
-# binance_client.py（最终优化版 - 懒加载单例）
+# binance_client.py（完整最终版 - 已接入 Config）
 import os
 import time
 import hmac
@@ -9,6 +9,7 @@ import logging
 import math
 from binance import Client
 from binance.exceptions import BinanceAPIException
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -25,11 +26,16 @@ class BinanceClient:
             raise ValueError("API Key 和 Secret 不能为空")
 
         self.client = Client(self.api_key, self.api_secret)
-        logging.info("[BinanceClient] 初始化成功，当前权益: {:.2f} USDT".format(self.get_account_balance()))
+        logging.info("[BinanceClient] 初始化成功")
 
     # ==================== 仓位计算 ====================
-    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
+    def calculate_position_size(self, symbol="ETHUSDT", leverage=None, equity_ratio=None):
         try:
+            if leverage is None:
+                leverage = Config.DEFAULT_LEVERAGE
+            if equity_ratio is None:
+                equity_ratio = Config.DEFAULT_EQUITY_RATIO
+
             account = self.client.futures_account()
             total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
             usable_equity = total_equity * equity_ratio
@@ -40,6 +46,8 @@ class BinanceClient:
 
             raw_qty = position_value / current_price
             final_qty = math.floor(raw_qty / 0.001) * 0.001
+
+            logging.info(f"[仓位计算] 权益比例: {equity_ratio*100}% | 杠杆: {leverage}x | 下单数量: {final_qty}")
             return round(final_qty, 3)
         except Exception as e:
             logging.error(f"[仓位计算失败] {e}")
@@ -137,14 +145,16 @@ class BinanceClient:
             logging.error(f"[获取 ATR 失败] {e}")
             return None
 
-    # ==================== 开仓报告（TP计算 + 钉钉） ====================
+    # ==================== 开仓报告（TP计算已使用 Config） ====================
     def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
         try:
             atr = self._get_atr(symbol) or (entry_price * 0.008)
 
-            tp1 = round(entry_price + atr * 1.0 if is_long else entry_price - atr * 1.0, 2)
-            tp2 = round(entry_price + atr * 2.0 if is_long else entry_price - atr * 2.0, 2)
-            tp3 = round(entry_price + atr * 3.0 if is_long else entry_price - atr * 3.0, 2)
+            # 使用 Config 中的 ATR 倍数
+            tp_multipliers = Config.TP_ATR_MULTIPLIERS
+            tp1 = round(entry_price + atr * tp_multipliers[0] if is_long else entry_price - atr * tp_multipliers[0], 2)
+            tp2 = round(entry_price + atr * tp_multipliers[1] if is_long else entry_price - atr * tp_multipliers[1], 2)
+            tp3 = round(entry_price + atr * tp_multipliers[2] if is_long else entry_price - atr * tp_multipliers[2], 2)
 
             direction = "开多" if is_long else "开空"
             emoji = "🟢" if is_long else "🔴"
@@ -187,7 +197,7 @@ class BinanceClient:
             logging.error(f"[钉钉发送失败] {e}")
 
 
-# ==================== 懒加载单例（核心修复） ====================
+# ==================== 懒加载单例 ====================
 _binance_client = None
 
 def get_binance_client():
