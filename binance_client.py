@@ -1,4 +1,4 @@
-# binance_client.py（最终版 - 仓位改为80% + TP 1.35/2.4/3.3）
+# binance_client.py（完整更新版 - TP倍数已调整为 1.0/2.0/3.0）
 import os
 import time
 import hmac
@@ -27,7 +27,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 仓位计算（已改为 80% 本金 × 5倍） ====================
+    # ==================== 仓位计算（80% 本金 × 5倍） ====================
     def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
         try:
             account = self.client.futures_account()
@@ -139,6 +139,7 @@ class BinanceClient:
         except:
             return 0.0
 
+    # ==================== 获取 ATR（4H） ====================
     def _get_atr(self, symbol, interval="240", limit=14):
         try:
             klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
@@ -154,14 +155,15 @@ class BinanceClient:
             logging.error(f"[获取 ATR 失败] {e}")
             return None
 
-    # ==================== 开仓报告（TP 已更新为 1.35/2.4/3.3） ====================
+    # ==================== 开仓报告（TP倍数已调整为 1.0/2.0/3.0） ====================
     def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
         try:
             atr = self._get_atr(symbol) or (entry_price * 0.008)
 
-            tp1 = round(entry_price + atr * 1.35 if is_long else entry_price - atr * 1.35, 2)
-            tp2 = round(entry_price + atr * 2.4  if is_long else entry_price - atr * 2.4,  2)
-            tp3 = round(entry_price + atr * 3.3  if is_long else entry_price - atr * 3.3,  2)
+            # ==================== 更紧的 ATR 倍数（贴合 30-60 美金区间） ====================
+            tp1 = round(entry_price + atr * 1.0 if is_long else entry_price - atr * 1.0, 2)
+            tp2 = round(entry_price + atr * 2.0 if is_long else entry_price - atr * 2.0, 2)
+            tp3 = round(entry_price + atr * 3.0 if is_long else entry_price - atr * 3.0, 2)
 
             direction = "开多" if is_long else "开空"
             emoji = "🟢" if is_long else "🔴"
@@ -170,10 +172,10 @@ class BinanceClient:
                 f"{emoji} **{direction} 成功** | {symbol}\n\n"
                 f"数量: {qty} 张\n"
                 f"开仓价: {entry_price} USDT\n\n"
-                f"止盈目标:\n"
-                f"• 止盈1: {tp1} USDT\n"
-                f"• 止盈2: {tp2} USDT\n"
-                f"• 止盈3: {tp3} USDT\n\n"
+                f"止盈目标（40-40-20）:\n"
+                f"• 止盈1 (40%): {tp1} USDT\n"
+                f"• 止盈2 (40%): {tp2} USDT\n"
+                f"• 止盈3 (20%): {tp3} USDT\n\n"
                 f"账户详情:\n"
                 f"• 账户权益: {self.get_account_balance():.2f} USDT\n"
                 f"• 可用余额: {self._get_available_balance():.2f} USDT"
@@ -186,6 +188,7 @@ class BinanceClient:
             logging.error(f"[发送开仓报告失败] {e}")
             return None
 
+    # ==================== 钉钉通知（带加签） ====================
     def _send_dingtalk(self, text):
         try:
             webhook = os.getenv("DINGTALK_WEBHOOK")
