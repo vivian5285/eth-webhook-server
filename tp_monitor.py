@@ -1,4 +1,4 @@
-# tp_monitor.py（完整最终健壮版 - WebSocket 实时 + 异常保护）
+# tp_monitor.py（完整最终健壮版 - 已修复 binance_client None 问题）
 import time
 import logging
 import threading
@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 class TPMonitor:
     def __init__(self):
-        self.binance_client = binance_client
+        self.binance_client = None          # 先置为 None，延迟赋值
         self.position_manager = position_manager
         self.supervisor = supervisor
         self.running = False
@@ -23,6 +23,14 @@ class TPMonitor:
 
     def start(self):
         if self._started:
+            return
+
+        # 延迟获取 binance_client 实例（关键修复）
+        from binance_client import binance_client as bc
+        self.binance_client = bc
+
+        if self.binance_client is None:
+            logging.error("[TP监控] binance_client 未初始化，跳过启动")
             return
 
         try:
