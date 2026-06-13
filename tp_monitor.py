@@ -1,4 +1,4 @@
-# tp_monitor.py（4H 适配版 - 已更新）
+# tp_monitor.py（4H 适配 + 人工干预走监督层完整版）
 import logging
 import time
 import threading
@@ -21,7 +21,7 @@ binance_client = BinanceClient(
 TP1_MULT = 1.35
 TP2_MULT = 2.4
 TP3_MULT = 3.3
-TRAIL_MULT = 1.3          # 追踪止盈距离
+TRAIL_MULT = 1.3
 
 
 class TPMonitor:
@@ -33,8 +33,8 @@ class TPMonitor:
         self.last_qty = 0
         self.tp1_done = False
         self.tp2_done = False
-        self.trailing_active = False      # 追踪止盈是否已激活
-        self.trailing_stop = None         # 当前追踪止损价格
+        self.trailing_active = False
+        self.trailing_stop = None
 
     def start(self):
         if self.running:
@@ -42,7 +42,7 @@ class TPMonitor:
         self.running = True
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
-        logging.info("[TP监控] 已启动（4H 适配版 + 轻追踪止盈）")
+        logging.info("[TP监控] 已启动（4H 适配版 + 轻追踪止盈 + 人工干预走监督层）")
 
     def stop(self):
         self.running = False
@@ -72,19 +72,35 @@ class TPMonitor:
         tp2 = position.get("tp2")
         tp3 = position.get("tp3")
 
-        # 人工干预检测（保持原有逻辑）
+        # ==================== 人工干预检测（走监督层推送钉钉） ====================
         if self.last_qty > 0 and abs(current_qty - self.last_qty) / self.last_qty > 0.15:
-            logging.info("[TP监控] 检测到人工干预，重新计算 TP")
+            change_type = "加仓" if current_qty > self.last_qty else "减仓/平仓"
+            logging.info(f"[TP监控] 检测到人工{change_type}，通知监督层处理")
+
             self.initial_qty = current_qty
             self.tp1_done = False
             self.tp2_done = False
             self.trailing_active = False
+            self.trailing_stop = None
+
             if avg_price:
                 atr = binance_client._get_atr(symbol) or (avg_price * 0.008)
                 new_tp1 = round(avg_price + atr * TP1_MULT if side == "LONG" else avg_price - atr * TP1_MULT, 2)
                 new_tp2 = round(avg_price + atr * TP2_MULT if side == "LONG" else avg_price - atr * TP2_MULT, 2)
                 new_tp3 = round(avg_price + atr * TP3_MULT if side == "LONG" else avg_price - atr * TP3_MULT, 2)
+
                 position_manager.update_position(side, symbol, current_qty, avg_price, new_tp1, new_tp2, new_tp3)
+
+                # 通知监督层（由监督层核实实盘后推送钉钉）
+                supervisor.notify_manual_intervention(
+                    change_type=change_type,
+                    symbol=symbol,
+                    side=side,
+                    current_qty=current_qty,
+                    new_tp1=new_tp1,
+                    new_tp2=new_tp2,
+                    new_tp3=new_tp3
+                )
 
         self.last_qty = current_qty
         if self.initial_qty is None:
@@ -98,7 +114,6 @@ class TPMonitor:
             return
 
         is_long = side == "LONG"
-        atr = binance_client._get_atr(symbol) or (avg_price * 0.008 if avg_price else 30)
 
         # ==================== 追踪止盈逻辑 ====================
         if self.trailing_active and self.trailing_stop is not None:
@@ -124,13 +139,13 @@ class TPMonitor:
 
         elif hit_tp2 and not self.tp2_done:
             target_close = round(self.initial_qty * 0.30, 3)
-            self._execute_fixed_qty(target_close, "2", current_price, symbol, atr, is_long)
+            self._execute_fixed_qty(target_close, "2", current_price, symbol, is_long)
 
         elif hit_tp1 and not self.tp1_done:
             target_close = round(self.initial_qty * 0.30, 3)
-            self._execute_fixed_qty(target_close, "1", current_price, symbol, atr, is_long)
+            self._execute_fixed_qty(target_close, "1", current_price, symbol, is_long)
 
-    def _execute_fixed_qty(self, close_qty, level, current_price, symbol, atr, is_long):
+    def _execute_fixed_qty(self, close_qty, level, current_price, symbol, is_long):
         if close_qty < 0.001:
             return
 
@@ -142,10 +157,11 @@ class TPMonitor:
                 self.tp1_done = True
             elif level == "2":
                 self.tp2_done = True
-                # ==================== TP2 触发后启动追踪止盈 ====================
+                # TP2 触发后启动追踪止盈
                 position = position_manager.get_position()
                 if position and position.get("avg_price"):
                     avg_price = position["avg_price"]
+                    atr = binance_client._get_atr(symbol) or (avg_price * 0.008)
                     if is_long:
                         self.trailing_stop = current_price - atr * TRAIL_MULT
                     else:
