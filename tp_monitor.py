@@ -1,8 +1,7 @@
-# tp_monitor.py（完整更新版 - 40-40-20 + TP1后自动保本）
+# tp_monitor.py（完整最终版 - 40-40-20 + TP1后自动保本）
 import time
 import logging
 import threading
-from datetime import datetime
 from binance_client import binance_client
 from position_manager import position_manager
 from position_supervisor import supervisor
@@ -26,7 +25,7 @@ class TPMonitor:
         self.running = True
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
-        logging.info("[TP监控] 已启动（4H适配 + 40-40-20分仓 + TP1后自动保本）")
+        logging.info("[TP监控] 已启动（40-40-20分仓 + TP1后自动保本 + 4H适配）")
 
     def stop(self):
         self.running = False
@@ -60,7 +59,7 @@ class TPMonitor:
                     time.sleep(6)
                     continue
 
-                # ==================== TP1：平40% + 自动设置保本止损 ====================
+                # ==================== TP1：平 40% + 自动设置保本止损 ====================
                 if position.get("tp1") and not position.get("tp1_hit"):
                     hit_tp1 = (side == "LONG" and current_price >= position["tp1"]) or \
                               (side == "SHORT" and current_price <= position["tp1"])
@@ -97,7 +96,7 @@ class TPMonitor:
                             self.supervisor.notify_tp_hit("1", close_qty, current_price)
                             logging.info(f"[TP1] 平40%成功，剩余仓位止损已移至保本价 {breakeven_sl}")
 
-                # ==================== TP2：平40% ====================
+                # ==================== TP2：平 40% ====================
                 if position.get("tp2") and position.get("tp1_hit") and not position.get("tp2_hit"):
                     hit_tp2 = (side == "LONG" and current_price >= position["tp2"]) or \
                               (side == "SHORT" and current_price <= position["tp2"])
@@ -121,7 +120,7 @@ class TPMonitor:
                             self.supervisor.notify_tp_hit("2", close_qty, current_price)
                             logging.info(f"[TP2] 平40%成功")
 
-                # ==================== TP3：平剩余20% ====================
+                # ==================== TP3：平剩余 20% ====================
                 if position.get("tp3") and position.get("tp2_hit"):
                     hit_tp3 = (side == "LONG" and current_price >= position["tp3"]) or \
                               (side == "SHORT" and current_price <= position["tp3"])
