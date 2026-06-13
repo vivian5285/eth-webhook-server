@@ -1,9 +1,10 @@
-# tp_monitor.py（最终版 - 已适配 get_binance_client）
+# tp_monitor.py（完整最终版 - 已接入 Config）
 import time
 import logging
 from binance_client import get_binance_client
 from position_manager import position_manager
 from position_supervisor import supervisor
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -21,17 +22,18 @@ class TPMonitor:
             logging.warning("[TPMonitor] 已经在运行中")
             return
         self.running = True
-        logging.info("[TPMonitor] TP监控已启动（最终版）")
+        logging.info("[TPMonitor] TP监控已启动（最终版 - 已使用 Config）")
         while self.running:
             try:
                 self._check_and_execute()
-                time.sleep(3)
+                time.sleep(Config.TP_CHECK_INTERVAL)
             except Exception as e:
                 logging.error(f"[TPMonitor] 循环异常: {e}", exc_info=True)
                 time.sleep(5)
 
     def stop(self):
         self.running = False
+        logging.info("[TPMonitor] TP监控已停止")
 
     def _reset_state(self):
         self.tp1_hit = False
@@ -60,57 +62,65 @@ class TPMonitor:
 
         is_long = side == "LONG"
 
-        # 保本止损（最高优先级）
+        # ==================== 保本止损（最高优先级） ====================
         if stop_loss is not None:
             if (is_long and current_price <= stop_loss) or (not is_long and current_price >= stop_loss):
-                logging.warning(f"🚨 [保本损触发] 现价 {current_price} 击穿止损线 {stop_loss}")
+                logging.warning(f"🚨 [保本损触发] 现价 {current_price} 击穿止损线 {stop_loss}，执行紧急全平！")
                 binance_client.close_all_positions(symbol)
-                supervisor.notify_close_all("触发动态保本损")
+                supervisor.notify_close_all("触发动态保本损，安全撤退")
                 position_manager.clear_position()
                 self._reset_state()
                 return
 
-        # TP1
+        # ==================== TP1 执行（使用 Config） ====================
         if not self.tp1_hit and tp1 is not None:
             if (is_long and current_price >= tp1) or (not is_long and current_price <= tp1):
-                closed_qty = self._execute_partial_close(symbol, 0.40)
+                logging.info(f"[TP1触发] 价格到达 {tp1}，准备平仓 {Config.TP_CLOSE_RATIOS[0]*100}%")
+                closed_qty = self._execute_partial_close(symbol, Config.TP_CLOSE_RATIOS[0])
+
                 if closed_qty > 0:
                     supervisor.notify_tp_hit(level="1", closed_qty=closed_qty, current_price=current_price)
-                    buffer = 10.0
+
+                    # 设置保本止损（使用 Config 中的固定缓冲）
+                    buffer = Config.BREAKEVEN_BUFFER_USD
                     new_sl = entry_price + buffer if is_long else entry_price - buffer
                     position_manager.update_position(
                         side=side, symbol=symbol,
-                        qty=position.get("qty", 0) * 0.6,
+                        qty=position.get("qty", 0) * (1 - Config.TP_CLOSE_RATIOS[0]),
                         avg_price=entry_price,
                         tp1=None, tp2=tp2, tp3=tp3,
                         stop_loss=round(new_sl, 2)
                     )
                 self.tp1_hit = True
 
-        # TP2
+        # ==================== TP2 执行（使用 Config） ====================
         if self.tp1_hit and not self.tp2_hit and tp2 is not None:
             if (is_long and current_price >= tp2) or (not is_long and current_price <= tp2):
-                closed_qty = self._execute_partial_close(symbol, 0.40)
+                logging.info(f"[TP2触发] 价格到达 {tp2}，准备平仓 {Config.TP_CLOSE_RATIOS[1]*100}%")
+                closed_qty = self._execute_partial_close(symbol, Config.TP_CLOSE_RATIOS[1])
+
                 if closed_qty > 0:
                     supervisor.notify_tp_hit(level="2", closed_qty=closed_qty, current_price=current_price)
                     position_manager.update_position(
                         side=side, symbol=symbol,
-                        qty=position.get("qty", 0) * 0.2,
+                        qty=position.get("qty", 0) * (1 - Config.TP_CLOSE_RATIOS[0] - Config.TP_CLOSE_RATIOS[1]),
                         avg_price=entry_price,
                         tp1=None, tp2=None, tp3=tp3,
                         stop_loss=position.get("stop_loss")
                     )
                 self.tp2_hit = True
 
-        # TP3
+        # ==================== TP3 执行（剩余仓位） ====================
         if tp3 is not None:
             if (is_long and current_price >= tp3) or (not is_long and current_price <= tp3):
+                logging.info(f"[TP3触发] 价格到达 {tp3}，平仓剩余仓位")
                 binance_client.close_all_positions(symbol)
                 supervisor.notify_tp_hit(level="3", closed_qty=position.get("qty", 0), current_price=current_price)
                 position_manager.clear_position()
                 self._reset_state()
 
     def _execute_partial_close(self, symbol, percent):
+        """执行部分平仓并返回实际平仓数量"""
         try:
             real_pos = binance_client.get_current_position(symbol)
             if not real_pos:
@@ -133,4 +143,5 @@ class TPMonitor:
             return None
 
 
+# 全局实例
 tp_monitor = TPMonitor()
