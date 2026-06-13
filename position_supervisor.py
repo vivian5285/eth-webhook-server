@@ -1,4 +1,4 @@
-# position_supervisor.py（完整更新版）
+# position_supervisor.py（完整最终版）
 import logging
 import threading
 from binance_client import binance_client
@@ -16,7 +16,7 @@ class PositionSupervisor:
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
-        logging.info("[监督层] PositionSupervisor 初始化完成（支持自动保本止损）")
+        logging.info("[监督层] PositionSupervisor 初始化完成（支持 40-40-20 + 自动保本止损）")
 
     def notify_open_success(self, signal: str, symbol: str, qty: float, entry_price: float):
         with self.lock:
