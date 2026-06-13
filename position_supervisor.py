@@ -1,31 +1,32 @@
-# position_supervisor.py（智慧层 - 完整最终版）
+# position_supervisor.py（最终版 - 智慧层统一协调）
 import logging
 import threading
-from binance_client import binance_client
+from binance_client import get_binance_client
 from position_manager import position_manager
+from config import Config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
 class PositionSupervisor:
     def __init__(self):
-        self.binance_client = binance_client
+        self.binance_client = get_binance_client()
         self.position_manager = position_manager
         self.last_signal = None
         self.consecutive_failure_count = 0
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
-        logging.info("[监督层] PositionSupervisor 初始化完成（智慧层统一负责通知与持仓协调）")
+        logging.info("[监督层] PositionSupervisor 初始化完成（智慧层）")
 
     def notify_open_success(self, signal: str, symbol: str, qty: float, entry_price: float):
-        """开仓成功通知（由智慧层统一处理 TP 计算 + 钉钉 + 持仓初始化）"""
+        """开仓成功后统一处理：计算TP + 初始化持仓 + 发送钉钉"""
         with self.lock:
             try:
                 is_long = signal == "OPEN_LONG"
                 direction = "多" if is_long else "空"
 
-                # 1. 调用 binance_client 计算 TP 并发送钉钉报告
+                # 1. 调用 binance_client 计算 TP 并发送开仓报告
                 tp_info = self.binance_client.send_position_open_report(
                     signal=signal,
                     symbol=symbol,
@@ -34,7 +35,7 @@ class PositionSupervisor:
                     is_long=is_long
                 )
 
-                # 2. 由智慧层初始化持仓（TP 由 binance_client 返回）
+                # 2. 初始化持仓（TP 由 binance_client 返回）
                 self.position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
                     symbol=symbol,
@@ -43,25 +44,25 @@ class PositionSupervisor:
                     tp1=tp_info.get("tp1") if tp_info else None,
                     tp2=tp_info.get("tp2") if tp_info else None,
                     tp3=tp_info.get("tp3") if tp_info else None,
-                    stop_loss=None  # TP1 触发后由 tp_monitor 自动设置保本
+                    stop_loss=None   # TP1 触发后由 tp_monitor 自动设置保本止损
                 )
 
                 self.last_signal = signal
                 self.consecutive_failure_count = 0
-                logging.info(f"[监督层] {direction} 开仓成功，持仓已初始化（TP1/TP2/TP3 已写入）")
+                logging.info(f"[监督层] {direction} 开仓成功，持仓已初始化")
 
             except Exception as e:
                 logging.error(f"[监督层] notify_open_success 异常: {e}", exc_info=True)
                 self.consecutive_failure_count += 1
 
     def notify_tp_hit(self, level: str, closed_qty: float, current_price: float):
-        """TP 分批止盈通知（智慧层统一发送）"""
+        """TP 分批止盈通知（智慧层统一发送钉钉 + 同步持仓）"""
         with self.lock:
             try:
                 logging.info(f"[监督层] TP{level} 触发，平仓数量: {closed_qty}")
 
-                # 同步实盘持仓
-                real_pos = self.binance_client.get_current_position("ETHUSDT")
+                # 同步实盘持仓状态
+                real_pos = self.binance_client.get_current_position(Config.SYMBOL)
                 if real_pos:
                     self.position_manager.reconcile(real_pos)
                 else:
@@ -102,7 +103,7 @@ class PositionSupervisor:
     def notify_manual_intervention(self, change_type: str, symbol: str, side: str,
                                    current_qty: float, new_tp1: float = None,
                                    new_tp2: float = None, new_tp3: float = None):
-        """人工干预通知（智慧层统一处理）"""
+        """人工干预通知"""
         with self.lock:
             try:
                 logging.warning(f"[监督层] 检测到人工{change_type}")
