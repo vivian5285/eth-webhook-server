@@ -1,8 +1,8 @@
-# position_manager.py（最终完整版 - 支持人工干预 TP 自动更新）
-import logging
+# position_manager.py（最终完整版）
 import json
 import os
-from typing import Optional, Dict, Any
+import logging
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -11,120 +11,98 @@ POSITION_FILE = "current_position.json"
 
 class PositionManager:
     def __init__(self):
-        self.position: Dict[str, Any] = {
-            "symbol": None,
-            "side": None,
-            "qty": 0.0,
-            "avg_price": 0.0,
-            "tp1": None,
-            "tp2": None,
-            "tp3": None,
-            "last_update_time": None
-        }
-        self._load_from_file()
+        self.position = self._load_position()
 
-    def _load_from_file(self):
-        """从文件加载持仓状态（重启后恢复）"""
+    def _load_position(self):
         if os.path.exists(POSITION_FILE):
             try:
                 with open(POSITION_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.position.update(data)
-                    logging.info("[PositionManager] 从文件恢复持仓状态")
+                    logging.info("[PositionManager] 从文件加载持仓状态")
+                    return data
             except Exception as e:
-                logging.error(f"[PositionManager] 加载文件失败: {e}")
+                logging.error(f"[PositionManager] 加载持仓文件失败: {e}")
+        return None
 
-    def _save_to_file(self):
-        """保存持仓状态到文件"""
+    def _save_position(self):
         try:
             with open(POSITION_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.position, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logging.error(f"[PositionManager] 保存文件失败: {e}")
+            logging.error(f"[PositionManager] 保存持仓文件失败: {e}")
 
-    def update_position(self, side: str, symbol: str, qty: float, avg_price: float,
-                        tp1: Optional[float] = None, tp2: Optional[float] = None, tp3: Optional[float] = None):
-        """更新持仓信息（开仓或手动干预后调用）"""
-        self.position.update({
-            "symbol": symbol,
+    def update_position(self, side, symbol, qty, avg_price, tp1=None, tp2=None, tp3=None):
+        self.position = {
             "side": side,
-            "qty": round(qty, 3),
-            "avg_price": round(avg_price, 2),
+            "symbol": symbol,
+            "qty": qty,
+            "avg_price": avg_price,
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
-            "last_update_time": self._get_current_time()
-        })
-        self._save_to_file()
+            "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self._save_position()
         logging.info(f"[PositionManager] 持仓已更新: {side} {qty} @ {avg_price}")
 
-    def reconcile(self, real_position: Optional[Dict]) -> bool:
+    def get_position(self):
+        return self.position
+
+    def clear_position(self):
+        self.position = None
+        if os.path.exists(POSITION_FILE):
+            try:
+                os.remove(POSITION_FILE)
+            except:
+                pass
+        logging.info("[PositionManager] 持仓已清空")
+
+    def reconcile(self, real_position):
         """
-        与币安真实持仓对账
-        返回 True 表示仓位发生显著变化（>10%）
+        核对实盘持仓与内存持仓是否一致
+        返回 True 表示有变化（需要更新）
         """
         if not real_position:
-            if self.position.get("qty", 0) > 0:
-                logging.info("[PositionManager] 检测到仓位已清空")
+            if self.position:
+                logging.info("[PositionManager] 实盘无持仓，内存有持仓 → 清空内存")
                 self.clear_position()
                 return True
             return False
 
-        real_qty = abs(float(real_position.get("positionAmt", 0)))
-        real_side = "LONG" if float(real_position.get("positionAmt", 0)) > 0 else "SHORT"
+        real_qty = float(real_position.get("positionAmt", 0))
+        real_side = "LONG" if real_qty > 0 else "SHORT"
         real_avg_price = float(real_position.get("entryPrice", 0))
 
-        current_qty = self.position.get("qty", 0)
+        if not self.position:
+            logging.info("[PositionManager] 内存无持仓，实盘有持仓 → 更新内存")
+            self.update_position(
+                side=real_side,
+                symbol=real_position.get("symbol"),
+                qty=abs(real_qty),
+                avg_price=real_avg_price
+            )
+            return True
 
-        # 更新当前持仓信息
-        self.position.update({
-            "symbol": real_position.get("symbol"),
-            "side": real_side,
-            "qty": round(real_qty, 3),
-            "avg_price": round(real_avg_price, 2),
-            "last_update_time": self._get_current_time()
-        })
-        self._save_to_file()
+        # 检测数量或方向是否有明显变化（>10%）
+        memory_qty = self.position.get("qty", 0)
+        memory_side = self.position.get("side")
 
-        # 判断是否发生显著变化（>10%）
-        if current_qty > 0:
-            change_ratio = abs(real_qty - current_qty) / current_qty
-            if change_ratio > 0.10:
-                logging.info(f"[PositionManager] 检测到显著变化: {current_qty} → {real_qty} ({change_ratio:.1%})")
-                return True
+        qty_change = abs(real_qty - memory_qty) / memory_qty if memory_qty > 0 else 1
+
+        if qty_change > 0.10 or real_side != memory_side:
+            logging.info(f"[PositionManager] 检测到持仓明显变化（{qty_change*100:.1f}%），更新内存")
+            self.update_position(
+                side=real_side,
+                symbol=real_position.get("symbol"),
+                qty=abs(real_qty),
+                avg_price=real_avg_price,
+                tp1=self.position.get("tp1"),
+                tp2=self.position.get("tp2"),
+                tp3=self.position.get("tp3")
+            )
+            return True
 
         return False
-
-    def get_position(self) -> Dict[str, Any]:
-        """获取当前持仓信息"""
-        return self.position.copy()
-
-    def clear_position(self):
-        """清空持仓（全平后调用）"""
-        self.position.update({
-            "symbol": None,
-            "side": None,
-            "qty": 0.0,
-            "avg_price": 0.0,
-            "tp1": None,
-            "tp2": None,
-            "tp3": None,
-            "last_update_time": self._get_current_time()
-        })
-        self._save_to_file()
-        logging.info("[PositionManager] 持仓已清空")
-
-    def get_tp_levels(self):
-        """获取当前 TP 价格"""
-        return {
-            "tp1": self.position.get("tp1"),
-            "tp2": self.position.get("tp2"),
-            "tp3": self.position.get("tp3")
-        }
-
-    def _get_current_time(self):
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 # 全局单例
