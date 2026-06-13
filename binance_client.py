@@ -27,8 +27,12 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 仓位计算（80% 本金 × 5倍） ====================
+    # ==================== 仓位计算（支持高杠杆 + 可配置资金比例） ====================
     def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
+        """
+        leverage: 杠杆倍数（当前测试用5倍，后续可调到15-20倍）
+        equity_ratio: 使用账户权益的比例（建议 0.3~0.8）
+        """
         try:
             account = self.client.futures_account()
             total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
@@ -42,7 +46,7 @@ class BinanceClient:
             raw_qty = position_value / current_price
             final_qty = math.floor(raw_qty / 0.001) * 0.001
 
-            logging.info(f"[仓位计算] 权益: {total_equity:.2f} | 可用: {usable_equity:.2f} | 下单数量: {final_qty}")
+            logging.info(f"[仓位计算] 权益: {total_equity:.2f} | 使用比例: {equity_ratio*100}% | 杠杆: {leverage}x | 下单数量: {final_qty}")
             return round(final_qty, 3)
 
         except Exception as e:
