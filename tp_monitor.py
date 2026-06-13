@@ -1,11 +1,13 @@
-# tp_monitor.py（最终版 - 已接入 supervisor 汇报）
+# tp_monitor.py（最终优化版 - P0修复：增加 stop_loss 检查）
 import time
 import logging
-from binance_client import binance_client
+from binance_client import get_binance_client
 from position_manager import position_manager
 from position_supervisor import supervisor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+binance_client = get_binance_client()
 
 
 class TPMonitor:
@@ -19,7 +21,7 @@ class TPMonitor:
             logging.warning("[TPMonitor] 已经在运行中")
             return
         self.running = True
-        logging.info("[TPMonitor] TP监控已启动（最终版 - 通过 supervisor 汇报）")
+        logging.info("[TPMonitor] TP监控已启动（最终版 - 已修复 stop_loss 检查）")
         while self.running:
             try:
                 self._check_and_execute()
@@ -48,6 +50,7 @@ class TPMonitor:
         tp1 = position.get("tp1")
         tp2 = position.get("tp2")
         tp3 = position.get("tp3")
+        stop_loss = position.get("stop_loss")
 
         if not entry_price:
             return
@@ -58,6 +61,16 @@ class TPMonitor:
 
         is_long = side == "LONG"
 
+        # ==================== 保本止损（最高优先级） ====================
+        if stop_loss is not None:
+            if (is_long and current_price <= stop_loss) or (not is_long and current_price >= stop_loss):
+                logging.warning(f"🚨 [保本损触发] 现价 {current_price} 击穿止损线 {stop_loss}，执行紧急全平！")
+                binance_client.close_all_positions(symbol)
+                supervisor.notify_close_all("触发动态保本损，安全撤退")
+                position_manager.clear_position()
+                self._reset_state()
+                return   # 触发止损后直接返回，不再检查 TP
+
         # ==================== TP1 执行（40%） ====================
         if not self.tp1_hit and tp1 is not None:
             if (is_long and current_price >= tp1) or (not is_long and current_price <= tp1):
@@ -65,11 +78,10 @@ class TPMonitor:
                 closed_qty = self._execute_partial_close(symbol, 0.40)
 
                 if closed_qty > 0:
-                    # 调用 supervisor 汇报（智慧层会先 reconcile 再推送钉钉）
                     supervisor.notify_tp_hit(level="1", closed_qty=closed_qty, current_price=current_price)
 
-                    # 设置保本止损
-                    buffer = abs(tp1 - entry_price) * 0.40
+                    # 设置保本止损（开仓价 + 固定缓冲）
+                    buffer = 10.0   # 建议固定 10U，更稳健（可根据实盘数据再调整）
                     new_sl = entry_price + buffer if is_long else entry_price - buffer
                     position_manager.update_position(
                         side=side, symbol=symbol,
