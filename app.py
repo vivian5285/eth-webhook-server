@@ -1,4 +1,4 @@
-# app.py（加强版 - 适配 gunicorn + 更 robust 的 TPMonitor 启动）
+# app.py（完整加强最终版 - 适配 gunicorn + 增强状态检查）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -18,32 +18,37 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 executor = ThreadPoolExecutor(max_workers=4)
 binance_client = get_binance_client()
 
-_tp_monitor_started = False   # 防止重复启动
+_tp_monitor_started = False
 
 
 def start_tp_monitor():
+    """启动 TP 监控线程（带保护，适配 gunicorn）"""
     global _tp_monitor_started
     try:
         if not _tp_monitor_started and not tp_monitor.running:
             monitor_thread = threading.Thread(target=tp_monitor.start, daemon=True)
             monitor_thread.start()
             _tp_monitor_started = True
-            logging.info("[post_fork] TP监控线程已成功启动")
+            logging.info("[启动] TP监控线程已成功启动（daemon=True）")
     except Exception as e:
-        logging.error(f"[TP监控启动失败] {e}", exc_info=True)
+        logging.error(f"[TP监控启动异常] {e}", exc_info=True)
 
 
 def handle_signal_in_background(data):
-    """后台处理 TradingView 信号（保持不变）"""
+    """后台异步处理 TradingView 信号"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", Config.SYMBOL)
+
         logging.info(f"========== [后台处理] 开始处理信号: {signal} ==========")
 
         if signal in ["OPEN_LONG", "OPEN_SHORT"]:
             is_long = signal == "OPEN_LONG"
+
+            # 先平后开
             current_pos = binance_client.get_current_position(symbol)
             if current_pos:
+                logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先全平")
                 binance_client.close_all_positions(symbol)
 
             qty = binance_client.calculate_position_size(symbol=symbol)
@@ -53,37 +58,66 @@ def handle_signal_in_background(data):
 
             side = "BUY" if is_long else "SELL"
             order = binance_client.place_market_order(symbol, side, qty)
-            entry_price = float(order.get("avgPrice", 0)) or float(
-                binance_client.client.futures_symbol_ticker(symbol=symbol)['price']
+            logging.info(f"[下单成功] {order}")
+
+            entry_price = float(order.get("avgPrice", 0)) or 0
+            if entry_price == 0:
+                ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
+                entry_price = float(ticker['price'])
+
+            supervisor.notify_open_success(
+                signal=signal, symbol=symbol, qty=qty, entry_price=entry_price
             )
 
-            supervisor.notify_open_success(signal=signal, symbol=symbol, qty=qty, entry_price=entry_price)
-
         elif signal == "CLOSE_ALL":
+            logging.info("[全平] 执行全平操作")
             binance_client.close_all_positions(symbol)
-            supervisor.notify_close_all(data.get("reason", "manual"))
+            supervisor.notify_close_all(data.get("reason", "manual_or_protection"))
 
         logging.info(f"========== [后台处理] 信号 {signal} 处理完成 ==========")
+
     except Exception as e:
         logging.error(f"[后台处理异常] {e}", exc_info=True)
 
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error"}), 400
-    executor.submit(handle_signal_in_background, data)
-    return jsonify({"status": "accepted", "signal": data.get("signal")}), 202
+    """TradingView Webhook 入口 - 立即返回 202"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"status": "error", "message": "无效JSON"}), 400
+
+        signal = data.get("signal")
+        logging.info(f"[Webhook] 收到信号: {signal}，已提交后台处理")
+
+        executor.submit(handle_signal_in_background, data)
+
+        return jsonify({
+            "status": "accepted",
+            "signal": signal,
+            "message": "信号已接收，正在后台处理"
+        }), 202
+
+    except Exception as e:
+        logging.error(f"[Webhook异常] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
 def status():
-    return jsonify({"status": "running", "tp_monitor_active": tp_monitor.running})
+    """健康检查接口（增强版）"""
+    return jsonify({
+        "status": "running",
+        "service": "ETH Webhook Trading System",
+        "version": "final-gunicorn-enhanced",
+        "tp_monitor_active": tp_monitor.running
+    })
 
 
 # ==================== gunicorn 关键钩子 ====================
 def post_fork(server, worker):
+    """每个 gunicorn worker 启动后执行"""
     logging.info(f"[gunicorn] Worker {worker.pid} 已启动，准备启动 TPMonitor...")
     start_tp_monitor()
 
