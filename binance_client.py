@@ -1,4 +1,4 @@
-# binance_client.py（最终优化版 - 钉钉排版已优化）
+# binance_client.py（最终版 - 仓位改为80% + TP 1.35/2.4/3.3）
 import os
 import time
 import hmac
@@ -27,8 +27,8 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logging.info("[BinanceClient] 初始化成功")
 
-    # ==================== 仓位计算（20% 本金 × 5倍） ====================
-    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.20):
+    # ==================== 仓位计算（已改为 80% 本金 × 5倍） ====================
+    def calculate_position_size(self, symbol="ETHUSDT", leverage=5.0, equity_ratio=0.80):
         try:
             account = self.client.futures_account()
             total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
@@ -132,28 +132,40 @@ class BinanceClient:
             logging.error(f"[获取权益失败] {e}")
             return 0.0
 
-    # ==================== 开仓报告（优化排版） ====================
+    def _get_available_balance(self):
+        try:
+            account = self.client.futures_account()
+            return float(account.get('availableBalance', 0))
+        except:
+            return 0.0
+
+    def _get_atr(self, symbol, interval="240", limit=14):
+        try:
+            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+            tr_list = []
+            for i in range(1, len(klines)):
+                high = float(klines[i][2])
+                low = float(klines[i][3])
+                prev_close = float(klines[i-1][4])
+                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                tr_list.append(tr)
+            return sum(tr_list) / len(tr_list) if tr_list else None
+        except Exception as e:
+            logging.error(f"[获取 ATR 失败] {e}")
+            return None
+
+    # ==================== 开仓报告（TP 已更新为 1.35/2.4/3.3） ====================
     def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
         try:
             atr = self._get_atr(symbol) or (entry_price * 0.008)
 
-            tp1_mult = 1.05
-            tp2_mult = 1.85
-            tp3_mult = 2.55
-
-            if is_long:
-                tp1 = round(entry_price + atr * tp1_mult, 2)
-                tp2 = round(entry_price + atr * tp2_mult, 2)
-                tp3 = round(entry_price + atr * tp3_mult, 2)
-            else:
-                tp1 = round(entry_price - atr * tp1_mult, 2)
-                tp2 = round(entry_price - atr * tp2_mult, 2)
-                tp3 = round(entry_price - atr * tp3_mult, 2)
+            tp1 = round(entry_price + atr * 1.35 if is_long else entry_price - atr * 1.35, 2)
+            tp2 = round(entry_price + atr * 2.4  if is_long else entry_price - atr * 2.4,  2)
+            tp3 = round(entry_price + atr * 3.3  if is_long else entry_price - atr * 3.3,  2)
 
             direction = "开多" if is_long else "开空"
             emoji = "🟢" if is_long else "🔴"
 
-            # ==================== 优化后的钉钉排版 ====================
             msg = (
                 f"{emoji} **{direction} 成功** | {symbol}\n\n"
                 f"数量: {qty} 张\n"
@@ -174,30 +186,6 @@ class BinanceClient:
             logging.error(f"[发送开仓报告失败] {e}")
             return None
 
-    def _get_available_balance(self):
-        try:
-            account = self.client.futures_account()
-            return float(account.get('availableBalance', 0))
-        except:
-            return 0.0
-
-    # ==================== 获取 ATR ====================
-    def _get_atr(self, symbol, interval="1h", limit=14):
-        try:
-            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-            tr_list = []
-            for i in range(1, len(klines)):
-                high = float(klines[i][2])
-                low = float(klines[i][3])
-                prev_close = float(klines[i-1][4])
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                tr_list.append(tr)
-            return sum(tr_list) / len(tr_list) if tr_list else None
-        except Exception as e:
-            logging.error(f"[获取 ATR 失败] {e}")
-            return None
-
-    # ==================== 钉钉通知（带加签） ====================
     def _send_dingtalk(self, text):
         try:
             webhook = os.getenv("DINGTALK_WEBHOOK")
