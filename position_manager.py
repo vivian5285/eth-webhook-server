@@ -1,4 +1,4 @@
-# position_manager.py（推荐替换版 - reconcile 已优化）
+# position_manager.py（最终推荐版 - 智能 reconcile + 支持 stop_loss）
 import logging
 from datetime import datetime
 from binance_client import get_binance_client
@@ -11,6 +11,7 @@ binance_client = get_binance_client()
 class PositionManager:
     def __init__(self):
         self.position = None
+        logging.info("[PositionManager] 初始化完成（最终版）")
 
     def update_position(self, side, symbol, qty, avg_price, 
                         tp1=None, tp2=None, tp3=None, stop_loss=None):
@@ -25,14 +26,21 @@ class PositionManager:
             "stop_loss": stop_loss,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        logging.info(f"[持仓更新] {side} {symbol} | Qty: {qty} | SL: {stop_loss}")
 
     def get_position(self):
         return self.position
 
     def clear_position(self):
         self.position = None
+        logging.info("[持仓清空] 已清除内存持仓")
 
     def reconcile(self, real_position):
+        """
+        智能 reconcile：
+        - 减仓：只更新数量，保留 TP 和 stop_loss（保护保本损）
+        - 加仓或恢复：激进重算 TP，清空 stop_loss
+        """
         if not real_position:
             if self.position:
                 self.clear_position()
@@ -44,6 +52,7 @@ class PositionManager:
         symbol = real_position.get('symbol', 'ETHUSDT')
 
         if not self.position:
+            # VPS 重启恢复
             self._aggressive_recalculate(real_side, symbol, real_qty, real_entry)
             return
 
@@ -57,9 +66,8 @@ class PositionManager:
             self.position["qty"] = round(real_qty, 3)
             return
 
-        # 关键区分：减仓 vs 加仓/恢复
         if real_qty < memory_qty and real_side == memory_side:
-            # 减仓：只更新数量，保留 TP 和 stop_loss
+            # 减仓：保留 stop_loss
             self.position["qty"] = round(real_qty, 3)
             logging.info("[Reconcile] 检测到减仓，仅更新数量，保留原有 TP 和 stop_loss")
         else:
@@ -82,7 +90,7 @@ class PositionManager:
             side=side, symbol=symbol, qty=qty, avg_price=entry_price,
             tp1=tp1, tp2=tp2, tp3=tp3, stop_loss=None
         )
-        logging.warning("[Reconcile] 检测到加仓或恢复，已激进重算 TP")
+        logging.warning("[Reconcile] 激进重算 TP 完成")
 
 
 position_manager = PositionManager()
