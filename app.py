@@ -1,4 +1,4 @@
-# app.py（最终版 - TV及时响应优化）
+# app.py（完整最终版 - 适配 gunicorn + 懒加载单例）
 from flask import Flask, request, jsonify
 import logging
 import threading
@@ -15,14 +15,23 @@ from config import Config
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# 后台任务线程池（用于处理信号）
 executor = ThreadPoolExecutor(max_workers=4)
-
 binance_client = get_binance_client()
 
 
+def start_tp_monitor():
+    """启动 TP 监控线程（适配 gunicorn）"""
+    try:
+        if not tp_monitor.running:
+            monitor_thread = threading.Thread(target=tp_monitor.start, daemon=True)
+            monitor_thread.start()
+            logging.info("[启动] TP监控模块已在后台线程启动")
+    except Exception as e:
+        logging.error(f"[TP监控启动异常] {e}", exc_info=True)
+
+
 def handle_signal_in_background(data):
-    """后台异步处理信号（不阻塞 TradingView webhook）"""
+    """后台异步处理 TradingView 信号"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", Config.SYMBOL)
@@ -37,8 +46,6 @@ def handle_signal_in_background(data):
             if current_pos:
                 logging.info(f"[先平后开] 检测到已有 {current_pos['side']} 仓位，先全平")
                 binance_client.close_all_positions(symbol)
-            else:
-                logging.info("[先平后开] 当前无持仓，直接开新仓")
 
             # 计算仓位并下单
             qty = binance_client.calculate_position_size(symbol=symbol)
@@ -79,7 +86,7 @@ def handle_signal_in_background(data):
 def webhook():
     """
     TradingView Webhook 入口
-    设计目标：立即返回 202，不阻塞 TradingView 警报
+    立即返回 202 Accepted，不阻塞 TradingView
     """
     try:
         data = request.get_json()
@@ -89,7 +96,7 @@ def webhook():
         signal = data.get("signal")
         logging.info(f"[Webhook] 收到信号: {signal}，已提交后台处理")
 
-        # 立即提交到后台线程，不阻塞响应
+        # 提交到后台线程处理
         executor.submit(handle_signal_in_background, data)
 
         return jsonify({
@@ -109,18 +116,16 @@ def status():
     return jsonify({
         "status": "running",
         "service": "ETH Webhook Trading System",
-        "version": "final"
+        "version": "final-gunicorn"
     })
 
 
-if __name__ == "__main__":
-    # ==================== 启动 TP 监控（后台线程） ====================
-    try:
-        monitor_thread = threading.Thread(target=tp_monitor.start, daemon=True)
-        monitor_thread.start()
-        logging.info("[启动] TP监控模块已在后台线程启动")
-    except Exception as e:
-        logging.error(f"[TP监控启动异常] {e}", exc_info=True)
+# ==================== gunicorn 钩子（关键） ====================
+def post_fork(server, worker):
+    """每个 gunicorn worker 启动后自动启动 TP 监控"""
+    start_tp_monitor()
 
-    # 启动 Flask（开发环境使用，生产环境请用 gunicorn）
+
+if __name__ == "__main__":
+    start_tp_monitor()
     app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
