@@ -1,15 +1,12 @@
-# app.py（完整更新版 - 配合 40-40-20 + 自动保本）
+# app.py（完整最终版）
 from flask import Flask, request, jsonify
 import logging
-import threading
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 from binance_client import BinanceClient
 from position_supervisor import supervisor
-from position_manager import position_manager
 from tp_monitor import tp_monitor
 
 load_dotenv()
@@ -21,7 +18,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-# 线程池（提升响应速度）
+# 线程池（快速响应优化）
 executor = ThreadPoolExecutor(max_workers=4)
 
 binance_client = BinanceClient(
@@ -33,7 +30,7 @@ binance_client = BinanceClient(
 
 
 def handle_signal_in_background(data):
-    """后台处理信号"""
+    """后台处理信号（支持先平后开）"""
     try:
         signal = data.get("signal")
         symbol = data.get("symbol", "ETHUSDT")
@@ -74,7 +71,7 @@ def handle_signal_in_background(data):
                 ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
                 entry_price = float(ticker['price'])
 
-            # 通知监督层（内部会调用 binance_client.send_position_open_report 更新 position_manager）
+            # 通知监督层（内部会更新 position_manager 并发送钉钉）
             supervisor.notify_open_success(
                 signal=signal,
                 symbol=symbol,
@@ -103,7 +100,7 @@ def webhook():
         signal = data.get("signal")
         logging.info(f"[Webhook] 收到信号: {signal}")
 
-        # 立即返回 200，后台处理
+        # 立即返回 200，后台异步处理（快速响应优化）
         executor.submit(handle_signal_in_background, data)
 
         return jsonify({
@@ -123,7 +120,7 @@ def status():
 
 # ==================== 启动 TP 监控 ====================
 tp_monitor.start()
-logging.info("[启动] TP监控模块已启动（支持 40-40-20 + TP1后自动保本）")
+logging.info("[启动] TP监控模块已启动（40-40-20 + TP1后自动保本）")
 
 
 if __name__ == "__main__":
