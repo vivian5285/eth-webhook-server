@@ -1,4 +1,4 @@
-# position_manager.py（完整最终版 - 支持 stop_loss）
+# position_manager.py（完整最终版 - 支持 stop_loss 保本止损）
 import json
 import os
 import logging
