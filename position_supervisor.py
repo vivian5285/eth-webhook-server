@@ -1,4 +1,4 @@
-# position_supervisor.py（最终优化版 - 钉钉排版已统一优化）
+# position_supervisor.py（最终完整版 - 包含人工干预通知）
 import logging
 import threading
 import os
@@ -25,7 +25,7 @@ class PositionSupervisor:
         self.max_failures = 3
         self.is_paused = False
         self.lock = threading.Lock()
-        logging.info("[监督层] PositionSupervisor 初始化完成")
+        logging.info("[监督层] PositionSupervisor 初始化完成（支持人工干预通知）")
 
     def notify_open_success(self, signal: str, symbol: str, qty: float, entry_price: float):
         with self.lock:
@@ -35,9 +35,9 @@ class PositionSupervisor:
 
                 atr = binance_client._get_atr(symbol) or (entry_price * 0.008)
 
-                tp1 = round(entry_price + atr * 1.05 if is_long else entry_price - atr * 1.05, 2)
-                tp2 = round(entry_price + atr * 1.85 if is_long else entry_price - atr * 1.85, 2)
-                tp3 = round(entry_price + atr * 2.55 if is_long else entry_price - atr * 2.55, 2)
+                tp1 = round(entry_price + atr * 1.35 if is_long else entry_price - atr * 1.35, 2)
+                tp2 = round(entry_price + atr * 2.4  if is_long else entry_price - atr * 2.4,  2)
+                tp3 = round(entry_price + atr * 3.3  if is_long else entry_price - atr * 3.3,  2)
 
                 position_manager.update_position(
                     side="LONG" if is_long else "SHORT",
@@ -73,7 +73,6 @@ class PositionSupervisor:
                 else:
                     position_manager.clear_position()
 
-                # ==================== 优化后的 TP 触发钉钉排版 ====================
                 if level == "1":
                     emoji = "🟡"
                     title = "TP1 第一止盈"
@@ -82,7 +81,7 @@ class PositionSupervisor:
                     title = "TP2 第二止盈"
                 else:
                     emoji = "🟢"
-                    title = "TP3 最终止盈"
+                    title = "TP3 最终止盈（含追踪）"
 
                 msg = (
                     f"{emoji} **{title} 触发**\n\n"
@@ -92,7 +91,6 @@ class PositionSupervisor:
                 )
 
                 binance_client._send_dingtalk(msg)
-
                 self.consecutive_failure_count = 0
 
             except Exception as e:
@@ -104,7 +102,6 @@ class PositionSupervisor:
                 logging.info(f"[监督层] 全平完成，原因: {reason}")
                 position_manager.clear_position()
 
-                # ==================== 优化后的全平钉钉排版 ====================
                 msg = (
                     f"⚠️ **全平完成**\n\n"
                     f"触发原因: {reason}\n\n"
@@ -115,6 +112,41 @@ class PositionSupervisor:
 
             except Exception as e:
                 logging.error(f"[监督层] notify_close_all 异常: {e}", exc_info=True)
+
+    # ==================== 新增：人工干预通知（监督层统一处理） ====================
+    def notify_manual_intervention(self, change_type: str, symbol: str, side: str, 
+                                   current_qty: float, new_tp1: float, new_tp2: float, new_tp3: float):
+        with self.lock:
+            try:
+                logging.info(f"[监督层] 收到人工{change_type}通知，开始核实实盘")
+
+                # 监督层核实实盘持仓
+                real_pos = binance_client.get_current_position(symbol)
+                if real_pos:
+                    position_manager.reconcile(real_pos)
+                else:
+                    position_manager.clear_position()
+
+                direction = "多" if side == "LONG" else "空"
+
+                msg = (
+                    f"⚠️ **检测到人工{change_type}**\n\n"
+                    f"品种: {symbol}\n"
+                    f"方向: {direction}\n"
+                    f"当前仓位: {current_qty} 张\n\n"
+                    f"新的止盈目标:\n"
+                    f"• TP1: {new_tp1} USDT\n"
+                    f"• TP2: {new_tp2} USDT\n"
+                    f"• TP3: {new_tp3} USDT\n\n"
+                    f"系统已自动更新 TP 并启动追踪止盈逻辑。"
+                )
+
+                binance_client._send_dingtalk(msg)
+                self.consecutive_failure_count = 0
+                logging.info(f"[监督层] 人工{change_type}通知已核实并推送钉钉")
+
+            except Exception as e:
+                logging.error(f"[监督层] notify_manual_intervention 异常: {e}", exc_info=True)
 
 
 # 全局单例
