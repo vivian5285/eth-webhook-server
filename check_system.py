@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# check_system.py（优化版 - 适配 gunicorn 多 worker 环境）
+# check_system.py（最终配套版 - 与加强版 app.py 完美配合）
 
 import subprocess
 import time
 import requests
-import sys
 
-print("=" * 70)
-print("ETH 量化交易系统 - 自检脚本（优化版 · 适配 gunicorn）")
+print("=" * 72)
+print("ETH 量化交易系统 - 自检脚本（最终版 · 适配 gunicorn）")
 print(f"检查时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
-print("=" * 70)
+print("=" * 72)
 print()
 
 errors = 0
@@ -28,16 +27,18 @@ else:
 print()
 
 # 2. 检查 Flask /status 接口（核心健康检查）
-print("[2] 检查 Flask /status 接口...")
+print("[2] 检查 Flask /status 接口 + TPMonitor 状态...")
 try:
     resp = requests.get("http://127.0.0.1:5000/status", timeout=5)
     if resp.status_code == 200:
         data = resp.json()
         print("✅ /status 接口正常")
+        
         if data.get("tp_monitor_active"):
-            print("✅ TPMonitor 在 worker 中已启动")
+            print("✅ TPMonitor 已在 gunicorn worker 中启动")
         else:
-            print("⚠️ TPMonitor 状态未知（gunicorn 多 worker 环境下正常现象）")
+            print("⚠️ TPMonitor 暂未在当前检查进程中检测到（gunicorn 多 worker 正常现象）")
+            print("   → 建议查看日志确认 [启动] TP监控线程已成功启动")
             warnings += 1
     else:
         print(f"❌ /status 接口异常: {resp.status_code}")
@@ -73,7 +74,7 @@ except Exception as e:
     errors += 1
 print()
 
-# 5. 检查 PositionSupervisor
+# 5. 检查 PositionSupervisor（智慧层）
 print("[5] 检查 PositionSupervisor（智慧层）...")
 try:
     from position_supervisor import supervisor
@@ -83,14 +84,14 @@ except Exception as e:
     errors += 1
 print()
 
-# 总结
-print("=" * 70)
+# ==================== 总结 ====================
+print("=" * 72)
 if errors == 0:
     if warnings == 0:
         print("🎉 系统整体状态优秀，可以进行实盘测试！")
     else:
-        print("✅ 系统核心功能正常（存在少量 gunicorn 环境下的预期警告）")
-        print("   → TPMonitor 在 gunicorn worker 中实际已启动，属于正常现象")
+        print("✅ 系统核心功能正常（存在 gunicorn 环境下的预期提示）")
+        print("   建议：重启后观察日志中是否出现「TP监控线程已成功启动」")
 else:
-    print(f"⚠️ 发现 {errors} 个错误，请根据上方提示排查")
-print("=" * 70)
+    print(f"⚠️ 发现 {errors} 个错误，请根据上方提示进行排查")
+print("=" * 72)
