@@ -1,181 +1,111 @@
-# tp_monitor.py（最终配套版 - 已简化初始化逻辑）
+# tp_monitor.py（优化版 - 配合 1.0/2.0/3.0 ATR 倍数）
 import time
 import logging
-import threading
-from binance import ThreadedWebsocketManager
 from binance_client import binance_client
 from position_manager import position_manager
-from position_supervisor import supervisor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-
 class TPMonitor:
     def __init__(self):
-        # 直接赋值（依赖 app.py 提前初始化 binance_client）
-        self.binance_client = binance_client
-        self.position_manager = position_manager
-        self.supervisor = supervisor
         self.running = False
-        self.twm = None
-        self.current_price = None
-        self.symbol = "ETHUSDT"
-        self._started = False
+        self.breakeven_triggered = False
 
     def start(self):
-        if self._started:
+        if self.running:
+            logging.warning("[TPMonitor] 已经在运行中")
             return
-
-        if self.binance_client is None:
-            logging.error("[TP监控] binance_client 未初始化，跳过启动")
-            return
-
-        try:
-            self.running = True
-            self.twm = ThreadedWebsocketManager(
-                api_key=self.binance_client.api_key,
-                api_secret=self.binance_client.api_secret
-            )
-            self.twm.start()
-
-            self.twm.start_symbol_ticker_socket(
-                callback=self._handle_price_update, 
-                symbol=self.symbol
-            )
-            self.twm.start_user_socket(callback=self._handle_account_update)
-
-            threading.Thread(target=self._monitor_loop, daemon=True).start()
-
-            self._started = True
-            logging.info("[TP监控] WebSocket 实时模式启动成功")
-
-        except Exception as e:
-            logging.error(f"[TP监控启动失败] {e}", exc_info=True)
-            self.running = False
+        self.running = True
+        logging.info("[TPMonitor] TP监控已启动（每3秒检查一次）")
+        while self.running:
+            try:
+                self._check_tp()
+                time.sleep(3)
+            except Exception as e:
+                logging.error(f"[TPMonitor] 循环异常: {e}")
+                time.sleep(5)
 
     def stop(self):
         self.running = False
-        if self.twm:
-            try:
-                self.twm.stop()
-            except:
-                pass
-        logging.info("[TP监控] 已停止")
+        logging.info("[TPMonitor] TP监控已停止")
 
-    def _handle_price_update(self, msg):
+    def _check_tp(self):
+        position = position_manager.get_position()
+        if not position:
+            self.breakeven_triggered = False
+            return
+
+        symbol = position.get("symbol", "ETHUSDT")
+        side = position.get("side")
+        entry_price = float(position.get("avg_price", 0))
+        tp1 = position.get("tp1")
+        tp2 = position.get("tp2")
+        tp3 = position.get("tp3")
+
+        if not tp1 or not tp2 or not tp3:
+            return
+
+        current_price = self._get_current_price(symbol)
+        if not current_price:
+            return
+
+        is_long = side == "LONG"
+
+        # ==================== TP1 触发（40%） ====================
+        if not self.breakeven_triggered:
+            if (is_long and current_price >= tp1) or (not is_long and current_price <= tp1):
+                logging.info(f"[TP1触发] 价格到达 {tp1}，平仓 40%")
+                binance_client.close_partial_position(symbol, position.get("qty", 0) * 0.4)
+                
+                # 移动到保本（带缓冲）
+                buffer = (tp1 - entry_price) * 0.45   # 使用 0.45 倍 TP1 距离作为缓冲
+                new_sl = entry_price + buffer if is_long else entry_price - buffer
+                
+                position_manager.update_position(
+                    side=side,
+                    symbol=symbol,
+                    qty=position.get("qty", 0) * 0.6,   # 剩余60%
+                    avg_price=entry_price,
+                    tp1=None,   # TP1 已触发
+                    tp2=tp2,
+                    tp3=tp3,
+                    stop_loss=round(new_sl, 2)
+                )
+                self.breakeven_triggered = True
+                logging.info(f"[保本已设置] 新止损价: {round(new_sl, 2)}")
+
+        # ==================== TP2 触发（40%） ====================
+        if self.breakeven_triggered and tp2:
+            if (is_long and current_price >= tp2) or (not is_long and current_price <= tp2):
+                logging.info(f"[TP2触发] 价格到达 {tp2}，平仓 40%")
+                binance_client.close_partial_position(symbol, position.get("qty", 0) * 0.4)
+                
+                position_manager.update_position(
+                    side=side,
+                    symbol=symbol,
+                    qty=position.get("qty", 0) * 0.2,   # 剩余20%
+                    avg_price=entry_price,
+                    tp1=None,
+                    tp2=None,
+                    tp3=tp3,
+                    stop_loss=position.get("stop_loss")
+                )
+
+        # ==================== TP3 触发（剩余20%） ====================
+        if tp3:
+            if (is_long and current_price >= tp3) or (not is_long and current_price <= tp3):
+                logging.info(f"[TP3触发] 价格到达 {tp3}，平仓剩余 20%")
+                binance_client.close_all_positions(symbol)
+                position_manager.clear_position()
+                self.breakeven_triggered = False
+
+    def _get_current_price(self, symbol):
         try:
-            if msg.get('c'):
-                self.current_price = float(msg['c'])
+            ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
+            return float(ticker['price'])
         except Exception as e:
-            logging.error(f"[价格更新异常] {e}")
-
-    def _handle_account_update(self, msg):
-        try:
-            if msg.get('e') == 'ACCOUNT_UPDATE':
-                real_pos = self.binance_client.get_current_position(self.symbol)
-                self.position_manager.reconcile(real_pos)
-        except Exception as e:
-            logging.error(f"[账户更新异常] {e}")
-
-    def _monitor_loop(self):
-        while self.running:
-            try:
-                position = self.position_manager.get_position()
-                if not position or position.get("qty", 0) <= 0 or self.current_price is None:
-                    time.sleep(2)
-                    continue
-
-                side = position.get("side")
-                entry_price = position.get("avg_price")
-                remaining_qty = position.get("qty", 0)
-                current_price = self.current_price
-
-                # ==================== TP1：平 40% + 自动设置保本止损 ====================
-                if position.get("tp1") and not position.get("tp1_hit"):
-                    hit_tp1 = (side == "LONG" and current_price >= position["tp1"]) or \
-                              (side == "SHORT" and current_price <= position["tp1"])
-
-                    if hit_tp1:
-                        close_qty = round(remaining_qty * 0.40, 3)
-                        result = self.binance_client.close_partial_position(self.symbol, close_qty)
-
-                        if result.get("status") == "success":
-                            position["tp1_hit"] = True
-                            remaining_qty = remaining_qty - close_qty
-
-                            buffer = 10
-                            if side == "LONG":
-                                breakeven_sl = entry_price + buffer
-                            else:
-                                breakeven_sl = entry_price - buffer
-
-                            position["stop_loss"] = breakeven_sl
-                            position["qty"] = remaining_qty
-
-                            self.position_manager.update_position(
-                                side=side, symbol=self.symbol, qty=remaining_qty,
-                                avg_price=entry_price,
-                                tp1=position.get("tp1"),
-                                tp2=position.get("tp2"),
-                                tp3=position.get("tp3"),
-                                stop_loss=breakeven_sl
-                            )
-
-                            self.supervisor.notify_tp_hit("1", close_qty, current_price)
-                            logging.info(f"[TP1] 平40%成功，保本止损已设为 {breakeven_sl}")
-
-                # ==================== TP2：平 40% ====================
-                if position.get("tp2") and position.get("tp1_hit") and not position.get("tp2_hit"):
-                    hit_tp2 = (side == "LONG" and current_price >= position["tp2"]) or \
-                              (side == "SHORT" and current_price <= position["tp2"])
-
-                    if hit_tp2:
-                        close_qty = round(remaining_qty * 0.40, 3)
-                        result = self.binance_client.close_partial_position(self.symbol, close_qty)
-                        if result.get("status") == "success":
-                            position["tp2_hit"] = True
-                            remaining_qty = remaining_qty - close_qty
-                            position["qty"] = remaining_qty
-
-                            self.position_manager.update_position(
-                                side=side, symbol=self.symbol, qty=remaining_qty,
-                                avg_price=entry_price,
-                                tp1=position.get("tp1"),
-                                tp2=position.get("tp2"),
-                                tp3=position.get("tp3"),
-                                stop_loss=position.get("stop_loss")
-                            )
-                            self.supervisor.notify_tp_hit("2", close_qty, current_price)
-                            logging.info("[TP2] 平40%成功")
-
-                # ==================== TP3：平剩余 20% ====================
-                if position.get("tp3") and position.get("tp2_hit"):
-                    hit_tp3 = (side == "LONG" and current_price >= position["tp3"]) or \
-                              (side == "SHORT" and current_price <= position["tp3"])
-
-                    if hit_tp3:
-                        result = self.binance_client.close_partial_position(self.symbol, remaining_qty)
-                        if result.get("status") == "success":
-                            self.position_manager.clear_position()
-                            self.supervisor.notify_tp_hit("3", remaining_qty, current_price)
-                            logging.info("[TP3] 剩余20%已平")
-
-                # ==================== 保本止损检查 ====================
-                if position.get("stop_loss"):
-                    sl_price = position["stop_loss"]
-                    hit_sl = (side == "LONG" and current_price <= sl_price) or \
-                             (side == "SHORT" and current_price >= sl_price)
-
-                    if hit_sl:
-                        self.binance_client.close_partial_position(self.symbol, remaining_qty)
-                        self.position_manager.clear_position()
-                        self.supervisor.notify_close_all("breakeven_after_tp1")
-                        logging.info(f"[保本止损] 触及 {sl_price}，已平剩余仓位")
-
-            except Exception as e:
-                logging.error(f"[TP监控循环异常] {e}", exc_info=True)
-
-            time.sleep(1)
+            logging.error(f"[获取当前价失败] {e}")
+            return None
 
 
 # 全局实例
