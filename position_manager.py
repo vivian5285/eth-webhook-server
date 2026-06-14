@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_manager.py（增强版 - 支持 SL/TP3 order_id 跟踪）
+# position_manager.py（最终完整版 - 支持 SL/TP3 order_id 跟踪）
 
 import logging
 import threading
@@ -15,13 +15,13 @@ class PositionManager:
         self._tp3_order_id: Optional[str] = None
         self._sl_order_id: Optional[str] = None
 
-    # ==================== 持仓管理 ====================
+    # ==================== 持仓核心管理 ====================
     def set_position(self, position_data: dict):
         with self._lock:
             self._position = position_data.copy()
             if "original_qty" not in self._position and "qty" in self._position:
                 self._position["original_qty"] = self._position.get("qty", 0)
-            logger.info(f"[PositionManager] 持仓已更新")
+            logger.info("[PositionManager] 持仓状态已更新")
 
     def get_position(self) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -33,6 +33,9 @@ class PositionManager:
             self._tp3_order_id = None
             self._sl_order_id = None
             logger.info("[PositionManager] 持仓及订单ID已清空")
+
+    def has_position(self) -> bool:
+        return self.get_current_qty() > 0
 
     def get_current_qty(self) -> float:
         pos = self.get_position()
@@ -47,7 +50,7 @@ class PositionManager:
     # ==================== TP3 限价单管理 ====================
     def set_tp3_order_id(self, order_id: str):
         with self._lock:
-            self._tp3_order_id = order_id
+            self._tp3_order_id = str(order_id)
             logger.info(f"[PositionManager] TP3 order_id 已记录: {order_id}")
 
     def get_tp3_order_id(self) -> Optional[str]:
@@ -57,11 +60,12 @@ class PositionManager:
     def clear_tp3_order(self):
         with self._lock:
             self._tp3_order_id = None
+            logger.info("[PositionManager] TP3 order_id 已清除")
 
     # ==================== 止损单管理 ====================
     def set_sl_order_id(self, order_id: str):
         with self._lock:
-            self._sl_order_id = order_id
+            self._sl_order_id = str(order_id)
             logger.info(f"[PositionManager] SL order_id 已记录: {order_id}")
 
     def get_sl_order_id(self) -> Optional[str]:
@@ -71,6 +75,8 @@ class PositionManager:
     def clear_sl_order(self):
         with self._lock:
             self._sl_order_id = None
+            logger.info("[PositionManager] SL order_id 已清除")
 
-    def has_position(self) -> bool:
-        return self.get_current_qty() > 0
+
+# ==================== 全局单例（必须保留） ====================
+position_manager = PositionManager()
