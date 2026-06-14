@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终完整版）
+# position_supervisor.py（最终完整版 - 已修复开仓逻辑）
 
 import logging
 import time
@@ -106,8 +106,33 @@ class PositionSupervisor:
             order_executor.close_position(reason or "保护性全平")
 
     def _handle_entry_signal(self, side, atr):
-        # 由 order_executor 处理
-        pass
+        """处理入场信号（核心修复点）"""
+        try:
+            # 调用执行层开仓
+            result = order_executor.open_position(side, {"atr": atr})
+
+            if result and result.get("success"):
+                # 开仓成功后发送详细报告
+                pos = position_manager.get_position()
+                if pos:
+                    self.report_open_success(
+                        side=side,
+                        usdt_amount=pos.get("usdt_amount", 0),
+                        entry_price=pos.get("entry_price", 0),
+                        sl=pos.get("sl_price", 0),
+                        tp1=pos.get("tp1_price", 0),
+                        tp2=pos.get("tp2_price", 0),
+                        tp3=pos.get("tp3_price", 0)
+                    )
+            else:
+                self.send_detailed_report("开仓失败", {
+                    "方向": side,
+                    "原因": result.get("message", "未知错误") if result else "执行层返回失败"
+                }, "❌", "ERROR")
+
+        except Exception as e:
+            logger.error(f"[Supervisor] 开仓处理异常: {e}")
+            self.send_detailed_report("开仓异常", {"错误": str(e)}, "❌", "ERROR")
 
     # ==================== 方向对齐检查 ====================
     def check_and_align_with_latest_signal(self):
@@ -131,9 +156,9 @@ class PositionSupervisor:
         order_executor.open_position(latest_action, {"atr": self.last_signal.get("atr")})
 
     def force_reconcile(self, source: str = "manual"):
-        # 增强版对账逻辑（可按需扩展）
+        # 增强版对账逻辑（可按需扩展详细报告）
         pass
 
 
-# ==================== 必须有这一行（单例） ====================
+# ==================== 单例导出（必须保留） ====================
 position_supervisor = PositionSupervisor()
