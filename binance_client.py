@@ -15,11 +15,11 @@ class BinanceClient:
             api_key=Config.BINANCE_API_KEY,
             api_secret=Config.BINANCE_API_SECRET
         )
-        # 切换到期货U本位
+        # 强制使用 U 本位合约接口
         self.client.FUTURES_URL = 'https://fapi.binance.com/fapi'
 
     def get_current_price(self, symbol: str):
-        """获取当前最新价格"""
+        """获取最新价格"""
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             return float(ticker['price'])
@@ -37,6 +37,18 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"[BinanceClient] 获取持仓失败: {e}")
             return None
+
+    def get_account_balance(self):
+        """获取 USDT 余额"""
+        try:
+            balance = self.client.futures_account_balance()
+            for asset in balance:
+                if asset['asset'] == 'USDT':
+                    return float(asset.get('balance', 0))
+            return 0.0
+        except Exception as e:
+            logger.error(f"[BinanceClient] 获取余额失败: {e}")
+            return 0.0
 
     def place_market_order(self, symbol: str, side: str, quantity: float, reduce_only: bool = False):
         """市价单下单"""
@@ -90,18 +102,6 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"[BinanceClient] 撤单异常: {e}")
             return None
-
-    def get_account_balance(self):
-        """获取账户余额（USDT）"""
-        try:
-            balance = self.client.futures_account_balance()
-            for asset in balance:
-                if asset['asset'] == 'USDT':
-                    return float(asset['balance'])
-            return 0.0
-        except Exception as e:
-            logger.error(f"[BinanceClient] 获取余额失败: {e}")
-            return 0.0
 
 
 # 单例
