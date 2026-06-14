@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py（VPS完全接管40/40/20最终内测版 - 2026-06-14）
+# app.py（最终优化版 - 适配 Gunicorn post_fork）
 
 import logging
 from datetime import datetime
@@ -10,15 +10,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ==================== 在模块加载时启动 ProfitTaker（适配 Gunicorn） ====================
-try:
-    from profit_taker import profit_taker
-    if not profit_taker.running:
-        profit_taker.start()
-        logger.info("[App] ProfitTaker 后台线程已启动（模块加载时）")
-except Exception as e:
-    logger.error(f"[App] ProfitTaker 启动失败: {e}")
-
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -26,14 +17,12 @@ def webhook():
         data = request.get_json(force=True, silent=True) or {}
         logger.info(f"[Webhook] 收到信号: {data}")
 
-        # Webhook Secret 校验（安全）
         from config import Config
         secret = data.get("secret", "")
         if Config.WEBHOOK_SECRET and secret != Config.WEBHOOK_SECRET:
             logger.warning("[Webhook] Secret 校验失败")
             return jsonify({"status": "error", "message": "invalid secret"}), 403
 
-        # 调用 Supervisor 处理（VPS完全接管模式）
         from position_supervisor import position_supervisor
         position_supervisor.handle_signal(data)
 
@@ -76,17 +65,8 @@ def status():
 
 
 if __name__ == '__main__':
-    # 本地直接运行 python app.py 时也会启动（双重保险）
-    try:
-        from profit_taker import profit_taker
-        if not profit_taker.running:
-            profit_taker.start()
-            logger.info("[App] ProfitTaker 已启动（本地运行模式）")
-
-        from position_supervisor import position_supervisor
-        position_supervisor.force_reconcile(source="startup")
-        logger.info("[App] 启动时强制对账完成")
-    except Exception as e:
-        logger.error(f"[App] 启动初始化失败: {e}")
-
+    # 本地调试时使用
+    from profit_taker import profit_taker
+    if not profit_taker.running:
+        profit_taker.start()
     app.run(host='0.0.0.0', port=5000)
