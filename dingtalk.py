@@ -1,41 +1,47 @@
-# dingtalk.py（最终加签美化版）
+#!/usr/bin/env python3
+# dingtalk.py（最终兼容版）
+
+import os
 import time
 import hmac
 import hashlib
 import base64
 import requests
-import logging
+from urllib.parse import quote_plus
+
 from config import Config
 
-def send_dingtalk(title: str, content: str, is_warning: bool = False):
+
+def send_dingtalk_message(content: str, title: str = "交易提醒"):
+    """发送钉钉通知"""
     webhook = Config.DINGTALK_WEBHOOK
     secret = Config.DINGTALK_SECRET
 
     if not webhook:
-        logging.warning("[DingTalk] 未配置 webhook，跳过发送")
+        print(f"[DingTalk] 未配置 webhook，跳过通知: {content}")
         return
 
     try:
         timestamp = str(round(time.time() * 1000))
-        string_to_sign = f"{timestamp}\n{secret}"
-        hmac_code = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
-        sign = base64.b64encode(hmac_code).decode("utf-8")
+        string_to_sign = f'{timestamp}\n{secret}'
+        string_to_sign_enc = string_to_sign.encode('utf-8')
+        secret_enc = secret.encode('utf-8')
+        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+        sign = quote_plus(base64.b64encode(hmac_code))
 
         url = f"{webhook}&timestamp={timestamp}&sign={sign}"
 
-        emoji = "🚨" if is_warning else "✅"
-        markdown_text = f"### {emoji} {title}\n\n{content}"
-
         data = {
-            "msgtype": "markdown",
-            "markdown": {"title": title, "text": markdown_text}
+            "msgtype": "text",
+            "text": {
+                "content": f"{title}\n{content}"
+            }
         }
 
-        resp = requests.post(url, json=data, timeout=8)
-        if resp.status_code == 200 and resp.json().get("errcode") == 0:
-            logging.info(f"[DingTalk] 发送成功: {title}")
+        resp = requests.post(url, json=data, timeout=5)
+        if resp.status_code == 200:
+            print("[DingTalk] 通知发送成功")
         else:
-            logging.error(f"[DingTalk] 发送失败: {resp.text}")
-
+            print(f"[DingTalk] 发送失败: {resp.text}")
     except Exception as e:
-        logging.error(f"[DingTalk] 发送异常: {e}")
+        print(f"[DingTalk] 发送异常: {e}")
