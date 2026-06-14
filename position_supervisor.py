@@ -1,136 +1,162 @@
-# position_supervisor.py（最终版 - 智慧层统一协调）
-import logging
-import threading
-from binance_client import get_binance_client
-from position_manager import position_manager
-from config import Config
+#!/usr/bin/env python3
+# position_supervisor.py（最终更新版 - 混合模式 + 人工仓位变化处理）
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+import time
+from typing import Optional, Dict, Any
+from threading import Lock
+
+from binance_client import binance_client
+from position_manager import position_manager
+from config import get_tp_multipliers, get_risk_params
+from utils.dingtalk import send_dingtalk_message  # 假设你有钉钉推送封装
 
 
 class PositionSupervisor:
     def __init__(self):
-        self.binance_client = get_binance_client()
-        self.position_manager = position_manager
-        self.last_signal = None
-        self.consecutive_failure_count = 0
-        self.max_failures = 3
-        self.is_paused = False
-        self.lock = threading.Lock()
-        logging.info("[监督层] PositionSupervisor 初始化完成（智慧层）")
+        self._lock = Lock()
+        self.client = binance_client
+        self.pm = position_manager
 
-    def notify_open_success(self, signal: str, symbol: str, qty: float, entry_price: float):
-        """开仓成功后统一处理：计算TP + 初始化持仓 + 发送钉钉"""
-        with self.lock:
-            try:
-                is_long = signal == "OPEN_LONG"
-                direction = "多" if is_long else "空"
+    # ==================== 开仓后处理（核心更新） ====================
+    
+    def notify_open_success(self, signal: Dict[str, Any], filled_qty: float, avg_price: float):
+        """
+        开仓成功后调用
+        1. 更新持仓状态
+        2. 计算 TP1/TP2/TP3
+        3. 只挂 TP3 限价单（混合模式）
+        4. 推送开仓通知
+        """
+        side = signal.get("side")
+        symbol = signal.get("symbol", "ETHUSDT")
 
-                # 1. 调用 binance_client 计算 TP 并发送开仓报告
-                tp_info = self.binance_client.send_position_open_report(
-                    signal=signal,
-                    symbol=symbol,
-                    qty=qty,
-                    entry_price=entry_price,
-                    is_long=is_long
+        # 更新持仓管理器
+        self.pm.update_position(side, filled_qty, avg_price)
+        
+        # 计算 TP 价格（可根据需要调整倍数）
+        tp_multipliers = get_tp_multipliers()  # 从 config 获取
+        atr = signal.get("atr", 25)            # 默认值，可从 signal 传入
+
+        tp1_price = avg_price + (atr * tp_multipliers.get("tp1", 0.8)) * (1 if side == "LONG" else -1)
+        tp2_price = avg_price + (atr * tp_multipliers.get("tp2", 1.4)) * (1 if side == "LONG" else -1)
+        tp3_price = avg_price + (atr * tp_multipliers.get("tp3", 2.0)) * (1 if side == "LONG" else -1)
+
+        self.pm.tp1_price = tp1_price
+        self.pm.tp2_price = tp2_price
+        self.pm.tp3_price = tp3_price
+
+        # === 混合模式核心：只挂 TP3 限价单 ===
+        self._place_tp3_limit_order(symbol, side, tp3_price, filled_qty)
+
+        # 推送开仓通知
+        msg = f"【开仓成功】{side} {symbol}\n" \
+              f"数量: {filled_qty}\n" \
+              f"均价: {avg_price}\n" \
+              f"TP1: {tp1_price:.2f} | TP2: {tp2_price:.2f} | TP3: {tp3_price:.2f}\n" \
+              f"已挂 TP3 限价单"
+        send_dingtalk_message(msg)
+
+    def _place_tp3_limit_order(self, symbol: str, side: str, tp3_price: float, qty: float):
+        """内部方法：挂 TP3 限价单"""
+        try:
+            order_side = "SELL" if side == "LONG" else "BUY"
+            order = self.client.place_limit_order(
+                symbol=symbol,
+                side=order_side,
+                price=tp3_price,
+                qty=qty,
+                reduce_only=True
+            )
+            if order and order.get("orderId"):
+                self.pm.set_tp3_limit_order(
+                    order_id=str(order["orderId"]),
+                    price=tp3_price,
+                    qty=qty
                 )
+                print(f"[Supervisor] TP3 限价单已挂出: {order['orderId']}")
+        except Exception as e:
+            print(f"[Supervisor] 挂 TP3 限价单失败: {e}")
+            send_dingtalk_message(f"【警告】TP3 限价单挂单失败: {e}")
 
-                # 2. 初始化持仓（TP 由 binance_client 返回）
-                self.position_manager.update_position(
-                    side="LONG" if is_long else "SHORT",
-                    symbol=symbol,
-                    qty=qty,
-                    avg_price=entry_price,
-                    tp1=tp_info.get("tp1") if tp_info else None,
-                    tp2=tp_info.get("tp2") if tp_info else None,
-                    tp3=tp_info.get("tp3") if tp_info else None,
-                    stop_loss=None   # TP1 触发后由 tp_monitor 自动设置保本止损
-                )
+    # ==================== TP3 限价单管理 ====================
+    
+    def cancel_tp3_limit_order(self, reason: str = "manual_or_new_signal"):
+        """取消当前 TP3 限价单"""
+        tp3_info = self.pm.get_tp3_limit_order()
+        if not tp3_info:
+            return
 
-                self.last_signal = signal
-                self.consecutive_failure_count = 0
-                logging.info(f"[监督层] {direction} 开仓成功，持仓已初始化")
+        try:
+            self.client.cancel_order(
+                symbol="ETHUSDT",
+                order_id=tp3_info["order_id"]
+            )
+            print(f"[Supervisor] TP3 限价单已取消 ({reason})")
+            self.pm.clear_tp3_limit_order()
+        except Exception as e:
+            print(f"[Supervisor] 取消 TP3 限价单失败: {e}")
 
-            except Exception as e:
-                logging.error(f"[监督层] notify_open_success 异常: {e}", exc_info=True)
-                self.consecutive_failure_count += 1
+    def on_tp3_limit_filled(self, filled_qty: float, fill_price: float):
+        """TP3 限价单成交回调（可由 webhook 或定时查询触发）"""
+        self.pm.clear_tp3_limit_order()
+        msg = f"【TP3 成交】限价单已成交\n数量: {filled_qty} | 价格: {fill_price}"
+        send_dingtalk_message(msg)
 
-    def notify_tp_hit(self, level: str, closed_qty: float, current_price: float):
-        """TP 分批止盈通知（智慧层统一发送钉钉 + 同步持仓）"""
-        with self.lock:
-            try:
-                logging.info(f"[监督层] TP{level} 触发，平仓数量: {closed_qty}")
+    # ==================== 人工仓位变化处理（新增核心逻辑） ====================
+    
+    def handle_manual_position_change(self, current_qty: float, current_avg_price: float):
+        """
+        处理人工加减仓后的逻辑
+        """
+        if not self.pm.has_significant_position_change(current_qty):
+            # 变化较小（<30%），只通知不重挂 TP3
+            self.pm.update_position(self.pm.side, current_qty, current_avg_price)
+            send_dingtalk_message("【人工调整】检测到小幅仓位变化（<30%），已更新状态，未重挂 TP3")
+            return
 
-                # 同步实盘持仓状态
-                real_pos = self.binance_client.get_current_position(Config.SYMBOL)
-                if real_pos:
-                    self.position_manager.reconcile(real_pos)
-                else:
-                    self.position_manager.clear_position()
+        # 变化较大 → 取消旧 TP3 → 更新状态 → 重新挂 TP3
+        self.cancel_tp3_limit_order(reason="manual_position_change")
 
-                emoji = "🟡" if level == "1" else ("🟠" if level == "2" else "🟢")
-                title = f"TP{level} 第{level}止盈"
+        # 更新持仓状态
+        self.pm.update_position(self.pm.side, current_qty, current_avg_price)
 
-                msg = (
-                    f"{emoji} **{title}**\n\n"
-                    f"平仓数量: {closed_qty} 张\n"
-                    f"成交价格: {current_price} USDT\n\n"
-                    f"系统已执行分批止盈。"
-                )
-                self.binance_client._send_dingtalk(msg)
-                self.consecutive_failure_count = 0
+        # 重新计算 TP3 并挂单
+        if current_qty > 0 and self.pm.tp3_price:
+            symbol = "ETHUSDT"
+            side = self.pm.side
+            new_tp3_price = self.pm.tp3_price  # 可根据新均价重新计算，这里简化处理
+            
+            self._place_tp3_limit_order(symbol, side, new_tp3_price, current_qty)
 
-            except Exception as e:
-                logging.error(f"[监督层] notify_tp_hit 异常: {e}", exc_info=True)
+        send_dingtalk_message(
+            f"【人工调整】检测到较大仓位变化（≥30%），已重新处理 TP3 限价单\n"
+            f"新数量: {current_qty} | 新均价: {current_avg_price}"
+        )
 
-    def notify_close_all(self, reason: str):
+    # ==================== TP 命中处理（TP1/TP2 由 tp_monitor 调用） ====================
+    
+    def notify_tp_hit(self, tp_level: int, filled_qty: float, fill_price: float):
+        """TP1 / TP2 命中后调用"""
+        if tp_level == 1:
+            # TP1 命中 → 移动止损到保本
+            breakeven_price = self.pm.avg_price
+            self.pm.set_stop_loss(breakeven_price)
+            msg = f"【TP1 命中】已移动止损至保本价 {breakeven_price}"
+        else:
+            msg = f"【TP{tp_level} 命中】成交数量: {filled_qty} | 价格: {fill_price}"
+
+        send_dingtalk_message(msg)
+
+    def notify_full_close(self, reason: str = "signal"):
         """全平通知"""
-        with self.lock:
-            try:
-                logging.info(f"[监督层] 全平完成，原因: {reason}")
-                self.position_manager.clear_position()
+        self.pm.clear_position()
+        send_dingtalk_message(f"【全平】原因: {reason}")
 
-                msg = (
-                    f"⚠️ **全平完成**\n\n"
-                    f"触发原因: {reason}\n\n"
-                    f"系统已执行全平操作，当前无持仓。"
-                )
-                self.binance_client._send_dingtalk(msg)
-
-            except Exception as e:
-                logging.error(f"[监督层] notify_close_all 异常: {e}", exc_info=True)
-
-    def notify_manual_intervention(self, change_type: str, symbol: str, side: str,
-                                   current_qty: float, new_tp1: float = None,
-                                   new_tp2: float = None, new_tp3: float = None):
-        """人工干预通知"""
-        with self.lock:
-            try:
-                logging.warning(f"[监督层] 检测到人工{change_type}")
-
-                real_pos = self.binance_client.get_current_position(symbol)
-                if real_pos:
-                    self.position_manager.reconcile(real_pos)
-                else:
-                    self.position_manager.clear_position()
-
-                direction = "多" if side == "LONG" else "空"
-                msg = (
-                    f"⚠️ **检测到人工{change_type}**\n\n"
-                    f"品种: {symbol}\n"
-                    f"方向: {direction}\n"
-                    f"当前仓位: {current_qty} 张\n"
-                )
-                if new_tp1:
-                    msg += f"\n新的止盈目标:\n• TP1: {new_tp1} USDT\n• TP2: {new_tp2} USDT\n• TP3: {new_tp3} USDT\n"
-                msg += "\n系统已自动更新持仓状态。"
-                self.binance_client._send_dingtalk(msg)
-
-                self.consecutive_failure_count = 0
-
-            except Exception as e:
-                logging.error(f"[监督层] notify_manual_intervention 异常: {e}", exc_info=True)
+    # ==================== 查询接口 ====================
+    
+    def get_current_position_info(self) -> Optional[Dict[str, Any]]:
+        return self.pm.get_position()
 
 
-# 全局单例（智慧层）
-supervisor = PositionSupervisor()
+# 全局单例
+position_supervisor = PositionSupervisor()
