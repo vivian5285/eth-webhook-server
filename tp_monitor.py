@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tp_monitor.py（监控层 - 完整更新版）
+# tp_monitor.py（监控层 - 完整最终版）
 
 import logging
 import time
@@ -18,13 +18,14 @@ class TPMonitor:
         self.running = False
         self.thread = None
         self.last_manual_check_time = 0
-        self.MANUAL_CHECK_INTERVAL = 8  # 秒，人工变化检测节流
+        self.last_position_qty = 0.0
+        self.MANUAL_CHECK_INTERVAL = 8          # 人工变化检测节流（秒）
+        self.tp1_triggered = False              # 标记 TP1 是否已触发过移动止损
 
     def start(self):
         if self.running:
-            logger.warning("[TPMonitor] 已经在运行中")
+            logger.warning("[TPMonitor] 已在运行中")
             return
-
         self.running = True
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
@@ -39,64 +40,81 @@ class TPMonitor:
     def _monitor_loop(self):
         while self.running:
             try:
-                self._check_position_status()
                 self._check_manual_position_change()
+                self._check_tp1_hit_and_move_breakeven()
             except Exception as e:
                 logger.error(f"[TPMonitor] 监控循环异常: {e}")
-
-            time.sleep(3)  # 每3秒检查一次
-
-    # ==================== 检查持仓状态 ====================
-    def _check_position_status(self):
-        memory_pos = position_manager.get_position()
-        if not memory_pos or memory_pos.get("qty", 0) <= 0:
-            return
-
-        # TODO: 这里可以扩展检查 TP3 限价单是否成交
-        # 如果 TP3 已成交，则清理状态并通知
-        pass
+            time.sleep(3)
 
     # ==================== 人工仓位变化检测 ====================
     def _check_manual_position_change(self):
         now = time.time()
         if now - self.last_manual_check_time < self.MANUAL_CHECK_INTERVAL:
             return
-
         self.last_manual_check_time = now
 
         try:
-            actual_pos = binance_client.get_position()
-            memory_pos = position_manager.get_position()
+            actual = binance_client.get_position()
+            memory = position_manager.get_position()
 
-            actual_qty = actual_pos.get("qty", 0) if actual_pos else 0
-            memory_qty = memory_pos.get("qty", 0) if memory_pos else 0
+            actual_qty = actual.get("qty", 0) if actual else 0
+            memory_qty = memory.get("qty", 0) if memory else 0
 
-            # 存在明显差异，说明是人工操作
             if abs(actual_qty - memory_qty) > 0.0001:
                 if actual_qty == 0 and memory_qty > 0:
-                    # 人工全平
                     position_manager.clear_position()
                     position_manager.clear_tp3_limit_order()
+                    self.tp1_triggered = False
                     send_dingtalk_message("【人工全平检测】仓位已被手动平掉")
-                    logger.warning("[TPMonitor] 检测到人工全平")
+                    position_supervisor.force_reconcile(source="tp_monitor")
 
                 elif actual_qty > 0 and memory_qty == 0:
-                    # 人工开仓
-                    position_manager.set_position(actual_pos)
+                    position_manager.set_position(actual)
                     send_dingtalk_message("【人工开仓检测】发现新持仓")
-                    logger.warning("[TPMonitor] 检测到人工开仓")
+                    position_supervisor.force_reconcile(source="tp_monitor")
 
                 elif actual_qty != memory_qty:
-                    # 部分平仓或加仓
-                    position_manager.set_position(actual_pos)
-                    send_dingtalk_message(f"【人工仓位变化】数量从 {memory_qty} → {actual_qty}")
-                    logger.warning(f"[TPMonitor] 人工仓位变化: {memory_qty} → {actual_qty}")
-
-                # 触发一次强制对账
-                position_supervisor.force_reconcile(source="tp_monitor")
+                    position_manager.set_position(actual)
+                    send_dingtalk_message(f"【人工仓位变化】数量: {memory_qty} → {actual_qty}")
+                    position_supervisor.force_reconcile(source="tp_monitor")
 
         except Exception as e:
             logger.error(f"[TPMonitor] 人工仓位检测失败: {e}")
+
+    # ==================== TP1 命中检测 + 移动止损 ====================
+    def _check_tp1_hit_and_move_breakeven(self):
+        """
+        简单逻辑：当内存仓位数量明显减少（接近 TP1 平仓比例），
+        且尚未触发过移动止损，则调用 move_to_breakeven()
+        """
+        try:
+            pos = position_manager.get_position()
+            if not pos or pos.get("qty", 0) <= 0:
+                self.tp1_triggered = False
+                self.last_position_qty = 0.0
+                return
+
+            current_qty = pos.get("qty", 0)
+            original_qty = pos.get("original_qty", current_qty)  # 如果有记录原始数量更好
+
+            # 如果没有记录原始数量，就用当前数量作为基准（简化处理）
+            if self.last_position_qty == 0:
+                self.last_position_qty = current_qty
+                return
+
+            # 判断是否发生了明显减仓（接近 TP1 比例）
+            reduction_ratio = (self.last_position_qty - current_qty) / self.last_position_qty if self.last_position_qty > 0 else 0
+
+            if reduction_ratio >= 0.25 and not self.tp1_triggered:
+                logger.info("[TPMonitor] 检测到 TP1 可能命中，准备移动止损到保本")
+                order_executor.move_to_breakeven()
+                self.tp1_triggered = True
+                send_dingtalk_message("【TP1 命中】已触发移动止损到保本")
+
+            self.last_position_qty = current_qty
+
+        except Exception as e:
+            logger.error(f"[TPMonitor] TP1 检测异常: {e}")
 
 
 # 全局单例
