@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# dingtalk.py（加强版 - 更好错误处理 + 详细日志）
+# dingtalk.py（修复版 - 签名逻辑优化）
 
 import logging
 import time
@@ -13,10 +13,10 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 
-def send_dingtalk_message(content: str, level: str = "INFO") -> bool:
+def send_dingtalk_message(content: str, title: str = "交易系统通知") -> bool:
     """
-    发送钉钉消息（加强版）
-    支持加签（secret）和普通 webhook
+    发送钉钉消息（修复版）
+    支持加签和不加签两种模式
     """
     webhook_url = Config.DINGTALK_WEBHOOK
     secret = Config.DINGTALK_SECRET
@@ -26,7 +26,7 @@ def send_dingtalk_message(content: str, level: str = "INFO") -> bool:
         return False
 
     try:
-        # 如果配置了 secret，则进行加签
+        # 构造请求 URL
         if secret:
             timestamp = str(round(time.time() * 1000))
             string_to_sign = f"{timestamp}\n{secret}"
@@ -40,16 +40,16 @@ def send_dingtalk_message(content: str, level: str = "INFO") -> bool:
         else:
             url = webhook_url
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json; charset=utf-8"}
         data = {
             "msgtype": "markdown",
             "markdown": {
-                "title": f"交易系统通知 - {level}",
+                "title": title,
                 "text": content
             }
         }
 
-        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response = requests.post(url, headers=headers, json=data, timeout=8)
 
         if response.status_code == 200:
             result = response.json()
