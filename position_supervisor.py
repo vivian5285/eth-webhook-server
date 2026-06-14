@@ -3,6 +3,7 @@
 
 import logging
 import time
+from datetime import datetime
 from typing import Dict, Any, Optional
 from binance_client import binance_client
 from position_manager import position_manager
@@ -221,11 +222,28 @@ class PositionSupervisor:
         )
         send_dingtalk_message(msg)
 
-    def send_detailed_decision(self, title: str, details: dict, emoji: str = "📌"):
-        """统一详细决策推送（美观 + 参数完整 + 中文友好）"""
-        lines = [f"{emoji} **【{title}】**"]
+    def send_detailed_decision(self, title: str, details: dict, emoji: str = "📌", level: str = "DECISION"):
+        """
+        统一详细决策推送（美观 + 参数完整 + 中文友好）
+        level: INFO / DECISION / WARNING / SECURITY / ERROR
+        """
+        level_emoji = {
+            "INFO": "ℹ️",
+            "DECISION": "✅",
+            "WARNING": "⚠️",
+            "SECURITY": "🔒",
+            "ERROR": "❌"
+        }.get(level, "📌")
+
+        lines = [
+            f"{emoji} **【{title}】** {level_emoji}",
+            f"> **时间**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`",
+            ""
+        ]
+
         for k, v in details.items():
             lines.append(f"**{k}**: `{v}`")
+
         msg = "\n".join(lines)
         send_dingtalk_message(msg)
 
