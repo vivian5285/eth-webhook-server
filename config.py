@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# config.py（最终兼容版 - 同时支持函数和 Config 类）
+# config.py（最终兼容版 - 同时支持函数和 Config 类 - 2026-06-14）
 
 import os
 from dotenv import load_dotenv
@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# ==================== 类式配置（兼容 dingtalk.py） ====================
+# ==================== 类式配置（兼容 dingtalk.py 等） ====================
 class Config:
     SYMBOL = "ETHUSDT"
     TIMEFRAME = "3h"
@@ -20,10 +20,12 @@ class Config:
 
 # ==================== 函数式配置（推荐新代码使用） ====================
 def get_tp_multipliers():
+    """VPS完全接管40/40/20模式下的TP倍数"""
     return {
-        "tp1": 0.8,
-        "tp2": 1.4,
-        "tp3": 2.0
+        "sl": 0.92,
+        "tp1": 1.08,
+        "tp2": 1.95,
+        "tp3": 3.0
     }
 
 
@@ -33,16 +35,16 @@ def get_risk_params():
         "max_risk_percent": 1.45,
         "daily_loss_limit": 5.5,
         "max_position_usdt": 250000,
-        "leverage": 3,
+        "leverage": 5,           # 内测阶段使用5x概念
         "volatility_threshold": 1.5
     }
 
 
 def get_monitor_config():
     return {
-        "check_interval": 2.5,
+        "check_interval": 1.5,
         "reconcile_interval": 28,
-        "significant_change_threshold": 0.30
+        "significant_change_threshold": 0.15   # 显著人工加仓阈值
     }
 
 
