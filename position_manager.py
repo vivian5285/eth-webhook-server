@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_manager.py（最终完整版 - 支持 SL/TP3 order_id 跟踪）
+# position_manager.py（最终兼容版 - 支持新旧接口）
 
 import logging
 import threading
@@ -47,7 +47,7 @@ class PositionManager:
             return float(pos.get("original_qty", pos.get("qty", 0)))
         return 0.0
 
-    # ==================== TP3 限价单管理 ====================
+    # ==================== TP3 限价单管理（新接口 + 旧接口兼容） ====================
     def set_tp3_order_id(self, order_id: str):
         with self._lock:
             self._tp3_order_id = str(order_id)
@@ -60,7 +60,16 @@ class PositionManager:
     def clear_tp3_order(self):
         with self._lock:
             self._tp3_order_id = None
-            logger.info("[PositionManager] TP3 order_id 已清除")
+
+    # 兼容旧接口（check_system.py 等仍在使用）
+    def has_tp3_limit_order(self) -> bool:
+        return self.get_tp3_order_id() is not None
+
+    def set_tp3_limit_order(self, has_order: bool, order_id: str = None):
+        if has_order and order_id:
+            self.set_tp3_order_id(order_id)
+        elif not has_order:
+            self.clear_tp3_order()
 
     # ==================== 止损单管理 ====================
     def set_sl_order_id(self, order_id: str):
@@ -75,8 +84,7 @@ class PositionManager:
     def clear_sl_order(self):
         with self._lock:
             self._sl_order_id = None
-            logger.info("[PositionManager] SL order_id 已清除")
 
 
-# ==================== 全局单例（必须保留） ====================
+# ==================== 全局单例 ====================
 position_manager = PositionManager()
