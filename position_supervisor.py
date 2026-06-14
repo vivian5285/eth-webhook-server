@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终完整版 - 支持旧格式兼容）
+# position_supervisor.py（最终完整版 - 同向/反向均先平后开）
 
 import logging
 import time
@@ -78,13 +78,13 @@ class PositionSupervisor:
         details = {
             "当前持仓方向": current_side,
             "最新TV信号方向": tv_side,
-            "执行动作": "先平后开强制对齐"
+            "执行动作": "先平后开"
         }
-        self.send_detailed_report("监督层强制方向对齐", details, "⚠️", "WARNING")
+        self.send_detailed_report("监督层先平后开", details, "🔄", "WARNING")
 
-    # ==================== 信号处理（已兼容新旧格式） ====================
+    # ==================== 信号处理 ====================
     def handle_signal(self, payload: Dict[str, Any]):
-        # 兼容旧格式（你以前内测用的 {"signal":"OPEN_LONG"...}）
+        # 兼容旧格式（你以前内测用的）
         signal = payload.get("signal", "").upper()
         action = payload.get("action", "").upper()
 
@@ -119,8 +119,27 @@ class PositionSupervisor:
             order_executor.close_position(reason or "保护性全平")
 
     def _handle_entry_signal(self, side, atr):
-        """处理入场信号"""
+        """
+        处理入场信号（最终版）
+        规则：收到 TV 任何入场信号（LONG/SHORT）→ 一律先平后开
+        """
         try:
+            current = position_manager.get_position()
+            has_position = current and current.get("current_qty", 0) > 0
+
+            # 如果当前有持仓，先平仓
+            if has_position:
+                current_side = current.get("side")
+                logger.info(f"[Supervisor] 收到入场信号 {side}，当前持 {current_side}，执行先平后开")
+                self.report_direction_align(current_side, side)
+
+                # 先平仓
+                order_executor.close_position("监督层收到新TV入场信号，强制先平仓")
+
+                # 等待平仓完成
+                time.sleep(1.8)
+
+            # 再开新方向
             result = order_executor.open_position(side, {"atr": atr})
 
             if result and result.get("success"):
@@ -142,10 +161,10 @@ class PositionSupervisor:
                 }, "❌", "ERROR")
 
         except Exception as e:
-            logger.error(f"[Supervisor] 开仓处理异常: {e}")
-            self.send_detailed_report("开仓异常", {"错误": str(e)}, "❌", "ERROR")
+            logger.error(f"[Supervisor] 处理入场信号异常: {e}")
+            self.send_detailed_report("入场信号处理异常", {"错误": str(e)}, "❌", "ERROR")
 
-    # ==================== 方向对齐检查 ====================
+    # ==================== 方向对齐检查（保留，供 ProfitTaker 周期性调用） ====================
     def check_and_align_with_latest_signal(self):
         if not self.last_signal:
             return
@@ -162,7 +181,7 @@ class PositionSupervisor:
             return
 
         self.report_direction_align(current_side, latest_action)
-        order_executor.close_position("监督层强制对齐最新TV方向")
+        order_executor.close_position("监督层周期性检测到方向不一致，强制平仓")
         time.sleep(1.8)
         order_executor.open_position(latest_action, {"atr": self.last_signal.get("atr")})
 
