@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终更新版 - 混合模式 + 人工仓位变化处理）
+# position_supervisor.py（最终版 - 混合模式）
 
 import time
 from typing import Optional, Dict, Any
@@ -7,8 +7,8 @@ from threading import Lock
 
 from binance_client import binance_client
 from position_manager import position_manager
-from config import get_tp_multipliers, get_risk_params
-from utils.dingtalk import send_dingtalk_message  # 假设你有钉钉推送封装
+from config import get_tp_multipliers
+from utils.dingtalk import send_dingtalk_message
 
 
 class PositionSupervisor:
@@ -17,25 +17,23 @@ class PositionSupervisor:
         self.client = binance_client
         self.pm = position_manager
 
-    # ==================== 开仓后处理（核心更新） ====================
-    
+    # ==================== 开仓成功后处理 ====================
     def notify_open_success(self, signal: Dict[str, Any], filled_qty: float, avg_price: float):
         """
         开仓成功后调用
-        1. 更新持仓状态
-        2. 计算 TP1/TP2/TP3
-        3. 只挂 TP3 限价单（混合模式）
-        4. 推送开仓通知
+        - 更新持仓状态
+        - 计算 TP1/TP2/TP3
+        - 只挂 TP3 限价单（混合模式核心）
         """
         side = signal.get("side")
         symbol = signal.get("symbol", "ETHUSDT")
 
-        # 更新持仓管理器
+        # 更新持仓
         self.pm.update_position(side, filled_qty, avg_price)
-        
-        # 计算 TP 价格（可根据需要调整倍数）
-        tp_multipliers = get_tp_multipliers()  # 从 config 获取
-        atr = signal.get("atr", 25)            # 默认值，可从 signal 传入
+
+        # 计算 TP 价格
+        tp_multipliers = get_tp_multipliers()
+        atr = signal.get("atr", 25)
 
         tp1_price = avg_price + (atr * tp_multipliers.get("tp1", 0.8)) * (1 if side == "LONG" else -1)
         tp2_price = avg_price + (atr * tp_multipliers.get("tp2", 1.4)) * (1 if side == "LONG" else -1)
@@ -45,15 +43,14 @@ class PositionSupervisor:
         self.pm.tp2_price = tp2_price
         self.pm.tp3_price = tp3_price
 
-        # === 混合模式核心：只挂 TP3 限价单 ===
+        # === 混合模式：只挂 TP3 限价单 ===
         self._place_tp3_limit_order(symbol, side, tp3_price, filled_qty)
 
-        # 推送开仓通知
-        msg = f"【开仓成功】{side} {symbol}\n" \
-              f"数量: {filled_qty}\n" \
-              f"均价: {avg_price}\n" \
-              f"TP1: {tp1_price:.2f} | TP2: {tp2_price:.2f} | TP3: {tp3_price:.2f}\n" \
-              f"已挂 TP3 限价单"
+        # 推送通知
+        msg = (f"【开仓成功】{side} {symbol}\n"
+               f"数量: {filled_qty} | 均价: {avg_price}\n"
+               f"TP1: {tp1_price:.2f} | TP2: {tp2_price:.2f} | TP3: {tp3_price:.2f}\n"
+               f"已挂 TP3 限价单")
         send_dingtalk_message(msg)
 
     def _place_tp3_limit_order(self, symbol: str, side: str, tp3_price: float, qty: float):
@@ -73,77 +70,61 @@ class PositionSupervisor:
                     price=tp3_price,
                     qty=qty
                 )
-                print(f"[Supervisor] TP3 限价单已挂出: {order['orderId']}")
+                print(f"[Supervisor] TP3 限价单已挂出，OrderID: {order['orderId']}")
         except Exception as e:
             print(f"[Supervisor] 挂 TP3 限价单失败: {e}")
             send_dingtalk_message(f"【警告】TP3 限价单挂单失败: {e}")
 
     # ==================== TP3 限价单管理 ====================
-    
-    def cancel_tp3_limit_order(self, reason: str = "manual_or_new_signal"):
-        """取消当前 TP3 限价单"""
+    def cancel_tp3_limit_order(self, reason: str = "new_signal"):
+        """取消 TP3 限价单"""
         tp3_info = self.pm.get_tp3_limit_order()
         if not tp3_info:
             return
 
         try:
-            self.client.cancel_order(
-                symbol="ETHUSDT",
-                order_id=tp3_info["order_id"]
-            )
-            print(f"[Supervisor] TP3 限价单已取消 ({reason})")
+            self.client.cancel_order(symbol="ETHUSDT", order_id=tp3_info["order_id"])
+            print(f"[Supervisor] TP3 限价单已取消，原因: {reason}")
             self.pm.clear_tp3_limit_order()
         except Exception as e:
             print(f"[Supervisor] 取消 TP3 限价单失败: {e}")
 
     def on_tp3_limit_filled(self, filled_qty: float, fill_price: float):
-        """TP3 限价单成交回调（可由 webhook 或定时查询触发）"""
+        """TP3 限价单成交回调"""
         self.pm.clear_tp3_limit_order()
-        msg = f"【TP3 成交】限价单已成交\n数量: {filled_qty} | 价格: {fill_price}"
-        send_dingtalk_message(msg)
+        send_dingtalk_message(f"【TP3 成交】限价单已成交 | 数量: {filled_qty} | 价格: {fill_price}")
 
-    # ==================== 人工仓位变化处理（新增核心逻辑） ====================
-    
+    # ==================== 人工仓位变化处理 ====================
     def handle_manual_position_change(self, current_qty: float, current_avg_price: float):
-        """
-        处理人工加减仓后的逻辑
-        """
+        """处理人工加减仓"""
         if not self.pm.has_significant_position_change(current_qty):
-            # 变化较小（<30%），只通知不重挂 TP3
+            # 变化较小，只更新状态 + 通知
             self.pm.update_position(self.pm.side, current_qty, current_avg_price)
             send_dingtalk_message("【人工调整】检测到小幅仓位变化（<30%），已更新状态，未重挂 TP3")
             return
 
         # 变化较大 → 取消旧 TP3 → 更新状态 → 重新挂 TP3
         self.cancel_tp3_limit_order(reason="manual_position_change")
-
-        # 更新持仓状态
         self.pm.update_position(self.pm.side, current_qty, current_avg_price)
 
-        # 重新计算 TP3 并挂单
         if current_qty > 0 and self.pm.tp3_price:
-            symbol = "ETHUSDT"
-            side = self.pm.side
-            new_tp3_price = self.pm.tp3_price  # 可根据新均价重新计算，这里简化处理
-            
-            self._place_tp3_limit_order(symbol, side, new_tp3_price, current_qty)
+            self._place_tp3_limit_order("ETHUSDT", self.pm.side, self.pm.tp3_price, current_qty)
 
         send_dingtalk_message(
             f"【人工调整】检测到较大仓位变化（≥30%），已重新处理 TP3 限价单\n"
             f"新数量: {current_qty} | 新均价: {current_avg_price}"
         )
 
-    # ==================== TP 命中处理（TP1/TP2 由 tp_monitor 调用） ====================
-    
+    # ==================== TP 命中通知 ====================
     def notify_tp_hit(self, tp_level: int, filled_qty: float, fill_price: float):
-        """TP1 / TP2 命中后调用"""
+        """TP1 / TP2 命中"""
         if tp_level == 1:
-            # TP1 命中 → 移动止损到保本
+            # TP1 命中后移动止损到保本
             breakeven_price = self.pm.avg_price
             self.pm.set_stop_loss(breakeven_price)
             msg = f"【TP1 命中】已移动止损至保本价 {breakeven_price}"
         else:
-            msg = f"【TP{tp_level} 命中】成交数量: {filled_qty} | 价格: {fill_price}"
+            msg = f"【TP{tp_level} 命中】数量: {filled_qty} | 价格: {fill_price}"
 
         send_dingtalk_message(msg)
 
@@ -153,7 +134,6 @@ class PositionSupervisor:
         send_dingtalk_message(f"【全平】原因: {reason}")
 
     # ==================== 查询接口 ====================
-    
     def get_current_position_info(self) -> Optional[Dict[str, Any]]:
         return self.pm.get_position()
 
