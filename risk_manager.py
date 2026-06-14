@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# risk_manager.py（最终完整版 - 含 breaker_triggered 兼容属性）
+# risk_manager.py（优化版 - 带5秒权益缓存 + 兼容属性）
 
 import logging
 import threading
+import time
 from datetime import datetime, date
 from typing import Optional
 from binance_client import binance_client
@@ -18,7 +19,37 @@ class RiskManager:
         self.last_reset_date: Optional[date] = None
         self.daily_loss_limit_percent: float = 5.5
 
+        # 权益缓存（避免频繁请求 Binance）
+        self._equity_cache: Optional[float] = None
+        self._equity_cache_time: float = 0
+        self._cache_ttl: float = 5.0  # 缓存有效期 5 秒
+
         self._initialize_daily_stats()
+
+    def _get_current_equity(self) -> float:
+        """带缓存的账户权益获取"""
+        with self._lock:
+            now = time.time()
+            # 如果缓存还在有效期内，直接返回缓存值
+            if self._equity_cache is not None and (now - self._equity_cache_time) < self._cache_ttl:
+                return self._equity_cache
+
+            # 缓存过期或不存在，重新请求 Binance
+            try:
+                account = binance_client.client.futures_account()
+                equity = float(account.get("totalWalletBalance", 0))
+
+                # 更新缓存
+                self._equity_cache = equity
+                self._equity_cache_time = now
+
+                return equity
+            except Exception as e:
+                logger.error(f"[RiskManager] 获取账户权益失败: {e}")
+                # 如果请求失败但有旧缓存，则返回旧值
+                if self._equity_cache is not None:
+                    return self._equity_cache
+                return 0.0
 
     def _initialize_daily_stats(self):
         with self._lock:
@@ -33,14 +64,6 @@ class RiskManager:
                     logger.info(f"[RiskManager] 新一天初始化 - 起始权益: {current_equity:.2f} USDT")
             except Exception as e:
                 logger.error(f"[RiskManager] 初始化每日统计失败: {e}")
-
-    def _get_current_equity(self) -> float:
-        try:
-            account = binance_client.client.futures_account()
-            return float(account.get("totalWalletBalance", 0))
-        except Exception as e:
-            logger.error(f"[RiskManager] 获取账户权益失败: {e}")
-            return 0.0
 
     def update_daily_peak(self, current_equity: Optional[float] = None):
         with self._lock:
@@ -125,7 +148,7 @@ class RiskManager:
     # ==================== 兼容旧版 check_system.py ====================
     @property
     def breaker_triggered(self):
-        """兼容旧版 check_system.py 使用 risk_manager.breaker_triggered"""
+        """兼容旧版 check_system.py"""
         return self.is_daily_breaker_triggered()
 
 
