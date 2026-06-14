@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# risk_manager.py（最终修复死锁版 - 网络请求不持锁）
+# risk_manager.py（最终无死锁版 - 2026-06-14）
 
 import logging
 import threading
@@ -28,24 +28,20 @@ class RiskManager:
         self._executor = ThreadPoolExecutor(max_workers=1)
 
     def _fetch_equity_from_binance(self) -> float:
-        """实际请求 Binance（不持锁）"""
         account = binance_client.client.futures_account()
         return float(account.get("totalWalletBalance", 0))
 
     def _get_current_equity(self) -> float:
         now = time.time()
 
-        # 先快速判断是否可以用缓存（不持锁）
         with self._lock:
             if self._equity_cache is not None and (now - self._equity_cache_time) < self._cache_ttl:
                 return self._equity_cache
 
-        # 缓存过期，发起带超时的请求（不持锁）
         try:
             future = self._executor.submit(self._fetch_equity_from_binance)
             equity = future.result(timeout=3.0)
 
-            # 只在更新缓存时持锁
             with self._lock:
                 self._equity_cache = equity
                 self._equity_cache_time = time.time()
