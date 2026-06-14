@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终完整版）
+# position_supervisor.py（最终稳定版）
 
 import logging
 import time
@@ -30,56 +30,50 @@ class PositionSupervisor:
             self._handle_close_signal(reason)
 
     def _handle_entry_signal(self, side: str):
-        current = position_manager.get_position()
-        has_position = current and current.get("current_qty", 0) > 0
+        try:
+            current = position_manager.get_position()
+            has_position = current and current.get("current_qty", 0) > 0
 
-        # 无论同向还是反向，都先全平
-        if has_position:
-            current_side = current.get("side", "UNKNOWN")
-            self.send_detailed_report("检测到持仓，执行先平后开", {
-                "当前持仓方向": current_side,
-                "新信号方向": side
-            }, "🔄", "WARNING")
+            if has_position:
+                current_side = current.get("side", "UNKNOWN")
+                self.send_detailed_report("检测到持仓，执行先平后开", {
+                    "当前持仓方向": current_side,
+                    "新信号方向": side
+                }, "🔄", "WARNING")
 
-            order_executor.close_position("监督层收到新入场信号，强制先平仓")
-            time.sleep(2.0)
+                order_executor.close_position("监督层收到新入场信号，强制先平仓")
+                time.sleep(2.0)
 
-        # 调用执行层下单
-        result = order_executor.open_position(side)
+            result = order_executor.open_position(side)
 
-        # 监督层核实
-        time.sleep(1.5)
-        real_pos = position_manager.get_position()
+            time.sleep(1.5)
+            real_pos = position_manager.get_position()
 
-        if result and result.get("success") and real_pos and real_pos.get("side") == side:
-            self.report_open_success(
-                side=side,
-                usdt_amount=real_pos.get("usdt_amount", 0),
-                entry_price=real_pos.get("entry_price", 0),
-                sl=real_pos.get("sl_price", 0),
-                tp1=real_pos.get("tp1_price", 0),
-                tp2=real_pos.get("tp2_price", 0),
-                tp3=real_pos.get("tp3_price", 0)
-            )
-        else:
-            self.send_detailed_report("开仓核实失败", {
-                "方向": side,
-                "执行结果": result.get("message") if result else "无返回"
-            }, "❌", "ERROR")
+            if result and result.get("success") and real_pos and real_pos.get("side") == side:
+                self.report_open_success(
+                    side=side,
+                    usdt_amount=real_pos.get("usdt_amount", 0),
+                    entry_price=real_pos.get("entry_price", 0),
+                    sl=real_pos.get("sl_price", 0),
+                    tp1=real_pos.get("tp1_price", 0),
+                    tp2=real_pos.get("tp2_price", 0),
+                    tp3=real_pos.get("tp3_price", 0)
+                )
+            else:
+                self.send_detailed_report("开仓核实失败", {
+                    "方向": side,
+                    "执行结果": result.get("message") if result else "无返回"
+                }, "❌", "ERROR")
+
+        except Exception as e:
+            logger.error(f"[Supervisor] 处理入场信号异常: {e}")
+            self.send_detailed_report("入场信号处理异常", {"错误": str(e)}, "❌", "ERROR")
 
     def _handle_close_signal(self, reason: str):
-        current = position_manager.get_position()
-        if not current or current.get("current_qty", 0) <= 0:
-            return
-
-        order_executor.close_position(reason or "手动全平")
-
-        time.sleep(1.5)
-        real_pos = position_manager.get_position()
-        if not real_pos or real_pos.get("current_qty", 0) <= 0:
-            self.send_detailed_report("保护性全平成功（已核实）", {
-                "平仓原因": reason
-            }, "🛑", "WARNING")
+        try:
+            order_executor.close_position(reason or "手动全平")
+        except Exception as e:
+            logger.error(f"[Supervisor] 平仓异常: {e}")
 
     def send_detailed_report(self, title: str, details: dict, emoji: str = "📌", level: str = "DECISION"):
         level_emoji = {
