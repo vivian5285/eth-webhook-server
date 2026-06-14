@@ -216,8 +216,18 @@ class ProfitTaker:
                 position_manager.set_sl_order_id(new_sl_order.get("orderId"))
 
             position_supervisor.force_reconcile(source="manual_add_recalc")
-            send_dingtalk_message(
-                f"【显著人工加仓 - TP123已重算收紧】\n加仓比例: {add_ratio*100:.1f}%\n新TP1: {tp1} | TP2: {tp2}"
+            position_supervisor.send_detailed_decision(
+                "显著人工加仓 - TP123已重算收紧",
+                {
+                    "加仓比例": f"{add_ratio*100:.1f}%",
+                    "新均价": entry,
+                    "新TP1": tp1,
+                    "新TP2": tp2,
+                    "新Runner TP3": tp3,
+                    "新SL": sl
+                },
+                "🔄",
+                level="WARNING"
             )
         except Exception as e:
             logger.error(f"[ProfitTaker] 重算TP失败: {e}")
