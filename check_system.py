@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# check_system.py（最终版 - 混合模式完整检查）
+# check_system.py（最终版 - 混合模式完整自检）
 
 import os
 import sys
@@ -16,9 +16,9 @@ from tp_monitor import tp_monitor
 
 
 def check_system():
-    print("=" * 75)
+    print("=" * 78)
     print(f"【量化交易系统自检】{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 75)
+    print("=" * 78)
 
     # ==================== 1. systemd 服务状态 ====================
     print("\n[1] systemd 服务状态")
@@ -35,19 +35,19 @@ def check_system():
     except Exception as e:
         print(f"⚠️ 无法检查 systemd 状态: {e}")
 
-    # ==================== 2. TPMonitor 状态 ====================
+    # ==================== 2. TPMonitor 状态（直接检查） ====================
     print("\n[2] TPMonitor 状态")
     if tp_monitor.running:
         print("✅ TPMonitor 正在运行")
         print(f"   检查间隔: {tp_monitor.check_interval}s | 节流间隔: {tp_monitor.reconcile_interval}s")
     else:
-        print("❌ TPMonitor 未运行（建议重启服务后检查）")
+        print("❌ TPMonitor 未运行（请检查 app.py 是否正确启动）")
 
     # ==================== 3. 当前持仓状态 ====================
     print("\n[3] 当前持仓状态")
     pos = position_manager.get_position()
     if pos and pos.get("qty", 0) > 0:
-        print(f"✅ 持仓中")
+        print("✅ 持仓中")
         print(f"   方向     : {pos['side']}")
         print(f"   数量     : {pos['qty']}")
         print(f"   均价     : {pos['avg_price']}")
@@ -58,8 +58,8 @@ def check_system():
     else:
         print("✅ 当前无持仓")
 
-    # ==================== 4. TP3 限价单状态（混合模式核心） ====================
-    print("\n[4] TP3 限价单状态")
+    # ==================== 4. TP3 限价单状态 ====================
+    print("\n[4] TP3 限价单状态（混合模式核心）")
     if position_manager.has_tp3_limit_order():
         tp3 = position_manager.get_tp3_limit_order()
         print("✅ TP3 限价单已挂出")
@@ -74,8 +74,8 @@ def check_system():
     last_check = position_manager.last_reconcile_time
     if last_check > 0:
         seconds_ago = int(time.time() - last_check)
-        status = "✅ 正常" if seconds_ago < 60 else "⚠️ 较久未检查"
-        print(f"   {seconds_ago} 秒前  ({status})")
+        status_text = "✅ 正常" if seconds_ago < 90 else "⚠️ 较久未检查"
+        print(f"   {seconds_ago} 秒前   ({status_text})")
     else:
         print("   尚未执行过仓位检查")
 
@@ -91,16 +91,16 @@ def check_system():
         if resp.status_code == 200:
             data = resp.json()
             print("✅ /status 接口正常")
-            print(f"   TPMonitor Running : {data.get('tp_monitor_running')}")
-            print(f"   Has TP3 Limit Order: {data.get('has_tp3_limit_order')}")
+            print(f"   TPMonitor Running   : {data.get('tp_monitor_running')}")
+            print(f"   Has TP3 Limit Order : {data.get('has_tp3_limit_order')}")
         else:
             print(f"❌ /status 接口异常: {resp.status_code}")
     except Exception as e:
         print(f"⚠️ /status 接口无法访问: {e}")
 
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 78)
     print("检查完成")
-    print("=" * 75)
+    print("=" * 78)
 
 
 if __name__ == "__main__":
