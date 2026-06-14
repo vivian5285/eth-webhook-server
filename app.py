@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py（完整修复版 - 适配 Flask 2.2+）
+# app.py（完整最终版 - 适配新分层架构）
 
 import os
 import logging
@@ -24,7 +24,6 @@ app = Flask(__name__)
 
 
 def get_current_equity() -> float:
-    """获取当前账户权益（可根据实际情况调整）"""
     try:
         balance = binance_client.get_account_balance()
         return float(balance.get("USDT", 0))
@@ -39,7 +38,7 @@ def handle_signal_in_background(signal_data: dict):
         action = signal_data.get("action", "").upper()
         logger.info(f"[Signal] 收到信号: {action}")
 
-        # ==================== 每日回撤熔断检查 ====================
+        # 每日回撤熔断检查
         if action in ["LONG", "SHORT"]:
             current_equity = get_current_equity()
             if not position_supervisor.is_new_entry_allowed(current_equity):
@@ -53,7 +52,7 @@ def handle_signal_in_background(signal_data: dict):
                 )
                 return
 
-        # ==================== 调用信号处理方法 ====================
+        # 分发信号
         if action == "LONG":
             position_supervisor.handle_long_signal(signal_data)
         elif action == "SHORT":
@@ -134,7 +133,7 @@ def startup_tasks():
     logger.info("[Startup] 启动任务完成")
 
 
-# ==================== 关键修复：模块加载时直接执行启动任务 ====================
+# ==================== 模块加载时执行启动任务 ====================
 startup_tasks()
 
 
