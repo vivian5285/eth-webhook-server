@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终完善版 - 已解决循环导入）
+# order_executor.py（最终完善版）
 
 import logging
 from binance_client import binance_client
@@ -15,25 +15,39 @@ class OrderExecutor:
 
     def open_position(self, side: str, data: dict = None):
         """
-        开仓逻辑（LONG / SHORT）
+        开仓逻辑（内测规则：余额80% + 5倍杠杆，永远只开一手）
         """
         try:
+            # 防止重复开仓（永远只开一手）
+            current_pos = position_manager.get_position()
+            if current_pos and current_pos.get("current_qty", 0) > 0:
+                logger.warning("[OrderExecutor] 当前已有持仓，拒绝重复开仓")
+                return {"success": False, "message": "当前已有持仓"}
+
             atr = data.get("atr", 30) if data else 30
             current_price = binance_client.get_current_price(SYMBOL)
             if current_price is None:
                 return {"success": False, "message": "无法获取当前价格"}
 
-            # 计算止损价
+            # 获取账户余额
+            balance = binance_client.get_account_balance()
+            if balance <= 0:
+                return {"success": False, "message": "账户余额为0"}
+
+            # 内测规则：使用余额的80% + 5倍杠杆
+            usable_balance = balance * 0.80
+            leverage = 5
+            max_position_value = usable_balance * leverage
+            qty = round(max_position_value / current_price, 3)
+            qty = max(qty, 0.001)  # 最小数量保护
+
+            # 计算止损价格
             if side.upper() == "LONG":
                 sl_price = round(current_price - atr * 0.92, 2)
                 order_side = "BUY"
             else:
                 sl_price = round(current_price + atr * 0.92, 2)
                 order_side = "SELL"
-
-            # 简单固定金额下单（后续可接入风控动态计算）
-            usdt_amount = 2000
-            qty = max(round(usdt_amount / current_price, 3), 0.001)
 
             # 市价开仓
             order = binance_client.place_market_order(SYMBOL, order_side, qty)
@@ -42,12 +56,12 @@ class OrderExecutor:
 
             fill_price = float(order.get("avgPrice", current_price))
 
-            # 记录持仓
+            # 记录持仓信息到 position_manager
             position_manager.set_initial_position(
                 side=side.upper(),
                 entry_price=fill_price,
                 initial_qty=qty,
-                usdt_amount=usdt_amount,
+                usdt_amount=round(qty * fill_price, 2),
                 atr=atr,
                 sl_price=sl_price
             )
@@ -58,8 +72,8 @@ class OrderExecutor:
             if sl_order:
                 position_manager.set_sl_order_id(sl_order.get("orderId"))
 
-            logger.info(f"[OrderExecutor] {side} 开仓成功 @ {fill_price}")
-            return {"success": True, "message": "开仓成功", "entry_price": fill_price}
+            logger.info(f"[OrderExecutor] {side} 开仓成功 | 数量:{qty} | 价格:{fill_price}")
+            return {"success": True, "message": "开仓成功", "entry_price": fill_price, "qty": qty}
 
         except Exception as e:
             logger.error(f"[OrderExecutor] 开仓异常: {e}")
