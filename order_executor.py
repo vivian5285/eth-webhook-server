@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终修复版 - 30USDT内测 + 强健判断）
+# order_executor.py（最终完善版 - 30USDT内测专用）
 
 import logging
 from binance_client import binance_client
@@ -8,7 +8,8 @@ from position_manager import position_manager
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
 
-# 内测固定金额（30U）
+# ==================== 内测固定金额 ====================
+# 当前使用固定30U进行内测，流程跑通后可改为动态计算
 TEST_FIXED_USDT_AMOUNT = 30
 
 
@@ -17,9 +18,13 @@ class OrderExecutor:
         pass
 
     def open_position(self, side: str, data: dict = None):
+        """
+        开仓逻辑（纯净稳定版）
+        """
         logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}, data={data}")
 
         try:
+            # 获取当前价格
             current_price = binance_client.get_current_price(SYMBOL)
             if current_price is None or current_price <= 0:
                 logger.error(f"[OrderExecutor] 当前价格无效: {current_price}")
@@ -27,18 +32,18 @@ class OrderExecutor:
 
             atr = data.get("atr", 30) if data else 30
 
-            # 固定金额下单
+            # 固定金额下单（内测用）
             usdt_amount = TEST_FIXED_USDT_AMOUNT
             qty = round(usdt_amount / current_price, 3)
 
-            # 防止数量为负或过小
+            # 防止数量无效
             if qty <= 0:
                 logger.error(f"[OrderExecutor] 计算出的下单数量无效: {qty}")
                 return {"success": False, "message": "下单数量无效"}
 
             logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
 
-            # 计算止损
+            # 计算止损价格
             if side.upper() == "LONG":
                 sl_price = round(current_price - atr * 0.92, 2)
                 order_side = "BUY"
@@ -46,13 +51,14 @@ class OrderExecutor:
                 sl_price = round(current_price + atr * 0.92, 2)
                 order_side = "SELL"
 
-            # 下单
+            # 市价开仓
             order = binance_client.place_market_order(SYMBOL, order_side, qty)
             if not order or order.get("status") != "FILLED":
                 return {"success": False, "message": "开仓失败"}
 
             fill_price = float(order.get("avgPrice", current_price))
 
+            # 记录持仓
             position_manager.set_initial_position(
                 side=side.upper(),
                 entry_price=fill_price,
@@ -62,7 +68,7 @@ class OrderExecutor:
                 sl_price=sl_price
             )
 
-            # 挂止损单
+            # 挂 STOP_MARKET 止损单
             close_side = "SELL" if side.upper() == "LONG" else "BUY"
             sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl_price, qty)
             if sl_order:
@@ -76,6 +82,9 @@ class OrderExecutor:
             return {"success": False, "message": str(e)}
 
     def close_position(self, reason: str = "手动平仓"):
+        """
+        全平当前持仓
+        """
         try:
             pos = position_manager.get_position()
             if not pos or pos.get("current_qty", 0) <= 0:
@@ -87,8 +96,10 @@ class OrderExecutor:
 
             close_side = "SELL" if side == "LONG" else "BUY"
 
+            # 市价全平
             order = binance_client.place_market_order(SYMBOL, close_side, qty, reduce_only=True)
             if order and order.get("status") == "FILLED":
+                # 撤销止损单
                 sl_order_id = position_manager.get_sl_order_id()
                 if sl_order_id:
                     try:
@@ -98,6 +109,7 @@ class OrderExecutor:
 
                 position_manager.clear_position()
 
+                # 延迟导入，避免循环导入
                 from position_supervisor import position_supervisor
                 position_supervisor.report_protective_close(reason, side, qty, avg_price)
 
@@ -111,6 +123,9 @@ class OrderExecutor:
             return {"success": False, "message": str(e)}
 
     def move_to_breakeven(self):
+        """
+        TP1 后移保本
+        """
         try:
             pos = position_manager.get_position()
             if not pos:
@@ -143,4 +158,5 @@ class OrderExecutor:
             logger.error(f"[OrderExecutor] 移保本异常: {e}")
 
 
+# 单例
 order_executor = OrderExecutor()
