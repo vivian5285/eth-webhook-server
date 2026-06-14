@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终稳定版 - 30USDT内测 + 加强核实）
+# order_executor.py（最终稳定版 - 30USDT内测 + 健壮atr处理）
 
 import logging
 from binance_client import binance_client
@@ -23,8 +23,9 @@ class OrderExecutor:
             if current_price is None or current_price <= 0:
                 return {"success": False, "message": "获取价格失败"}
 
+            # ==================== 健壮处理 atr（关键修复） ====================
             atr = 30
-            if data and data.get("atr") is not None:
+            if data and isinstance(data, dict) and data.get("atr") is not None:
                 atr = data.get("atr")
 
             usdt_amount = TEST_FIXED_USDT_AMOUNT
@@ -33,8 +34,9 @@ class OrderExecutor:
             if qty <= 0:
                 return {"success": False, "message": "下单数量无效"}
 
-            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
+            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}, ATR:{atr}")
 
+            # 计算止损
             if side.upper() == "LONG":
                 sl_price = round(current_price - atr * 0.92, 2)
                 order_side = "BUY"
@@ -42,6 +44,7 @@ class OrderExecutor:
                 sl_price = round(current_price + atr * 0.92, 2)
                 order_side = "SELL"
 
+            # 市价开仓
             order = binance_client.place_market_order(SYMBOL, order_side, qty)
             if not order or order.get("status") != "FILLED":
                 return {"success": False, "message": "开仓失败"}
@@ -57,6 +60,7 @@ class OrderExecutor:
                 sl_price=sl_price
             )
 
+            # 挂止损单
             close_side = "SELL" if side.upper() == "LONG" else "BUY"
             sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl_price, qty)
             if sl_order:
