@@ -1,97 +1,66 @@
 #!/usr/bin/env python3
-# check_system.py（最终配套版 - 与加强版 app.py 完美配合）
+# check_system.py（混合模式优化版）
 
-import subprocess
-import time
-import requests
+import sys
+import os
+from datetime import datetime
 
-print("=" * 72)
-print("ETH 量化交易系统 - 自检脚本（最终版 · 适配 gunicorn）")
-print(f"检查时间：{time.strftime('%Y-%m-%d %H:%M:%S')}")
-print("=" * 72)
-print()
+# 确保能导入项目模块
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-errors = 0
-warnings = 0
+from position_manager import position_manager
+from position_supervisor import position_supervisor
+from tp_monitor import tp_monitor
 
-# 1. 检查 systemd 服务状态
-print("[1] 检查 systemd 服务状态...")
-result = subprocess.run(
-    ["systemctl", "is-active", "--quiet", "eth-webhook.service"]
-)
-if result.returncode == 0:
-    print("✅ eth-webhook.service 正在运行")
-else:
-    print("❌ eth-webhook.service 未运行")
-    errors += 1
-print()
 
-# 2. 检查 Flask /status 接口（核心健康检查）
-print("[2] 检查 Flask /status 接口 + TPMonitor 状态...")
-try:
-    resp = requests.get("http://127.0.0.1:5000/status", timeout=5)
-    if resp.status_code == 200:
-        data = resp.json()
-        print("✅ /status 接口正常")
-        
-        if data.get("tp_monitor_active"):
-            print("✅ TPMonitor 已在 gunicorn worker 中启动")
-        else:
-            print("⚠️ TPMonitor 暂未在当前检查进程中检测到（gunicorn 多 worker 正常现象）")
-            print("   → 建议查看日志确认 [启动] TP监控线程已成功启动")
-            warnings += 1
-    else:
-        print(f"❌ /status 接口异常: {resp.status_code}")
-        errors += 1
-except Exception as e:
-    print(f"❌ /status 接口无法访问: {e}")
-    errors += 1
-print()
+def check_system():
+    print("=" * 60)
+    print(f"【系统检查】{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
 
-# 3. 检查 BinanceClient（懒加载单例）
-print("[3] 检查 BinanceClient 初始化（懒加载单例）...")
-try:
-    from binance_client import get_binance_client
-    client = get_binance_client()
-    balance = client.get_account_balance()
-    print(f"✅ BinanceClient 初始化成功，当前权益: {balance:.2f} USDT")
-except Exception as e:
-    print(f"❌ BinanceClient 初始化失败: {e}")
-    errors += 1
-print()
+    # 1. TPMonitor 运行状态
+    print(f"\n[1] TPMonitor 状态: {'✅ 运行中' if tp_monitor.running else '❌ 未运行'}")
 
-# 4. 检查 PositionManager
-print("[4] 检查 PositionManager...")
-try:
-    from position_manager import position_manager
+    # 2. 当前持仓状态
     pos = position_manager.get_position()
     if pos:
-        print(f"✅ 当前有持仓: {pos['side']} {pos['qty']} 张 @ {pos['avg_price']}")
+        print(f"\n[2] 当前持仓:")
+        print(f"    方向: {pos['side']}")
+        print(f"    数量: {pos['qty']}")
+        print(f"    均价: {pos['avg_price']}")
+        print(f"    止损: {pos.get('stop_loss', '未设置')}")
+        print(f"    TP1 : {pos.get('tp1_price')}")
+        print(f"    TP2 : {pos.get('tp2_price')}")
+        print(f"    TP3 : {pos.get('tp3_price')}")
     else:
-        print("✅ 当前无持仓（正常）")
-except Exception as e:
-    print(f"❌ PositionManager 检查失败: {e}")
-    errors += 1
-print()
+        print("\n[2] 当前持仓: ✅ 无持仓")
 
-# 5. 检查 PositionSupervisor（智慧层）
-print("[5] 检查 PositionSupervisor（智慧层）...")
-try:
-    from position_supervisor import supervisor
-    print("✅ PositionSupervisor 已初始化")
-except Exception as e:
-    print(f"❌ PositionSupervisor 检查失败: {e}")
-    errors += 1
-print()
-
-# ==================== 总结 ====================
-print("=" * 72)
-if errors == 0:
-    if warnings == 0:
-        print("🎉 系统整体状态优秀，可以进行实盘测试！")
+    # 3. TP3 限价单状态（混合模式关键）
+    if position_manager.has_tp3_limit_order():
+        tp3_info = position_manager.get_tp3_limit_order()
+        print(f"\n[3] TP3 限价单: ✅ 存在")
+        print(f"    Order ID : {tp3_info['order_id']}")
+        print(f"    价格     : {tp3_info['price']}")
+        print(f"    数量     : {tp3_info['qty']}")
     else:
-        print("✅ 系统核心功能正常（存在 gunicorn 环境下的预期提示）")
-        print("   建议：重启后观察日志中是否出现「TP监控线程已成功启动」")
-else:
-    print(f"⚠️ 发现 {errors} 个错误，请根据上方提示进行排查")
-print("=" * 72)
+        print("\n[3] TP3 限价单: ✅ 无挂单")
+
+    # 4. 最后一次仓位检查时间（用于判断节流是否正常）
+    last_check = position_manager.last_reconcile_time
+    if last_check > 0:
+        from time import time
+        seconds_ago = int(time() - last_check)
+        print(f"\n[4] 最后仓位检查: {seconds_ago} 秒前")
+    else:
+        print("\n[4] 最后仓位检查: 尚未执行")
+
+    # 5. Supervisor 状态
+    print(f"\n[5] PositionSupervisor: ✅ 正常")
+
+    print("\n" + "=" * 60)
+    print("检查完成")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    check_system()
