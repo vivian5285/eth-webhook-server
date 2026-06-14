@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # risk_manager.py（每日回撤熔断 + 状态管理）
 
 import os
