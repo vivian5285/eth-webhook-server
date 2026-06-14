@@ -1,146 +1,176 @@
-# tp_monitor.py（最终完整版 - 已彻底移除 binance_client 未初始化检查）
+#!/usr/bin/env python3
+# tp_monitor.py（最终更新版 - 混合模式）
+
 import time
-import logging
-from binance_client import get_binance_client
+import threading
+from typing import Optional
+
+from binance_client import binance_client
 from position_manager import position_manager
-from position_supervisor import supervisor
-from config import Config
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
-binance_client = get_binance_client()
+from position_supervisor import position_supervisor
+from config import get_monitor_config
 
 
 class TPMonitor:
     def __init__(self):
+        self.client = binance_client
+        self.pm = position_manager
+        self.supervisor = position_supervisor
         self.running = False
-        self.tp1_hit = False
-        self.tp2_hit = False
+        self.thread: Optional[threading.Thread] = None
+        
+        # 配置
+        self.check_interval = 2.5          # 价格检查间隔（秒）
+        self.reconcile_interval = 28       # 仓位变化检测间隔（秒）
+        self.last_reconcile_ts = 0
 
     def start(self):
         if self.running:
-            logging.warning("[TPMonitor] 已经在运行中")
             return
         self.running = True
-        logging.info("[TPMonitor] TP监控已启动（最终版）")
-        while self.running:
-            try:
-                self._check_and_execute()
-                time.sleep(Config.TP_CHECK_INTERVAL)
-            except Exception as e:
-                logging.error(f"[TPMonitor] 循环异常: {e}", exc_info=True)
-                time.sleep(5)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        print("[TPMonitor] 启动成功（混合模式 - 只监控 TP1/TP2）")
 
     def stop(self):
         self.running = False
-        logging.info("[TPMonitor] TP监控已停止")
+        if self.thread:
+            self.thread.join(timeout=5)
+        print("[TPMonitor] 已停止")
 
-    def _reset_state(self):
-        self.tp1_hit = False
-        self.tp2_hit = False
+    def _run(self):
+        """主循环"""
+        while self.running:
+            try:
+                self._check_and_execute()
+                
+                # 节流式仓位变化检测（每 28 秒左右执行一次）
+                self._throttled_position_check()
+                
+            except Exception as e:
+                print(f"[TPMonitor] 循环异常: {e}")
+            
+            time.sleep(self.check_interval)
+
+    def _throttled_position_check(self):
+        """节流检查仓位是否发生人工变化"""
+        now = time.time()
+        if now - self.last_reconcile_ts < self.reconcile_interval:
+            return
+        
+        self.last_reconcile_ts = now
+        self.pm.record_reconcile_time()
+
+        try:
+            # 从交易所获取当前实际持仓
+            position = self.client.get_position("ETHUSDT")
+            if not position:
+                return
+
+            current_qty = float(position.get("positionAmt", 0))
+            current_avg_price = float(position.get("entryPrice", 0))
+
+            # 判断是否发生明显变化（>=30%）
+            if self.pm.has_significant_position_change(current_qty):
+                print("[TPMonitor] 检测到较大仓位变化，触发处理...")
+                self.supervisor.handle_manual_position_change(current_qty, current_avg_price)
+
+        except Exception as e:
+            print(f"[TPMonitor] 仓位检查异常: {e}")
 
     def _check_and_execute(self):
-        position = position_manager.get_position()
-        if not position:
-            self._reset_state()
+        """检查止损和 TP1/TP2"""
+        pos = self.pm.get_position()
+        if not pos:
             return
 
-        symbol = position.get("symbol", "ETHUSDT")
-        side = position.get("side")
-        entry_price = float(position.get("avg_price", 0))
-        tp1 = position.get("tp1")
-        tp2 = position.get("tp2")
-        tp3 = position.get("tp3")
-        stop_loss = position.get("stop_loss")
-
-        if not entry_price:
-            return
-
-        current_price = self._get_current_price(symbol)
+        current_price = self.client.get_current_price("ETHUSDT")
         if not current_price:
             return
 
-        is_long = side == "LONG"
+        side = pos["side"]
+        qty = pos["qty"]
+        stop_loss = pos.get("stop_loss")
+        tp1 = pos.get("tp1_price")
+        tp2 = pos.get("tp2_price")
 
-        # ==================== 保本止损（最高优先级） ====================
-        if stop_loss is not None:
-            if (is_long and current_price <= stop_loss) or (not is_long and current_price >= stop_loss):
-                logging.warning(f"🚨 [保本损触发] 现价 {current_price} 击穿止损线 {stop_loss}，执行紧急全平！")
-                binance_client.close_all_positions(symbol)
-                supervisor.notify_close_all("触发动态保本损，安全撤退")
-                position_manager.clear_position()
-                self._reset_state()
+        # ========== 最高优先级：止损检查 ==========
+        if stop_loss:
+            if (side == "LONG" and current_price <= stop_loss) or \
+               (side == "SHORT" and current_price >= stop_loss):
+                self._execute_full_close("stop_loss_hit")
                 return
 
-        # ==================== TP1 执行（40%） ====================
-        if not self.tp1_hit and tp1 is not None:
-            if (is_long and current_price >= tp1) or (not is_long and current_price <= tp1):
-                logging.info(f"[TP1触发] 价格到达 {tp1}，准备平仓 {Config.TP_CLOSE_RATIOS[0]*100}%")
-                closed_qty = self._execute_partial_close(symbol, Config.TP_CLOSE_RATIOS[0])
+        # ========== TP1 检查 ==========
+        if tp1 and qty > 0:
+            if (side == "LONG" and current_price >= tp1) or \
+               (side == "SHORT" and current_price <= tp1):
+                self._execute_tp(1, tp1)
+                return
 
-                if closed_qty > 0:
-                    supervisor.notify_tp_hit(level="1", closed_qty=closed_qty, current_price=current_price)
+        # ========== TP2 检查 ==========
+        if tp2 and qty > 0:
+            if (side == "LONG" and current_price >= tp2) or \
+               (side == "SHORT" and current_price <= tp2):
+                self._execute_tp(2, tp2)
+                return
 
-                    # 设置保本止损（使用 Config 中的固定缓冲）
-                    buffer = Config.BREAKEVEN_BUFFER_USD
-                    new_sl = entry_price + buffer if is_long else entry_price - buffer
-                    position_manager.update_position(
-                        side=side, symbol=symbol,
-                        qty=position.get("qty", 0) * (1 - Config.TP_CLOSE_RATIOS[0]),
-                        avg_price=entry_price,
-                        tp1=None, tp2=tp2, tp3=tp3,
-                        stop_loss=round(new_sl, 2)
-                    )
-                self.tp1_hit = True
+    def _execute_tp(self, tp_level: int, target_price: float):
+        """执行 TP1 或 TP2 分批平仓"""
+        pos = self.pm.get_position()
+        if not pos:
+            return
 
-        # ==================== TP2 执行（40%） ====================
-        if self.tp1_hit and not self.tp2_hit and tp2 is not None:
-            if (is_long and current_price >= tp2) or (not is_long and current_price <= tp2):
-                logging.info(f"[TP2触发] 价格到达 {tp2}，准备平仓 {Config.TP_CLOSE_RATIOS[1]*100}%")
-                closed_qty = self._execute_partial_close(symbol, Config.TP_CLOSE_RATIOS[1])
+        total_qty = pos["qty"]
+        # 分批比例（可从 config 读取）
+        close_ratio = 0.4 if tp_level == 1 else 0.4
+        close_qty = round(total_qty * close_ratio, 3)
 
-                if closed_qty > 0:
-                    supervisor.notify_tp_hit(level="2", closed_qty=closed_qty, current_price=current_price)
-                    position_manager.update_position(
-                        side=side, symbol=symbol,
-                        qty=position.get("qty", 0) * (1 - Config.TP_CLOSE_RATIOS[0] - Config.TP_CLOSE_RATIOS[1]),
-                        avg_price=entry_price,
-                        tp1=None, tp2=None, tp3=tp3,
-                        stop_loss=position.get("stop_loss")
-                    )
-                self.tp2_hit = True
+        if close_qty <= 0:
+            return
 
-        # ==================== TP3 执行（剩余20%） ====================
-        if tp3 is not None:
-            if (is_long and current_price >= tp3) or (not is_long and current_price <= tp3):
-                logging.info(f"[TP3触发] 价格到达 {tp3}，平仓剩余仓位")
-                binance_client.close_all_positions(symbol)
-                supervisor.notify_tp_hit(level="3", closed_qty=position.get("qty", 0), current_price=current_price)
-                position_manager.clear_position()
-                self._reset_state()
+        side = "SELL" if pos["side"] == "LONG" else "BUY"
 
-    def _execute_partial_close(self, symbol, percent):
-        """执行部分平仓并返回实际平仓数量"""
         try:
-            real_pos = binance_client.get_current_position(symbol)
-            if not real_pos:
-                return 0
-            current_qty = abs(float(real_pos.get("positionAmt", 0)))
-            close_qty = round(current_qty * percent, 3)
-            if close_qty < 0.001:
-                return 0
-            result = binance_client.close_partial_position(symbol, close_qty)
-            return close_qty if result.get("status") == "success" else 0
+            # 执行平仓
+            self.client.close_position(
+                symbol="ETHUSDT",
+                side=side,
+                qty=close_qty
+            )
+
+            # 更新内部状态
+            remaining_qty = max(0, total_qty - close_qty)
+            if remaining_qty > 0:
+                self.pm.update_position(pos["side"], remaining_qty, pos["avg_price"])
+            else:
+                self.pm.clear_position()
+
+            # 通知 supervisor
+            self.supervisor.notify_tp_hit(tp_level, close_qty, target_price)
+
+            # TP1 命中后移动止损到保本
+            if tp_level == 1 and remaining_qty > 0:
+                breakeven = pos["avg_price"]
+                self.pm.set_stop_loss(breakeven)
+                print(f"[TPMonitor] TP1 命中，已移动止损至保本价: {breakeven}")
+
         except Exception as e:
-            logging.error(f"[部分平仓失败] {e}")
-            return 0
+            print(f"[TPMonitor] 执行 TP{tp_level} 失败: {e}")
 
-    def _get_current_price(self, symbol):
+    def _execute_full_close(self, reason: str):
+        """全平仓位"""
         try:
-            ticker = binance_client.client.futures_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
-        except:
-            return None
+            pos = self.pm.get_position()
+            if pos and pos["qty"] > 0:
+                side = "SELL" if pos["side"] == "LONG" else "BUY"
+                self.client.close_position("ETHUSDT", side, pos["qty"])
+            
+            self.pm.clear_position()
+            self.supervisor.notify_full_close(reason)
+            print(f"[TPMonitor] 全平完成，原因: {reason}")
+        except Exception as e:
+            print(f"[TPMonitor] 全平失败: {e}")
 
 
 # 全局实例
