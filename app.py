@@ -10,6 +10,15 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ==================== 在模块加载时启动 ProfitTaker（适配 Gunicorn） ====================
+try:
+    from profit_taker import profit_taker
+    if not profit_taker.running:
+        profit_taker.start()
+        logger.info("[App] ProfitTaker 后台线程已启动（模块加载时）")
+except Exception as e:
+    logger.error(f"[App] ProfitTaker 启动失败: {e}")
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -67,11 +76,12 @@ def status():
 
 
 if __name__ == '__main__':
-    # ==================== 启动时初始化 ====================
+    # 本地直接运行 python app.py 时也会启动（双重保险）
     try:
         from profit_taker import profit_taker
-        profit_taker.start()
-        logger.info("[App] ProfitTaker 已启动（VPS完全接管40/40/20模式）")
+        if not profit_taker.running:
+            profit_taker.start()
+            logger.info("[App] ProfitTaker 已启动（本地运行模式）")
 
         from position_supervisor import position_supervisor
         position_supervisor.force_reconcile(source="startup")
