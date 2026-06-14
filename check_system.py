@@ -1,143 +1,84 @@
 #!/usr/bin/env python3
-# check_system.py（完整检查脚本 - 适配新分层架构）
+# check_system.py（轻量版 - 快速检查，不触发重度 RiskManager 调用）
 
+import requests
 import sys
-import logging
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+BASE_URL = "http://localhost:5000"
 
 
-def check_imports():
-    """检查核心模块是否能正常导入"""
-    logger.info("=== 1. 检查模块导入 ===")
+def check_http_status():
+    """通过 /status 接口快速获取系统状态（推荐方式）"""
+    print("=== 1. 检查 HTTP 服务状态 ===")
     try:
-        from binance_client import binance_client
-        from position_manager import position_manager
-        from position_supervisor import position_supervisor
-        from order_executor import order_executor
-        from tp_monitor import tp_monitor
-        from risk_manager import risk_manager
-        from dingtalk import send_dingtalk_message
-        logger.info("✓ 所有核心模块导入成功")
-        return True
-    except Exception as e:
-        logger.error(f"✗ 模块导入失败: {e}")
+        resp = requests.get(f"{BASE_URL}/status", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            print(f"✓ HTTP 服务正常响应")
+            print(f"  - has_position: {data.get('has_position')}")
+            print(f"  - has_tp3_limit_order: {data.get('has_tp3_limit_order')}")
+            print(f"  - daily_breaker_triggered: {data.get('daily_breaker_triggered')}")
+            print(f"  - current_drawdown: {data.get('current_drawdown_percent', 'N/A')}%")
+            return True
+        else:
+            print(f"✗ HTTP 服务返回异常状态码: {resp.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"✗ 无法连接到本地服务: {e}")
+        print("  → 请确认服务是否正常运行: sudo systemctl status eth-webhook.service")
         return False
 
 
-def check_position_manager():
-    """检查 PositionManager 状态"""
-    logger.info("\n=== 2. 检查 PositionManager ===")
-    try:
-        from position_manager import position_manager
-        
-        pos = position_manager.get_position()
-        has_tp3 = position_manager.has_tp3_limit_order()
-        
-        logger.info(f"当前持仓: {pos}")
-        logger.info(f"是否有 TP3 限价单: {has_tp3}")
-        logger.info(f"当前持仓数量: {position_manager.get_current_qty()}")
-        logger.info("✓ PositionManager 正常")
-        return True
-    except Exception as e:
-        logger.error(f"✗ PositionManager 检查失败: {e}")
-        return False
+def check_basic_imports():
+    """只检查关键模块能否正常导入（不触发网络请求）"""
+    print("\n=== 2. 检查核心模块导入 ===")
+    modules = [
+        ("position_manager", "PositionManager"),
+        ("binance_client", "BinanceClient"),
+        ("order_executor", "OrderExecutor"),
+        ("position_supervisor", "PositionSupervisor"),
+    ]
+
+    all_ok = True
+    for module_name, display_name in modules:
+        try:
+            __import__(module_name)
+            print(f"✓ {display_name} 导入成功")
+        except Exception as e:
+            print(f"✗ {display_name} 导入失败: {e}")
+            all_ok = False
+    return all_ok
 
 
-def check_binance_client():
-    """检查 BinanceClient 连接"""
-    logger.info("\n=== 3. 检查 BinanceClient ===")
-    try:
-        from binance_client import binance_client
-        
-        price = binance_client.get_current_price()
-        usdt_balance = binance_client.get_usdt_balance()
-        position = binance_client.get_position()
-        
-        logger.info(f"当前 ETH 价格: {price}")
-        logger.info(f"USDT 可用余额: {usdt_balance}")
-        logger.info(f"当前持仓信息: {position}")
-        logger.info("✓ BinanceClient 连接正常")
-        return True
-    except Exception as e:
-        logger.error(f"✗ BinanceClient 检查失败: {e}")
-        return False
-
-
-def check_risk_manager():
-    """检查 RiskManager"""
-    logger.info("\n=== 4. 检查 RiskManager ===")
+def check_risk_manager_light():
+    """轻量检查 RiskManager（只看初始化，不调用重方法）"""
+    print("\n=== 3. 检查 RiskManager（轻量） ===")
     try:
         from risk_manager import risk_manager
-        logger.info(f"每日峰值权益: {risk_manager.daily_peak_equity}")
-        logger.info(f"熔断是否触发: {risk_manager.breaker_triggered}")
-        logger.info("✓ RiskManager 正常")
+        print("✓ RiskManager 导入成功")
+        # 只打印缓存的峰值，不触发实时请求
+        print(f"  - daily_peak_equity (缓存): {getattr(risk_manager, 'daily_peak_equity', 0):.2f} USDT")
         return True
     except Exception as e:
-        logger.error(f"✗ RiskManager 检查失败: {e}")
-        return False
-
-
-def check_tp_monitor():
-    """检查 TPMonitor 状态"""
-    logger.info("\n=== 5. 检查 TPMonitor ===")
-    try:
-        from tp_monitor import tp_monitor
-        logger.info(f"TPMonitor 运行状态: {tp_monitor.running}")
-        logger.info("✓ TPMonitor 正常")
-        return True
-    except Exception as e:
-        logger.error(f"✗ TPMonitor 检查失败: {e}")
-        return False
-
-
-def check_position_supervisor():
-    """检查 PositionSupervisor"""
-    logger.info("\n=== 6. 检查 PositionSupervisor ===")
-    try:
-        from position_supervisor import position_supervisor
-        
-        # 测试对账功能
-        result = position_supervisor.force_reconcile(source="check_script")
-        logger.info(f"强制对账结果: {result}")
-        logger.info("✓ PositionSupervisor 正常")
-        return True
-    except Exception as e:
-        logger.error(f"✗ PositionSupervisor 检查失败: {e}")
-        return False
-
-
-def check_order_executor():
-    """检查 OrderExecutor"""
-    logger.info("\n=== 7. 检查 OrderExecutor ===")
-    try:
-        from order_executor import order_executor
-        logger.info("✓ OrderExecutor 正常（实例化成功）")
-        return True
-    except Exception as e:
-        logger.error(f"✗ OrderExecutor 检查失败: {e}")
+        print(f"✗ RiskManager 检查异常: {e}")
         return False
 
 
 def main():
-    logger.info("开始系统全面检查...\n")
-    
-    results = []
-    results.append(check_imports())
-    results.append(check_position_manager())
-    results.append(check_binance_client())
-    results.append(check_risk_manager())
-    results.append(check_tp_monitor())
-    results.append(check_position_supervisor())
-    results.append(check_order_executor())
-    
-    logger.info("\n" + "="*50)
-    if all(results):
-        logger.info("✅ 系统检查全部通过！")
+    print(f"开始轻量系统检查... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
+
+    http_ok = check_http_status()
+    import_ok = check_basic_imports()
+    risk_ok = check_risk_manager_light()
+
+    print("\n" + "=" * 50)
+    if http_ok and import_ok:
+        print("✓ 轻量检查通过，核心服务基本正常")
+        print("  建议：使用 curl http://localhost:5000/status 查看完整状态")
     else:
-        logger.warning("⚠️  系统检查存在问题，请查看上方日志")
-    logger.info("="*50)
+        print("⚠ 检查发现问题，请查看上方日志")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
