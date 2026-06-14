@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tp_monitor.py（最终更新版 - 混合模式）
+# tp_monitor.py（最终版 - 混合模式）
 
 import time
 import threading
@@ -8,7 +8,6 @@ from typing import Optional
 from binance_client import binance_client
 from position_manager import position_manager
 from position_supervisor import position_supervisor
-from config import get_monitor_config
 
 
 class TPMonitor:
@@ -18,10 +17,10 @@ class TPMonitor:
         self.supervisor = position_supervisor
         self.running = False
         self.thread: Optional[threading.Thread] = None
-        
+
         # 配置
-        self.check_interval = 2.5          # 价格检查间隔（秒）
-        self.reconcile_interval = 28       # 仓位变化检测间隔（秒）
+        self.check_interval = 2.5          # 价格检查频率（秒）
+        self.reconcile_interval = 28       # 人工仓位变化检测节流间隔（秒）
         self.last_reconcile_ts = 0
 
     def start(self):
@@ -30,7 +29,7 @@ class TPMonitor:
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
-        print("[TPMonitor] 启动成功（混合模式 - 只监控 TP1/TP2）")
+        print("[TPMonitor] 启动成功（混合模式 - 只监控 TP1/TP2 + 节流检测人工变化）")
 
     def stop(self):
         self.running = False
@@ -43,26 +42,22 @@ class TPMonitor:
         while self.running:
             try:
                 self._check_and_execute()
-                
-                # 节流式仓位变化检测（每 28 秒左右执行一次）
                 self._throttled_position_check()
-                
             except Exception as e:
                 print(f"[TPMonitor] 循环异常: {e}")
-            
             time.sleep(self.check_interval)
 
+    # ==================== 节流式人工仓位变化检测 ====================
     def _throttled_position_check(self):
-        """节流检查仓位是否发生人工变化"""
+        """每 28 秒检查一次是否发生人工加减仓"""
         now = time.time()
         if now - self.last_reconcile_ts < self.reconcile_interval:
             return
-        
+
         self.last_reconcile_ts = now
         self.pm.record_reconcile_time()
 
         try:
-            # 从交易所获取当前实际持仓
             position = self.client.get_position("ETHUSDT")
             if not position:
                 return
@@ -70,16 +65,16 @@ class TPMonitor:
             current_qty = float(position.get("positionAmt", 0))
             current_avg_price = float(position.get("entryPrice", 0))
 
-            # 判断是否发生明显变化（>=30%）
             if self.pm.has_significant_position_change(current_qty):
-                print("[TPMonitor] 检测到较大仓位变化，触发处理...")
+                print("[TPMonitor] 检测到较大人工仓位变化，触发处理...")
                 self.supervisor.handle_manual_position_change(current_qty, current_avg_price)
 
         except Exception as e:
-            print(f"[TPMonitor] 仓位检查异常: {e}")
+            print(f"[TPMonitor] 仓位变化检查异常: {e}")
 
+    # ==================== 核心检查与执行 ====================
     def _check_and_execute(self):
-        """检查止损和 TP1/TP2"""
+        """检查止损、TP1、TP2"""
         pos = self.pm.get_position()
         if not pos:
             return
@@ -94,21 +89,21 @@ class TPMonitor:
         tp1 = pos.get("tp1_price")
         tp2 = pos.get("tp2_price")
 
-        # ========== 最高优先级：止损检查 ==========
+        # ========== 最高优先级：止损 ==========
         if stop_loss:
             if (side == "LONG" and current_price <= stop_loss) or \
                (side == "SHORT" and current_price >= stop_loss):
                 self._execute_full_close("stop_loss_hit")
                 return
 
-        # ========== TP1 检查 ==========
+        # ========== TP1 ==========
         if tp1 and qty > 0:
             if (side == "LONG" and current_price >= tp1) or \
                (side == "SHORT" and current_price <= tp1):
                 self._execute_tp(1, tp1)
                 return
 
-        # ========== TP2 检查 ==========
+        # ========== TP2 ==========
         if tp2 and qty > 0:
             if (side == "LONG" and current_price >= tp2) or \
                (side == "SHORT" and current_price <= tp2):
@@ -122,7 +117,6 @@ class TPMonitor:
             return
 
         total_qty = pos["qty"]
-        # 分批比例（可从 config 读取）
         close_ratio = 0.4 if tp_level == 1 else 0.4
         close_qty = round(total_qty * close_ratio, 3)
 
@@ -132,21 +126,14 @@ class TPMonitor:
         side = "SELL" if pos["side"] == "LONG" else "BUY"
 
         try:
-            # 执行平仓
-            self.client.close_position(
-                symbol="ETHUSDT",
-                side=side,
-                qty=close_qty
-            )
+            self.client.close_position("ETHUSDT", side, close_qty)
 
-            # 更新内部状态
             remaining_qty = max(0, total_qty - close_qty)
             if remaining_qty > 0:
                 self.pm.update_position(pos["side"], remaining_qty, pos["avg_price"])
             else:
                 self.pm.clear_position()
 
-            # 通知 supervisor
             self.supervisor.notify_tp_hit(tp_level, close_qty, target_price)
 
             # TP1 命中后移动止损到保本
@@ -159,13 +146,13 @@ class TPMonitor:
             print(f"[TPMonitor] 执行 TP{tp_level} 失败: {e}")
 
     def _execute_full_close(self, reason: str):
-        """全平仓位"""
+        """全平"""
         try:
             pos = self.pm.get_position()
             if pos and pos["qty"] > 0:
                 side = "SELL" if pos["side"] == "LONG" else "BUY"
                 self.client.close_position("ETHUSDT", side, pos["qty"])
-            
+
             self.pm.clear_position()
             self.supervisor.notify_full_close(reason)
             print(f"[TPMonitor] 全平完成，原因: {reason}")
