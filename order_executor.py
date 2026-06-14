@@ -8,7 +8,7 @@ from position_manager import position_manager
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
 
-# 内测固定金额（30U）
+# ==================== 内测配置 ====================
 TEST_FIXED_USDT_AMOUNT = 30
 
 
@@ -89,6 +89,7 @@ class OrderExecutor:
 
             order = binance_client.place_market_order(SYMBOL, close_side, qty, reduce_only=True)
             if order and order.get("status") == "FILLED":
+                # 撤销止损单
                 sl_order_id = position_manager.get_sl_order_id()
                 if sl_order_id:
                     try:
@@ -98,6 +99,7 @@ class OrderExecutor:
 
                 position_manager.clear_position()
 
+                # 延迟导入，避免循环导入
                 from position_supervisor import position_supervisor
                 position_supervisor.report_protective_close(reason, side, qty, avg_price)
 
