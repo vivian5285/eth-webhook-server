@@ -90,6 +90,10 @@ class ProfitTaker:
         # === 18-50 USD 目标范围监控（A 需求） ===
         self._check_tp_distance(pos)
 
+        # === 监督层方向对齐检查（与最新 TV 信号一致性） ===
+        from position_supervisor import position_supervisor
+        position_supervisor.check_and_align_with_latest_signal()
+
         # 自主 40/40/20
         hit_level = None
         if side == "LONG":
