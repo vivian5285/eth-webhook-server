@@ -32,6 +32,31 @@ class ProfitTaker:
         self._thread.start()
         logger.info("[ProfitTaker] VPS 完全接管 40/40/20 模式已启动")
 
+    def _check_tp_distance(self, pos: dict):
+        """检查从入场到 TP3 的 USD 距离是否在目标 18-50 美元范围内"""
+        try:
+            entry = pos.get("entry_price", 0)
+            tp3 = pos.get("tp3_price", 0)
+            side = pos.get("side")
+
+            if entry <= 0 or tp3 <= 0:
+                return
+
+            distance_usd = abs(tp3 - entry)
+
+            if distance_usd < 18 or distance_usd > 50:
+                msg = (
+                    f"⚠️ **【TP 距离提醒】**\n"
+                    f"当前从入场到 TP3 距离为 **{distance_usd:.2f} USD**，"
+                    f"目标范围建议 18~50 USD。\n"
+                    f"方向: {side} | 入场: {entry} | TP3: {tp3}\n"
+                    f"建议关注 ATR 倍数或当前市场波动率。"
+                )
+                send_dingtalk_message(msg)
+                logger.warning(f"[ProfitTaker] TP3 距离异常: {distance_usd:.2f} USD")
+        except Exception as e:
+            logger.error(f"[ProfitTaker] TP 距离检查异常: {e}")
+
     def _run(self):
         while self.running:
             try:
@@ -62,6 +87,10 @@ class ProfitTaker:
         tp1_price = pos.get("tp1_price")
         tp2_price = pos.get("tp2_price")
 
+        # === 18-50 USD 目标范围监控（A 需求） ===
+        self._check_tp_distance(pos)
+
+        # 自主 40/40/20
         hit_level = None
         if side == "LONG":
             if not tp1_hit and current_price >= tp1_price:
@@ -77,6 +106,7 @@ class ProfitTaker:
         if hit_level:
             self._execute_scale_out(hit_level, initial_qty, current_qty, side)
 
+        # 人工加减仓检测
         now = time.time()
         if now - self._last_manual_check_time > 8:
             self._detect_manual_change(pos, current_qty)
@@ -101,9 +131,16 @@ class ProfitTaker:
                 order_executor.move_to_breakeven()
 
             position_supervisor.force_reconcile(source=f"profit_taker_{level.lower()}")
-            send_dingtalk_message(
-                f"【{level} 自主减仓 - VPS完全接管】\n方向: {side} | 减仓: {close_qty} | 剩余: {new_current}"
-            )
+
+            # 详细决策推送（美观 + 参数完整）
+            details = {
+                "方向": side,
+                "减仓数量": close_qty,
+                "剩余数量": new_current,
+                "触发级别": level,
+                "当前模式": "VPS完全接管 40/40/20"
+            }
+            position_supervisor.send_detailed_decision(f"{level} 自主减仓成功", details, "✅")
         except Exception as e:
             logger.error(f"[ProfitTaker] {level} 减仓失败: {e}")
 
@@ -163,6 +200,7 @@ class ProfitTaker:
                         "tp_stage": 0
                     })
 
+            # 重挂 SL
             old_sl = position_manager.get_sl_order_id()
             if old_sl:
                 try: binance_client.cancel_order(SYMBOL, old_sl)
