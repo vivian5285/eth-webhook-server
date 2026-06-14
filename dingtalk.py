@@ -1,47 +1,71 @@
 #!/usr/bin/env python3
-# dingtalk.py（最终兼容版）
+# dingtalk.py（加强版 - 更好错误处理 + 详细日志）
 
-import os
+import logging
 import time
 import hmac
 import hashlib
 import base64
+import urllib.parse
 import requests
-from urllib.parse import quote_plus
-
 from config import Config
 
+logger = logging.getLogger(__name__)
 
-def send_dingtalk_message(content: str, title: str = "交易提醒"):
-    """发送钉钉通知"""
-    webhook = Config.DINGTALK_WEBHOOK
+
+def send_dingtalk_message(content: str, level: str = "INFO") -> bool:
+    """
+    发送钉钉消息（加强版）
+    支持加签（secret）和普通 webhook
+    """
+    webhook_url = Config.DINGTALK_WEBHOOK
     secret = Config.DINGTALK_SECRET
 
-    if not webhook:
-        print(f"[DingTalk] 未配置 webhook，跳过通知: {content}")
-        return
+    if not webhook_url:
+        logger.warning("[DingTalk] 未配置 DINGTALK_WEBHOOK，跳过发送")
+        return False
 
     try:
-        timestamp = str(round(time.time() * 1000))
-        string_to_sign = f'{timestamp}\n{secret}'
-        string_to_sign_enc = string_to_sign.encode('utf-8')
-        secret_enc = secret.encode('utf-8')
-        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
-        sign = quote_plus(base64.b64encode(hmac_code))
+        # 如果配置了 secret，则进行加签
+        if secret:
+            timestamp = str(round(time.time() * 1000))
+            string_to_sign = f"{timestamp}\n{secret}"
+            hmac_code = hmac.new(
+                secret.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                digestmod=hashlib.sha256
+            ).digest()
+            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+            url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
+        else:
+            url = webhook_url
 
-        url = f"{webhook}&timestamp={timestamp}&sign={sign}"
-
+        headers = {"Content-Type": "application/json"}
         data = {
-            "msgtype": "text",
-            "text": {
-                "content": f"{title}\n{content}"
+            "msgtype": "markdown",
+            "markdown": {
+                "title": f"交易系统通知 - {level}",
+                "text": content
             }
         }
 
-        resp = requests.post(url, json=data, timeout=5)
-        if resp.status_code == 200:
-            print("[DingTalk] 通知发送成功")
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("errcode") == 0:
+                logger.info("[DingTalk] 消息发送成功")
+                return True
+            else:
+                logger.error(f"[DingTalk] 发送失败: {result}")
+                return False
         else:
-            print(f"[DingTalk] 发送失败: {resp.text}")
+            logger.error(f"[DingTalk] HTTP请求失败: {response.status_code} - {response.text}")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"[DingTalk] 网络请求异常: {e}")
+        return False
     except Exception as e:
-        print(f"[DingTalk] 发送异常: {e}")
+        logger.error(f"[DingTalk] 发送异常: {e}")
+        return False
