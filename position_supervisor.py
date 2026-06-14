@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终版 - 全面详细钉钉报告）
+# position_supervisor.py（最终完整版）
 
 import logging
 import time
@@ -34,7 +34,6 @@ class PositionSupervisor:
             lines.append(f"**{k}**: `{v}`")
         send_dingtalk_message("\n".join(lines))
 
-    # ==================== 常用报告封装 ====================
     def report_open_success(self, side, usdt_amount, entry_price, sl, tp1, tp2, tp3):
         details = {
             "方向": side,
@@ -107,10 +106,10 @@ class PositionSupervisor:
             order_executor.close_position(reason or "保护性全平")
 
     def _handle_entry_signal(self, side, atr):
-        # 由 order_executor 处理开仓 + 报告
+        # 由 order_executor 处理
         pass
 
-    # ==================== 方向对齐 ====================
+    # ==================== 方向对齐检查 ====================
     def check_and_align_with_latest_signal(self):
         if not self.last_signal:
             return
@@ -132,7 +131,9 @@ class PositionSupervisor:
         order_executor.open_position(latest_action, {"atr": self.last_signal.get("atr")})
 
     def force_reconcile(self, source: str = "manual"):
-        # 增强版对账（已包含详细报告逻辑）
+        # 增强版对账逻辑（可按需扩展）
         pass
-# 在文件最后一行添加
+
+
+# ==================== 必须有这一行（单例） ====================
 position_supervisor = PositionSupervisor()
