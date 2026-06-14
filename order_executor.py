@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终完善版）
+# order_executor.py（内测专用最终版 - 固定小金额模式）
 
 import logging
 from binance_client import binance_client
@@ -8,6 +8,11 @@ from position_manager import position_manager
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
 
+# ==================== 内测配置区 ====================
+# 当前使用固定小金额模式（方便内测）
+# 等流程跑通后，把下面这行改回动态 80% + 5倍杠杆计算
+TEST_FIXED_USDT_AMOUNT = 30          # 内测固定下单金额（单位：USDT）
+
 
 class OrderExecutor:
     def __init__(self):
@@ -15,9 +20,9 @@ class OrderExecutor:
 
     def open_position(self, side: str, data: dict = None):
         """
-        开仓逻辑（纯执行层）
-        说明：是否需要先平仓由 position_supervisor 统一决策，
-              这里只负责执行开仓操作。
+        开仓逻辑（内测固定小金额版）
+        说明：当前使用固定金额，方便内测。
+              等流程跑通后可切换为动态 80% + 5倍杠杆计算。
         """
         logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}, data={data}")
 
@@ -27,21 +32,13 @@ class OrderExecutor:
                 logger.error("[OrderExecutor] 获取当前价格失败，终止开仓")
                 return {"success": False, "message": "获取价格失败"}
 
-            balance = binance_client.get_account_balance()
-            if balance is None or balance <= 0:
-                logger.error(f"[OrderExecutor] 获取余额失败或余额为0: {balance}")
-                return {"success": False, "message": "余额不足"}
-
             atr = data.get("atr", 30) if data else 30
 
-            # 内测规则：余额80% + 5倍杠杆
-            usable_balance = balance * 0.80
-            leverage = 5
-            max_position_value = usable_balance * leverage
-            qty = round(max_position_value / current_price, 3)
-            qty = max(qty, 0.001)
+            # ==================== 内测固定小金额计算 ====================
+            usdt_amount = TEST_FIXED_USDT_AMOUNT
+            qty = max(round(usdt_amount / current_price, 3), 0.001)
 
-            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 可用余额:{balance}, 下单数量:{qty}")
+            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
 
             # 计算止损价格
             if side.upper() == "LONG":
