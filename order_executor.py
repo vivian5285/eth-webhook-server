@@ -15,18 +15,18 @@ class OrderExecutor:
 
     def open_position(self, side: str, data: dict = None):
         """
-        开仓逻辑（加强版：80%余额 + 5倍杠杆 + 防御判断 + 详细日志）
+        开仓逻辑（纯执行层）
+        说明：是否需要先平仓由 position_supervisor 统一决策，
+              这里只负责执行开仓操作。
         """
         logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}, data={data}")
 
         try:
-            # 获取当前价格
             current_price = binance_client.get_current_price(SYMBOL)
             if current_price is None:
                 logger.error("[OrderExecutor] 获取当前价格失败，终止开仓")
                 return {"success": False, "message": "获取价格失败"}
 
-            # 获取账户可用余额
             balance = binance_client.get_account_balance()
             if balance is None or balance <= 0:
                 logger.error(f"[OrderExecutor] 获取余额失败或余额为0: {balance}")
@@ -34,7 +34,7 @@ class OrderExecutor:
 
             atr = data.get("atr", 30) if data else 30
 
-            # 内测规则：使用余额的80% + 5倍杠杆
+            # 内测规则：余额80% + 5倍杠杆
             usable_balance = balance * 0.80
             leverage = 5
             max_position_value = usable_balance * leverage
@@ -42,12 +42,6 @@ class OrderExecutor:
             qty = max(qty, 0.001)
 
             logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 可用余额:{balance}, 下单数量:{qty}")
-
-            # 防止重复开仓（永远只开一手）
-            current_pos = position_manager.get_position()
-            if current_pos and current_pos.get("current_qty", 0) > 0:
-                logger.warning("[OrderExecutor] 当前已有持仓，拒绝重复开仓")
-                return {"success": False, "message": "当前已有持仓"}
 
             # 计算止损价格
             if side.upper() == "LONG":
