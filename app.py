@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
-# app.py（最终更新版 - 混合模式 + 快速响应）
+# app.py（最终优化版 - 混合模式 + 快速响应）
 
 import os
 import logging
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor
-import threading
 
 from position_supervisor import position_supervisor
 from tp_monitor import tp_monitor
 from binance_client import binance_client
-from config import WEBHOOK_SECRET  # 可选，用于简单鉴权
+from config import WEBHOOK_SECRET
 
 # ==================== Flask App 初始化 ====================
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 后台线程池（建议 worker 数量 4~8）
+# 后台线程池
 executor = ThreadPoolExecutor(max_workers=6)
 
-# ==================== 启动 TPMonitor ====================
+
 def start_tp_monitor():
+    """启动 TPMonitor（只启动一次）"""
     if not tp_monitor.running:
         tp_monitor.start()
         logger.info("[App] TPMonitor 已启动")
+
 
 # ==================== Webhook 入口（快速响应） ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(silent=True) or request.form.to_dict()
 
-    # 可选：简单鉴权
+    # 可选鉴权
     if WEBHOOK_SECRET and data.get("secret") != WEBHOOK_SECRET:
         return jsonify({"status": "error", "message": "Invalid secret"}), 403
 
@@ -42,19 +43,14 @@ def webhook():
 
 def handle_signal_in_background(data: dict):
     """
-    后台处理信号（核心逻辑）
-    新信号处理顺序：
-    1. 如果有 TP3 限价单 → 先撤销
-    2. 全平当前仓位（如有）
-    3. 开新仓
+    后台处理信号（混合模式核心逻辑）
     """
     try:
         signal_type = data.get("signal", "").upper()
         symbol = data.get("symbol", "ETHUSDT")
-
         logger.info(f"[Signal] 收到信号: {signal_type} {symbol}")
 
-        # ========== 新信号到来时的清理逻辑（混合模式关键） ==========
+        # ========== 新信号到来时的清理（混合模式关键） ==========
         if signal_type in ["LONG", "SHORT"]:
             # 1. 如果有 TP3 限价单，先撤销
             if position_supervisor.pm.has_tp3_limit_order():
@@ -72,7 +68,6 @@ def handle_signal_in_background(data: dict):
                     position_supervisor.notify_full_close("new_signal")
                 except Exception as e:
                     logger.error(f"[Signal] 全平失败: {e}")
-                    position_supervisor.notify_full_close("new_signal_failed")
 
             # 3. 开新仓
             logger.info(f"[Signal] 开始开新仓: {signal_type}")
@@ -80,7 +75,7 @@ def handle_signal_in_background(data: dict):
                 order = binance_client.open_market_order(
                     symbol=symbol,
                     side=signal_type,
-                    usdt_amount=data.get("usdt_amount", 100)  # 可从 signal 获取
+                    usdt_amount=data.get("usdt_amount", 100)
                 )
                 if order:
                     filled_qty = float(order.get("origQty", 0))
@@ -91,7 +86,6 @@ def handle_signal_in_background(data: dict):
                 logger.error(f"[Signal] 开仓失败: {e}")
 
         elif signal_type == "CLOSE":
-            # 收到平仓信号
             current_pos = position_supervisor.pm.get_position()
             if current_pos and current_pos.get("qty", 0) > 0:
                 side = "SELL" if current_pos["side"] == "LONG" else "BUY"
