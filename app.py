@@ -17,6 +17,13 @@ def webhook():
         data = request.get_json(force=True, silent=True) or {}
         logger.info(f"[Webhook] 收到信号: {data}")
 
+        # Webhook Secret 校验（安全）
+        from config import Config
+        secret = data.get("secret", "")
+        if Config.WEBHOOK_SECRET and secret != Config.WEBHOOK_SECRET:
+            logger.warning("[Webhook] Secret 校验失败")
+            return jsonify({"status": "error", "message": "invalid secret"}), 403
+
         # 调用 Supervisor 处理（VPS完全接管模式）
         from position_supervisor import position_supervisor
         position_supervisor.handle_signal(data)
