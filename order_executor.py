@@ -15,31 +15,39 @@ class OrderExecutor:
 
     def open_position(self, side: str, data: dict = None):
         """
-        开仓逻辑（内测规则：余额80% + 5倍杠杆，永远只开一手）
+        开仓逻辑（加强版：80%余额 + 5倍杠杆 + 防御判断 + 详细日志）
         """
-        try:
-            # 防止重复开仓（永远只开一手）
-            current_pos = position_manager.get_position()
-            if current_pos and current_pos.get("current_qty", 0) > 0:
-                logger.warning("[OrderExecutor] 当前已有持仓，拒绝重复开仓")
-                return {"success": False, "message": "当前已有持仓"}
+        logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}, data={data}")
 
-            atr = data.get("atr", 30) if data else 30
+        try:
+            # 获取当前价格
             current_price = binance_client.get_current_price(SYMBOL)
             if current_price is None:
-                return {"success": False, "message": "无法获取当前价格"}
+                logger.error("[OrderExecutor] 获取当前价格失败，终止开仓")
+                return {"success": False, "message": "获取价格失败"}
 
-            # 获取账户余额
+            # 获取账户可用余额
             balance = binance_client.get_account_balance()
-            if balance <= 0:
-                return {"success": False, "message": "账户余额为0"}
+            if balance is None or balance <= 0:
+                logger.error(f"[OrderExecutor] 获取余额失败或余额为0: {balance}")
+                return {"success": False, "message": "余额不足"}
+
+            atr = data.get("atr", 30) if data else 30
 
             # 内测规则：使用余额的80% + 5倍杠杆
             usable_balance = balance * 0.80
             leverage = 5
             max_position_value = usable_balance * leverage
             qty = round(max_position_value / current_price, 3)
-            qty = max(qty, 0.001)  # 最小数量保护
+            qty = max(qty, 0.001)
+
+            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 可用余额:{balance}, 下单数量:{qty}")
+
+            # 防止重复开仓（永远只开一手）
+            current_pos = position_manager.get_position()
+            if current_pos and current_pos.get("current_qty", 0) > 0:
+                logger.warning("[OrderExecutor] 当前已有持仓，拒绝重复开仓")
+                return {"success": False, "message": "当前已有持仓"}
 
             # 计算止损价格
             if side.upper() == "LONG":
@@ -56,7 +64,7 @@ class OrderExecutor:
 
             fill_price = float(order.get("avgPrice", current_price))
 
-            # 记录持仓信息到 position_manager
+            # 记录持仓信息
             position_manager.set_initial_position(
                 side=side.upper(),
                 entry_price=fill_price,
