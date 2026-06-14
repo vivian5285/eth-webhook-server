@@ -205,3 +205,5 @@ def get_binance_client():
     if _binance_client is None:
         _binance_client = BinanceClient()
     return _binance_client
+    # 在 binance_client.py 最后一行添加
+binance_client = _binance_client
