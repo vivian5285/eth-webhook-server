@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终简化版 - 永远只保持一手 + 全平后开新 + 钉钉全推送）
+# position_supervisor.py（最终内测版 - 永远只保持一手 + 先平后开 + 核实推送 - 2026-06-14）
 
 import logging
 import time
@@ -39,16 +39,16 @@ class PositionSupervisor:
         current = position_manager.get_position()
         has_position = current is not None and current.get("original_qty", 0) > 0
 
-        # 1. 开仓前先撤销 TP3 限价单（无论有没有持仓）
+        # 1. 开仓前先撤销 TP3 限价单
         self._cancel_tp3_if_exists()
 
-        # 2. 如果有持仓（无论同向还是反向），都先全平
+        # 2. 无论同向还是反向，都先全平旧仓位
         if has_position:
             current_side = current.get("side", "UNKNOWN")
             logger.info(f"[Supervisor] 检测到持仓 ({current_side})，收到 {action} 信号 → 先全平旧仓位")
             send_dingtalk_message(f"【全平旧仓】{current_side} → 准备开 {action}")
             self._force_close_position("replace_position")
-            time.sleep(1.8)  # 等待平仓完成
+            time.sleep(1.5)
 
         # 3. 风控检查
         if not self.is_new_entry_allowed():
@@ -69,12 +69,7 @@ class PositionSupervisor:
             return
 
         self._cancel_tp3_if_exists()
-
-        close_reason = reason if reason else "手动全平"
-        order_executor.close_position(close_reason)
-
-        if reason:
-            send_dingtalk_message(f"【平仓】原因: {reason}")
+        order_executor.close_position(reason if reason else "保护性全平")
 
     # ==================== 内部方法 ====================
     def _force_close_position(self, reason: str):
@@ -96,17 +91,16 @@ class PositionSupervisor:
             return False
         return True
 
-    # ==================== 其他已有方法 ====================
     def force_reconcile(self, source: str = "manual"):
         logger.info(f"[Supervisor] 强制对账执行，来源: {source}")
         send_dingtalk_message(f"【强制对账】来源: {source}")
-        # 这里保留你原来的对账逻辑
 
     def notify_open_success(self, side, usdt_amount, entry_price, tp1, tp2, tp3):
-        msg = (f"【开仓成功】{side}\n"
+        msg = (f"【开仓成功 - VPS完全接管40/40/20模式】{side}\n"
                f"金额: {usdt_amount} USDT\n"
                f"入场价: {entry_price}\n"
-               f"TP1: {tp1} | TP2: {tp2} | TP3: {tp3}")
+               f"TP1: {tp1} | TP2: {tp2} | Runner: {tp3}\n"
+               f"ProfitTaker 已接管价格监控与 scale-out")
         send_dingtalk_message(msg)
 
 
