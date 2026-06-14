@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终版 - 固定30USDT + 不依赖外部atr）
+# order_executor.py（最终稳定版 - 固定30USDT内测）
 
 import logging
 from binance_client import binance_client
@@ -25,7 +25,7 @@ class OrderExecutor:
             if current_price is None or current_price <= 0:
                 return {"success": False, "message": "获取价格失败"}
 
-            # 直接使用内部默认 ATR（不再依赖外部传入）
+            # 使用内部固定 ATR（不再依赖外部传入）
             atr = DEFAULT_ATR
             usdt_amount = TEST_FIXED_USDT_AMOUNT
             qty = round(usdt_amount / current_price, 3)
@@ -35,12 +35,18 @@ class OrderExecutor:
 
             logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
 
-            # 计算止损
+            # ==================== 计算 TP123 和止损 ====================
             if side.upper() == "LONG":
-                sl_price = round(current_price - atr * 0.92, 2)
+                tp1_price = round(current_price + atr * 1.08, 2)
+                tp2_price = round(current_price + atr * 1.95, 2)
+                tp3_price = round(current_price + atr * 3.0, 2)
+                sl_price  = round(current_price - atr * 0.92, 2)
                 order_side = "BUY"
             else:
-                sl_price = round(current_price + atr * 0.92, 2)
+                tp1_price = round(current_price - atr * 1.08, 2)
+                tp2_price = round(current_price - atr * 1.95, 2)
+                tp3_price = round(current_price - atr * 3.0, 2)
+                sl_price  = round(current_price + atr * 0.92, 2)
                 order_side = "SELL"
 
             # 市价开仓
@@ -50,16 +56,20 @@ class OrderExecutor:
 
             fill_price = float(order.get("avgPrice", current_price))
 
+            # 记录持仓（包含 TP123）
             position_manager.set_initial_position(
                 side=side.upper(),
                 entry_price=fill_price,
                 initial_qty=qty,
                 usdt_amount=round(qty * fill_price, 2),
                 atr=atr,
-                sl_price=sl_price
+                sl_price=sl_price,
+                tp1_price=tp1_price,
+                tp2_price=tp2_price,
+                tp3_price=tp3_price
             )
 
-            # 挂止损单
+            # 挂 STOP_MARKET 止损单
             close_side = "SELL" if side.upper() == "LONG" else "BUY"
             sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl_price, qty)
             if sl_order:
@@ -86,6 +96,7 @@ class OrderExecutor:
 
             order = binance_client.place_market_order(SYMBOL, close_side, qty, reduce_only=True)
             if order and order.get("status") == "FILLED":
+                # 撤销止损单
                 sl_order_id = position_manager.get_sl_order_id()
                 if sl_order_id:
                     try:
@@ -140,4 +151,5 @@ class OrderExecutor:
             logger.error(f"[OrderExecutor] 移保本异常: {e}")
 
 
+# 单例
 order_executor = OrderExecutor()
