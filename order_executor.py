@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终稳定版 - 固定30USDT + 正确调用position_manager）
+# order_executor.py（最终修正版 - 已修复set_initial_position调用）
 
 import logging
 from binance_client import binance_client
@@ -34,7 +34,6 @@ class OrderExecutor:
 
             logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
 
-            # 计算止损和TP价格
             if side.upper() == "LONG":
                 sl_price = round(current_price - atr * 0.92, 2)
                 tp1_price = round(current_price + atr * 1.08, 2)
@@ -48,14 +47,13 @@ class OrderExecutor:
                 tp3_price = round(current_price - atr * 3.0, 2)
                 order_side = "SELL"
 
-            # 市价开仓
             order = binance_client.place_market_order(SYMBOL, order_side, qty)
             if not order or order.get("status") != "FILLED":
                 return {"success": False, "message": "开仓失败"}
 
             fill_price = float(order.get("avgPrice", current_price))
 
-            # ==================== 正确调用 position_manager（必须用 dict） ====================
+            # ==================== 关键修复：用 dict 方式调用 ====================
             position_manager.set_initial_position({
                 "side": side.upper(),
                 "entry_price": fill_price,
@@ -69,10 +67,11 @@ class OrderExecutor:
                 "tp3_price": tp3_price,
                 "tp1_hit": False,
                 "tp2_hit": False,
-                "tp_stage": 0
+                "tp_stage": 0,
+                "qty": qty   # 兼容 position_manager 里的 original_qty 逻辑
             })
 
-            # 挂 STOP_MARKET 止损单
+            # 挂止损单
             close_side = "SELL" if side.upper() == "LONG" else "BUY"
             sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl_price, qty)
             if sl_order:
