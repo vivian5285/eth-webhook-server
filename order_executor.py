@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（最终稳定版 - 30USDT内测 + 健壮atr处理）
+# order_executor.py（最终版 - 固定30USDT + 不依赖外部atr）
 
 import logging
 from binance_client import binance_client
@@ -8,7 +8,9 @@ from position_manager import position_manager
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
 
+# ==================== 内测固定参数 ====================
 TEST_FIXED_USDT_AMOUNT = 30
+DEFAULT_ATR = 30
 
 
 class OrderExecutor:
@@ -16,25 +18,22 @@ class OrderExecutor:
         pass
 
     def open_position(self, side: str, data: dict = None):
-        logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}, data={data}")
+        logger.info(f"[OrderExecutor] 收到开仓请求 → side={side}")
 
         try:
             current_price = binance_client.get_current_price(SYMBOL)
             if current_price is None or current_price <= 0:
                 return {"success": False, "message": "获取价格失败"}
 
-            # ==================== 健壮处理 atr（关键修复） ====================
-            atr = 30
-            if data and isinstance(data, dict) and data.get("atr") is not None:
-                atr = data.get("atr")
-
+            # 直接使用内部默认 ATR（不再依赖外部传入）
+            atr = DEFAULT_ATR
             usdt_amount = TEST_FIXED_USDT_AMOUNT
             qty = round(usdt_amount / current_price, 3)
 
             if qty <= 0:
                 return {"success": False, "message": "下单数量无效"}
 
-            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}, ATR:{atr}")
+            logger.info(f"[OrderExecutor] 计算结果 → 价格:{current_price}, 下单金额:{usdt_amount}U, 数量:{qty}")
 
             # 计算止损
             if side.upper() == "LONG":
