@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（执行层 - 一次性完整版，已适配你的 binance_client.py）
+# order_executor.py（执行层 - 最终完整版）
 
 import logging
 import time
@@ -45,7 +45,7 @@ class OrderExecutor:
                 send_dingtalk_message(f"【开仓失败】{side} - ATR 无效")
                 return
 
-            # 4. 计算开仓金额
+            # 4. 计算开仓金额（使用真实余额）
             usdt_amount = self._calculate_usdt_amount(atr)
 
             # 5. 市价开仓
@@ -65,7 +65,7 @@ class OrderExecutor:
                 side, entry_price, atr
             )
 
-            # 8. 设置分批止盈（TP1/TP2 市价平 + TP3 限价单）
+            # 8. 设置分批止盈（主要挂 TP3 限价单）
             self._setup_take_profit_levels(side, usdt_amount, entry_price, tp1_price, tp2_price, tp3_price)
 
             # 9. 更新内存持仓状态
@@ -76,7 +76,8 @@ class OrderExecutor:
                 "tp1_price": tp1_price,
                 "tp2_price": tp2_price,
                 "tp3_price": tp3_price,
-                "original_usdt_amount": usdt_amount
+                "original_usdt_amount": usdt_amount,
+                "original_qty": round(usdt_amount / entry_price, 3) if entry_price > 0 else 0
             })
 
             # 10. 发送通知
@@ -98,10 +99,16 @@ class OrderExecutor:
                 return
 
             side = current.get("side", "LONG")
-            # 从内存获取原始金额反推数量（简化处理）
-            original_usdt = current.get("original_usdt_amount", self.default_usdt_amount)
-            entry_price = current.get("entry_price", binance_client.get_current_price(SYMBOL) or 0)
-            qty = round(original_usdt / entry_price, 3) if entry_price > 0 else 0.01
+            qty = current.get("original_qty", 0)
+
+            # 如果内存中没有数量，尝试从 Binance 获取
+            if qty <= 0:
+                qty = binance_client.get_position_qty(SYMBOL)
+                if qty < 0:
+                    qty = abs(qty)  # 空头是负数
+
+            if qty <= 0:
+                qty = 0.01  # 兜底
 
             binance_client.close_position(SYMBOL, side, qty)
             self._cancel_tp3_limit_order()
@@ -124,9 +131,10 @@ class OrderExecutor:
             if not entry_price:
                 return
 
-            # 这里可以扩展为真实修改止损单
             logger.info(f"[OrderExecutor] 移动止损到保本价: {entry_price}")
             send_dingtalk_message(f"【移动止损】已移至保本价 {entry_price}")
+
+            # TODO: 如需真正修改止损单，可在此扩展
 
         except Exception as e:
             logger.error(f"[OrderExecutor] 移动止损失败: {e}")
@@ -145,20 +153,26 @@ class OrderExecutor:
         if current and current.get("original_usdt_amount", 0) > 0:
             try:
                 side = current.get("side", "LONG")
-                entry_price = current.get("entry_price", binance_client.get_current_price(SYMBOL) or 0)
-                usdt_amount = current.get("original_usdt_amount", self.default_usdt_amount)
-                qty = round(usdt_amount / entry_price, 3) if entry_price > 0 else 0.01
+                qty = current.get("original_qty", 0)
 
-                binance_client.close_position(SYMBOL, side, qty)
-                position_manager.clear_position()
-                time.sleep(0.5)
-                logger.info("[OrderExecutor] 已全平旧仓位")
+                if qty <= 0:
+                    qty = binance_client.get_position_qty(SYMBOL)
+                    if qty < 0:
+                        qty = abs(qty)
+
+                if qty > 0:
+                    binance_client.close_position(SYMBOL, side, qty)
+                    position_manager.clear_position()
+                    time.sleep(0.5)
+                    logger.info("[OrderExecutor] 已全平旧仓位")
             except Exception as e:
                 logger.error(f"[OrderExecutor] 全平旧仓位失败: {e}")
 
     def _calculate_usdt_amount(self, atr: float) -> float:
         try:
-            equity = 20000  # TODO: 后续可改为真实获取账户权益
+            equity = binance_client.get_usdt_balance()
+            if equity <= 0:
+                equity = 20000  # 兜底
             risk_amount = equity * (self.risk_percent / 100)
             return min(round(risk_amount, 2), self.default_usdt_amount)
         except Exception as e:
@@ -188,8 +202,6 @@ class OrderExecutor:
                 binance_client.place_limit_order(SYMBOL, close_side, tp3_price, tp3_qty, reduce_only=True)
                 position_manager.set_tp3_limit_order(True)
                 logger.info(f"[OrderExecutor] TP3 限价单已挂出 @ {tp3_price}")
-
-            # TP1 和 TP2 由 tp_monitor 监控后触发市价平仓
 
         except Exception as e:
             logger.error(f"[OrderExecutor] 设置止盈失败: {e}")
