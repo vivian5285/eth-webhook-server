@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# profit_taker.py（VPS 完全接管 40/40/20 最终内测版 - 2026-06-14）
+# profit_taker.py（最终版 - 包含详细钉钉报告）
 
 import time
 import logging
@@ -32,31 +32,6 @@ class ProfitTaker:
         self._thread.start()
         logger.info("[ProfitTaker] VPS 完全接管 40/40/20 模式已启动")
 
-    def _check_tp_distance(self, pos: dict):
-        """检查从入场到 TP3 的 USD 距离是否在目标 18-50 美元范围内"""
-        try:
-            entry = pos.get("entry_price", 0)
-            tp3 = pos.get("tp3_price", 0)
-            side = pos.get("side")
-
-            if entry <= 0 or tp3 <= 0:
-                return
-
-            distance_usd = abs(tp3 - entry)
-
-            if distance_usd < 18 or distance_usd > 50:
-                msg = (
-                    f"⚠️ **【TP 距离提醒】**\n"
-                    f"当前从入场到 TP3 距离为 **{distance_usd:.2f} USD**，"
-                    f"目标范围建议 18~50 USD。\n"
-                    f"方向: {side} | 入场: {entry} | TP3: {tp3}\n"
-                    f"建议关注 ATR 倍数或当前市场波动率。"
-                )
-                send_dingtalk_message(msg)
-                logger.warning(f"[ProfitTaker] TP3 距离异常: {distance_usd:.2f} USD")
-        except Exception as e:
-            logger.error(f"[ProfitTaker] TP 距离检查异常: {e}")
-
     def _run(self):
         while self.running:
             try:
@@ -74,8 +49,6 @@ class ProfitTaker:
         side = pos.get("side")
         initial_qty = pos.get("initial_qty", 0)
         current_qty = pos.get("current_qty", initial_qty)
-        tp1_hit = pos.get("tp1_hit", False)
-        tp2_hit = pos.get("tp2_hit", False)
 
         if initial_qty <= 0 or current_qty <= 0:
             return
@@ -84,17 +57,18 @@ class ProfitTaker:
         if current_price is None:
             return
 
-        tp1_price = pos.get("tp1_price")
-        tp2_price = pos.get("tp2_price")
-
-        # === 18-50 USD 目标范围监控（A 需求） ===
+        # TP 距离监控（18-50 USD）
         self._check_tp_distance(pos)
 
-        # === 监督层方向对齐检查（与最新 TV 信号一致性） ===
-        from position_supervisor import position_supervisor
+        # 监督层方向对齐检查
         position_supervisor.check_and_align_with_latest_signal()
 
-        # 自主 40/40/20
+        # 自主 40/40/20 减仓
+        tp1_price = pos.get("tp1_price")
+        tp2_price = pos.get("tp2_price")
+        tp1_hit = pos.get("tp1_hit", False)
+        tp2_hit = pos.get("tp2_hit", False)
+
         hit_level = None
         if side == "LONG":
             if not tp1_hit and current_price >= tp1_price:
@@ -116,6 +90,30 @@ class ProfitTaker:
             self._detect_manual_change(pos, current_qty)
             self._last_manual_check_time = now
 
+    def _check_tp_distance(self, pos: dict):
+        """检查从入场到 TP3 的 USD 距离"""
+        try:
+            entry = pos.get("entry_price", 0)
+            tp3 = pos.get("tp3_price", 0)
+            side = pos.get("side")
+            if entry <= 0 or tp3 <= 0:
+                return
+            distance_usd = abs(tp3 - entry)
+            if distance_usd < 18 or distance_usd > 50:
+                position_supervisor.send_detailed_report(
+                    "TP 距离异常提醒",
+                    {
+                        "当前距离": f"{distance_usd:.2f} USD",
+                        "建议范围": "18~50 USD",
+                        "方向": side,
+                        "入场价": entry,
+                        "TP3": tp3
+                    },
+                    "⚠️", "WARNING"
+                )
+        except Exception as e:
+            logger.error(f"[ProfitTaker] TP 距离检查异常: {e}")
+
     def _execute_scale_out(self, level: str, initial_qty: float, current_qty: float, side: str):
         ratio = TP1_RATIO if level == "TP1" else TP2_RATIO
         close_qty = round(initial_qty * ratio, 3)
@@ -136,15 +134,18 @@ class ProfitTaker:
 
             position_supervisor.force_reconcile(source=f"profit_taker_{level.lower()}")
 
-            # 详细决策推送（美观 + 参数完整）
-            details = {
-                "方向": side,
-                "减仓数量": close_qty,
-                "剩余数量": new_current,
-                "触发级别": level,
-                "当前模式": "VPS完全接管 40/40/20"
-            }
-            position_supervisor.send_detailed_decision(f"{level} 自主减仓成功", details, "✅")
+            # 详细钉钉报告
+            position_supervisor.send_detailed_report(
+                f"{level} 自主减仓成功",
+                {
+                    "方向": side,
+                    "减仓数量": close_qty,
+                    "剩余数量": new_current,
+                    "触发级别": level
+                },
+                "✅", "DECISION"
+            )
+
         except Exception as e:
             logger.error(f"[ProfitTaker] {level} 减仓失败: {e}")
 
@@ -183,12 +184,12 @@ class ProfitTaker:
                 tp1 = round(entry + atr * 1.08, 2)
                 tp2 = round(entry + atr * 1.95, 2)
                 tp3 = round(entry + atr * 3.0, 2)
-                sl  = round(entry - atr * 0.92, 2)
+                sl = round(entry - atr * 0.92, 2)
             else:
                 tp1 = round(entry - atr * 1.08, 2)
                 tp2 = round(entry - atr * 1.95, 2)
                 tp3 = round(entry - atr * 3.0, 2)
-                sl  = round(entry + atr * 0.92, 2)
+                sl = round(entry + atr * 0.92, 2)
 
             position_manager.update_current_qty(new_qty)
             with position_manager._lock:
@@ -204,11 +205,13 @@ class ProfitTaker:
                         "tp_stage": 0
                     })
 
-            # 重挂 SL
+            # 撤销旧止损单并重新挂单
             old_sl = position_manager.get_sl_order_id()
             if old_sl:
-                try: binance_client.cancel_order(SYMBOL, old_sl)
-                except: pass
+                try:
+                    binance_client.cancel_order(SYMBOL, old_sl)
+                except:
+                    pass
 
             close_side = "SELL" if side == "LONG" else "BUY"
             new_sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl, new_qty)
@@ -216,19 +219,10 @@ class ProfitTaker:
                 position_manager.set_sl_order_id(new_sl_order.get("orderId"))
 
             position_supervisor.force_reconcile(source="manual_add_recalc")
-            position_supervisor.send_detailed_decision(
-                "显著人工加仓 - TP123已重算收紧",
-                {
-                    "加仓比例": f"{add_ratio*100:.1f}%",
-                    "新均价": entry,
-                    "新TP1": tp1,
-                    "新TP2": tp2,
-                    "新Runner TP3": tp3,
-                    "新SL": sl
-                },
-                "🔄",
-                level="WARNING"
-            )
+
+            # 详细报告
+            position_supervisor.report_manual_add_recalc(add_ratio, entry, tp1, tp2, tp3, sl)
+
         except Exception as e:
             logger.error(f"[ProfitTaker] 重算TP失败: {e}")
 
