@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# app.py（完整更新版 - 集成每日回撤熔断 + 强制对账）
+# app.py（完整修复版 - 适配 Flask 2.2+）
 
 import os
 import logging
 import threading
 from flask import Flask, request, jsonify
-from datetime import datetime
 
 from config import Config
 from binance_client import binance_client
@@ -15,7 +14,6 @@ from tp_monitor import tp_monitor
 from risk_manager import risk_manager
 from dingtalk import send_dingtalk_message
 
-# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,9 +24,8 @@ app = Flask(__name__)
 
 
 def get_current_equity() -> float:
-    """获取当前账户权益（简单实现，可根据实际 binance_client 调整）"""
+    """获取当前账户权益（可根据实际情况调整）"""
     try:
-        # 优先使用 USDT 余额作为权益参考（可后续优化为 总权益）
         balance = binance_client.get_account_balance()
         return float(balance.get("USDT", 0))
     except Exception as e:
@@ -42,7 +39,7 @@ def handle_signal_in_background(signal_data: dict):
         action = signal_data.get("action", "").upper()
         logger.info(f"[Signal] 收到信号: {action}")
 
-        # ==================== 新增：开新仓前检查每日回撤熔断 ====================
+        # ==================== 每日回撤熔断检查 ====================
         if action in ["LONG", "SHORT"]:
             current_equity = get_current_equity()
             if not position_supervisor.is_new_entry_allowed(current_equity):
@@ -56,7 +53,7 @@ def handle_signal_in_background(signal_data: dict):
                 )
                 return
 
-        # ==================== 原有信号处理逻辑 ====================
+        # ==================== 调用信号处理方法 ====================
         if action == "LONG":
             position_supervisor.handle_long_signal(signal_data)
         elif action == "SHORT":
@@ -73,17 +70,14 @@ def handle_signal_in_background(signal_data: dict):
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """接收 TradingView webhook"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({"status": "error", "message": "No JSON data"}), 400
 
-        # 简单验证（可根据需要加强）
         if Config.WEBHOOK_SECRET and data.get("secret") != Config.WEBHOOK_SECRET:
             return jsonify({"status": "error", "message": "Invalid secret"}), 403
 
-        # 快速返回 202，后台处理
         threading.Thread(target=handle_signal_in_background, args=(data,)).start()
         return jsonify({"status": "accepted"}), 202
 
@@ -122,7 +116,6 @@ def status():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.before_first_request
 def startup_tasks():
     """服务启动时执行的任务"""
     logger.info("[Startup] 执行启动任务...")
@@ -133,7 +126,7 @@ def startup_tasks():
     except Exception as e:
         logger.error(f"[Startup] 启动对账失败: {e}")
 
-    # 2. 启动 TPMonitor（如果还没启动）
+    # 2. 启动 TPMonitor
     if not tp_monitor.running:
         tp_monitor.start()
         logger.info("[Startup] TPMonitor 已启动")
@@ -141,6 +134,9 @@ def startup_tasks():
     logger.info("[Startup] 启动任务完成")
 
 
+# ==================== 关键修复：模块加载时直接执行启动任务 ====================
+startup_tasks()
+
+
 if __name__ == "__main__":
-    # 开发环境直接运行
     app.run(host="0.0.0.0", port=5000, debug=False)
