@@ -1,85 +1,62 @@
 #!/usr/bin/env python3
-# app.py（最终修复版 - 防御式 status + 后台启动任务）
+# app.py（终极极简版 - 最小启动 footprint）
 
 import logging
-import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 
-# 核心模块导入
-from position_manager import position_manager
-from risk_manager import risk_manager
-from order_executor import order_executor
-from binance_client import binance_client
-from position_supervisor import position_supervisor
-from tp_monitor import tp_monitor
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# 延迟导入（避免启动时就加载重模块）
+_position_manager = None
+_risk_manager = None
 
-def startup_tasks():
-    """启动时执行的任务（后台线程运行）"""
-    try:
-        logger.info("[Startup] 开始执行启动任务...")
-        position_supervisor.force_reconcile(source="startup")
-        tp_monitor.start()
-        logger.info("[Startup] 启动任务完成")
-    except Exception as e:
-        logger.error(f"[Startup] 启动任务异常: {e}")
+def get_position_manager():
+    global _position_manager
+    if _position_manager is None:
+        from position_manager import position_manager as pm
+        _position_manager = pm
+    return _position_manager
 
-
-@app.before_first_request
-def start_background_tasks():
-    """在第一个请求前启动后台任务（不阻塞 worker）"""
-    thread = threading.Thread(target=startup_tasks, daemon=True)
-    thread.start()
-    logger.info("[App] 后台启动任务线程已启动")
+def get_risk_manager():
+    global _risk_manager
+    if _risk_manager is None:
+        from risk_manager import risk_manager as rm
+        _risk_manager = rm
+    return _risk_manager
 
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """接收 TradingView webhook 信号"""
     try:
         data = request.get_json(force=True, silent=True) or {}
         logger.info(f"[Webhook] 收到信号: {data}")
-
-        # 这里后续可以接入你的信号解析 + 下单逻辑
-        # 目前先返回成功，方便测试
-        return jsonify({"status": "ok", "message": "webhook received"}), 200
-
+        # TODO: 这里后续接入你的信号解析 + 下单逻辑
+        return jsonify({"status": "ok", "received": True}), 200
     except Exception as e:
-        logger.error(f"[Webhook] 处理异常: {e}")
+        logger.error(f"[Webhook] 异常: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
 def status():
-    """轻量状态接口（防御式，防止 RiskManager 拖垮 worker）"""
+    """极简状态接口，几乎不依赖任何重模块"""
     try:
-        # 防御式获取 RiskManager 状态
-        try:
-            breaker = risk_manager.is_daily_breaker_triggered()
-            drawdown = risk_manager.get_current_drawdown_percent()
-        except Exception as e:
-            logger.warning(f"/status 获取 RiskManager 状态失败: {e}")
-            breaker = False
-            drawdown = 0.0
+        pm = get_position_manager()
+        rm = get_risk_manager()
 
         return jsonify({
-            "has_position": position_manager.has_position(),
-            "has_tp3_limit_order": position_manager.has_tp3_limit_order(),
-            "daily_breaker_triggered": breaker,
-            "current_drawdown_percent": drawdown,
+            "has_position": pm.has_position(),
+            "has_tp3_limit_order": pm.has_tp3_limit_order(),
+            "daily_breaker_triggered": rm.is_daily_breaker_triggered(),
+            "current_drawdown_percent": rm.get_current_drawdown_percent(),
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
-        logger.error(f"/status 接口异常: {e}")
+        logger.error(f"/status 异常: {e}")
         return jsonify({
             "has_position": False,
             "has_tp3_limit_order": False,
@@ -89,15 +66,5 @@ def status():
         }), 500
 
 
-@app.route('/force_reconcile', methods=['POST'])
-def force_reconcile():
-    """手动触发对账"""
-    try:
-        position_supervisor.force_reconcile(source="manual")
-        return jsonify({"status": "ok", "message": "reconcile triggered"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000)
