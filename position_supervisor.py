@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终版 - 纯监督 + 核实 + 报告）
+# position_supervisor.py（最终版 - 严格先平后开 + 监督层核实 + 详细报告）
 
 import logging
 import time
@@ -15,47 +15,72 @@ class PositionSupervisor:
     def __init__(self):
         pass
 
-    # ==================== 接收执行层/止盈层汇报 ====================
-    def report_action(self, action_type: str, details: dict):
-        """执行层或止盈层干完活后向监督层汇报"""
-        self.send_detailed_report(f"【{action_type}】执行完成", details, "📋", "INFO")
+    def handle_signal(self, payload: Dict[str, Any]):
+        action = payload.get("action", "").upper()
+        reason = payload.get("reason", "")
 
-    # ==================== 核实实盘（核心职责） ====================
-    def verify_and_report(self, expected_side: str = None):
-        """
-        监督层核实实盘
-        - 正常情况：核实通过后发详细报告
-        - 异常情况：发现不一致时才主动下令对齐
-        """
+        self.send_detailed_report("收到TV信号", {
+            "信号类型": action,
+            "原因": reason or "正常入场"
+        }, "📡", "INFO")
+
+        if action in ["LONG", "SHORT"]:
+            self._handle_entry_signal(action)
+        elif action == "CLOSE":
+            self._handle_close_signal(reason)
+
+    def _handle_entry_signal(self, side: str):
+        current = position_manager.get_position()
+        has_position = current and current.get("current_qty", 0) > 0
+
+        # 无论同向还是反向，都先全平
+        if has_position:
+            current_side = current.get("side", "UNKNOWN")
+            self.send_detailed_report("检测到持仓，执行先平后开", {
+                "当前持仓方向": current_side,
+                "新信号方向": side
+            }, "🔄", "WARNING")
+
+            order_executor.close_position("监督层收到新入场信号，强制先平仓")
+            time.sleep(2.0)
+
+        # 执行开新仓
+        result = order_executor.open_position(side)
+
+        # 监督层核实
+        time.sleep(1.5)
         real_pos = position_manager.get_position()
 
-        if expected_side and real_pos and real_pos.get("side") != expected_side:
-            # 发现严重不一致，监督层下令对齐
-            logger.warning(f"[Supervisor] 实盘与预期不一致，执行强制对齐")
-            self.send_detailed_report("实盘核实异常，执行对齐", {
-                "预期方向": expected_side,
-                "实际方向": real_pos.get("side") if real_pos else "无持仓"
-            }, "⚠️", "WARNING")
+        if result and result.get("success") and real_pos and real_pos.get("side") == side:
+            self.report_open_success(
+                side=side,
+                usdt_amount=real_pos.get("usdt_amount", 0),
+                entry_price=real_pos.get("entry_price", 0),
+                sl=real_pos.get("sl_price", 0),
+                tp1=real_pos.get("tp1_price", 0),
+                tp2=real_pos.get("tp2_price", 0),
+                tp3=real_pos.get("tp3_price", 0)
+            )
+        else:
+            self.send_detailed_report("开仓核实失败", {
+                "方向": side,
+                "执行结果": result.get("message") if result else "无返回"
+            }, "❌", "ERROR")
 
-            # 这里可以让执行层去对齐（按需开启）
-            # order_executor.close_position("监督层强制对齐")
+    def _handle_close_signal(self, reason: str):
+        current = position_manager.get_position()
+        if not current or current.get("current_qty", 0) <= 0:
             return
 
-        # 核实通过，发送详细报告
-        if real_pos:
-            self.send_detailed_report("持仓核实通过", {
-                "方向": real_pos.get("side"),
-                "数量": real_pos.get("current_qty"),
-                "入场价": real_pos.get("entry_price"),
-                "止损价": real_pos.get("sl_price"),
-                "TP1": real_pos.get("tp1_price"),
-                "TP2": real_pos.get("tp2_price"),
-                "TP3": real_pos.get("tp3_price"),
-            }, "✅", "DECISION")
-        else:
-            self.send_detailed_report("当前无持仓（核实通过）", {}, "ℹ️", "INFO")
+        order_executor.close_position(reason or "手动全平")
 
-    # ==================== 统一详细报告（只有监督层能发） ====================
+        time.sleep(1.5)
+        real_pos = position_manager.get_position()
+        if not real_pos or real_pos.get("current_qty", 0) <= 0:
+            self.send_detailed_report("保护性全平成功（已核实）", {
+                "平仓原因": reason
+            }, "🛑", "WARNING")
+
     def send_detailed_report(self, title: str, details: dict, emoji: str = "📌", level: str = "DECISION"):
         level_emoji = {
             "INFO": "ℹ️", "DECISION": "✅", "WARNING": "⚠️",
@@ -73,10 +98,26 @@ class PositionSupervisor:
         from dingtalk import send_dingtalk_message
         send_dingtalk_message("\n".join(lines))
 
-    def force_reconcile(self, source: str = "manual"):
-        """只有监督层有权主动对齐"""
-        self.send_detailed_report("监督层主动对齐", {"来源": source}, "🔧", "WARNING")
-        # 可在此调用执行层对齐逻辑
+    def report_open_success(self, side, usdt_amount, entry_price, sl, tp1, tp2, tp3):
+        details = {
+            "方向": side,
+            "入场金额": f"{usdt_amount} USDT",
+            "入场均价": entry_price,
+            "止损价格": sl,
+            "TP1 价格": tp1,
+            "TP2 价格": tp2,
+            "TP3 Runner 价格": tp3
+        }
+        self.send_detailed_report("开仓成功（已核实）", details, "🚀", "DECISION")
+
+    def report_protective_close(self, reason, side, qty, avg_price):
+        details = {
+            "平仓方向": side,
+            "平仓数量": qty,
+            "持仓均价": avg_price,
+            "平仓原因": reason
+        }
+        self.send_detailed_report("保护性全平（已核实）", details, "🛑", "WARNING")
 
 
 position_supervisor = PositionSupervisor()
