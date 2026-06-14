@@ -2,6 +2,7 @@
 # binance_client.py（强壮增强版 - 支持止损单管理）
 
 import os
+import time
 import logging
 from binance.client import Client
 from binance.enums import *
@@ -33,16 +34,20 @@ class BinanceClient:
             logger.error(f"[BinanceClient] 开仓失败: {e}")
             raise
 
-    def close_position(self, symbol: str, side: str, qty: float):
-        try:
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side.upper(), type=ORDER_TYPE_MARKET,
-                quantity=qty, reduceOnly=True
-            )
-            return order
-        except Exception as e:
-            logger.error(f"[BinanceClient] 平仓失败: {e}")
-            raise
+    def close_position(self, symbol: str, side: str, qty: float, max_retry: int = 2):
+        for attempt in range(max_retry + 1):
+            try:
+                order = self.client.futures_create_order(
+                    symbol=symbol, side=side.upper(), type=ORDER_TYPE_MARKET,
+                    quantity=qty, reduceOnly=True
+                )
+                return order
+            except Exception as e:
+                if attempt == max_retry:
+                    logger.error(f"[BinanceClient] 平仓失败（已重试{max_retry}次）: {e}")
+                    raise
+                time.sleep(0.8 * (attempt + 1))
+                logger.warning(f"[BinanceClient] 平仓重试 {attempt+1}/{max_retry}")
 
     def place_limit_order(self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = True):
         try:
