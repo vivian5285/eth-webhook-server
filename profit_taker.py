@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# profit_taker.py（最终版 - 包含详细钉钉报告）
+# profit_taker.py（最终完整版）
 
 import time
 import logging
@@ -8,7 +8,6 @@ from binance_client import binance_client
 from position_manager import position_manager
 from order_executor import order_executor
 from position_supervisor import position_supervisor
-from dingtalk import send_dingtalk_message
 
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
@@ -60,7 +59,7 @@ class ProfitTaker:
         # TP 距离监控（18-50 USD）
         self._check_tp_distance(pos)
 
-        # 监督层方向对齐检查
+        # 监督层方向对齐检查（备份机制）
         position_supervisor.check_and_align_with_latest_signal()
 
         # 自主 40/40/20 减仓
