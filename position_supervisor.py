@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终完整版 - 已修复开仓逻辑）
+# position_supervisor.py（最终完整版 - 支持旧格式兼容）
 
 import logging
 import time
@@ -82,11 +82,24 @@ class PositionSupervisor:
         }
         self.send_detailed_report("监督层强制方向对齐", details, "⚠️", "WARNING")
 
-    # ==================== 信号处理 ====================
+    # ==================== 信号处理（已兼容新旧格式） ====================
     def handle_signal(self, payload: Dict[str, Any]):
+        # 兼容旧格式（你以前内测用的 {"signal":"OPEN_LONG"...}）
+        signal = payload.get("signal", "").upper()
         action = payload.get("action", "").upper()
+
+        if signal:
+            if signal == "OPEN_LONG":
+                action = "LONG"
+            elif signal == "OPEN_SHORT":
+                action = "SHORT"
+            elif signal in ["CLOSE", "CLOSE_ALL"]:
+                action = "CLOSE"
+            reason = payload.get("reason", "")
+        else:
+            reason = payload.get("reason", "")
+
         atr = payload.get("atr")
-        reason = payload.get("reason", "")
 
         self.last_signal = {
             "action": action,
@@ -106,13 +119,11 @@ class PositionSupervisor:
             order_executor.close_position(reason or "保护性全平")
 
     def _handle_entry_signal(self, side, atr):
-        """处理入场信号（核心修复点）"""
+        """处理入场信号"""
         try:
-            # 调用执行层开仓
             result = order_executor.open_position(side, {"atr": atr})
 
             if result and result.get("success"):
-                # 开仓成功后发送详细报告
                 pos = position_manager.get_position()
                 if pos:
                     self.report_open_success(
@@ -156,9 +167,8 @@ class PositionSupervisor:
         order_executor.open_position(latest_action, {"atr": self.last_signal.get("atr")})
 
     def force_reconcile(self, source: str = "manual"):
-        # 增强版对账逻辑（可按需扩展详细报告）
         pass
 
 
-# ==================== 单例导出（必须保留） ====================
+# ==================== 单例导出 ====================
 position_supervisor = PositionSupervisor()
