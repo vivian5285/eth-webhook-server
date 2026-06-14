@@ -1,123 +1,108 @@
 #!/usr/bin/env python3
-# binance_client.py（强壮增强版 - 支持止损单管理）
+# binance_client.py（最终完整版）
 
-import os
-import time
 import logging
 from binance.client import Client
-from binance.enums import *
-from dotenv import load_dotenv
+from binance.exceptions import BinanceAPIException
+from config import Config
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 
 class BinanceClient:
     def __init__(self):
-        api_key = os.getenv("BINANCE_API_KEY")
-        api_secret = os.getenv("BINANCE_API_SECRET")
-        if not api_key or not api_secret:
-            raise ValueError("Binance API Key/Secret 未配置")
-        self.client = Client(api_key, api_secret)
-        logger.info("[BinanceClient] 初始化成功")
+        self.client = Client(
+            api_key=Config.BINANCE_API_KEY,
+            api_secret=Config.BINANCE_API_SECRET
+        )
+        # 切换到期货U本位
+        self.client.FUTURES_URL = 'https://fapi.binance.com/fapi'
 
-    def open_market_order(self, symbol: str, side: str, usdt_amount: float):
+    def get_current_price(self, symbol: str):
+        """获取当前最新价格"""
         try:
-            ticker = self.client.get_symbol_ticker(symbol=symbol)
-            price = float(ticker["price"])
-            qty = round(usdt_amount / price, 3)
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side.upper(), type=ORDER_TYPE_MARKET, quantity=qty
-            )
-            return order
-        except Exception as e:
-            logger.error(f"[BinanceClient] 开仓失败: {e}")
-            raise
-
-    def close_position(self, symbol: str, side: str, qty: float, max_retry: int = 2):
-        for attempt in range(max_retry + 1):
-            try:
-                order = self.client.futures_create_order(
-                    symbol=symbol, side=side.upper(), type=ORDER_TYPE_MARKET,
-                    quantity=qty, reduceOnly=True
-                )
-                return order
-            except Exception as e:
-                if attempt == max_retry:
-                    logger.error(f"[BinanceClient] 平仓失败（已重试{max_retry}次）: {e}")
-                    raise
-                time.sleep(0.8 * (attempt + 1))
-                logger.warning(f"[BinanceClient] 平仓重试 {attempt+1}/{max_retry}")
-
-    def place_limit_order(self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = True):
-        try:
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side.upper(), type=ORDER_TYPE_LIMIT,
-                timeInForce=TIME_IN_FORCE_GTC, price=round(price, 2),
-                quantity=qty, reduceOnly=reduce_only
-            )
-            return order
-        except Exception as e:
-            logger.error(f"[BinanceClient] 挂限价单失败: {e}")
-            raise
-
-    def place_stop_loss_order(self, symbol: str, side: str, stop_price: float, qty: float):
-        try:
-            order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side.upper(),
-                type="STOP_MARKET",
-                stopPrice=round(stop_price, 2),
-                quantity=qty,
-                reduceOnly=True
-            )
-            logger.info(f"[BinanceClient] 止损单已挂出 @ {stop_price}")
-            return order
-        except Exception as e:
-            logger.error(f"[BinanceClient] 挂止损单失败: {e}")
-            raise
-
-    def cancel_order(self, symbol: str, order_id: str):
-        try:
-            result = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
-            return result
-        except Exception as e:
-            logger.error(f"[BinanceClient] 撤销订单失败: {e}")
-            raise
-
-    def get_current_price(self, symbol: str = "ETHUSDT"):
-        try:
-            ticker = self.client.get_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            return float(ticker['price'])
         except Exception as e:
             logger.error(f"[BinanceClient] 获取价格失败: {e}")
             return None
 
-    def get_position(self, symbol: str = "ETHUSDT"):
+    def get_position_qty(self, symbol: str):
+        """获取当前持仓数量"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
-            return positions[0] if positions else None
+            if positions:
+                return float(positions[0].get('positionAmt', 0))
+            return 0.0
         except Exception as e:
             logger.error(f"[BinanceClient] 获取持仓失败: {e}")
             return None
 
-    def get_position_qty(self, symbol: str = "ETHUSDT") -> float:
-        pos = self.get_position(symbol)
-        if pos:
-            return float(pos.get("positionAmt", 0))
-        return 0.0
-
-    def get_usdt_balance(self) -> float:
+    def place_market_order(self, symbol: str, side: str, quantity: float, reduce_only: bool = False):
+        """市价单下单"""
         try:
-            account = self.client.futures_account()
-            for asset in account.get("assets", []):
-                if asset.get("asset") == "USDT":
-                    return float(asset.get("availableBalance", 0))
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side.upper(),
+                type='MARKET',
+                quantity=quantity,
+                reduceOnly=reduce_only
+            )
+            logger.info(f"[BinanceClient] 市价单下单成功: {order.get('orderId')}")
+            return order
+        except BinanceAPIException as e:
+            logger.error(f"[BinanceClient] 市价单下单失败: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[BinanceClient] 市价单异常: {e}")
+            return None
+
+    def place_stop_loss_order(self, symbol: str, side: str, stop_price: float, quantity: float):
+        """挂 STOP_MARKET 止损单"""
+        try:
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side.upper(),
+                type='STOP_MARKET',
+                stopPrice=stop_price,
+                quantity=quantity,
+                reduceOnly=True,
+                timeInForce='GTC'
+            )
+            logger.info(f"[BinanceClient] 止损单挂单成功: {order.get('orderId')}")
+            return order
+        except BinanceAPIException as e:
+            logger.error(f"[BinanceClient] 止损单挂单失败: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[BinanceClient] 止损单异常: {e}")
+            return None
+
+    def cancel_order(self, symbol: str, order_id: int):
+        """撤销订单"""
+        try:
+            result = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
+            logger.info(f"[BinanceClient] 撤单成功: {order_id}")
+            return result
+        except BinanceAPIException as e:
+            logger.error(f"[BinanceClient] 撤单失败: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"[BinanceClient] 撤单异常: {e}")
+            return None
+
+    def get_account_balance(self):
+        """获取账户余额（USDT）"""
+        try:
+            balance = self.client.futures_account_balance()
+            for asset in balance:
+                if asset['asset'] == 'USDT':
+                    return float(asset['balance'])
             return 0.0
         except Exception as e:
-            logger.error(f"[BinanceClient] 获取 USDT 余额失败: {e}")
+            logger.error(f"[BinanceClient] 获取余额失败: {e}")
             return 0.0
 
 
-_binance_client = BinanceClient()
-binance_client = _binance_client
+# 单例
+binance_client = BinanceClient()
