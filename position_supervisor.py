@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（最终版 - 监督层角色清晰版）
+# position_supervisor.py（最终完整版）
 
 import logging
 import time
@@ -33,7 +33,7 @@ class PositionSupervisor:
         current = position_manager.get_position()
         has_position = current and current.get("current_qty", 0) > 0
 
-        # 无论同向还是反向，都先全平（保证永远只开一手）
+        # 无论同向还是反向，都先全平
         if has_position:
             current_side = current.get("side", "UNKNOWN")
             self.send_detailed_report("检测到持仓，执行先平后开", {
@@ -47,7 +47,7 @@ class PositionSupervisor:
         # 调用执行层下单
         result = order_executor.open_position(side)
 
-        # 监督层核实实盘
+        # 监督层核实
         time.sleep(1.5)
         real_pos = position_manager.get_position()
 
