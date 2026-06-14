@@ -134,3 +134,5 @@ class PositionSupervisor:
     def force_reconcile(self, source: str = "manual"):
         # 增强版对账（已包含详细报告逻辑）
         pass
+# 在文件最后一行添加
+position_supervisor = PositionSupervisor()
