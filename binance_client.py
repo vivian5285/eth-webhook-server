@@ -1,209 +1,115 @@
-# binance_client.py（完整最终版 - 已接入 Config）
+#!/usr/bin/env python3
+# binance_client.py（最终更新版 - 支持混合模式）
+
 import os
 import time
-import hmac
-import hashlib
-import base64
-import urllib.parse
-import logging
-import math
-from binance import Client
-from binance.exceptions import BinanceAPIException
-from config import Config
+from binance.client import Client
+from binance.enums import *
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+load_dotenv()
 
 
 class BinanceClient:
-    def __init__(self, api_key=None, api_secret=None, 
-                 risk_percent=0.85, max_leverage=5.0):
-        self.api_key = api_key or os.getenv("BINANCE_API_KEY")
-        self.api_secret = api_secret or os.getenv("BINANCE_API_SECRET")
-        self.risk_percent = risk_percent
-        self.max_leverage = max_leverage
+    def __init__(self):
+        api_key = os.getenv("BINANCE_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET")
+        
+        if not api_key or not api_secret:
+            raise ValueError("Binance API Key/Secret 未配置")
 
-        if not self.api_key or not self.api_secret:
-            raise ValueError("API Key 和 Secret 不能为空")
+        self.client = Client(api_key, api_secret)
+        print("[BinanceClient] 初始化成功")
 
-        self.client = Client(self.api_key, self.api_secret)
-        logging.info("[BinanceClient] 初始化成功")
-
-    # ==================== 仓位计算 ====================
-    def calculate_position_size(self, symbol="ETHUSDT", leverage=None, equity_ratio=None):
+    # ==================== 市价开仓 ====================
+    def open_market_order(self, symbol: str, side: str, usdt_amount: float = 100):
+        """市价开仓"""
         try:
-            if leverage is None:
-                leverage = Config.DEFAULT_LEVERAGE
-            if equity_ratio is None:
-                equity_ratio = Config.DEFAULT_EQUITY_RATIO
+            ticker = self.client.get_symbol_ticker(symbol=symbol)
+            price = float(ticker["price"])
+            qty = round(usdt_amount / price, 3)
 
-            account = self.client.futures_account()
-            total_equity = float(account['totalWalletBalance']) + float(account.get('totalUnrealizedProfit', 0))
-            usable_equity = total_equity * equity_ratio
-            position_value = usable_equity * leverage
-
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            current_price = float(ticker['price'])
-
-            raw_qty = position_value / current_price
-            final_qty = math.floor(raw_qty / 0.001) * 0.001
-
-            logging.info(f"[仓位计算] 权益比例: {equity_ratio*100}% | 杠杆: {leverage}x | 下单数量: {final_qty}")
-            return round(final_qty, 3)
-        except Exception as e:
-            logging.error(f"[仓位计算失败] {e}")
-            return 0.0
-
-    # ==================== 下单 ====================
-    def place_market_order(self, symbol, side, quantity):
-        try:
-            return self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=quantity
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side.upper(),
+                type=ORDER_TYPE_MARKET,
+                quantity=qty
             )
-        except BinanceAPIException as e:
-            logging.error(f"[下单失败] {e}")
+            return order
+        except Exception as e:
+            print(f"[BinanceClient] 开仓失败: {e}")
             raise
 
-    # ==================== 全平 ====================
-    def close_all_positions(self, symbol):
+    # ==================== 平仓 ====================
+    def close_position(self, symbol: str, side: str, qty: float):
+        """平仓"""
         try:
-            position = self.get_current_position(symbol)
-            if not position or float(position['positionAmt']) == 0:
-                return {"status": "skipped", "reason": "无持仓"}
-
-            qty = abs(float(position['positionAmt']))
-            side = "SELL" if float(position['positionAmt']) > 0 else "BUY"
-
             order = self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
+                symbol=symbol,
+                side=side.upper(),
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+                reduceOnly=True
             )
-            return {"status": "success", "order": order}
+            return order
         except Exception as e:
-            logging.error(f"[全平失败] {e}")
-            return {"status": "error", "message": str(e)}
+            print(f"[BinanceClient] 平仓失败: {e}")
+            raise
 
-    # ==================== 部分平仓 ====================
-    def close_partial_position(self, symbol, quantity):
+    # ==================== 挂限价单（混合模式核心） ====================
+    def place_limit_order(self, symbol: str, side: str, price: float, qty: float, reduce_only: bool = True):
+        """挂限价单（用于 TP3）"""
         try:
-            position = self.get_current_position(symbol)
-            if not position:
-                return {"status": "error", "message": "无持仓"}
-
-            current_qty = abs(float(position['positionAmt']))
-            if quantity > current_qty:
-                quantity = current_qty
-
-            side = "SELL" if float(position['positionAmt']) > 0 else "BUY"
             order = self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=quantity, reduceOnly=True
+                symbol=symbol,
+                side=side.upper(),
+                type=ORDER_TYPE_LIMIT,
+                timeInForce=TIME_IN_FORCE_GTC,
+                price=round(price, 2),
+                quantity=qty,
+                reduceOnly=reduce_only
             )
-            return {"status": "success", "order": order}
+            return order
         except Exception as e:
-            logging.error(f"[部分平仓失败] {e}")
-            return {"status": "error", "message": str(e)}
+            print(f"[BinanceClient] 挂限价单失败: {e}")
+            raise
 
-    # ==================== 获取当前持仓 ====================
-    def get_current_position(self, symbol):
+    # ==================== 撤销订单 ====================
+    def cancel_order(self, symbol: str, order_id: str):
+        """撤销订单"""
+        try:
+            result = self.client.futures_cancel_order(
+                symbol=symbol,
+                orderId=order_id
+            )
+            return result
+        except Exception as e:
+            print(f"[BinanceClient] 撤销订单失败: {e}")
+            raise
+
+    # ==================== 获取当前价格 ====================
+    def get_current_price(self, symbol: str = "ETHUSDT"):
+        try:
+            ticker = self.client.get_symbol_ticker(symbol=symbol)
+            return float(ticker["price"])
+        except Exception as e:
+            print(f"[BinanceClient] 获取价格失败: {e}")
+            return None
+
+    # ==================== 获取持仓 ====================
+    def get_position(self, symbol: str = "ETHUSDT"):
         try:
             positions = self.client.futures_position_information(symbol=symbol)
-            for pos in positions:
-                if float(pos['positionAmt']) != 0:
-                    return pos
+            if positions:
+                return positions[0]
             return None
         except Exception as e:
-            logging.error(f"[获取持仓失败] {e}")
+            print(f"[BinanceClient] 获取持仓失败: {e}")
             return None
 
-    # ==================== 获取账户权益 ====================
-    def get_account_balance(self):
-        try:
-            account = self.client.futures_account()
-            return float(account['totalWalletBalance'])
-        except Exception as e:
-            logging.error(f"[获取权益失败] {e}")
-            return 0.0
 
-    def _get_available_balance(self):
-        try:
-            account = self.client.futures_account()
-            return float(account.get('availableBalance', 0))
-        except:
-            return 0.0
+# ==================== 单例模式 ====================
+_binance_client = BinanceClient()
 
-    # ==================== 获取 ATR ====================
-    def _get_atr(self, symbol, interval="240", limit=14):
-        try:
-            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-            tr_list = []
-            for i in range(1, len(klines)):
-                high = float(klines[i][2])
-                low = float(klines[i][3])
-                prev_close = float(klines[i-1][4])
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                tr_list.append(tr)
-            return sum(tr_list) / len(tr_list) if tr_list else None
-        except Exception as e:
-            logging.error(f"[获取 ATR 失败] {e}")
-            return None
-
-    # ==================== 开仓报告（TP计算已使用 Config） ====================
-    def send_position_open_report(self, signal, symbol, qty, entry_price, is_long):
-        try:
-            atr = self._get_atr(symbol) or (entry_price * 0.008)
-
-            # 使用 Config 中的 ATR 倍数
-            tp_multipliers = Config.TP_ATR_MULTIPLIERS
-            tp1 = round(entry_price + atr * tp_multipliers[0] if is_long else entry_price - atr * tp_multipliers[0], 2)
-            tp2 = round(entry_price + atr * tp_multipliers[1] if is_long else entry_price - atr * tp_multipliers[1], 2)
-            tp3 = round(entry_price + atr * tp_multipliers[2] if is_long else entry_price - atr * tp_multipliers[2], 2)
-
-            direction = "开多" if is_long else "开空"
-            emoji = "🟢" if is_long else "🔴"
-
-            msg = (
-                f"{emoji} **{direction} 成功** | {symbol}\n\n"
-                f"数量: {qty} 张\n"
-                f"开仓价: {entry_price} USDT\n\n"
-                f"止盈目标（40-40-20）:\n"
-                f"• 止盈1 (40%): {tp1} USDT\n"
-                f"• 止盈2 (40%): {tp2} USDT\n"
-                f"• 止盈3 (20%): {tp3} USDT\n\n"
-                f"账户权益: {self.get_account_balance():.2f} USDT"
-            )
-            self._send_dingtalk(msg)
-            return {"tp1": tp1, "tp2": tp2, "tp3": tp3}
-        except Exception as e:
-            logging.error(f"[发送开仓报告失败] {e}")
-            return None
-
-    # ==================== 钉钉通知 ====================
-    def _send_dingtalk(self, text):
-        try:
-            webhook = os.getenv("DINGTALK_WEBHOOK")
-            secret = os.getenv("DINGTALK_SECRET")
-            if not webhook or not secret:
-                logging.warning("[钉钉] 未配置 Webhook 或 Secret，跳过发送")
-                return
-
-            timestamp = str(round(time.time() * 1000))
-            string_to_sign = f'{timestamp}\n{secret}'
-            hmac_code = hmac.new(secret.encode(), string_to_sign.encode(), digestmod=hashlib.sha256).digest()
-            sign = urllib.parse.quote_plus(base64.b64encode(hmac_code).decode())
-
-            url = f"{webhook}&timestamp={timestamp}&sign={sign}"
-            import requests
-            data = {"msgtype": "text", "text": {"content": text}}
-            requests.post(url, json=data, timeout=5)
-        except Exception as e:
-            logging.error(f"[钉钉发送失败] {e}")
-
-
-# ==================== 懒加载单例 ====================
-_binance_client = None
-
-def get_binance_client():
-    global _binance_client
-    if _binance_client is None:
-        _binance_client = BinanceClient()
-    return _binance_client
-    # 在 binance_client.py 最后一行添加
+# 公开别名（解决导入问题）
 binance_client = _binance_client
