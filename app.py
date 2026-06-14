@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py（最终版 - VPS完全接管40/40/20 + 监督层主动对齐）
+# app.py（最终完整版）
 
 import logging
 from datetime import datetime
@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-# ==================== 启动时初始化 ProfitTaker ====================
+# ==================== 启动时初始化 ProfitTaker（Gunicorn 兼容） ====================
 try:
     from profit_taker import profit_taker
     if not profit_taker.running:
         profit_taker.start()
-        logger.info("[App] ProfitTaker 后台线程已启动")
+        logger.info("[App] ProfitTaker 后台线程已启动（模块加载时）")
 except Exception as e:
     logger.error(f"[App] ProfitTaker 启动失败: {e}")
 
@@ -34,7 +34,7 @@ def webhook():
             logger.warning("[Webhook] Secret 校验失败")
             return jsonify({"status": "error", "message": "invalid secret"}), 403
 
-        # 交给监督层处理
+        # 交给监督层处理（已兼容新旧格式）
         from position_supervisor import position_supervisor
         position_supervisor.handle_signal(data)
 
