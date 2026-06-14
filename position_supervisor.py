@@ -16,12 +16,21 @@ logger = logging.getLogger(__name__)
 class PositionSupervisor:
     def __init__(self):
         self.forced_close_reasons = ["max_adverse", "reverse_exit", "rsi_exit", "time_stop", "reverse_position"]
+        self.last_signal = None   # 记录最新收到的 TV 信号，用于方向对齐检查
 
     # ==================== 统一信号入口 ====================
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
         atr = payload.get("atr")
         reason = payload.get("reason", "")
+
+        # 记录最新信号（用于后续方向对齐检查）
+        self.last_signal = {
+            "action": action,
+            "atr": atr,
+            "reason": reason,
+            "timestamp": time.time()
+        }
 
         logger.info(f"[Supervisor] 收到信号 → action={action}, reason={reason}")
 
@@ -91,16 +100,133 @@ class PositionSupervisor:
             return False
         return True
 
+    def check_and_align_with_latest_signal(self):
+        """
+        检查当前持仓方向是否与最新 TV 信号一致。
+        如不一致，监督层有权命令执行层强制对齐（先平后开最新 TV 方向）。
+        """
+        if not self.last_signal:
+            return
+
+        latest_action = self.last_signal.get("action")
+        if latest_action not in ["LONG", "SHORT"]:
+            return
+
+        current = position_manager.get_position()
+        has_position = current is not None and current.get("current_qty", 0) > 0
+
+        if not has_position:
+            return  # 无持仓则无需对齐
+
+        current_side = current.get("side")
+
+        if current_side == latest_action:
+            return  # 方向一致，无需操作
+
+        # 方向不一致 → 强制对齐最新 TV 信号
+        logger.warning(f"[Supervisor] 持仓方向({current_side})与最新TV信号({latest_action})不一致，执行强制对齐")
+        send_dingtalk_message(
+            f"⚠️ **【监督层强制对齐】**\n"
+            f"当前持仓: `{current_side}`\n"
+            f"最新 TV 信号: `{latest_action}`\n"
+            f"执行先平后开对齐..."
+        )
+
+        self._cancel_tp3_if_exists()
+        order_executor.close_position("监督层强制对齐最新TV方向")
+        time.sleep(1.8)
+
+        # 重新开最新 TV 方向
+        signal_data = {"atr": self.last_signal.get("atr")}
+        order_executor.open_position(latest_action, signal_data)
+
     def force_reconcile(self, source: str = "manual"):
+        """增强版强制对账：对比内存与 Binance 实际持仓，并在不一致时尝试修复或告警"""
         logger.info(f"[Supervisor] 强制对账执行，来源: {source}")
-        send_dingtalk_message(f"【强制对账】来源: {source}")
+
+        try:
+            memory_pos = position_manager.get_position()
+            binance_pos = binance_client.get_position("ETHUSDT")
+
+            if not binance_pos or float(binance_pos.get("positionAmt", 0)) == 0:
+                # Binance 无持仓
+                if memory_pos:
+                    position_manager.clear_position()
+                    send_dingtalk_message(f"【强制对账】Binance 无持仓，内存已清空（来源: {source}）")
+                return
+
+            binance_qty = float(binance_pos.get("positionAmt", 0))
+            binance_side = "LONG" if binance_qty > 0 else "SHORT"
+            binance_entry = float(binance_pos.get("entryPrice", 0))
+
+            if not memory_pos:
+                # 内存无持仓但 Binance 有 → 尝试恢复
+                position_manager.set_initial_position({
+                    "side": binance_side,
+                    "entry_price": binance_entry,
+                    "current_qty": abs(binance_qty),
+                    "original_qty": abs(binance_qty),
+                    "tp_stage": 0
+                })
+                send_dingtalk_message(f"【强制对账恢复】内存重建持仓（来源: {source}）")
+                return
+
+            # 对比关键字段
+            mem_qty = memory_pos.get("current_qty", 0)
+            mem_side = memory_pos.get("side")
+            mem_entry = memory_pos.get("entry_price", 0)
+
+            diff_qty = abs(mem_qty - binance_qty)
+            inconsistent = False
+            msg_parts = []
+
+            if mem_side != binance_side:
+                inconsistent = True
+                msg_parts.append(f"方向不一致: 内存{mem_side} vs Binance{binance_side}")
+
+            if diff_qty > 0.5:  # 数量差异超过0.5个ETH
+                inconsistent = True
+                msg_parts.append(f"数量差异较大: 内存{mem_qty} vs Binance{binance_qty}")
+
+            if abs(mem_entry - binance_entry) > 1.0:  # 均价差异>1美元
+                inconsistent = True
+                msg_parts.append(f"均价差异: 内存{mem_entry} vs Binance{binance_entry}")
+
+            if inconsistent:
+                # 以 Binance 为准更新内存
+                position_manager.update_current_qty(binance_qty)
+                with position_manager._lock:
+                    if position_manager._position:
+                        position_manager._position["side"] = binance_side
+                        position_manager._position["entry_price"] = binance_entry
+
+                send_dingtalk_message(
+                    f"【强制对账发现不一致并已修复】来源: {source}\n" + "\n".join(msg_parts)
+                )
+            else:
+                logger.info(f"[Supervisor] 对账一致（来源: {source}）")
+
+        except Exception as e:
+            logger.error(f"[Supervisor] 强制对账异常: {e}")
+            send_dingtalk_message(f"【强制对账异常】来源: {source}\n{str(e)}")
 
     def notify_open_success(self, side, usdt_amount, entry_price, tp1, tp2, tp3):
-        msg = (f"【开仓成功 - VPS完全接管40/40/20模式】{side}\n"
-               f"金额: {usdt_amount} USDT\n"
-               f"入场价: {entry_price}\n"
-               f"TP1: {tp1} | TP2: {tp2} | Runner: {tp3}\n"
-               f"ProfitTaker 已接管价格监控与 scale-out")
+        msg = (
+            f"🚀 **【开仓成功】** `{side}`\n\n"
+            f"**金额**: `{usdt_amount} USDT`\n"
+            f"**入场价**: `{entry_price}`\n"
+            f"**TP1**: `{tp1}` | **TP2**: `{tp2}` | **Runner**: `{tp3}`\n\n"
+            f"_ProfitTaker 已接管 40/40/20 scale-out_\n"
+            f"_来源: VPS完全接管模式_"
+        )
+        send_dingtalk_message(msg)
+
+    def send_detailed_decision(self, title: str, details: dict, emoji: str = "📌"):
+        """统一详细决策推送（美观 + 参数完整 + 中文友好）"""
+        lines = [f"{emoji} **【{title}】**"]
+        for k, v in details.items():
+            lines.append(f"**{k}**: `{v}`")
+        msg = "\n".join(lines)
         send_dingtalk_message(msg)
 
 
