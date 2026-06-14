@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（强壮完整版 - A/B/C 落地）
+# order_executor.py（VPS完全接管40/40/20最终内测版 - 2026-06-14）
 
 import logging
 import time
@@ -13,26 +13,24 @@ SYMBOL = "ETHUSDT"
 
 class OrderExecutor:
     def __init__(self):
-        self.tp1_close_ratio = 0.30
-        self.tp2_close_ratio = 0.30
-        self.tp3_close_ratio = 0.40
-        self.atr_sl_mult = 1.0
-        self.atr_tp1_mult = 1.3
-        self.atr_tp2_mult = 2.5
-        self.atr_tp3_mult = 3.8
+        self.tp1_close_ratio = 0.40
+        self.tp2_close_ratio = 0.40
+        self.tp3_close_ratio = 0.20
+        self.atr_sl_mult = 0.92
+        self.atr_tp1_mult = 1.08
+        self.atr_tp2_mult = 1.95
+        self.atr_tp3_mult = 3.0
         self.risk_percent = 0.90
-        self.default_usdt_amount = 100
 
-    # ==================== 开新仓（强壮版） ====================
     def open_position(self, side: str, signal_data: dict):
         logger.info(f"[OrderExecutor] 开始处理 {side} 开仓信号")
         try:
-            self._cancel_existing_orders()          # 撤销旧 TP3 和 SL
+            self._cancel_existing_orders()
             self._close_existing_position()
 
             atr = float(signal_data.get("atr", 0))
             if atr <= 0:
-                send_dingtalk_message(f"【开仓失败】{side} - ATR 无效")
+                send_dingtalk_message(f"【开仓失败】{side} - ATR无效")
                 return
 
             usdt_amount = self._calculate_usdt_amount(atr)
@@ -46,22 +44,16 @@ class OrderExecutor:
 
             tp1_price, tp2_price, tp3_price, sl_price = self._calculate_tp_sl_prices(side, entry_price, atr)
 
-            # 1. 挂初始止损单（STOP_MARKET）
             close_side = "SELL" if side == "LONG" else "BUY"
             original_qty = round(usdt_amount / entry_price, 3)
+
+            # 只挂初始SL（VPS完全接管模式）
             sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, sl_price, original_qty)
             if sl_order:
                 position_manager.set_sl_order_id(sl_order.get("orderId"))
 
-            # 2. 挂 TP3 限价单
-            tp3_qty = round(original_qty * self.tp3_close_ratio, 3)
-            if tp3_qty > 0:
-                tp3_order = binance_client.place_limit_order(SYMBOL, close_side, tp3_price, tp3_qty, reduce_only=True)
-                if tp3_order:
-                    position_manager.set_tp3_order_id(tp3_order.get("orderId"))
-
-            # 3. 更新内存状态
-            position_manager.set_position({
+            # 更新状态（profit_taker完全接管scale-out）
+            position_manager.set_initial_position({
                 "side": side,
                 "entry_price": entry_price,
                 "sl_price": sl_price,
@@ -69,33 +61,31 @@ class OrderExecutor:
                 "tp2_price": tp2_price,
                 "tp3_price": tp3_price,
                 "original_usdt_amount": usdt_amount,
-                "original_qty": original_qty
+                "original_qty": original_qty,
+                "atr": atr
             })
 
             from position_supervisor import position_supervisor
             position_supervisor.notify_open_success(side, usdt_amount, entry_price, tp1_price, tp2_price, tp3_price)
-            logger.info(f"[OrderExecutor] {side} 开仓完成（已挂 SL + TP3）")
+            logger.info(f"[OrderExecutor] {side} 开仓完成（仅挂SL，profit_taker已接管）")
 
         except Exception as e:
             logger.error(f"[OrderExecutor] 开新仓异常: {e}")
             send_dingtalk_message(f"【开新仓异常】{side}\n{str(e)}")
 
-    # ==================== 移动止损到保本（强壮版 - B） ====================
     def move_to_breakeven(self):
         try:
             current = position_manager.get_position()
             if not current:
                 return
-
             entry_price = current.get("entry_price")
             side = current.get("side", "LONG")
-            qty = current.get("original_qty", 0)
+            qty = current.get("current_qty", current.get("original_qty", 0))
             if qty <= 0:
                 qty = abs(binance_client.get_position_qty(SYMBOL))
 
             close_side = "SELL" if side == "LONG" else "BUY"
 
-            # 取消旧止损单
             old_sl_id = position_manager.get_sl_order_id()
             if old_sl_id:
                 try:
@@ -103,25 +93,22 @@ class OrderExecutor:
                 except:
                     pass
 
-            # 挂新保本止损单
             new_sl_order = binance_client.place_stop_loss_order(SYMBOL, close_side, entry_price, qty)
             if new_sl_order:
                 position_manager.set_sl_order_id(new_sl_order.get("orderId"))
 
             logger.info(f"[OrderExecutor] 移动止损到保本价: {entry_price}")
             send_dingtalk_message(f"【移动止损】已移至保本价 {entry_price}")
-
         except Exception as e:
             logger.error(f"[OrderExecutor] 移动止损失败: {e}")
 
-    # ==================== 全平 ====================
     def close_position(self, reason: str = "手动全平"):
         try:
             current = position_manager.get_position()
             if not current:
                 return
             side = current.get("side", "LONG")
-            qty = current.get("original_qty", 0) or abs(binance_client.get_position_qty(SYMBOL)) or 0.01
+            qty = current.get("current_qty", current.get("original_qty", 0)) or 0.01
 
             self._cancel_existing_orders()
             binance_client.close_position(SYMBOL, side, qty)
@@ -130,9 +117,7 @@ class OrderExecutor:
         except Exception as e:
             logger.error(f"[OrderExecutor] 全平失败: {e}")
 
-    # ==================== 内部方法 ====================
     def _cancel_existing_orders(self):
-        # 取消 TP3
         tp3_id = position_manager.get_tp3_order_id()
         if tp3_id:
             try:
@@ -141,7 +126,6 @@ class OrderExecutor:
                 pass
             position_manager.clear_tp3_order()
 
-        # 取消 SL
         sl_id = position_manager.get_sl_order_id()
         if sl_id:
             try:
@@ -165,10 +149,9 @@ class OrderExecutor:
     def _calculate_usdt_amount(self, atr: float) -> float:
         try:
             equity = binance_client.get_usdt_balance() or 20000
-            risk_amount = equity * (self.risk_percent / 100)
-            return min(round(risk_amount, 2), self.default_usdt_amount)
+            return round(equity * 0.80, 2)
         except:
-            return self.default_usdt_amount
+            return 200
 
     def _calculate_tp_sl_prices(self, side: str, entry_price: float, atr: float):
         if side == "LONG":
