@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# position_supervisor.py（完整最终版 - 集成 TP 监控 + 部分平仓）
+# position_supervisor.py（完整最终版 - 集成 ATR 动态 TP 计算）
 import logging
 import time
 from typing import Dict, Any
 from order_executor import order_executor
+from binance_client import binance_client
 from dingtalk import (
     report_risk_trigger,
     report_anomaly,
@@ -20,7 +21,8 @@ class PositionSupervisor:
     def __init__(self):
         self.position_manager = position_manager
         self.risk_manager = risk_manager
-        logger.info("[Supervisor] 监督层初始化完成（支持 TP 监控 + 部分平仓）")
+        self.client = binance_client
+        logger.info("[Supervisor] 监督层初始化完成（支持 ATR 动态 TP）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -31,11 +33,11 @@ class PositionSupervisor:
 
     def _handle_entry_signal(self, action: str):
         try:
-            # ========== 1. 新信号到达 → 先清空旧 TP 监控 ==========
+            # 1. 新信号到达 → 清空旧 TP 监控
             from tp_monitor import tp_monitor
             tp_monitor.clear_tp_levels()
 
-            # 2. 撤销所有限价单（含 TP3）
+            # 2. 撤销所有限价单
             order_executor.cancel_all_tp_orders()
             time.sleep(0.8)
 
@@ -51,34 +53,44 @@ class PositionSupervisor:
                 report_risk_trigger(f"{action} 开仓被风控拒绝")
                 return
 
-            # 5. 立即重开新仓
+            # 5. 重开新仓
             order_executor.open_position(action, {})
 
-            # 6. 开仓后核实实盘 + 设置 TP 监控
+            # 6. 开仓后核实实盘
             time.sleep(2.5)
             self._verify_and_align_position(action)
 
-            # ========== 7. 开仓成功后设置 TP 并启动监控 ==========
+            # ========== 7. 使用 ATR 动态计算 TP1/TP2/TP3 并启动监控 ==========
             real_pos = self.position_manager.get_position()
             if real_pos and float(real_pos.get("positionAmt", 0)) != 0:
+
                 entry_price = float(real_pos.get("entryPrice", 0))
                 side = self.position_manager.get_position_side()
                 qty = self.position_manager.get_position_qty()
 
-                # TODO: 后续可替换为 ATR 动态计算 TP 价格
+                # 获取 ATR（3H K线，14周期）
+                atr = self.client.get_atr(symbol="ETHUSDT", interval="3h", limit=50, period=14)
+
+                # ATR 获取失败时的兜底值
+                if atr <= 0:
+                    atr = 22.0
+                    logger.warning(f"[Supervisor] ATR 获取失败，使用兜底值 {atr}")
+
+                logger.info(f"[Supervisor] 当前 ATR(3H,14) = {atr}")
+
                 if side == "LONG":
-                    tp1 = round(entry_price * 1.015, 2)   # +1.5%
-                    tp2 = round(entry_price * 1.03, 2)    # +3.0%
-                    tp3 = round(entry_price * 1.05, 2)    # +5.0%
+                    tp1 = round(entry_price + atr * 1.3, 2)   # 第一段止盈
+                    tp2 = round(entry_price + atr * 2.6, 2)   # 第二段止盈
+                    tp3 = round(entry_price + atr * 4.2, 2)   # 第三段止盈
                 else:  # SHORT
-                    tp1 = round(entry_price * 0.985, 2)   # -1.5%
-                    tp2 = round(entry_price * 0.97, 2)    # -3.0%
-                    tp3 = round(entry_price * 0.95, 2)    # -5.0%
+                    tp1 = round(entry_price - atr * 1.3, 2)
+                    tp2 = round(entry_price - atr * 2.6, 2)
+                    tp3 = round(entry_price - atr * 4.2, 2)
 
                 tp_monitor.set_tp_levels(tp1, tp2, tp3, side, qty)
                 tp_monitor.start()
 
-                logger.info(f"[Supervisor] TP 监控已启动 | TP1={tp1} TP2={tp2} TP3={tp3}")
+                logger.info(f"[Supervisor] ATR动态TP已设置 | TP1={tp1} | TP2={tp2} | TP3={tp3}")
 
         except Exception as e:
             logger.error(f"[Supervisor] 处理 {action} 信号异常: {e}", exc_info=True)
@@ -105,7 +117,6 @@ class PositionSupervisor:
             time.sleep(1.8)
             order_executor.open_position(expected_side, {})
 
-            # 再次核实
             final_pos = self.position_manager.get_position()
             if final_pos and final_pos.get("side") == expected_side:
                 report_verification_success(expected_side, expected_side, final_pos.get("positionAmt", 0))
