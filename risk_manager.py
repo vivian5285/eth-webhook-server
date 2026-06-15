@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class RiskManager:
     def __init__(self):
+        # 【核心修复】将普通的 Lock 改为可重入锁 RLock，允许同一线程嵌套获取锁，彻底解决死锁问题
         self._lock = threading.RLock()
         
         self.daily_peak_equity: float = 0.0
