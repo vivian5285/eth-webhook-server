@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（完整最终版 - 2026-06-15）
+# order_executor.py（完整更新版 - 支持动态数量执行）
 import logging
 import time
 from binance_client import binance_client
@@ -15,23 +15,28 @@ class OrderExecutor:
     def __init__(self):
         self.client = binance_client
         self.position_manager = position_manager
-        logger.info("[OrderExecutor] 执行层初始化完成（已加强执行确认 + 真实PnL）")
+        logger.info("[OrderExecutor] 执行层初始化完成（已支持动态数量执行 + 真实PnL）")
 
     # ==================== 开仓 ====================
 
     def open_position(self, side: str, params: dict = None):
         """市价单开仓"""
         try:
-            current_price = self.client.get_current_price()
-            logger.info(f"[OrderExecutor] 准备开 {side} 仓，当前价格: {current_price}")
+            quantity = params.get("quantity", 0) if params else 0
+            if quantity <= 0:
+                report_anomaly(f"{side} 开仓失败：执行数量异常 ({quantity})")
+                return None
 
-            order = self.client.place_market_order(side=side, quantity=0)  # quantity 由外部或风控控制
+            current_price = self.client.get_current_price()
+            logger.info(f"[OrderExecutor] 准备开 {side} 仓，当前价格: {current_price}，执行数量: {quantity}")
+
+            order = self.client.place_market_order(side=side, quantity=quantity)
             if order:
                 logger.info(f"[OrderExecutor] {side} 开仓成功")
-                send_dingtalk_message(f"🚀 【开仓】{side} @ {current_price}")
+                send_dingtalk_message(f"🚀 【开仓】{side} @ {current_price} | 数量: {quantity}")
                 return order
             else:
-                report_anomaly(f"{side} 开仓失败")
+                report_anomaly(f"{side} 开仓失败，未返回订单信息")
                 return None
         except Exception as e:
             logger.error(f"[OrderExecutor] 开仓异常: {e}", exc_info=True)
