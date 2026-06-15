@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# state_manager.py（完整最终版 - 状态持久化管理）
+# state_manager.py（完整最终版 - 状态持久化管理，已修复权限路径）
 import json
 import os
 import logging
@@ -7,7 +7,8 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = "/home/workdir/artifacts/trading_state.json"
+# 修改为项目目录下的 data 文件夹，避免 root 权限冲突
+STATE_FILE = "/home/trading/eth-webhook-server/data/trading_state.json"
 
 
 class StateManager:
@@ -60,10 +61,4 @@ class StateManager:
         try:
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
-            logger.info("[StateManager] 状态已清空")
-        except Exception as e:
-            logger.error(f"[StateManager] 清空状态失败: {e}")
-
-
-# 全局单例
-state_manager = StateManager()
+            logger.info("[StateManager] 状态已清
