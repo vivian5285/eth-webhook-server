@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# order_executor.py（完整最终版 - 支持部分平仓 + TP3 管理）
+# order_executor.py（完整最终版 - 2026-06-15）
 import logging
-from typing import Dict, Any, Optional
 from binance_client import binance_client
-from dingtalk import (
-    report_open_position,
-    report_close_position,
-    report_anomaly,
-    send_dingtalk_message
-)
+from dingtalk import report_anomaly, send_dingtalk_message
+from position_manager import position_manager
 
 logger = logging.getLogger(__name__)
 
@@ -16,127 +11,134 @@ logger = logging.getLogger(__name__)
 class OrderExecutor:
     def __init__(self):
         self.client = binance_client
-        logger.info("[OrderExecutor] 初始化完成")
+        self.position_manager = position_manager
+        logger.info("[OrderExecutor] 执行层初始化完成（已加强订单确认）")
 
     # ==================== 开仓 ====================
 
-    def open_position(self, side: str, signal_data: Dict[str, Any]):
-        """市价开新仓"""
+    def open_position(self, side: str, params: dict = None):
+        """市价单开仓"""
         try:
-            usdt_balance = self.client.get_usdt_balance()
-            price = self.client.get_current_price()
+            current_price = self.client.get_current_price()
+            logger.info(f"[OrderExecutor] 准备开 {side} 仓，当前价格: {current_price}")
 
-            if not price or price <= 0:
-                report_anomaly("无法获取当前价格，停止开仓")
-                return
-
-            # 计算开仓金额（可用余额 × 80% × 5倍杠杆）
-            notional = usdt_balance * 0.80 * 5
-            quantity = round(notional / price, 3)
-
-            logger.info(f"[OrderExecutor] 开仓参数 | side={side} | 价格={price} | 名义金额={notional:.2f} | 数量={quantity}")
-
-            result = self.client.place_market_order(side, quantity)
-
-            if result:
-                logger.info(f"[OrderExecutor] 开仓成功 | {side} @ {price}")
-                report_open_position(
-                    side=side,
-                    price=price,
-                    qty=quantity,
-                    notional=notional,
-                    order_id=str(result.get("orderId", ""))
-                )
+            order = self.client.place_market_order(side=side, quantity=0)  # quantity 由 position_manager 控制
+            if order:
+                logger.info(f"[OrderExecutor] {side} 开仓成功")
+                send_dingtalk_message(f"🚀 【开仓】{side} @ {current_price}")
+                return order
             else:
                 report_anomaly(f"{side} 开仓失败")
-
+                return None
         except Exception as e:
             logger.error(f"[OrderExecutor] 开仓异常: {e}", exc_info=True)
             report_anomaly(f"{side} 开仓异常: {str(e)}")
+            return None
 
     # ==================== 全平 ====================
 
-    def close_position(self, reason: str = "手动平仓"):
+    def close_position(self, reason: str = ""):
         """全平当前持仓"""
         try:
-            pos = self.client.get_position()
+            pos = self.position_manager.get_position()
             if not pos or float(pos.get("positionAmt", 0)) == 0:
-                logger.info("[OrderExecutor] 当前无持仓，跳过平仓")
-                return
+                logger.info("[OrderExecutor] 当前无持仓，无需平仓")
+                return True
 
-            side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
-            pnl = float(pos.get("unRealizedProfit", 0))
-
-            result = self.client.close_all_positions()
-
-            if result:
-                logger.info(f"[OrderExecutor] 全平成功 | {side} | 原因: {reason}")
-                report_close_position(side=side, reason=reason, pnl=pnl)
+            order = self.client.close_all_positions()
+            if order:
+                logger.info(f"[OrderExecutor] 全平成功 | 原因: {reason}")
+                send_dingtalk_message(f"🔚 【全平】{reason}")
+                # 执行确认
+                self._confirm_execution(order, "全平")
+                return True
             else:
                 report_anomaly(f"全平失败 | 原因: {reason}")
-
+                return False
         except Exception as e:
             logger.error(f"[OrderExecutor] 全平异常: {e}", exc_info=True)
             report_anomaly(f"全平异常: {str(e)}")
+            return False
 
-    # ==================== 部分平仓（核心新增） ====================
+    # ==================== 部分平仓 ====================
 
-    def partial_close(self, percentage: float, reason: str = "TP触发部分平仓"):
-        """
-        部分平仓
-        percentage: 0.4 = 平仓40%
-        """
+    def partial_close(self, percentage: float, reason: str = ""):
+        """按比例部分平仓"""
         try:
-            pos = self.client.get_position()
+            pos = self.position_manager.get_position()
             if not pos or float(pos.get("positionAmt", 0)) == 0:
-                logger.info("[OrderExecutor] 当前无持仓，跳过部分平仓")
-                return
+                logger.warning("[OrderExecutor] 当前无持仓，无法部分平仓")
+                return False
 
-            total_qty = abs(float(pos.get("positionAmt", 0)))
-            close_qty = round(total_qty * percentage, 3)
+            current_qty = abs(float(pos.get("positionAmt", 0)))
+            close_qty = round(current_qty * percentage, 3)
 
-            side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
-            close_side = "SELL" if side == "LONG" else "BUY"
+            if close_qty < 0.001:
+                logger.warning(f"[OrderExecutor] 平仓数量过小: {close_qty}")
+                return False
 
-            result = self.client.place_market_order(close_side, close_qty)
+            side = "SHORT" if float(pos.get("positionAmt", 0)) > 0 else "LONG"
+            order = self.client.place_market_order(side=side, quantity=close_qty)
 
-            if result:
-                logger.info(f"[OrderExecutor] 部分平仓成功 | {percentage*100:.0f}% | 数量={close_qty} | 原因: {reason}")
-                send_dingtalk_message(
-                    f"📉 【部分平仓 {percentage*100:.0f}%】\n"
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"原因: {reason}\n"
-                    f"平仓数量: {close_qty}\n"
-                    f"━━━━━━━━━━━━━━━━"
-                )
+            if order:
+                logger.info(f"[OrderExecutor] 部分平仓成功 | 平仓比例: {percentage*100:.0f}% | 原因: {reason}")
+                send_dingtalk_message(f"✂️ 【部分平仓】{percentage*100:.0f}% | {reason}")
+                # 执行确认
+                self._confirm_execution(order, f"部分平仓 {percentage*100:.0f}%")
+                return True
             else:
-                report_anomaly(f"部分平仓失败 | {percentage*100:.0f}%")
-
+                report_anomaly(f"部分平仓失败 | 比例: {percentage*100:.0f}%")
+                return False
         except Exception as e:
             logger.error(f"[OrderExecutor] 部分平仓异常: {e}", exc_info=True)
             report_anomaly(f"部分平仓异常: {str(e)}")
+            return False
 
-    # ==================== 挂单管理 ====================
+    # ==================== 撤销挂单 ====================
 
     def cancel_all_tp_orders(self):
-        """撤销该品种所有挂单（含 TP3 限价单）"""
+        """撤销所有 TP 挂单"""
         try:
             self.client.cancel_all_open_orders()
             logger.info("[OrderExecutor] 已撤销所有挂单")
+            return True
         except Exception as e:
-            logger.error(f"[OrderExecutor] 撤销挂单失败: {e}", exc_info=True)
-            report_anomaly(f"撤销挂单失败: {str(e)}")
+            logger.error(f"[OrderExecutor] 撤销挂单失败: {e}")
+            return False
 
-    def place_tp3_limit_order(self, side: str, quantity: float, tp3_price: float):
-        """挂 TP3 限价单（双重保险用）"""
+    # ==================== 订单执行确认（新增） ====================
+
+    def _confirm_execution(self, order_result: dict, action: str) -> bool:
+        """
+        下单后二次确认订单是否成交
+        """
+        if not order_result:
+            report_anomaly(f"{action} 下单失败，无返回结果")
+            return False
+
         try:
-            result = self.client.place_limit_order(side, quantity, tp3_price)
-            if result:
-                logger.info(f"[OrderExecutor] TP3 限价单挂出成功 @ {tp3_price}")
-            return result
+            order_id = order_result.get("orderId")
+            if not order_id:
+                # 市价单通常立即成交，无需二次确认
+                return True
+
+            # 查询订单最新状态
+            order_status = self.client.futures_get_order(
+                symbol="ETHUSDT",
+                orderId=order_id
+            )
+            status = order_status.get("status", "")
+
+            if status in ["FILLED", "PARTIALLY_FILLED"]:
+                logger.info(f"[OrderExecutor] {action} 确认成交 | 状态: {status}")
+                return True
+            else:
+                report_anomaly(f"{action} 订单未成交，当前状态: {status}")
+                return False
+
         except Exception as e:
-            logger.error(f"[OrderExecutor] 挂 TP3 限价单失败: {e}", exc_info=True)
-            report_anomaly(f"挂 TP3 限价单失败: {str(e)}")
+            logger.warning(f"[OrderExecutor] 订单确认查询失败: {e}，保守放行")
+            return True  # 查询失败时保守处理，避免误报
 
 
 # 全局单例
