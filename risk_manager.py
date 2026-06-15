@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# risk_manager.py（增强版 - 2026-06-15）
+# risk_manager.py（完整最终版 - 2026-06-15）
 import logging
 from datetime import datetime, date
 from typing import Dict
@@ -49,7 +49,7 @@ class RiskManager:
             self.consecutive_losses = 0
 
     def update_drawdown(self, current_drawdown: float):
-        """更新当前回撤"""
+        """更新当前回撤并动态调整风险系数"""
         self.current_drawdown = current_drawdown
         self._update_risk_multiplier()
 
@@ -76,21 +76,17 @@ class RiskManager:
         """综合风控检查（核心接口）"""
         self._reset_daily_if_needed()
 
-        # 1. 每日亏损熔断
         if self.is_daily_breaker_triggered():
             return False
 
-        # 2. 连续亏损熔断
         if self.consecutive_losses >= self.max_consecutive_losses:
             logger.warning(f"[RiskManager] 触发连续亏损熔断！连续亏损次数: {self.consecutive_losses}")
             return False
 
-        # 3. 单日交易次数限制
         if self.today_trade_count >= self.max_daily_trades:
             logger.warning(f"[RiskManager] 达到单日最大交易次数限制: {self.today_trade_count}")
             return False
 
-        # 4. 最大回撤限制
         if self.current_drawdown >= self.max_drawdown_limit:
             logger.warning(f"[RiskManager] 触发最大回撤限制: {self.current_drawdown:.2%}")
             return False
@@ -101,8 +97,21 @@ class RiskManager:
         """获取当前动态风险系数"""
         return self.risk_mult
 
+    def on_position_closed(self, pnl: float, is_full_close: bool = False):
+        """
+        平仓时自动调用，更新风控数据（实现自动闭环）
+        """
+        self.record_trade_result(pnl)
+        self.update_daily_pnl(pnl)
+
+        logger.info(
+            f"[RiskManager] 收到平仓记录 | PnL: {pnl:+.2f} | "
+            f"连续亏损: {self.consecutive_losses} | "
+            f"当日累计PnL: {self.daily_pnl:+.2f}"
+        )
+
     def get_status(self) -> Dict:
-        """获取当前风控状态（供健康检查使用）"""
+        """获取当前风控状态（供 /health 接口使用）"""
         self._reset_daily_if_needed()
         return {
             "daily_pnl": round(self.daily_pnl, 4),
