@@ -61,4 +61,10 @@ class StateManager:
         try:
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
-            logger.info("[StateManager] 状态已清
+            logger.info("[StateManager] 状态已清空")
+        except Exception as e:
+            logger.error(f"[StateManager] 清空状态失败: {e}")
+
+
+# 全局单例
+state_manager = StateManager()
