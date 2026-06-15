@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binance_client.py（V2 完整版 - 包含所有持仓查询与总权益查询）
+# binance_client.py（V2.5 终极完整版 - 已修复 LONG/SHORT 到 BUY/SELL 的翻译）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -21,6 +21,7 @@ class BinanceClient:
         logger.info("[BinanceClient] Binance客户端初始化成功")
 
     def get_current_price(self, symbol: str = "ETHUSDT") -> float:
+        """获取当前价格"""
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             return float(ticker["price"])
@@ -29,6 +30,7 @@ class BinanceClient:
             return 0.0
 
     def get_available_balance(self, asset: str = "USDT") -> float:
+        """获取合约账户指定资产的可用余额"""
         try:
             account_info = self.client.futures_account()
             for a in account_info.get("assets", []):
@@ -39,18 +41,17 @@ class BinanceClient:
             logger.error(f"[BinanceClient] 获取可用余额失败: {e}")
             return 0.0
 
-    # ==================== V2 新增：总权益查询（用于回撤计算） ====================
     def get_total_equity(self) -> float:
-        """获取合约账户总权益（包含未实现盈亏）"""
+        """获取合约账户总权益（用于动态回撤计算）"""
         try:
             account_info = self.client.futures_account()
             return float(account_info.get("totalMarginBalance", 0.0))
         except Exception as e:
             logger.error(f"[BinanceClient] 获取总权益失败: {e}")
             return 0.0
-    # =========================================================================
 
     def get_position(self, symbol: str = "ETHUSDT") -> Optional[Dict[str, Any]]:
+        """获取当前持仓信息"""
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if positions and len(positions) > 0:
@@ -61,6 +62,7 @@ class BinanceClient:
             return None
 
     def get_open_orders(self, symbol: str = "ETHUSDT") -> List[Dict]:
+        """获取当前所有挂单"""
         try:
             return self.client.futures_get_open_orders(symbol=symbol)
         except Exception as e:
@@ -69,6 +71,7 @@ class BinanceClient:
 
     def get_atr(self, symbol: str = "ETHUSDT", interval: str = "3h", 
                 limit: int = 50, period: int = 14) -> Optional[float]:
+        """计算 ATR（Average True Range）"""
         try:
             klines = self.client.futures_klines(
                 symbol=symbol,
@@ -96,14 +99,18 @@ class BinanceClient:
             return None
 
     def place_market_order(self, side: str, quantity: float, symbol: str = "ETHUSDT"):
+        """市价单下单（已完美兼容 TV 信号与币安底层指令）"""
         try:
+            # 【核心修复】：做翻译官，将 LONG 转为 BUY，SHORT 转为 SELL
+            binance_side = "BUY" if side.upper() == "LONG" else "SELL"
+            
             order = self.client.futures_create_order(
                 symbol=symbol,
-                side=side.upper(),
+                side=binance_side,  # 使用翻译后的方向
                 type="MARKET",
                 quantity=quantity
             )
-            logger.info(f"[BinanceClient] 市价单下单成功: {side} {quantity}")
+            logger.info(f"[BinanceClient] 市价单下单成功: {binance_side} {quantity}")
             return order
         except BinanceAPIException as e:
             logger.error(f"[BinanceClient] 市价单下单失败: {e}")
@@ -113,6 +120,7 @@ class BinanceClient:
             return None
 
     def close_all_positions(self, symbol: str = "ETHUSDT"):
+        """全平当前持仓"""
         try:
             position = self.client.futures_position_information(symbol=symbol)
             if not position:
@@ -138,6 +146,7 @@ class BinanceClient:
             return None
 
     def futures_get_order(self, symbol: str, orderId: int):
+        """查询订单状态"""
         try:
             return self.client.futures_get_order(symbol=symbol, orderId=orderId)
         except Exception as e:
@@ -145,6 +154,7 @@ class BinanceClient:
             return None
 
     def cancel_all_open_orders(self, symbol: str = "ETHUSDT"):
+        """撤销所有挂单"""
         try:
             self.client.futures_cancel_all_open_orders(symbol=symbol)
             logger.info("[BinanceClient] 已撤销所有挂单")
@@ -154,6 +164,7 @@ class BinanceClient:
             return False
 
     def get_recent_realized_pnl(self, minutes: int = 10) -> float:
+        """获取最近一段时间内的已实现盈亏（真实数据）"""
         try:
             from datetime import datetime, timedelta
 
