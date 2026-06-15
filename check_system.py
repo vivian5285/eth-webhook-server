@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# check_system.py（轻量版 - 快速检查，不触发重度 RiskManager 调用）
+# check_system.py（适配 2026-06-15 最新版 /health 接口）
 
 import requests
 import sys
@@ -9,17 +9,24 @@ BASE_URL = "http://localhost:5000"
 
 
 def check_http_status():
-    """通过 /status 接口快速获取系统状态（推荐方式）"""
+    """通过 /health 接口快速获取系统状态"""
     print("=== 1. 检查 HTTP 服务状态 ===")
     try:
-        resp = requests.get(f"{BASE_URL}/status", timeout=5)
+        resp = requests.get(f"{BASE_URL}/health", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             print(f"✓ HTTP 服务正常响应")
-            print(f"  - has_position: {data.get('has_position')}")
-            print(f"  - has_tp3_limit_order: {data.get('has_tp3_limit_order')}")
-            print(f"  - daily_breaker_triggered: {data.get('daily_breaker_triggered')}")
-            print(f"  - current_drawdown: {data.get('current_drawdown_percent', 'N/A')}%")
+            print(f"  - 系统状态: {data.get('status')}")
+            print(f"  - TP 监控运行中: {data.get('tp_monitoring')}")
+            print(f"  - 当前是否有持仓: {data.get('has_position')}")
+            if data.get('has_position'):
+                print(f"  - 持仓方向: {data.get('position_side')} | 数量: {data.get('position_qty')}")
+            
+            # 解析嵌套的风控状态
+            risk = data.get('risk_status', {})
+            print(f"  - 允许交易: {risk.get('is_trading_allowed')}")
+            print(f"  - 当前风控系数: {risk.get('risk_mult', 1.0)}")
+            print(f"  - 当日累计盈亏: {risk.get('daily_pnl', 0.0):.2f} USDT")
             return True
         else:
             print(f"✗ HTTP 服务返回异常状态码: {resp.status_code}")
@@ -38,6 +45,7 @@ def check_basic_imports():
         ("binance_client", "BinanceClient"),
         ("order_executor", "OrderExecutor"),
         ("position_supervisor", "PositionSupervisor"),
+        ("risk_manager", "RiskManager"),
     ]
 
     all_ok = True
@@ -52,13 +60,13 @@ def check_basic_imports():
 
 
 def check_risk_manager_light():
-    """轻量检查 RiskManager（只看初始化，不调用重方法）"""
-    print("\n=== 3. 检查 RiskManager（轻量） ===")
+    """轻量检查 RiskManager（不调用重方法）"""
+    print("\n=== 3. 检查风控模块配置 ===")
     try:
         from risk_manager import risk_manager
         print("✓ RiskManager 导入成功")
-        # 只打印缓存的峰值，不触发实时请求
-        print(f"  - daily_peak_equity (缓存): {getattr(risk_manager, 'daily_peak_equity', 0):.2f} USDT")
+        print(f"  - 每日最大亏损限制: {risk_manager.daily_loss_limit_pct * 100:.2f}%")
+        print(f"  - 最大连续亏损次数: {risk_manager.max_consecutive_losses}")
         return True
     except Exception as e:
         print(f"✗ RiskManager 检查异常: {e}")
@@ -66,18 +74,17 @@ def check_risk_manager_light():
 
 
 def main():
-    print(f"开始轻量系统检查... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
+    print(f"开始轻量系统自检... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
 
     http_ok = check_http_status()
     import_ok = check_basic_imports()
     risk_ok = check_risk_manager_light()
 
     print("\n" + "=" * 50)
-    if http_ok and import_ok:
-        print("✓ 轻量检查通过，核心服务基本正常")
-        print("  建议：使用 curl http://localhost:5000/status 查看完整状态")
+    if http_ok and import_ok and risk_ok:
+        print("✓ 轻量检查全数通过，系统已准备就绪！")
     else:
-        print("⚠ 检查发现问题，请查看上方日志")
+        print("⚠ 检查发现问题，请查看上方日志排查。")
     print("=" * 50)
 
 
