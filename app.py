@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# app.py（修复版 - 已接入 position_supervisor）
+# app.py（完整稳定版 + Secret 校验 - 2026-06-15）
+import os
 import logging
 import threading
 from datetime import datetime
@@ -9,6 +10,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# ==================== 配置 ====================
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your_secret_here")  # 建议改成强密码
 
 _position_manager = None
 _risk_manager = None
@@ -31,7 +35,7 @@ def get_risk_manager():
 from position_supervisor import position_supervisor
 
 def process_signal_async(data: dict):
-    """后台线程处理信号，避免阻塞 webhook 快速返回"""
+    """后台处理信号"""
     try:
         logger.info(f"[Signal] 开始后台处理: {data.get('action')} {data.get('symbol')}")
         position_supervisor.handle_signal(data)
@@ -42,9 +46,16 @@ def process_signal_async(data: dict):
 def webhook():
     try:
         data = request.get_json(force=True, silent=True) or {}
-        logger.info(f"[Webhook] 收到信号: {data}")
 
-        # 后台处理（不阻塞返回）
+        # Secret 校验
+        received_secret = data.get("secret", "")
+        if received_secret != WEBHOOK_SECRET:
+            logger.warning(f"[Webhook] Secret 校验失败")
+            return jsonify({"status": "error", "message": "invalid secret"}), 403
+
+        logger.info(f"[Webhook] 收到合法信号: {data}")
+
+        # 后台处理
         threading.Thread(target=process_signal_async, args=(data,), daemon=True).start()
 
         return jsonify({"status": "ok", "message": "received"}), 200
