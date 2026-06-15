@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # order_executor.py（完整最终版 - 2026-06-15）
 import logging
+import time
 from binance_client import binance_client
 from dingtalk import report_anomaly, send_dingtalk_message
 from position_manager import position_manager
+from risk_manager import risk_manager
+from trade_logger import log_trade
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +15,7 @@ class OrderExecutor:
     def __init__(self):
         self.client = binance_client
         self.position_manager = position_manager
-        logger.info("[OrderExecutor] 执行层初始化完成（已加强订单确认）")
+        logger.info("[OrderExecutor] 执行层初始化完成（已加强执行确认 + 真实PnL）")
 
     # ==================== 开仓 ====================
 
@@ -22,7 +25,7 @@ class OrderExecutor:
             current_price = self.client.get_current_price()
             logger.info(f"[OrderExecutor] 准备开 {side} 仓，当前价格: {current_price}")
 
-            order = self.client.place_market_order(side=side, quantity=0)  # quantity 由 position_manager 控制
+            order = self.client.place_market_order(side=side, quantity=0)  # quantity 由外部或风控控制
             if order:
                 logger.info(f"[OrderExecutor] {side} 开仓成功")
                 send_dingtalk_message(f"🚀 【开仓】{side} @ {current_price}")
@@ -38,18 +41,30 @@ class OrderExecutor:
     # ==================== 全平 ====================
 
     def close_position(self, reason: str = ""):
-        """全平当前持仓"""
+        """全平当前持仓（使用真实 realized PnL）"""
         try:
             pos = self.position_manager.get_position()
             if not pos or float(pos.get("positionAmt", 0)) == 0:
                 logger.info("[OrderExecutor] 当前无持仓，无需平仓")
                 return True
 
+            current_qty = abs(float(pos.get("positionAmt", 0)))
+            side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
+
             order = self.client.close_all_positions()
             if order:
-                logger.info(f"[OrderExecutor] 全平成功 | 原因: {reason}")
-                send_dingtalk_message(f"🔚 【全平】{reason}")
-                # 执行确认
+                time.sleep(1.5)  # 等待 Binance 结算 realized PnL
+
+                # 使用真实已实现盈亏（更精准）
+                real_pnl = self.client.get_recent_realized_pnl(minutes=8)
+
+                logger.info(f"[OrderExecutor] 全平成功 | 原因: {reason} | 真实PnL: {real_pnl:+.2f}")
+                send_dingtalk_message(f"🔚 【全平】{reason} | 真实盈亏: {real_pnl:+.2f} USDT")
+
+                # 自动更新风控 + 记录日志
+                risk_manager.on_position_closed(real_pnl, is_full_close=True)
+                log_trade("FULL_CLOSE", side, current_qty, self.client.get_current_price(), real_pnl, reason)
+
                 self._confirm_execution(order, "全平")
                 return True
             else:
@@ -63,7 +78,7 @@ class OrderExecutor:
     # ==================== 部分平仓 ====================
 
     def partial_close(self, percentage: float, reason: str = ""):
-        """按比例部分平仓"""
+        """按比例部分平仓（使用真实 realized PnL）"""
         try:
             pos = self.position_manager.get_position()
             if not pos or float(pos.get("positionAmt", 0)) == 0:
@@ -72,18 +87,22 @@ class OrderExecutor:
 
             current_qty = abs(float(pos.get("positionAmt", 0)))
             close_qty = round(current_qty * percentage, 3)
+            side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
 
-            if close_qty < 0.001:
-                logger.warning(f"[OrderExecutor] 平仓数量过小: {close_qty}")
-                return False
-
-            side = "SHORT" if float(pos.get("positionAmt", 0)) > 0 else "LONG"
             order = self.client.place_market_order(side=side, quantity=close_qty)
-
             if order:
-                logger.info(f"[OrderExecutor] 部分平仓成功 | 平仓比例: {percentage*100:.0f}% | 原因: {reason}")
-                send_dingtalk_message(f"✂️ 【部分平仓】{percentage*100:.0f}% | {reason}")
-                # 执行确认
+                time.sleep(1.5)
+
+                # 使用真实已实现盈亏（更精准）
+                real_pnl = self.client.get_recent_realized_pnl(minutes=5)
+
+                logger.info(f"[OrderExecutor] 部分平仓成功 | {percentage*100:.0f}% | 真实PnL: {real_pnl:+.2f}")
+                send_dingtalk_message(f"✂️ 【部分平仓】{percentage*100:.0f}% | 真实盈亏: {real_pnl:+.2f} USDT")
+
+                # 自动更新风控 + 记录日志
+                risk_manager.on_position_closed(real_pnl, is_full_close=False)
+                log_trade("PARTIAL_CLOSE", side, close_qty, self.client.get_current_price(), real_pnl, reason)
+
                 self._confirm_execution(order, f"部分平仓 {percentage*100:.0f}%")
                 return True
             else:
@@ -106,12 +125,10 @@ class OrderExecutor:
             logger.error(f"[OrderExecutor] 撤销挂单失败: {e}")
             return False
 
-    # ==================== 订单执行确认（新增） ====================
+    # ==================== 订单执行确认 ====================
 
     def _confirm_execution(self, order_result: dict, action: str) -> bool:
-        """
-        下单后二次确认订单是否成交
-        """
+        """下单后二次确认订单是否成交"""
         if not order_result:
             report_anomaly(f"{action} 下单失败，无返回结果")
             return False
@@ -119,10 +136,8 @@ class OrderExecutor:
         try:
             order_id = order_result.get("orderId")
             if not order_id:
-                # 市价单通常立即成交，无需二次确认
-                return True
+                return True  # 市价单通常立即成交
 
-            # 查询订单最新状态
             order_status = self.client.futures_get_order(
                 symbol="ETHUSDT",
                 orderId=order_id
@@ -138,7 +153,7 @@ class OrderExecutor:
 
         except Exception as e:
             logger.warning(f"[OrderExecutor] 订单确认查询失败: {e}，保守放行")
-            return True  # 查询失败时保守处理，避免误报
+            return True
 
 
 # 全局单例
