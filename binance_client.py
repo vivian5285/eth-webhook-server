@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binance_client.py（完整更新版 - 2026-06-15）
+# binance_client.py（完整更新版 - 包含可用余额查询）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -27,6 +27,18 @@ class BinanceClient:
             return float(ticker["price"])
         except Exception as e:
             logger.error(f"[BinanceClient] 获取当前价格失败: {e}")
+            return 0.0
+
+    def get_available_balance(self, asset: str = "USDT") -> float:
+        """获取合约账户指定资产的可用余额"""
+        try:
+            account_info = self.client.futures_account()
+            for a in account_info.get("assets", []):
+                if a.get("asset") == asset:
+                    return float(a.get("availableBalance", 0.0))
+            return 0.0
+        except Exception as e:
+            logger.error(f"[BinanceClient] 获取可用余额失败: {e}")
             return 0.0
 
     def get_atr(self, symbol: str = "ETHUSDT", interval: str = "3h", 
@@ -123,7 +135,6 @@ class BinanceClient:
     def get_recent_realized_pnl(self, minutes: int = 10) -> float:
         """
         获取最近一段时间内的已实现盈亏（真实数据）
-        用于风控数据精准更新，替代估算方式
         """
         try:
             from datetime import datetime, timedelta
