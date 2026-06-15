@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trade_logger.py（完整最终版 - 结构化交易日志）
+# trade_logger.py（完整最终版 - 结构化交易日志，已修复权限路径）
 import json
 import os
 from datetime import datetime
@@ -8,7 +8,8 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-TRADE_LOG_FILE = "/home/workdir/artifacts/trade_log.jsonl"
+# 修改为项目目录下的 data 文件夹，避免 root 权限冲突
+TRADE_LOG_FILE = "/home/trading/eth-webhook-server/data/trade_log.jsonl"
 
 
 def _ensure_log_file():
