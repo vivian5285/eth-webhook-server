@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# dingtalk.py（加签 + 极致美观详细版 - 2026-06-15）
+# dingtalk.py（V2.5 机构级 Markdown 报告引擎）
 import os
 import time
 import hmac
@@ -28,38 +28,38 @@ def _generate_sign(secret: str) -> tuple:
 
 
 def _get_signed_url() -> str:
-    """返回带加签的完整 URL"""
-    if not DINGTALK_WEBHOOK:
-        return ""
+    if not DINGTALK_WEBHOOK: return ""
     if DINGTALK_SECRET:
         timestamp, sign = _generate_sign(DINGTALK_SECRET)
         return f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
     return DINGTALK_WEBHOOK
 
 
-def send_dingtalk_message(message: str, is_at_all: bool = False):
-    """通用发送函数（保留兼容）"""
+def send_markdown_message(title: str, text: str, is_at_all: bool = False):
+    """发送极度美观的 Markdown 富文本消息"""
     if not DINGTALK_WEBHOOK:
-        logger.warning("[DingTalk] 未配置 DINGTALK_WEBHOOK_URL，跳过发送")
+        logger.warning("[DingTalk] 未配置 Webhook，跳过发送")
         return False
 
     try:
         url = _get_signed_url()
-        if not url:
-            logger.warning("[DingTalk] Webhook URL 无效")
-            return False
+        if not url: return False
+
+        # 统一注入头部时间戳与签名
+        full_text = f"### {title}\n> **⏱ 汇报时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n{text}\n---\n*🤖 万亿战神 V2 · 全域最终自审自查机制*"
 
         data = {
-            "msgtype": "text",
-            "text": {
-                "content": f"🤖 [ETH量化系统] {datetime.now().strftime('%m-%d %H:%M:%S')}\n{message}"
+            "msgtype": "markdown",
+            "markdown": {
+                "title": title,
+                "text": full_text
             },
             "at": {"isAtAll": is_at_all}
         }
 
         resp = requests.post(url, json=data, timeout=8)
         if resp.status_code == 200 and resp.json().get("errcode") == 0:
-            logger.info("[DingTalk] 消息发送成功")
+            logger.info(f"[DingTalk] Markdown 报告发送成功: {title}")
             return True
         else:
             logger.error(f"[DingTalk] 发送失败: {resp.text}")
@@ -69,83 +69,93 @@ def send_dingtalk_message(message: str, is_at_all: bool = False):
         return False
 
 
-# ==================== 专业报告函数 ====================
+# ==================== 监督层核实专用报告模板 ====================
 
-def report_open_position(side: str, price: float, qty: float, notional: float, order_id: str = ""):
-    """开仓成功报告"""
-    msg = (
-        f"✅ 【开仓成功】{side}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"📍 价格: {price}\n"
-        f"📦 数量: {qty}\n"
-        f"💰 名义金额: {notional:.2f} USDT\n"
-        f"🆔 订单ID: {order_id}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%H:%M:%S')}"
-    )
-    send_dingtalk_message(msg)
+def report_supervisor_open(side: str, entry_price: float, qty: float, tp_dict: dict, account_info: dict):
+    """实盘开仓核实通过报告"""
+    emoji = "🟩" if side == "LONG" else "🟥"
+    action_text = "做多 (LONG)" if side == "LONG" else "做空 (SHORT)"
+    
+    text = f"""
+**📍 实盘持仓核实通过**
+- **交易方向**：{emoji} **{action_text}**
+- **实盘入场**：`{entry_price}` USDT
+- **确认仓位**：`{qty}` ETH (杠杆: 5x)
 
+**🎯 动态止盈布局 (ATR计算)**
+- **TP1 (40%)**：`{tp_dict.get('tp1')}`
+- **TP2 (40%)**：`{tp_dict.get('tp2')}`
+- **TP3 (20%)**：`{tp_dict.get('tp3')}`
 
-def report_close_position(side: str, reason: str, pnl: float = 0):
-    """平仓报告"""
-    emoji = "🔴" if side == "LONG" else "🟢"
-    msg = (
-        f"{emoji} 【平仓完成】{side}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"原因: {reason}\n"
-        f"盈亏: {pnl:+.2f} USDT\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {datetime.now().strftime('%H:%M:%S')}"
-    )
-    send_dingtalk_message(msg)
+**📊 当前账户与风控状态**
+- **可用保证金**：{account_info.get('balance', 0):.2f} USDT
+- **账户总权益**：{account_info.get('equity', 0):.2f} USDT
+- **动态风险系数**：`{account_info.get('risk_mult', 1.0)}`
+"""
+    send_markdown_message("🚀 新开仓实盘核实报告", text)
 
 
-def report_verification_success(expected: str, actual: str, qty: float):
-    """实盘核实通过"""
-    msg = (
-        f"✅ 【实盘核实通过】\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"信号方向: {expected}\n"
-        f"实盘方向: {actual}\n"
-        f"持仓数量: {qty}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"系统动作已与TV信号一致"
-    )
-    send_dingtalk_message(msg)
+def report_supervisor_close(side: str, reason: str, real_pnl: float, account_info: dict):
+    """实盘平仓核实报告"""
+    pnl_emoji = "🔥" if real_pnl > 0 else "🩸"
+    
+    text = f"""
+**🔚 信号平仓核实完毕**
+- **平仓原因**：{reason}
+- **原仓方向**：{side}
+- **真实已实现盈亏**：{pnl_emoji} **{real_pnl:+.2f} USDT**
+
+**📉 账户结算后状态**
+- **账户总权益**：{account_info.get('equity', 0):.2f} USDT
+- **当日累计盈亏**：{account_info.get('daily_pnl', 0):+.2f} USDT
+- **连续亏损次数**：{account_info.get('consecutive_losses', 0)} 次
+- **当前最大回撤**：{account_info.get('drawdown', 0):.2%}
+"""
+    send_markdown_message("🔚 信号平仓核实报告", text)
+
+
+def report_supervisor_tp_trigger(level: str, trigger_price: float, real_pnl: float, next_action: str):
+    """止盈触发核实报告"""
+    text = f"""
+**🎯 止盈防线被击穿**
+- **触发级别**：**{level}**
+- **触发价格**：`{trigger_price}` USDT
+- **本段真实落袋盈亏**：🔥 **{real_pnl:+.2f} USDT**
+
+**🛡️ 系统后续应对**
+- {next_action}
+"""
+    send_markdown_message(f"🎯 {level} 止盈触发实盘核实", text)
+
+
+def report_supervisor_intervention(old_qty: float, new_qty: float, new_tps: dict):
+    """人工干预应对报告"""
+    text = f"""
+**⚠️ 检测到外部仓位变更 (人工干预)**
+- **系统原计仓位**：`{old_qty}` ETH
+- **实盘侦测仓位**：`{new_qty}` ETH
+- **应对决策**：已接管新仓位，并基于当前价格重新计算安全边界！
+
+**🔄 重新锚定的止盈防线**
+- **新 TP1**：`{new_tps.get('tp1')}`
+- **新 TP2**：`{new_tps.get('tp2')}`
+- **新 TP3**：`{new_tps.get('tp3')}`
+"""
+    send_markdown_message("🚨 人工干预动态纠正报告", text, is_at_all=True)
 
 
 def report_force_align(old_side: str, new_side: str):
-    """强制对齐报告"""
-    msg = (
-        f"⚠️ 【强制对齐执行】\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"原持仓方向: {old_side}\n"
-        f"已强制平掉并重开: {new_side}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"监督层已完成方向修正"
-    )
-    send_dingtalk_message(msg)
+    """防逆向操作强制重置"""
+    text = f"""
+**☠️ 检测到严重逆向人工持仓**
+- **实盘违规方向**：{old_side}
+- **TV最高权威方向**：{new_side}
+- **应对决策**：已强行抹平违规仓位，强制对齐 TV 信号！
+- **警告**：请勿在资管账户中私自反向对冲！
+"""
+    send_markdown_message("⚔️ 强制对齐纠正报告", text, is_at_all=True)
 
 
 def report_anomaly(message: str):
-    """异常提醒"""
-    msg = (
-        f"🚨 【系统异常提醒】\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"{message}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"请立即检查实盘！"
-    )
-    send_dingtalk_message(msg, is_at_all=True)
-
-
-def report_risk_trigger(message: str):
-    """风控触发提醒"""
-    msg = (
-        f"🛑 【风控触发】\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"{message}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"已拒绝新开仓信号"
-    )
-    send_dingtalk_message(msg, is_at_all=True)
+    text = f"**🚨 运行时拦截日志**\n\n{message}\n\n请管理员立刻登入服务器排查！"
+    send_markdown_message("🚨 系统异常熔断警报", text, is_at_all=True)
