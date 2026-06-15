@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# risk_manager.py（完整最终版 - 2026-06-15）
+# risk_manager.py（V2 完整版 - 包含自动回撤计算与峰值记录）
 import logging
 from datetime import datetime, date
 from typing import Dict
@@ -22,11 +22,13 @@ class RiskManager:
         self.consecutive_losses = 0
         self.current_drawdown = 0.0
         self.risk_mult = 1.0                       # 动态风险系数
+        
+        # V2 新增：资金峰值记录
+        self.peak_equity = 0.0
 
-        logger.info("[RiskManager] 增强版风控初始化完成")
+        logger.info("[RiskManager] 增强版风控（含动态回撤扫描）初始化完成")
 
     def _reset_daily_if_needed(self):
-        """每日重置统计"""
         if date.today() != self.today:
             self.today = date.today()
             self.daily_pnl = 0.0
@@ -34,12 +36,10 @@ class RiskManager:
             logger.info("[RiskManager] 每日统计已重置")
 
     def update_daily_pnl(self, pnl: float):
-        """更新当日盈亏"""
         self._reset_daily_if_needed()
         self.daily_pnl += pnl
 
     def record_trade_result(self, pnl: float):
-        """记录交易结果（用于连续亏损统计）"""
         self._reset_daily_if_needed()
         self.today_trade_count += 1
 
@@ -49,12 +49,10 @@ class RiskManager:
             self.consecutive_losses = 0
 
     def update_drawdown(self, current_drawdown: float):
-        """更新当前回撤并动态调整风险系数"""
         self.current_drawdown = current_drawdown
         self._update_risk_multiplier()
 
     def _update_risk_multiplier(self):
-        """根据回撤动态调整风险系数"""
         if self.current_drawdown >= 0.10:
             self.risk_mult = 0.35
         elif self.current_drawdown >= 0.07:
@@ -64,8 +62,26 @@ class RiskManager:
         else:
             self.risk_mult = 1.0
 
+    # ==================== V2 新增：自动检查并更新回撤 ====================
+    def check_and_update_drawdown(self):
+        """由后台 Cron 线程定时调用，计算真实回撤并自动调节风控系数"""
+        from binance_client import binance_client
+        current_equity = binance_client.get_total_equity()
+        
+        if current_equity <= 0:
+            return
+
+        # 更新历史峰值
+        if current_equity > self.peak_equity:
+            self.peak_equity = current_equity
+
+        if self.peak_equity > 0:
+            drawdown = (self.peak_equity - current_equity) / self.peak_equity
+            self.update_drawdown(drawdown)
+            logger.debug(f"[RiskManager] 回撤扫描 - 权益: {current_equity:.2f}, 峰值: {self.peak_equity:.2f}, 回撤: {drawdown:.2%}, 风险系数: {self.risk_mult}")
+    # =====================================================================
+
     def is_daily_breaker_triggered(self) -> bool:
-        """检查是否触发每日熔断"""
         self._reset_daily_if_needed()
         if self.daily_pnl <= -abs(self.daily_loss_limit_pct):
             logger.warning(f"[RiskManager] 触发每日熔断！当日亏损: {self.daily_pnl:.2%}")
@@ -73,7 +89,6 @@ class RiskManager:
         return False
 
     def is_trading_allowed(self) -> bool:
-        """综合风控检查（核心接口）"""
         self._reset_daily_if_needed()
 
         if self.is_daily_breaker_triggered():
@@ -94,13 +109,9 @@ class RiskManager:
         return True
 
     def get_risk_multiplier(self) -> float:
-        """获取当前动态风险系数"""
         return self.risk_mult
 
     def on_position_closed(self, pnl: float, is_full_close: bool = False):
-        """
-        平仓时自动调用，更新风控数据（实现自动闭环）
-        """
         self.record_trade_result(pnl)
         self.update_daily_pnl(pnl)
 
@@ -111,13 +122,13 @@ class RiskManager:
         )
 
     def get_status(self) -> Dict:
-        """获取当前风控状态（供 /health 接口使用）"""
         self._reset_daily_if_needed()
         return {
             "daily_pnl": round(self.daily_pnl, 4),
             "consecutive_losses": self.consecutive_losses,
             "today_trade_count": self.today_trade_count,
             "current_drawdown": round(self.current_drawdown, 4),
+            "peak_equity": round(self.peak_equity, 2),
             "risk_mult": self.risk_mult,
             "is_trading_allowed": self.is_trading_allowed()
         }
