@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# binance_client.py（完整更新版 - 包含可用余额查询）
+# binance_client.py（完整更新版 - 已修复 get_position 和 get_open_orders）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,30 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"[BinanceClient] 获取可用余额失败: {e}")
             return 0.0
+
+    # ==================== 新增：持仓与挂单查询 ====================
+    
+    def get_position(self, symbol: str = "ETHUSDT") -> Optional[Dict[str, Any]]:
+        """获取当前持仓信息"""
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            # 币安接口返回的是列表，我们需要提取当前 symbol 的字典对象
+            if positions and len(positions) > 0:
+                return positions[0]
+            return None
+        except Exception as e:
+            logger.error(f"[BinanceClient] 获取持仓失败: {e}")
+            return None
+
+    def get_open_orders(self, symbol: str = "ETHUSDT") -> List[Dict]:
+        """获取当前所有挂单"""
+        try:
+            return self.client.futures_get_open_orders(symbol=symbol)
+        except Exception as e:
+            logger.error(f"[BinanceClient] 获取挂单失败: {e}")
+            return []
+
+    # ==============================================================
 
     def get_atr(self, symbol: str = "ETHUSDT", interval: str = "3h", 
                 limit: int = 50, period: int = 14) -> Optional[float]:
@@ -133,9 +157,7 @@ class BinanceClient:
             return False
 
     def get_recent_realized_pnl(self, minutes: int = 10) -> float:
-        """
-        获取最近一段时间内的已实现盈亏（真实数据）
-        """
+        """获取最近一段时间内的已实现盈亏（真实数据）"""
         try:
             from datetime import datetime, timedelta
 
