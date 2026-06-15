@@ -13,6 +13,7 @@ from dingtalk import (
 )
 from position_manager import position_manager
 from risk_manager import risk_manager
+from trade_logger import log_trade
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class PositionSupervisor:
         self.position_manager = position_manager
         self.risk_manager = risk_manager
         self.client = binance_client
-        logger.info("[Supervisor] 监督层初始化完成（已接入增强版风控）")
+        logger.info("[Supervisor] 监督层初始化完成（已集成交易日志）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -36,17 +37,15 @@ class PositionSupervisor:
             from tp_monitor import tp_monitor
             tp_monitor.clear_tp_levels()
 
-            # 撤销所有挂单
             order_executor.cancel_all_tp_orders()
             time.sleep(0.8)
 
-            # 全平当前持仓
             current = self.position_manager.get_position()
             if current and float(current.get("positionAmt", 0)) != 0:
                 order_executor.close_position("新信号到达，全平旧仓")
                 time.sleep(1.8)
 
-            # ========== 使用增强版综合风控检查 ==========
+            # 综合风控检查
             if not self.risk_manager.is_trading_allowed():
                 report_risk_trigger(f"{action} 开仓被综合风控拒绝")
                 return
@@ -63,6 +62,16 @@ class PositionSupervisor:
                 entry_price = float(real_pos.get("entryPrice", 0))
                 side = self.position_manager.get_position_side()
                 qty = self.position_manager.get_position_qty()
+
+                # === 新增：记录开仓日志 ===
+                log_trade(
+                    action="OPEN",
+                    side=side,
+                    qty=qty,
+                    price=entry_price,
+                    pnl=0.0,
+                    reason="新信号开仓"
+                )
 
                 atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
 
@@ -85,38 +94,24 @@ class PositionSupervisor:
             report_anomaly(f"{action} 处理异常: {str(e)}")
 
     def _verify_and_align_position(self, expected_side: str):
-        """开仓后核实实盘方向"""
         real_pos = self.position_manager.get_position()
         real_side = real_pos.get("side") if real_pos else None
 
         if real_side == expected_side:
-            report_verification_success(
-                expected=expected_side,
-                actual=real_side,
-                qty=real_pos.get("positionAmt", 0) if real_pos else 0
-            )
+            report_verification_success(expected_side, real_side, real_pos.get("positionAmt", 0) if real_pos else 0)
             return
 
         if real_side and real_side != expected_side:
-            logger.warning(f"[Supervisor] 实盘方向不一致！信号={expected_side}，实盘={real_side} → 强制对齐")
-            report_force_align(old_side=real_side, new_side=expected_side)
-
-            order_executor.close_position("强制对齐方向")
+            report_force_align(real_side, expected_side)
+            order_executor.close_position("强制对齐")
             time.sleep(1.8)
             order_executor.open_position(expected_side, {})
-
-            final_pos = self.position_manager.get_position()
-            if final_pos and final_pos.get("side") == expected_side:
-                report_verification_success(expected_side, expected_side, final_pos.get("positionAmt", 0))
 
     def _handle_close_signal(self):
         from tp_monitor import tp_monitor
         tp_monitor.clear_tp_levels()
         order_executor.cancel_all_tp_orders()
         order_executor.close_position("收到 CLOSE 信号")
-
-        # 可在此处记录交易结果（需配合 order_executor 返回盈亏）
-        # self.risk_manager.record_trade_result(pnl)
 
 
 # 全局单例
