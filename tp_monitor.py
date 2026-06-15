@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-# tp_monitor.py（支持部分平仓 + TP3 双重监控版 - 2026-06-15）
+# tp_monitor.py（增强版 - 支持状态持久化 + 人工干预自动纠正）
 import logging
 import time
 import threading
+import json
 from typing import Optional
 from binance_client import binance_client
 from order_executor import order_executor
-from dingtalk import report_anomaly, send_dingtalk_message
 from position_manager import position_manager
+from dingtalk import report_anomaly, send_dingtalk_message
+from state_manager import state_manager
 
 logger = logging.getLogger(__name__)
 
 
 class TPMonitor:
-    def __init__(self, check_interval: float = 4.0):
+    def __init__(self, check_interval: float = 5.0):
         self.client = binance_client
         self.executor = order_executor
         self.position_manager = position_manager
@@ -23,32 +25,61 @@ class TPMonitor:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
-        self.tp1_price: Optional[float] = None
-        self.tp2_price: Optional[float] = None
-        self.tp3_price: Optional[float] = None
-        self.position_side: Optional[str] = None
-        self.position_qty: float = 0.0
+        # 当前监控状态
+        self.tp1_price = self.tp2_price = self.tp3_price = None
+        self.position_side = None
+        self.position_qty = 0.0
+        self.entry_price = 0.0
         self.is_monitoring = False
 
-        logger.info("[TPMonitor] 初始化完成（支持部分平仓）")
+        # 启动时尝试恢复状态
+        self._restore_from_state()
 
-    def set_tp_levels(self, tp1: float, tp2: float, tp3: float, side: str, qty: float):
+        logger.info("[TPMonitor] 增强版初始化完成（支持人工干预检测）")
+
+    def _restore_from_state(self):
+        """启动时从 state.json 恢复 TP 状态"""
+        state = state_manager.load_state()
+        if state and state.get("is_monitoring"):
+            with self._lock:
+                self.tp1_price = state.get("tp1")
+                self.tp2_price = state.get("tp2")
+                self.tp3_price = state.get("tp3")
+                self.position_side = state.get("side")
+                self.position_qty = state.get("remaining_qty", 0)
+                self.entry_price = state.get("entry_price", 0)
+                self.is_monitoring = True
+            logger.info(f"[TPMonitor] 从状态文件恢复监控: {state}")
+
+    def set_tp_levels(self, tp1: float, tp2: float, tp3: float, side: str, qty: float, entry_price: float = 0):
         with self._lock:
             self.tp1_price = tp1
             self.tp2_price = tp2
             self.tp3_price = tp3
             self.position_side = side
             self.position_qty = qty
+            self.entry_price = entry_price or self.position_manager.get_position().get("entryPrice", 0)
             self.is_monitoring = True
-            logger.info(f"[TPMonitor] TP价格已设置 | TP1={tp1} TP2={tp2} TP3={tp3} Side={side}")
+
+            # 保存状态
+            state_manager.save_state({
+                "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                "side": side,
+                "remaining_qty": qty,
+                "entry_price": self.entry_price,
+                "is_monitoring": True
+            })
+        logger.info(f"[TPMonitor] TP 已设置并持久化 | TP1={tp1} TP2={tp2} TP3={tp3}")
 
     def clear_tp_levels(self):
         with self._lock:
             self.tp1_price = self.tp2_price = self.tp3_price = None
             self.position_side = None
             self.position_qty = 0.0
+            self.entry_price = 0.0
             self.is_monitoring = False
-            logger.info("[TPMonitor] TP价格已清空")
+        state_manager.clear_state()
+        logger.info("[TPMonitor] TP 状态已清空")
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -65,6 +96,8 @@ class TPMonitor:
         self.clear_tp_levels()
         logger.info("[TPMonitor] 监控线程已停止")
 
+    # ==================== 核心监控循环 ====================
+
     def _monitor_loop(self):
         while not self._stop_event.is_set():
             try:
@@ -72,63 +105,126 @@ class TPMonitor:
                     time.sleep(self.check_interval)
                     continue
 
+                # === 1. 先进行实盘对账（检测人工干预）===
+                self._reconcile_position()
+
+                if not self.is_monitoring:
+                    time.sleep(self.check_interval)
+                    continue
+
+                # === 2. 获取当前价格并判断 TP ===
                 current_price = self.client.get_current_price()
                 if current_price <= 0:
                     time.sleep(self.check_interval)
                     continue
 
-                with self._lock:
-                    side = self.position_side
-                    tp1, tp2, tp3 = self.tp1_price, self.tp2_price, self.tp3_price
-
-                triggered_level = None
-                if side == "LONG":
-                    if tp3 and current_price >= tp3:
-                        triggered_level = "TP3"
-                    elif tp2 and current_price >= tp2:
-                        triggered_level = "TP2"
-                    elif tp1 and current_price >= tp1:
-                        triggered_level = "TP1"
-                elif side == "SHORT":
-                    if tp3 and current_price <= tp3:
-                        triggered_level = "TP3"
-                    elif tp2 and current_price <= tp2:
-                        triggered_level = "TP2"
-                    elif tp1 and current_price <= tp1:
-                        triggered_level = "TP1"
-
+                triggered_level = self._check_tp_trigger(current_price)
                 if triggered_level:
                     self._handle_tp_trigger(triggered_level, current_price)
-                    if triggered_level == "TP3":
-                        self.clear_tp_levels()
 
             except Exception as e:
-                logger.error(f"[TPMonitor] 监控异常: {e}", exc_info=True)
-                report_anomaly(f"TP监控异常: {str(e)}")
+                logger.error(f"[TPMonitor] 监控循环异常: {e}", exc_info=True)
+                report_anomaly(f"TP 监控异常: {str(e)}")
 
             time.sleep(self.check_interval)
+
+    def _reconcile_position(self):
+        """实盘对账 + 人工干预检测"""
+        real_pos = self.position_manager.get_position()
+        if not real_pos:
+            return
+
+        real_side = self.position_manager.get_position_side()
+        real_qty = self.position_manager.get_position_qty()
+
+        # 情况1: 方向完全冲突（人工反向开仓）
+        if real_side and real_side != self.position_side:
+            logger.warning(f"[TPMonitor] 检测到反向持仓！系统={self.position_side}，实盘={real_side} → 自动平仓纠正")
+            send_dingtalk_message(
+                f"🚨 【检测到人工反向持仓】\n"
+                f"系统方向: {self.position_side}\n"
+                f"实盘方向: {real_side}\n"
+                f"系统将自动平掉冲突仓位，以 TV 信号为准。"
+            )
+            self.executor.close_position("检测到反向持仓，系统自动纠正")
+            self.clear_tp_levels()
+            return
+
+        # 情况2: 仓位数量发生明显变化（加仓或减仓）
+        if real_qty > 0 and abs(real_qty - self.position_qty) > 0.01:
+            logger.info(f"[TPMonitor] 检测到仓位数量变化: {self.position_qty} → {real_qty}，准备重新计算 TP")
+            self._handle_quantity_change(real_qty)
+
+    def _handle_quantity_change(self, new_qty: float):
+        """数量变化后自动重新计算 TP"""
+        try:
+            current_atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
+            current_entry = self.position_manager.get_position().get("entryPrice", self.entry_price)
+
+            if self.position_side == "LONG":
+                new_tp1 = round(current_entry + current_atr * 1.3, 2)
+                new_tp2 = round(current_entry + current_atr * 2.6, 2)
+                new_tp3 = round(current_entry + current_atr * 4.2, 2)
+            else:
+                new_tp1 = round(current_entry - current_atr * 1.3, 2)
+                new_tp2 = round(current_entry - current_atr * 2.6, 2)
+                new_tp3 = round(current_entry - current_atr * 4.2, 2)
+
+            with self._lock:
+                self.position_qty = new_qty
+                self.tp1_price = new_tp1
+                self.tp2_price = new_tp2
+                self.tp3_price = new_tp3
+
+            state_manager.save_state({
+                "tp1": new_tp1, "tp2": new_tp2, "tp3": new_tp3,
+                "side": self.position_side,
+                "remaining_qty": new_qty,
+                "entry_price": current_entry,
+                "is_monitoring": True
+            })
+
+            send_dingtalk_message(
+                f"🔄 【仓位变化自动调整 TP】\n"
+                f"新数量: {new_qty}\n"
+                f"新 TP1: {new_tp1} | TP2: {new_tp2} | TP3: {new_tp3}"
+            )
+            logger.info(f"[TPMonitor] 仓位变化后已自动更新 TP")
+
+        except Exception as e:
+            logger.error(f"[TPMonitor] 重新计算 TP 失败: {e}")
+
+    def _check_tp_trigger(self, current_price: float) -> Optional[str]:
+        with self._lock:
+            side = self.position_side
+            tp1, tp2, tp3 = self.tp1_price, self.tp2_price, self.tp3_price
+
+        if side == "LONG":
+            if tp3 and current_price >= tp3: return "TP3"
+            if tp2 and current_price >= tp2: return "TP2"
+            if tp1 and current_price >= tp1: return "TP1"
+        else:
+            if tp3 and current_price <= tp3: return "TP3"
+            if tp2 and current_price <= tp2: return "TP2"
+            if tp1 and current_price <= tp1: return "TP1"
+        return None
 
     def _handle_tp_trigger(self, level: str, current_price: float):
         try:
             if level == "TP1":
-                self.executor.partial_close(0.40, f"{level} 触发平仓40%")
+                self.executor.partial_close(0.40, f"{level} 触发")
             elif level == "TP2":
-                self.executor.partial_close(0.40, f"{level} 触发平仓40%")
+                self.executor.partial_close(0.40, f"{level} 触发")
             elif level == "TP3":
-                self.executor.partial_close(0.20, f"{level} 触发平仓剩余20%")
-                # TP3触发后可额外挂限价单（双重保险）
-                # self.executor.place_tp3_limit_order(...)
+                self.executor.partial_close(0.20, f"{level} 触发")
+                self.clear_tp_levels()
 
             pnl = self.position_manager.get_unrealized_pnl()
-            send_dingtalk_message(
-                f"🎯 【{level} 触发】\n"
-                f"当前价: {current_price}\n"
-                f"方向: {self.position_side}\n"
-                f"未实现盈亏: {pnl:+.2f} USDT"
-            )
+            send_dingtalk_message(f"🎯 【{level} 触发】 当前价 {current_price} | 未实现盈亏 {pnl:+.2f} USDT")
+
         except Exception as e:
-            logger.error(f"[TPMonitor] 处理{level}触发失败: {e}", exc_info=True)
-            report_anomaly(f"{level} 触发处理异常: {str(e)}")
+            logger.error(f"[TPMonitor] 处理 {level} 触发失败: {e}")
 
 
+# 全局单例
 tp_monitor = TPMonitor()
