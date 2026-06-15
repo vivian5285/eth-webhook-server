@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（完整最终版 - 2026-06-15）
+# position_supervisor.py（完整更新版 - 2026-06-15）
 import logging
 import time
 from typing import Dict, Any
@@ -22,7 +22,7 @@ class PositionSupervisor:
         self.position_manager = position_manager
         self.risk_manager = risk_manager
         self.client = binance_client
-        logger.info("[Supervisor] 监督层初始化完成（支持 ATR + 移动止盈 + 人工干预纠正）")
+        logger.info("[Supervisor] 监督层初始化完成（已接入增强版风控）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -36,18 +36,22 @@ class PositionSupervisor:
             from tp_monitor import tp_monitor
             tp_monitor.clear_tp_levels()
 
+            # 撤销所有挂单
             order_executor.cancel_all_tp_orders()
             time.sleep(0.8)
 
+            # 全平当前持仓
             current = self.position_manager.get_position()
             if current and float(current.get("positionAmt", 0)) != 0:
                 order_executor.close_position("新信号到达，全平旧仓")
                 time.sleep(1.8)
 
-            if not self.is_new_entry_allowed():
-                report_risk_trigger(f"{action} 开仓被风控拒绝")
+            # ========== 使用增强版综合风控检查 ==========
+            if not self.risk_manager.is_trading_allowed():
+                report_risk_trigger(f"{action} 开仓被综合风控拒绝")
                 return
 
+            # 执行开仓
             order_executor.open_position(action, {})
             time.sleep(2.5)
             self._verify_and_align_position(action)
@@ -77,22 +81,33 @@ class PositionSupervisor:
                 logger.info(f"[Supervisor] ATR动态TP已设置 | TP1={tp1} TP2={tp2} TP3={tp3}")
 
         except Exception as e:
-            logger.error(f"[Supervisor] 处理 {action} 异常: {e}", exc_info=True)
+            logger.error(f"[Supervisor] 处理 {action} 信号异常: {e}", exc_info=True)
             report_anomaly(f"{action} 处理异常: {str(e)}")
 
     def _verify_and_align_position(self, expected_side: str):
+        """开仓后核实实盘方向"""
         real_pos = self.position_manager.get_position()
         real_side = real_pos.get("side") if real_pos else None
 
         if real_side == expected_side:
-            report_verification_success(expected_side, real_side, real_pos.get("positionAmt", 0) if real_pos else 0)
+            report_verification_success(
+                expected=expected_side,
+                actual=real_side,
+                qty=real_pos.get("positionAmt", 0) if real_pos else 0
+            )
             return
 
         if real_side and real_side != expected_side:
-            report_force_align(real_side, expected_side)
-            order_executor.close_position("强制对齐")
+            logger.warning(f"[Supervisor] 实盘方向不一致！信号={expected_side}，实盘={real_side} → 强制对齐")
+            report_force_align(old_side=real_side, new_side=expected_side)
+
+            order_executor.close_position("强制对齐方向")
             time.sleep(1.8)
             order_executor.open_position(expected_side, {})
+
+            final_pos = self.position_manager.get_position()
+            if final_pos and final_pos.get("side") == expected_side:
+                report_verification_success(expected_side, expected_side, final_pos.get("positionAmt", 0))
 
     def _handle_close_signal(self):
         from tp_monitor import tp_monitor
@@ -100,11 +115,9 @@ class PositionSupervisor:
         order_executor.cancel_all_tp_orders()
         order_executor.close_position("收到 CLOSE 信号")
 
-    def is_new_entry_allowed(self) -> bool:
-        try:
-            return not self.risk_manager.is_daily_breaker_triggered()
-        except:
-            return True
+        # 可在此处记录交易结果（需配合 order_executor 返回盈亏）
+        # self.risk_manager.record_trade_result(pnl)
 
 
+# 全局单例
 position_supervisor = PositionSupervisor()
