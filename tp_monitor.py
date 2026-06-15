@@ -8,7 +8,7 @@ from binance_client import binance_client
 from position_manager import position_manager
 from order_executor import order_executor
 from position_supervisor import position_supervisor
-3
+
 logger = logging.getLogger(__name__)
 SYMBOL = "ETHUSDT"
 
