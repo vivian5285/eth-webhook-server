@@ -8,7 +8,7 @@ from position_supervisor_binance import position_supervisor
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] app: %(message)s')
 app = Flask(__name__)
 
-@app.route('/webhook/binance', methods=['POST'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
     # 1. 提取 JSON 包裹
     data = request.get_json(silent=True)
