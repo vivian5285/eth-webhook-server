@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（V2.5 极致静默执行版）
+# order_executor.py（V2.5 极致静默执行版 - 精度统一修复版）
 import logging
 import time
 from binance_client import binance_client
@@ -7,6 +7,7 @@ from trade_logger import log_trade
 from risk_manager import risk_manager
 
 logger = logging.getLogger(__name__)
+
 
 class OrderExecutor:
     def __init__(self):
@@ -17,7 +18,12 @@ class OrderExecutor:
         """静默开仓，只返回订单结果"""
         try:
             quantity = params.get("quantity", 0) if params else 0
-            if quantity <= 0: return None
+            if quantity <= 0:
+                return None
+
+            # 统一精度：数量保留3位小数
+            quantity = round(quantity, 3)
+
             logger.info(f"[OrderExecutor] 执行开仓: {side} {quantity}")
             return self.client.place_market_order(side=side, quantity=quantity)
         except Exception as e:
@@ -34,21 +40,22 @@ class OrderExecutor:
                 if not pos or float(pos.get("positionAmt", 0)) == 0:
                     return True, 0.0
 
-                current_qty = abs(float(pos.get("positionAmt", 0)))
+                # 统一精度：数量保留3位小数
+                current_qty = round(abs(float(pos.get("positionAmt", 0))), 3)
                 side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
 
                 order = self.client.close_all_positions()
                 if order:
                     time.sleep(1.5)
                     real_pnl = self.client.get_recent_realized_pnl(minutes=8)
-                    
+
                     risk_manager.on_position_closed(real_pnl, is_full_close=True)
-                    log_trade("FULL_CLOSE", side, current_qty, self.client.get_current_price(), real_pnl, reason)
+                    log_trade("FULL_CLOSE", side, current_qty, round(self.client.get_current_price(), 2), real_pnl, reason)
                     return True, real_pnl
 
             except Exception as e:
                 logger.error(f"[OrderExecutor] 全平重试 {attempt}: {e}")
-            
+
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (2 ** attempt))
 
@@ -65,6 +72,7 @@ class OrderExecutor:
                     return False, 0.0
 
                 current_qty = abs(float(pos.get("positionAmt", 0)))
+                # 统一精度：平仓数量保留3位小数
                 close_qty = round(current_qty * percentage, 3)
                 side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
 
@@ -72,13 +80,13 @@ class OrderExecutor:
                 if order:
                     time.sleep(1.5)
                     real_pnl = self.client.get_recent_realized_pnl(minutes=5)
-                    
+
                     risk_manager.on_position_closed(real_pnl, is_full_close=False)
-                    log_trade("PARTIAL_CLOSE", side, close_qty, self.client.get_current_price(), real_pnl, reason)
+                    log_trade("PARTIAL_CLOSE", side, close_qty, round(self.client.get_current_price(), 2), real_pnl, reason)
                     return True, real_pnl
             except Exception as e:
                 logger.error(f"[OrderExecutor] 部分平仓重试 {attempt}: {e}")
-            
+
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (2 ** attempt))
 
@@ -86,5 +94,6 @@ class OrderExecutor:
 
     def cancel_all_tp_orders(self):
         self.client.cancel_all_open_orders()
+
 
 order_executor = OrderExecutor()
