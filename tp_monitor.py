@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tp_monitor.py（V2.5 监控层，接入高级报告体系）
+# tp_monitor.py（V2.5 监控层 - 精度统一修复版）
 import logging
 import time
 import threading
@@ -11,6 +11,7 @@ import dingtalk
 from state_manager import state_manager
 
 logger = logging.getLogger(__name__)
+
 
 class TPMonitor:
     def __init__(self, check_interval: float = 5.0):
@@ -44,13 +45,23 @@ class TPMonitor:
 
     def set_tp_levels(self, tp1: float, tp2: float, tp3: float, side: str, qty: float, entry_price: float = 0):
         with self._lock:
-            self.tp1_price, self.tp2_price, self.tp3_price = tp1, tp2, tp3
-            self.position_side, self.position_qty = side, qty
-            self.entry_price = entry_price or self.position_manager.get_position().get("entryPrice", 0)
+            # 统一精度：价格保留2位，数量保留3位
+            self.tp1_price = round(tp1, 2)
+            self.tp2_price = round(tp2, 2)
+            self.tp3_price = round(tp3, 2)
+            self.position_side = side
+            self.position_qty = round(qty, 3)
+            self.entry_price = round(entry_price or self.position_manager.get_position().get("entryPrice", 0), 2)
             self.is_monitoring = True
+
             state_manager.save_state({
-                "tp1": tp1, "tp2": tp2, "tp3": tp3, "side": side,
-                "remaining_qty": qty, "entry_price": self.entry_price, "is_monitoring": True
+                "tp1": self.tp1_price,
+                "tp2": self.tp2_price,
+                "tp3": self.tp3_price,
+                "side": side,
+                "remaining_qty": self.position_qty,
+                "entry_price": self.entry_price,
+                "is_monitoring": True
             })
 
     def clear_tp_levels(self):
@@ -63,14 +74,16 @@ class TPMonitor:
         state_manager.clear_state()
 
     def start(self):
-        if self._thread and self._thread.is_alive(): return
+        if self._thread and self._thread.is_alive():
+            return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop_event.set()
-        if self._thread: self._thread.join(timeout=5)
+        if self._thread:
+            self._thread.join(timeout=5)
         self.clear_tp_levels()
 
     def _monitor_loop(self):
@@ -100,7 +113,8 @@ class TPMonitor:
 
     def _reconcile_position(self):
         real_pos = self.position_manager.get_position()
-        if not real_pos: return
+        if not real_pos:
+            return
 
         real_side = self.position_manager.get_position_side()
         real_qty = self.position_manager.get_position_qty()
@@ -117,24 +131,37 @@ class TPMonitor:
     def _handle_quantity_change(self, new_qty: float):
         try:
             current_atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
-            current_entry = float(self.position_manager.get_position().get("entryPrice", self.entry_price))
+            current_entry = round(float(self.position_manager.get_position().get("entryPrice", self.entry_price)), 2)
 
             if self.position_side == "LONG":
-                tps = {"tp1": round(current_entry + current_atr * 1.3, 2), "tp2": round(current_entry + current_atr * 2.6, 2), "tp3": round(current_entry + current_atr * 4.2, 2)}
+                tps = {
+                    "tp1": round(current_entry + current_atr * 1.3, 2),
+                    "tp2": round(current_entry + current_atr * 2.6, 2),
+                    "tp3": round(current_entry + current_atr * 4.2, 2)
+                }
             else:
-                tps = {"tp1": round(current_entry - current_atr * 1.3, 2), "tp2": round(current_entry - current_atr * 2.6, 2), "tp3": round(current_entry - current_atr * 4.2, 2)}
+                tps = {
+                    "tp1": round(current_entry - current_atr * 1.3, 2),
+                    "tp2": round(current_entry - current_atr * 2.6, 2),
+                    "tp3": round(current_entry - current_atr * 4.2, 2)
+                }
 
             with self._lock:
-                self.position_qty = new_qty
-                self.tp1_price, self.tp2_price, self.tp3_price = tps['tp1'], tps['tp2'], tps['tp3']
+                self.position_qty = round(new_qty, 3)
+                self.tp1_price = tps['tp1']
+                self.tp2_price = tps['tp2']
+                self.tp3_price = tps['tp3']
 
             state_manager.save_state({
-                "tp1": tps['tp1'], "tp2": tps['tp2'], "tp3": tps['tp3'],
-                "side": self.position_side, "remaining_qty": new_qty,
-                "entry_price": current_entry, "is_monitoring": True
+                "tp1": self.tp1_price,
+                "tp2": self.tp2_price,
+                "tp3": self.tp3_price,
+                "side": self.position_side,
+                "remaining_qty": self.position_qty,
+                "entry_price": self.entry_price,
+                "is_monitoring": True
             })
-            
-            # 核实播报
+
             dingtalk.report_supervisor_intervention(self.position_qty, new_qty, tps)
 
         except Exception as e:
@@ -143,29 +170,38 @@ class TPMonitor:
     def _check_tp_trigger(self, current_price: float) -> Optional[str]:
         with self._lock:
             side, tp1, tp2, tp3 = self.position_side, self.tp1_price, self.tp2_price, self.tp3_price
+
         if side == "LONG":
-            if tp3 and current_price >= tp3: return "TP3"
-            if tp2 and current_price >= tp2: return "TP2"
-            if tp1 and current_price >= tp1: return "TP1"
+            if tp3 and current_price >= tp3:
+                return "TP3"
+            if tp2 and current_price >= tp2:
+                return "TP2"
+            if tp1 and current_price >= tp1:
+                return "TP1"
         else:
-            if tp3 and current_price <= tp3: return "TP3"
-            if tp2 and current_price <= tp2: return "TP2"
-            if tp1 and current_price <= tp1: return "TP1"
+            if tp3 and current_price <= tp3:
+                return "TP3"
+            if tp2 and current_price <= tp2:
+                return "TP2"
+            if tp1 and current_price <= tp1:
+                return "TP1"
         return None
 
     def _handle_tp_trigger(self, level: str, current_price: float):
         try:
-            if level == "TP1" or level == "TP2":
+            if level in ["TP1", "TP2"]:
                 success, real_pnl = self.executor.partial_close(0.40, f"{level} 触发")
                 if success:
                     self._move_tp3_after_partial(current_price)
-                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl, f"已落袋40%并强制移动 TP3 建立防线。")
+                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl,
+                                                          "已落袋40%并强制移动 TP3 建立防线。")
 
             elif level == "TP3":
                 success, real_pnl = self.executor.partial_close(0.20, f"{level} 触发")
                 if success:
                     self.clear_tp_levels()
-                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl, "最终防线到达，本轮交易闭环完成，监控层休眠。")
+                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl,
+                                                          "最终防线到达，本轮交易闭环完成，监控层休眠。")
 
         except Exception as e:
             logger.error(f"[TPMonitor] 处理 {level} 失败: {e}")
@@ -179,11 +215,16 @@ class TPMonitor:
                 self.tp3_price = new_tp3
 
             state_manager.save_state({
-                "tp1": self.tp1_price, "tp2": self.tp2_price, "tp3": new_tp3,
-                "side": self.position_side, "remaining_qty": round(self.position_qty * 0.2, 3),
-                "entry_price": self.entry_price, "is_monitoring": True
+                "tp1": self.tp1_price,
+                "tp2": self.tp2_price,
+                "tp3": new_tp3,
+                "side": self.position_side,
+                "remaining_qty": round(self.position_qty * 0.2, 3),
+                "entry_price": self.entry_price,
+                "is_monitoring": True
             })
         except Exception as e:
             logger.error(f"[TPMonitor] 移动 TP3 失败: {e}")
+
 
 tp_monitor = TPMonitor()
