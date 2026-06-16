@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
-# binance_client.py（V2.5 终极完整版 - 已修复 LONG/SHORT 到 BUY/SELL 的翻译）
+# binance_client.py（V2.6 环境自适应增强版 - 融合翻译修复与环境穿透读取）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import os
 from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv
+
+# ==================== 环境穿透防御 ====================
+# 强制锁定绝对路径，无论怎么启动都能找到 .env
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
 
-
 class BinanceClient:
     def __init__(self):
-        api_key = os.getenv("BINANCE_API_KEY")
-        api_secret = os.getenv("BINANCE_API_SECRET")
+        # 优先读取环境变量
+        self.api_key = os.getenv("BINANCE_API_KEY")
+        self.api_secret = os.getenv("BINANCE_API_SECRET")
 
-        if not api_key or not api_secret:
-            raise ValueError("请设置 BINANCE_API_KEY 和 BINANCE_API_SECRET 环境变量")
+        # 详细环境诊断，确保失败时能一眼看出路径对不对
+        if not self.api_key or not self.api_secret:
+            raise ValueError(
+                f"\n⚠️ 严重错误：Binance 凭证缺失！\n"
+                f"尝试加载的 .env 路径: {os.path.join(BASE_DIR, '.env')}\n"
+                f"请检查该文件是否存在，且格式是否正确。"
+            )
 
-        self.client = Client(api_key, api_secret)
-        logger.info("[BinanceClient] Binance客户端初始化成功")
+        try:
+            self.client = Client(self.api_key, self.api_secret)
+            logger.info("[BinanceClient] Binance客户端初始化成功")
+        except Exception as e:
+            raise ConnectionError(f"初始化币安客户端失败: {e}")
 
     def get_current_price(self, symbol: str = "ETHUSDT") -> float:
         """获取当前价格"""
@@ -106,7 +120,7 @@ class BinanceClient:
             
             order = self.client.futures_create_order(
                 symbol=symbol,
-                side=binance_side,  # 使用翻译后的方向
+                side=binance_side,
                 type="MARKET",
                 quantity=quantity
             )
@@ -191,6 +205,5 @@ class BinanceClient:
             logger.warning(f"[BinanceClient] 获取真实 realized PnL 失败: {e}，返回 0")
             return 0.0
 
-
-# 全局单例
+# 暴露给其他模块导入
 binance_client = BinanceClient()
