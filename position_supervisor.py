@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_binance.py（V2.5 终极监督层 - 已增强仓位计算 + 最低名义价值保护）
+# position_supervisor_binance.py（V2.5 终极监督层 - 精度统一修复版）
 import logging
 import time
 from typing import Dict, Any
@@ -10,6 +10,7 @@ from risk_manager import risk_manager
 import dingtalk
 
 logger = logging.getLogger(__name__)
+
 
 class PositionSupervisor:
     def __init__(self):
@@ -24,7 +25,6 @@ class PositionSupervisor:
             self._handle_close_signal()
 
     def _get_account_snapshot(self) -> dict:
-        """获取播报所需的全局快照"""
         return {
             "balance": self.client.get_available_balance("USDT"),
             "equity": self.client.get_total_equity(),
@@ -57,7 +57,7 @@ class PositionSupervisor:
                 dingtalk.report_anomaly(f"风控熔断系统已拦截 {action} 信号。")
                 return
 
-            # ==================== 增强版仓位计算（保留 80% * 5倍 逻辑 + 最低名义价值保护） ====================
+            # ==================== 增强版仓位计算（精度统一） ====================
             risk_mult = risk_manager.get_risk_multiplier()
             available_balance = self.client.get_available_balance("USDT")
             current_price = self.client.get_current_price("ETHUSDT")
@@ -66,17 +66,17 @@ class PositionSupervisor:
                 logger.warning("[Supervisor] 可用余额或价格异常，放弃开仓")
                 return
 
-            # 用户要求的固定逻辑：可用余额 × 80% × 5倍 × risk_mult
-            target_qty = round((available_balance * 0.8 * 5 * risk_mult) / current_price, 4)
+            # 用户要求的逻辑：可用余额 × 80% × 5倍 × risk_mult
+            target_qty = round((available_balance * 0.8 * 5 * risk_mult) / current_price, 3)
 
-            # 最低名义价值保护（防止 Binance 报 notional < 20 的错误）
+            # 最低名义价值保护
             MIN_NOTIONAL = 20.0
-            min_qty = round(MIN_NOTIONAL / current_price + 0.0005, 4)
+            min_qty = round(MIN_NOTIONAL / current_price + 0.001, 3)
             target_qty = max(target_qty, min_qty)
 
             # 硬上限保护
             MAX_POSITION_USDT = 250000
-            max_qty = round(MAX_POSITION_USDT / current_price, 4)
+            max_qty = round(MAX_POSITION_USDT / current_price, 3)
             target_qty = min(target_qty, max_qty)
 
             if target_qty <= 0:
@@ -89,16 +89,17 @@ class PositionSupervisor:
             order_executor.open_position(action, {"quantity": target_qty})
             time.sleep(2.5)
 
-            # 【核心：监督层实盘核实】
+            # 实盘核实
             self._verify_and_align_position(action)
             real_pos = position_manager.get_position()
 
             if real_pos and float(real_pos.get("positionAmt", 0)) != 0:
-                entry_price = float(real_pos.get("entryPrice", 0))
+                entry_price = round(float(real_pos.get("entryPrice", 0)), 2)
                 side = position_manager.get_position_side()
                 qty = position_manager.get_position_qty()
                 atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
 
+                # ==================== TP价格统一使用2位小数 ====================
                 if side == "LONG":
                     tp_dict = {
                         "tp1": round(entry_price + atr * 1.3, 2),
@@ -112,11 +113,9 @@ class PositionSupervisor:
                         "tp3": round(entry_price - atr * 4.2, 2)
                     }
 
-                # 移交监控权
                 tp_monitor.set_tp_levels(tp_dict['tp1'], tp_dict['tp2'], tp_dict['tp3'], side, qty, entry_price)
                 tp_monitor.start()
 
-                # 【核心：监督层发布详尽报告】
                 dingtalk.report_supervisor_open(side, entry_price, qty, tp_dict, self._get_account_snapshot())
 
         except Exception as e:
@@ -146,5 +145,6 @@ class PositionSupervisor:
                 real_pnl=real_pnl,
                 account_info=self._get_account_snapshot()
             )
+
 
 position_supervisor = PositionSupervisor()
