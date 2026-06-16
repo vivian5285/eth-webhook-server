@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor.py（V2.5 终极监督层，集权核实与详细通报）
+# position_supervisor_binance.py（V2.5 终极监督层 - 已增强仓位计算 + 最低名义价值保护）
 import logging
 import time
 from typing import Dict, Any
@@ -45,7 +45,6 @@ class PositionSupervisor:
             if current and float(current.get("positionAmt", 0)) != 0:
                 success, real_pnl = order_executor.close_position("新信号到达，全平旧仓")
                 if success:
-                    # 监督层核实并发送平仓报告
                     dingtalk.report_supervisor_close(
                         side=position_manager.get_position_side() or "未知",
                         reason="反向信号触发，铁血清空旧仓",
@@ -58,23 +57,42 @@ class PositionSupervisor:
                 dingtalk.report_anomaly(f"风控熔断系统已拦截 {action} 信号。")
                 return
 
+            # ==================== 增强版仓位计算（保留 80% * 5倍 逻辑 + 最低名义价值保护） ====================
             risk_mult = risk_manager.get_risk_multiplier()
             available_balance = self.client.get_available_balance("USDT")
             current_price = self.client.get_current_price("ETHUSDT")
 
-            if available_balance <= 0 or current_price <= 0: return
+            if available_balance <= 0 or current_price <= 0:
+                logger.warning("[Supervisor] 可用余额或价格异常，放弃开仓")
+                return
 
-            target_qty = round((available_balance * 0.8 * 5 * risk_mult) / current_price, 3)
-            if target_qty <= 0: return
+            # 用户要求的固定逻辑：可用余额 × 80% × 5倍 × risk_mult
+            target_qty = round((available_balance * 0.8 * 5 * risk_mult) / current_price, 4)
+
+            # 最低名义价值保护（防止 Binance 报 notional < 20 的错误）
+            MIN_NOTIONAL = 20.0
+            min_qty = round(MIN_NOTIONAL / current_price + 0.0005, 4)
+            target_qty = max(target_qty, min_qty)
+
+            # 硬上限保护
+            MAX_POSITION_USDT = 250000
+            max_qty = round(MAX_POSITION_USDT / current_price, 4)
+            target_qty = min(target_qty, max_qty)
+
+            if target_qty <= 0:
+                logger.warning("[Supervisor] 计算出的目标仓位为0，放弃开仓")
+                return
+
+            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH (名义价值约 {target_qty * current_price:.2f} USDT)")
 
             # 静默执行开仓
             order_executor.open_position(action, {"quantity": target_qty})
             time.sleep(2.5)
-            
+
             # 【核心：监督层实盘核实】
             self._verify_and_align_position(action)
             real_pos = position_manager.get_position()
-            
+
             if real_pos and float(real_pos.get("positionAmt", 0)) != 0:
                 entry_price = float(real_pos.get("entryPrice", 0))
                 side = position_manager.get_position_side()
@@ -82,9 +100,17 @@ class PositionSupervisor:
                 atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
 
                 if side == "LONG":
-                    tp_dict = {"tp1": round(entry_price + atr * 1.3, 2), "tp2": round(entry_price + atr * 2.6, 2), "tp3": round(entry_price + atr * 4.2, 2)}
+                    tp_dict = {
+                        "tp1": round(entry_price + atr * 1.3, 2),
+                        "tp2": round(entry_price + atr * 2.6, 2),
+                        "tp3": round(entry_price + atr * 4.2, 2)
+                    }
                 else:
-                    tp_dict = {"tp1": round(entry_price - atr * 1.3, 2), "tp2": round(entry_price - atr * 2.6, 2), "tp3": round(entry_price - atr * 4.2, 2)}
+                    tp_dict = {
+                        "tp1": round(entry_price - atr * 1.3, 2),
+                        "tp2": round(entry_price - atr * 2.6, 2),
+                        "tp3": round(entry_price - atr * 4.2, 2)
+                    }
 
                 # 移交监控权
                 tp_monitor.set_tp_levels(tp_dict['tp1'], tp_dict['tp2'], tp_dict['tp3'], side, qty, entry_price)
@@ -110,7 +136,7 @@ class PositionSupervisor:
         from tp_monitor import tp_monitor
         tp_monitor.clear_tp_levels()
         order_executor.cancel_all_tp_orders()
-        
+
         current_side = position_manager.get_position_side()
         success, real_pnl = order_executor.close_position("TV 下发主动 CLOSE 信号")
         if success:
