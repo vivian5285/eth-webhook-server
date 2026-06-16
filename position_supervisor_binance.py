@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_binance.py（V2.5 终极监督层 - 精度统一修复版）
+# position_supervisor_binance.py（V2.6 容错增强版）
 import logging
 import time
 from typing import Dict, Any
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class PositionSupervisor:
     def __init__(self):
         self.client = binance_client
-        logger.info("[Supervisor] 监督层初始化完成（已接管所有核实与播报权限）")
+        logger.info("[Supervisor] 监督层初始化完成（容错增强版）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -25,39 +25,54 @@ class PositionSupervisor:
             self._handle_close_signal()
 
     def _get_account_snapshot(self) -> dict:
-        return {
-            "balance": self.client.get_available_balance("USDT"),
-            "equity": self.client.get_total_equity(),
-            "risk_mult": risk_manager.get_risk_multiplier(),
-            "daily_pnl": risk_manager.daily_pnl,
-            "consecutive_losses": risk_manager.consecutive_losses,
-            "drawdown": risk_manager.current_drawdown
-        }
+        try:
+            return {
+                "balance": self.client.get_available_balance("USDT"),
+                "equity": self.client.get_total_equity(),
+                "risk_mult": risk_manager.get_risk_multiplier(),
+                "daily_pnl": getattr(risk_manager, 'daily_pnl', 0.0),
+                "consecutive_losses": getattr(risk_manager, 'consecutive_losses', 0),
+                "drawdown": getattr(risk_manager, 'current_drawdown', 0.0)
+            }
+        except Exception as e:
+            logger.error(f"[Supervisor] 获取账户快照失败: {e}")
+            return {}
 
     def _handle_entry_signal(self, action: str):
         try:
             from tp_monitor import tp_monitor
-            tp_monitor.clear_tp_levels()
-            order_executor.cancel_all_tp_orders()
+
+            # 1. 清空旧 TP 状态
+            try:
+                tp_monitor.clear_tp_levels()
+                order_executor.cancel_all_tp_orders()
+            except Exception as e:
+                logger.warning(f"[Supervisor] 清空旧 TP/挂单失败（可忽略）: {e}")
+
             time.sleep(0.8)
 
+            # 2. 如果有旧持仓，先强制平掉
             current = position_manager.get_position()
             if current and float(current.get("positionAmt", 0)) != 0:
-                success, real_pnl = order_executor.close_position("新信号到达，全平旧仓")
-                if success:
-                    dingtalk.report_supervisor_close(
-                        side=position_manager.get_position_side() or "未知",
-                        reason="反向信号触发，铁血清空旧仓",
-                        real_pnl=real_pnl,
-                        account_info=self._get_account_snapshot()
-                    )
+                try:
+                    success, real_pnl = order_executor.close_position("新信号到达，全平旧仓")
+                    if success:
+                        dingtalk.report_supervisor_close(
+                            side=position_manager.get_position_side() or "未知",
+                            reason="反向/同向信号触发，铁血清空旧仓",
+                            real_pnl=real_pnl,
+                            account_info=self._get_account_snapshot()
+                        )
+                except Exception as e:
+                    logger.error(f"[Supervisor] 平旧仓异常: {e}")
                 time.sleep(1.8)
 
+            # 3. 风控检查
             if not risk_manager.is_trading_allowed():
                 dingtalk.report_anomaly(f"风控熔断系统已拦截 {action} 信号。")
                 return
 
-            # ==================== 增强版仓位计算（精度统一） ====================
+            # 4. 仓位计算（保留用户要求的 80% * 5倍 逻辑）
             risk_mult = risk_manager.get_risk_multiplier()
             available_balance = self.client.get_available_balance("USDT")
             current_price = self.client.get_current_price("ETHUSDT")
@@ -66,15 +81,13 @@ class PositionSupervisor:
                 logger.warning("[Supervisor] 可用余额或价格异常，放弃开仓")
                 return
 
-            # 用户要求的逻辑：可用余额 × 80% × 5倍 × risk_mult
             target_qty = round((available_balance * 0.8 * 5 * risk_mult) / current_price, 3)
 
-            # 最低名义价值保护
+            # 最低名义价值 + 最大仓位保护
             MIN_NOTIONAL = 20.0
             min_qty = round(MIN_NOTIONAL / current_price + 0.001, 3)
             target_qty = max(target_qty, min_qty)
 
-            # 硬上限保护
             MAX_POSITION_USDT = 250000
             max_qty = round(MAX_POSITION_USDT / current_price, 3)
             target_qty = min(target_qty, max_qty)
@@ -83,68 +96,104 @@ class PositionSupervisor:
                 logger.warning("[Supervisor] 计算出的目标仓位为0，放弃开仓")
                 return
 
-            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH (名义价值约 {target_qty * current_price:.2f} USDT)")
+            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH")
 
-            # 静默执行开仓
+            # 5. 执行开仓
             order_executor.open_position(action, {"quantity": target_qty})
-            time.sleep(2.5)
+            time.sleep(2.8)  # 等待成交
 
-            # 实盘核实
+            # 6. 实盘核实 + 强制对齐
             self._verify_and_align_position(action)
+
+            # 7. 获取实盘持仓并设置 TP
             real_pos = position_manager.get_position()
+            if not real_pos or float(real_pos.get("positionAmt", 0)) == 0:
+                logger.warning("[Supervisor] 开仓后未检测到实盘持仓，可能下单失败或延迟")
+                dingtalk.report_anomaly(f"{action} 开仓后未检测到持仓，请人工检查！")
+                return
 
-            if real_pos and float(real_pos.get("positionAmt", 0)) != 0:
-                entry_price = round(float(real_pos.get("entryPrice", 0)), 2)
-                side = position_manager.get_position_side()
-                qty = position_manager.get_position_qty()
-                atr = self.client.get_atr("ETHUSDT", "3h", 50, 14) or 22.0
+            entry_price = round(float(real_pos.get("entryPrice", 0)), 2)
+            side = position_manager.get_position_side()
+            qty = position_manager.get_position_qty()
 
-                # ==================== TP价格统一使用2位小数 ====================
-                if side == "LONG":
-                    tp_dict = {
-                        "tp1": round(entry_price + atr * 1.3, 2),
-                        "tp2": round(entry_price + atr * 2.6, 2),
-                        "tp3": round(entry_price + atr * 4.2, 2)
-                    }
-                else:
-                    tp_dict = {
-                        "tp1": round(entry_price - atr * 1.3, 2),
-                        "tp2": round(entry_price - atr * 2.6, 2),
-                        "tp3": round(entry_price - atr * 4.2, 2)
-                    }
+            # ATR 计算（增加容错）
+            atr = self.client.get_atr("ETHUSDT", "1h", 50, 14) or 22.0
+            if atr <= 0:
+                atr = 22.0
+                logger.warning("[Supervisor] ATR 获取异常，使用默认值 22.0")
 
+            # 计算 TP（保留2位小数）
+            if side == "LONG":
+                tp_dict = {
+                    "tp1": round(entry_price + atr * 1.3, 2),
+                    "tp2": round(entry_price + atr * 2.6, 2),
+                    "tp3": round(entry_price + atr * 4.2, 2)
+                }
+            else:
+                tp_dict = {
+                    "tp1": round(entry_price - atr * 1.3, 2),
+                    "tp2": round(entry_price - atr * 2.6, 2),
+                    "tp3": round(entry_price - atr * 4.2, 2)
+                }
+
+            # 8. 启动 TP 监控
+            try:
                 tp_monitor.set_tp_levels(tp_dict['tp1'], tp_dict['tp2'], tp_dict['tp3'], side, qty, entry_price)
                 tp_monitor.start()
+            except Exception as e:
+                logger.error(f"[Supervisor] 启动 TP 监控失败: {e}")
 
-                dingtalk.report_supervisor_open(side, entry_price, qty, tp_dict, self._get_account_snapshot())
+            # 9. 发送开仓报告
+            dingtalk.report_supervisor_open(side, entry_price, qty, tp_dict, self._get_account_snapshot())
 
         except Exception as e:
-            logger.error(f"[Supervisor] 处理 {action} 异常: {e}", exc_info=True)
+            logger.error(f"[Supervisor] 处理 {action} 信号异常: {e}", exc_info=True)
+            dingtalk.report_anomaly(f"处理 {action} 信号时发生异常: {str(e)[:100]}")
 
     def _verify_and_align_position(self, expected_side: str):
-        real_pos = position_manager.get_position()
-        real_side = real_pos.get("side") if real_pos else None
+        """实盘核实 + 强制对齐（增强容错版）"""
+        try:
+            real_pos = position_manager.get_position()
+            if not real_pos:
+                logger.warning("[Supervisor] 无法获取实盘持仓信息，跳过对齐检查")
+                return
 
-        if real_side and real_side != expected_side:
-            dingtalk.report_force_align(real_side, expected_side)
-            order_executor.close_position("强制对齐")
-            time.sleep(1.8)
-            order_executor.open_position(expected_side, {"quantity": 0})
+            real_side = real_pos.get("side")
+            real_qty = float(real_pos.get("positionAmt", 0))
+
+            if real_qty != 0 and real_side and real_side != expected_side:
+                logger.warning(f"[Supervisor] 检测到反向持仓！实盘: {real_side}，信号要求: {expected_side}")
+                dingtalk.report_force_align(real_side, expected_side)
+
+                # 强制平掉反向持仓
+                try:
+                    order_executor.close_position("强制对齐 - 平反向持仓")
+                    time.sleep(1.5)
+                    order_executor.open_position(expected_side, {"quantity": 0})  # 重新按信号开仓
+                except Exception as e:
+                    logger.error(f"[Supervisor] 强制对齐执行异常: {e}")
+
+        except Exception as e:
+            logger.error(f"[Supervisor] 强制对齐过程异常: {e}")
 
     def _handle_close_signal(self):
-        from tp_monitor import tp_monitor
-        tp_monitor.clear_tp_levels()
-        order_executor.cancel_all_tp_orders()
+        try:
+            from tp_monitor import tp_monitor
+            tp_monitor.clear_tp_levels()
+            order_executor.cancel_all_tp_orders()
 
-        current_side = position_manager.get_position_side()
-        success, real_pnl = order_executor.close_position("TV 下发主动 CLOSE 信号")
-        if success:
-            dingtalk.report_supervisor_close(
-                side=current_side or "未知",
-                reason="TV 主动离场信号",
-                real_pnl=real_pnl,
-                account_info=self._get_account_snapshot()
-            )
+            current_side = position_manager.get_position_side()
+            success, real_pnl = order_executor.close_position("TV 下发主动 CLOSE 信号")
+
+            if success:
+                dingtalk.report_supervisor_close(
+                    side=current_side or "未知",
+                    reason="TV 主动离场信号",
+                    real_pnl=real_pnl,
+                    account_info=self._get_account_snapshot()
+                )
+        except Exception as e:
+            logger.error(f"[Supervisor] 处理 CLOSE 信号异常: {e}", exc_info=True)
 
 
 position_supervisor = PositionSupervisor()
