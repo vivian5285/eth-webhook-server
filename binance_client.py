@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binance_client.py (V3.0 完美终极版 - 修复 TV 信号兼容与环境穿透)
+# binance_client.py (V3.1 完整修复版 - 补充 cancel_all_open_orders)
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -12,6 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
+
 
 class BinanceClient:
     def __init__(self):
@@ -68,13 +69,49 @@ class BinanceClient:
             logger.error(f"[BinanceClient] 获取持仓失败: {e}")
             return None
 
+    def get_open_orders(self, symbol: str = "ETHUSDT") -> List[Dict]:
+        """获取当前所有挂单"""
+        try:
+            return self.client.futures_get_open_orders(symbol=symbol)
+        except Exception as e:
+            logger.error(f"[BinanceClient] 获取挂单失败: {e}")
+            return []
+
+    def get_atr(self, symbol: str = "ETHUSDT", interval: str = "3h",
+                limit: int = 50, period: int = 14) -> Optional[float]:
+        """计算 ATR（Average True Range）"""
+        try:
+            klines = self.client.futures_klines(
+                symbol=symbol,
+                interval=interval,
+                limit=limit
+            )
+            if len(klines) < period + 1:
+                return None
+
+            true_ranges = []
+            for i in range(1, len(klines)):
+                high = float(klines[i][2])
+                low = float(klines[i][3])
+                prev_close = float(klines[i - 1][4])
+
+                tr1 = high - low
+                tr2 = abs(high - prev_close)
+                tr3 = abs(low - prev_close)
+                true_ranges.append(max(tr1, tr2, tr3))
+
+            atr = sum(true_ranges[-period:]) / period
+            return round(atr, 2)
+        except Exception as e:
+            logger.error(f"[BinanceClient] 计算 ATR 失败: {e}")
+            return None
+
     def place_market_order(self, side: str, quantity: float, symbol: str = "ETHUSDT"):
         """市价单下单（完美兼容 TV 的 BUY/SELL 与手动输入的 LONG/SHORT）"""
         try:
-            # 核心修复：无论是发 BUY 还是 LONG，都统统转换为币安底层的 BUY
             side_upper = side.upper()
             binance_side = "BUY" if side_upper in ["BUY", "LONG"] else "SELL"
-            
+
             order = self.client.futures_create_order(
                 symbol=symbol,
                 side=binance_side,
@@ -115,5 +152,52 @@ class BinanceClient:
             logger.error(f"[BinanceClient] 全平失败: {e}")
             return None
 
-# 暴露给其他模块导入
+    def cancel_all_open_orders(self, symbol: str = "ETHUSDT"):
+        """撤销指定交易对的所有挂单"""
+        try:
+            self.client.futures_cancel_all_open_orders(symbol=symbol)
+            logger.info(f"[BinanceClient] 已成功撤销 {symbol} 的所有挂单")
+            return True
+        except Exception as e:
+            logger.error(f"[BinanceClient] 撤销 {symbol} 挂单失败: {e}")
+            return False
+
+    def futures_get_order(self, symbol: str, orderId: int):
+        """查询订单状态"""
+        try:
+            return self.client.futures_get_order(symbol=symbol, orderId=orderId)
+        except Exception as e:
+            logger.error(f"[BinanceClient] 查询订单失败: {e}")
+            return None
+
+    def get_recent_realized_pnl(self, minutes: int = 10) -> float:
+        """获取最近一段时间内的已实现盈亏（真实数据）"""
+        try:
+            from datetime import datetime, timedelta
+
+            end_time = int(datetime.now().timestamp() * 1000)
+            start_time = int((datetime.now() - timedelta(minutes=minutes)).timestamp() * 1000)
+
+            income_list = self.client.futures_income(
+                incomeType="REALIZED_PNL",
+                startTime=start_time,
+                endTime=end_time,
+                limit=100
+            )
+
+            total_pnl = 0.0
+            for item in income_list:
+                total_pnl += float(item.get("income", 0))
+
+            if total_pnl != 0:
+                logger.info(f"[BinanceClient] 获取到最近 {minutes} 分钟真实已实现盈亏: {total_pnl:+.2f} USDT")
+
+            return total_pnl
+
+        except Exception as e:
+            logger.warning(f"[BinanceClient] 获取真实 realized PnL 失败: {e}，返回 0")
+            return 0.0
+
+
+# 全局单例
 binance_client = BinanceClient()
