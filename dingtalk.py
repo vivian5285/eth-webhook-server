@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# dingtalk.py（V3.0 币安 15/30/50 固定差价止盈专属战报版）
+# dingtalk.py（V3.1 币安 12/25/50 极限刺客专属战报版）
 import os
 import time
 import hmac
@@ -46,7 +46,7 @@ def send_markdown_message(title: str, text: str, is_at_all: bool = False):
         if not url: return False
 
         # 统一注入头部时间戳与签名
-        full_text = f"### {title}\n> **⏱ 汇报时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n{text}\n---\n*🤖 币安战神 V4 · 全域单向护城河与死咬机制*"
+        full_text = f"### {title}\n> **⏱ 汇报时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n{text}\n---\n*🤖 币安战神 V4.2 · 12/25/50 极限刺客引擎*"
 
         data = {
             "msgtype": "markdown",
@@ -80,9 +80,9 @@ def report_supervisor_open(side: str, entry_price: float, qty: float, tp_dict: d
 **📍 实盘持仓核实通过 (单向一手)**
 - **交易方向**：{emoji} **{action_text}**
 - **实盘入场**：`{entry_price}` USDT
-- **确认仓位**：`{qty}` ETH (50%本金 / 20x杠杆)
+- **确认仓位**：`{qty}` ETH (48%本金 / 20x杠杆)
 
-**🎯 固定止盈防线 (15/30/50U 刺客流)**
+**🎯 极限止盈防线 (12/25/50U 刺客流)**
 - **TP1 (40%)**：`{tp_dict.get('tp1')}`
 - **TP2 (40%)**：`{tp_dict.get('tp2')}`
 - **TP3 (20%)**：`{tp_dict.get('tp3')}`
@@ -135,7 +135,7 @@ def report_supervisor_intervention(old_qty: float, new_qty: float, new_tps: dict
 - **实盘侦测仓位**：`{new_qty}` ETH
 - **应对决策**：已接管新仓位，并基于当前入场价重新锚定止盈！
 
-**🔄 重新锚定的 15/30/50 止盈防线**
+**🔄 重新锚定的 12/25/50 止盈防线**
 - **新 TP1 (40%)**：`{new_tps.get('tp1')}`
 - **新 TP2 (40%)**：`{new_tps.get('tp2')}`
 - **新 TP3 (20%)**：`{new_tps.get('tp3')}`
