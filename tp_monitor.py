@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tp_monitor.py（V2.6 容错增强版）
+# tp_monitor.py（V2.7 终极修复版 - 解决无限循环与平仓残留死穴）
 import logging
 import time
 import threading
@@ -203,19 +203,36 @@ class TPMonitor:
 
     def _handle_tp_trigger(self, level: str, current_price: float):
         try:
-            if level in ["TP1", "TP2"]:
+            if level == "TP1":
                 success, real_pnl = self.executor.partial_close(0.40, f"{level} 触发")
                 if success:
+                    time.sleep(1.5)  # 等待币安接口刷新
+                    new_qty = self.position_manager.get_position_qty()
+                    with self._lock:
+                        self.tp1_price = None  # 销毁 TP1，绝对防止无限循环触发！
+                        self.position_qty = new_qty  # 同步自己平仓后的仓位，防止误判为人工干预
                     self._move_tp3_after_partial(current_price)
-                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl,
-                                                          "已落袋40%并移动 TP3。")
+                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl, "已落袋 40%，TP1 防线完成使命，成功移动 TP3。")
+
+            elif level == "TP2":
+                # 数学修复：因为此时剩下的已经是初始的 60%（TP1触发过），要平掉初始的 40%，即需要平掉当前剩余的 2/3 (0.6667)
+                success, real_pnl = self.executor.partial_close(0.6667, f"{level} 触发")
+                if success:
+                    time.sleep(1.5)
+                    new_qty = self.position_manager.get_position_qty()
+                    with self._lock:
+                        self.tp1_price = None # 以防跳空暴涨导致 TP1 没被置空
+                        self.tp2_price = None # 销毁 TP2
+                        self.position_qty = new_qty
+                    self._move_tp3_after_partial(current_price)
+                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl, "已落袋 40%，TP2 防线完成使命，成功移动 TP3。")
 
             elif level == "TP3":
-                success, real_pnl = self.executor.partial_close(0.20, f"{level} 触发")
+                # 最后一重防线，直接调用全平接口，绝对不留任何仓位残渣！
+                success, real_pnl = self.executor.close_position(f"{level} 触发")
                 if success:
                     self.clear_tp_levels()
-                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl,
-                                                          "最终防线到达，本轮交易闭环。")
+                    dingtalk.report_supervisor_tp_trigger(level, current_price, real_pnl, "最终防线到达，本轮交易闭环全平。")
 
         except Exception as e:
             logger.error(f"[TPMonitor] 处理 {level} 触发异常: {e}")
@@ -231,9 +248,9 @@ class TPMonitor:
             state_manager.save_state({
                 "tp1": self.tp1_price,
                 "tp2": self.tp2_price,
-                "tp3": new_tp3,
+                "tp3": self.tp3_price,
                 "side": self.position_side,
-                "remaining_qty": round(self.position_qty * 0.2, 3),
+                "remaining_qty": self.position_qty,  # 修复：使用已更新的真实内部目标仓位
                 "entry_price": self.entry_price,
                 "is_monitoring": True
             })
