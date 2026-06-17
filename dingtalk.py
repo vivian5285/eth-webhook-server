@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# dingtalk.py（V2.5 机构级 Markdown 报告引擎）
+# dingtalk.py（V3.0 币安 15/30/50 固定差价止盈专属战报版）
 import os
 import time
 import hmac
@@ -46,7 +46,7 @@ def send_markdown_message(title: str, text: str, is_at_all: bool = False):
         if not url: return False
 
         # 统一注入头部时间戳与签名
-        full_text = f"### {title}\n> **⏱ 汇报时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n{text}\n---\n*🤖 万亿战神 V2 · 全域最终自审自查机制*"
+        full_text = f"### {title}\n> **⏱ 汇报时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n---\n{text}\n---\n*🤖 币安战神 V4 · 全域单向护城河与死咬机制*"
 
         data = {
             "msgtype": "markdown",
@@ -77,12 +77,12 @@ def report_supervisor_open(side: str, entry_price: float, qty: float, tp_dict: d
     action_text = "做多 (LONG)" if side == "LONG" else "做空 (SHORT)"
     
     text = f"""
-**📍 实盘持仓核实通过**
+**📍 实盘持仓核实通过 (单向一手)**
 - **交易方向**：{emoji} **{action_text}**
 - **实盘入场**：`{entry_price}` USDT
-- **确认仓位**：`{qty}` ETH (杠杆: 5x)
+- **确认仓位**：`{qty}` ETH (50%本金 / 20x杠杆)
 
-**🎯 动态止盈布局 (ATR计算)**
+**🎯 固定止盈防线 (15/30/50U 刺客流)**
 - **TP1 (40%)**：`{tp_dict.get('tp1')}`
 - **TP2 (40%)**：`{tp_dict.get('tp2')}`
 - **TP3 (20%)**：`{tp_dict.get('tp3')}`
@@ -100,16 +100,15 @@ def report_supervisor_close(side: str, reason: str, real_pnl: float, account_inf
     pnl_emoji = "🔥" if real_pnl > 0 else "🩸"
     
     text = f"""
-**🔚 信号平仓核实完毕**
-- **平仓原因**：{reason}
+**🔚 阵地清算核实完毕**
+- **清场原因**：{reason}
 - **原仓方向**：{side}
 - **真实已实现盈亏**：{pnl_emoji} **{real_pnl:+.2f} USDT**
 
 **📉 账户结算后状态**
 - **账户总权益**：{account_info.get('equity', 0):.2f} USDT
 - **当日累计盈亏**：{account_info.get('daily_pnl', 0):+.2f} USDT
-- **连续亏损次数**：{account_info.get('consecutive_losses', 0)} 次
-- **当前最大回撤**：{account_info.get('drawdown', 0):.2%}
+- **最大回撤拦截**：{account_info.get('drawdown', 0):.2%}
 """
     send_markdown_message("🔚 信号平仓核实报告", text)
 
@@ -119,13 +118,13 @@ def report_supervisor_tp_trigger(level: str, trigger_price: float, real_pnl: flo
     text = f"""
 **🎯 止盈防线被击穿**
 - **触发级别**：**{level}**
-- **触发价格**：`{trigger_price}` USDT
-- **本段真实落袋盈亏**：🔥 **{real_pnl:+.2f} USDT**
+- **触发现价**：`{trigger_price}` USDT
+- **本段落袋盈亏**：🔥 **{real_pnl:+.2f} USDT**
 
 **🛡️ 系统后续应对**
 - {next_action}
 """
-    send_markdown_message(f"🎯 {level} 止盈触发实盘核实", text)
+    send_markdown_message(f"🎯 {level} 止盈光速落袋", text)
 
 
 def report_supervisor_intervention(old_qty: float, new_qty: float, new_tps: dict):
@@ -134,12 +133,12 @@ def report_supervisor_intervention(old_qty: float, new_qty: float, new_tps: dict
 **⚠️ 检测到外部仓位变更 (人工干预)**
 - **系统原计仓位**：`{old_qty}` ETH
 - **实盘侦测仓位**：`{new_qty}` ETH
-- **应对决策**：已接管新仓位，并基于当前价格重新计算安全边界！
+- **应对决策**：已接管新仓位，并基于当前入场价重新锚定止盈！
 
-**🔄 重新锚定的止盈防线**
-- **新 TP1**：`{new_tps.get('tp1')}`
-- **新 TP2**：`{new_tps.get('tp2')}`
-- **新 TP3**：`{new_tps.get('tp3')}`
+**🔄 重新锚定的 15/30/50 止盈防线**
+- **新 TP1 (40%)**：`{new_tps.get('tp1')}`
+- **新 TP2 (40%)**：`{new_tps.get('tp2')}`
+- **新 TP3 (20%)**：`{new_tps.get('tp3')}`
 """
     send_markdown_message("🚨 人工干预动态纠正报告", text, is_at_all=True)
 
@@ -147,11 +146,11 @@ def report_supervisor_intervention(old_qty: float, new_qty: float, new_tps: dict
 def report_force_align(old_side: str, new_side: str):
     """防逆向操作强制重置"""
     text = f"""
-**☠️ 检测到严重逆向人工持仓**
+**☠️ 触发单向持仓底线保护**
 - **实盘违规方向**：{old_side}
 - **TV最高权威方向**：{new_side}
-- **应对决策**：已强行抹平违规仓位，强制对齐 TV 信号！
-- **警告**：请勿在资管账户中私自反向对冲！
+- **应对决策**：已强行抹平违规仓位，强制洗盘重开对齐 TV！
+- **警告**：系统已锁定单向持仓模式，请勿人为挂单反向对冲！
 """
     send_markdown_message("⚔️ 强制对齐纠正报告", text, is_at_all=True)
 
