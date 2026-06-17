@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# order_executor.py（V2.5 极致静默执行版 - 精度统一修复版）
+# order_executor.py（V2.6 终极修复版 - 彻底修复平仓方向与爆仓漏洞）
 import logging
 import time
 from binance_client import binance_client
@@ -72,17 +72,22 @@ class OrderExecutor:
                     return False, 0.0
 
                 current_qty = abs(float(pos.get("positionAmt", 0)))
-                # 统一精度：平仓数量保留3位小数
                 close_qty = round(current_qty * percentage, 3)
-                side = "LONG" if float(pos.get("positionAmt", 0)) > 0 else "SHORT"
 
-                order = self.client.place_market_order(side=side, quantity=close_qty)
+                # ！！！极其致命的修正点！！！
+                # 持多单(Amt>0)时，平仓动作必须是 "SELL"；持空单时，平仓动作必须是 "BUY"
+                is_long = float(pos.get("positionAmt", 0)) > 0
+                action_side = "SELL" if is_long else "BUY"
+                pos_side = "LONG" if is_long else "SHORT"
+
+                # 传入正确的 action_side 去吃单平仓
+                order = self.client.place_market_order(side=action_side, quantity=close_qty)
                 if order:
                     time.sleep(1.5)
                     real_pnl = self.client.get_recent_realized_pnl(minutes=5)
 
                     risk_manager.on_position_closed(real_pnl, is_full_close=False)
-                    log_trade("PARTIAL_CLOSE", side, close_qty, round(self.client.get_current_price(), 2), real_pnl, reason)
+                    log_trade("PARTIAL_CLOSE", pos_side, close_qty, round(self.client.get_current_price(), 2), real_pnl, reason)
                     return True, real_pnl
             except Exception as e:
                 logger.error(f"[OrderExecutor] 部分平仓重试 {attempt}: {e}")
