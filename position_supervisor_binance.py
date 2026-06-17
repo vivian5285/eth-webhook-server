@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_binance.py（V4.1 洁癖清场 + 48%满仓滑点保护版）
+# position_supervisor_binance.py（V4.2 洁癖清场 + 12/25/50 极限刺客版）
 import logging
 import time
 from typing import Dict, Any
@@ -73,7 +73,6 @@ class PositionSupervisor:
                 logger.warning("[Supervisor] 可用余额或价格异常，放弃开仓")
                 return
 
-            # 【终极修复点】：从 0.50 下调至 0.48，完美避开币安 -2019 保证金不足的底层风控限制
             target_qty = round((available_balance * 0.48 * 20) / current_price, 3)
 
             MIN_NOTIONAL = 20.0
@@ -89,7 +88,7 @@ class PositionSupervisor:
             # 5. 实盘核实 + 强制对齐
             self._verify_and_align_position(action)
 
-            # 6. 获取实盘持仓并设置固定 15/30/50 止盈
+            # 6. 获取实盘持仓并设置固定 12/25/50 极限止盈
             real_pos = position_manager.get_position()
             if not real_pos or float(real_pos.get("positionAmt", 0)) == 0:
                 logger.warning("[Supervisor] 开仓后未检测到实盘持仓")
@@ -99,17 +98,17 @@ class PositionSupervisor:
             side = position_manager.get_position_side()
             qty = position_manager.get_position_qty()
 
-            # 收紧止盈价格区间：15U / 30U / 50U 刺客流
+            # ！！！极限收紧止盈价格区间：12U / 25U / 50U 刺客流 ！！！
             if side == "LONG":
                 tp_dict = {
-                    "tp1": round(entry_price + 15.0, 2),
-                    "tp2": round(entry_price + 30.0, 2),
+                    "tp1": round(entry_price + 12.0, 2),
+                    "tp2": round(entry_price + 25.0, 2),
                     "tp3": round(entry_price + 50.0, 2)
                 }
             else:
                 tp_dict = {
-                    "tp1": round(entry_price - 15.0, 2),
-                    "tp2": round(entry_price - 30.0, 2),
+                    "tp1": round(entry_price - 12.0, 2),
+                    "tp2": round(entry_price - 25.0, 2),
                     "tp3": round(entry_price - 50.0, 2)
                 }
 
