@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_binance.py（V4.0 洁癖清场 + 50%满仓固定比例版）
+# position_supervisor_binance.py（V4.1 洁癖清场 + 48%满仓滑点保护版）
 import logging
 import time
 from typing import Dict, Any
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class PositionSupervisor:
     def __init__(self):
         self.client = binance_client
-        logger.info("[Supervisor] 监督层初始化完成（50%满仓固定+绝对清场版）")
+        logger.info("[Supervisor] 监督层初始化完成（48%满仓滑点保护+绝对清场版）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -65,7 +65,7 @@ class PositionSupervisor:
                 dingtalk.report_anomaly(f"风控熔断系统已拦截 {action} 信号。")
                 return
 
-            # 3. 仓位计算（永远一手：本金余额 50% * 20倍）
+            # 3. 仓位计算（永远一手：本金余额 48% * 20倍，预留 2% 防市价滑点爆仓）
             available_balance = self.client.get_available_balance("USDT")
             current_price = self.client.get_current_price("ETHUSDT")
 
@@ -73,14 +73,14 @@ class PositionSupervisor:
                 logger.warning("[Supervisor] 可用余额或价格异常，放弃开仓")
                 return
 
-            # 强制按 50% 可用余额与 20 倍杠杆计算名义价值
-            target_qty = round((available_balance * 0.50 * 20) / current_price, 3)
+            # 【终极修复点】：从 0.50 下调至 0.48，完美避开币安 -2019 保证金不足的底层风控限制
+            target_qty = round((available_balance * 0.48 * 20) / current_price, 3)
 
             MIN_NOTIONAL = 20.0
             min_qty = round(MIN_NOTIONAL / current_price + 0.001, 3)
             target_qty = max(target_qty, min_qty)
 
-            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH (50%本金, 20x)")
+            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH (48%本金防滑点, 20x)")
 
             # 4. 执行开仓
             order_executor.open_position(action, {"quantity": target_qty})
@@ -99,7 +99,7 @@ class PositionSupervisor:
             side = position_manager.get_position_side()
             qty = position_manager.get_position_qty()
 
-            # 收紧止盈价格区间：15U / 30U / 50U
+            # 收紧止盈价格区间：15U / 30U / 50U 刺客流
             if side == "LONG":
                 tp_dict = {
                     "tp1": round(entry_price + 15.0, 2),
