@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tp_monitor.py（V4.0 币安 WS 毫秒雷达 + 静态靶子定点引爆版）
+# tp_monitor.py（V4.2 币安 WS 毫秒雷达 + 12/25/50 静态靶子定点引爆版）
 import logging
 import time
 import threading
@@ -186,16 +186,17 @@ class TPMonitor:
         try:
             current_entry = round(float(self.position_manager.get_position().get("entryPrice", self.entry_price)), 2)
 
+            # ！！！干预后重新对齐 12/25/50 防线 ！！！
             if self.position_side == "LONG":
                 tps = {
-                    "tp1": round(current_entry + 15.0, 2),
-                    "tp2": round(current_entry + 30.0, 2),
+                    "tp1": round(current_entry + 12.0, 2),
+                    "tp2": round(current_entry + 25.0, 2),
                     "tp3": round(current_entry + 50.0, 2)
                 }
             else:
                 tps = {
-                    "tp1": round(current_entry - 15.0, 2),
-                    "tp2": round(current_entry - 30.0, 2),
+                    "tp1": round(current_entry - 12.0, 2),
+                    "tp2": round(current_entry - 25.0, 2),
                     "tp3": round(current_entry - 50.0, 2)
                 }
 
