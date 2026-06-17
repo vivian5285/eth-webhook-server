@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binance_client.py（V3.2 优化稳定版 - 修复 ATR interval 问题）
+# binance_client.py（V4.0 单向持仓护城河版）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -11,7 +11,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-
 
 class BinanceClient:
     def __init__(self):
@@ -71,35 +70,33 @@ class BinanceClient:
 
     def get_atr(self, symbol: str = "ETHUSDT", interval: str = "1h",
                 limit: int = 50, period: int = 14) -> Optional[float]:
-        """计算 ATR（已优化 interval，默认使用 1h 更稳定）"""
         try:
             klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-            if len(klines) < period + 1:
-                return None
-
+            if len(klines) < period + 1: return None
             true_ranges = []
             for i in range(1, len(klines)):
-                high = float(klines[i][2])
-                low = float(klines[i][3])
-                prev_close = float(klines[i - 1][4])
+                high, low, prev_close = float(klines[i][2]), float(klines[i][3]), float(klines[i-1][4])
                 tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
                 true_ranges.append(tr)
-
-            atr = sum(true_ranges[-period:]) / period
-            return round(atr, 2)
-        except Exception as e:
-            logger.warning(f"[BinanceClient] 计算 ATR 失败: {e}，返回 None")
+            return round(sum(true_ranges[-period:]) / period, 2)
+        except Exception:
             return None
 
-    def place_market_order(self, side: str, quantity: float, symbol: str = "ETHUSDT"):
+    def place_market_order(self, side: str, quantity: float, symbol: str = "ETHUSDT", reduce_only: bool = False):
+        """【升级】加入 reduce_only 参数，确保单向模式下止盈绝对不会变成反向开仓"""
         try:
-            side_upper = side.upper()
-            binance_side = "BUY" if side_upper in ["BUY", "LONG"] else "SELL"
+            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            params = {
+                "symbol": symbol,
+                "side": binance_side,
+                "type": "MARKET",
+                "quantity": quantity
+            }
+            if reduce_only:
+                params["reduceOnly"] = "true"
 
-            order = self.client.futures_create_order(
-                symbol=symbol, side=binance_side, type="MARKET", quantity=quantity
-            )
-            logger.info(f"[BinanceClient] 市价单下单成功: {binance_side} {quantity}")
+            order = self.client.futures_create_order(**params)
+            logger.info(f"[BinanceClient] 市价单下单成功: {binance_side} {quantity} (ReduceOnly: {reduce_only})")
             return order
         except BinanceAPIException as e:
             logger.error(f"[BinanceClient] 市价单下单失败: {e}")
@@ -111,13 +108,10 @@ class BinanceClient:
     def close_all_positions(self, symbol: str = "ETHUSDT"):
         try:
             position = self.client.futures_position_information(symbol=symbol)
-            if not position:
-                return None
-
+            if not position: return None
             pos_amt = float(position[0].get("positionAmt", 0))
-            if pos_amt == 0:
-                return None
-
+            if pos_amt == 0: return None
+            
             side = "SELL" if pos_amt > 0 else "BUY"
             order = self.client.futures_create_order(
                 symbol=symbol, side=side, type="MARKET", quantity=abs(pos_amt), reduceOnly=True
@@ -142,15 +136,11 @@ class BinanceClient:
             from datetime import datetime, timedelta
             end_time = int(datetime.now().timestamp() * 1000)
             start_time = int((datetime.now() - timedelta(minutes=minutes)).timestamp() * 1000)
-
             income_list = self.client.futures_income(
                 incomeType="REALIZED_PNL", startTime=start_time, endTime=end_time, limit=100
             )
-            total_pnl = sum(float(item.get("income", 0)) for item in income_list)
-            return total_pnl
-        except Exception as e:
-            logger.warning(f"[BinanceClient] 获取 realized PnL 失败: {e}")
+            return sum(float(item.get("income", 0)) for item in income_list)
+        except Exception:
             return 0.0
-
 
 binance_client = BinanceClient()
