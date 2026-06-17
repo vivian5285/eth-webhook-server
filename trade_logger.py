@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# trade_logger.py（完整最终版 - 结构化交易日志，已修复权限路径）
-import json
+# trade_logger.py（SQLite 工业级数据库版）
+import sqlite3
 import os
 from datetime import datetime
 import logging
@@ -8,103 +8,63 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# 修改为项目目录下的 data 文件夹，避免 root 权限冲突
-TRADE_LOG_FILE = "/home/trading/eth-webhook-server/data/trade_log.jsonl"
+# 数据存放路径
+DB_DIR = "/home/trading/binance-engine/data"
+DB_FILE = os.path.join(DB_DIR, "trade_log.db")
 
+def _init_db():
+    """初始化 SQLite 数据库与表结构"""
+    if not os.path.exists(DB_DIR):
+        os.makedirs(DB_DIR, exist_ok=True)
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            action TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            price REAL NOT NULL,
+            pnl REAL NOT NULL,
+            reason TEXT
+        )
+    ''')
+    # 创建索引加快未来查询
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON trades (timestamp)')
+    conn.commit()
+    conn.close()
 
-def _ensure_log_file():
-    """确保日志目录和文件存在"""
-    directory = os.path.dirname(TRADE_LOG_FILE)
-    if not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
-    if not os.path.exists(TRADE_LOG_FILE):
-        with open(TRADE_LOG_FILE, "w", encoding="utf-8") as f:
-            pass  # 创建空文件
+# 启动时自动建表
+_init_db()
 
-
-def log_trade(
-    action: str,
-    side: str,
-    qty: float,
-    price: float,
-    pnl: float = 0.0,
-    reason: str = "",
-    extra: Optional[Dict] = None
-):
-    """
-    记录结构化交易日志（JSON Lines 格式）
-
-    参数:
-        action: 操作类型 (OPEN / PARTIAL_CLOSE / FULL_CLOSE)
-        side:   方向 (LONG / SHORT)
-        qty:    数量
-        price:  成交价格
-        pnl:    估算盈亏（USDT）
-        reason: 原因/备注
-        extra:  额外信息（可选字典）
-    """
-    _ensure_log_file()
-
-    record = {
-        "timestamp": datetime.now().isoformat(),
-        "action": action,
-        "side": side,
-        "qty": round(qty, 4),
-        "price": round(price, 2),
-        "pnl": round(pnl, 2),
-        "reason": reason
-    }
-
-    if extra:
-        record.update(extra)
-
+def log_trade(action: str, side: str, qty: float, price: float, pnl: float = 0.0, reason: str = "", extra: Optional[Dict] = None):
+    """记录交易到 SQLite 数据库"""
+    timestamp = datetime.now().isoformat()
     try:
-        with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-        logger.debug(f"[TradeLogger] 已记录: {action} {side} {qty} @ {price} | PnL: {pnl:+.2f}")
-
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO trades (timestamp, action, side, qty, price, pnl, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (timestamp, action, side, qty, price, pnl, reason))
+        conn.commit()
+        conn.close()
+        logger.info(f"[TradeLogger] 数据库已存入: {action} {side} | PnL: {pnl:+.2f}")
     except Exception as e:
-        logger.error(f"[TradeLogger] 写入交易日志失败: {e}")
-
+        logger.error(f"[TradeLogger] 写入 SQLite 数据库失败: {e}")
 
 def get_recent_trades(limit: int = 20) -> List[Dict]:
-    """
-    获取最近的交易记录（用于复盘或展示）
-    """
-    _ensure_log_file()
-    records = []
-
+    """从数据库抓取最近记录"""
     try:
-        with open(TRADE_LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        # 取最后 N 行
-        for line in lines[-limit:]:
-            line = line.strip()
-            if line:
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-
-        return records
-
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM trades ORDER BY id DESC LIMIT ?', (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows][::-1] # 逆序返回
     except Exception as e:
-        logger.error(f"[TradeLogger] 读取交易日志失败: {e}")
+        logger.error(f"[TradeLogger] 读取 SQLite 失败: {e}")
         return []
-
-
-def get_today_trades() -> List[Dict]:
-    """获取今天的交易记录"""
-    today = datetime.now().date().isoformat()
-    all_trades = get_recent_trades(limit=200)
-    return [t for t in all_trades if t.get("timestamp", "").startswith(today)]
-
-
-if __name__ == "__main__":
-    # 测试用
-    log_trade("TEST", "LONG", 0.5, 2450.5, 12.8, "测试日志")
-    print("最近交易记录：")
-    for trade in get_recent_trades(5):
-        print(trade)
