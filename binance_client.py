@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binance_client.py（V4.0 单向持仓护城河版）
+# binance_client.py（V5.0 限价挂单刺客版）
 import logging
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -68,22 +68,34 @@ class BinanceClient:
             logger.error(f"[BinanceClient] 获取挂单失败: {e}")
             return []
 
-    def get_atr(self, symbol: str = "ETHUSDT", interval: str = "1h",
-                limit: int = 50, period: int = 14) -> Optional[float]:
+    # ==================== V5.0 核心新增：只减仓限价单引擎 ====================
+    def place_limit_order(self, side: str, quantity: float, price: float, symbol: str = "ETHUSDT", reduce_only: bool = True):
+        """【终极防线】精准下达限价止盈单，挂载至币安撮合引擎深处"""
         try:
-            klines = self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
-            if len(klines) < period + 1: return None
-            true_ranges = []
-            for i in range(1, len(klines)):
-                high, low, prev_close = float(klines[i][2]), float(klines[i][3]), float(klines[i-1][4])
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                true_ranges.append(tr)
-            return round(sum(true_ranges[-period:]) / period, 2)
-        except Exception:
+            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            params = {
+                "symbol": symbol,
+                "side": binance_side,
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "quantity": quantity,
+                "price": str(price) # 确保价格为字符串格式以符合API要求
+            }
+            if reduce_only:
+                params["reduceOnly"] = "true"
+
+            order = self.client.futures_create_order(**params)
+            logger.info(f"🎯 [BinanceClient] 限价单挂载成功: {binance_side} {quantity} 张 @ 价格 {price} (ReduceOnly: {reduce_only})")
+            return order
+        except BinanceAPIException as e:
+            logger.error(f"❌ [BinanceClient] 限价单挂载失败: {e}")
             return None
+        except Exception as e:
+            logger.error(f"❌ [BinanceClient] 限价单挂载异常: {e}")
+            return None
+    # =========================================================================
 
     def place_market_order(self, side: str, quantity: float, symbol: str = "ETHUSDT", reduce_only: bool = False):
-        """【升级】加入 reduce_only 参数，确保单向模式下止盈绝对不会变成反向开仓"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
@@ -125,22 +137,10 @@ class BinanceClient:
     def cancel_all_open_orders(self, symbol: str = "ETHUSDT"):
         try:
             self.client.futures_cancel_all_open_orders(symbol=symbol)
-            logger.info(f"[BinanceClient] 已撤销 {symbol} 所有挂单")
+            logger.info(f"[BinanceClient] 🧹 已彻底撤销 {symbol} 所有挂单")
             return True
         except Exception as e:
             logger.error(f"[BinanceClient] 撤销挂单失败: {e}")
             return False
-
-    def get_recent_realized_pnl(self, minutes: int = 10) -> float:
-        try:
-            from datetime import datetime, timedelta
-            end_time = int(datetime.now().timestamp() * 1000)
-            start_time = int((datetime.now() - timedelta(minutes=minutes)).timestamp() * 1000)
-            income_list = self.client.futures_income(
-                incomeType="REALIZED_PNL", startTime=start_time, endTime=end_time, limit=100
-            )
-            return sum(float(item.get("income", 0)) for item in income_list)
-        except Exception:
-            return 0.0
 
 binance_client = BinanceClient()
