@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_binance.py（V4.2 洁癖清场 + 12/25/50 极限刺客版）
+# position_supervisor_binance.py（V5.0 开仓即挂单·限价刺客流）
 import logging
 import time
 from typing import Dict, Any
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class PositionSupervisor:
     def __init__(self):
         self.client = binance_client
-        logger.info("[Supervisor] 监督层初始化完成（48%满仓滑点保护+绝对清场版）")
+        logger.info("🧠 [Supervisor] 监督层V5.0初始化完成（开仓即挂三段限价止盈防线）")
 
     def handle_signal(self, payload: Dict[str, Any]):
         action = payload.get("action", "").upper()
@@ -40,10 +40,10 @@ class PositionSupervisor:
         try:
             from tp_monitor import tp_monitor
 
-            # 1. 绝对清场：撤销全部限价单 -> 全平所有旧仓位 (永远保持单向一手)
+            # 1. 绝对清场：撤销币安系统里全部历史挂单（包含没吃到的旧止盈），然后全平仓位
             try:
+                self.client.cancel_all_open_orders("ETHUSDT")
                 tp_monitor.clear_tp_levels()
-                order_executor.cancel_all_tp_orders()
             except Exception:
                 pass
             time.sleep(0.5)
@@ -65,7 +65,7 @@ class PositionSupervisor:
                 dingtalk.report_anomaly(f"风控熔断系统已拦截 {action} 信号。")
                 return
 
-            # 3. 仓位计算（永远一手：本金余额 48% * 20倍，预留 2% 防市价滑点爆仓）
+            # 3. 仓位计算
             available_balance = self.client.get_available_balance("USDT")
             current_price = self.client.get_current_price("ETHUSDT")
 
@@ -74,12 +74,11 @@ class PositionSupervisor:
                 return
 
             target_qty = round((available_balance * 0.48 * 20) / current_price, 3)
-
             MIN_NOTIONAL = 20.0
             min_qty = round(MIN_NOTIONAL / current_price + 0.001, 3)
             target_qty = max(target_qty, min_qty)
 
-            logger.info(f"[Supervisor] 最终计算仓位: {target_qty} ETH (48%本金防滑点, 20x)")
+            logger.info(f"⚔️ [Supervisor] 准备突击! 仓位: {target_qty} ETH (48%本金防滑点, 20x)")
 
             # 4. 执行开仓
             order_executor.open_position(action, {"quantity": target_qty})
@@ -88,36 +87,48 @@ class PositionSupervisor:
             # 5. 实盘核实 + 强制对齐
             self._verify_and_align_position(action)
 
-            # 6. 获取实盘持仓并设置固定 12/25/50 极限止盈
+            # 6. 获取实盘真实持仓，准备挂载【交易所限价单】
             real_pos = position_manager.get_position()
             if not real_pos or float(real_pos.get("positionAmt", 0)) == 0:
-                logger.warning("[Supervisor] 开仓后未检测到实盘持仓")
+                logger.warning("[Supervisor] 开仓后未检测到实盘持仓，取消挂单计划")
                 return
 
             entry_price = round(float(real_pos.get("entryPrice", 0)), 2)
             side = position_manager.get_position_side()
-            qty = position_manager.get_position_qty()
+            qty = abs(float(real_pos.get("positionAmt", 0)))
 
-            # ！！！极限收紧止盈价格区间：12U / 25U / 50U 刺客流 ！！！
+            # 计算三段止盈阶梯价格
             if side == "LONG":
                 tp_dict = {
                     "tp1": round(entry_price + 12.0, 2),
                     "tp2": round(entry_price + 25.0, 2),
                     "tp3": round(entry_price + 50.0, 2)
                 }
+                close_side = "SELL"
             else:
                 tp_dict = {
                     "tp1": round(entry_price - 12.0, 2),
                     "tp2": round(entry_price - 25.0, 2),
                     "tp3": round(entry_price - 50.0, 2)
                 }
+                close_side = "BUY"
 
-            # 7. 启动 TP 监控
+            # 核心算法：精准分割仓位数量，确保完全平仓且无残留
+            qty1 = round(qty * 0.40, 3)
+            qty2 = round(qty * 0.40, 3)
+            qty3 = round(qty - qty1 - qty2, 3)
+
+            logger.info(f"🛡️ [Supervisor] 正在向币安撮合引擎投递限价止盈单...")
+            self.client.place_limit_order(side=close_side, quantity=qty1, price=tp_dict["tp1"], reduce_only=True)
+            self.client.place_limit_order(side=close_side, quantity=qty2, price=tp_dict["tp2"], reduce_only=True)
+            self.client.place_limit_order(side=close_side, quantity=qty3, price=tp_dict["tp3"], reduce_only=True)
+
+            # 7. 启动静默监控（仅负责对账和汇报，不负责下单）
             try:
-                tp_monitor.set_tp_levels(tp_dict['tp1'], tp_dict['tp2'], tp_dict['tp3'], side, qty, entry_price)
+                tp_monitor.set_watch_levels(side, qty)
                 tp_monitor.start()
             except Exception as e:
-                logger.error(f"[Supervisor] 启动 TP 监控失败: {e}")
+                logger.error(f"[Supervisor] 启动对账监控失败: {e}")
 
             # 8. 发送纯实盘开仓报告
             dingtalk.report_supervisor_open(side, entry_price, qty, tp_dict, self._get_account_snapshot())
@@ -147,8 +158,9 @@ class PositionSupervisor:
     def _handle_close_signal(self):
         try:
             from tp_monitor import tp_monitor
+            # 先撤销所有未成交的止盈单
+            self.client.cancel_all_open_orders("ETHUSDT")
             tp_monitor.clear_tp_levels()
-            order_executor.cancel_all_tp_orders()
 
             current_side = position_manager.get_position_side()
             success, real_pnl = order_executor.close_position("TV 下发主动 CLOSE 信号")
