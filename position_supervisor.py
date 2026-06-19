@@ -17,28 +17,24 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 👑 V10.0 自适应策略乘数 (与 TV 回测因子完全一致)
-        self.tp_ratios = [0.30, 0.30, 0.40] # 仓位切割 30/30/40
+        self.tp_ratios = [0.30, 0.30, 0.40] 
         self.tp1_mult = 1.28
         self.tp2_mult = 2.50
         self.tp3_mult = 3.60
         self.sl_mult = 0.92
         
-        # 运行时状态机
         self.initial_qty = 0.0
         self.watched_qty = 0.0
         self.watched_entry = 0.0
         self.current_side = None
-        self.current_atr = 30.0 # 默认兜底值
+        self.current_atr = 30.0 
         self.current_adx = 20.0
 
-        logger.info("🧠 币安 V10.0 启动：ATR自适应防线、保本移动状态机、全域自愈已激活！")
+        logger.info("🧠 币安实盘测试启动：30%本金/10x杠杆、ATR自适应防线、保本移动状态机！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
-        
-        # 提取 TV 传来的核心动能数据
         self.current_atr = float(payload.get("atr", 30.0))
         self.current_adx = float(payload.get("adx", 20.0))
         
@@ -61,8 +57,9 @@ class PositionSupervisor:
 
                 self._close_all("新战局入场")
                 
+                # 🚀 测试期参数：30% 可用资金，10倍杠杆
                 balance = binance_client.get_available_balance()
-                qty = round((balance * 0.48 * 20) / curr_px, 3)
+                qty = round((balance * 0.30 * 10) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
                 
                 binance_client.place_market_order(action, qty)
@@ -72,7 +69,7 @@ class PositionSupervisor:
                 if pos and float(pos.get("positionAmt", 0)) != 0:
                     self.current_side = action
                     real_qty = abs(float(pos["positionAmt"]))
-                    self.initial_qty = real_qty # 记录初始总兵力
+                    self.initial_qty = real_qty
                     self._protect_and_monitor(real_qty, float(pos["entryPrice"]))
         finally:
             self._lock.release()
@@ -86,7 +83,6 @@ class PositionSupervisor:
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001:
             qty1, qty2, qty3 = 0, 0, qty 
 
-        # 👑 ATR 自适应算价
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -138,8 +134,7 @@ class PositionSupervisor:
     def _rebuild_defenses(self, qty, entry):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         
-        # 👑 保本移动逻辑：如果残余仓位 < 初始仓位的 80% (说明TP1已吃单)
-        # 那么新的止损直接移到开仓价 (Break-even)
+        # 保本防线计算
         is_breakeven = qty < (self.initial_qty * 0.8)
         
         if self.current_side == "LONG":
