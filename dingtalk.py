@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-币安 (Binance) 专属战报系统 V9.0
-适配参数：7/15/40 止盈网，30美金价差市价止损
+币安 (Binance) 专属战报系统 V10.0
+核心特性：ATR 自适应防线、保本移动状态机播报
 """
 import os, time, hmac, hashlib, base64, urllib.parse, logging, requests
 from datetime import datetime
@@ -28,30 +28,31 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V9.0 (全域自愈护甲版)*"
+            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V10.0 (机构级自适应版)*"
         }
     }
     try: requests.post(_get_signed_url(), json=payload, timeout=5)
     except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
-def report_supervisor_open(side, price, qty, tp_pxs, sl_px):
+def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr):
     emoji = "🟩" if side == "LONG" else "🟥"
-    send_alert("⚔️ 现价吃单完毕 (币安专属防线)", {
+    send_alert("⚔️ 现价吃单完毕 (ATR动态防线)", {
         "防守方向": f"{emoji} {side}",
         "实盘均价": f"`{price:.2f}`",
         "吃单头寸": f"`{qty}` ETH",
-        "三阶止盈网 (7/15/40)": f"`{tp_pxs[0]}`(30%) | `{tp_pxs[1]}`(30%) | `{tp_pxs[2]}`(40%)",
-        "绝对防击穿止损 (30美金)": f"`{sl_px:.2f}`"
+        "真实波动(ATR)": f"`{atr:.2f}` 美金",
+        "自适应止盈 (1.28/2.5/3.6X)": f"`{tp_pxs[0]}` | `{tp_pxs[1]}` | `{tp_pxs[2]}`",
+        "初始止损 (0.92X)": f"`{sl_px:.2f}`"
     })
 
-def report_intervention(qty, entry_px, new_tp, new_sl):
-    send_alert("⚠️ 察觉雷达异动：触发防线自愈", {
-        "触发原因": "检测到某阶段止盈落袋，或遭遇人工加减仓干预",
-        "当前真实残余头寸": f"`{qty}` ETH",
-        "更新后底层均价": f"`{entry_px:.2f}`",
-        "系统自愈动作": "已撤销错乱旧单，生成全新专属防线",
-        "新统一限价止盈 (兜底40价差)": f"`{new_tp:.2f}`",
-        "新绝对条件止损 (30价差)": f"`{new_sl:.2f}`"
+def report_intervention(qty, entry_px, new_tp, new_sl, action_msg):
+    send_alert("⚠️ 雷达异动：触发自适应重装", {
+        "触发原因": "止盈落袋，或遭遇人工干预 (加减仓)",
+        "当前残余头寸": f"`{qty}` ETH",
+        "更新后均价": f"`{entry_px:.2f}`",
+        "止损状态更新": f"**{action_msg}**",
+        "兜底限价止盈 (3.6X)": f"`{new_tp:.2f}`",
+        "当前条件止损": f"`{new_sl:.2f}`"
     })
 
 def report_force_align(real_side, expected_side):
