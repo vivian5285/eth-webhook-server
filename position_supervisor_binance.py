@@ -6,7 +6,6 @@ from binance_client import binance_client
 from position_manager import position_manager
 import dingtalk
 
-# 工业级日志防爆盘配置
 if not os.path.exists('logs'): os.makedirs('logs')
 handler = RotatingFileHandler('logs/binance_brain.log', maxBytes=5*1024*1024, backupCount=3)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Brain: %(message)s', handlers=[handler, logging.StreamHandler()])
@@ -18,7 +17,6 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 币安 7/15/40 止盈网，30绝对价差止损
         self.tp_diffs = [7.0, 15.0, 40.0]
         self.tp_ratios = [0.30, 0.30, 0.40]
         self.sl_diff = 30.0 
@@ -27,10 +25,12 @@ class PositionSupervisor:
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 币安 V9.0 启动：轮询探针、日志切割、精度护甲、全域自愈已激活！")
+        logger.info("🧠 币安 V9.2 启动：防追高防火墙、轮询探针、精度护甲、全域自愈已激活！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
+        tv_price = payload.get("price", 0.0)  # 获取 TV 传过来的信号触发价
+        
         if not action: return
 
         if not self._lock.acquire(blocking=False):
@@ -45,26 +45,33 @@ class PositionSupervisor:
                 return
 
             if action in ["LONG", "SHORT"]:
-                logger.info(f"📡 新TV信号 {action} 抵达，执行破釜沉舟式清场！")
-                self._close_all("新战局入场，旧阵地彻底销毁")
-                
-                # 动态算仓
-                balance = binance_client.get_available_balance()
+                # 提前获取盘口价格与余额
                 curr_px = binance_client.get_current_price(self.symbol)
+                balance = binance_client.get_available_balance()
                 if balance <= 0 or curr_px <= 0: return
+
+                # 🚀 隐患1修复：防超时/防滑点验证
+                if tv_price > 0:
+                    price_diff = abs(curr_px - float(tv_price))
+                    if price_diff > 5.0:
+                        msg = f"现价 `{curr_px}` 与 TV信号价 `{tv_price}` 偏差达 **{price_diff:.2f} 美金**！已拦截本次信号，宁可踏空，绝不追高。"
+                        logger.warning(f"🚨 {msg}")
+                        dingtalk.report_system_alert("网络超时/滑点保护拦截", msg)
+                        return
+
+                logger.info(f"📡 新TV信号 {action} 抵达，验证通过，执行破釜沉舟式清场！")
+                self._close_all("新战局入场，旧阵地彻底销毁")
                 
                 qty = round((balance * 0.48 * 20) / curr_px, 3)
                 min_qty = round(20.0 / curr_px + 0.001, 3)
                 qty = max(qty, min_qty)
                 
-                # 防假死强攻机制
                 logger.info(f"🐺 现价立刻突击：方向 {action}，头寸 {qty} ETH")
                 for attempt in range(3):
                     res = binance_client.place_market_order(action, qty)
                     if res: break
                     time.sleep(0.5)
                 
-                # 轮询探针：防缓存延迟，最多查 5 次
                 pos = None
                 for _ in range(5):
                     time.sleep(1)
