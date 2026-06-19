@@ -19,9 +19,9 @@ class PositionSupervisor:
         
         self.tp_ratios = [0.30, 0.30, 0.40] 
         self.tp1_mult = 1.28
-        self.tp2_mult = 2.50
-        self.tp3_mult = 3.60
-        self.sl_mult = 0.92
+        self.tp2_mult = 2.45
+        self.tp3_mult = 3.45
+        self.sl_mult = 1.03
         self.trail_tight = 0.55
         
         self.initial_qty = 0.0
@@ -31,23 +31,21 @@ class PositionSupervisor:
         self.current_atr = 30.0 
         self.current_adx = 20.0
         
-        # 追踪止盈状态机变量
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10 终极版：参数透传、ADX自适应追踪雷达已全面激活！")
+        logger.info("🧠 币安 V10.4 大脑已加载：动态 SL 与 ADX 追踪全部激活！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
         
-        # 🚀 实时解析 TV 透传的参数阵列
         self.current_atr = float(payload.get("atr", 30.0))
         self.current_adx = float(payload.get("adx", 20.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
-        self.tp2_mult = float(payload.get("tp2_m", 2.50))
-        self.tp3_mult = float(payload.get("tp3_m", 3.60))
-        self.sl_mult  = float(payload.get("sl_m", 0.92))
+        self.tp2_mult = float(payload.get("tp2_m", 2.45))
+        self.tp3_mult = float(payload.get("tp3_m", 3.45))
+        self.sl_mult  = float(payload.get("sl_m", 1.03)) # V10.4 动态止损
         self.trail_tight = float(payload.get("tt", 0.55))
         
         if not action: return
@@ -56,20 +54,17 @@ class PositionSupervisor:
         try:
             self.monitoring = False 
             if action == "CLOSE":
-                self._close_all("接收到 TV 绝对清场指令")
+                self._close_all("紧急斩仓：触发 V10.4 快速反转保护！")
                 return
 
             if action in ["LONG", "SHORT"]:
                 curr_px = binance_client.get_current_price(self.symbol)
                 if tv_price > 0 and abs(curr_px - tv_price) > 5.0:
-                    msg = f"现价 `{curr_px}` 与信号价 `{tv_price}` 偏差达 **{abs(curr_px - tv_price):.2f} U**！已拦截防追高。"
-                    logger.warning(msg)
-                    dingtalk.report_system_alert("防追高拦截", msg)
+                    dingtalk.report_system_alert("防追高拦截", f"滑点过大")
                     return
 
                 self._close_all("新战局入场")
                 
-                # 30% 资金，10倍杠杆
                 balance = binance_client.get_available_balance()
                 qty = round((balance * 0.30 * 10) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
@@ -134,14 +129,19 @@ class PositionSupervisor:
                     dingtalk.report_force_align(actual_side, self.current_side)
                     break
                 
-                # 🚀 ADX 动态追踪计算
                 curr_px = binance_client.get_current_price(self.symbol)
-                if self.current_side == "LONG":
-                    self.best_price = max(self.best_price, curr_px)
-                else:
-                    self.best_price = min(self.best_price, curr_px)
+                if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
+                else: self.best_price = min(self.best_price, curr_px)
 
-                trail_factor = self.trail_tight * (0.65 if self.current_adx > 25 else 0.95)
+                # 🚀 V10.4 引擎复刻
+                if self.current_adx > 28:
+                    tf_multiplier = 0.55
+                elif self.current_adx > 20:
+                    tf_multiplier = 0.68
+                else:
+                    tf_multiplier = 0.90
+                    
+                trail_factor = self.trail_tight * tf_multiplier
                 trail_offset = self.current_atr * trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.8)
 
@@ -154,7 +154,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, actual_entry, dynamic_sl=new_sl)
-                            dingtalk.report_intervention(actual_qty, actual_entry, 0, new_sl, "🚀 追踪止盈：防线向前推进！")
+                            dingtalk.report_intervention(actual_qty, actual_entry, 0, new_sl, "🚀 追踪止盈：绝对保本推移！")
                             
                     else:
                         calculated_sl = round(self.best_price + trail_offset, 2)
@@ -164,7 +164,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, actual_entry, dynamic_sl=new_sl)
-                            dingtalk.report_intervention(actual_qty, actual_entry, 0, new_sl, "🚀 追踪止盈：防线向下推进！")
+                            dingtalk.report_intervention(actual_qty, actual_entry, 0, new_sl, "🚀 追踪止盈：绝对保本推移！")
                 
                 elif abs(actual_qty - self.watched_qty) > 0.001 or abs(actual_entry - self.watched_entry) > 0.5:
                     binance_client.cancel_all_open_orders()
@@ -191,7 +191,13 @@ class PositionSupervisor:
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
         time.sleep(0.5)
-        binance_client.close_all_positions()
+        # 死循环验证
+        for i in range(8):
+            binance_client.close_all_positions()
+            time.sleep(0.8)
+            pos = position_manager.get_position()
+            if not pos or float(pos.get("positionAmt", 0)) == 0:
+                break
         self.monitoring = False
         if reason: dingtalk.report_supervisor_close(reason)
 
