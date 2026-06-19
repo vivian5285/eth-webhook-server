@@ -13,21 +13,22 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        self.tp_diffs = [12.0, 25.0, 50.0]
-        self.tp_ratios = [0.40, 0.40, 0.20]
-        self.sl_diff = 20.0 
+        # 👑 币安 V8.1 战术升级：7/15/40 止盈，30 绝对止损
+        self.tp_diffs = [7.0, 15.0, 40.0]
+        self.tp_ratios = [0.30, 0.30, 0.40] # 30%, 30%, 40%
+        self.sl_diff = 30.0  # 止损抗击打能力提升至 30 美金价差
         
         self.watched_qty = 0.0
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 币安大脑启动：并发锁护甲、精度防崩溃、全域自愈已激活！")
+        logger.info("🧠 币安 V8.1 启动：7/15/40止盈网、30价差抗震止损、精度护甲已激活！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         if not action: return
 
-        # 🚀 补丁1：非阻塞全局锁，完美拦截并发的重复信号
+        # 非阻塞全局锁，完美拦截并发的重复信号
         if not self._lock.acquire(blocking=False):
             logger.warning("🚨 正在执行部署，直接丢弃并发的重复信号！")
             return
@@ -67,11 +68,12 @@ class PositionSupervisor:
     def _protect_and_monitor(self, qty, entry_price):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         
+        # 按 30% / 30% / 40% 精准切割
         qty1 = round(qty * self.tp_ratios[0], 3)
         qty2 = round(qty * self.tp_ratios[1], 3)
         qty3 = round(qty - qty1 - qty2, 3)
 
-        # 🚀 补丁3：精度防崩溃护甲
+        # 精度防崩溃护甲
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001:
             logger.warning(f"⚠️ 头寸 {qty} ETH 过于微小，触发精度保护！合并防线至单一终极止盈。")
             qty1, qty2 = 0, 0
@@ -132,6 +134,7 @@ class PositionSupervisor:
     def _rebuild_defenses(self, qty, entry):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         
+        # 异动自愈：将残余头寸统一挂到最高止盈 40 美金，并重新布置 30 美金止损
         if self.current_side == "LONG":
             tp_safe = round(entry + self.tp_diffs[2], 2)
             sl_safe = round(entry - self.sl_diff, 2)
