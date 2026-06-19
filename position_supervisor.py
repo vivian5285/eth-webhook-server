@@ -22,31 +22,29 @@ class PositionSupervisor:
         self.tp2_mult = 2.45
         self.tp3_mult = 3.45
         self.sl_mult = 1.03
-        self.trail_tight = 0.55
+        self.current_trail_factor = 0.50 # V10.6 专属：直接接管追踪系数
         
         self.initial_qty = 0.0
         self.watched_qty = 0.0
         self.watched_entry = 0.0
         self.current_side = None
         self.current_atr = 30.0 
-        self.current_adx = 20.0
-        
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.4 大脑已加载：动态 SL 与 ADX 追踪全部激活！")
+        logger.info("🧠 币安 V10.6 极简大脑加载完毕：完全执行 TV 透传指令！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
         
+        # 🚀 完整解析 V10.6 高级 JSON
         self.current_atr = float(payload.get("atr", 30.0))
-        self.current_adx = float(payload.get("adx", 20.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
         self.tp2_mult = float(payload.get("tp2_m", 2.45))
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
-        self.sl_mult  = float(payload.get("sl_m", 1.03)) # V10.4 动态止损
-        self.trail_tight = float(payload.get("tt", 0.55))
+        self.sl_mult  = float(payload.get("sl_m", 1.03)) 
+        self.current_trail_factor = float(payload.get("trail_factor", 0.50)) # 直接读取 TV 算好的追踪系数
         
         if not action: return
         if not self._lock.acquire(blocking=False): return
@@ -54,7 +52,7 @@ class PositionSupervisor:
         try:
             self.monitoring = False 
             if action == "CLOSE":
-                self._close_all("紧急斩仓：触发 V10.4 快速反转保护！")
+                self._close_all("紧急斩仓：触发 V10.6 快速反转保护！")
                 return
 
             if action in ["LONG", "SHORT"]:
@@ -133,16 +131,8 @@ class PositionSupervisor:
                 if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
                 else: self.best_price = min(self.best_price, curr_px)
 
-                # 🚀 V10.4 引擎复刻
-                if self.current_adx > 28:
-                    tf_multiplier = 0.55
-                elif self.current_adx > 20:
-                    tf_multiplier = 0.68
-                else:
-                    tf_multiplier = 0.90
-                    
-                trail_factor = self.trail_tight * tf_multiplier
-                trail_offset = self.current_atr * trail_factor * 0.45 
+                # 🚀 V10.6 极简防线：抛弃 Python 内部计算，完全信任 Pine 的透传！
+                trail_offset = self.current_atr * self.current_trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.8)
 
                 if is_breakeven:
@@ -191,7 +181,6 @@ class PositionSupervisor:
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
         time.sleep(0.5)
-        # 死循环验证
         for i in range(8):
             binance_client.close_all_positions()
             time.sleep(0.8)
