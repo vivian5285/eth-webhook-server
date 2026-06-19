@@ -23,7 +23,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V8.0 (全域自愈版)*"
+            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V8.1 (高抗震网格版)*"
         }
     }
     try: requests.post(_get_signed_url(), json=payload, timeout=5)
@@ -35,8 +35,8 @@ def report_supervisor_open(side, price, qty, tp_pxs, sl_px):
         "防守方向": f"{emoji} {side}",
         "实盘均价": f"`{price:.2f}`",
         "吃单头寸": f"`{qty}` ETH",
-        "三阶止盈网 (12/25/50)": f"`{tp_pxs[0]}`(40%) | `{tp_pxs[1]}`(40%) | `{tp_pxs[2]}`(20%)",
-        "绝对止损 (20美金价差)": f"`{sl_px:.2f}`"
+        "三阶止盈网 (7/15/40)": f"`{tp_pxs[0]}`(30%) | `{tp_pxs[1]}`(30%) | `{tp_pxs[2]}`(40%)",
+        "绝对止损 (30美金价差)": f"`{sl_px:.2f}`"
     })
 
 def report_intervention(qty, entry_px, new_tp, new_sl):
@@ -45,8 +45,8 @@ def report_intervention(qty, entry_px, new_tp, new_sl):
         "当前真实残余头寸": f"`{qty}` ETH",
         "更新后底层均价": f"`{entry_px:.2f}`",
         "系统自愈动作": "已撤销错乱旧单，生成全新专属防线",
-        "新统一限价止盈 (兜底)": f"`{new_tp:.2f}`",
-        "新绝对条件止损": f"`{new_sl:.2f}`"
+        "新统一限价止盈 (兜底40价差)": f"`{new_tp:.2f}`",
+        "新绝对条件止损 (30价差)": f"`{new_sl:.2f}`"
     })
 
 def report_force_align(real_side, expected_side):
