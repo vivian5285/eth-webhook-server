@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 币安 (Binance) 专属战报系统 V10.0
-核心特性：ATR 自适应防线、保本移动状态机播报
+核心特性：ATR 自适应防线、保本移动状态机、30%实盘资金测算
 """
 import os, time, hmac, hashlib, base64, urllib.parse, logging, requests
 from datetime import datetime
@@ -28,7 +28,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V10.0 (机构级自适应版)*"
+            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 Binance 万亿战神 V10.0 (实盘自适应版)*"
         }
     }
     try: requests.post(_get_signed_url(), json=payload, timeout=5)
@@ -46,13 +46,13 @@ def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr):
     })
 
 def report_intervention(qty, entry_px, new_tp, new_sl, action_msg):
-    send_alert("⚠️ 雷达异动：触发自适应重装", {
+    send_alert("⚠️ 雷达异动：触发状态机重装", {
         "触发原因": "止盈落袋，或遭遇人工干预 (加减仓)",
         "当前残余头寸": f"`{qty}` ETH",
         "更新后均价": f"`{entry_px:.2f}`",
-        "止损状态更新": f"**{action_msg}**",
+        "止损防线状态": f"**{action_msg}**",
         "兜底限价止盈 (3.6X)": f"`{new_tp:.2f}`",
-        "当前条件止损": f"`{new_sl:.2f}`"
+        "当前安全止损": f"`{new_sl:.2f}`"
     })
 
 def report_force_align(real_side, expected_side):
