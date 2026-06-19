@@ -17,7 +17,10 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
+        # 资金切分比例固定 (30/30/40)
         self.tp_ratios = [0.30, 0.30, 0.40] 
+        
+        # 兜底默认倍数（实盘中会被 TV 传来的最新参数覆盖）
         self.tp1_mult = 1.28
         self.tp2_mult = 2.50
         self.tp3_mult = 3.60
@@ -30,13 +33,19 @@ class PositionSupervisor:
         self.current_atr = 30.0 
         self.current_adx = 20.0
 
-        logger.info("🧠 币安实盘测试启动：30%本金/10x杠杆、ATR自适应防线、保本移动状态机！")
+        logger.info("🧠 币安 V10 终极版启动：TV面板参数透传已激活，30%资金/10x杠杆就绪！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
+        
+        # 🚀 核心升级：实时读取 TV 传过来的策略面板倍数！
         self.current_atr = float(payload.get("atr", 30.0))
         self.current_adx = float(payload.get("adx", 20.0))
+        self.tp1_mult = float(payload.get("tp1_m", 1.28))
+        self.tp2_mult = float(payload.get("tp2_m", 2.50))
+        self.tp3_mult = float(payload.get("tp3_m", 3.60))
+        self.sl_mult  = float(payload.get("sl_m", 0.92))
         
         if not action: return
         if not self._lock.acquire(blocking=False): return
@@ -83,6 +92,7 @@ class PositionSupervisor:
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001:
             qty1, qty2, qty3 = 0, 0, qty 
 
+        # 🚀 使用 TV 透传的动态倍数算价
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -134,7 +144,7 @@ class PositionSupervisor:
     def _rebuild_defenses(self, qty, entry):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         
-        # 保本防线计算
+        # 雷达保本防线计算
         is_breakeven = qty < (self.initial_qty * 0.8)
         
         if self.current_side == "LONG":
