@@ -28,7 +28,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 V10.29 终极对齐版*"
+            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 V10.38 4档自适应版*"
         }
     }
     try: 
@@ -36,40 +36,43 @@ def send_alert(title, data_dict):
     except Exception as e:
         logger.error(f"钉钉发送失败: {e}")
 
-# (深币的 report 暂时保留兼容参数，下一轮我们去改深币)
-def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0):
+# 🚀 新增：4档市场状态翻译器
+def get_regime_name(regime_code):
+    if regime_code == 1: return "🧊 极弱震荡 (防守游击)"
+    if regime_code == 2: return "🚶 弱势波段 (紧密跟踪)"
+    if regime_code == 3: return "🏃 中势推升 (标准网格)"
+    if regime_code == 4: return "🚀 强势单边 (格局放飞)"
+    return "未知状态"
+
+def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
     emoji = "🟩" if side == "LONG" else "🟥"
     clean_msg = "✅ 纯净新开 (旧仓已归零)" if old_qty == 0 else f"🚨 战阵反转 (强平旧仓 {old_qty} 张)"
-    send_alert("⚔️ 深币现价吃单", {
+    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
+    tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
+
+    send_alert("⚔️ 深币现价吃单 (4档自适应版)", {
         "防守方向": f"**{emoji} {side}**",
-        "实盘均价": f"`{price:.2f}` USDT",
-        "动态头寸": f"`{qty}` 张",
+        "市场判定": f"**{get_regime_name(regime)}**", 
+        "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
+        "动态头寸": f"`{qty}` 张 (10/30/60 切分)",
         "状态反馈": f"**{clean_msg}**",
-        "真实波动(ATR)": f"`{atr:.2f}`",
-        "自适应止盈": f"`{tp_pxs[0]}` ｜ `{tp_pxs[1]}` ｜ `{tp_pxs[2]}`",
-        "初始止损": f"**`{sl_px:.2f}`**"
+        "止盈 (TV 理论)": tv_tp_str,
+        "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
+        "止损 (实盘埋伏)": f"**`{sl_px:.2f}`**"
     })
 
-def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_tp_pxs=None, tv_sl_px=0):
+def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
     emoji = "🟩" if side == "LONG" else "🟥"
-    
-    # 🚀 计算滑点误差 (吃单价 vs TV理想价)
-    if tv_price > 0:
-        slip = price - tv_price if side == "LONG" else tv_price - price
-        slip_txt = f"{slip:+.2f} 刀"
-    else:
-        slip_txt = "未知"
-        
+    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
-    real_tp_str = f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`"
 
-    send_alert("⚔️ 币安现价吃单 (V10.29 完美对齐版)", {
+    send_alert("⚔️ 币安现价吃单 (4档自适应版)", {
         "防守方向": f"**{emoji} {side}**",
-        "实盘吃单均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
+        "市场判定": f"**{get_regime_name(regime)}**", 
+        "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "动态头寸": f"`{qty}` ETH (10/30/60 切分)",
         "止盈 (TV 理论)": tv_tp_str,
-        "止盈 (实盘排队)": real_tp_str,
-        "止损 (TV 理论)": f"`{tv_sl_px:.2f}`" if tv_sl_px > 0 else "未提供",
+        "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
         "止损 (实盘埋伏)": f"**`{sl_px:.2f}`**"
     })
 
