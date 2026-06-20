@@ -17,12 +17,21 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        self.tp_ratios = [0.30, 0.30, 0.40] 
+        # 🚀 V10.29 核心修复：完美对齐 TV 的 10/30/60 网格切割比例
+        self.tp_ratios = [0.10, 0.30, 0.60] 
+        
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
         self.tp3_mult = 3.45
         self.sl_mult = 1.03
-        self.current_trail_factor = 0.50 # V10.6 专属：直接接管追踪系数
+        self.current_trail_factor = 0.50
+        
+        # V10.29 理论价格透传缓存
+        self.tv_price = 0.0
+        self.tv_tp1 = 0.0
+        self.tv_tp2 = 0.0
+        self.tv_tp3 = 0.0
+        self.tv_sl = 0.0
         
         self.initial_qty = 0.0
         self.watched_qty = 0.0
@@ -32,36 +41,42 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.6 极简大脑加载完毕：完全执行 TV 透传指令！")
+        logger.info("🧠 币安 V10.29 完美对齐大脑加载完毕：全量接收 TV 理论数据！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
-        tv_price = float(payload.get("price", 0.0))
         
-        # 🚀 完整解析 V10.6 高级 JSON
+        # 🚀 V10.29 全域 JSON 解析 (囊括真实倍数与理论绝对价)
+        self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
         self.tp2_mult = float(payload.get("tp2_m", 2.45))
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
         self.sl_mult  = float(payload.get("sl_m", 1.03)) 
-        self.current_trail_factor = float(payload.get("trail_factor", 0.50)) # 直接读取 TV 算好的追踪系数
+        self.current_trail_factor = float(payload.get("trail_factor", 0.50))
+        
+        self.tv_tp1 = float(payload.get("tv_tp1", 0.0))
+        self.tv_tp2 = float(payload.get("tv_tp2", 0.0))
+        self.tv_tp3 = float(payload.get("tv_tp3", 0.0))
+        self.tv_sl  = float(payload.get("tv_sl", 0.0))
         
         if not action: return
         if not self._lock.acquire(blocking=False): return
 
         try:
             self.monitoring = False 
+            # 🚀 V10.29 最高指令：TV 下发 CLOSE，无条件全平清场
             if action == "CLOSE":
-                self._close_all("紧急斩仓：触发 V10.6 快速反转保护！")
+                self._close_all("终极兜底防线：TV 图表已清仓，实盘强制对齐！")
                 return
 
             if action in ["LONG", "SHORT"]:
                 curr_px = binance_client.get_current_price(self.symbol)
-                if tv_price > 0 and abs(curr_px - tv_price) > 5.0:
-                    dingtalk.report_system_alert("防追高拦截", f"滑点过大")
+                if self.tv_price > 0 and abs(curr_px - self.tv_price) > 5.0:
+                    dingtalk.report_system_alert("防追高拦截", f"滑点过大，TV {self.tv_price} 实盘 {curr_px}")
                     return
 
-                self._close_all("新战局入场")
+                self._close_all("新战局入场，清理阵地")
                 
                 balance = binance_client.get_available_balance()
                 qty = round((balance * 0.30 * 10) / curr_px, 3)
@@ -75,6 +90,7 @@ class PositionSupervisor:
                     self.current_side = action
                     real_qty = abs(float(pos["positionAmt"]))
                     self.initial_qty = real_qty
+                    # 把实际抢到的均价传给排兵布阵函数
                     self._protect_and_monitor(real_qty, float(pos["entryPrice"]))
         finally:
             self._lock.release()
@@ -87,6 +103,7 @@ class PositionSupervisor:
 
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001: qty1, qty2, qty3 = 0, 0, qty 
 
+        # 🚀 永远以“真实入场均价”作为圆心，加上 TV 给的倍数半径，算出真实的实盘止盈止损价
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -106,7 +123,13 @@ class PositionSupervisor:
         self.best_price = entry_price
         self.current_sl = sl
 
-        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], sl, self.current_atr)
+        # 将实盘挂单价与 TV 理论价一起发给钉钉对比
+        dingtalk.report_supervisor_open(
+            self.current_side, entry_price, qty, 
+            [tp1, tp2, tp3], sl, self.current_atr,
+            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl
+        )
+        
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
@@ -131,9 +154,9 @@ class PositionSupervisor:
                 if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
                 else: self.best_price = min(self.best_price, curr_px)
 
-                # 🚀 V10.6 极简防线：抛弃 Python 内部计算，完全信任 Pine 的透传！
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                is_breakeven = actual_qty < (self.initial_qty * 0.8)
+                # 🚀 适配 10/30/60：一旦前 10% 或 30% 被吃掉，防线立刻启动绝对保本
+                is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
                 if is_breakeven:
                     if self.current_side == "LONG":
@@ -170,10 +193,10 @@ class PositionSupervisor:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if self.current_side == "LONG":
             tp_safe = round(entry + self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.8) else round(entry - self.current_atr * self.sl_mult, 2))
+            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.95) else round(entry - self.current_atr * self.sl_mult, 2))
         else:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.8) else round(entry + self.current_atr * self.sl_mult, 2))
+            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.95) else round(entry + self.current_atr * self.sl_mult, 2))
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
         binance_client.place_stop_market_order(close_side, sl_safe)
