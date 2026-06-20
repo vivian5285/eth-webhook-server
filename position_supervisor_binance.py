@@ -26,7 +26,8 @@ class PositionSupervisor:
         self.sl_mult = 1.03
         self.current_trail_factor = 0.50
         
-        # 理论价格透传缓存
+        # 理论价格与状态透传缓存
+        self.regime = 3
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
         self.tv_tp2 = 0.0
@@ -41,12 +42,13 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.29 完美上帝视角大脑加载完毕：全量接收 TV 理论数据与清盘死因！")
+        logger.info("🧠 币安 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         
-        # 🚀 解析 TV 传来的全量参数
+        # 🚀 解析 TV 传来的全量自适应参数
+        self.regime = int(payload.get("regime", 3)) # 接收 4 档状态
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -65,7 +67,6 @@ class PositionSupervisor:
 
         try:
             self.monitoring = False 
-            # 🚀 V10.29 完美接收死因 (Reason)
             if action == "CLOSE":
                 reason = payload.get("reason", "TV 图表要求强制清仓")
                 self._close_all(f"TV 终极裁决: {reason}")
@@ -103,7 +104,6 @@ class PositionSupervisor:
 
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001: qty1, qty2, qty3 = 0, 0, qty 
 
-        # 永远以“真实入场均价”作为圆心，加上 TV 给的倍数半径
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -123,10 +123,11 @@ class PositionSupervisor:
         self.best_price = entry_price
         self.current_sl = sl
 
+        # 🚀 将 regime 档位传入钉钉
         dingtalk.report_supervisor_open(
             self.current_side, entry_price, qty, 
             [tp1, tp2, tp3], sl, self.current_atr,
-            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl
+            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
         
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -154,7 +155,6 @@ class PositionSupervisor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                # 一旦前 10% (TP1) 被吃掉，立刻启动绝对保本
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
                 if is_breakeven:
