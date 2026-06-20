@@ -17,7 +17,7 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 🚀 V10.29 核心修复：完美对齐 TV 的 10/30/60 网格切割比例
+        # 🚀 10/30/60 完美网格比例对齐
         self.tp_ratios = [0.10, 0.30, 0.60] 
         
         self.tp1_mult = 1.28
@@ -26,7 +26,7 @@ class PositionSupervisor:
         self.sl_mult = 1.03
         self.current_trail_factor = 0.50
         
-        # V10.29 理论价格透传缓存
+        # 理论价格透传缓存
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
         self.tv_tp2 = 0.0
@@ -41,12 +41,12 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.29 完美对齐大脑加载完毕：全量接收 TV 理论数据！")
+        logger.info("🧠 币安 V10.29 完美上帝视角大脑加载完毕：全量接收 TV 理论数据与清盘死因！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         
-        # 🚀 V10.29 全域 JSON 解析 (囊括真实倍数与理论绝对价)
+        # 🚀 解析 TV 传来的全量参数
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -65,9 +65,10 @@ class PositionSupervisor:
 
         try:
             self.monitoring = False 
-            # 🚀 V10.29 最高指令：TV 下发 CLOSE，无条件全平清场
+            # 🚀 V10.29 完美接收死因 (Reason)
             if action == "CLOSE":
-                self._close_all("终极兜底防线：TV 图表已清仓，实盘强制对齐！")
+                reason = payload.get("reason", "TV 图表要求强制清仓")
+                self._close_all(f"TV 终极裁决: {reason}")
                 return
 
             if action in ["LONG", "SHORT"]:
@@ -90,7 +91,6 @@ class PositionSupervisor:
                     self.current_side = action
                     real_qty = abs(float(pos["positionAmt"]))
                     self.initial_qty = real_qty
-                    # 把实际抢到的均价传给排兵布阵函数
                     self._protect_and_monitor(real_qty, float(pos["entryPrice"]))
         finally:
             self._lock.release()
@@ -103,7 +103,7 @@ class PositionSupervisor:
 
         if qty1 < 0.001 or qty2 < 0.001 or qty3 < 0.001: qty1, qty2, qty3 = 0, 0, qty 
 
-        # 🚀 永远以“真实入场均价”作为圆心，加上 TV 给的倍数半径，算出真实的实盘止盈止损价
+        # 永远以“真实入场均价”作为圆心，加上 TV 给的倍数半径
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -123,7 +123,6 @@ class PositionSupervisor:
         self.best_price = entry_price
         self.current_sl = sl
 
-        # 将实盘挂单价与 TV 理论价一起发给钉钉对比
         dingtalk.report_supervisor_open(
             self.current_side, entry_price, qty, 
             [tp1, tp2, tp3], sl, self.current_atr,
@@ -155,7 +154,7 @@ class PositionSupervisor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                # 🚀 适配 10/30/60：一旦前 10% 或 30% 被吃掉，防线立刻启动绝对保本
+                # 一旦前 10% (TP1) 被吃掉，立刻启动绝对保本
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
                 if is_breakeven:
