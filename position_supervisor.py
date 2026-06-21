@@ -17,8 +17,8 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 🚀 10/30/60 完美网格比例对齐
-        self.tp_ratios = [0.10, 0.30, 0.60] 
+        # 🚀 适配全新打分引擎：33/33/34 均匀三等分网格
+        self.tp_ratios = [0.33, 0.33, 0.34] 
         
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
@@ -42,13 +42,13 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
+        logger.info("🧠 币安 [极速打分版] 大脑加载完毕：已切换为 33/33/34 三等分网格！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
         
         # 🚀 解析 TV 传来的全量自适应参数
-        self.regime = int(payload.get("regime", 3)) # 接收 4 档状态
+        self.regime = int(payload.get("regime", 3)) # 接收档位
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -155,7 +155,9 @@ class PositionSupervisor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                is_breakeven = actual_qty < (self.initial_qty * 0.95)
+                
+                # 🚀 适配 33% 首仓止盈：只要仓位缩水至初始的 75% 以下，视为 TP1 已吃掉，立刻拉起保本！
+                is_breakeven = actual_qty < (self.initial_qty * 0.75)
 
                 if is_breakeven:
                     if self.current_side == "LONG":
@@ -192,10 +194,10 @@ class PositionSupervisor:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if self.current_side == "LONG":
             tp_safe = round(entry + self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.95) else round(entry - self.current_atr * self.sl_mult, 2))
+            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.75) else round(entry - self.current_atr * self.sl_mult, 2))
         else:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.95) else round(entry + self.current_atr * self.sl_mult, 2))
+            sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.75) else round(entry + self.current_atr * self.sl_mult, 2))
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
         binance_client.place_stop_market_order(close_side, sl_safe)
