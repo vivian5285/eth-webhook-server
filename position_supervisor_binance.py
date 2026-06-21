@@ -48,7 +48,7 @@ class PositionSupervisor:
         action = payload.get("action", "").upper()
         
         # 🚀 解析 TV 传来的全量自适应参数
-        self.regime = int(payload.get("regime", 3)) # 接收 4 档状态
+        self.regime = int(payload.get("regime", 3))
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -81,8 +81,21 @@ class PositionSupervisor:
                 self._close_all("新战局入场，清理阵地")
                 
                 balance = binance_client.get_available_balance()
-                qty = round((balance * 0.30 * 10) / curr_px, 3)
+                
+                # 🚀 资管级动态仓位管理：最高 50% 的 20 倍杠杆
+                if self.regime == 1:
+                    dynamic_margin = 0.15
+                elif self.regime == 2:
+                    dynamic_margin = 0.25
+                elif self.regime == 3:
+                    dynamic_margin = 0.35
+                else:
+                    dynamic_margin = 0.50
+                    
+                qty = round((balance * dynamic_margin * 20) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
+                
+                logger.info(f"💰 触发档位 {self.regime}，系统自动调拨 {dynamic_margin*100}% 资金执行 20 倍杠杆！")
                 
                 binance_client.place_market_order(action, qty)
                 time.sleep(2) 
@@ -123,14 +136,13 @@ class PositionSupervisor:
         self.best_price = entry_price
         self.current_sl = sl
 
-        # 🚀 将 regime 档位传入钉钉
         dingtalk.report_supervisor_open(
             self.current_side, entry_price, qty, 
             [tp1, tp2, tp3], sl, self.current_atr,
             self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
         
-        self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
+        self.watched_qty, self.watched_entry, self.monitoring = True, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
