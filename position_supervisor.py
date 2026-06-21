@@ -42,7 +42,7 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
+        logger.info("🧠 币安 V10.38 灾备终极版大脑加载完毕：全量接收 4档自适应数据！")
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
@@ -142,7 +142,8 @@ class PositionSupervisor:
             self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
         
-        self.watched_qty, self.watched_entry, self.monitoring = True, entry_price, True
+        # 修复变量绑定：确保被监听的数量完美对齐开仓数量
+        self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -224,4 +225,29 @@ class PositionSupervisor:
         self.monitoring = False
         if reason: dingtalk.report_supervisor_close(reason)
 
+    def recover_state_on_startup(self):
+        """🚀 灾备系统：开机自动检测遗留阵地并唤醒雷达"""
+        try:
+            pos = position_manager.get_position()
+            if pos and float(pos.get("positionAmt", 0)) != 0:
+                real_amt = float(pos["positionAmt"])
+                self.current_side = "LONG" if real_amt > 0 else "SHORT"
+                self.initial_qty = abs(real_amt)
+                self.watched_qty = self.initial_qty
+                self.watched_entry = float(pos["entryPrice"])
+                self.best_price = self.watched_entry
+                
+                # 设置基础保守参数以防无信号真空期
+                self.current_atr = 30.0 
+                self.regime = 3 
+                self.monitoring = True
+                
+                logger.info(f"🔄 灾备自愈：系统重启！检测到遗留阵地 {self.current_side} {self.initial_qty} ETH，哨兵雷达已强行接管！")
+                threading.Thread(target=self._sentinel_loop, daemon=True).start()
+            else:
+                logger.info("🔄 灾备自愈：系统重启。当前空仓，雷达待命。")
+        except Exception as e:
+            logger.error(f"灾备恢复失败: {e}")
+
 position_supervisor = PositionSupervisor()
+position_supervisor.recover_state_on_startup() # 👈 开机自检自愈执行点
