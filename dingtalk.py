@@ -36,12 +36,12 @@ def send_alert(title, data_dict):
     except Exception as e:
         logger.error(f"钉钉发送失败: {e}")
 
-# 🚀 新增：4档市场状态翻译器
+# 🚀 核心优化：将动态调拨的资金比例直接显示在钉钉战报中！
 def get_regime_name(regime_code):
-    if regime_code == 1: return "🧊 极弱震荡 (防守游击)"
-    if regime_code == 2: return "🚶 弱势波段 (紧密跟踪)"
-    if regime_code == 3: return "🏃 中势推升 (标准网格)"
-    if regime_code == 4: return "🚀 强势单边 (格局放飞)"
+    if regime_code == 1: return "🧊 极弱震荡 (15% 试探轻仓)"
+    if regime_code == 2: return "🚶 弱势波段 (25% 基础阵地)"
+    if regime_code == 3: return "🏃 中势推升 (35% 标准重装)"
+    if regime_code == 4: return "🚀 强势单边 (50% 满载出击)"
     return "未知状态"
 
 def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
@@ -50,9 +50,9 @@ def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0, tv_pri
     slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
-    send_alert("⚔️ 深币现价吃单 (4档自适应版)", {
+    send_alert("⚔️ 深币现价吃单 (4档动态版)", {
         "防守方向": f"**{emoji} {side}**",
-        "市场判定": f"**{get_regime_name(regime)}**", 
+        "市场与资金": f"**{get_regime_name(regime)}**", 
         "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "动态头寸": f"`{qty}` 张 (10/30/60 切分)",
         "状态反馈": f"**{clean_msg}**",
@@ -66,9 +66,9 @@ def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_
     slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
-    send_alert("⚔️ 币安现价吃单 (4档自适应版)", {
+    send_alert("⚔️ 币安现价吃单 (4档动态版)", {
         "防守方向": f"**{emoji} {side}**",
-        "市场判定": f"**{get_regime_name(regime)}**", 
+        "市场与资金": f"**{get_regime_name(regime)}**", 
         "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "动态头寸": f"`{qty}` ETH (10/30/60 切分)",
         "止盈 (TV 理论)": tv_tp_str,
