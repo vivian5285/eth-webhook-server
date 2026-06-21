@@ -28,7 +28,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 (极速打分版)*"
+            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 V10.38 4档自适应版*"
         }
     }
     try: 
@@ -36,7 +36,7 @@ def send_alert(title, data_dict):
     except Exception as e:
         logger.error(f"钉钉发送失败: {e}")
 
-# 🚀 4档市场状态翻译器
+# 🚀 新增：4档市场状态翻译器
 def get_regime_name(regime_code):
     if regime_code == 1: return "🧊 极弱震荡 (防守游击)"
     if regime_code == 2: return "🚶 弱势波段 (紧密跟踪)"
@@ -50,11 +50,11 @@ def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0, tv_pri
     slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
-    send_alert("⚔️ 深币现价吃单 (极速打分版)", {
+    send_alert("⚔️ 深币现价吃单 (4档自适应版)", {
         "防守方向": f"**{emoji} {side}**",
         "市场判定": f"**{get_regime_name(regime)}**", 
         "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
-        "动态头寸": f"`{qty}` 张 (33/33/34 均分)",
+        "动态头寸": f"`{qty}` 张 (10/30/60 切分)",
         "状态反馈": f"**{clean_msg}**",
         "止盈 (TV 理论)": tv_tp_str,
         "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
@@ -66,11 +66,11 @@ def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_
     slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
-    send_alert("⚔️ 币安现价吃单 (极速打分版)", {
+    send_alert("⚔️ 币安现价吃单 (4档自适应版)", {
         "防守方向": f"**{emoji} {side}**",
         "市场判定": f"**{get_regime_name(regime)}**", 
         "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
-        "动态头寸": f"`{qty}` ETH (33/33/34 均分)",
+        "动态头寸": f"`{qty}` ETH (10/30/60 切分)",
         "止盈 (TV 理论)": tv_tp_str,
         "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
         "止损 (实盘埋伏)": f"**`{sl_px:.2f}`**"
