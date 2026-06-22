@@ -14,18 +14,27 @@ class BinanceClient:
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
-        logger.info("🟢 Binance V8.0 底层驱动已加载")
+        logger.info("🟢 Binance V10.38 动态权益驱动版已加载")
 
     def get_current_price(self, symbol="ETHUSDT"):
         try: return float(self.client.futures_symbol_ticker(symbol=symbol)["price"])
         except: return 0.0
 
     def get_available_balance(self, asset="USDT"):
+        # 👑 完美读取币安金库：优先读取动态总权益 (marginBalance) 以确保熔断防线精准！
         try:
             for a in self.client.futures_account().get("assets", []):
-                if a.get("asset") == asset: return float(a.get("availableBalance", 0.0))
+                if a.get("asset") == asset: 
+                    # marginBalance = Wallet Balance + Unrealized PNL (包含浮盈浮亏的真实总资产)
+                    margin_bal = float(a.get("marginBalance", 0.0))
+                    if margin_bal > 0:
+                        return margin_bal
+                    # 如果异常获取不到动态权益，再退化使用可用余额
+                    return float(a.get("availableBalance", 0.0))
             return 0.0
-        except: return 0.0
+        except Exception as e: 
+            logger.error(f"获取币安真实余额失败: {e}")
+            return 0.0
 
     def get_position(self, symbol="ETHUSDT"):
         try:
