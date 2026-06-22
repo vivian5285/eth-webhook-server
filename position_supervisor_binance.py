@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import logging, time, threading, os
+import logging, time, threading, os, json
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from binance_client import binance_client
 from position_manager import position_manager
@@ -17,16 +18,13 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 🚀 10/30/60 完美网格比例对齐
         self.tp_ratios = [0.10, 0.30, 0.60] 
-        
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
         self.tp3_mult = 3.45
         self.sl_mult = 1.03
         self.current_trail_factor = 0.50
         
-        # 理论价格与状态透传缓存
         self.regime = 3
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
@@ -42,12 +40,42 @@ class PositionSupervisor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 币安 V10.38 灾备终极版大脑加载完毕：全量接收 4档自适应数据！")
+        # 🛡️ 每日熔断护甲参数
+        self.daily_start_date = ""
+        self.daily_start_balance = 0.0
+        self.cb_level1_pct = -5.0  # 🟡 亏损 5% 军费减半
+        self.cb_level2_pct = -10.0 # 🔴 亏损 10% 彻底熔断
+
+        logger.info("🧠 币安 V10.38 物理熔断版大脑加载完毕：双重风险护甲已激活！")
+
+    def _get_or_update_daily_baseline(self, current_balance):
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        tracker_file = 'binance_risk_tracker.json'
+        
+        if self.daily_start_date != today:
+            try:
+                if os.path.exists(tracker_file):
+                    with open(tracker_file, 'r') as f:
+                        data = json.load(f)
+                        if data.get('date') == today:
+                            self.daily_start_date = today
+                            self.daily_start_balance = float(data.get('balance'))
+                            return self.daily_start_balance
+            except Exception: pass
+                
+            self.daily_start_date = today
+            self.daily_start_balance = current_balance
+            try:
+                with open(tracker_file, 'w') as f:
+                    json.dump({'date': today, 'balance': current_balance}, f)
+            except Exception: pass
+            logger.info(f"📅 新的交易日 ({today}) 开启，重置币安本金基线: {current_balance:.2f} USDT")
+            dingtalk.report_system_alert("📅 交易日重置", f"今日基线本金已更新为: **{current_balance:.2f} USDT**")
+            
+        return self.daily_start_balance
 
     def handle_signal(self, payload):
         action = payload.get("action", "").upper()
-        
-        # 🚀 解析 TV 传来的全量自适应参数
         self.regime = int(payload.get("regime", 3))
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
@@ -56,7 +84,6 @@ class PositionSupervisor:
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
         self.sl_mult  = float(payload.get("sl_m", 1.03)) 
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
-        
         self.tv_tp1 = float(payload.get("tv_tp1", 0.0))
         self.tv_tp2 = float(payload.get("tv_tp2", 0.0))
         self.tv_tp3 = float(payload.get("tv_tp3", 0.0))
@@ -80,22 +107,35 @@ class PositionSupervisor:
 
                 self._close_all("新战局入场，清理阵地")
                 
+                # 🛡️ 必须在平仓后获取干净余额进行基线对比
                 balance = binance_client.get_available_balance()
+                baseline = self._get_or_update_daily_baseline(balance)
                 
-                # 🚀 资管级动态仓位管理：最高 50% 的 20 倍杠杆
-                if self.regime == 1:
-                    dynamic_margin = 0.15
-                elif self.regime == 2:
-                    dynamic_margin = 0.25
-                elif self.regime == 3:
-                    dynamic_margin = 0.35
-                else:
-                    dynamic_margin = 0.50
+                daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
+                
+                # 🔴 第二道护甲：绝对熔断
+                if daily_pnl_pct <= self.cb_level2_pct:
+                    msg = f"今日真实亏损已达 {daily_pnl_pct:.2f}%，触发【🔴 绝对熔断】！系统物理锁死，今日拒绝开新仓！"
+                    logger.warning(msg)
+                    dingtalk.report_system_alert("🔴 账户物理熔断", msg)
+                    return
+                
+                if self.regime == 1: dynamic_margin = 0.15
+                elif self.regime == 2: dynamic_margin = 0.25
+                elif self.regime == 3: dynamic_margin = 0.35
+                else: dynamic_margin = 0.50
+                
+                # 🟡 第一道护甲：风险降级
+                if daily_pnl_pct <= self.cb_level1_pct:
+                    dynamic_margin *= 0.5
+                    msg = f"今日亏损达 {daily_pnl_pct:.2f}%，触发【🟡 风险降级护甲】，本次开仓军费强制减半至 {dynamic_margin*100}%"
+                    logger.warning(msg)
+                    dingtalk.report_system_alert("🟡 仓位降级护甲", msg)
                     
                 qty = round((balance * dynamic_margin * 20) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
                 
-                logger.info(f"💰 触发档位 {self.regime}，系统自动调拨 {dynamic_margin*100}% 资金执行 20 倍杠杆！")
+                logger.info(f"💰 触发档位 {self.regime}，系统自动调拨资金执行 20 倍杠杆！")
                 
                 binance_client.place_market_order(action, qty)
                 time.sleep(2) 
@@ -141,8 +181,6 @@ class PositionSupervisor:
             [tp1, tp2, tp3], sl, self.current_atr,
             self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
-        
-        # 修复变量绑定：确保被监听的数量完美对齐开仓数量
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
@@ -180,7 +218,6 @@ class PositionSupervisor:
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, actual_entry, dynamic_sl=new_sl)
                             dingtalk.report_intervention(actual_qty, actual_entry, 0, new_sl, "🚀 追踪止盈：绝对保本推移！")
-                            
                     else:
                         calculated_sl = round(self.best_price + trail_offset, 2)
                         new_sl = min(calculated_sl, self.watched_entry, self.current_sl)
@@ -226,7 +263,6 @@ class PositionSupervisor:
         if reason: dingtalk.report_supervisor_close(reason)
 
     def recover_state_on_startup(self):
-        """🚀 灾备系统：开机自动检测遗留阵地并唤醒雷达"""
         try:
             pos = position_manager.get_position()
             if pos and float(pos.get("positionAmt", 0)) != 0:
@@ -236,18 +272,13 @@ class PositionSupervisor:
                 self.watched_qty = self.initial_qty
                 self.watched_entry = float(pos["entryPrice"])
                 self.best_price = self.watched_entry
-                
-                # 设置基础保守参数以防无信号真空期
                 self.current_atr = 30.0 
                 self.regime = 3 
                 self.monitoring = True
-                
-                logger.info(f"🔄 灾备自愈：系统重启！检测到遗留阵地 {self.current_side} {self.initial_qty} ETH，哨兵雷达已强行接管！")
+                logger.info(f"🔄 灾备自愈：系统重启！哨兵雷达已强行接管！")
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
-            else:
-                logger.info("🔄 灾备自愈：系统重启。当前空仓，雷达待命。")
         except Exception as e:
             logger.error(f"灾备恢复失败: {e}")
 
 position_supervisor = PositionSupervisor()
-position_supervisor.recover_state_on_startup() # 👈 开机自检自愈执行点
+position_supervisor.recover_state_on_startup()
