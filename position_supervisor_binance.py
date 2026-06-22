@@ -43,10 +43,19 @@ class PositionSupervisor:
         # 🛡️ 每日熔断护甲参数
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
-        self.cb_level1_pct = -5.0  # 🟡 亏损 5% 军费减半
-        self.cb_level2_pct = -10.0 # 🔴 亏损 10% 彻底熔断
+        self.cb_level1_pct = -5.0
+        self.cb_level2_pct = -10.0
 
-        logger.info("🧠 币安 V10.38 物理熔断版大脑加载完毕：双重风险护甲已激活！")
+        # ==================== 移动保本止损自适应触发比例 ====================
+        # 强势行情更早启动保本，弱势行情给更多呼吸空间
+        self.breakeven_ratios = {
+            1: 0.70,   # 极弱 - 最保守
+            2: 0.65,   # 弱势
+            3: 0.60,   # 中势（默认）
+            4: 0.55    # 强势 - 相对积极
+        }
+
+        logger.info("🧠 币安 V10.41 最终呼吸空间版大脑加载完毕：硬止损已移除，regime自适应保本已启用！")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -100,20 +109,22 @@ class PositionSupervisor:
                 return
 
             if action in ["LONG", "SHORT"]:
+                # 🔄 无论同向还是反向，永远先撤单 + 全平，保持干净状态 + 单方向持仓
+                binance_client.cancel_all_open_orders()
+                time.sleep(0.6)
+                self._close_all("新信号到达，强制清理旧仓位与挂单")
+                time.sleep(0.8)
+
                 curr_px = binance_client.get_current_price(self.symbol)
                 if self.tv_price > 0 and abs(curr_px - self.tv_price) > 5.0:
                     dingtalk.report_system_alert("防追高拦截", f"滑点过大，TV {self.tv_price} 实盘 {curr_px}")
                     return
 
-                self._close_all("新战局入场，清理阵地")
-                
-                # 🛡️ 必须在平仓后获取干净余额进行基线对比
                 balance = binance_client.get_available_balance()
                 baseline = self._get_or_update_daily_baseline(balance)
                 
                 daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
                 
-                # 🔴 第二道护甲：绝对熔断
                 if daily_pnl_pct <= self.cb_level2_pct:
                     msg = f"今日真实亏损已达 {daily_pnl_pct:.2f}%，触发【🔴 绝对熔断】！系统物理锁死，今日拒绝开新仓！"
                     logger.warning(msg)
@@ -125,7 +136,6 @@ class PositionSupervisor:
                 elif self.regime == 3: dynamic_margin = 0.35
                 else: dynamic_margin = 0.50
                 
-                # 🟡 第一道护甲：风险降级
                 if daily_pnl_pct <= self.cb_level1_pct:
                     dynamic_margin *= 0.5
                     msg = f"今日亏损达 {daily_pnl_pct:.2f}%，触发【🟡 风险降级护甲】，本次开仓军费强制减半至 {dynamic_margin*100}%"
@@ -161,24 +171,22 @@ class PositionSupervisor:
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
             tp3 = round(entry_price + self.current_atr * self.tp3_mult, 2)
-            sl = round(entry_price - self.current_atr * self.sl_mult, 2)
         else:
             tp1 = round(entry_price - self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price - self.current_atr * self.tp2_mult, 2)
             tp3 = round(entry_price - self.current_atr * self.tp3_mult, 2)
-            sl = round(entry_price + self.current_atr * self.sl_mult, 2)
 
+        # 注意：已完全移除初始硬止损，只挂三层止盈
         if qty1 >= 0.001: binance_client.place_limit_order(close_side, qty1, tp1, reduce_only=True)
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
-        binance_client.place_stop_market_order(close_side, sl)
         
         self.best_price = entry_price
-        self.current_sl = sl
+        self.current_sl = entry_price   # 初始不设置硬止损
 
         dingtalk.report_supervisor_open(
             self.current_side, entry_price, qty, 
-            [tp1, tp2, tp3], sl, self.current_atr,
+            [tp1, tp2, tp3], self.current_sl, self.current_atr,
             self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -208,7 +216,18 @@ class PositionSupervisor:
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
-                if is_breakeven:
+                # ==================== regime 自适应移动保本触发 ====================
+                activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
+                has_moved_favorably = False
+                
+                if self.current_side == "LONG":
+                    required_price = self.watched_entry + self.current_atr * self.tp1_mult * activation_ratio
+                    has_moved_favorably = curr_px >= required_price
+                else:
+                    required_price = self.watched_entry - self.current_atr * self.tp1_mult * activation_ratio
+                    has_moved_favorably = curr_px <= required_price
+
+                if is_breakeven and has_moved_favorably:
                     if self.current_side == "LONG":
                         calculated_sl = round(self.best_price - trail_offset, 2)
                         new_sl = max(calculated_sl, self.watched_entry, self.current_sl)
@@ -248,7 +267,9 @@ class PositionSupervisor:
             sl_safe = dynamic_sl if dynamic_sl else (round(entry, 2) if qty < (self.initial_qty * 0.95) else round(entry + self.current_atr * self.sl_mult, 2))
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
-        binance_client.place_stop_market_order(close_side, sl_safe)
+        # 仅在已进入保本模式或仓位已减小时才挂止损
+        if dynamic_sl or qty < (self.initial_qty * 0.95):
+            binance_client.place_stop_market_order(close_side, sl_safe)
 
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
