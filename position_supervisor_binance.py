@@ -36,8 +36,6 @@ class PositionSupervisor:
         
         self.current_side = None
         self.last_tv_side = None
-        
-        # 🚀 响应 GROK 建议：新增人工违规干预追踪标记
         self.manual_intervention_flag = False
 
         self.daily_start_date = ""
@@ -50,7 +48,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [10.0 满分封神版]已加载（修复TP警报冲突 + 人工全平状态标记）")
+        logger.info("🧠 币安 VPS [绝对防刷版]已加载（严格执行统一出口指令 + 人工防乱动拦截）")
 
     def _save_state(self):
         state = {
@@ -66,7 +64,7 @@ class PositionSupervisor:
             with open(self.state_file, 'w') as f:
                 json.dump(state, f)
         except Exception as e:
-            logger.error(f"保存状态失败: {e}")
+            pass
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -101,12 +99,10 @@ class PositionSupervisor:
         try:
             self.monitoring = False
 
+            # 🎯 统一步骤 1：无论是不是保护性平仓，执行坚决
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护平仓"
-                if "极端" in reason or "反转" in reason:
-                    self._close_all(f"🚨 红色警报保护性全平 - {reason}")
-                else:
-                    self._close_all(f"🛡️ 保护性全平 - {reason}")
+                self._close_all(f"🛡️ 保护性全平 - {reason}")
                 return
 
             if raw_action == "CLOSE_TP3":
@@ -118,14 +114,16 @@ class PositionSupervisor:
                 self._close_all(f"🧹 TV 强制清仓: {reason}")
                 return
 
+            # 🎯 统一步骤 2：新方向到达一律更新仓位：先平后开，永远一手
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
-                self.manual_intervention_flag = False  # 🚀 新指令到达，洗白犯罪记录
+                self.manual_intervention_flag = False
                 self._save_state()
                 
+                # 坚决贯彻“平仓完撤单就全撤了再开仓”
                 binance_client.cancel_all_open_orders()
-                time.sleep(0.6)
-                self._close_all("新信号到达，强制清理旧仓位")
+                time.sleep(0.5)
+                self._close_all("新信号到达，强制清理旧阵地准备战斗")
                 time.sleep(0.8)
 
                 curr_px = binance_client.get_current_price(self.symbol)
@@ -198,18 +196,18 @@ class PositionSupervisor:
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 actual_qty = abs(real_amt)
                 
+                # 🎯 人工异动精准识别
                 if real_amt == 0:
                     if self.watched_qty > 0:
-                        # 🚀 记录人工全平标记
                         self.manual_intervention_flag = True
                         self._save_state()
-                        logger.warning("🚨 警报：检测到人工违规干预，手动全平了仓位！")
                         self._close_all("🚨 检测到人工违规干预：手动全平仓位！已停止监控。")
-                        dingtalk.report_system_alert("违规干预 (已记录标记)", "检测到人工手动全平了仓位，系统已自动清理残留挂单并退出雷达防御。")
+                        dingtalk.report_system_alert("违规干预 (已记录)", "检测到人工手动全平了仓位，系统已自动清理残留挂单并退出雷达防御。")
                     else:
                         self._close_all("仓位归零 (正常离场)")
                     break
 
+                # 🎯 强行对齐 TV 终极防线
                 if actual_side != self.last_tv_side:
                     self._close_all(f"🚨 致命违规：实盘方向({actual_side})与 TV指令({self.last_tv_side})反转！")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
@@ -218,16 +216,16 @@ class PositionSupervisor:
                 if actual_qty > self.watched_qty + 0.001:
                     self.manual_intervention_flag = True
                     self._save_state()
-                    logger.warning(f"🚨 检测到人工违规加仓！强行清盘！")
                     self._close_all("🚨 拒绝人工违规加仓，强制清盘！")
-                    dingtalk.report_system_alert("违规干预 (已记录标记)", "系统检测到人工加仓，已执行强制市价全平！")
+                    dingtalk.report_system_alert("违规干预 (已记录)", "系统检测到人工加仓，已执行强制市价全平！")
                     break
 
                 if actual_qty < self.watched_qty - 0.001:
-                    logger.info(f"✅ 仓位合规变动 (TP触发/部分平仓): {self.watched_qty} -> {actual_qty}")
+                    logger.info(f"✅ 仓位合规变动 (TP触发或部分平仓): {self.watched_qty} -> {actual_qty}")
                     self.watched_qty = actual_qty 
                     self._save_state()
 
+                # 🎯 防手贱自动挂单重建
                 open_orders = position_manager.get_open_orders(self.symbol)
                 if len(open_orders) == 0 and actual_qty > 0:
                     logger.warning("🚨 发现持仓裸奔！立即自动重建防线！")
@@ -240,6 +238,7 @@ class PositionSupervisor:
                 else:
                     self.best_price = min(self.best_price, curr_px)
 
+                # 🎯 第三把关：雷达移动保本止损
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
@@ -304,6 +303,7 @@ class PositionSupervisor:
         self.watched_qty = 0.0
         self._save_state()
         
+        # 实盘核实后才发钉钉报告
         if reason and closed_successfully:
             dingtalk.report_supervisor_close(reason)
         elif reason:
@@ -316,7 +316,6 @@ class PositionSupervisor:
                     saved_state = json.load(f)
                     self.last_tv_side = saved_state.get("last_tv_side")
                     self.manual_intervention_flag = saved_state.get("manual_intervention_flag", False)
-                    logger.info(f"💾 已读取硬盘记忆：TV最后指令方向为 {self.last_tv_side}")
 
             pos = position_manager.get_position(self.symbol)
             if pos and float(pos.get("positionAmt", 0)) != 0:
