@@ -19,9 +19,9 @@ app = Flask(__name__)
 # ==================== Webhook 入口 ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. 尝试解析 JSON（兼容 TradingView 不同格式）
+    # 1. 尝试解析 JSON（兼容 TradingView 多种格式）
     data = request.get_json(force=True, silent=True)
-    
+
     if not data:
         try:
             raw_data = request.get_data(as_text=True)
@@ -39,9 +39,9 @@ def webhook():
         return jsonify({"status": "error", "message": "Invalid secret"}), 403
 
     action = data.get("action", "UNKNOWN")
-    logger.info(f"[Webhook] 收到有效信号 → Action: {action}")
+    logger.info(f"[Webhook] 收到有效信号 → Action: {action} | Regime: {data.get('regime', 'N/A')}")
 
-    # 3. 异步交给大脑处理（避免阻塞）
+    # 3. 异步交给大脑处理（避免阻塞 Flask）
     try:
         threading.Thread(
             target=position_supervisor.handle_signal,
@@ -59,10 +59,14 @@ def webhook():
     }), 200
 
 
-# ==================== 健康检查（可选） ====================
+# ==================== 健康检查接口 ====================
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok", "service": "binance_webhook"}), 200
+    return jsonify({
+        "status": "ok",
+        "service": "binance_webhook",
+        "version": "v6.9-final"
+    }), 200
 
 
 if __name__ == '__main__':
