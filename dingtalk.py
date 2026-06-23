@@ -12,8 +12,10 @@ DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
 def _get_signed_url():
-    if not DINGTALK_WEBHOOK: return ""
-    if not DINGTALK_SECRET: return DINGTALK_WEBHOOK
+    if not DINGTALK_WEBHOOK:
+        return ""
+    if not DINGTALK_SECRET:
+        return DINGTALK_WEBHOOK
     ts = str(round(time.time() * 1000))
     hmac_code = hmac.new(DINGTALK_SECRET.encode('utf-8'), f'{ts}\n{DINGTALK_SECRET}'.encode('utf-8'), hashlib.sha256).digest()
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
@@ -21,68 +23,80 @@ def _get_signed_url():
 
 def send_alert(title, data_dict):
     signed_url = _get_signed_url()
-    if not signed_url: return
-    
+    if not signed_url:
+        return
+
     text = "\n".join([f"* **{k}**: {v}" for k, v in data_dict.items()])
     payload = {
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 V10.41 呼吸空间最终版*"
+            "text": f"## {title}\n***\n> **⏱ 战神核对**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{text}\n\n***\n*🤖 战神 V10.42 最终呼吸空间版*"
         }
     }
-    try: 
-        requests.post(signed_url, json=payload, timeout=5)
+    try:
+        requests.post(signed_url, json=payload, timeout=6)
     except Exception as e:
         logger.error(f"钉钉发送失败: {e}")
 
 def get_regime_name(regime_code):
-    if regime_code == 1: return "🧊 极弱震荡 (15% 试探轻仓)"
+    if regime_code == 1: return "🧊 极弱震荡 (15% 轻仓试探)"
     if regime_code == 2: return "🚶 弱势波段 (25% 基础阵地)"
-    if regime_code == 3: return "🏃 中势推升 (35% 标准重装)"
+    if regime_code == 3: return "🏃 中势推升 (35% 标准仓位)"
     if regime_code == 4: return "🚀 强势单边 (50% 满载出击)"
     return "未知状态"
 
-def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
-    emoji = "🟩" if side == "LONG" else "🟥"
-    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
-    tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
+# ==================== 开仓报告 ====================
+def report_supervisor_open(side, price, qty, tp_pxs, atr, regime=3):
+    emoji = "🟩 多头" if side == "LONG" else "🟥 空头"
+    tp_str = f"`{tp_pxs[0]:.2f}` → `{tp_pxs[1]:.2f}` → `{tp_pxs[2]:.2f}`"
 
-    # 优化文案：明确提示当前策略已移除初始硬止损
-    stop_info = f"**`{sl_px:.2f}`**（初始无硬止损，由TV反转保护 + 动态保本守护）" if sl_px == price else f"**`{sl_px:.2f}`**"
-
-    send_alert("⚔️ 币安现价吃单 (V10.41 呼吸空间版)", {
-        "防守方向": f"**{emoji} {side}**",
-        "市场与资金": f"**{get_regime_name(regime)}**", 
-        "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
-        "动态头寸": f"`{qty}` ETH (10/30/60 切分)",
-        "止盈 (TV 理论)": tv_tp_str,
-        "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
-        "止损策略": stop_info
+    send_alert("⚔️ 币安现价开仓 (V10.42 最终版)", {
+        "防守方向": f"**{emoji}**",
+        "市场强度": f"**{get_regime_name(regime)}**",
+        "实盘均价": f"**`{price:.2f}`** USDT",
+        "开仓数量": f"`{qty}` ETH",
+        "止盈排队": tp_str,
+        "ATR": f"`{atr:.2f}`",
+        "策略版本": "v6.9 四档位自适应反转 + 18/32/50 止盈"
     })
 
-def report_intervention(qty, entry_px, new_tp, new_sl, action_msg):
-    send_alert("⚠️ 雷达动态追踪防御", {
+# ==================== 移动保本 / 干预报告 ====================
+def report_intervention(qty, entry_px, new_sl, action_msg):
+    send_alert("🚀 雷达动态保本推移", {
         "残余头寸": f"`{qty}`",
         "入场均价": f"`{entry_px:.2f}`",
-        "雷达响应": f"**{action_msg}**",
-        "最新安全止损": f"**`{new_sl:.2f}`**"
+        "雷达动作": f"**{action_msg}**",
+        "最新止损价": f"**`{new_sl:.2f}`**（已推至保本或更好）"
     })
 
+# ==================== 强制对齐报告 ====================
 def report_force_align(real_side, expected_side):
-    send_alert("🚨 严重违纪：触发铁血对齐", {
-        "实盘发现方向": f"`{real_side}`",
-        "TV应有方向": f"`{expected_side}`",
-        "处理结果": "**已执行物理级清仓，坚决对齐信号源！**"
+    send_alert("🚨 严重异常：强制物理对齐", {
+        "实盘当前方向": f"`{real_side}`",
+        "TV 期望方向": f"`{expected_side}`",
+        "处理结果": "**已执行全平 + 撤单，强制对齐信号源**"
     })
 
+# ==================== 清仓报告（增强区分） ====================
 def report_supervisor_close(reason):
-    send_alert("🧹 币安阵地彻底清盘", {
-        "触发机制": f"*{reason}*",
-        "当前状态": "**挂单全撤，仓位全平，资金回炉待命**"
+    if "TP3" in reason:
+        title = "🎯 TP3 止盈全平"
+        detail = f"**{reason}**（策略 TP3 触发，仓位归零）"
+    elif "保护性全平" in reason or "反转保护" in reason or "RSI" in reason:
+        title = "🛡️ 保护性全平"
+        detail = f"**{reason}**（策略保护机制触发）"
+    else:
+        title = "🧹 仓位清盘"
+        detail = f"**{reason}**"
+
+    send_alert(title, {
+        "触发原因": detail,
+        "当前状态": "挂单已全部撤销，仓位已归零，资金回炉待命"
     })
 
+# ==================== 系统告警 ====================
 def report_system_alert(title, detail):
-    send_alert(f"⚠️ 系统风险告警: {title}", {
+    send_alert(f"⚠️ 系统风险告警：{title}", {
         "核心详情": f"**{detail}**"
     })
