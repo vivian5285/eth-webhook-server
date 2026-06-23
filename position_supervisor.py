@@ -48,7 +48,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [绝对防刷版]已加载（严格执行统一出口指令 + 人工防乱动拦截）")
+        logger.info("🧠 币安 VPS [已移除固定止损]已加载（TP限价单 + 雷达动态管理 + TV警报统一出口）")
 
     def _save_state(self):
         state = {
@@ -99,7 +99,6 @@ class PositionSupervisor:
         try:
             self.monitoring = False
 
-            # 🎯 统一步骤 1：无论是不是保护性平仓，执行坚决
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护平仓"
                 self._close_all(f"🛡️ 保护性全平 - {reason}")
@@ -114,13 +113,11 @@ class PositionSupervisor:
                 self._close_all(f"🧹 TV 强制清仓: {reason}")
                 return
 
-            # 🎯 统一步骤 2：新方向到达一律更新仓位：先平后开，永远一手
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self.manual_intervention_flag = False
                 self._save_state()
                 
-                # 坚决贯彻“平仓完撤单就全撤了再开仓”
                 binance_client.cancel_all_open_orders()
                 time.sleep(0.5)
                 self._close_all("新信号到达，强制清理旧阵地准备战斗")
@@ -179,7 +176,8 @@ class PositionSupervisor:
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
         
-        binance_client.place_stop_market_order(close_side, self.current_sl)
+        # 已移除初始固定止损单（按你要求）
+        # binance_client.place_stop_market_order(close_side, self.current_sl)
 
         self.best_price = entry_price
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -196,7 +194,6 @@ class PositionSupervisor:
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 actual_qty = abs(real_amt)
                 
-                # 🎯 人工异动精准识别
                 if real_amt == 0:
                     if self.watched_qty > 0:
                         self.manual_intervention_flag = True
@@ -207,7 +204,6 @@ class PositionSupervisor:
                         self._close_all("仓位归零 (正常离场)")
                     break
 
-                # 🎯 强行对齐 TV 终极防线
                 if actual_side != self.last_tv_side:
                     self._close_all(f"🚨 致命违规：实盘方向({actual_side})与 TV指令({self.last_tv_side})反转！")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
@@ -225,11 +221,10 @@ class PositionSupervisor:
                     self.watched_qty = actual_qty 
                     self._save_state()
 
-                # 🎯 防手贱自动挂单重建
                 open_orders = position_manager.get_open_orders(self.symbol)
                 if len(open_orders) == 0 and actual_qty > 0:
                     logger.warning("🚨 发现持仓裸奔！立即自动重建防线！")
-                    self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=self.current_sl)
+                    self._rebuild_defenses(actual_qty, self.watched_entry)
                     dingtalk.report_system_alert("防线重建", "检测到保护挂单被撤销，已自动重新铺设！")
 
                 curr_px = binance_client.get_current_price(self.symbol)
@@ -238,7 +233,6 @@ class PositionSupervisor:
                 else:
                     self.best_price = min(self.best_price, curr_px)
 
-                # 🎯 第三把关：雷达移动保本止损
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
@@ -259,7 +253,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._save_state()
-                            self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
+                            self._rebuild_defenses(actual_qty, self.watched_entry)
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
                     else:
                         new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry)
@@ -268,7 +262,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._save_state()
-                            self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
+                            self._rebuild_defenses(actual_qty, self.watched_entry)
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
 
             except Exception as e:
@@ -279,14 +273,11 @@ class PositionSupervisor:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if self.current_side == "LONG":
             tp_safe = round(entry + self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else round(entry - self.current_atr * self.sl_mult, 2)
         else:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
-            sl_safe = dynamic_sl if dynamic_sl else round(entry + self.current_atr * self.sl_mult, 2)
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
-        if dynamic_sl:
-            binance_client.place_stop_market_order(close_side, sl_safe)
+        # 已移除 stop-market 重建（按你要求不再挂固定止损）
 
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
@@ -303,7 +294,6 @@ class PositionSupervisor:
         self.watched_qty = 0.0
         self._save_state()
         
-        # 实盘核实后才发钉钉报告
         if reason and closed_successfully:
             dingtalk.report_supervisor_close(reason)
         elif reason:
@@ -329,11 +319,10 @@ class PositionSupervisor:
                 self.watched_qty = self.initial_qty
                 self.watched_entry = float(pos["entryPrice"])
                 self.best_price = self.watched_entry
-                
                 self.current_atr = 30.0
                 self.current_sl = self.watched_entry 
-                
                 self.monitoring = True
+                
                 logger.info("🔄 灾备自愈：哨兵已满血接管实盘")
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
         except Exception as e:
