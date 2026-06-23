@@ -48,7 +48,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [已移除固定止损]已加载（TP限价单 + 雷达动态管理 + TV警报统一出口）")
+        logger.info("🧠 币安 VPS [已移除固定止损 + 仓位缩减至13倍]已加载")
 
     def _save_state(self):
         state = {
@@ -140,7 +140,8 @@ class PositionSupervisor:
                 if daily_pnl_pct <= self.cb_level1_pct:
                     dynamic_margin *= 0.5
 
-                qty = round((balance * dynamic_margin * 20) / curr_px, 3)
+                # ==================== 已调整为 *13（原 *20） ====================
+                qty = round((balance * dynamic_margin * 13) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
 
                 binance_client.place_market_order(raw_action, qty)
@@ -175,9 +176,6 @@ class PositionSupervisor:
         if qty1 >= 0.001: binance_client.place_limit_order(close_side, qty1, tp1, reduce_only=True)
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
-        
-        # 已移除初始固定止损单（按你要求）
-        # binance_client.place_stop_market_order(close_side, self.current_sl)
 
         self.best_price = entry_price
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -269,7 +267,7 @@ class PositionSupervisor:
                 logger.error(f"哨兵异常: {e}")
             time.sleep(3)
 
-    def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
+    def _rebuild_defenses(self, qty, entry):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if self.current_side == "LONG":
             tp_safe = round(entry + self.current_atr * self.tp3_mult, 2)
@@ -277,7 +275,6 @@ class PositionSupervisor:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
-        # 已移除 stop-market 重建（按你要求不再挂固定止损）
 
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
