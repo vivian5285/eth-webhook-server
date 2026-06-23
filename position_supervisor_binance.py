@@ -4,7 +4,7 @@ import logging, time, threading, os, json
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from binance_client import binance_client
-from position_manager import position_manager  # 🚀 完美迎回我们的专属大管家！
+from position_manager import position_manager
 import dingtalk
 
 if not os.path.exists('logs'): os.makedirs('logs')
@@ -18,9 +18,7 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 止盈比例不再写死，将在下单时根据 regime 动态生成
         self.tp_ratios = [0.05, 0.20, 0.75]   
-
         self.tp1_mult = 1.55
         self.tp2_mult = 3.0
         self.tp3_mult = 4.8
@@ -37,21 +35,16 @@ class PositionSupervisor:
         self.watched_entry = 0.0
         self.current_side = None
 
-        # 每日熔断护甲
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
         self.cb_level1_pct = -5.0
         self.cb_level2_pct = -10.0
 
-        # 四档位自适应保本触发比例
         self.breakeven_ratios = {
-            1: 0.72,   # 极弱 - 最保守
-            2: 0.68,   # 弱势
-            3: 0.60,   # 中势
-            4: 0.50    # 强势 - 更早启动保本
+            1: 0.72, 2: 0.68, 3: 0.60, 4: 0.50
         }
 
-        logger.info("🧠 币安 VPS 最终优化版已加载（四档TP比例激活 + PositionManager 架构还原 + 手误修复终极版！）")
+        logger.info("🧠 币安 VPS 最终审计重构版已加载（精准解析 + 状态核实 + 完美兼容）")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -76,14 +69,21 @@ class PositionSupervisor:
         self.tp3_mult = float(payload.get("tp3_m", 4.8))
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
 
+        # 🚀 优化点 1：在入口处就基于 regime 提前锁定 tp_ratios
+        if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
+        elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
+        elif self.regime == 3: self.tp_ratios = [0.18, 0.32, 0.50]
+        else: self.tp_ratios = [0.05, 0.20, 0.75]
+
         if not raw_action: return
         if not self._lock.acquire(blocking=False): return
 
         try:
             self.monitoring = False
 
+            # 🚀 优化点 1：深度解析 CLOSE_PROTECT 带出的具体原因
             if raw_action.startswith("CLOSE_PROTECT"):
-                reason = raw_action.split("|")[1] if "|" in raw_action else "保护性全平"
+                reason = raw_action.split("|")[1] if "|" in raw_action else "极端保护"
                 self._close_all(f"保护性全平 - {reason}")
                 return
 
@@ -111,7 +111,6 @@ class PositionSupervisor:
                     dingtalk.report_system_alert("🔴 账户物理熔断", f"今日亏损已达 {daily_pnl_pct:.2f}%，拒绝开新仓")
                     return
 
-                # 四档位动态资金分配
                 if self.regime == 1: dynamic_margin = 0.15
                 elif self.regime == 2: dynamic_margin = 0.25
                 elif self.regime == 3: dynamic_margin = 0.35
@@ -126,7 +125,7 @@ class PositionSupervisor:
                 binance_client.place_market_order(raw_action, qty)
                 time.sleep(2)
 
-                # 🚀 这里重新使用 position_manager
+                # 🚀 优化点 5：统一调用 position_manager 核实仓位
                 pos = position_manager.get_position(self.symbol)
                 if pos and float(pos.get("positionAmt", 0)) != 0:
                     self.current_side = raw_action
@@ -137,12 +136,6 @@ class PositionSupervisor:
             self._lock.release()
 
     def _protect_and_monitor(self, qty, entry_price):
-        # 🚀 完美还原策略的四档动态止盈网格比例
-        if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
-        elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
-        elif self.regime == 3: self.tp_ratios = [0.18, 0.32, 0.50]
-        else: self.tp_ratios = [0.05, 0.20, 0.75]
-
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         qty1 = round(qty * self.tp_ratios[0], 3)
         qty2 = round(qty * self.tp_ratios[1], 3)
@@ -163,29 +156,40 @@ class PositionSupervisor:
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
         
-        # 挂载物理止损单防爆
         binance_client.place_stop_market_order(close_side, self.current_sl)
 
         self.best_price = entry_price
-        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime)
-        
-        # 🚀 致命手误已修复：精确记录初始仓位数量 (qty)
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         
+        # 🚀 优化点 4：执行完所有挂单操作后，再发开仓报告
+        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
         while self.monitoring:
             try:
-                # 🚀 哨兵雷达也切回 position_manager
+                # 🚀 优化点 5：循环内全量使用 position_manager
                 pos = position_manager.get_position(self.symbol)
                 real_amt = float(pos.get("positionAmt", 0)) if pos else 0.0
+                
                 if real_amt == 0:
-                    self._close_all("仓位归零"); break
+                    self._close_all("仓位归零 (实盘核实)")
+                    break
 
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 if actual_side != self.current_side:
-                    self._close_all("强制对齐"); break
+                    self._close_all("强制对齐 (方向反转)")
+                    dingtalk.report_force_align(actual_side, self.current_side)
+                    break
+
+                actual_qty = abs(real_amt)
+                
+                # 🚀 优化点 3：人工干预与状态同步检测
+                # 如果实盘数量变小了（比如人工平了一半，或者某档TP被吃掉），VPS状态立刻同步，防止瞎算！
+                if actual_qty < self.watched_qty - 0.001:
+                    logger.info(f"检测到仓位变动 (可能TP触发或人工干预减仓): {self.watched_qty} -> {actual_qty}")
+                    self.watched_qty = actual_qty 
+                # (如果人工瞎加仓导致 actual_qty 变大，为防止风控失效，不主动调大 watched_qty)
 
                 curr_px = binance_client.get_current_price(self.symbol)
                 if self.current_side == "LONG":
@@ -193,9 +197,8 @@ class PositionSupervisor:
                 else:
                     self.best_price = min(self.best_price, curr_px)
 
-                actual_qty = abs(real_amt)
+                # 保本逻辑判断
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
-
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
 
@@ -215,6 +218,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
+                            # 🚀 优化点 4：实盘核实重建防线后，才发推移报告
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
                     else:
                         new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry)
@@ -245,20 +249,25 @@ class PositionSupervisor:
     def _close_all(self, reason=""):
         binance_client.cancel_all_open_orders()
         time.sleep(0.5)
+        closed_successfully = False
         for _ in range(6):
             binance_client.close_all_positions()
             time.sleep(0.7)
-            # 🚀 确认清仓也使用 position_manager
+            # 🚀 统一调用
             pos = position_manager.get_position(self.symbol)
             if not pos or float(pos.get("positionAmt", 0)) == 0:
+                closed_successfully = True
                 break
         self.monitoring = False
-        if reason:
+        
+        # 🚀 优化点 4：实盘确定清仓成功后再发报告
+        if reason and closed_successfully:
             dingtalk.report_supervisor_close(reason)
+        elif reason:
+            dingtalk.report_system_alert("⚠️ 清仓可能未完全执行", reason)
 
     def recover_state_on_startup(self):
         try:
-            # 🚀 灾备恢复使用 position_manager
             pos = position_manager.get_position(self.symbol)
             if pos and float(pos.get("positionAmt", 0)) != 0:
                 real_amt = float(pos["positionAmt"])
@@ -268,7 +277,6 @@ class PositionSupervisor:
                 self.watched_entry = float(pos["entryPrice"])
                 self.best_price = self.watched_entry
                 
-                # 赋予安全的默认参数以防断电失忆
                 self.current_atr = 30.0
                 self.current_sl = self.watched_entry 
                 
