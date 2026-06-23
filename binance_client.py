@@ -15,7 +15,7 @@ class BinanceClient:
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
-        logger.info("🟢 Binance Client V10.42 已加载")
+        logger.info("🟢 Binance Client V10.42 已加载 (底层挂单查询已补全)")
 
     # ==================== 查询类 ====================
     def get_current_price(self, symbol="ETHUSDT"):
@@ -50,16 +50,22 @@ class BinanceClient:
             logger.error(f"[查询持仓失败] {symbol}: {e}")
             return None
 
+    def get_open_orders(self, symbol="ETHUSDT"):
+        """获取当前所有挂单（配合 PositionManager 使用）"""
+        try:
+            orders = self.client.futures_get_open_orders(symbol=symbol)
+            return orders
+        except Exception as e:
+            logger.error(f"[获取挂单失败] {symbol}: {e}")
+            return []
+
     # ==================== 下单类 ====================
     def place_market_order(self, side, quantity, symbol="ETHUSDT"):
         """市价开仓"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             order = self.client.futures_create_order(
-                symbol=symbol,
-                side=binance_side,
-                type="MARKET",
-                quantity=quantity
+                symbol=symbol, side=binance_side, type="MARKET", quantity=quantity
             )
             logger.info(f"[市价开仓成功] {side} {quantity} {symbol}")
             return order
@@ -72,16 +78,10 @@ class BinanceClient:
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
-                "symbol": symbol,
-                "side": binance_side,
-                "type": "LIMIT",
-                "timeInForce": "GTC",
-                "quantity": quantity,
-                "price": str(round(price, 2))
+                "symbol": symbol, "side": binance_side, "type": "LIMIT",
+                "timeInForce": "GTC", "quantity": quantity, "price": str(round(price, 2))
             }
-            if reduce_only:
-                params["reduceOnly"] = "true"
-
+            if reduce_only: params["reduceOnly"] = "true"
             order = self.client.futures_create_order(**params)
             logger.info(f"[限价单成功] {side} {quantity} @ {price}")
             return order
@@ -94,11 +94,8 @@ class BinanceClient:
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
-                "symbol": symbol,
-                "side": binance_side,
-                "type": "STOP_MARKET",
-                "stopPrice": str(round(stop_price, 2)),
-                "closePosition": "true"
+                "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
+                "stopPrice": str(round(stop_price, 2)), "closePosition": "true"
             }
             order = self.client.futures_create_order(**params)
             logger.info(f"[止损单成功] {side} Stop @ {stop_price}")
@@ -118,19 +115,13 @@ class BinanceClient:
     def close_all_positions(self, symbol="ETHUSDT"):
         try:
             pos = self.get_position(symbol)
-            if not pos:
-                return None
+            if not pos: return None
             pos_amt = float(pos.get("positionAmt", 0))
-            if pos_amt == 0:
-                return None
+            if pos_amt == 0: return None
 
             side = "SELL" if pos_amt > 0 else "BUY"
             order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=abs(pos_amt),
-                reduceOnly=True
+                symbol=symbol, side=side, type="MARKET", quantity=abs(pos_amt), reduceOnly=True
             )
             logger.info(f"[市价平仓成功] {symbol}")
             return order
@@ -138,6 +129,4 @@ class BinanceClient:
             logger.error(f"[市价平仓失败] {symbol}: {e}")
             return None
 
-
-# 实例化
 binance_client = BinanceClient()
