@@ -17,19 +17,19 @@ class PositionSupervisor:
         self.symbol = "ETHUSDT"
         self.monitoring = False
         self._lock = threading.Lock()
-        
-        # ✅ 已对齐策略 v6.9 的止盈比例
-        self.tp_ratios = [0.18, 0.32, 0.50] 
-        
+
+        # ✅ 已完全对齐策略 v6.9
+        self.tp_ratios = [0.18, 0.32, 0.50]
+
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
         self.tp3_mult = 3.45
         self.sl_mult = 1.03
         self.current_trail_factor = 0.50
-        
+
         self.regime = 3
         self.tv_price = 0.0
-        self.current_atr = 30.0 
+        self.current_atr = 30.0
         self.best_price = 0.0
         self.current_sl = 0.0
 
@@ -44,7 +44,7 @@ class PositionSupervisor:
         self.cb_level1_pct = -5.0
         self.cb_level2_pct = -10.0
 
-        # 四档位自适应移动保本触发比例（强势更早启动）
+        # 四档位自适应移动保本触发比例
         self.breakeven_ratios = {
             1: 0.70,   # 极弱
             2: 0.65,   # 弱势
@@ -52,19 +52,20 @@ class PositionSupervisor:
             4: 0.55    # 强势
         }
 
-        logger.info("🧠 币安 V10.42 最终适配版大脑加载完毕（已完全对齐策略 v6.9）")
+        logger.info("🧠 币安 V10.42 最终完整版大脑已加载（完全适配策略 v6.9）")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
         tracker_file = 'binance_risk_tracker.json'
-        
+
         if self.daily_start_date != today:
             self.daily_start_date = today
             self.daily_start_balance = current_balance
             try:
                 with open(tracker_file, 'w') as f:
                     json.dump({'date': today, 'balance': current_balance}, f)
-            except: pass
+            except:
+                pass
             logger.info(f"📅 新交易日基线已更新: {current_balance:.2f} USDT")
         return self.daily_start_balance
 
@@ -78,13 +79,15 @@ class PositionSupervisor:
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
 
-        if not raw_action: return
-        if not self._lock.acquire(blocking=False): return
+        if not raw_action:
+            return
+        if not self._lock.acquire(blocking=False):
+            return
 
         try:
             self.monitoring = False
 
-            # ==================== 警报解析（更清晰） ====================
+            # ==================== 警报解析（清晰版） ====================
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护性全平"
                 self._close_all(f"保护性全平 - {reason}")
@@ -99,11 +102,11 @@ class PositionSupervisor:
                 self._close_all(f"TV 强制清仓: {reason}")
                 return
 
-            # ==================== 开仓逻辑 ====================
+            # ==================== 开仓流程 ====================
             if raw_action in ["LONG", "SHORT"]:
                 binance_client.cancel_all_open_orders()
                 time.sleep(0.6)
-                self._close_all("新信号到达，强制清理旧仓位")
+                self._close_all("新信号到达，强制清理旧仓位与挂单")
                 time.sleep(0.8)
 
                 curr_px = binance_client.get_current_price(self.symbol)
@@ -166,10 +169,13 @@ class PositionSupervisor:
         self.current_sl = entry_price
 
         dingtalk.report_supervisor_open(
-            self.current_side, entry_price, qty, 
+            self.current_side, entry_price, qty,
             [tp1, tp2, tp3], self.current_atr, self.regime
         )
-        self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
+
+        self.watched_qty = qty
+        self.watched_entry = entry_price
+        self.monitoring = True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -177,15 +183,20 @@ class PositionSupervisor:
             try:
                 pos = position_manager.get_position()
                 real_amt = float(pos.get("positionAmt", 0)) if pos else 0.0
-                if real_amt == 0: self._close_all("仓位归零"); break
+                if real_amt == 0:
+                    self._close_all("仓位归零")
+                    break
 
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 if actual_side != self.current_side:
-                    self._close_all("强制对齐"); break
+                    self._close_all("强制对齐")
+                    break
 
                 curr_px = binance_client.get_current_price(self.symbol)
-                if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
-                else: self.best_price = min(self.best_price, curr_px)
+                if self.current_side == "LONG":
+                    self.best_price = max(self.best_price, curr_px)
+                else:
+                    self.best_price = min(self.best_price, curr_px)
 
                 actual_qty = abs(real_amt)
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
@@ -209,7 +220,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
-                            dingtalk.report_intervention(actual_qty, self.watched_entry, 0, new_sl, "🚀 追踪止盈保本推移")
+                            dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
                     else:
                         new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry)
                         if new_sl < self.current_sl - 2:
@@ -217,7 +228,7 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
-                            dingtalk.report_intervention(actual_qty, self.watched_entry, 0, new_sl, "🚀 追踪止盈保本推移")
+                            dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
 
             except Exception as e:
                 logger.error(f"哨兵异常: {e}")
@@ -246,7 +257,8 @@ class PositionSupervisor:
             if not pos or float(pos.get("positionAmt", 0)) == 0:
                 break
         self.monitoring = False
-        if reason: dingtalk.report_supervisor_close(reason)
+        if reason:
+            dingtalk.report_supervisor_close(reason)
 
     def recover_state_on_startup(self):
         try:
