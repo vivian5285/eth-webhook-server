@@ -36,6 +36,9 @@ class PositionSupervisor:
         
         self.current_side = None
         self.last_tv_side = None
+        
+        # 🚀 响应 GROK 建议：新增人工违规干预追踪标记
+        self.manual_intervention_flag = False
 
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
@@ -47,7 +50,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [终局封神版]已加载（硬盘记忆 + 动态归因 + 人工拦截）")
+        logger.info("🧠 币安 VPS [10.0 满分封神版]已加载（修复TP警报冲突 + 人工全平状态标记）")
 
     def _save_state(self):
         state = {
@@ -56,7 +59,8 @@ class PositionSupervisor:
             "watched_qty": self.watched_qty,
             "watched_entry": self.watched_entry,
             "current_sl": self.current_sl,
-            "monitoring": self.monitoring
+            "monitoring": self.monitoring,
+            "manual_intervention_flag": self.manual_intervention_flag
         }
         try:
             with open(self.state_file, 'w') as f:
@@ -116,6 +120,7 @@ class PositionSupervisor:
 
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
+                self.manual_intervention_flag = False  # 🚀 新指令到达，洗白犯罪记录
                 self._save_state()
                 
                 binance_client.cancel_all_open_orders()
@@ -195,9 +200,12 @@ class PositionSupervisor:
                 
                 if real_amt == 0:
                     if self.watched_qty > 0:
+                        # 🚀 记录人工全平标记
+                        self.manual_intervention_flag = True
+                        self._save_state()
                         logger.warning("🚨 警报：检测到人工违规干预，手动全平了仓位！")
                         self._close_all("🚨 检测到人工违规干预：手动全平仓位！已停止监控。")
-                        dingtalk.report_system_alert("违规干预", "检测到人工手动全平了仓位，系统已自动清理残留挂单并退出雷达防御。")
+                        dingtalk.report_system_alert("违规干预 (已记录标记)", "检测到人工手动全平了仓位，系统已自动清理残留挂单并退出雷达防御。")
                     else:
                         self._close_all("仓位归零 (正常离场)")
                     break
@@ -208,9 +216,11 @@ class PositionSupervisor:
                     break
 
                 if actual_qty > self.watched_qty + 0.001:
+                    self.manual_intervention_flag = True
+                    self._save_state()
                     logger.warning(f"🚨 检测到人工违规加仓！强行清盘！")
                     self._close_all("🚨 拒绝人工违规加仓，强制清盘！")
-                    dingtalk.report_system_alert("违规干预", "系统检测到人工加仓，已执行强制市价全平！")
+                    dingtalk.report_system_alert("违规干预 (已记录标记)", "系统检测到人工加仓，已执行强制市价全平！")
                     break
 
                 if actual_qty < self.watched_qty - 0.001:
@@ -305,6 +315,7 @@ class PositionSupervisor:
                 with open(self.state_file, 'r') as f:
                     saved_state = json.load(f)
                     self.last_tv_side = saved_state.get("last_tv_side")
+                    self.manual_intervention_flag = saved_state.get("manual_intervention_flag", False)
                     logger.info(f"💾 已读取硬盘记忆：TV最后指令方向为 {self.last_tv_side}")
 
             pos = position_manager.get_position(self.symbol)
