@@ -51,7 +51,7 @@ class PositionSupervisor:
             4: 0.50    # 强势 - 更早启动保本
         }
 
-        logger.info("🧠 币安 VPS 最终优化版已加载（四档TP比例激活 + PositionManager 架构还原！）")
+        logger.info("🧠 币安 VPS 最终优化版已加载（四档TP比例激活 + PositionManager 架构还原 + 手误修复终极版！）")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -168,7 +168,10 @@ class PositionSupervisor:
 
         self.best_price = entry_price
         dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime)
-        self.watched_qty, self.watched_entry, self.monitoring = True, entry_price, True
+        
+        # 🚀 致命手误已修复：精确记录初始仓位数量 (qty)
+        self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
+        
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
