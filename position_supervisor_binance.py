@@ -33,7 +33,9 @@ class PositionSupervisor:
         self.initial_qty = 0.0
         self.watched_qty = 0.0
         self.watched_entry = 0.0
+        
         self.current_side = None
+        self.last_tv_side = None  # 🚀 新增：死死记住 TV 的最后神圣指令
 
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
@@ -44,7 +46,7 @@ class PositionSupervisor:
             1: 0.72, 2: 0.68, 3: 0.60, 4: 0.50
         }
 
-        logger.info("🧠 币安 VPS 最终审计重构版已加载（精准解析 + 状态核实 + 完美兼容）")
+        logger.info("🧠 币安 VPS [生产终局版]已加载（零容忍人工干预 + 挂单自愈 + 极速保护）")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -69,7 +71,6 @@ class PositionSupervisor:
         self.tp3_mult = float(payload.get("tp3_m", 4.8))
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
 
-        # 🚀 优化点 1：在入口处就基于 regime 提前锁定 tp_ratios
         if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
         elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
         elif self.regime == 3: self.tp_ratios = [0.18, 0.32, 0.50]
@@ -81,22 +82,28 @@ class PositionSupervisor:
         try:
             self.monitoring = False
 
-            # 🚀 优化点 1：深度解析 CLOSE_PROTECT 带出的具体原因
+            # 🚀 优化点：分级解析 CLOSE_PROTECT，极端行情加速处理
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "极端保护"
-                self._close_all(f"保护性全平 - {reason}")
+                if "极端" in reason or "反转" in reason:
+                    self._close_all(f"🚨 红色警报保护性全平 - {reason}")
+                else:
+                    self._close_all(f"🛡️ 保护性全平 - {reason}")
                 return
 
             if raw_action == "CLOSE_TP3":
-                self._close_all("TP3 止盈全平")
+                self._close_all("🎯 TP3 止盈全平")
                 return
 
             if raw_action == "CLOSE":
                 reason = payload.get("reason", "TV 强制清仓")
-                self._close_all(f"TV 强制清仓: {reason}")
+                self._close_all(f"🧹 TV 强制清仓: {reason}")
                 return
 
             if raw_action in ["LONG", "SHORT"]:
+                # 记录神圣指令
+                self.last_tv_side = raw_action
+                
                 binance_client.cancel_all_open_orders()
                 time.sleep(0.6)
                 self._close_all("新信号到达，强制清理旧仓位")
@@ -125,7 +132,6 @@ class PositionSupervisor:
                 binance_client.place_market_order(raw_action, qty)
                 time.sleep(2)
 
-                # 🚀 优化点 5：统一调用 position_manager 核实仓位
                 pos = position_manager.get_position(self.symbol)
                 if pos and float(pos.get("positionAmt", 0)) != 0:
                     self.current_side = raw_action
@@ -161,35 +167,46 @@ class PositionSupervisor:
         self.best_price = entry_price
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         
-        # 🚀 优化点 4：执行完所有挂单操作后，再发开仓报告
         dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
         while self.monitoring:
             try:
-                # 🚀 优化点 5：循环内全量使用 position_manager
                 pos = position_manager.get_position(self.symbol)
                 real_amt = float(pos.get("positionAmt", 0)) if pos else 0.0
                 
                 if real_amt == 0:
-                    self._close_all("仓位归零 (实盘核实)")
+                    self._close_all("仓位归零 (实盘核实已清空)")
                     break
 
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
-                if actual_side != self.current_side:
-                    self._close_all("强制对齐 (方向反转)")
-                    dingtalk.report_force_align(actual_side, self.current_side)
+                actual_qty = abs(real_amt)
+
+                # 🚀 终极防护 1：严格锁定最后 TV 方向
+                if actual_side != self.last_tv_side:
+                    self._close_all(f"🚨 致命违规：实盘方向({actual_side})与 TV指令({self.last_tv_side})反转！强制斩仓！")
+                    dingtalk.report_force_align(actual_side, self.last_tv_side)
                     break
 
-                actual_qty = abs(real_amt)
-                
-                # 🚀 优化点 3：人工干预与状态同步检测
-                # 如果实盘数量变小了（比如人工平了一半，或者某档TP被吃掉），VPS状态立刻同步，防止瞎算！
+                # 🚀 终极防护 2：对“人工手贱加仓”零容忍秒杀
+                if actual_qty > self.watched_qty + 0.001:
+                    logger.warning(f"🚨 检测到人工违规加仓！系统记录: {self.watched_qty}, 实盘: {actual_qty}. 强行清盘保护！")
+                    self._close_all("🚨 拒绝人工违规加仓，强制清盘没收权限！")
+                    dingtalk.report_system_alert("违规干预", "系统检测到人工加仓，为防止算法风控失效，已执行强制市价全平！")
+                    break
+
+                # 正常 TP 或人工减仓，状态同步
                 if actual_qty < self.watched_qty - 0.001:
-                    logger.info(f"检测到仓位变动 (可能TP触发或人工干预减仓): {self.watched_qty} -> {actual_qty}")
+                    logger.info(f"✅ 仓位合规变动 (TP触发/部分平仓): {self.watched_qty} -> {actual_qty}")
                     self.watched_qty = actual_qty 
-                # (如果人工瞎加仓导致 actual_qty 变大，为防止风控失效，不主动调大 watched_qty)
+
+                # 🚀 终极防护 3：挂单存活检测 (防手贱撤单)
+                open_orders = position_manager.get_open_orders(self.symbol)
+                if len(open_orders) == 0 and actual_qty > 0:
+                    logger.warning("🚨 警告：发现持仓裸奔！所有保护挂单已丢失，立即自动重建防线！")
+                    self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=self.current_sl)
+                    dingtalk.report_system_alert("防线重建", "检测到所有保护挂单被意外撤销，系统已自动重新铺设止盈/止损网！")
 
                 curr_px = binance_client.get_current_price(self.symbol)
                 if self.current_side == "LONG":
@@ -197,7 +214,7 @@ class PositionSupervisor:
                 else:
                     self.best_price = min(self.best_price, curr_px)
 
-                # 保本逻辑判断
+                # 移动保本逻辑
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
@@ -218,7 +235,6 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
-                            # 🚀 优化点 4：实盘核实重建防线后，才发推移报告
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 追踪止盈保本推移")
                     else:
                         new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry)
@@ -253,18 +269,16 @@ class PositionSupervisor:
         for _ in range(6):
             binance_client.close_all_positions()
             time.sleep(0.7)
-            # 🚀 统一调用
             pos = position_manager.get_position(self.symbol)
             if not pos or float(pos.get("positionAmt", 0)) == 0:
                 closed_successfully = True
                 break
         self.monitoring = False
         
-        # 🚀 优化点 4：实盘确定清仓成功后再发报告
         if reason and closed_successfully:
             dingtalk.report_supervisor_close(reason)
         elif reason:
-            dingtalk.report_system_alert("⚠️ 清仓可能未完全执行", reason)
+            dingtalk.report_system_alert("⚠️ 清仓未完全执行", reason)
 
     def recover_state_on_startup(self):
         try:
@@ -272,6 +286,10 @@ class PositionSupervisor:
             if pos and float(pos.get("positionAmt", 0)) != 0:
                 real_amt = float(pos["positionAmt"])
                 self.current_side = "LONG" if real_amt > 0 else "SHORT"
+                
+                # 恢复时，同步最后神圣方向
+                self.last_tv_side = self.current_side 
+                
                 self.initial_qty = abs(real_amt)
                 self.watched_qty = self.initial_qty
                 self.watched_entry = float(pos["entryPrice"])
@@ -281,7 +299,7 @@ class PositionSupervisor:
                 self.current_sl = self.watched_entry 
                 
                 self.monitoring = True
-                logger.info("🔄 灾备自愈：哨兵已重新接管")
+                logger.info("🔄 灾备自愈：哨兵已满血接管实盘")
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
         except Exception as e:
             logger.error(f"灾备恢复失败: {e}")
