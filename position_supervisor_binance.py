@@ -39,7 +39,7 @@ class PositionSupervisor:
         self.last_tv_side = None
         self.manual_intervention_flag = False
         
-        # 🚀 TV理论比对池
+        # TV理论比对池
         self.tv_tps = [0.0, 0.0, 0.0]
 
         self.daily_start_date = ""
@@ -107,13 +107,13 @@ class PositionSupervisor:
         try:
             self.monitoring = False
 
-            # 🛡️ 保护性全平
+            # 保护性全平
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护性清仓"
                 self._close_all(f"{reason}")
                 return
 
-            # 🎯 TP3 终极收网
+            # TP3 终极收网
             if raw_action == "CLOSE_TP3":
                 self._close_all("TP3 止盈收网")
                 return
@@ -123,7 +123,7 @@ class PositionSupervisor:
                 self._close_all(f"{reason}")
                 return
 
-            # ⚔️ 新方向开仓（先撤 -> 后平 -> 等待 -> 再开）
+            # 新方向开仓（先撤 -> 后平 -> 等待 -> 再开）
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self.manual_intervention_flag = False
@@ -185,22 +185,19 @@ class PositionSupervisor:
             tp3 = round(entry_price - self.current_atr * self.tp3_mult, 2)
             self.current_sl = round(entry_price + self.current_atr * self.sl_mult, 2)
 
-        # 🚀 立刻铺设限价止盈防线
+        # 永远一手：立刻铺设 3层 限价防线
         if qty1 >= 0.001: binance_client.place_limit_order(close_side, qty1, tp1, reduce_only=True)
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
 
-        # 🛑 核心改动：不再发送初始硬止损，防止币安恶意插针扫损。防线交由 TV 和雷达接管。
-        # binance_client.place_stop_market_order(close_side, self.current_sl) -> 已移除
-        logger.info("🛡️ 初始硬止损已隐身，防线完全交由 TV 信号与本地追踪雷达接管！")
+        # 🛑 核心改动：不再发送初始硬止损，完全交由本地防守
+        logger.info("🛡️ 初始硬止损已隐身，防线交由 TV 与本地雷达接管！")
 
         self.best_price = entry_price
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
         
         logger.info(f"[TV理论止盈参考] TP1={self.tv_tps[0]}, TP2={self.tv_tps[1]}, TP3={self.tv_tps[2]}")
-        
-        # 将参数打包交给钉钉战报处理
         dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
@@ -212,7 +209,6 @@ class PositionSupervisor:
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 actual_qty = abs(real_amt)
                 
-                # 🛑 防人工全平
                 if real_amt == 0:
                     if self.watched_qty > 0:
                         self.manual_intervention_flag = True
@@ -222,30 +218,25 @@ class PositionSupervisor:
                         self._close_all("仓位归零 (正常离场)")
                     break
 
-                # 🛑 强制方向对齐
                 if actual_side != self.last_tv_side:
                     self._close_all(f"致命方向错乱：实盘({actual_side}) vs TV({self.last_tv_side})")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
                     break
 
-                # 🛑 防人工加仓
                 if actual_qty > self.watched_qty + 0.001:
                     self.manual_intervention_flag = True
                     self._save_state()
                     self._close_all("🚨 拒绝人工违规加仓，强制没收操作权限！")
                     break
 
-                # 🟢 TP 触发或正常减仓
                 if actual_qty < self.watched_qty - 0.001:
                     logger.info(f"✅ 仓位合规衰减: {self.watched_qty} -> {actual_qty}")
                     self.watched_qty = actual_qty 
                     self._save_state()
 
-                # 🛡️ 挂单自愈系统 (智能判断是否已处于追踪状态)
                 open_orders = position_manager.get_open_orders(self.symbol)
                 if len(open_orders) == 0 and actual_qty > 0:
                     logger.warning("🚨 发现持仓裸奔！立即自动重建防线！")
-                    # 如果雷达已经启动，就把止损挂上；如果没启动，就不挂止损，保持隐身。
                     is_trailing = False
                     if self.current_side == "LONG" and self.current_sl >= self.watched_entry:
                         is_trailing = True
@@ -260,7 +251,7 @@ class PositionSupervisor:
                 if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
                 else: self.best_price = min(self.best_price, curr_px)
 
-                # 🚀 追踪保本雷达
+                # 追踪保本雷达
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
@@ -281,18 +272,15 @@ class PositionSupervisor:
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._save_state()
-                            # 此时传入 dynamic_sl，雷达接管止损，向交易所挂出保本实体单
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 雷达启动，物理保本止损已挂出")
                     else:
                         new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry)
-                        # 如果没有初始值或需要更新
                         if self.current_sl > self.watched_entry or new_sl < self.current_sl - 2.0:
                             binance_client.cancel_all_open_orders()
                             time.sleep(0.5)
                             self.current_sl = new_sl
                             self._save_state()
-                            # 此时传入 dynamic_sl，雷达接管止损，向交易所挂出保本实体单
                             self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
                             dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 雷达启动，物理保本止损已挂出")
 
@@ -308,7 +296,7 @@ class PositionSupervisor:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
-        # 只有动态追踪生效时，才会向交易所发送物理止损单
+        # 仅在动态追踪生效时向交易所挂出止损
         if dynamic_sl:
             binance_client.place_stop_market_order(close_side, dynamic_sl)
 
@@ -339,7 +327,6 @@ class PositionSupervisor:
                     saved_state = json.load(f)
                     self.last_tv_side = saved_state.get("last_tv_side")
                     self.manual_intervention_flag = saved_state.get("manual_intervention_flag", False)
-                    logger.info(f"💾 灾备读取：TV最后指令为 {self.last_tv_side}")
 
             pos = position_manager.get_position(self.symbol)
             if pos and float(pos.get("positionAmt", 0)) != 0:
