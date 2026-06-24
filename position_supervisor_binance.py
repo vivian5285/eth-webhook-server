@@ -26,6 +26,9 @@ class PositionSupervisor:
         self.sl_mult = 1.25
         self.current_trail_factor = 0.50
 
+        # 🚀 币安专属：0.4% 的同向开仓偏移滤网
+        self.price_diff_pct = 0.004 
+
         self.regime = 3
         self.current_atr = 30.0
         self.best_price = 0.0
@@ -50,7 +53,7 @@ class PositionSupervisor:
         self.breakeven_ratios = {1: 0.72, 2: 0.68, 3: 0.60, 4: 0.50}
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [隐身防守追踪版] 已加载：20x杠杆 + 移除初始硬止损 + 雷达接管追踪")
+        logger.info("🧠 币安 VPS [0.4% 百分比滤网版] 已加载：防震荡+隐身防守追踪！")
 
     def _save_state(self):
         state = {
@@ -123,49 +126,80 @@ class PositionSupervisor:
                 self._close_all(f"{reason}")
                 return
 
-            # 新方向开仓（先撤 -> 后平 -> 等待 -> 再开）
+            # ⚔️ 智能入场与滤网判断
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self.manual_intervention_flag = False
                 self._save_state()
-                
-                binance_client.cancel_all_open_orders()
-                time.sleep(0.5)
-                self._close_all("新方向指令到达，强制清场换防")
-                time.sleep(0.8) 
+                self._handle_smart_entry(raw_action)
+                return
 
-                curr_px = binance_client.get_current_price(self.symbol)
-                balance = binance_client.get_available_balance()
-                baseline = self._get_or_update_daily_baseline(balance)
-                daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
-
-                if daily_pnl_pct <= self.cb_level2_pct:
-                    dingtalk.report_system_alert("🔴 账户物理熔断", f"今日亏损 {daily_pnl_pct:.2f}%，停止开新仓")
-                    return
-
-                if self.regime == 1: dynamic_margin = 0.15
-                elif self.regime == 2: dynamic_margin = 0.25
-                elif self.regime == 3: dynamic_margin = 0.35
-                else: dynamic_margin = 0.50
-
-                if daily_pnl_pct <= self.cb_level1_pct:
-                    dynamic_margin *= 0.5
-
-                binance_client.set_leverage(self.symbol, leverage=20)
-                qty = round((balance * dynamic_margin * 20) / curr_px, 3)
-                qty = max(qty, round(20.0 / curr_px + 0.001, 3))
-
-                binance_client.place_market_order(raw_action, qty)
-                time.sleep(2)
-
-                pos = position_manager.get_position(self.symbol)
-                if pos and float(pos.get("positionAmt", 0)) != 0:
-                    self.current_side = raw_action
-                    real_qty = abs(float(pos["positionAmt"]))
-                    self.initial_qty = real_qty
-                    self._protect_and_monitor(real_qty, float(pos["entryPrice"]))
         finally:
             self._lock.release()
+
+    # ==================== 🚀 币安专属百分比智能滤网 ====================
+    def _handle_smart_entry(self, action):
+        curr_px = binance_client.get_current_price(self.symbol)
+        pos = position_manager.get_position(self.symbol)
+        has_position = pos and float(pos.get("positionAmt", 0)) != 0
+
+        if not has_position:
+            binance_client.cancel_all_open_orders()
+            time.sleep(0.5)
+            self._open_position(action, curr_px)
+            return
+
+        real_amt = float(pos["positionAmt"])
+        current_side = "LONG" if real_amt > 0 else "SHORT"
+        avg_price = float(pos["entryPrice"])
+
+        # 核心逻辑：同向对比百分比，反向直接对冲
+        if current_side == action:
+            diff_pct = abs(curr_px - avg_price) / avg_price
+            if diff_pct <= self.price_diff_pct:
+                logger.info(f"🛡️ [币安拦截] 现价 {curr_px} 与持仓均价 {avg_price} 同向差异 {diff_pct*100:.2f}% ≤ 阈值 {self.price_diff_pct*100:.2f}%，防震荡忽略！")
+                return
+            else:
+                logger.info(f"🔄 [币安换仓] 现价 {curr_px} 与持仓均价 {avg_price} 同向差异 {diff_pct*100:.2f}% > 阈值 {self.price_diff_pct*100:.2f}%，执行先平后开！")
+                self._close_all("同方向大幅推移，更新阵地")
+                time.sleep(1.2)
+                self._open_position(action, curr_px)
+        else:
+            logger.info(f"⚔️ [币安反转] 收到反向信号，执行先平后开")
+            self._close_all("新方向指令到达，强制清场换防")
+            time.sleep(1.2)
+            self._open_position(action, curr_px)
+
+    def _open_position(self, action, curr_px):
+        balance = binance_client.get_available_balance()
+        baseline = self._get_or_update_daily_baseline(balance)
+        daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
+
+        if daily_pnl_pct <= self.cb_level2_pct:
+            dingtalk.report_system_alert("🔴 账户物理熔断", f"今日亏损 {daily_pnl_pct:.2f}%，停止开新仓")
+            return
+
+        if self.regime == 1: dynamic_margin = 0.15
+        elif self.regime == 2: dynamic_margin = 0.25
+        elif self.regime == 3: dynamic_margin = 0.35
+        else: dynamic_margin = 0.50
+
+        if daily_pnl_pct <= self.cb_level1_pct:
+            dynamic_margin *= 0.5
+
+        binance_client.set_leverage(self.symbol, leverage=20)
+        qty = round((balance * dynamic_margin * 20) / curr_px, 3)
+        qty = max(qty, round(20.0 / curr_px + 0.001, 3))
+
+        binance_client.place_market_order(action, qty)
+        time.sleep(2)
+
+        pos = position_manager.get_position(self.symbol)
+        if pos and float(pos.get("positionAmt", 0)) != 0:
+            self.current_side = action
+            real_qty = abs(float(pos["positionAmt"]))
+            self.initial_qty = real_qty
+            self._protect_and_monitor(real_qty, float(pos["entryPrice"]))
 
     def _protect_and_monitor(self, qty, entry_price):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
@@ -173,7 +207,6 @@ class PositionSupervisor:
         qty2 = round(qty * self.tp_ratios[1], 3)
         qty3 = round(qty - qty1 - qty2, 3)
 
-        # 独立计算理论上的追踪起点
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -190,7 +223,6 @@ class PositionSupervisor:
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
 
-        # 🛑 核心改动：不再发送初始硬止损，完全交由本地防守
         logger.info("🛡️ 初始硬止损已隐身，防线交由 TV 与本地雷达接管！")
 
         self.best_price = entry_price
