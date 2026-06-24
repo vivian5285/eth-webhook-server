@@ -37,6 +37,9 @@ class PositionSupervisor:
         self.current_side = None
         self.last_tv_side = None
         self.manual_intervention_flag = False
+        
+        # 🚀 理论比对参数
+        self.tv_tps = [0.0, 0.0, 0.0]
 
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
@@ -48,7 +51,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [已移除固定止损 + 仓位缩减至13倍]已加载")
+        logger.info("🧠 币安 VPS [实盘与理论TP终极对比版] 已加载")
 
     def _save_state(self):
         state = {
@@ -76,7 +79,6 @@ class PositionSupervisor:
                 with open(tracker_file, 'w') as f:
                     json.dump({'date': today, 'balance': current_balance}, f)
             except: pass
-            logger.info(f"📅 新交易日基线已更新: {current_balance:.2f} USDT")
         return self.daily_start_balance
 
     def handle_signal(self, payload):
@@ -87,6 +89,13 @@ class PositionSupervisor:
         self.tp2_mult = float(payload.get("tp2_m", 3.0))
         self.tp3_mult = float(payload.get("tp3_m", 4.8))
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
+        
+        # 🚀 提取理论参考价格
+        self.tv_tps = [
+            float(payload.get("tv_tp1", 0)),
+            float(payload.get("tv_tp2", 0)),
+            float(payload.get("tv_tp3", 0))
+        ]
 
         if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
         elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
@@ -120,7 +129,7 @@ class PositionSupervisor:
                 
                 binance_client.cancel_all_open_orders()
                 time.sleep(0.5)
-                self._close_all("新信号到达，强制清理旧阵地准备战斗")
+                self._close_all("新方向到达，强制清场，永远一手")
                 time.sleep(0.8)
 
                 curr_px = binance_client.get_current_price(self.symbol)
@@ -140,7 +149,6 @@ class PositionSupervisor:
                 if daily_pnl_pct <= self.cb_level1_pct:
                     dynamic_margin *= 0.5
 
-                # ==================== 已调整为 *13（原 *20） ====================
                 qty = round((balance * dynamic_margin * 13) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
 
@@ -181,7 +189,8 @@ class PositionSupervisor:
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
         
-        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime)
+        # 🚀 将实盘 TP 与 理论 TV_TP 传给钉钉播报
+        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -273,7 +282,6 @@ class PositionSupervisor:
             tp_safe = round(entry + self.current_atr * self.tp3_mult, 2)
         else:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
-
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
 
     def _close_all(self, reason=""):
@@ -308,10 +316,8 @@ class PositionSupervisor:
             if pos and float(pos.get("positionAmt", 0)) != 0:
                 real_amt = float(pos["positionAmt"])
                 self.current_side = "LONG" if real_amt > 0 else "SHORT"
-                
                 if not self.last_tv_side:
                     self.last_tv_side = self.current_side 
-                
                 self.initial_qty = abs(real_amt)
                 self.watched_qty = self.initial_qty
                 self.watched_entry = float(pos["entryPrice"])
