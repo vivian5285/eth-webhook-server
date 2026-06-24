@@ -51,7 +51,7 @@ class PositionSupervisor:
         }
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [10.0 满分封神版] 已加载：13倍稳健杠杆 + TV理论TP对比 + 硬盘记忆护甲")
+        logger.info("🧠 币安 VPS [10.0 满分封神版] 已加载：20倍杠杆 + TV理论TP对比 + 硬盘记忆护甲")
 
     def _save_state(self):
         state = {
@@ -152,6 +152,9 @@ class PositionSupervisor:
 
                 if daily_pnl_pct <= self.cb_level1_pct:
                     dynamic_margin *= 0.5
+
+                # 设置杠杆为20倍（新增）
+                binance_client.set_leverage(self.symbol, leverage=20)
 
                 # 🚀 已改回 20 倍杠杆
                 qty = round((balance * dynamic_margin * 20) / curr_px, 3)
