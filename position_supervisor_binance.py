@@ -153,8 +153,8 @@ class PositionSupervisor:
                 if daily_pnl_pct <= self.cb_level1_pct:
                     dynamic_margin *= 0.5
 
-                # 🚀 降维防守：开仓乘数由 20 降为 13
-                qty = round((balance * dynamic_margin * 13) / curr_px, 3)
+                # 🚀 已改回 20 倍杠杆
+                qty = round((balance * dynamic_margin * 20) / curr_px, 3)
                 qty = max(qty, round(20.0 / curr_px + 0.001, 3))
 
                 binance_client.place_market_order(raw_action, qty)
