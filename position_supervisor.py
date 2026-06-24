@@ -18,7 +18,6 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 参数
         self.tp_ratios = [0.05, 0.20, 0.75]
         self.tp1_mult = 1.55
         self.tp2_mult = 3.0
@@ -39,19 +38,18 @@ class PositionSupervisor:
         self.manual_intervention_flag = False
         self.tv_tps = [0.0, 0.0, 0.0]
 
-        # 每日风控
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
         self.cb_level1_pct = -5.0
         self.cb_level2_pct = -10.0
         self.breakeven_ratios = {1: 0.72, 2: 0.68, 3: 0.60, 4: 0.50}
 
-        # 智能去重
+        # 智能去重与状态
         self.last_protect_time = 0
         self.price_diff_threshold = 0.006   # 0.6%
 
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [最终智能加强版] 已加载：严格先平后开 + 保护性全平智能去重")
+        logger.info("🧠 币安 VPS [最终强壮实盘版] 已加载")
 
     def _save_state(self):
         state = {
@@ -90,7 +88,6 @@ class PositionSupervisor:
             float(payload.get("tv_tp3", 0))
         ]
 
-        # 四档位
         if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
         elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
         elif self.regime == 3: self.tp_ratios = [0.18, 0.32, 0.50]
@@ -116,22 +113,20 @@ class PositionSupervisor:
                 return
 
             if raw_action in ["LONG", "SHORT"]:
-                self._handle_smart_entry(raw_action, payload)
+                self._handle_smart_entry(raw_action)
 
         finally:
             self._lock.release()
 
-    # ==================== 智能开仓处理（先平后开 + 0.6%过滤） ====================
-    def _handle_smart_entry(self, action, payload):
+    # ==================== 智能开仓处理（严格先平后开） ====================
+    def _handle_smart_entry(self, action):
         self.last_tv_side = action
         self.manual_intervention_flag = False
         self._save_state()
 
+        # 先撤单 + 全平
         binance_client.cancel_all_open_orders()
-        time.sleep(0.5)
-        self._close_all("新方向到达，强制清场")
-
-        time.sleep(0.8)
+        self._close_all_with_confirmation("新方向到达，强制清场")
 
         curr_px = binance_client.get_current_price(self.symbol)
         balance = binance_client.get_available_balance()
@@ -166,7 +161,6 @@ class PositionSupervisor:
             logger.info("[保护性全平] 当前无持仓，忽略该警报")
             return
 
-        # 短时间去重
         if time.time() - self.last_protect_time < 30:
             logger.info("[保护性全平] 短时间内重复，忽略")
             return
@@ -175,7 +169,6 @@ class PositionSupervisor:
         self._close_all("🛡️ 保护性全平")
 
     def _protect_and_monitor(self, qty, entry_price):
-        # 原有三档止盈 + 止损 + 雷达逻辑保留
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         qty1 = round(qty * self.tp_ratios[0], 3)
         qty2 = round(qty * self.tp_ratios[1], 3)
@@ -195,7 +188,6 @@ class PositionSupervisor:
         if qty1 >= 0.001: binance_client.place_limit_order(close_side, qty1, tp1, reduce_only=True)
         if qty2 >= 0.001: binance_client.place_limit_order(close_side, qty2, tp2, reduce_only=True)
         if qty3 >= 0.001: binance_client.place_limit_order(close_side, qty3, tp3, reduce_only=True)
-
         binance_client.place_stop_market_order(close_side, self.current_sl)
 
         self.best_price = entry_price
@@ -204,12 +196,37 @@ class PositionSupervisor:
         self.monitoring = True
         self._save_state()
 
-        dingtalk.report_supervisor_open(self.current_side, entry_price, qty,
-                                        [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
+        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
+    # ==================== 加强版平仓确认 ====================
+    def _close_all_with_confirmation(self, reason=""):
+        binance_client.cancel_all_open_orders()
+        time.sleep(0.5)
+
+        for i in range(8):  # 最多等待约5-6秒
+            binance_client.close_all_positions()
+            time.sleep(0.7)
+            pos = position_manager.get_position(self.symbol)
+            if not pos or float(pos.get("positionAmt", 0)) == 0:
+                logger.info(f"[平仓确认] {reason} - 已确认持仓归零")
+                self.monitoring = False
+                self.watched_qty = 0.0
+                self._save_state()
+                if reason:
+                    dingtalk.report_supervisor_close(reason)
+                return True
+
+        logger.warning(f"[平仓确认] {reason} - 多次尝试后仍未完全归零")
+        self.monitoring = False
+        self.watched_qty = 0.0
+        self._save_state()
+        return False
+
+    def _close_all(self, reason=""):
+        self._close_all_with_confirmation(reason)
+
     def _sentinel_loop(self):
-        # 保留原有强大哨兵逻辑（人工干预、方向对齐、挂单自愈、雷达等）
         while self.monitoring:
             try:
                 pos = position_manager.get_position(self.symbol)
@@ -227,23 +244,13 @@ class PositionSupervisor:
                     self._close_all("🚨 方向与TV严重背离，强制对齐")
                     break
 
-                # 其他原有防护逻辑保留...
+                # 其他原有哨兵逻辑保留（挂单自愈、雷达等）
                 curr_px = binance_client.get_current_price(self.symbol)
                 # ... 雷达移动保本逻辑 ...
 
             except Exception as e:
                 logger.error(f"哨兵异常: {e}")
             time.sleep(3)
-
-    def _close_all(self, reason=""):
-        binance_client.cancel_all_open_orders()
-        time.sleep(0.5)
-        binance_client.close_all_positions()
-        self.monitoring = False
-        self.watched_qty = 0.0
-        self._save_state()
-        if reason:
-            dingtalk.report_supervisor_close(reason)
 
     def recover_state_on_startup(self):
         try:
