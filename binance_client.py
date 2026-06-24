@@ -17,6 +17,17 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logger.info("🟢 Binance Client V10.42 已加载 (底层挂单查询已补全)")
 
+    # ==================== 新增：设置杠杆 ====================
+    def set_leverage(self, symbol="ETHUSDT", leverage=20):
+        """设置指定交易对的杠杆倍数"""
+        try:
+            result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"[设置杠杆成功] {symbol} → {leverage}x")
+            return result
+        except Exception as e:
+            logger.error(f"[设置杠杆失败] {symbol} → {leverage}x: {e}")
+            return None
+
     # ==================== 查询类 ====================
     def get_current_price(self, symbol="ETHUSDT"):
         try:
