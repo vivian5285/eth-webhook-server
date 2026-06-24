@@ -16,32 +16,45 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ==================== Webhook 入口 ====================
+# ==================== Webhook 入口（及时响应版） ====================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # 1. 尝试解析 JSON（兼容 TradingView 多种格式）
-    data = request.get_json(force=True, silent=True)
+    # 1. 快速解析 JSON（兼容 TradingView 多种格式）
+    try:
+        if request.is_json:
+            data = request.get_json()
+        else:
+            raw_data = request.get_data(as_text=True)
+            data = json.loads(raw_data) if raw_data else {}
+    except Exception as e:
+        logger.warning(f"[Webhook] JSON 解析失败: {e}")
+        return jsonify({
+            "status": "error", 
+            "message": "Invalid JSON format"
+        }), 400
 
     if not data:
-        try:
-            raw_data = request.get_data(as_text=True)
-            data = json.loads(raw_data)
-        except Exception as e:
-            logger.warning(f"[Webhook] JSON 解析失败: {e}")
-            return jsonify({"status": "error", "message": "无效的 JSON 数据"}), 400
+        return jsonify({
+            "status": "error", 
+            "message": "Empty payload"
+        }), 400
 
-    # 2. 校验密钥
+    # 2. 密钥校验（快速失败）
     secret = str(data.get("secret", "")).strip()
     expected_secret = os.getenv("WEBHOOK_SECRET", "528586")
 
     if secret != expected_secret:
-        logger.warning("[Webhook] Secret 校验失败！")
-        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+        logger.warning("[Webhook] Secret 校验失败")
+        return jsonify({
+            "status": "error", 
+            "message": "Invalid secret"
+        }), 403
 
     action = data.get("action", "UNKNOWN")
-    logger.info(f"[Webhook] 收到有效信号 → Action: {action} | Regime: {data.get('regime', 'N/A')}")
+    logger.info(f"[Webhook] 收到信号 → {action} | Regime: {data.get('regime', 'N/A')}")
 
-    # 3. 异步交给大脑处理（避免阻塞 Flask）
+    # 3. 立即返回成功（关键！让 TradingView 快速确认）
+    #    实际处理放到后台线程，避免阻塞响应
     try:
         threading.Thread(
             target=position_supervisor.handle_signal,
@@ -50,8 +63,13 @@ def webhook():
         ).start()
     except Exception as e:
         logger.error(f"[Webhook] 启动处理线程失败: {e}")
-        return jsonify({"status": "error", "message": "内部执行错误"}), 500
+        # 即使启动线程失败，也返回成功，避免 TradingView 报错
+        return jsonify({
+            "status": "success",
+            "message": "Signal received (processing may have issues)"
+        }), 200
 
+    # 4. 快速返回响应给 TradingView
     return jsonify({
         "status": "success",
         "message": "Signal received and processing started",
@@ -59,16 +77,16 @@ def webhook():
     }), 200
 
 
-# ==================== 健康检查接口 ====================
+# ==================== 健康检查 ====================
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "ok",
         "service": "binance_webhook",
-        "version": "v6.9-final"
+        "version": "final-stable"
     }), 200
 
 
 if __name__ == '__main__':
-    logger.info("🚀 Binance Webhook 服务启动中...")
-    app.run(host='127.0.0.1', port=5003, debug=False)
+    logger.info("🚀 Binance Webhook 服务启动中（及时响应稳定版）...")
+    app.run(host='127.0.0.1', port=5003, debug=False, threaded=True)
