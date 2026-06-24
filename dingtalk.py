@@ -43,7 +43,7 @@ def send_alert(title, data_dict, header_color="#000000"):
 
     markdown_text = f"""### <font color="{header_color}">{title}</font>
 > **⏱ 军区时间**：`{now_time}`
-> **📍 策略节点**：[ 中海资本 · 万亿战神 v6.9 ]
+> **📍 策略节点**：[ 中海资本 · 万亿战神 v6.9.13 ]
 
 ---
 {body_text}
@@ -71,17 +71,22 @@ def get_regime_name(regime_code):
     if regime_code == 4: return _green("🚀 [4档] 强势单边 (积极吃饱)")
     return "未知状态"
 
-# ==================== 开仓战报 (极具视觉冲击力) ====================
-def report_supervisor_open(side, price, qty, tp_pxs, atr, regime):
+# ==================== 开仓战报 (实盘 vs TV理论比对) ====================
+def report_supervisor_open(side, price, qty, tp_pxs, atr, regime, tv_tps=None):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
-    tp_str = f"TP1 `{tp_pxs[0]:.2f}` ➔ TP2 `{tp_pxs[1]:.2f}` ➔ TP3 `{tp_pxs[2]:.2f}`"
+    
+    # 🚀 展示实盘计算的 TP 与 TV理论传来的 TP 进行精准比对
+    if tv_tps and len(tv_tps) == 3 and tv_tps[0] > 0:
+        tp_str = f"TP1 `{tp_pxs[0]:.2f}` (TV:`{tv_tps[0]:.2f}`) ➔ TP2 `{tp_pxs[1]:.2f}` (TV:`{tv_tps[1]:.2f}`) ➔ TP3 `{tp_pxs[2]:.2f}` (TV:`{tv_tps[2]:.2f}`)"
+    else:
+        tp_str = f"TP1 `{tp_pxs[0]:.2f}` ➔ TP2 `{tp_pxs[1]:.2f}` ➔ TP3 `{tp_pxs[2]:.2f}`"
 
     data = {
         "🎛️ 交易方向": side_str,
         "📊 市场环境": get_regime_name(regime),
         "💰 进场均价": f"**{price:.2f}** USDT",
         "📦 部署数量": f"**{qty}** ETH",
-        "🎯 止盈阵列": _orange(tp_str),
+        "🎯 实盘止盈阵列": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}")
     }
     send_alert("⚔️ 战神列阵：实盘建仓完毕", data, header_color="#000000")
