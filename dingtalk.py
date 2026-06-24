@@ -28,12 +28,11 @@ def _get_signed_url():
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
     return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={sign}"
 
-def send_alert(title, data_dict, header_color="#000000"):
+def send_alert(title, data_dict, header_color="#F3BA2F"):
     signed_url = _get_signed_url()
     if not signed_url:
         return
 
-    # 构建高颜值 Markdown 文本
     text_lines = []
     for k, v in data_dict.items():
         text_lines.append(f"- **{k}** : {v}")
@@ -41,98 +40,94 @@ def send_alert(title, data_dict, header_color="#000000"):
     body_text = "\n".join(text_lines)
     now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+    # 🔶 币安专属 Header
     markdown_text = f"""### <font color="{header_color}">{title}</font>
 > **⏱ 军区时间**：`{now_time}`
-> **📍 策略节点**：[ 中海资本 · 万亿战神 v6.9.13 ]
+> **📍 策略节点**：[ 中海资本 · 币安万亿战神 趋势主阵地 ]
 
 ---
 {body_text}
 
 ---
-*🤖 Quant AI 自动驾驶引擎持仓播报*
+*🔶 Quant AI 趋势波段·自动驾驶引擎*
 """
 
-    payload = {
-        "msgtype": "markdown",
-        "markdown": {
-            "title": title, # 钉钉通知栏显示的标题
-            "text": markdown_text
-        }
-    }
-    try:
-        requests.post(signed_url, json=payload, timeout=6)
-    except Exception as e:
-        logger.error(f"钉钉发送失败: {e}")
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
+    try: requests.post(signed_url, json=payload, timeout=6)
+    except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
 def get_regime_name(regime_code):
     if regime_code == 1: return _gray("🧊 [1档] 极弱震荡 (保守防守)")
-    if regime_code == 2: return _blue("🚶 [2档] 弱势波段 (稳健为主)")
-    if regime_code == 3: return _orange("🏃 [3档] 中势推升 (均衡操作)")
-    if regime_code == 4: return _green("🚀 [4档] 强势单边 (积极吃饱)")
+    if regime_code == 2: return _blue("🚶 [2档] 弱势波段 (稳健推升)")
+    if regime_code == 3: return _orange("🏃 [3档] 中势推升 (标准波段)")
+    if regime_code == 4: return _green("🚀 [4档] 强势单边 (趋势吃满)")
     return "未知状态"
 
-# ==================== 开仓战报 (实盘 vs TV理论比对) ====================
+# ==================== 开仓战报 (币安趋势专属) ====================
 def report_supervisor_open(side, price, qty, tp_pxs, atr, regime, tv_tps=None):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
     
-    # 🚀 展示实盘计算的 TP 与 TV理论传来的 TP 进行精准比对
+    # 🎯 币安专属：实盘挂网价格与 TV 理论价格严格对齐展示
     if tv_tps and len(tv_tps) == 3 and tv_tps[0] > 0:
-        tp_str = f"TP1 `{tp_pxs[0]:.2f}` (TV:`{tv_tps[0]:.2f}`) ➔ TP2 `{tp_pxs[1]:.2f}` (TV:`{tv_tps[1]:.2f}`) ➔ TP3 `{tp_pxs[2]:.2f}` (TV:`{tv_tps[2]:.2f}`)"
+        tp_str = f"TP1 `{tp_pxs[0]:.2f}` (TV:`{tv_tps[0]:.2f}`)\n\n" \
+                 f"  ➔ TP2 `{tp_pxs[1]:.2f}` (TV:`{tv_tps[1]:.2f}`)\n\n" \
+                 f"  ➔ TP3 `{tp_pxs[2]:.2f}` (TV:`{tv_tps[2]:.2f}`)"
     else:
         tp_str = f"TP1 `{tp_pxs[0]:.2f}` ➔ TP2 `{tp_pxs[1]:.2f}` ➔ TP3 `{tp_pxs[2]:.2f}`"
 
     data = {
-        "🎛️ 交易方向": side_str,
-        "📊 市场环境": get_regime_name(regime),
-        "💰 进场均价": f"**{price:.2f}** USDT",
-        "📦 部署数量": f"**{qty}** ETH",
-        "🎯 实盘止盈阵列": _orange(tp_str),
+        "🎛️ 趋势方向": side_str,
+        "📊 市场强度": get_regime_name(regime),
+        "💰 进场成本": f"**{price:.2f}** USDT",
+        "📦 阵地头寸": f"**{qty}** ETH (13x稳健风控)",
+        "🕸️ 止盈网格": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}")
     }
-    send_alert("⚔️ 战神列阵：实盘建仓完毕", data, header_color="#000000")
+    # 采用币安黄作为入场战报的主打色
+    send_alert("🔶 战神出击：趋势主阵地建立", data, header_color="#F3BA2F")
 
-# ==================== 动态保本 / 干预报告 ====================
+# ==================== 动态保本 / 雷达报告 ====================
 def report_intervention(qty, entry_px, new_sl, action_msg):
     data = {
         "🛡️ 战术动作": _blue(action_msg),
-        "📦 阵地头寸": f"`{qty}` ETH",
-        "💰 入场成本": f"`{entry_px:.2f}` USDT",
-        "🔒 最新防线": _green(f"**{new_sl:.2f}** USDT (已上移)")
+        "📦 利润头寸": f"`{qty}` ETH",
+        "💰 原始成本": f"`{entry_px:.2f}` USDT",
+        "🔒 追踪止损": _green(f"**{new_sl:.2f}** USDT (已推进锁润)")
     }
-    send_alert("🚀 捷报：追踪止盈保本推移", data, header_color="#0070C0")
+    send_alert("📈 捷报：追踪雷达锁定波段利润", data, header_color="#00B050")
 
-# ==================== 强制对齐报告 (极度危险警告) ====================
+# ==================== 强制对齐 (红牌警告) ====================
 def report_force_align(real_side, expected_side):
     data = {
-        "🚨 异常状况": _red("**实盘仓位与策略大脑发生严重精神分裂！**"),
-        "🕵️ 实盘方向": _red(real_side),
-        "🧠 策略指令": _blue(expected_side),
-        "⚡ 仲裁结果": _red("**拒绝妥协！已执行物理斩仓，强行对齐信号源！**")
+        "🚨 违纪通报": _red("**币安实盘方向与 TV 终极防线发生背离！**"),
+        "🕵️ 现场方向": _red(real_side),
+        "🧠 战略要求": _blue(expected_side),
+        "⚡ 执行结果": _red("**物理斩仓！已强行对齐信号源！**")
     }
-    send_alert("🚨 严重警告：方向强行物理对齐", data, header_color="#FF0000")
+    send_alert("🚨 红牌警告：方向强行物理对齐", data, header_color="#FF0000")
 
-# ==================== 清仓战报（智能语境分析） ====================
+# ==================== 智能归因·清仓战报 ====================
 def report_supervisor_close(reason):
     if "TP3" in reason:
-        title = "🏆 完美胜利：TP3 止盈收网"
+        title = "🏆 完美胜利：币安波段吃满收网"
         header_color = "#00B050"
         color_reason = _green(f"**{reason}**")
-        status = _green("利润已全额落袋，资金回炉待命。")
-    elif "保护" in reason or "反转" in reason or "RSI" in reason or "插针" in reason:
-        title = "🛡️ 战术撤退：触发保护机制"
+        status = _green("TP3 终极目标已达，利润已全额落袋！")
+    elif "打分反转" in reason or "插针" in reason or "RSI" in reason or "保护" in reason:
+        title = "🛡️ 战术防守：触发保护归一机制"
         header_color = "#FF9900"
         color_reason = _orange(f"**{reason}**")
-        status = _gray("防守止盈/止损已触发，阵地已打扫干净。")
+        status = _gray("底层网格已清空，防守阵地已打扫干净。")
     elif "人工" in reason or "违规" in reason:
-        title = "🛑 系统截断：拒绝人工干预"
+        title = "🛑 系统截断：没收人工接管权限"
         header_color = "#FF3333"
         color_reason = _red(f"**{reason}**")
-        status = _red("系统已剥夺人工接管权限，执行强制物理清盘！")
+        status = _red("检测到手贱异动，强制清盘保护风控模型！")
     else:
-        title = "🧹 阵地清场：仓位已归零"
+        title = "🧹 阵地换防：仓位清零"
         header_color = "#808080"
         color_reason = _gray(f"**{reason}**")
-        status = "挂单已撤销，底层账本确认归零。"
+        status = "实盘与挂单已完全物理清零。"
 
     data = {
         "📋 触发归因": color_reason,
@@ -140,11 +135,10 @@ def report_supervisor_close(reason):
     }
     send_alert(title, data, header_color=header_color)
 
-# ==================== 系统底层风险告警 ====================
 def report_system_alert(title, detail):
     data = {
-        "⚠️ 告警级别": _red("最高级别 (CRITICAL)"),
+        "⚠️ 熔断级别": _red("最高级别 (CRITICAL)"),
         "📝 核心详情": _red(f"**{detail}**"),
-        "🛠️ 建议动作": "请立即登录服务器或交易所APP复核状态！"
+        "🛠️ 建议动作": "请立即登录币安账户进行安全复核！"
     }
-    send_alert(f"⚠️ 系统熔断：{title}", data, header_color="#FF0000")
+    send_alert(f"⚠️ 系统告警：{title}", data, header_color="#FF0000")
