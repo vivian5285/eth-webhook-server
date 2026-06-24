@@ -57,7 +57,7 @@ def send_alert(title, data_dict, header_color="#F3BA2F"):
     except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
 def get_regime_name(regime_code):
-    if regime_code == 1: return _gray("🧊 [1档] 极弱震荡 (保守防守)")
+    if regime_code == 1: return _gray("🧊 [1档] 极弱震荡 (防守为主)")
     if regime_code == 2: return _blue("🚶 [2档] 弱势波段 (稳健推升)")
     if regime_code == 3: return _orange("🏃 [3档] 中势推升 (标准波段)")
     if regime_code == 4: return _green("🚀 [4档] 强势单边 (趋势吃满)")
@@ -79,11 +79,10 @@ def report_supervisor_open(side, price, qty, tp_pxs, atr, regime, tv_tps=None):
         "🎛️ 趋势方向": side_str,
         "📊 市场强度": get_regime_name(regime),
         "💰 进场成本": f"**{price:.2f}** USDT",
-        "📦 阵地头寸": f"**{qty}** ETH (13x稳健风控)",
+        "📦 阵地头寸": f"**{qty}** ETH (20x全火力)",
         "🕸️ 止盈网格": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}")
     }
-    # 采用币安黄作为入场战报的主打色
     send_alert("🔶 战神出击：趋势主阵地建立", data, header_color="#F3BA2F")
 
 # ==================== 动态保本 / 雷达报告 ====================
@@ -113,12 +112,12 @@ def report_supervisor_close(reason):
         header_color = "#00B050"
         color_reason = _green(f"**{reason}**")
         status = _green("TP3 终极目标已达，利润已全额落袋！")
-    elif "打分反转" in reason or "插针" in reason or "RSI" in reason or "保护" in reason:
-        title = "🛡️ 战术防守：触发保护归一机制"
+    elif "反转" in reason or "插针" in reason or "RSI" in reason or "保护" in reason:
+        title = "🛡️ 战术防守：触发归一保护机制"
         header_color = "#FF9900"
         color_reason = _orange(f"**{reason}**")
         status = _gray("底层网格已清空，防守阵地已打扫干净。")
-    elif "人工" in reason or "违规" in reason:
+    elif "人工" in reason or "违规" in reason or "干预" in reason:
         title = "🛑 系统截断：没收人工接管权限"
         header_color = "#FF3333"
         color_reason = _red(f"**{reason}**")
