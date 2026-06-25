@@ -33,6 +33,7 @@ class PositionSupervisor:
         self.current_atr = 30.0
         self.best_price = 0.0
         self.current_sl = 0.0
+        self.tv_price = 0.0
 
         self.initial_qty = 0.0
         self.watched_qty = 0.0
@@ -42,18 +43,16 @@ class PositionSupervisor:
         self.last_tv_side = None
         self.manual_intervention_flag = False
         
-        # TV理论比对池
         self.tv_tps = [0.0, 0.0, 0.0]
 
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
         self.cb_level1_pct = -5.0
         self.cb_level2_pct = -10.0
-
         self.breakeven_ratios = {1: 0.72, 2: 0.68, 3: 0.60, 4: 0.50}
         
         self.state_file = 'vps_state.json'
-        logger.info("🧠 币安 VPS [0.4% 百分比滤网版] 已加载：防震荡+隐身防守追踪！")
+        logger.info("🧠 币安 VPS [全域终极适配版] 已加载：防震荡+防死锁+智能测距+精准滑点！")
 
     def _save_state(self):
         state = {
@@ -68,7 +67,7 @@ class PositionSupervisor:
         try:
             with open(self.state_file, 'w') as f:
                 json.dump(state, f)
-        except Exception as e: pass
+        except Exception: pass
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -79,54 +78,54 @@ class PositionSupervisor:
             try:
                 with open(tracker_file, 'w') as f: json.dump({'date': today, 'balance': current_balance}, f)
             except: pass
-            logger.info(f"📅 新交易日基线已更新: {current_balance:.2f} USDT")
         return self.daily_start_balance
 
     def handle_signal(self, payload):
         raw_action = payload.get("action", "").upper()
         self.regime = int(payload.get("regime", 3))
         self.current_atr = float(payload.get("atr", 30.0))
+        self.tv_price = float(payload.get("price", 0.0)) # 🚀 接收策略传来的现价算滑点
         self.tp1_mult = float(payload.get("tp1_m", 1.55))
         self.tp2_mult = float(payload.get("tp2_m", 3.0))
         self.tp3_mult = float(payload.get("tp3_m", 4.8))
         self.current_trail_factor = float(payload.get("trail_factor", 0.50))
         
-        # 提取 TV 理论止盈点用于比对
         self.tv_tps = [
             float(payload.get("tv_tp1", 0)),
             float(payload.get("tv_tp2", 0)),
             float(payload.get("tv_tp3", 0))
         ]
 
-        # 匹配 TV 中的比例分配
+        # 🚀 严格匹配 TV 源码的四档比例
         if self.regime == 1: self.tp_ratios = [0.25, 0.35, 0.40]
         elif self.regime == 2: self.tp_ratios = [0.20, 0.35, 0.45]
         elif self.regime == 3: self.tp_ratios = [0.18, 0.32, 0.50]
         else: self.tp_ratios = [0.05, 0.20, 0.75]
 
         if not raw_action: return
-        if not self._lock.acquire(blocking=False): return
+        
+        # 🚀 修复死锁：允许排队10秒，绝不漏接保护性清仓指令！
+        if not self._lock.acquire(timeout=10.0): 
+            logger.error("⚠️ 系统正忙，获取锁超时")
+            return
 
         try:
             self.monitoring = False
 
-            # 保护性全平
             if raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护性清仓"
-                self._close_all(f"{reason}")
+                self._close_all(f"🛡️ 保护触发: {reason}")
                 return
 
-            # TP3 终极收网
             if raw_action == "CLOSE_TP3":
-                self._close_all("TP3 止盈收网")
+                self._close_all("🎯 TP3 终极止盈收网")
                 return
 
             if raw_action == "CLOSE":
                 reason = payload.get("reason", "TV 强制清仓")
-                self._close_all(f"{reason}")
+                self._close_all(f"🧹 强制清仓: {reason}")
                 return
 
-            # ⚔️ 智能入场与滤网判断
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self.manual_intervention_flag = False
@@ -137,7 +136,6 @@ class PositionSupervisor:
         finally:
             self._lock.release()
 
-    # ==================== 🚀 币安专属百分比智能滤网 ====================
     def _handle_smart_entry(self, action):
         curr_px = binance_client.get_current_price(self.symbol)
         pos = position_manager.get_position(self.symbol)
@@ -153,14 +151,16 @@ class PositionSupervisor:
         current_side = "LONG" if real_amt > 0 else "SHORT"
         avg_price = float(pos["entryPrice"])
 
-        # 核心逻辑：同向对比百分比，反向直接对冲
+        # 核心逻辑：同向对比百分比拦截震荡，反向直接对冲
         if current_side == action:
             diff_pct = abs(curr_px - avg_price) / avg_price
             if diff_pct <= self.price_diff_pct:
-                logger.info(f"🛡️ [币安拦截] 现价 {curr_px} 与持仓均价 {avg_price} 同向差异 {diff_pct*100:.2f}% ≤ 阈值 {self.price_diff_pct*100:.2f}%，防震荡忽略！")
+                logger.info(f"🛡️ [币安拦截] 同向差异 {diff_pct*100:.2f}% ≤ 阈值 {self.price_diff_pct*100:.2f}%，防震荡忽略！")
+                self.monitoring = True 
+                threading.Thread(target=self._sentinel_loop, daemon=True).start()
                 return
             else:
-                logger.info(f"🔄 [币安换仓] 现价 {curr_px} 与持仓均价 {avg_price} 同向差异 {diff_pct*100:.2f}% > 阈值 {self.price_diff_pct*100:.2f}%，执行先平后开！")
+                logger.info(f"🔄 [币安换仓] 同向差异 {diff_pct*100:.2f}% > 阈值，执行先平后开！")
                 self._close_all("同方向大幅推移，更新阵地")
                 time.sleep(1.2)
                 self._open_position(action, curr_px)
@@ -188,6 +188,7 @@ class PositionSupervisor:
             dynamic_margin *= 0.5
 
         binance_client.set_leverage(self.symbol, leverage=20)
+        # 🚀 币安自带 3 位小数高精度兼容，不会像深币那样报错
         qty = round((balance * dynamic_margin * 20) / curr_px, 3)
         qty = max(qty, round(20.0 / curr_px + 0.001, 3))
 
@@ -207,6 +208,7 @@ class PositionSupervisor:
         qty2 = round(qty * self.tp_ratios[1], 3)
         qty3 = round(qty - qty1 - qty2, 3)
 
+        # 🚀 严格使用实盘进场价 + TV算好的乘数距离 计算挂单点位
         if self.current_side == "LONG":
             tp1 = round(entry_price + self.current_atr * self.tp1_mult, 2)
             tp2 = round(entry_price + self.current_atr * self.tp2_mult, 2)
@@ -229,8 +231,8 @@ class PositionSupervisor:
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
         
-        logger.info(f"[TV理论止盈参考] TP1={self.tv_tps[0]}, TP2={self.tv_tps[1]}, TP3={self.tv_tps[2]}")
-        dingtalk.report_supervisor_open(self.current_side, entry_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
+        # 🚀 向钉钉传入 tv_price 计算滑点
+        dingtalk.report_supervisor_open(self.current_side, entry_price, self.tv_price, qty, [tp1, tp2, tp3], self.current_atr, self.regime, self.tv_tps)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -241,6 +243,7 @@ class PositionSupervisor:
                 actual_side = "LONG" if real_amt > 0 else "SHORT"
                 actual_qty = abs(real_amt)
                 
+                # 🛡️ 铁血防线：人工全平核查
                 if real_amt == 0:
                     if self.watched_qty > 0:
                         self.manual_intervention_flag = True
@@ -250,11 +253,13 @@ class PositionSupervisor:
                         self._close_all("仓位归零 (正常离场)")
                     break
 
+                # 🛡️ 铁血防线：方向对齐核查
                 if actual_side != self.last_tv_side:
                     self._close_all(f"致命方向错乱：实盘({actual_side}) vs TV({self.last_tv_side})")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
                     break
 
+                # 🛡️ 铁血防线：人工加仓核查
                 if actual_qty > self.watched_qty + 0.001:
                     self.manual_intervention_flag = True
                     self._save_state()
@@ -266,6 +271,7 @@ class PositionSupervisor:
                     self.watched_qty = actual_qty 
                     self._save_state()
 
+                # 自愈补单系统
                 open_orders = position_manager.get_open_orders(self.symbol)
                 if len(open_orders) == 0 and actual_qty > 0:
                     logger.warning("🚨 发现持仓裸奔！立即自动重建防线！")
@@ -328,7 +334,6 @@ class PositionSupervisor:
             tp_safe = round(entry - self.current_atr * self.tp3_mult, 2)
 
         binance_client.place_limit_order(close_side, qty, tp_safe, reduce_only=True)
-        # 仅在动态追踪生效时向交易所挂出止损
         if dynamic_sl:
             binance_client.place_stop_market_order(close_side, dynamic_sl)
 
