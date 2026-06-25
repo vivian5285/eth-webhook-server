@@ -54,23 +54,24 @@ def get_regime_name(regime_code):
     if regime_code == 4: return _green("🚀 [4档] 强势单边 (趋势吃满)")
     return "未知状态"
 
-# ==================== 开仓战报 (加入精准滑点计算) ====================
 def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
     
-    # 🎯 币安黄蓝版专属：滑点计算与网格交叉核对
     if tv_price > 0:
         slip = entry_price - tv_price if side == "LONG" else tv_price - entry_price
         slip_txt = f"{slip:+.2f} 刀"
     else:
         slip_txt = "未知 (TV未传价)"
 
-    if tv_tps and len(tv_tps) == 3 and tv_tps[0] > 0:
-        tp_str = f"TP1 `{tp_pxs[0]:.2f}` (TV:`{tv_tps[0]:.2f}`)\n\n" \
-                 f"  ➔ TP2 `{tp_pxs[1]:.2f}` (TV:`{tv_tps[1]:.2f}`)\n\n" \
-                 f"  ➔ TP3 `{tp_pxs[2]:.2f}` (TV:`{tv_tps[2]:.2f}`)"
-    else:
-        tp_str = f"TP1 `{tp_pxs[0]:.2f}` ➔ TP2 `{tp_pxs[1]:.2f}` ➔ TP3 `{tp_pxs[2]:.2f}`"
+    # 动态构建网格显示，不再写死3档
+    tp_str = ""
+    valid_tp_count = sum(1 for px in tp_pxs if px > 0)
+    
+    for i in range(len(tp_pxs)):
+        if tp_pxs[i] > 0:
+            prefix = "" if tp_str == "" else "\n\n  ➔ "
+            tv_val = f"(TV:`{tv_tps[i]:.2f}`)" if tv_tps and i < len(tv_tps) and tv_tps[i] > 0 else ""
+            tp_str += f"{prefix}TP{i+1} `{tp_pxs[i]:.2f}` {tv_val}"
 
     data = {
         "🎛️ 趋势方向": side_str,
@@ -79,54 +80,34 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📦 阵地头寸": f"**{qty}** ETH (20x 满血火力)",
         "🕸️ 止盈网格": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}"),
-        "📡 哨兵状态": _blue("🟢 实盘核查：3挡实体限价单已挂载，初始硬止损隐身！")
+        "📡 哨兵状态": _blue(f"🟢 实盘核查：{valid_tp_count}挡实体限价单已挂载，初始硬止损隐身！")
     }
     send_alert("🔶 战神出击：币安趋势主阵地建立", data, header_color="#F3BA2F")
 
 def report_intervention(qty, entry_px, new_sl, action_msg):
-    data = {
+    send_alert("📈 捷报：追踪雷达锁死趋势利润", {
         "🛡️ 战术动作": _blue(action_msg),
         "📦 利润头寸": f"`{qty}` ETH",
         "💰 原始成本": f"`{entry_px:.2f}` USDT",
         "🔒 最新止损": _green(f"**{new_sl:.2f}** USDT (已上移锁润)"),
         "📡 实盘核查": _blue("✅ 确认利润回吐雷达启动，物理保本单已推至盘口！")
-    }
-    send_alert("📈 捷报：追踪雷达锁死趋势利润", data, header_color="#0070C0")
+    }, "#0070C0")
 
 def report_force_align(real_side, expected_side):
     send_alert("🚨 严重警告：方向强行物理对齐", {
-        "🚨 异常状况": _red("**币安仓位与 TV 战略指令发生严重精神分裂！**"),
+        "🚨 异常状况": _red("**币安仓位与 TV 战略指令发生严重背离！**"),
         "🕵️ 现场方向": _red(real_side),
         "🧠 策略指令": _blue(expected_side),
         "⚡ 仲裁结果": _red("**拒绝妥协！已完成物理级清仓，坚决对齐信号源！**")
-    }, header_color="#FF0000")
+    }, "#FF0000")
 
 def report_supervisor_close(reason):
-    if "TP3" in reason:
-        title = "🏆 完美胜利：币安大趋势吃满收网"
-        header_color = "#00B050"
-        color_reason = _green(f"**{reason}**")
-        status = _green("TP3 终极网格全部吃掉，暴利已安全落袋。")
-    elif "反转" in reason or "插针" in reason or "RSI" in reason or "保护" in reason:
-        title = "🛡️ 战术防守：统一归一保护机制触发"
-        header_color = "#FF9900"
-        color_reason = _orange(f"**{reason}**")
-        status = _gray("大级别防守警报到达，多空网格全撤，打扫战场待命。")
-    elif "人工" in reason or "违规" in reason or "干预" in reason:
-        title = "🛑 铁血截断：强制接管清盘"
-        header_color = "#FF3333"
-        color_reason = _red(f"**{reason}**")
-        status = _red("系统已无情截断违规乱动，强制全平没收交易权限！")
-    else:
-        title = "🧹 换防清场：仓位已归零"
-        header_color = "#808080"
-        color_reason = _gray(f"**{reason}**")
-        status = "交易所真实持仓已核实，账本完美归零。"
+    if "TP3" in reason: title, color, status = "🏆 完美胜利：币安大趋势吃满收网", "#00B050", "TP3 终极网格全部吃掉，暴利已安全落袋。"
+    elif "保护" in reason: title, color, status = "🛡️ 战术防守：统一归一保护机制触发", "#FF9900", "大级别防守警报到达，多空网格全撤，打扫战场待命。"
+    elif "人工" in reason or "违规" in reason: title, color, status = "🛑 铁血截断：强制接管清盘", "#FF3333", "系统已无情截断违规乱动，强制全平没收交易权限！"
+    else: title, color, status = "🧹 换防清场：仓位已归零", "#808080", "交易所真实持仓已核实，账本完美归零。"
 
-    send_alert(title, {"📋 触发归因": color_reason, "✅ 账本状态": status}, header_color=header_color)
+    send_alert(title, {"📋 触发归因": f"**{reason}**", "✅ 账本状态": status}, color)
 
 def report_system_alert(title, detail):
-    send_alert(f"⚠️ 系统熔断：{title}", {
-        "⚠️ 告警级别": _red("最高级别 (CRITICAL)"),
-        "📝 核心详情": _red(f"**{detail}**")
-    }, header_color="#FF0000")
+    send_alert(f"⚠️ 系统熔断：{title}", {"⚠️ 告警级别": _red("最高级别 (CRITICAL)"), "📝 核心详情": _red(f"**{detail}**")}, "#FF0000")
