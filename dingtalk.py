@@ -14,7 +14,7 @@ DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 def _green(text): return f'<font color="#00B050">{text}</font>'
 def _red(text): return f'<font color="#FF3333">{text}</font>'
 def _blue(text): return f'<font color="#0070C0">{text}</font>'
-def _orange(text): return f'<font color="#F3BA2F">{text}</font>' # 币安黄主题标签[cite: 26]
+def _orange(text): return f'<font color="#F3BA2F">{text}</font>' 
 def _gray(text): return f'<font color="#808080">{text}</font>'
 
 def _get_signed_url():
@@ -35,13 +35,13 @@ def send_alert(title, data_dict, header_color="#F3BA2F"):
 
     markdown_text = f"""### <font color="{header_color}">{title}</font>
 > **⏱ 军区时间**：`{now_time}`
-> **📍 阵地标识**：[ 币安 Binance · 150分钟核心主阵地 V12.2 ]
+> **📍 阵地标识**：[ 币安 Binance · 主力进攻阵地 ]
 
 ---
 {body_text}
 
 ---
-*🔶 Quant AI 趋势大波段·自动驾驶引擎*
+*🔶 Quant AI 自动驾驶引擎*
 """
     payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
     try: requests.post(signed_url, json=payload, timeout=6)
@@ -58,13 +58,12 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     side_str = _green("🟩 开多 (LONG)") if side == "LONG" else _red("🟥 开空 (SHORT)")
     slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知"
 
-    # 🕸️ 动态为止盈布防建立理论价对比[cite: 26]
     tp_str = ""
     for i in range(len(tp_pxs)):
         if tp_pxs[i] > 0:
             prefix = "" if tp_str == "" else "\n\n  ➔ "
             tv_val = f"(TV理论:`{tv_tps[i]:.2f}`)" if tv_tps and i < len(tv_tps) and tv_tps[i] > 0 else ""
-            tp_str += f"{prefix}TP{i+1} 实盘挂单 `{tp_pxs[i]:.2f}` {tv_val}"
+            tp_str += f"{prefix}TP{i+1} 物理挂单 `{tp_pxs[i]:.2f}` {tv_val}"
 
     data = {
         "🎛️ 趋势方向": side_str,
@@ -73,17 +72,17 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📦 唯一头寸": f"**{qty}** ETH (币安 20x 满血火力)",
         "🕸️ 止盈布防比对": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}"),
-        "📡 哨兵状态": _blue("🟢 实盘核查：限价止盈网格已全部铺设，先平后开净空成功！")
+        "📡 哨兵状态": _blue("🟢 实盘核查：TP123限价网格已铺设，未设硬止损，雷达待命中！")
     }
-    send_alert("🔶 战神出击：币安大级别主阵地建立", data, header_color="#F3BA2F")
+    send_alert("🔶 战神出击：币安大级别阵地建立", data, header_color="#F3BA2F")
 
 def report_intervention(qty, entry_px, new_sl, action_msg):
     send_alert("📈 捷报：追踪雷达锁死趋势利润", {
         "🛡️ 战术动作": _blue(action_msg),
-        "📦 利润头寸": f"`{qty}` ETH",
+        "📦 利润头寸": f"`{qty}` 张",
         "💰 原始成本": f"`{entry_px:.2f}` USDT",
-        "🔒 最新止损": _green(f"**{new_sl:.2f}** USDT (已保护利润)"),
-        "📡 实盘核查": _blue("✅ 确认触发移动保本机制！物理条件单已在币安端上移推升。")
+        "🔒 最新硬防线": _green(f"**{new_sl:.2f}** USDT (物理保本单已挂)"),
+        "📡 实盘核查": _blue("✅ 确认触发移动保本机制！实盘已挂载止损单锁定利润。")
     }, "#0070C0")
 
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price):
@@ -91,25 +90,22 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     send_alert("🔄 币安阵地异动重置", {
         "触发机制": _blue("🛡️ 智慧大脑态势感知同步"),
         "实盘动作": action_color,
-        "数量变化": f"`{old_qty}` ➔ `{new_qty}` ETH",
+        "数量变化": f"`{old_qty}` ➔ `{new_qty}`",
         "最新均价": f"**{new_entry_price:.2f}** USDT",
-        "后续动作": "✅ 已无缝接管干预！强撤废旧单，并根据当前实际张数按比例重新挂出三档限价止盈！"
+        "后续动作": "✅ 已无缝接管干预！强撤废旧单，重新铺设最新比例限价止盈！"
     }, "#FF9900")
 
 def report_force_align(real_side, expected_side):
     send_alert("🚨 严重警告：方向强行物理对齐", {
-        "🚨 异常状况": _red("**币安实盘方向与 TV 战略指令发生严重背离！**"),
+        "🚨 异常状况": _red("**实盘方向与 TV 战略指令发生严重背离！**"),
         "🕵️ 现场方向": _red(real_side),
         "🧠 策略指令": _blue(expected_side),
-        "⚡ 仲裁结果": _red("**拒绝加仓与方向重叠！已完成核武全平，强行保持干净状态。**")
+        "⚡ 仲裁结果": _red("**已拒绝逆势持仓！核武全平完毕，强行保持干净状态。**")
     }, "#FF0000")
 
 def report_supervisor_close(reason):
-    if "TP3" in reason or "止盈" in reason: title, color, status = "🏆 完美胜利：币安大趋势吃满收网", "#00B050", "三档网格已全部吃掉，暴利已安全落袋。"
-    elif "保护" in reason: title, color, status = "🛡️ 战术防守：保护平仓机制触发", "#FF9900", "大级别平仓警报到达，多空网格全撤，打扫战场空仓待命。"
-    else: title, color, status = "🧹 先平后开 / 常规清场", "#808080", "旧仓位及挂单已执行原子清空，账本归零等待下一步开仓。"
+    if "TP3" in reason or "止盈" in reason: title, color, status = "🏆 完美胜利：大趋势吃满收网", "#00B050", "三档网格已全部吃掉，暴利安全落袋。"
+    elif "保护" in reason: title, color, status = "🛡️ 战术防守：保护平仓机制触发", "#FF9900", "趋势警报解除，多空网格全撤，打扫战场空仓待命。"
+    else: title, color, status = "🧹 先平后开 / 常规清场", "#808080", "旧阵地已原子级爆破，账本归零等待新指令。"
 
     send_alert(title, {"📋 平仓原理解析": f"**{reason}**", "✅ 账本状态": status}, color)
-
-def report_system_alert(title, detail):
-    send_alert(f"⚠️ 系统告警：{title}", {"⚠️ 告警级别": _red("最高级别 (CRITICAL)"), "📝 核心详情": _red(f"**{detail}**")}, "#FF0000")
