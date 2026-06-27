@@ -17,8 +17,7 @@ class BinanceClient:
         self.client = Client(self.api_key, self.api_secret)
         logger.info("🟢 Binance Client V10.42 已加载 (底层挂单查询已补全)")
 
-    # ==================== 新增：设置杠杆 ====================
-    def set_leverage(self, symbol="ETHUSDT", leverage=20):
+    def set_leverage(self, symbol="ETHUSDT", leverage=15):
         """设置指定交易对的杠杆倍数"""
         try:
             result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
@@ -28,7 +27,6 @@ class BinanceClient:
             logger.error(f"[设置杠杆失败] {symbol} → {leverage}x: {e}")
             return None
 
-    # ==================== 查询类 ====================
     def get_current_price(self, symbol="ETHUSDT"):
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
@@ -39,7 +37,6 @@ class BinanceClient:
             return 0.0
 
     def get_available_balance(self, asset="USDT"):
-        """优先使用 marginBalance（包含未实现盈亏的真实权益）"""
         try:
             account = self.client.futures_account()
             for a in account.get("assets", []):
@@ -62,7 +59,6 @@ class BinanceClient:
             return None
 
     def get_open_orders(self, symbol="ETHUSDT"):
-        """获取当前所有挂单（配合 PositionManager 使用）"""
         try:
             orders = self.client.futures_get_open_orders(symbol=symbol)
             return orders
@@ -70,9 +66,7 @@ class BinanceClient:
             logger.error(f"[获取挂单失败] {symbol}: {e}")
             return []
 
-    # ==================== 下单类 ====================
     def place_market_order(self, side, quantity, symbol="ETHUSDT"):
-        """市价开仓"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             order = self.client.futures_create_order(
@@ -85,7 +79,6 @@ class BinanceClient:
             return None
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT", reduce_only=True):
-        """限价单（主要用于止盈）"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
@@ -101,7 +94,6 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT"):
-        """市价止损单"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
@@ -115,7 +107,6 @@ class BinanceClient:
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 
-    # ==================== 撤单 & 清仓 ====================
     def cancel_all_open_orders(self, symbol="ETHUSDT"):
         try:
             self.client.futures_cancel_all_open_orders(symbol=symbol)
