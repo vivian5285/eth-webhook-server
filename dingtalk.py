@@ -54,7 +54,7 @@ def get_regime_name(regime_code):
     if regime_code == 4: return _green("🚀 [4档] 强势单边 (趋势吃满)")
     return "未知状态"
 
-def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None):
+def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime):
     side_str = _green("🟩 开多 (LONG)") if side == "LONG" else _red("🟥 开空 (SHORT)")
     slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知"
 
@@ -62,17 +62,16 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     for i in range(len(tp_pxs)):
         if tp_pxs[i] > 0:
             prefix = "" if tp_str == "" else "\n\n  ➔ "
-            tv_val = f"(TV理论:`{tv_tps[i]:.2f}`)" if tv_tps and i < len(tv_tps) and tv_tps[i] > 0 else ""
-            tp_str += f"{prefix}TP{i+1} 物理挂单 `{tp_pxs[i]:.2f}` {tv_val}"
+            tp_str += f"{prefix}TP{i+1} 物理挂单 `{tp_pxs[i]:.2f}`"
 
     data = {
         "🎛️ 趋势方向": side_str,
         "📊 市场强度": get_regime_name(regime),
         "💰 进场成本": f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)",
-        "📦 唯一头寸": f"**{qty}** ETH (币安 20x 满血火力)",
+        "📦 唯一头寸": f"**{qty}** ETH (币安 15x 稳健火力)",
         "🕸️ 止盈布防比对": _orange(tp_str),
         "📏 波动参考": _gray(f"ATR = {atr:.4f}"),
-        "📡 哨兵状态": _blue("🟢 实盘核查：TP123限价网格已铺设，未设硬止损，雷达待命中！")
+        "📡 哨兵状态": _blue("🟢 实盘：限价网格已铺设，无硬止损，雷达待命！")
     }
     send_alert("🔶 战神出击：币安大级别阵地建立", data, header_color="#F3BA2F")
 
