@@ -11,90 +11,105 @@ logger = logging.getLogger(__name__)
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
-def _purple(text): return f'<font color="#9B59B6">{text}</font>'
-def _green(text): return f'<font color="#27AE60">{text}</font>'
-def _red(text): return f'<font color="#E74C3C">{text}</font>'
-def _blue(text): return f'<font color="#3498DB">{text}</font>'
-def _orange(text): return f'<font color="#F39C12">{text}</font>' # 币安黄
-def _gray(text): return f'<font color="#7F8C8D">{text}</font>'
+def _green(text): return f'<font color="#00B050">{text}</font>'
+def _red(text): return f'<font color="#FF3333">{text}</font>'
+def _blue(text): return f'<font color="#0070C0">{text}</font>'
+def _orange(text): return f'<font color="#F3BA2F">{text}</font>' # 币安黄主题标签[cite: 26]
+def _gray(text): return f'<font color="#808080">{text}</font>'
 
 def _get_signed_url():
     if not DINGTALK_WEBHOOK: return ""
     if not DINGTALK_SECRET: return DINGTALK_WEBHOOK
     ts = str(round(time.time() * 1000))
     hmac_code = hmac.new(DINGTALK_SECRET.encode('utf-8'), f'{ts}\n{DINGTALK_SECRET}'.encode('utf-8'), hashlib.sha256).digest()
-    return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={urllib.parse.quote_plus(base64.b64encode(hmac_code))}"
+    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+    return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={sign}"
 
-def send_alert(title, data_dict, header_color="#F39C12"):
+def send_alert(title, data_dict, header_color="#F3BA2F"):
     signed_url = _get_signed_url()
     if not signed_url: return
-    body_text = "\n".join([f"- **{k}**: {v}" for k, v in data_dict.items()])
-    # 专属币安大级别标签
-    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 币安 Binance · 150分钟四档位雷达版 V12.2 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 币安趋势波段收割机*"
-    try: requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
-    except Exception as e: pass
+
+    text_lines = [f"- **{k}** : {v}" for k, v in data_dict.items()]
+    body_text = "\n".join(text_lines)
+    now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    markdown_text = f"""### <font color="{header_color}">{title}</font>
+> **⏱ 军区时间**：`{now_time}`
+> **📍 阵地标识**：[ 币安 Binance · 150分钟核心主阵地 V12.2 ]
+
+---
+{body_text}
+
+---
+*🔶 Quant AI 趋势大波段·自动驾驶引擎*
+"""
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
+    try: requests.post(signed_url, json=payload, timeout=6)
+    except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
 def get_regime_name(regime_code):
-    if regime_code == 1: return _gray("🧊 [1档] 极弱震荡")
-    if regime_code == 2: return _blue("🚶 [2档] 弱势推升")
-    if regime_code == 3: return _orange("🏃 [3档] 中势单边")
-    if regime_code == 4: return _green("🚀 [4档] 强势主升")
+    if regime_code == 1: return _gray("🧊 [1档] 极弱震荡 (保守防守)")
+    if regime_code == 2: return _blue("🚶 [2档] 弱势波段 (稳健推升)")
+    if regime_code == 3: return _orange("🏃 [3档] 中势推升 (标准波段)")
+    if regime_code == 4: return _green("🚀 [4档] 强势单边 (趋势吃满)")
     return "未知状态"
 
-def report_binance_open(side, regime, atr, entry_price, tv_price, qty, tp_pxs, tv_tps):
+def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None):
     side_str = _green("🟩 开多 (LONG)") if side == "LONG" else _red("🟥 开空 (SHORT)")
     slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知"
 
-    # 对比实盘挂单和TV理论值
-    compare_str = ""
-    for i in range(3):
-        real_px = tp_pxs[i] if i < len(tp_pxs) else 0
-        tv_px = tv_tps[i] if i < len(tv_tps) else 0
-        prefix = "" if compare_str == "" else "\n  ➔ "
-        compare_str += f"{prefix}TP{i+1}：实盘已挂 `{real_px:.2f}` (理论 `{tv_px:.2f}`)"
+    # 🕸️ 动态为止盈布防建立理论价对比[cite: 26]
+    tp_str = ""
+    for i in range(len(tp_pxs)):
+        if tp_pxs[i] > 0:
+            prefix = "" if tp_str == "" else "\n\n  ➔ "
+            tv_val = f"(TV理论:`{tv_tps[i]:.2f}`)" if tv_tps and i < len(tv_tps) and tv_tps[i] > 0 else ""
+            tp_str += f"{prefix}TP{i+1} 实盘挂单 `{tp_pxs[i]:.2f}` {tv_val}"
 
-    send_alert("🔶 币安战神出击", {
-        "🎛️ 持仓方向": side_str,
+    data = {
+        "🎛️ 趋势方向": side_str,
         "📊 市场强度": get_regime_name(regime),
-        "💰 进场均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
-        "📦 开仓数量": f"`{qty}` ETH（20x 唯一主仓位）",
-        "📏 大级别ATR": _gray(f"{atr:.2f}"),
-        "🕸️ 止盈布防比对": _orange(compare_str),
-        "📡 系统动作": _blue("✅ 绝对净身入场！旧仓已洗清，限价止盈已挂网。")
-    }, "#F39C12")
+        "💰 进场成本": f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)",
+        "📦 唯一头寸": f"**{qty}** ETH (币安 20x 满血火力)",
+        "🕸️ 止盈布防比对": _orange(tp_str),
+        "📏 波动参考": _gray(f"ATR = {atr:.4f}"),
+        "📡 哨兵状态": _blue("🟢 实盘核查：限价止盈网格已全部铺设，先平后开净空成功！")
+    }
+    send_alert("🔶 战神出击：币安大级别主阵地建立", data, header_color="#F3BA2F")
 
-def report_radar_move(side, new_sl):
-    send_alert("📈 币安雷达：锁润防线推升", {
-        "方向": _green("多头") if side == "LONG" else _red("空头"),
-        "最新止损单": _green(f"**{new_sl:.2f}** USDT"),
-        "说明": _purple("趋势动能延续，硬止损已重新挂单至安全水位！")
-    }, "#2980B9")
+def report_intervention(qty, entry_px, new_sl, action_msg):
+    send_alert("📈 捷报：追踪雷达锁死趋势利润", {
+        "🛡️ 战术动作": _blue(action_msg),
+        "📦 利润头寸": f"`{qty}` ETH",
+        "💰 原始成本": f"`{entry_px:.2f}` USDT",
+        "🔒 最新止损": _green(f"**{new_sl:.2f}** USDT (已保护利润)"),
+        "📡 实盘核查": _blue("✅ 确认触发移动保本机制！物理条件单已在币安端上移推升。")
+    }, "#0070C0")
 
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price):
+    action_color = _green("手动增仓") if "加仓" in action_type else _orange("手动部分减仓")
     send_alert("🔄 币安阵地异动重置", {
-        "触发机制": _blue("🛡️ 态势感知引擎启动"),
-        "系统判定": _orange(action_type),
-        "仓位变化": f"`{old_qty}` -> `{new_qty}` ETH",
-        "当前均价": f"**{new_entry_price:.2f}** USDT",
-        "后续动作": "✅ 已接纳干预！撤销旧防线，基于最新仓位比例重新挂出 TP1/2/3 止盈单。"
-    }, "#E67E22")
+        "触发机制": _blue("🛡️ 智慧大脑态势感知同步"),
+        "实盘动作": action_color,
+        "数量变化": f"`{old_qty}` ➔ `{new_qty}` ETH",
+        "最新均价": f"**{new_entry_price:.2f}** USDT",
+        "后续动作": "✅ 已无缝接管干预！强撤废旧单，并根据当前实际张数按比例重新挂出三档限价止盈！"
+    }, "#FF9900")
 
 def report_force_align(real_side, expected_side):
-    send_alert("🚨 方向异常强制核武对齐", {
-        "实盘方向": f"`{real_side}`",
-        "TV期望方向": f"`{expected_side}`",
-        "处理结果": "**检测到极度背离，已动用市价对冲强平一切，恢复绝对净空！**"
+    send_alert("🚨 严重警告：方向强行物理对齐", {
+        "🚨 异常状况": _red("**币安实盘方向与 TV 战略指令发生严重背离！**"),
+        "🕵️ 现场方向": _red(real_side),
+        "🧠 策略指令": _blue(expected_side),
+        "⚡ 仲裁结果": _red("**拒绝加仓与方向重叠！已完成核武全平，强行保持干净状态。**")
     }, "#FF0000")
 
-def report_binance_clear(reason):
-    if "完结" in reason or "收网" in reason: title, color = "🏆 完美清场", "#27AE60"
-    elif "保护" in reason: title, color = "🛡️ 战术撤退", "#F39C12"
-    elif "强制" in reason or "先平" in reason: title, color = "🧹 策略核武全平", "#7F8C8D"
-    else: title, color = "🛑 阵地重置", "#C0392B"
+def report_supervisor_close(reason):
+    if "TP3" in reason or "止盈" in reason: title, color, status = "🏆 完美胜利：币安大趋势吃满收网", "#00B050", "三档网格已全部吃掉，暴利已安全落袋。"
+    elif "保护" in reason: title, color, status = "🛡️ 战术防守：保护平仓机制触发", "#FF9900", "大级别平仓警报到达，多空网格全撤，打扫战场空仓待命。"
+    else: title, color, status = "🧹 先平后开 / 常规清场", "#808080", "旧仓位及挂单已执行原子清空，账本归零等待下一步开仓。"
 
-    # 重点展示解析后的平仓原因！
-    send_alert(title, {
-        "执行结果": "✅ 币安账户已撤销所有挂单，仓位绝对归零",
-        "清场原理解析": f"**{reason}**",
-        "系统状态": "静默待机，等待下一次 150 分钟级别确定性信号..."
-    }, color)
+    send_alert(title, {"📋 平仓原理解析": f"**{reason}**", "✅ 账本状态": status}, color)
+
+def report_system_alert(title, detail):
+    send_alert(f"⚠️ 系统告警：{title}", {"⚠️ 告警级别": _red("最高级别 (CRITICAL)"), "📝 核心详情": _red(f"**{detail}**")}, "#FF0000")
