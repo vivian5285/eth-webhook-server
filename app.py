@@ -20,16 +20,13 @@ def webhook():
     if str(data.get("secret", "")).strip() != os.getenv("WEBHOOK_SECRET", "528586"): return jsonify({"status": "error", "message": "Invalid secret"}), 403
 
     raw_action = data.get("action", "UNKNOWN")
+    reason = data.get("reason", "策略安全轮换")
     
-    # 💡 优化：网关端本地控制台日志清晰解析平仓原因
     if "CLOSE_PROTECT" in raw_action:
-        action_name = "保护性全平"
-        reason = raw_action.split("|")[1] if "|" in raw_action else "策略安全换防"
-        logger.info(f"[Webhook] 📥 收到信号 → 【{action_name}】\| 原因: {reason} | Regime: {data.get('regime', 'N/A')}")
+        logger.info(f"[Webhook] 📥 收到信号 → 【保护性全平】 | 原因: {reason} | Regime: {data.get('regime', 'N/A')}")
     else:
         logger.info(f"[Webhook] 📥 收到信号 → 【{raw_action}】 | Regime: {data.get('regime', 'N/A')}")
 
-    # 异步秒回，防止 TV 报 Timeout
     try:
         threading.Thread(target=position_supervisor.handle_signal, args=(data,), daemon=True).start()
     except Exception as e:
