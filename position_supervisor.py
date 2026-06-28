@@ -18,14 +18,16 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 🚀 资金比例与雷达追踪系数由 VPS 自主控制，不再自己算价格
+        # 🚀 资金比例与智慧雷达矩阵（融合了双轨保本与分寸感机制）
+        # activation: 行情到达 TP1 距离的百分之多少，强制启动“保本盾”
+        # trail_offset: 激活后，止损线距离波段极值的 ATR 倍数 (决定防守的呼吸空间)
         self.regime_settings = {
-            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "trail": 0.55},
-            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "trail": 0.60},
-            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "trail": 0.65},
-            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "trail": 0.70}
+            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "activation": 0.40, "trail_offset": 0.40},
+            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "activation": 0.50, "trail_offset": 0.60},
+            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.60, "trail_offset": 0.90},
+            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.70, "trail_offset": 1.30}
         }
-        self.leverage = 15  # 统一调整为 15 倍杠杆
+        self.leverage = 15  # 统一稳健 15 倍杠杆
 
         self.regime = 3
         self.current_atr = 30.0
@@ -44,7 +46,7 @@ class PositionSupervisorBinance:
         self.tv_tps = [0.0, 0.0, 0.0]
         
         self.state_file = 'binance_vps_state.json'
-        logger.info("🧠 币安 VPS [军师托管版] 已加载：TV全权指挥价格，15倍杠杆配置完毕！")
+        logger.info("🧠 币安 VPS [军师托管版] 已加载：双轨智慧雷达部署完毕！")
 
     def _save_state(self):
         try:
@@ -56,7 +58,7 @@ class PositionSupervisorBinance:
                     "watched_entry": self.watched_entry, 
                     "current_sl": self.current_sl, 
                     "monitoring": self.monitoring,
-                    "tv_tps": self.tv_tps  # 必须保存 TV 传来的止盈价，防重启丢失
+                    "tv_tps": self.tv_tps  # 保存 TV 传来的止盈价
                 }, f)
         except Exception as e: 
             logger.error(f"保存状态失败: {e}")
@@ -69,7 +71,6 @@ class PositionSupervisorBinance:
         self.current_atr = float(payload.get("atr", 30.0))
         self.tv_price = float(payload.get("price", 0.0))
         
-        # 无脑提取 TV 算好的理论价格
         self.tv_tps = [
             float(payload.get("tv_tp1", 0)), 
             float(payload.get("tv_tp2", 0)), 
@@ -141,10 +142,9 @@ class PositionSupervisorBinance:
         qty2 = round(qty * ratios[1], 3)
         qty3 = round(qty - qty1 - qty2, 3)
 
-        tp_pxs = self.tv_tps  # 彻底听从 TV 给的价格
-        self.current_sl = entry_price # 仅作雷达启动参考，不挂物理止损单
+        tp_pxs = self.tv_tps  
+        self.current_sl = entry_price 
 
-        # 无脑挂出 TV 给的限价止盈单
         if qty1 > 0 and tp_pxs[0] > 0: binance_client.place_limit_order(close_side, qty1, tp_pxs[0], reduce_only=True)
         if qty2 > 0 and tp_pxs[1] > 0: binance_client.place_limit_order(close_side, qty2, tp_pxs[1], reduce_only=True)
         if qty3 > 0 and tp_pxs[2] > 0: binance_client.place_limit_order(close_side, qty3, tp_pxs[2], reduce_only=True)
@@ -194,36 +194,50 @@ class PositionSupervisorBinance:
                     curr_px = binance_client.get_current_price(self.symbol)
                     self.best_price = max(self.best_price, curr_px) if self.current_side == "LONG" else min(self.best_price, curr_px)
 
-                    # 雷达触发计算 (基于 TV 传来的 TP1 距离)
+                    # ========================================================
+                    # 🎯 智慧雷达触发计算 (双轨保本锁润机制)
+                    # ========================================================
                     tp1_dist = abs(self.tv_tps[0] - self.watched_entry) if self.tv_tps[0] > 0 else self.current_atr * 1.5
-                    trail_factor = self.regime_settings[self.regime]["trail"]
-                    activation_ratio = 0.45 if self.regime >= 3 else 0.60 
+                    
+                    cfg = self.regime_settings[self.regime]
+                    activation_ratio = cfg["activation"]
+                    trail_atr_multiplier = cfg["trail_offset"]
 
                     required = self.watched_entry + (tp1_dist * activation_ratio) if self.current_side == "LONG" else self.watched_entry - (tp1_dist * activation_ratio)
                     has_moved_favorably = curr_px >= required if self.current_side == "LONG" else curr_px <= required
 
                     if has_moved_favorably:
-                        trail_offset = self.current_atr * trail_factor * 0.45
+                        trail_offset = self.current_atr * trail_atr_multiplier
+                        # 千分之1.5的手续费/滑点缓冲，保证绝对保本
+                        fee_buffer = self.watched_entry * 0.0015 
+
                         if self.current_side == "LONG":
-                            new_sl = max(round(self.best_price - trail_offset, 2), self.watched_entry + 1.0)
-                            if new_sl > self.current_sl + 2.0:
+                            breakeven_floor = self.watched_entry + fee_buffer
+                            new_sl = max(round(self.best_price - trail_offset, 2), breakeven_floor)
+                            
+                            if new_sl > self.current_sl + 1.0: 
                                 binance_client.cancel_all_open_orders(self.symbol)
                                 time.sleep(0.5)
                                 self.current_sl = new_sl
+                                self._save_state()
                                 self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
-                                dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 雷达激活：锁润硬防线已物理推升！")
+                                dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, f"🚀 档位{self.regime} 雷达激活：保本盾升起，锁润底线物理推升！")
+                        
                         else:
-                            new_sl = min(round(self.best_price + trail_offset, 2), self.watched_entry - 1.0)
-                            if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 2.0:
+                            breakeven_floor = self.watched_entry - fee_buffer
+                            new_sl = min(round(self.best_price + trail_offset, 2), breakeven_floor)
+                            
+                            if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
                                 binance_client.cancel_all_open_orders(self.symbol)
                                 time.sleep(0.5)
                                 self.current_sl = new_sl
+                                self._save_state()
                                 self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
-                                dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, "🚀 雷达激活：锁润硬防线已物理下压！")
+                                dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, f"🚀 档位{self.regime} 雷达激活：保本盾降下，锁润顶线物理下压！")
                 finally:
                     self._lock.release()
             except Exception as e: logger.error(f"哨兵异常: {e}")
-            time.sleep(6) # 放缓巡逻频率，6秒足够且安全
+            time.sleep(6)
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
@@ -238,7 +252,6 @@ class PositionSupervisorBinance:
         if qty2 > 0 and tp_pxs[1] > 0: binance_client.place_limit_order(close_side, qty2, tp_pxs[1], reduce_only=True)
         if qty3 > 0 and tp_pxs[2] > 0: binance_client.place_limit_order(close_side, qty3, tp_pxs[2], reduce_only=True)
         
-        # 仅当雷达推升时才挂载物理止损
         if dynamic_sl: binance_client.place_stop_market_order(close_side, dynamic_sl)
 
     def _close_all(self, reason=""):
@@ -267,7 +280,7 @@ class PositionSupervisorBinance:
                 with open(self.state_file, 'r') as f:
                     s = json.load(f)
                     self.last_tv_side = s.get("last_tv_side")
-                    self.tv_tps = s.get("tv_tps", [0.0, 0.0, 0.0]) # 恢复 TV 传来的价格
+                    self.tv_tps = s.get("tv_tps", [0.0, 0.0, 0.0])
 
             pos = position_manager.get_position(self.symbol)
             if pos and float(pos.get("positionAmt", 0)) != 0:
