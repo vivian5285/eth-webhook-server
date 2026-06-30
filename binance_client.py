@@ -15,7 +15,45 @@ class BinanceClient:
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
-        logger.info("🟢 Binance Client v13.1-gold 已加载")
+        self._symbol_filters = {}
+        logger.info("🟢 Binance Client v13.3-smart-guard 已加载")
+
+    def _load_symbol_filters(self, symbol="ETHUSDT"):
+        if symbol in self._symbol_filters:
+            return self._symbol_filters[symbol]
+        try:
+            info = self.client.futures_exchange_info()
+            for s in info.get("symbols", []):
+                if s.get("symbol") == symbol:
+                    self._symbol_filters[symbol] = s
+                    return s
+        except Exception as e:
+            logger.warning(f"[合约规格] 获取失败 {symbol}: {e}")
+        return {}
+
+    def format_quantity(self, qty, symbol="ETHUSDT"):
+        sym = self._load_symbol_filters(symbol)
+        step = 0.001
+        for f in sym.get("filters", []):
+            if f.get("filterType") == "LOT_SIZE":
+                step = float(f.get("stepSize", step))
+                break
+        q = float(qty)
+        if step > 0:
+            q = round(round(q / step) * step, 8)
+        return q
+
+    def format_price(self, price, symbol="ETHUSDT"):
+        sym = self._load_symbol_filters(symbol)
+        tick = 0.01
+        for f in sym.get("filters", []):
+            if f.get("filterType") == "PRICE_FILTER":
+                tick = float(f.get("tickSize", tick))
+                break
+        p = float(price)
+        if tick > 0:
+            p = round(round(p / tick) * tick, 8)
+        return f"{p:.2f}" if tick <= 0.01 else str(p)
 
     def set_leverage(self, symbol="ETHUSDT", leverage=15):
         """设置指定交易对的杠杆倍数"""
@@ -79,20 +117,24 @@ class BinanceClient:
             return None
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT", reduce_only=True):
-        px_str = str(round(float(price), 2))
+        qty = self.format_quantity(quantity, symbol)
+        px_str = self.format_price(price, symbol)
+        if qty <= 0:
+            logger.error(f"[限价单跳过] 数量无效 {quantity}")
+            return None
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "LIMIT",
-                "timeInForce": "GTC", "quantity": quantity, "price": px_str,
+                "timeInForce": "GTC", "quantity": qty, "price": px_str,
             }
             if reduce_only:
-                params["reduceOnly"] = "true"
+                params["reduceOnly"] = True
             order = self.client.futures_create_order(**params)
-            logger.info(f"[限价单成功] {side} {quantity} @ {px_str} orderId={order.get('orderId', '')}")
+            logger.info(f"[限价单成功] {side} {qty} @ {px_str} orderId={order.get('orderId', '')}")
             return order
         except Exception as e:
-            logger.error(f"[限价单失败] {side} {quantity} @ {px_str}: {e}")
+            logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT"):
@@ -107,6 +149,17 @@ class BinanceClient:
             return order
         except Exception as e:
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
+            return None
+
+    def cancel_order(self, symbol="ETHUSDT", order_id=None):
+        if not order_id:
+            return None
+        try:
+            res = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
+            logger.info(f"[撤单成功] {symbol} orderId={order_id}")
+            return res
+        except Exception as e:
+            logger.error(f"[撤单失败] {symbol} orderId={order_id}: {e}")
             return None
 
     def cancel_all_open_orders(self, symbol="ETHUSDT"):
