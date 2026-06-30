@@ -15,7 +15,7 @@ class BinanceClient:
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
-        logger.info("🟢 Binance Client V10.42 已加载 (底层挂单查询已补全)")
+        logger.info("🟢 Binance Client v13.1-gold 已加载")
 
     def set_leverage(self, symbol="ETHUSDT", leverage=15):
         """设置指定交易对的杠杆倍数"""
@@ -79,18 +79,20 @@ class BinanceClient:
             return None
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT", reduce_only=True):
+        px_str = str(round(float(price), 2))
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "LIMIT",
-                "timeInForce": "GTC", "quantity": quantity, "price": str(round(price, 2))
+                "timeInForce": "GTC", "quantity": quantity, "price": px_str,
             }
-            if reduce_only: params["reduceOnly"] = "true"
+            if reduce_only:
+                params["reduceOnly"] = "true"
             order = self.client.futures_create_order(**params)
-            logger.info(f"[限价单成功] {side} {quantity} @ {price}")
+            logger.info(f"[限价单成功] {side} {quantity} @ {px_str} orderId={order.get('orderId', '')}")
             return order
         except Exception as e:
-            logger.error(f"[限价单失败] {side} {quantity} @ {price}: {e}")
+            logger.error(f"[限价单失败] {side} {quantity} @ {px_str}: {e}")
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT"):
