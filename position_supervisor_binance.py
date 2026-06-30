@@ -131,6 +131,126 @@ class PositionSupervisorBinance:
                 matched += 1
         return matched, pending_prices
 
+    def _collect_tp_limit_orders(self):
+        """reduceOnly 限价止盈单明细"""
+        orders = []
+        for o in binance_client.get_open_orders(self.symbol):
+            if o.get("type") != "LIMIT":
+                continue
+            if str(o.get("reduceOnly", "")).lower() not in ("true", "1"):
+                continue
+            px = float(o.get("price", 0) or 0)
+            if px <= 0:
+                continue
+            orders.append({
+                "price": round(px, 2),
+                "qty": round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3),
+            })
+        return orders
+
+    def _has_duplicate_tp_orders(self, tolerance=1.0):
+        """同一 TP 价位出现多张单，或总张数超过应有档数"""
+        orders = self._collect_tp_limit_orders()
+        expected = self._expected_tp_count()
+        if expected <= 0:
+            return False
+        if len(orders) > expected:
+            return True
+        for tp in self.tv_tps:
+            if tp <= 0:
+                continue
+            at_px = [o for o in orders if abs(o["price"] - tp) <= tolerance]
+            if len(at_px) > 1:
+                return True
+        return False
+
+    def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=1.0, qty_tol=0.002):
+        """头寸对应的 TP123 价位+数量均已正确挂好，且雷达止损（若需要）也在"""
+        tp_pxs = self.tv_tps
+        expected = self._expected_tp_count(tp_pxs)
+        if expected == 0:
+            return dynamic_sl is None or self._has_stop_sl_near(dynamic_sl, tolerance)
+
+        orders = self._collect_tp_limit_orders()
+        ratios = self.regime_settings[self.regime]["ratios"]
+        qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
+        levels = [(qty1, tp_pxs[0]), (qty2, tp_pxs[1]), (qty3, tp_pxs[2])]
+
+        matched_levels = 0
+        expected_prices = []
+        for q, px in levels:
+            if q <= 0 or px <= 0:
+                continue
+            expected_prices.append(px)
+            at_px = [o for o in orders if abs(o["price"] - px) <= tolerance]
+            if len(at_px) != 1:
+                return False
+            if abs(at_px[0]["qty"] - q) > qty_tol:
+                return False
+            matched_levels += 1
+
+        if matched_levels < expected:
+            return False
+
+        for o in orders:
+            if not any(abs(o["price"] - p) <= tolerance for p in expected_prices):
+                return False
+
+        if dynamic_sl and not self._has_stop_sl_near(dynamic_sl, tolerance):
+            return False
+        return True
+
+    def _ensure_defenses_on_recover(self, live_qty, entry, dynamic_sl=None):
+        """
+        重启接管：先审计盘口，已齐全则跳过撤单补挂，避免重复挂 TP。
+        返回 (matched, pending_prices, expected, rebuilt)
+        """
+        expected = self._expected_tp_count(self.tv_tps)
+        matched, pending_prices = self._count_matched_tp_orders(self.tv_tps)
+
+        if self._has_duplicate_tp_orders():
+            logger.warning(
+                f"🧹 检测到重复止盈单（当前 {len(self._collect_tp_limit_orders())} 张，"
+                f"应有 {expected} 档），清理后重建"
+            )
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(1.0)
+        elif self._defenses_fully_ok(live_qty, dynamic_sl):
+            logger.info(
+                f"✅ 重启接管：TP123 已在盘口齐全 ({matched}/{expected}) "
+                f"挂单价 {pending_prices}，跳过撤单补挂"
+            )
+            if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+                close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+                binance_client.place_stop_market_order(close_side, dynamic_sl)
+                logger.info(f"📡 仅补挂缺失雷达止损 @ {dynamic_sl:.2f}")
+            return matched, pending_prices, expected, False
+        elif matched >= expected:
+            logger.warning(
+                f"⚠️ 止盈档数够但数量/比例不符，清理后按仓位重建 | 挂单价 {pending_prices}"
+            )
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(1.0)
+        else:
+            logger.info(
+                f"📋 止盈未齐 ({matched}/{expected}) 挂单价 {pending_prices}，补挂缺失档位"
+            )
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(1.0)
+
+        for attempt in range(3):
+            placed = self._rebuild_defenses(live_qty, entry, dynamic_sl=dynamic_sl)
+            logger.info(f"重启补挂 TP 尝试 {attempt + 1}/3，API 返回成功 {placed}/{expected} 笔")
+            matched, pending_prices = self._wait_tp_hung(self.tv_tps, retries=4, delay=0.8)
+            if expected == 0 or matched >= expected:
+                break
+            logger.warning(
+                f"重启补挂 TP 未完成 ({matched}/{expected})，挂单价 {pending_prices}，准备重试"
+            )
+            time.sleep(1.0)
+
+        return matched, pending_prices, expected, True
+
     def _wait_tp_hung(self, tp_pxs, retries=5, delay=0.8):
         expected = self._expected_tp_count(tp_pxs)
         matched, pending = 0, []
@@ -517,21 +637,9 @@ class PositionSupervisorBinance:
                     f"雷达={'已激活' if radar_active else '待命'}"
                 )
 
-                binance_client.cancel_all_open_orders(self.symbol)
-                time.sleep(1.0)
-
-                expected = self._expected_tp_count(self.tv_tps)
-                matched, pending_prices = 0, []
-                for attempt in range(3):
-                    placed = self._rebuild_defenses(real_amt, self.watched_entry, dynamic_sl=sl_to_pass)
-                    logger.info(f"重启补挂 TP 尝试 {attempt + 1}/3，API 返回成功 {placed}/{expected} 笔")
-                    matched, pending_prices = self._wait_tp_hung(self.tv_tps, retries=4, delay=0.8)
-                    if expected == 0 or matched >= expected:
-                        break
-                    logger.warning(
-                        f"重启补挂 TP 未完成 ({matched}/{expected})，挂单价 {pending_prices}，准备重试"
-                    )
-                    time.sleep(1.0)
+                matched, pending_prices, expected, _rebuilt = self._ensure_defenses_on_recover(
+                    real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
+                )
 
                 self.monitoring = True
                 self._save_state()
@@ -540,9 +648,10 @@ class PositionSupervisorBinance:
 
                 verified = self._verify_position(self.current_side)
                 if verified and abs(verified['size'] - real_amt) < 0.001:
+                    skip_note = " | 盘口已齐全，未重复补挂" if not _rebuilt else ""
                     verify_note = (
                         f"接管 {real_amt} ETH @ {verified['entry_price']:.2f} | "
-                        f"止盈 {matched} 档 | 挂单价 {pending_prices}"
+                        f"止盈 {matched} 档 | 挂单价 {pending_prices}{skip_note}"
                     )
                     dingtalk.report_recover_takeover(
                         self.current_side, real_amt, verified['entry_price'],
