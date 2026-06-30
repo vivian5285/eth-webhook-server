@@ -66,11 +66,9 @@ kill_by_port() {
 kill_residual_processes() {
     pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
     pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
-    pkill -9 -f "gunicorn.*app:app"             2>/dev/null || true
+    pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
     pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
     pkill -9 -f "position_supervisor.py"        2>/dev/null || true
-    pkill -9 -f "${DIR}/app.py"                 2>/dev/null || true
-    pkill -9 -f "python.*app.py"                2>/dev/null || true
     if [ -f "$PID_FILE" ]; then
         OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -167,28 +165,52 @@ install_deps() {
         || log_warn "语法预检跳过（非致命）"
 }
 
+get_gunicorn_master_pid() {
+    local pid=""
+    if [ -f "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        pid="$(lsof -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 start_service() {
     log_step "[3/6] 启动 Gunicorn 网关 (workers=${WORKERS}, threads=${THREADS})..."
     mkdir -p "$LOG_DIR"
     : > "$LOG_FILE"
+    rm -f "$PID_FILE"
 
-    nohup gunicorn \
+    # 使用 --daemon 正式脱离终端，避免 nohup & 被 shell 作业控制 SIGKILL
+    gunicorn \
         --workers "$WORKERS" \
         --threads "$THREADS" \
         --timeout 120 \
         --graceful-timeout 30 \
         --bind "${BIND_HOST}:${PORT}" \
         --pid "$PID_FILE" \
+        --log-file "$LOG_FILE" \
         --access-logfile "$LOG_DIR/gunicorn_access.log" \
         --error-logfile "$LOG_DIR/gunicorn_error.log" \
         --capture-output \
-        app:app >> "$LOG_FILE" 2>&1 &
+        --daemon \
+        app:app
 
-    sleep 1
-    GUNICORN_PID="$(cat "$PID_FILE" 2>/dev/null || echo "")"
-    if [ -z "$GUNICORN_PID" ] || ! kill -0 "$GUNICORN_PID" 2>/dev/null; then
+    sleep 2
+    GUNICORN_PID="$(get_gunicorn_master_pid || true)"
+    if [ -z "$GUNICORN_PID" ]; then
         log_fail "Gunicorn 启动失败，请检查日志"
-        tail -n 20 "$LOG_FILE" 2>/dev/null || true
+        tail -n 30 "$LOG_FILE" 2>/dev/null || true
+        tail -n 15 "$LOG_DIR/gunicorn_error.log" 2>/dev/null || true
         return 1
     fi
     log_ok "Gunicorn 已启动 PID=${GUNICORN_PID}"
@@ -214,15 +236,10 @@ health_check() {
     log_step "[5/6] 多重健康审计..."
     sleep "$HEALTH_WAIT_SEC"
 
-    GUNICORN_PID="$(cat "$PID_FILE" 2>/dev/null || echo "")"
-    if [ -n "$GUNICORN_PID" ] && kill -0 "$GUNICORN_PID" 2>/dev/null; then
-        log_ok "Gunicorn 主进程存活 PID=${GUNICORN_PID}"
-    else
-        log_fail "Gunicorn 主进程已退出"
-    fi
-
     HEALTH_BODY="$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "")"
+    HEALTH_OK=0
     if echo "$HEALTH_BODY" | grep -q "binance_webhook"; then
+        HEALTH_OK=1
         log_ok "GET /health 正常 → ${HEALTH_BODY}"
     else
         log_fail "GET /health 异常 → ${HEALTH_BODY:-无响应}"
@@ -236,6 +253,15 @@ health_check() {
         log_ok "POST /webhook 回路 200 OK（secret 校验通过）"
     else
         log_fail "POST /webhook 异常 HTTP=${HTTP_STATUS}"
+    fi
+
+    GUNICORN_PID="$(get_gunicorn_master_pid || true)"
+    if [ -n "$GUNICORN_PID" ] && kill -0 "$GUNICORN_PID" 2>/dev/null; then
+        log_ok "Gunicorn 主进程存活 PID=${GUNICORN_PID}"
+    elif [ "$HEALTH_OK" -eq 1 ] && [ "$HTTP_STATUS" = "200" ]; then
+        log_warn "PID 文件进程已变，但 HTTP 健康检查全部通过（服务正常运行）"
+    else
+        log_fail "Gunicorn 主进程已退出且 HTTP 检查未通过"
     fi
 
     sleep 2
