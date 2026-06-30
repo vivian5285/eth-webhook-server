@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import logging
+import json
+import time
+import threading
 from binance.client import Client
 import os
 from dotenv import load_dotenv
@@ -9,6 +12,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
+WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
+
 
 class BinanceClient:
     def __init__(self):
@@ -16,7 +21,14 @@ class BinanceClient:
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
         self._symbol_filters = {}
-        logger.info("🟢 Binance Client v13.4-nuclear-guard 已加载")
+        self._price_cache = {}
+        self._price_cache_ts = {}
+        self._price_lock = threading.Lock()
+        self._pub_ws_running = False
+        self._pub_ws_symbol = None
+        self._rest_price_min_interval = 30
+        self._last_rest_price_fetch = 0.0
+        logger.info("🟢 Binance Client v13.4.3-ws-radar 已加载")
 
     def _load_symbol_filters(self, symbol="ETHUSDT"):
         if symbol in self._symbol_filters:
@@ -65,14 +77,95 @@ class BinanceClient:
             logger.error(f"[设置杠杆失败] {symbol} → {leverage}x: {e}")
             return None
 
-    def get_current_price(self, symbol="ETHUSDT"):
+    def _set_ws_price(self, symbol, price):
+        with self._price_lock:
+            self._price_cache[symbol] = price
+            self._price_cache_ts[symbol] = time.time()
+
+    def _get_ws_price(self, symbol, max_age=30.0):
+        with self._price_lock:
+            px = self._price_cache.get(symbol)
+            ts = self._price_cache_ts.get(symbol, 0.0)
+        if px and (time.time() - ts) <= max_age:
+            return px
+        return None
+
+    def start_public_price_ws(self, symbol="ETHUSDT"):
+        """订阅 markPrice@1s — 雷达用 WS 推价，避免 REST 轮询限频"""
+        if self._pub_ws_running and self._pub_ws_symbol == symbol:
+            return
+        self._pub_ws_symbol = symbol
+        if not self._pub_ws_running:
+            self._pub_ws_running = True
+            threading.Thread(
+                target=self._public_price_ws_loop, args=(symbol,), daemon=True,
+            ).start()
+            logger.info(f"📡 币安公开 WS 启动: {symbol}@markPrice@1s")
+
+    def _public_price_ws_loop(self, symbol):
         try:
+            import websocket
+        except ImportError:
+            logger.warning("未安装 websocket-client，雷达将回退 REST 慢速兜底")
+            self._pub_ws_running = False
+            return
+
+        stream = f"{symbol.lower()}@markPrice@1s"
+        url = f"{WS_MARKET_BASE}/{stream}"
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                if isinstance(data, dict) and "data" in data:
+                    data = data["data"]
+                px = float(data.get("p") or data.get("markPrice") or 0)
+                if px > 0:
+                    self._set_ws_price(symbol, px)
+            except Exception as e:
+                logger.debug(f"WS 行情解析: {e}")
+
+        def on_error(ws, error):
+            logger.warning(f"币安公开 WS 错误: {error}")
+
+        def on_close(ws, code, msg):
+            logger.warning(f"币安公开 WS 断开: {code} {msg}")
+
+        while self._pub_ws_running:
+            try:
+                ws = websocket.WebSocketApp(
+                    url, on_message=on_message, on_error=on_error, on_close=on_close,
+                )
+                ws.run_forever(ping_interval=180, ping_timeout=30)
+            except Exception as e:
+                logger.error(f"币安公开 WS 异常: {e}")
+            if self._pub_ws_running:
+                time.sleep(3)
+
+    def get_current_price(self, symbol="ETHUSDT", prefer_ws=True):
+        """优先 WS 缓存；REST 仅作兜底且限频（有 WS 时 ≥30s 一次）"""
+        if prefer_ws:
+            ws_px = self._get_ws_price(symbol)
+            if ws_px:
+                return ws_px
+        now = time.time()
+        min_gap = self._rest_price_min_interval if self._pub_ws_running else 2
+        cached = self._get_ws_price(symbol, max_age=min_gap)
+        if cached:
+            return cached
+        if now - self._last_rest_price_fetch < min_gap:
+            stale = self._get_ws_price(symbol, max_age=120)
+            return stale or 0.0
+        try:
+            self._last_rest_price_fetch = now
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             price = float(ticker["price"])
+            if price > 0:
+                self._set_ws_price(symbol, price)
             return price
         except Exception as e:
             logger.error(f"[查询价格失败] {symbol}: {e}")
-            return 0.0
+            stale = self._get_ws_price(symbol, max_age=120)
+            return stale or 0.0
 
     def get_available_balance(self, asset="USDT"):
         try:
