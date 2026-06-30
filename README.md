@@ -1,107 +1,201 @@
-# ETH Webhook Trading Server
+# 币安 Binance · ETH 永续 Webhook 交易系统
 
-基于 TradingView Webhook + Binance 的 ETH 永续合约自动化交易系统（混合止盈模式）。
+**当前版本：`v13.4.3-ws-radar`**
 
-## 项目简介
-
-本系统采用**清晰分层架构**设计，将信号接收、风控编排、交易执行、后台监控、状态管理完全解耦，便于维护和扩展。适合个人 + 客户资管使用，强调**风控优先 + 防回吐**。
-
-## 系统架构（分层设计）
-app.py (入口层)
-↓
-position_supervisor.py (编排层)
-├── 信号分发 (handle_long/short/close)
-├── 每日回撤熔断检查
-└── 强制对账
-↓
-order_executor.py (执行层)
-├── 开仓 / 全平
-├── TP1/TP2/TP3 混合止盈管理
-└── 移动止损
-↓
-binance_client.py (API 封装层)
-
-**后台监控层**：`tp_monitor.py`（独立线程运行）
-**状态管理层**：`position_manager.py`
-**风控层**：`risk_manager.py`
-
-## 各模块职责
-
-| 模块 | 职责 | 说明 |
-|------|------|------|
-| `app.py` | 入口 + 路由 | 接收 TradingView Webhook，快速响应 |
-| `position_supervisor.py` | 编排 + 风控 | 信号分发、每日回撤熔断、强制对账、通知 |
-| `order_executor.py` | 交易执行 | 市价开仓、设置 TP1/TP2/TP3、移动止损、全平 |
-| `tp_monitor.py` | 后台监控 | 人工仓位变化检测、TP1 命中触发移动止损 |
-| `position_manager.py` | 状态管理 | 内存持仓 + TP3 限价单状态管理 |
-| `risk_manager.py` | 风控 | 每日回撤熔断 |
-| `binance_client.py` | Binance API 封装 | 开仓、平仓、挂单、余额查询等 |
-| `dingtalk.py` | 通知 | 钉钉机器人消息发送 |
-
-## 核心特性
-
-- **混合止盈模式**：TP1/TP2 市价分批止盈 + TP3 限价单留仓
-- **每日回撤熔断**：达到阈值自动拒绝新开仓
-- **强制对账机制**：启动时 + 人工操作后自动对账
-- **人工操作检测**：后台自动识别手动开平仓并同步状态
-- **移动止损**：TP1 命中后自动移动至保本
-- **风险控制**：基于真实账户权益计算仓位
-
-## 快速开始
-
-### 1. 安装依赖
-2. 配置环境变量
-创建 .env 文件：
-BINANCE_API_KEY=your_key
-BINANCE_API_SECRET=your_secret
-WEBHOOK_SECRET=your_webhook_secret
-DINGTALK_WEBHOOK=your_dingtalk_webhook
-3. 启动服务
-python3 app.py
-# 或使用 systemd
-sudo systemctl start eth-webhook.service
-4. 系统检查
-python3 check_system.py
-接口方法说明/webhookPOSTTradingView 信号入口/reconcilePOST手动触发强制对账/statusGET查询系统当前状态
-TradingView Webhook 信号格式示例
-{
-  "action": "LONG",
-  "atr": 45.6,
-  "secret": "your_webhook_secret"
-}
-支持的 action：LONG、SHORT、CLOSE
-注意事项
-
-系统默认使用 ETHUSDT 永续合约
-建议配合 one-way 持仓模式使用
-实盘前请先在测试网充分验证
-客户资管账户建议使用更保守的参数
-项目结构
-eth-webhook-server/
-├── app.py                    # 入口服务
-├── position_supervisor.py    # 编排 + 风控层
-├── order_executor.py         # 交易执行层
-├── tp_monitor.py             # 后台监控
-├── position_manager.py       # 状态管理
-├── risk_manager.py           # 风控
-├── binance_client.py         # Binance API 封装
-├── dingtalk.py
-├── config.py
-├── check_system.py           # 系统检查脚本
-└── README.md
-后续优化方向
-
-完善 TP1/TP2 真实命中后的市价平仓逻辑
-move_to_breakeven() 真实止损单修改
-TP3 限价单 order_id 跟踪与成交检测
-参数外部化配置
+TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 VPS 逻辑对齐，单位按 **ETH** 计算，钉钉为 **黄金主题**。
 
 ---
 
-### 保存后执行：
+## VPS 部署信息
 
-```bash
-chmod +x README.md
+| 项目 | 值 |
+|------|-----|
+| 目录 | `~/binance-engine` |
+| 端口 | **5003** |
+| 健康检查 | `GET /health` |
+| 主日志 | `logs/binance_brain.log` |
+| 部署脚本 | `bash deploy_binance.sh` |
+
+---
+
+## 系统架构
+
+```
+TradingView Webhook
+        ↓
+    app.py（网关，异步线程）
+        ↓
+position_supervisor_binance.py（智慧大脑）
+├── TV/开仓日志持久化
+├── 重启闪电接管 + TV 对账
+├── TP123 比例审计 + 增量/核武补挂
+├── 雷达移动保本（WS 推价 + STOP_MARKET）
+└── 哨兵循环（持仓/人工异动/定期扫描）
+        ↓
+binance_client.py（REST 交易 + 公开 WS 行情）
+position_manager.py（持仓查询封装）
+dingtalk.py（黄金钉钉播报）
+```
+
+> 旧版模块（`order_executor.py`、`tp_monitor.py`、`position_supervisor.py` 等）已不在热路径，当前以 `position_supervisor_binance.py` 为准。
+
+---
+
+## 核心能力（v13.4.x）
+
+### 1. 重启闪电接管
+- 读取 `binance_vps_state.json` + **TV 日志** + **开仓日志**
+- 对账：实盘方向 / 入场价 / 最新 TV 信号
+- TP123 **价位 + 数量** 严格审计（regime 比例）
+- 已齐全 → **跳过补挂**；不齐 → 增量补挂 → 仍失败 → **核武清场重挂**
+
+### 2. 限价止盈 TP123
+- 比例随档位（regime 1~4）变化，例如 3 档：`18% / 32% / 50%`
+- `reduceOnly` 限价单，价格/数量对齐 tick/step
+- 重复单自动核武撤净重挂
+
+### 3. 雷达移动保本
+- 价格达 TP1 距离的 60%（3 档默认）→ 激活雷达
+- 跟踪 `best_price`，ATR × 档位倍数推升/下压 STOP_MARKET
+- **WebSocket** 订阅 `ethusdt@markPrice@1s`，REST 查价仅 ≥30s 兜底
+- 哨兵轮询：常态 6s / 接近激活 3s / 雷达激活 2s
+- 推止损时只撤 STOP，**TP123 保留**
+
+### 4. 人工异动
+- 手动加/减仓、部分止盈 → 智能重对齐
+- 人工全平 → 撤单复位 + 钉钉
+- 方向与 TV 背离 → 核武全平
+
+### 5. 日志与审计
+| 文件 | 说明 |
+|------|------|
+| `logs/binance_tv_journal.jsonl` | 每条 TV 信号 |
+| `logs/binance_open_journal.jsonl` | 开仓 / 接管记录 |
+| `logs/binance_brain.log` | 大脑主日志 |
+| `binance_vps_state.json` | 运行时状态（自动生成） |
+
+---
+
+## 环境变量（`.env`）
+
+```env
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+WEBHOOK_SECRET=528586
+DINGTALK_WEBHOOK=
+DINGTALK_SECRET=
+FLASK_HOST=0.0.0.0
+FLASK_PORT=5003
+```
+
+---
+
+## TradingView Webhook
+
+**URL：** `http://你的VPS:5003/webhook`
+
+```json
+{
+  "action": "SHORT",
+  "secret": "528586",
+  "regime": 3,
+  "atr": 30.0,
+  "price": 1560.0,
+  "tv_tp1": 1537.85,
+  "tv_tp2": 1517.40,
+  "tv_tp3": 1499.22,
+  "reason": "可选说明"
+}
+```
+
+| action | 说明 |
+|--------|------|
+| `LONG` / `SHORT` | 先平后开 → 挂 TP123 → 启动哨兵 + WS |
+| `CLOSE` | 换防清场 |
+| `CLOSE_PROTECT` | 保护性全平 |
+| `CLOSE_TP3` | TP3 吃满收网 |
+
+---
+
+## 本地开发
 
 ```bash
 pip install -r requirements.txt
+python app.py
+# 或
+gunicorn --bind 0.0.0.0:5003 --workers 1 --threads 10 --daemon app:app
+```
+
+---
+
+## VPS 部署（标准流程）
+
+```bash
+cd ~/binance-engine
+git fetch origin && git reset --hard origin/main
+
+# 版本门控
+grep v13.4.3-ws-radar binance_client.py position_supervisor_binance.py
+
+pip3 install -r requirements.txt   # 含 websocket-client
+bash deploy_binance.sh
+
+# 验收
+tail -60 logs/binance_brain.log
+curl -s http://127.0.0.1:5003/health
+```
+
+**部署成功日志示例：**
+
+```
+🧠 币安 VPS [v13.4.3-ws-radar] 军师托管版已加载
+📡 币安公开 WS 启动: ETHUSDT@markPrice@1s
+Websocket connected
+🔄 [系统重启点火] 检测到实盘持仓 SHORT 0.406 ETH ...
+✅TP1 0.073@1537.85 | ✅TP2 0.13@1517.40 | ✅TP3 0.203@1499.22
+```
+
+**健康检查响应：**
+
+```json
+{"service":"binance_webhook","status":"ok","version":"v13.4.3-ws-radar"}
+```
+
+---
+
+## 与深币系统区别
+
+| 项目 | 币安 | 深币 |
+|------|------|------|
+| 单位 | ETH | 张 |
+| 端口 | 5003 | 5004 |
+| 钉钉主题 | 黄金 | 紫金 |
+| 止损类型 | STOP_MARKET | 条件单 trigger |
+| WS 频道 | markPrice@1s | market-latest |
+| 杠杆 | 15x | 15x |
+
+---
+
+## 版本演进摘要
+
+| 版本 | 要点 |
+|------|------|
+| v13.3-smart-guard | TV/开仓日志、比例审计、增量补挂 |
+| v13.4-nuclear-guard | 核武清场重挂（重复单/0-3 对齐失败） |
+| v13.4.1-qtyfix | 深币张数 `'1.000000'` 解析修复 |
+| v13.4.2-radar-live | 雷达自适应轮询 2~6s |
+| **v13.4.3-ws-radar** | **WS 推价 + REST 限频兜底** |
+
+---
+
+## 注意事项
+
+1. 部署务必 `git reset --hard origin/main`。
+2. 币安首次升级 v13.4.3 需 `pip install -r requirements.txt`（`websocket-client`）。
+3. 重启后钉钉「闪电接管报告」应显示 TP **3/3 比例审计 ✅**。
+4. 仅同时持有一个方向；新信号 **先撤单 → 平仓 → 再开仓**。
+5. 建议 one-way 持仓模式，ETHUSDT 永续。
+
+---
+
+*Quant AI · 币安黄金趋势大波段引擎*
