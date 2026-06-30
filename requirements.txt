@@ -4,3 +4,4 @@ python-binance
 python-dotenv
 gunicorn
 requests
+websocket-client==1.8.0
