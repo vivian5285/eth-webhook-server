@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ==========================================
 # 币安 Binance — 工业级干净重部署脚本
+# 版本: v13.1-daemon2  (使用 gunicorn --daemon，勿用 nohup)
 # 流程: 强制核武清场 → 确认端口空闲 → 依赖 → 启动 → 多重健康审计
 # ==========================================
 
 set -uo pipefail
+
+DEPLOY_SCRIPT_VERSION="v13.1-daemon2"
 
 PORT=5003
 WORKERS=1
@@ -146,17 +149,30 @@ install_deps() {
     find "$DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
 
-    if grep -q "BINANCE_VPS_VERSION.*v13.1-gold" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
-        log_ok "position_supervisor_binance.py 版本 v13.1-gold"
+    if grep -q "BINANCE_VPS_VERSION.*v13.3-smart-guard" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
+        log_ok "position_supervisor_binance.py 版本 v13.3-smart-guard"
     else
-        log_fail "position_supervisor_binance.py 不是最新版！缺少 v13.1-gold，请先 push/pull 最新代码"
+        log_fail "position_supervisor_binance.py 不是最新版！缺少 v13.3-smart-guard，请先 push/pull 最新代码"
         return 1
+    fi
+
+    if grep -q "v13.3-smart-guard" "$DIR/binance_client.py" 2>/dev/null; then
+        log_ok "binance_client.py 版本 v13.3-smart-guard"
+    else
+        log_warn "binance_client.py 可能不是最新版（缺少 v13.3-smart-guard）"
     fi
 
     if grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
         log_ok "dingtalk.py 金色主题已就绪"
     else
         log_warn "dingtalk.py 可能不是最新金色主题"
+    fi
+
+    if grep -q "\-\-daemon" "$DIR/deploy_binance.sh" 2>/dev/null; then
+        log_ok "deploy_binance.sh ${DEPLOY_SCRIPT_VERSION}（daemon 模式）"
+    else
+        log_fail "deploy_binance.sh 仍是旧版（含 nohup）！请 git pull 最新代码"
+        return 1
     fi
 
     python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
@@ -265,10 +281,10 @@ health_check() {
     fi
 
     sleep 2
-    if grep -q "v13.1-gold" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 v13.1-gold 已成功加载"
+    if grep -q "v13.3-smart-guard" "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.3-smart-guard 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
-        log_warn "大脑已加载但版本可能过旧（日志中无 v13.1-gold）"
+        log_warn "大脑已加载但版本可能过旧（日志中无 v13.3-smart-guard）"
     elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
         log_ok "闪电接管已执行（binance_brain.log）"
     else
@@ -279,9 +295,14 @@ health_check() {
         log_ok "雷达哨兵监控已启动或待命"
     fi
 
-    echo -e "  ${CYAN}→ 当前币安相关进程:${NC}"
-    ps -ef 2>/dev/null | grep -E "gunicorn.*${PORT}|app:app" | grep -v grep \
+    echo -e "  ${CYAN}→ 当前本目录 Gunicorn 进程:${NC}"
+    ps -ef 2>/dev/null | grep "${DIR}" | grep gunicorn | grep -v grep \
         | awk '{print "     PID="$2" CMD="$8" "$9" "$10}' || true
+
+    # HTTP 全通过则视为部署成功（不因 PID 文件瞬变误报失败）
+    if [ "$HEALTH_OK" -eq 1 ] && [ "$HTTP_STATUS" = "200" ]; then
+        DEPLOY_OK=1
+    fi
 }
 
 print_summary() {
@@ -303,7 +324,7 @@ print_summary() {
     echo ""
 }
 
-echo -e "\n${CYAN}=== 币安系统 · 干净重部署开始 ===${NC}"
+echo -e "\n${CYAN}=== 币安系统 · 干净重部署开始 [${DEPLOY_SCRIPT_VERSION}] ===${NC}"
 echo -e "  工作目录: ${DIR}"
 echo -e "  目标端口: ${PORT}"
 echo ""
