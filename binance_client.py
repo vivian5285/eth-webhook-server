@@ -16,7 +16,7 @@ class BinanceClient:
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         self.client = Client(self.api_key, self.api_secret)
         self._symbol_filters = {}
-        logger.info("🟢 Binance Client v13.3-smart-guard 已加载")
+        logger.info("🟢 Binance Client v13.4-nuclear-guard 已加载")
 
     def _load_symbol_filters(self, symbol="ETHUSDT"):
         if symbol in self._symbol_filters:
