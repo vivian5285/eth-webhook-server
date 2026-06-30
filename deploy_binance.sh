@@ -149,17 +149,17 @@ install_deps() {
     find "$DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
 
-    if grep -q "BINANCE_VPS_VERSION.*v13.4-nuclear-guard" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
-        log_ok "position_supervisor_binance.py 版本 v13.4-nuclear-guard"
+    if grep -q "BINANCE_VPS_VERSION.*v13.4.3-ws-radar" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
+        log_ok "position_supervisor_binance.py 版本 v13.4.3-ws-radar"
     else
-        log_fail "position_supervisor_binance.py 不是最新版！缺少 v13.4-nuclear-guard，请先 push/pull 最新代码"
+        log_fail "position_supervisor_binance.py 不是最新版！缺少 v13.4.3-ws-radar，请先 push/pull 最新代码"
         return 1
     fi
 
-    if grep -q "v13.4-nuclear-guard" "$DIR/binance_client.py" 2>/dev/null; then
-        log_ok "binance_client.py 版本 v13.4-nuclear-guard"
+    if grep -q "v13.4.3-ws-radar" "$DIR/binance_client.py" 2>/dev/null; then
+        log_ok "binance_client.py 版本 v13.4.3-ws-radar"
     else
-        log_warn "binance_client.py 可能不是最新版（缺少 v13.4-nuclear-guard）"
+        log_warn "binance_client.py 可能不是最新版（缺少 v13.4.3-ws-radar）"
     fi
 
     if grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
@@ -281,10 +281,10 @@ health_check() {
     fi
 
     sleep 2
-    if grep -q "v13.4-nuclear-guard" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 v13.4-nuclear-guard 已成功加载"
+    if grep -q "v13.4.3-ws-radar" "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.4.3-ws-radar 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
-        log_warn "大脑已加载但版本可能过旧（日志中无 v13.4-nuclear-guard）"
+        log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.3-ws-radar）"
     elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
         log_ok "闪电接管已执行（binance_brain.log）"
     else
