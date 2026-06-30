@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.3-smart-guard"
+BINANCE_VPS_VERSION = "v13.4-nuclear-guard"
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
 
@@ -456,42 +456,131 @@ class PositionSupervisorBinance:
             time.sleep(0.4)
         return placed
 
-    def _full_rebuild_tp_loop(self, live_qty, entry, dynamic_sl=None):
-        expected = self._expected_tp_count(self.tv_tps)
-        matched, pending_prices = 0, []
-        for attempt in range(3):
-            placed = self._rebuild_defenses(live_qty, entry, dynamic_sl=dynamic_sl)
-            logger.info(f"全量重建 TP 尝试 {attempt + 1}/3，成功 {placed}/{expected} 笔")
-            matched, pending_prices = self._wait_tp_hung(
-                self.tv_tps, live_qty=live_qty, retries=5, delay=1.0,
-            )
-            audit = self._audit_tp_levels(live_qty)
-            if expected == 0 or audit["matched_full"] >= expected:
-                matched = audit["matched_full"]
-                pending_prices = audit["pending_prices"]
-                break
+    def _audit_requires_nuclear(self, audit):
+        """重复/多档缺失/总单数超标 → 必须核武级清场重挂，增量补挂权限不足"""
+        expected = audit.get("expected", 0)
+        if expected <= 0:
+            return False
+        if audit.get("matched_full", 0) >= expected and not audit.get("orphans"):
+            return False
+        orders = self._collect_tp_limit_orders()
+        if len(orders) > expected:
+            return True
+        if audit.get("matched_full", 0) == 0 and audit.get("issues"):
+            return True
+        bad = [lv for lv in audit.get("levels", []) if lv.get("status") in ("duplicate", "qty_mismatch")]
+        if bad:
+            return True
+        missing = sum(1 for lv in audit.get("levels", []) if lv.get("status") == "missing")
+        if missing >= 2:
+            return True
+        if audit.get("orphans"):
+            return True
+        return False
+
+    def _cancel_all_tp_limit_orders(self):
+        """撤销全部限价止盈（不动 STOP 雷达止损）"""
+        cancelled = 0
+        for o in binance_client.get_open_orders(self.symbol):
+            if not self._is_tp_limit_order(o):
+                continue
+            oid = o.get("orderId")
+            if oid:
+                binance_client.cancel_order(self.symbol, oid)
+                cancelled += 1
+                time.sleep(0.15)
+        if cancelled:
+            logger.info(f"🧹 已撤销全部限价止盈 {cancelled} 张")
+        return cancelled
+
+    def _ensure_radar_sl(self, dynamic_sl, live_qty=None):
+        if not dynamic_sl:
+            return
+        if self._has_stop_sl_near(dynamic_sl):
+            return
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        binance_client.place_stop_market_order(close_side, dynamic_sl)
+        time.sleep(0.35)
+
+    def _nuclear_realign_tp(self, live_qty, entry, dynamic_sl=None, rounds=3):
+        """
+        核武级止盈对齐：每轮先撤净限价 TP → 按比例重挂 TP123 → 雷达止损单独保留/重挂。
+        解决重复单堆积、多档缺失时增量补挂权限不足的问题。
+        """
+        sl_preserve = dynamic_sl is not None
+        last_audit = self._audit_tp_levels(live_qty)
+        for r in range(rounds):
             logger.warning(
-                f"全量重建未完成 ({audit['matched_full']}/{expected}) "
-                f"{self._format_audit_summary(audit)}，重试"
+                f"☢️ 核武级止盈清场重挂 {r + 1}/{rounds} | 持仓 {live_qty} ETH | "
+                f"当前 {last_audit['matched_full']}/{last_audit['expected']} | "
+                f"{self._format_audit_summary(last_audit)}"
             )
-            time.sleep(1.2)
-        return matched, pending_prices, expected
+            if sl_preserve:
+                self._cancel_all_tp_limit_orders()
+            else:
+                binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(1.0)
+            tp_sl = None if sl_preserve else dynamic_sl
+            placed = self._rebuild_defenses(live_qty, entry, dynamic_sl=tp_sl)
+            logger.info(f"☢️ 核武轮 {r + 1} 新挂 {placed} 笔限价止盈")
+            if sl_preserve:
+                time.sleep(0.6)
+                self._ensure_radar_sl(dynamic_sl, live_qty)
+            time.sleep(1.0)
+            last_audit = self._audit_tp_levels(live_qty)
+            if self._defenses_fully_ok(live_qty, dynamic_sl):
+                logger.info(f"☢️ 核武重挂成功: {self._format_audit_summary(last_audit)}")
+                return last_audit
+            logger.warning(
+                f"☢️ 核武轮 {r + 1} 仍未对齐: {self._format_audit_summary(last_audit)}"
+            )
+            time.sleep(1.5)
+        return last_audit
+
+    def _full_rebuild_tp_loop(self, live_qty, entry, dynamic_sl=None):
+        audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
+        return audit["matched_full"], audit["pending_prices"], audit["expected"]
 
     def _smart_realign_defenses(self, live_qty, entry, dynamic_sl=None, reason=""):
-        """统一智能防线对齐：孤儿清理 → 增量补挂 → 必要时全量重建"""
+        """统一智能防线对齐：审计 → 增量或核武 → 仍未达标则强制核武"""
         if reason:
             logger.info(f"🧠 智能防线对齐: {reason}")
+        initial = self._audit_tp_levels(live_qty)
+        if self._defenses_fully_ok(live_qty, dynamic_sl):
+            logger.info(f"✅ 防线已齐，跳过: {self._format_audit_summary(initial)}")
+            return {
+                "matched": initial["matched_full"],
+                "expected": initial["expected"],
+                "pending_prices": initial["pending_prices"],
+                "rebuilt": False,
+                "audit": initial,
+                "nuclear": False,
+            }
+
         self._cancel_orphan_tp_orders(live_qty)
         matched, pending_prices, expected, rebuilt = self._ensure_defenses_on_recover(
             live_qty, entry, dynamic_sl=dynamic_sl,
         )
         audit = self._audit_tp_levels(live_qty)
+        nuclear = False
+
+        if expected > 0 and audit["matched_full"] < expected:
+            logger.warning(
+                f"⚠️ 常规对齐未达标 ({audit['matched_full']}/{expected})，"
+                f"升级核武级清场重挂"
+            )
+            audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
+            matched = audit["matched_full"]
+            pending_prices = audit["pending_prices"]
+            rebuilt = nuclear = True
+
         return {
-            "matched": audit["matched_full"],
+            "matched": matched,
             "expected": expected,
-            "pending_prices": audit["pending_prices"],
+            "pending_prices": pending_prices,
             "rebuilt": rebuilt,
             "audit": audit,
+            "nuclear": nuclear,
         }
 
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
@@ -500,10 +589,15 @@ class PositionSupervisorBinance:
         self._cancel_stop_orders()
         time.sleep(0.35)
         if not self._defenses_fully_ok(live_qty, dynamic_sl=None):
-            self._cancel_orphan_tp_orders(live_qty)
-            self._patch_missing_tp_levels(live_qty)
-            time.sleep(0.6)
-        binance_client.place_stop_market_order(close_side, new_sl)
+            if self._audit_requires_nuclear(self._audit_tp_levels(live_qty)):
+                self._nuclear_realign_tp(live_qty, entry, dynamic_sl=new_sl, rounds=2)
+            else:
+                self._cancel_orphan_tp_orders(live_qty)
+                self._patch_missing_tp_levels(live_qty)
+                time.sleep(0.6)
+                self._ensure_radar_sl(new_sl, live_qty)
+        else:
+            binance_client.place_stop_market_order(close_side, new_sl)
         time.sleep(0.4)
 
     def _ensure_defenses_on_recover(self, live_qty, entry, dynamic_sl=None):
@@ -520,16 +614,13 @@ class PositionSupervisorBinance:
             f"{self._format_audit_summary(audit)}"
         )
 
-        if self._has_duplicate_tp_orders():
+        if self._audit_requires_nuclear(audit) or self._has_duplicate_tp_orders():
             logger.warning(
-                f"🧹 重复止盈单（{len(self._collect_tp_limit_orders())} 张 > {expected} 档），清场重建"
+                f"☢️ 审计触发核武级重挂: {len(self._collect_tp_limit_orders())} 张止盈 | "
+                f"{self._format_audit_summary(audit)}"
             )
-            binance_client.cancel_all_open_orders(self.symbol)
-            time.sleep(1.5)
-            matched, pending_prices, expected = self._full_rebuild_tp_loop(
-                live_qty, entry, dynamic_sl,
-            )
-            return matched, pending_prices, expected, True
+            audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
+            return audit["matched_full"], audit["pending_prices"], audit["expected"], True
 
         if self._defenses_fully_ok(live_qty, dynamic_sl):
             logger.info(
@@ -558,14 +649,10 @@ class PositionSupervisorBinance:
             return matched, audit["pending_prices"], expected, True
 
         logger.warning(
-            f"⚠️ 增量补挂仍不足 ({matched}/{expected}) {audit['issues']}，清场全量重建"
+            f"⚠️ 增量补挂仍不足 ({matched}/{expected}) {audit['issues']}，升级核武级重挂"
         )
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(1.5)
-        matched, pending_prices, expected = self._full_rebuild_tp_loop(
-            live_qty, entry, dynamic_sl,
-        )
-        return matched, pending_prices, expected, True
+        audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
+        return audit["matched_full"], audit["pending_prices"], expected, True
 
     def _wait_tp_hung(self, tp_pxs, live_qty=None, retries=5, delay=0.8):
         expected = self._expected_tp_count(tp_pxs)
