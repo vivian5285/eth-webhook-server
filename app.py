@@ -34,5 +34,11 @@ def webhook():
 
     return jsonify({"status": "success", "message": "Signal received and processing started", "action": raw_action}), 200
 
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"service": "binance_webhook", "status": "ok", "version": "v13.1"}), 200
+
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5003, debug=False, threaded=True)
