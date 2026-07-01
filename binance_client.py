@@ -28,7 +28,7 @@ class BinanceClient:
         self._pub_ws_symbol = None
         self._rest_price_min_interval = 30
         self._last_rest_price_fetch = 0.0
-        logger.info("🟢 Binance Client v13.4.3-ws-radar 已加载")
+        logger.info("🟢 Binance Client v13.4.6-flat-reconcile 已加载")
 
     def _load_symbol_filters(self, symbol="ETHUSDT"):
         if symbol in self._symbol_filters:
