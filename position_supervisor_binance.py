@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.4.5-recover-radar"
+BINANCE_VPS_VERSION = "v13.4.6-flat-reconcile"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -67,6 +67,52 @@ class PositionSupervisorBinance:
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
         self._start_signal_worker()
+        self._start_idle_flat_patrol()
+
+    def _start_idle_flat_patrol(self):
+        """空仓待命时后台巡检：发现孤立蚂蚁仓 → 自动扫尾 + 钉钉"""
+        def loop():
+            while True:
+                time.sleep(30)
+                if self.monitoring:
+                    continue
+                if not self._lock.acquire(timeout=2.0):
+                    continue
+                try:
+                    if self.monitoring:
+                        continue
+                    pos = self._get_active_position()
+                    if not pos or pos["size"] <= 0:
+                        continue
+                    if not self._is_dust_qty(pos["size"]) and not self._should_finalize_tp_victory(pos["size"]):
+                        continue
+                    if not self.current_side:
+                        self.current_side = pos["side"]
+                    logger.warning(
+                        f"🐜 [空闲巡检] 发现残量 {pos['side']} {pos['size']} ETH → 扫尾"
+                    )
+                    self._sweep_dust_and_finalize("重启扫描：盘口蚂蚁仓自动扫平")
+                except Exception as e:
+                    logger.error(f"空闲巡检异常: {e}")
+                finally:
+                    self._lock.release()
+
+        threading.Thread(target=loop, daemon=True, name="idle-flat-patrol").start()
+
+    @staticmethod
+    def _call_dingtalk(fn, **kwargs):
+        """兼容 VPS 旧版 dingtalk.py（缺少 verified / swept_dust / radar_sl_ok 等新参数）"""
+        try:
+            fn(**kwargs)
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            legacy = {
+                k: v for k, v in kwargs.items()
+                if k not in ("verified", "swept_dust", "radar_sl_ok")
+            }
+            logger.warning(f"钉钉旧版降级播报 {getattr(fn, '__name__', 'dingtalk')}: {exc}")
+            fn(**legacy)
 
     def _start_signal_worker(self):
         if self._signal_worker_started:
@@ -276,8 +322,9 @@ class PositionSupervisorBinance:
                 return
             verify_note = f"{base_note} | REST 同步略延迟"
             logger.info(f"平仓钉钉：REST 延迟，仍推送收网播报 | reason={reason}")
-        dingtalk.report_supervisor_close(
-            reason or "仓位归零 (人工全平 / 止盈吃满)",
+        self._call_dingtalk(
+            dingtalk.report_supervisor_close,
+            reason=reason or "仓位归零 (人工全平 / 止盈吃满)",
             verify_note=verify_note,
             verified=flat,
             swept_dust=swept_dust,
@@ -322,6 +369,56 @@ class PositionSupervisorBinance:
             f"(initial={self.initial_qty}, watched={self.watched_qty}) → 扫尾强平"
         )
         self._sweep_dust_and_finalize(reason)
+        return True
+
+    def _recover_missed_flat_on_startup(self, was_monitoring=False):
+        """重启对账：服务宕机/重启期间已全平，但账本仍有仓 → 补发完美胜利钉钉"""
+        pos = self._get_active_position()
+        if pos and pos["size"] > 0:
+            return False
+
+        prev_watched = float(self.watched_qty or 0)
+        prev_initial = float(self.initial_qty or 0)
+        prev_side = self.current_side
+
+        had_active_book = (
+            prev_watched > 0
+            or prev_initial > 0
+            or prev_side in ("LONG", "SHORT")
+            or was_monitoring
+        )
+        if not had_active_book:
+            last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+            if last_open and last_open.get("source") in ("open", "recover"):
+                had_active_book = True
+                prev_watched = prev_watched or float(last_open.get("qty", 0) or 0)
+                prev_side = prev_side or last_open.get("side")
+
+        if not had_active_book:
+            return False
+
+        logger.warning(
+            f"📭 [重启对账] 账本/日志曾有仓 (watched={prev_watched}, side={prev_side}, "
+            f"monitoring={was_monitoring}) 但盘口已全平 → 补发收网播报"
+        )
+        binance_client.cancel_all_open_orders(self.symbol)
+        self.monitoring = False
+        self.watched_qty = 0.0
+        self.current_side = None
+        self.initial_qty = 0.0
+        self._save_state()
+
+        verify_note = (
+            f"重启对账补发 | 原账本 {prev_watched} ETH {prev_side or ''} | "
+            f"盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
+        )
+        self._call_dingtalk(
+            dingtalk.report_supervisor_close,
+            reason="仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)",
+            verify_note=verify_note,
+            verified=True,
+            swept_dust=False,
+        )
         return True
 
     def _verify_position(self, expected_side=None):
@@ -828,9 +925,12 @@ class PositionSupervisorBinance:
         else:
             verify_note = f"{base_note} | 止损已提交，REST 同步略延迟"
             logger.info(f"雷达钉钉：止损已挂 REST 延迟，仍推送捷报 @{new_sl:.2f}")
-        dingtalk.report_intervention(
-            real_amt, self.watched_entry, new_sl,
-            action_msg,
+        self._call_dingtalk(
+            dingtalk.report_intervention,
+            qty=real_amt,
+            entry_px=self.watched_entry,
+            new_sl=new_sl,
+            action_msg=action_msg,
             verify_note=verify_note,
             verified=verified,
         )
@@ -1015,9 +1115,16 @@ class PositionSupervisorBinance:
             self._record_open_log(
                 self.current_side, verified["size"], verified["entry_price"], source="open",
             )
-            dingtalk.report_supervisor_open(
-                self.current_side, verified['entry_price'], self.tv_price,
-                verified['size'], tp_pxs, self.current_atr, self.regime, self.tv_tps,
+            self._call_dingtalk(
+                dingtalk.report_supervisor_open,
+                side=self.current_side,
+                entry_price=verified['entry_price'],
+                tv_price=self.tv_price,
+                qty=verified['size'],
+                tp_pxs=tp_pxs,
+                atr=self.current_atr,
+                regime=self.regime,
+                tv_tps=self.tv_tps,
                 verify_note=verify_note,
                 tp_audit=audit,
                 verified=True,
@@ -1167,8 +1274,12 @@ class PositionSupervisorBinance:
                                 f"止盈 {result['matched']}/{result['expected']} 档 | "
                                 f"{self._format_audit_summary(result['audit'])}"
                             )
-                            dingtalk.report_manual_position_change(
-                                action_msg, old_qty, real_amt, verified['entry_price'],
+                            self._call_dingtalk(
+                                dingtalk.report_manual_position_change,
+                                action_type=action_msg,
+                                old_qty=old_qty,
+                                new_qty=real_amt,
+                                new_entry_price=verified['entry_price'],
                                 verify_note=verify_note,
                                 tp_audit=result["audit"],
                                 verified=True,
@@ -1304,16 +1415,24 @@ class PositionSupervisorBinance:
                 verify_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
                 if not flat:
                     verify_note += " | REST 同步略延迟"
-                dingtalk.report_force_align(real_side, expected_side, verify_note=verify_note, verified=flat)
+                self._call_dingtalk(
+                    dingtalk.report_force_align,
+                    real_side=real_side,
+                    expected_side=expected_side,
+                    verify_note=verify_note,
+                    verified=flat,
+                )
             else:
                 self._report_flat_close(reason)
 
     def recover_state_on_startup(self):
         """重启闪电接管：对账 TV/开仓日志 → 核实实盘 → 智能补挂 TP123 → 恢复雷达"""
         try:
+            saved_monitoring = False
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
                     s = json.load(f)
+                    saved_monitoring = bool(s.get("monitoring"))
                     self.last_tv_side = s.get("last_tv_side")
                     self.current_side = s.get("current_side")
                     self.current_sl = s.get("current_sl", 0.0)
@@ -1328,6 +1447,9 @@ class PositionSupervisorBinance:
                     self.last_tv_signal = s.get("last_tv_signal")
 
             if self._scan_and_sweep_dust_on_startup():
+                return
+
+            if self._recover_missed_flat_on_startup(was_monitoring=saved_monitoring):
                 return
 
             pos = self._get_active_position()
@@ -1404,9 +1526,15 @@ class PositionSupervisorBinance:
                         f"止盈 {matched}/{expected} 档 | "
                         f"{self._format_audit_summary(audit)}{skip_note}{tv_note}{reconcile_txt}"
                     )
-                    dingtalk.report_recover_takeover(
-                        self.current_side, real_amt, verified['entry_price'],
-                        self.tv_tps, self.regime, radar_active, self.current_sl,
+                    self._call_dingtalk(
+                        dingtalk.report_recover_takeover,
+                        side=self.current_side,
+                        qty=real_amt,
+                        entry=verified['entry_price'],
+                        tv_tps=self.tv_tps,
+                        regime=self.regime,
+                        radar_active=radar_active,
+                        sl_price=self.current_sl,
                         verify_note=verify_note,
                         tp_matched=matched,
                         tp_expected=expected,
