@@ -6,6 +6,7 @@ import time
 import threading
 import os
 import json
+import queue
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from binance_client import binance_client
@@ -58,9 +59,37 @@ class PositionSupervisorBinance:
         self.last_tv_side = None
         self.last_tv_signal = None
         self._scan_ticks = 0
+        self._signal_queue = queue.Queue()
+        self._signal_worker_started = False
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
+        self._start_signal_worker()
+
+    def _start_signal_worker(self):
+        if self._signal_worker_started:
+            return
+        self._signal_worker_started = True
+        threading.Thread(target=self._signal_worker_loop, daemon=True, name="tv-signal-worker").start()
+
+    def _signal_worker_loop(self):
+        while True:
+            payload = self._signal_queue.get()
+            try:
+                self._process_signal(payload)
+            except Exception as e:
+                logger.error(f"❌ 信号处理异常: {e}", exc_info=True)
+            finally:
+                self._signal_queue.task_done()
+
+    def enqueue_signal(self, payload):
+        depth = self._signal_queue.qsize()
+        action = (payload.get("action") or "?").upper()
+        self._signal_queue.put(payload)
+        logger.info(f"📬 TV信号入队: {action} | 队列深度 {depth + 1}")
+
+    def signal_queue_depth(self):
+        return self._signal_queue.qsize()
 
     def _append_journal(self, path, record):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -706,32 +735,70 @@ class PositionSupervisorBinance:
         return qty1, qty2, qty3
 
     def handle_signal(self, payload):
-        raw_action = payload.get("action", "").upper()
-        self.regime = int(payload.get("regime", 3))
+        """兼容旧调用路径"""
+        self.enqueue_signal(payload)
+
+    def _safe_float(self, val, default=0.0):
+        try:
+            if val is None or val == "":
+                return default
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_int(self, val, default=3):
+        try:
+            if val is None or val == "":
+                return default
+            return int(float(val))
+        except (TypeError, ValueError):
+            return default
+
+    def _process_signal(self, payload):
+        raw_action = str(payload.get("action", "")).strip().upper()
+        self.regime = self._safe_int(payload.get("regime"), 3)
         if self.regime not in self.regime_settings:
             self.regime = 3
 
-        self.current_atr = float(payload.get("atr", 30.0))
-        self.tv_price = float(payload.get("price", 0.0))
+        self.current_atr = self._safe_float(payload.get("atr"), 30.0)
+        self.tv_price = self._safe_float(payload.get("price"), 0.0)
         self.tv_tps = self._sanitize_tp_prices([
-            float(payload.get("tv_tp1", 0)),
-            float(payload.get("tv_tp2", 0)),
-            float(payload.get("tv_tp3", 0)),
+            self._safe_float(payload.get("tv_tp1"), 0),
+            self._safe_float(payload.get("tv_tp2"), 0),
+            self._safe_float(payload.get("tv_tp3"), 0),
         ])
-        close_reason = payload.get("reason", "策略指标反转/波动率安全退出")
+        close_reason = str(payload.get("reason") or "策略指标反转/波动率安全退出").strip()
+        close_side = str(payload.get("side") or "").strip().upper()
+        pnl_pct = payload.get("pnl_pct")
 
         if not raw_action:
+            logger.warning("TV 信号缺少 action，已忽略")
             return
         if raw_action in ("LONG", "SHORT", "CLOSE", "CLOSE_PROTECT", "CLOSE_TP3") or \
                 raw_action.startswith("CLOSE"):
             self._record_tv_signal(payload, raw_action)
-        if not self._lock.acquire(timeout=10.0):
+
+        if not self._lock.acquire(timeout=120.0):
+            logger.error(f"⏱️ 锁等待 120s 超时，信号 {raw_action} 重新入队")
+            self._signal_queue.put(payload)
             return
 
         try:
             self.monitoring = False
             if raw_action == "CLOSE_PROTECT" or raw_action.startswith("CLOSE_PROTECT"):
-                self._close_all(f"🛡️ 保护性全平：{close_reason}")
+                extra = ""
+                if close_side:
+                    extra += f" | TV方向 {close_side}"
+                if pnl_pct is not None and pnl_pct != "":
+                    extra += f" | 近似盈亏 {pnl_pct}%"
+                pos = self._get_active_position()
+                if not pos or pos.get("size", 0) <= 0:
+                    logger.info(f"🛡️ 保护性全平到达但盘口已空仓 → 撤单复位 | {close_reason}{extra}")
+                    self._handle_manual_flat_detected(
+                        f"🛡️ TV保护性全平（盘口已空）: {close_reason}{extra}"
+                    )
+                else:
+                    self._close_all(f"🛡️ 保护性全平：{close_reason}{extra}")
             elif raw_action == "CLOSE_TP3":
                 self._close_all("🎯 完美胜利：大趋势吃满，TP3 终极收网")
             elif raw_action == "CLOSE":
@@ -740,6 +807,8 @@ class PositionSupervisorBinance:
                 self.last_tv_side = raw_action
                 self._save_state()
                 self._handle_smart_entry(raw_action)
+            else:
+                logger.warning(f"未识别的 TV action: {raw_action}")
         finally:
             self._lock.release()
 
