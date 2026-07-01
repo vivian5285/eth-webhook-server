@@ -527,12 +527,13 @@ class PositionSupervisorBinance:
 
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None):
         if not dynamic_sl:
-            return
+            return False
         if self._has_stop_sl_near(dynamic_sl):
-            return
+            return True
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        binance_client.place_stop_market_order(close_side, dynamic_sl)
+        res = binance_client.place_stop_market_order(close_side, dynamic_sl)
         time.sleep(0.35)
+        return res is not None
 
     def _nuclear_realign_tp(self, live_qty, entry, dynamic_sl=None, rounds=3):
         """
@@ -616,21 +617,24 @@ class PositionSupervisorBinance:
         }
 
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
-        """雷达推升：只撤旧止损，TP 增量补挂保留正确单"""
+        """雷达推升：只撤旧止损，TP 增量补挂保留正确单。返回止损是否已成功提交。"""
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         self._cancel_stop_orders()
         time.sleep(0.35)
+        sl_placed = False
         if not self._defenses_fully_ok(live_qty, dynamic_sl=None):
             if self._audit_requires_nuclear(self._audit_tp_levels(live_qty)):
                 self._nuclear_realign_tp(live_qty, entry, dynamic_sl=new_sl, rounds=2)
+                sl_placed = self._has_stop_sl_near(new_sl) or self._ensure_radar_sl(new_sl, live_qty)
             else:
                 self._cancel_orphan_tp_orders(live_qty)
                 self._patch_missing_tp_levels(live_qty)
                 time.sleep(0.6)
-                self._ensure_radar_sl(new_sl, live_qty)
+                sl_placed = self._ensure_radar_sl(new_sl, live_qty)
         else:
-            binance_client.place_stop_market_order(close_side, new_sl)
+            sl_placed = binance_client.place_stop_market_order(close_side, new_sl) is not None
         time.sleep(0.4)
+        return sl_placed
 
     def _ensure_defenses_on_recover(self, live_qty, entry, dynamic_sl=None):
         """
@@ -702,13 +706,44 @@ class PositionSupervisorBinance:
         return matched, pending
 
     def _has_stop_sl_near(self, sl_price, tolerance=2.0):
+        target = round(float(sl_price), 2)
         for o in binance_client.get_open_orders(self.symbol):
             if o.get("type") not in ("STOP_MARKET", "STOP"):
                 continue
-            sp = float(o.get("stopPrice", 0) or 0)
-            if sp > 0 and abs(sp - sl_price) <= tolerance:
-                return True
+            for key in ("stopPrice", "triggerPrice", "activatePrice"):
+                val = o.get(key)
+                if val is None or str(val).strip() in ("", "0"):
+                    continue
+                try:
+                    if abs(round(float(val), 2) - target) <= tolerance:
+                        return True
+                except (TypeError, ValueError):
+                    continue
         return False
+
+    def _report_radar_intervention(self, real_amt, new_sl, action_msg, sl_placed=True):
+        """雷达推止损后推送钉钉：REST 核查重试；挂单已成功则核查延迟仍播报。"""
+        verified = self._wait_verify(
+            lambda: self._has_stop_sl_near(new_sl),
+            retries=6,
+            delay=0.5,
+        )
+        base_note = (
+            f"止损 @ {new_sl:.2f} | 持仓 {real_amt} ETH | 轮询 {SENTINEL_POLL_RADAR}s"
+        )
+        if not sl_placed and not verified:
+            logger.warning(f"雷达钉钉跳过：止损 @ {new_sl:.2f} 提交失败且盘口未核查到")
+            return
+        if verified:
+            verify_note = base_note
+        else:
+            verify_note = f"{base_note} | 止损已提交，REST 同步略延迟"
+            logger.info(f"雷达钉钉：止损已挂 REST 延迟，仍推送捷报 @{new_sl:.2f}")
+        dingtalk.report_intervention(
+            real_amt, self.watched_entry, new_sl,
+            action_msg,
+            verify_note=verify_note,
+        )
 
     def _wait_verify(self, checks_fn, retries=3, delay=0.6):
         for _ in range(retries):
@@ -968,32 +1003,26 @@ class PositionSupervisorBinance:
             if new_sl > self.current_sl + 1.0:
                 self.current_sl = new_sl
                 self._save_state()
-                self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
-                if self._has_stop_sl_near(new_sl):
-                    dingtalk.report_intervention(
-                        real_amt, self.watched_entry, new_sl,
-                        f"🚀 档位{self.regime} 雷达实时跟踪：保本盾推升至 {new_sl:.2f}",
-                        verify_note=f"止损 @ {new_sl:.2f} | 持仓 {real_amt} ETH | 轮询 {SENTINEL_POLL_RADAR}s",
-                    )
-                    moved = True
-                else:
-                    logger.warning(f"雷达钉钉跳过：止损单 @{new_sl} 实盘核查未通过")
+                sl_placed = self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                self._report_radar_intervention(
+                    real_amt, new_sl,
+                    f"🚀 档位{self.regime} 雷达实时跟踪：保本盾推升至 {new_sl:.2f}",
+                    sl_placed=sl_placed,
+                )
+                moved = True
         else:
             breakeven_floor = self.watched_entry - fee_buffer
             new_sl = min(round(self.best_price + trail_offset, 2), breakeven_floor)
             if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
                 self.current_sl = new_sl
                 self._save_state()
-                self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
-                if self._has_stop_sl_near(new_sl):
-                    dingtalk.report_intervention(
-                        real_amt, self.watched_entry, new_sl,
-                        f"🚀 档位{self.regime} 雷达实时跟踪：保本顶线下压至 {new_sl:.2f}",
-                        verify_note=f"止损 @ {new_sl:.2f} | 持仓 {real_amt} ETH | 轮询 {SENTINEL_POLL_RADAR}s",
-                    )
-                    moved = True
-                else:
-                    logger.warning(f"雷达钉钉跳过：止损单 @{new_sl} 实盘核查未通过")
+                sl_placed = self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                self._report_radar_intervention(
+                    real_amt, new_sl,
+                    f"🚀 档位{self.regime} 雷达实时跟踪：保本顶线下压至 {new_sl:.2f}",
+                    sl_placed=sl_placed,
+                )
+                moved = True
         return moved
 
     def _sentinel_loop(self):
