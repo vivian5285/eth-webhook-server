@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.4.4-dust-flat"
+BINANCE_VPS_VERSION = "v13.4.5-recover-radar"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -300,6 +300,27 @@ class PositionSupervisorBinance:
         self._save_state()
         binance_client.cancel_all_open_orders(self.symbol)
         self._report_flat_close(reason, swept_dust=True)
+
+    def _scan_and_sweep_dust_on_startup(self):
+        """重启首检：发现蚂蚁仓/止盈残量 → 扫尾收网，避免误接管为正常持仓"""
+        pos = self._get_active_position()
+        if not pos or pos["size"] <= 0:
+            return False
+        if not self.current_side:
+            self.current_side = pos["side"]
+        real_amt = pos["size"]
+        if not self._is_dust_qty(real_amt) and not self._should_finalize_tp_victory(real_amt):
+            return False
+        if self.initial_qty > 0 or self.watched_qty > 0:
+            reason = "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
+        else:
+            reason = "重启扫描：盘口蚂蚁仓自动扫平"
+        logger.warning(
+            f"🐜 [重启扫描] {self.current_side} 残量 {real_amt} ETH "
+            f"(initial={self.initial_qty}, watched={self.watched_qty}) → 扫尾强平"
+        )
+        self._sweep_dust_and_finalize(reason)
+        return True
 
     def _verify_position(self, expected_side=None):
         pos = self._get_active_position()
@@ -1301,12 +1322,19 @@ class PositionSupervisorBinance:
                     self.initial_qty = s.get("initial_qty", 0.0)
                     self.last_tv_signal = s.get("last_tv_signal")
 
+            if self._scan_and_sweep_dust_on_startup():
+                return
+
             pos = self._get_active_position()
             if pos:
                 reconcile_notes = self._reconcile_context_on_recover(pos)
                 real_amt = pos["size"]
                 self.current_side = pos["side"]
-                self.watched_qty = self.initial_qty = real_amt
+                saved_initial = float(self.initial_qty or 0)
+                if saved_initial <= 0:
+                    saved_initial = real_amt
+                self.watched_qty = real_amt
+                self.initial_qty = saved_initial
                 self.watched_entry = pos["entry_price"]
 
                 curr_px = binance_client.get_current_price(self.symbol)
@@ -1348,6 +1376,13 @@ class PositionSupervisorBinance:
 
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
+                if radar_active:
+                    sl_ok = self._ensure_radar_sl(self.current_sl, real_amt)
+                    logger.info(
+                        f"📡 [重启] 雷达哨兵已点火 | SL={self.current_sl:.2f} | "
+                        f"止损={'已挂/已确认' if sl_ok else '待哨兵补挂'}"
+                    )
+
                 verified = self._verify_position(self.current_side)
                 if verified and abs(verified['size'] - real_amt) < 0.001:
                     tv_note = ""
@@ -1384,9 +1419,11 @@ class PositionSupervisorBinance:
 
                 logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
             else:
+                binance_client.cancel_all_open_orders(self.symbol)
                 logger.info("🔄 [系统重启点火] 盘口干净无持仓，账本复位为空仓待命。")
                 self.monitoring = False
                 self.watched_qty = 0.0
+                self.current_side = None
                 self._save_state()
         except Exception as e:
             logger.error(f"❌ 闪电接管异常: {e}")
