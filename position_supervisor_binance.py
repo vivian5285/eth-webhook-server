@@ -23,10 +23,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.4.3-ws-radar"
+BINANCE_VPS_VERSION = "v13.4.4-dust-flat"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
+DUST_QTY_ETH = 0.004
+TP_COMPLETE_RESIDUAL_RATIO = 0.12
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
 
@@ -234,6 +236,70 @@ class PositionSupervisorBinance:
     def _verify_flat(self):
         pos = self._get_active_position()
         return pos is None
+
+    def _is_dust_qty(self, qty):
+        """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
+        try:
+            q = float(qty)
+        except (TypeError, ValueError):
+            return False
+        return 0 < q <= DUST_QTY_ETH
+
+    def _should_finalize_tp_victory(self, real_amt):
+        """止盈网格已吃完、盘口无 TP 限价单，但可能残留蚂蚁仓 → 扫尾收网"""
+        if real_amt <= 0:
+            return False
+        if self._is_dust_qty(real_amt):
+            return True
+        if self._collect_limit_tp_prices():
+            return False
+        ref = self.initial_qty or self.watched_qty
+        if ref > 0 and real_amt <= ref * TP_COMPLETE_RESIDUAL_RATIO:
+            return True
+        return False
+
+    def _report_flat_close(self, reason, swept_dust=False):
+        """平仓/止盈收网钉钉：REST 核查重试，与深币播报对齐"""
+        flat = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
+        base_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
+        if swept_dust:
+            base_note = f"蚂蚁仓已市价扫尾 | {base_note}"
+        if flat:
+            verify_note = base_note
+        else:
+            pos = self._get_active_position()
+            residual = pos["size"] if pos else 0.0
+            if residual > 0 and not self._is_dust_qty(residual):
+                logger.warning(
+                    f"平仓钉钉跳过：空仓核查未通过 | 残留 {residual} ETH | reason={reason}"
+                )
+                return
+            verify_note = f"{base_note} | REST 同步略延迟"
+            logger.info(f"平仓钉钉：REST 延迟，仍推送收网播报 | reason={reason}")
+        dingtalk.report_supervisor_close(
+            reason or "仓位归零 (人工全平 / 止盈吃满)",
+            verify_note=verify_note,
+        )
+
+    def _sweep_dust_and_finalize(self, reason):
+        """哨兵检测：止盈后蚂蚁仓/无 TP 残量 → 撤单 + reduceOnly 扫尾 + 完美胜利钉钉"""
+        logger.warning(f"🐜 止盈扫尾：检测到残量，启动蚂蚁仓强平 → {reason}")
+        self.monitoring = False
+        binance_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.4)
+        for round_i in range(4):
+            pos = self._get_active_position()
+            if not pos or pos["size"] <= 0:
+                break
+            close_side = "SELL" if pos["side"] == "LONG" else "BUY"
+            logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {pos['size']} ETH reduceOnly")
+            binance_client.place_market_order(close_side, pos["size"], reduce_only=True)
+            time.sleep(1.0)
+        self.watched_qty = 0.0
+        self.current_side = None
+        self._save_state()
+        binance_client.cancel_all_open_orders(self.symbol)
+        self._report_flat_close(reason, swept_dust=True)
 
     def _verify_position(self, expected_side=None):
         pos = self._get_active_position()
@@ -855,12 +921,7 @@ class PositionSupervisorBinance:
         self.current_side = None
         binance_client.cancel_all_open_orders(self.symbol)
         self._save_state()
-        flat = self._wait_verify(self._verify_flat)
-        if flat:
-            dingtalk.report_supervisor_close(
-                reason or "仓位归零 (人工全平 / 止盈吃满)",
-                verify_note="盘口无持仓 | 挂单已清空 | 智慧大脑复位待命",
-            )
+        self._report_flat_close(reason or "仓位归零 (人工全平 / 止盈吃满)")
 
     def _handle_smart_entry(self, action):
         """三重把关之一：新 TV 方向 → 先撤后平再开"""
@@ -1044,6 +1105,12 @@ class PositionSupervisorBinance:
                             )
                         break
 
+                    if self.watched_qty > 0 and self._should_finalize_tp_victory(real_amt):
+                        self._sweep_dust_and_finalize(
+                            "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
+                        )
+                        break
+
                     if actual_side != self.last_tv_side:
                         reason = f"致命方向背离：实盘({actual_side}) vs TV({self.last_tv_side})"
                         self._close_all(reason, force_align=(actual_side, self.last_tv_side))
@@ -1177,17 +1244,26 @@ class PositionSupervisorBinance:
             close_side = "SELL" if amt > 0 else "BUY"
             live_sz = round(abs(amt), 3)
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
-            binance_client.place_market_order(close_side, live_sz)
+            binance_client.place_market_order(close_side, live_sz, reduce_only=True)
             time.sleep(1.5)
 
         if not closed_successfully:
             residual = self._get_active_position()
             residual_sz = residual["size"] if residual else 0.0
-            logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} ETH")
-            dingtalk.report_system_alert(
-                "强平未完全归零",
-                f"6 轮市价平仓后仍剩 {residual_sz} ETH，请人工核查币安盘口",
-            )
+            if residual_sz > 0 and self._is_dust_qty(residual_sz):
+                close_side = "SELL" if residual["side"] == "LONG" else "BUY"
+                logger.warning(f"🐜 强平后残 {residual_sz} ETH，触发蚂蚁仓扫尾")
+                binance_client.place_market_order(close_side, residual_sz, reduce_only=True)
+                time.sleep(1.0)
+                closed_successfully = self._verify_flat()
+            if not closed_successfully:
+                residual = self._get_active_position()
+                residual_sz = residual["size"] if residual else 0.0
+                logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} ETH")
+                dingtalk.report_system_alert(
+                    "强平未完全归零",
+                    f"6 轮市价平仓后仍剩 {residual_sz} ETH，请人工核查币安盘口",
+                )
 
         self.monitoring = False
         self.watched_qty = 0.0
@@ -1196,16 +1272,15 @@ class PositionSupervisorBinance:
         binance_client.cancel_all_open_orders(self.symbol)
 
         if reason and closed_successfully:
-            flat = self._wait_verify(self._verify_flat)
-            if flat:
-                verify_note = "盘口无持仓 | 挂单已清空"
-                if force_align:
-                    real_side, expected_side = force_align
-                    dingtalk.report_force_align(real_side, expected_side, verify_note=verify_note)
-                else:
-                    dingtalk.report_supervisor_close(reason, verify_note=verify_note)
+            if force_align:
+                real_side, expected_side = force_align
+                flat = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
+                verify_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
+                if not flat:
+                    verify_note += " | REST 同步略延迟"
+                dingtalk.report_force_align(real_side, expected_side, verify_note=verify_note)
             else:
-                logger.warning(f"平仓钉钉跳过：空仓核查未通过 | reason={reason}")
+                self._report_flat_close(reason)
 
     def recover_state_on_startup(self):
         """重启闪电接管：对账 TV/开仓日志 → 核实实盘 → 智能补挂 TP123 → 恢复雷达"""
