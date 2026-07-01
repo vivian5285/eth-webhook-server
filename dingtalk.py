@@ -54,12 +54,13 @@ def _classify_close(reason, verify_note="", swept_dust=False):
     note = verify_note or ""
     is_dust_ctx = swept_dust or "蚂蚁仓" in note or "蚂蚁仓" in r or "重启扫描" in r or "扫尾" in r
 
-    if "TP3" in r or "完美胜利" in r or "止盈" in r:
+    if "TP3" in r or "完美胜利" in r or "止盈" in r or "重启对账" in note:
         return {
             "title": "🏆 完美胜利：币安大趋势吃满收网",
             "status": _g(
                 "三档网格已全部吃掉，暴利安全落袋。"
-                + ("（含蚂蚁仓扫尾）" if is_dust_ctx else ""),
+                + ("（含蚂蚁仓扫尾）" if is_dust_ctx else "")
+                + ("（重启对账补发）" if "重启对账" in note else ""),
                 G_LIGHT,
             ),
             "header": G_TITLE,
