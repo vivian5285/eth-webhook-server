@@ -197,16 +197,25 @@ class BinanceClient:
             logger.error(f"[获取挂单失败] {symbol}: {e}")
             return []
 
-    def place_market_order(self, side, quantity, symbol="ETHUSDT"):
+    def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False):
+        qty = self.format_quantity(quantity, symbol)
+        if qty <= 0:
+            logger.error(f"[市价单跳过] 数量无效 {quantity}")
+            return None
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
-            order = self.client.futures_create_order(
-                symbol=symbol, side=binance_side, type="MARKET", quantity=quantity
-            )
-            logger.info(f"[市价开仓成功] {side} {quantity} {symbol}")
+            params = {
+                "symbol": symbol, "side": binance_side, "type": "MARKET", "quantity": qty,
+            }
+            if reduce_only:
+                params["reduceOnly"] = True
+            order = self.client.futures_create_order(**params)
+            tag = "平仓" if reduce_only else "开仓"
+            logger.info(f"[市价{tag}成功] {side} {qty} {symbol}")
             return order
         except Exception as e:
-            logger.error(f"[市价开仓失败] {side} {quantity} {symbol}: {e}")
+            tag = "平仓" if reduce_only else "开仓"
+            logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT", reduce_only=True):
