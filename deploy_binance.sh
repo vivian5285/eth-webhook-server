@@ -7,8 +7,8 @@
 
 set -uo pipefail
 
-REQUIRED_SUPERVISOR_VERSION="v13.4.5-recover-radar"
-REQUIRED_CLIENT_VERSION="v13.4.5-recover-radar"
+REQUIRED_SUPERVISOR_VERSION="v13.4.6-flat-reconcile"
+REQUIRED_CLIENT_VERSION="v13.4.6-flat-reconcile"
 DEPLOY_SCRIPT_VERSION="v13.1-daemon2"
 
 PORT=5003
