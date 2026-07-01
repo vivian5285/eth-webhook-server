@@ -279,6 +279,8 @@ class PositionSupervisorBinance:
         dingtalk.report_supervisor_close(
             reason or "仓位归零 (人工全平 / 止盈吃满)",
             verify_note=verify_note,
+            verified=flat,
+            swept_dust=swept_dust,
         )
 
     def _sweep_dust_and_finalize(self, reason):
@@ -830,6 +832,7 @@ class PositionSupervisorBinance:
             real_amt, self.watched_entry, new_sl,
             action_msg,
             verify_note=verify_note,
+            verified=verified,
         )
 
     def _wait_verify(self, checks_fn, retries=3, delay=0.6):
@@ -1017,6 +1020,7 @@ class PositionSupervisorBinance:
                 verified['size'], tp_pxs, self.current_atr, self.regime, self.tv_tps,
                 verify_note=verify_note,
                 tp_audit=audit,
+                verified=True,
             )
             if expected > 0 and matched < expected:
                 dingtalk.report_system_alert(
@@ -1167,6 +1171,7 @@ class PositionSupervisorBinance:
                                 action_msg, old_qty, real_amt, verified['entry_price'],
                                 verify_note=verify_note,
                                 tp_audit=result["audit"],
+                                verified=True,
                             )
                             if result["expected"] > 0 and result["matched"] < result["expected"]:
                                 dingtalk.report_system_alert(
@@ -1299,7 +1304,7 @@ class PositionSupervisorBinance:
                 verify_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
                 if not flat:
                     verify_note += " | REST 同步略延迟"
-                dingtalk.report_force_align(real_side, expected_side, verify_note=verify_note)
+                dingtalk.report_force_align(real_side, expected_side, verify_note=verify_note, verified=flat)
             else:
                 self._report_flat_close(reason)
 
@@ -1376,6 +1381,7 @@ class PositionSupervisorBinance:
 
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
+                sl_ok = True
                 if radar_active:
                     sl_ok = self._ensure_radar_sl(self.current_sl, real_amt)
                     logger.info(
@@ -1406,6 +1412,7 @@ class PositionSupervisorBinance:
                         tp_expected=expected,
                         tp_audit=audit,
                         last_tv_signal=self.last_tv_signal,
+                        radar_sl_ok=sl_ok,
                     )
                     if expected > 0 and matched < expected:
                         dingtalk.report_system_alert(
