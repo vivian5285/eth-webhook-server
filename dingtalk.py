@@ -351,6 +351,17 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     send_alert("🔄 币安 VPS 重启 · 闪电接管报告", data)
 
 
+def report_recover_standby(verify_note="", version=""):
+    data = {
+        "📡 实盘核查": _g(f"{VERIFY_TAG} | 盘口无持仓", G_MAIN),
+        "✅ 系统状态": _g("空仓待命 · 挂单已清空 · 雷达/哨兵复位", G_LIGHT),
+        "🔮 版本": _g(version or "binance_webhook", G_MUTED),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🔄 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
+
+
 def report_system_alert(title, detail):
     send_alert(f"⚠️ 系统告警：{title}", {
         "⚠️ 告警级别": _g("最高级别 (CRITICAL)", G_DEEP),
