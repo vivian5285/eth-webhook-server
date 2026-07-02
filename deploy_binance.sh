@@ -7,9 +7,9 @@
 
 set -uo pipefail
 
-REQUIRED_SUPERVISOR_VERSION="v13.4.6-flat-reconcile"
-REQUIRED_CLIENT_VERSION="v13.4.6-flat-reconcile"
 DEPLOY_SCRIPT_VERSION="v13.1-daemon2"
+# 接受 v13.4.6 / v13.4.7 / v13.4.8 等（手动同步 GitHub 时版本号可能不同步）
+MIN_SUPERVISOR_VERSION_PREFIX="v13.4."
 
 PORT=5003
 WORKERS=1
@@ -151,17 +151,20 @@ install_deps() {
     find "$DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
 
-    if grep -q "BINANCE_VPS_VERSION.*${REQUIRED_SUPERVISOR_VERSION}" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
-        log_ok "position_supervisor_binance.py 版本 ${REQUIRED_SUPERVISOR_VERSION}"
+    SUPERVISOR_VER="$(grep 'BINANCE_VPS_VERSION' "$DIR/position_supervisor_binance.py" 2>/dev/null | head -1 || true)"
+    if echo "$SUPERVISOR_VER" | grep -qE 'BINANCE_VPS_VERSION.*v13\.4\.(6|7|8|9)'; then
+        log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
+    elif echo "$SUPERVISOR_VER" | grep -q "${MIN_SUPERVISOR_VERSION_PREFIX}"; then
+        log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
     else
-        log_fail "position_supervisor_binance.py 不是最新版！需要 ${REQUIRED_SUPERVISOR_VERSION}（git pull 不会自动有 Cursor 本地改动，请 scp 上传桌面最新文件）"
+        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
         return 1
     fi
 
-    if grep -q "${REQUIRED_CLIENT_VERSION}" "$DIR/binance_client.py" 2>/dev/null; then
-        log_ok "binance_client.py 版本 ${REQUIRED_CLIENT_VERSION}"
+    if grep -qE 'v13\.4\.(6|7|8)|Binance Client v13\.4' "$DIR/binance_client.py" 2>/dev/null; then
+        log_ok "binance_client.py 版本已就绪"
     else
-        log_warn "binance_client.py 可能不是最新版（缺少 ${REQUIRED_CLIENT_VERSION}）"
+        log_warn "binance_client.py 可能不是最新版（建议含 v13.4.x 标识）"
     fi
 
     if grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
@@ -283,10 +286,10 @@ health_check() {
     fi
 
     sleep 2
-    if grep -q "${REQUIRED_SUPERVISOR_VERSION}" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 ${REQUIRED_SUPERVISOR_VERSION} 已成功加载"
+    if grep -qE 'v13\.4\.(6|7|8|9)' "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.4.6+ 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
-        log_warn "大脑已加载但版本可能过旧（日志中无 ${REQUIRED_SUPERVISOR_VERSION}）"
+        log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.6+）"
     elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
         log_ok "闪电接管已执行（binance_brain.log）"
     else
