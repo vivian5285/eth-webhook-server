@@ -221,6 +221,25 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verif
     send_alert("📈 捷报：追踪雷达锁死趋势利润", data, G_DEEP)
 
 
+def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
+                   verify_note="", verified=True):
+    data = {
+        "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
+        "📦 本次止盈": _g(f"`{filled_qty}` {UNIT_LABEL}", G_ACCENT),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
+        "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
+        "🧭 方向/档位": _g(f"{side} | Regime {regime}", G_MUTED),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | TP{tp_level} 限价止盈已成交",
+            "⏳ 止盈已成交，REST 同步略延迟 | 哨兵持续对齐",
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert(f"🎯 捷报：币安 TP{tp_level} 止盈成交", data, G_DEEP)
+
+
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
                                   verify_note="", tp_audit=None, verified=True):
     action_txt = _g("手动增仓", G_LIGHT) if "加仓" in action_type else _g("手动部分减仓", G_ACCENT)
