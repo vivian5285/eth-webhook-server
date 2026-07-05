@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/20x 适配）
+# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/8x 适配）
 import logging
 import time
 import threading
@@ -45,7 +45,7 @@ class PositionSupervisorBinance:
             3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.60, "trail_offset": 0.90},
             4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.70, "trail_offset": 1.30},
         }
-        self.leverage = 20
+        self.leverage = 8
 
         self.regime = 3
         self.current_atr = 30.0
