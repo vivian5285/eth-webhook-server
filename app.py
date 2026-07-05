@@ -37,7 +37,7 @@ def webhook():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"service": "binance_webhook", "status": "ok", "version": "v13.5.3-radar-guardian"}), 200
+    return jsonify({"service": "binance_webhook", "status": "ok", "version": "v13.5.5-scorch-verify"}), 200
 
 
 if __name__ == '__main__':
