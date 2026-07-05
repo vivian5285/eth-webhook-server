@@ -167,6 +167,21 @@ class BinanceClient:
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
 
+    def get_sizing_balance(self, asset="USDT"):
+        """本金口径（walletBalance），用于 regime 仓位预算，不含浮盈放大"""
+        try:
+            account = self.client.futures_account()
+            for a in account.get("assets", []):
+                if a.get("asset") == asset:
+                    wallet = float(a.get("walletBalance", 0.0) or 0.0)
+                    if wallet > 0:
+                        return wallet
+                    return float(a.get("availableBalance", 0.0) or 0.0)
+            return 0.0
+        except Exception as e:
+            logger.error(f"[查询本金余额失败] {e}")
+            return 0.0
+
     def get_available_balance(self, asset="USDT"):
         try:
             account = self.client.futures_account()
