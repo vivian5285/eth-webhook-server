@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.1-atr-priority"
+BINANCE_VPS_VERSION = "v13.5.3-radar-guardian"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -351,6 +351,25 @@ class PositionSupervisorBinance:
     def _verify_flat(self):
         pos = self._get_active_position()
         return pos is None
+
+    def _ensure_flat_before_open(self, reason_tag="开仓前"):
+        """开仓闸门：盘口必须归零，否则阶梯强平；仍失败则拒绝叠仓"""
+        if self._wait_verify(self._verify_flat, retries=4, delay=0.4):
+            return True
+        logger.warning(f"⚠️ {reason_tag}：检测到残留持仓，启动强制平仓")
+        if self._close_all(f"{reason_tag} · 强制清场", reset_state=True):
+            return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
+        return False
+
+    def _calc_target_open_qty(self, curr_px):
+        """按 regime 保证金比例 × 杠杆，基于 walletBalance 计算目标 ETH 数量"""
+        balance = binance_client.get_sizing_balance()
+        margin_pct = self.regime_settings[self.regime]["margin"]
+        margin_usdt = balance * margin_pct
+        if curr_px <= 0:
+            return 0.0, balance, margin_usdt, margin_pct
+        qty = round((margin_usdt * self.leverage) / curr_px, 3)
+        return qty, balance, margin_usdt, margin_pct
 
     def _is_dust_qty(self, qty):
         """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
@@ -760,9 +779,13 @@ class PositionSupervisorBinance:
         return True
 
     def _patch_missing_tp_levels(self, live_qty, tolerance=1.0, qty_tol=0.005):
-        """只补缺失/错误的 TP 档，保留已正确的挂单（避免重启先撤单再挂失败）"""
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        """只补缺失档；重复/偏差交核武，禁止叠单"""
         live_qty = self._resolve_live_qty(live_qty)
+        audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
+        if self._defense_needs_immediate_fix(audit):
+            logger.warning("补挂跳过：检测到重复/缺失/偏差，改走核武对齐")
+            return 0
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         ratios = self.regime_settings[self.regime]["ratios"]
         qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
         levels = [(qty1, self.tv_tps[0]), (qty2, self.tv_tps[1]), (qty3, self.tv_tps[2])]
@@ -802,7 +825,7 @@ class PositionSupervisorBinance:
         if bad:
             return True
         missing = sum(1 for lv in audit.get("levels", []) if lv.get("status") == "missing")
-        if missing >= 2:
+        if missing >= 1:
             return True
         if audit.get("orphans"):
             return True
@@ -868,68 +891,135 @@ class PositionSupervisorBinance:
             time.sleep(1.5)
         return last_audit
 
-    def _full_rebuild_tp_loop(self, live_qty, entry, dynamic_sl=None):
-        audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
-        return audit["matched_full"], audit["pending_prices"], audit["expected"]
+    def _defense_needs_immediate_fix(self, audit):
+        """重复/缺失/数量偏差/孤儿单 → 必须撤单重算重挂（禁止增量叠单）"""
+        if self._audit_requires_nuclear(audit):
+            return True
+        for lv in audit.get("levels", []):
+            if lv.get("status") in ("duplicate", "missing", "qty_mismatch"):
+                return True
+        return bool(audit.get("issues") or audit.get("orphans"))
 
-    def _smart_realign_defenses(self, live_qty, entry, dynamic_sl=None, reason=""):
-        """统一智能防线对齐：审计 → 增量或核武 → 仍未达标则强制核武"""
-        if reason:
-            logger.info(f"🧠 智能防线对齐: {reason}")
-        initial = self._audit_tp_levels(live_qty)
-        if self._defenses_fully_ok(live_qty, dynamic_sl):
-            logger.info(f"✅ 防线已齐，跳过: {self._format_audit_summary(initial)}")
+    def _enforce_defense_alignment(self, live_qty, entry, dynamic_sl=None, reason="", rounds=3):
+        """
+        防线对齐总线：先撤净限价 TP → 审计 → 核武重挂 → 仍失败再补一轮。
+        开仓/异动/雷达守护统一走此入口，避免 rebuild + patch 叠单。
+        """
+        live_qty = self._resolve_live_qty(live_qty)
+        if live_qty <= 0:
+            audit = self._audit_tp_levels(live_qty)
             return {
-                "matched": initial["matched_full"],
-                "expected": initial["expected"],
-                "pending_prices": initial["pending_prices"],
+                "matched": 0, "expected": audit.get("expected", 0),
+                "pending_prices": [], "rebuilt": False, "audit": audit, "nuclear": False,
+            }
+        if reason:
+            logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} ETH")
+
+        self._cancel_all_tp_limit_orders()
+        time.sleep(0.45)
+        audit = self._audit_tp_levels(live_qty)
+        if self._defenses_fully_ok(live_qty, dynamic_sl) and not audit.get("orphans"):
+            logger.info(f"✅ 防线已齐: {self._format_audit_summary(audit)}")
+            if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+                self._ensure_radar_sl(dynamic_sl, live_qty)
+            return {
+                "matched": audit["matched_full"],
+                "expected": audit["expected"],
+                "pending_prices": audit["pending_prices"],
                 "rebuilt": False,
-                "audit": initial,
+                "audit": audit,
                 "nuclear": False,
             }
 
-        self._cancel_orphan_tp_orders(live_qty)
-        matched, pending_prices, expected, rebuilt = self._ensure_defenses_on_recover(
-            live_qty, entry, dynamic_sl=dynamic_sl,
+        sl_preserve = dynamic_sl if dynamic_sl and self._is_radar_active() else dynamic_sl
+        audit = self._nuclear_realign_tp(
+            live_qty, entry, dynamic_sl=sl_preserve, rounds=rounds,
         )
-        audit = self._audit_tp_levels(live_qty)
-        nuclear = False
-
-        if expected > 0 and audit["matched_full"] < expected:
-            logger.warning(
-                f"⚠️ 常规对齐未达标 ({audit['matched_full']}/{expected})，"
-                f"升级核武级清场重挂"
+        if audit["matched_full"] < audit["expected"]:
+            logger.warning("☢️ 首轮核武未齐，雷达守护追加一轮重挂")
+            audit = self._nuclear_realign_tp(
+                live_qty, entry, dynamic_sl=sl_preserve, rounds=2,
             )
-            audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
-            matched = audit["matched_full"]
-            pending_prices = audit["pending_prices"]
-            rebuilt = nuclear = True
-
         return {
-            "matched": matched,
-            "expected": expected,
-            "pending_prices": pending_prices,
-            "rebuilt": rebuilt,
+            "matched": audit["matched_full"],
+            "expected": audit["expected"],
+            "pending_prices": audit["pending_prices"],
+            "rebuilt": True,
             "audit": audit,
-            "nuclear": nuclear,
+            "nuclear": True,
         }
 
+    def _radar_guardian_audit(self, real_amt, curr_px):
+        """
+        雷达最高权限：每轮哨兵实时审计 TP123 比例与挂单。
+        异常 → 撤单重算重挂；雷达移动止损逻辑不受影响。
+        """
+        if real_amt <= 0 or not self.monitoring:
+            return None
+        audit = self._audit_tp_levels(real_amt)
+        sl = self._radar_sl_to_pass()
+        if not self._defense_needs_immediate_fix(audit) and self._defenses_fully_ok(real_amt, sl):
+            return None
+
+        logger.warning(
+            f"📡 [雷达守护] TP 未对齐 → 撤单重算重挂 | "
+            f"{self._format_audit_summary(audit)}"
+        )
+        sl_preserve = sl if self._is_radar_active() else None
+        result = self._enforce_defense_alignment(
+            real_amt, self.watched_entry, dynamic_sl=sl_preserve,
+            reason="雷达守护实时纠偏", rounds=3,
+        )
+        new_audit = result["audit"]
+        if new_audit["matched_full"] < new_audit["expected"]:
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                "雷达守护：止盈仍未对齐",
+                (
+                    f"{self.current_side} {real_amt} ETH | "
+                    f"{self._format_audit_summary(new_audit)} | 请人工核查币安挂单"
+                ),
+            )
+        elif self._defense_needs_immediate_fix(audit):
+            logger.info(
+                f"📡 [雷达守护] 纠偏完成: "
+                f"{new_audit['matched_full']}/{new_audit['expected']} | "
+                f"{self._format_audit_summary(new_audit)}"
+            )
+        return result
+
+
+    def _smart_realign_defenses(self, live_qty, entry, dynamic_sl=None, reason=""):
+        """统一委托防线对齐总线（撤单 → 重算 → 重挂）"""
+        return self._enforce_defense_alignment(
+            live_qty, entry, dynamic_sl=dynamic_sl, reason=reason or "智能防线对齐", rounds=3,
+        )
+
+    def _full_rebuild_tp_loop(self, live_qty, entry, dynamic_sl=None):
+        result = self._enforce_defense_alignment(
+            live_qty, entry, dynamic_sl=dynamic_sl, reason="全量重建", rounds=3,
+        )
+        audit = result["audit"]
+        return audit["matched_full"], audit["pending_prices"], audit["expected"]
+
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
-        """雷达推升：只撤旧止损，TP 增量补挂保留正确单。返回止损是否已成功提交。"""
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        """雷达推升：先确保 TP 对齐，再只换止损（保留雷达动态保本）"""
         self._cancel_stop_orders()
         time.sleep(0.35)
-        sl_placed = False
-        if not self._defenses_fully_ok(live_qty, dynamic_sl=None):
-            if self._audit_requires_nuclear(self._audit_tp_levels(live_qty)):
-                self._nuclear_realign_tp(live_qty, entry, dynamic_sl=new_sl, rounds=2)
-                sl_placed = self._has_stop_sl_near(new_sl) or self._ensure_radar_sl(new_sl, live_qty)
-            else:
-                self._cancel_orphan_tp_orders(live_qty)
-                self._patch_missing_tp_levels(live_qty)
-                time.sleep(0.6)
-                sl_placed = self._ensure_radar_sl(new_sl, live_qty)
-        else:
+        audit = self._audit_tp_levels(live_qty)
+        if self._defense_needs_immediate_fix(audit):
+            self._enforce_defense_alignment(
+                live_qty, entry, dynamic_sl=new_sl,
+                reason="雷达推升前 TP 纠偏", rounds=2,
+            )
+        elif not self._defenses_fully_ok(live_qty, dynamic_sl=None):
+            self._enforce_defense_alignment(
+                live_qty, entry, dynamic_sl=new_sl,
+                reason="雷达推升前 TP 补齐", rounds=2,
+            )
+        sl_placed = self._ensure_radar_sl(new_sl, live_qty)
+        if not sl_placed:
+            close_side = "SHORT" if self.current_side == "LONG" else "LONG"
             sl_placed = binance_client.place_stop_market_order(close_side, new_sl) is not None
         time.sleep(0.4)
         return sl_placed
@@ -1389,8 +1479,20 @@ class PositionSupervisorBinance:
     def _full_reentry(self, action, close_reason):
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
-        self._close_all(close_reason)
-        time.sleep(1.2)
+        if not self._close_all(close_reason, reset_state=True):
+            logger.error("❌ 先平后开中止：平仓未归零，拒绝叠仓开仓")
+            dingtalk.report_system_alert(
+                "先平后开中止 · 平仓未归零",
+                "6 轮强平后盘口仍有持仓，已拒绝新开仓，请人工核查币安盘口",
+            )
+            return
+        if not self._wait_verify(self._verify_flat, retries=8, delay=0.5):
+            logger.error("❌ 先平后开中止：空仓核查未通过")
+            dingtalk.report_system_alert(
+                "先平后开中止 · 空仓核查失败",
+                "平仓指令已发但 REST 仍显示持仓，已拒绝叠仓开仓",
+            )
+            return
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
@@ -1464,6 +1566,12 @@ class PositionSupervisorBinance:
             return
 
         logger.info(f"⚡ 收到建仓信号 [{action}]，空仓极速开仓")
+        if not self._ensure_flat_before_open("空仓开仓"):
+            dingtalk.report_system_alert(
+                "开仓中止 · 盘口非空",
+                f"收到 TV {action} 但实盘仍有残留持仓，已拒绝叠仓开仓",
+            )
+            return
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         curr_px = curr_px or binance_client.get_current_price(self.symbol)
@@ -1472,13 +1580,18 @@ class PositionSupervisorBinance:
         self._touch_entry_signal_signature(action)
 
     def _open_position(self, action, curr_px):
-        balance = binance_client.get_available_balance()
-        margin_pct = self.regime_settings[self.regime]["margin"]
+        qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
+        if qty <= 0:
+            logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
+            return
 
         binance_client.set_leverage(self.symbol, leverage=self.leverage)
-        qty = round((balance * margin_pct * self.leverage) / curr_px, 3)
-        if qty <= 0:
-            return
+        notional = qty * curr_px
+        logger.info(
+            f"📐 仓位预算 R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
+            f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH "
+            f"(名义 ~{notional:.0f}U)"
+        )
 
         open_side = "BUY" if action == "LONG" else "SELL"
         logger.info(f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 个ETH | 档位 {self.regime}")
@@ -1487,14 +1600,31 @@ class PositionSupervisorBinance:
 
         pos = self._get_active_position()
         if pos:
+            real_qty = pos["size"]
+            if real_qty > qty * 1.06:
+                logger.error(
+                    f"🚨 持仓超标: 目标 {qty} ETH，实盘 {real_qty} ETH "
+                    f"(>{qty * 1.06:.3f})，疑似未平干净叠仓"
+                )
+                dingtalk.report_system_alert(
+                    "持仓超标 · 疑似叠仓",
+                    f"目标 {qty} ETH (保证金预算 {margin_usdt:.0f}U)，"
+                    f"实盘 {real_qty} ETH @ {pos['entry_price']:.2f}，请人工核查",
+                )
             self.current_side = action
             self.open_regime = self.regime
             self.open_atr = self.current_atr
-            real_qty = pos["size"]
             self.initial_qty = real_qty
-            self._protect_and_monitor(real_qty, pos["entry_price"])
+            self._protect_and_monitor(
+                real_qty, pos["entry_price"],
+                budget_note=(
+                    f"本金 {balance:.0f}U | R{self.regime} {margin_pct:.0%} "
+                    f"→ 保证金 {margin_usdt:.0f}U | 目标 {qty} ETH"
+                ),
+                target_qty=qty,
+            )
 
-    def _protect_and_monitor(self, qty, entry_price):
+    def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0):
         tp_pxs = self.tv_tps
         self.current_sl = entry_price
         self.best_price = entry_price
@@ -1502,21 +1632,23 @@ class PositionSupervisorBinance:
         self._save_state()
 
         self._ensure_price_ws()
-        self._rebuild_defenses(qty, entry_price, dynamic_sl=None)
 
         verified = self._wait_verify(lambda: self._verify_position(self.current_side))
         if verified:
-            result = self._smart_realign_defenses(
+            result = self._enforce_defense_alignment(
                 verified["size"], verified["entry_price"],
-                reason="开仓后二次核查",
+                dynamic_sl=None, reason="开仓后防线对齐", rounds=3,
             )
             matched, expected = result["matched"], result["expected"]
-            pending_prices = result["pending_prices"]
             audit = result["audit"]
             verify_note = (
+                f"{budget_note} | " if budget_note else ""
+            ) + (
                 f"持仓 {verified['size']} ETH @ {verified['entry_price']:.2f} | "
                 f"限价止盈 {matched}/{expected} 档 | {self._format_audit_summary(audit)}"
             )
+            if target_qty > 0 and verified["size"] > target_qty * 1.06:
+                verify_note += f" | ⚠️ 超标目标 {target_qty} ETH"
             self._record_open_log(
                 self.current_side, verified["size"], verified["entry_price"], source="open",
             )
@@ -1792,17 +1924,8 @@ class PositionSupervisorBinance:
                             self._report_qty_change_dingtalk(old_qty, real_amt, result)
 
                         self._scan_ticks += 1
-                        if not qty_changed and self._scan_ticks % 10 == 0:
-                            audit = self._audit_tp_levels(real_amt)
-                            if audit["issues"]:
-                                logger.info(
-                                    f"🔍 定期扫描发现异常: {audit['issues']}，触发智能补挂"
-                                )
-                                sl_to_pass = self._radar_sl_to_pass()
-                                self._smart_realign_defenses(
-                                    real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
-                                    reason="定期防线扫描",
-                                )
+                        if not qty_changed:
+                            self._radar_guardian_audit(real_amt, curr_px)
 
                         if curr_px <= 0:
                             continue
@@ -1833,6 +1956,9 @@ class PositionSupervisorBinance:
             logger.warning(f"重建防线跳过：交易所无可用持仓 (传入 {qty} ETH)")
             return 0
 
+        self._cancel_all_tp_limit_orders()
+        time.sleep(0.35)
+
         if abs(live_qty - qty) > 0.001:
             self.watched_qty = live_qty
             self._save_state()
@@ -1857,10 +1983,12 @@ class PositionSupervisorBinance:
             binance_client.place_stop_market_order(close_side, dynamic_sl)
         return placed
 
-    def _close_all(self, reason="", force_align=None):
-        """三重把关之二：先撤单释放冻结仓位，6 轮阶梯强平至归零"""
+    def _close_all(self, reason="", force_align=None, reset_state=True):
+        """先撤全部挂单再阶梯强平；返回是否已空仓"""
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
+        self._cancel_all_tp_limit_orders()
+        time.sleep(0.3)
         closed_successfully = False
 
         for round_i in range(6):
@@ -1894,10 +2022,22 @@ class PositionSupervisorBinance:
                     f"6 轮市价平仓后仍剩 {residual_sz} ETH，请人工核查币安盘口",
                 )
 
-        self.monitoring = False
-        self.watched_qty = 0.0
-        self.current_side = None
-        self._save_state()
+        if reset_state:
+            if closed_successfully:
+                self.monitoring = False
+                self.watched_qty = 0.0
+                self.current_side = None
+            else:
+                residual = self._get_active_position()
+                if residual:
+                    self.watched_qty = residual["size"]
+                    self.current_side = residual["side"]
+                    self.watched_entry = residual["entry_price"]
+                    logger.warning(
+                        f"强平未归零，账本同步实盘: {self.current_side} {self.watched_qty} ETH"
+                    )
+            self._save_state()
+
         binance_client.cancel_all_open_orders(self.symbol)
 
         if reason and closed_successfully:
@@ -1916,6 +2056,8 @@ class PositionSupervisorBinance:
                 )
             else:
                 self._report_flat_close(reason)
+
+        return closed_successfully
 
     def recover_state_on_startup(self):
         """重启闪电接管：对账 TV/开仓日志 → 核实实盘 → 智能补挂 TP123 → 恢复雷达"""
