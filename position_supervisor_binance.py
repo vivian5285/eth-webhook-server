@@ -23,12 +23,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.4.10-recover-dingtalk"
+BINANCE_VPS_VERSION = "v13.5.1-atr-priority"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
+# 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
+SAME_DIR_MIN_SPREAD_PCT = 0.15
+SAME_DIR_DEDUP_SEC = 300
+ATR_SIMILAR_RATIO = 0.03  # 持仓 ATR 与 TV ATR 偏差 ≤3% 视为未变
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
 
@@ -63,6 +67,10 @@ class PositionSupervisorBinance:
         self._scan_ticks = 0
         self._signal_queue = queue.Queue()
         self._signal_worker_started = False
+        self._sentinel_active = False
+        self.open_regime = 3
+        self.open_atr = 30.0
+        self._last_entry_signal = None
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -313,6 +321,8 @@ class PositionSupervisorBinance:
                     "best_price": self.best_price,
                     "initial_qty": self.initial_qty,
                     "last_tv_signal": self.last_tv_signal,
+                    "open_regime": self.open_regime,
+                    "open_atr": self.open_atr,
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -1229,6 +1239,164 @@ class PositionSupervisorBinance:
         finally:
             self._lock.release()
 
+    def _entry_price_diff_pct(self, price_a, price_b, ref_px):
+        ref = ref_px or max(abs(price_a), abs(price_b), 1.0)
+        return abs(float(price_a) - float(price_b)) / ref * 100.0
+
+    def _is_similar_atr(self, atr_a, atr_b):
+        a, b = float(atr_a or 0), float(atr_b or 0)
+        if a <= 0 and b <= 0:
+            return True
+        if a <= 0 or b <= 0:
+            return False
+        return abs(a - b) / max(a, b) <= ATR_SIMILAR_RATIO
+
+    def _touch_entry_signal_signature(self, action):
+        self._last_entry_signal = {
+            "action": action,
+            "tv_price": self.tv_price,
+            "atr": self.current_atr,
+            "regime": self.regime,
+            "tv_tps": list(self.tv_tps),
+            "ts": time.time(),
+        }
+
+    def _is_duplicate_flat_entry(self, action, curr_px):
+        sig = self._last_entry_signal
+        if not sig or sig.get("action") != action:
+            return False
+        if time.time() - float(sig.get("ts", 0)) > SAME_DIR_DEDUP_SEC:
+            return False
+        if not self._is_similar_atr(sig.get("atr"), self.current_atr):
+            return False
+        if int(sig.get("regime", 0)) != int(self.regime):
+            return False
+        ref_px = curr_px or self.tv_price or sig.get("tv_price") or 1.0
+        diff = self._entry_price_diff_pct(sig.get("tv_price", 0), self.tv_price, ref_px)
+        return diff < SAME_DIR_MIN_SPREAD_PCT
+
+    def _same_direction_entry_mode(self, action, pos, curr_px):
+        """同向智能决策：① ATR → ② 档位 → ③ 理论开仓价差"""
+        ref_px = curr_px or self.tv_price or pos["entry_price"]
+        live_entry = pos["entry_price"]
+        diff_pct = self._entry_price_diff_pct(live_entry, self.tv_price, ref_px)
+        open_regime = int(getattr(self, "open_regime", self.regime) or self.regime)
+        open_atr = float(getattr(self, "open_atr", self.current_atr) or self.current_atr)
+        tv_atr = float(self.current_atr)
+
+        if not self._is_similar_atr(open_atr, tv_atr):
+            logger.info(
+                f"🔄 同向 [{action}] ATR {open_atr:.2f}→{tv_atr:.2f} 变化 "
+                f"(>{ATR_SIMILAR_RATIO:.0%}) → 先平后开重入"
+            )
+            return "FULL_REENTRY", diff_pct, "atr_changed", open_atr, tv_atr
+
+        if int(self.regime) != open_regime:
+            logger.info(
+                f"🔄 同向 [{action}] 档位 R{open_regime}→R{self.regime} → 先平后开重入"
+            )
+            return "FULL_REENTRY", diff_pct, "regime_changed", open_atr, tv_atr
+
+        if diff_pct >= SAME_DIR_MIN_SPREAD_PCT:
+            logger.info(
+                f"🔄 同向 [{action}] 价差 {diff_pct:.3f}% ≥ {SAME_DIR_MIN_SPREAD_PCT}% → 先平后开"
+            )
+            return "FULL_REENTRY", diff_pct, "spread_ok", open_atr, tv_atr
+
+        logger.info(
+            f"🧠 同向 [{action}] ATR {tv_atr:.2f} 未变 + 价差 {diff_pct:.3f}% "
+            f"< {SAME_DIR_MIN_SPREAD_PCT}% → 仅刷新 TP123"
+        )
+        return "REFRESH_TP", diff_pct, "refresh_tp", open_atr, tv_atr
+
+    def _report_smart_reentry(self, action, pos, diff_pct, reason, open_atr, tv_atr):
+        live_entry = pos["entry_price"]
+        reason_txt = {
+            "atr_changed": f"TV ATR `{tv_atr:.2f}` ≠ 持仓 ATR `{open_atr:.2f}` → 刷新仓位",
+            "regime_changed": f"档位 R{self.open_regime}→R{self.regime} → 刷新仓位",
+            "spread_ok": f"理论价差 {diff_pct:.3f}% ≥ {SAME_DIR_MIN_SPREAD_PCT}% → 刷新仓位",
+        }.get(reason, "同向刷新仓位")
+        self._call_dingtalk(
+            dingtalk.report_smart_same_dir_decision,
+            side=action,
+            decision=f"reentry_{reason}",
+            live_entry=live_entry,
+            tv_price=self.tv_price,
+            diff_pct=diff_pct,
+            threshold_pct=SAME_DIR_MIN_SPREAD_PCT,
+            open_regime=self.open_regime,
+            tv_regime=self.regime,
+            open_atr=open_atr,
+            tv_atr=tv_atr,
+            qty=pos["size"],
+            verify_note=(
+                f"核实持仓 {pos['size']} ETH @ {live_entry:.2f} | {reason_txt} | 执行先平后开"
+            ),
+        )
+
+    def _same_direction_refresh_tp(self, action, pos, curr_px, diff_pct, open_atr, tv_atr):
+        live_pos = self._get_active_position()
+        if not live_pos or live_pos["size"] <= 0:
+            logger.warning("🧠 同向刷新: 实盘已无持仓，跳过")
+            return
+
+        real_qty = live_pos["size"]
+        entry = live_pos["entry_price"]
+        self.current_side = action
+        self.watched_qty = real_qty
+        self.watched_entry = entry
+        self.monitoring = True
+        self._save_state()
+
+        sl_to_pass = self._radar_sl_to_pass()
+        result = self._smart_realign_defenses(
+            real_qty, entry, dynamic_sl=sl_to_pass,
+            reason="同向TV智能刷新止盈",
+        )
+        self._ensure_sentinel_running()
+
+        verify_note = (
+            f"核实持仓 {real_qty} ETH @ {entry:.2f} | TV理论 {self.tv_price:.2f} | "
+            f"持仓ATR {open_atr:.2f} = TV ATR {tv_atr:.2f} | "
+            f"价差 {diff_pct:.3f}% (< {SAME_DIR_MIN_SPREAD_PCT}%) | "
+            f"止盈 {result['matched']}/{result['expected']} 档 | "
+            f"{self._format_audit_summary(result['audit'])}"
+        )
+        self._call_dingtalk(
+            dingtalk.report_smart_same_dir_decision,
+            side=action,
+            decision="skip_refresh_tp",
+            live_entry=entry,
+            tv_price=self.tv_price,
+            diff_pct=diff_pct,
+            threshold_pct=SAME_DIR_MIN_SPREAD_PCT,
+            open_regime=self.open_regime,
+            tv_regime=self.regime,
+            open_atr=open_atr,
+            tv_atr=tv_atr,
+            qty=real_qty,
+            tp_audit=result["audit"],
+            verify_note=verify_note,
+        )
+        logger.info("🧠 同向智能处理完成: ATR未变+价差不足，未再开仓，TP123 已按新 TV 价刷新")
+
+    def _ensure_sentinel_running(self):
+        if self.monitoring and not self._sentinel_active:
+            threading.Thread(
+                target=self._sentinel_loop, daemon=True, name="sentinel",
+            ).start()
+
+    def _full_reentry(self, action, close_reason):
+        binance_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.5)
+        self._close_all(close_reason)
+        time.sleep(1.2)
+        binance_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.5)
+        curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+        if curr_px > 0:
+            self._open_position(action, curr_px)
+
     def _handle_manual_flat_detected(self, reason):
         """人工全平 / 止盈吃满：智能复位账本"""
         logger.info(f"📭 感知空仓: {reason}")
@@ -1240,25 +1408,68 @@ class PositionSupervisorBinance:
         self._report_flat_close(reason or "仓位归零 (人工全平 / 止盈吃满)")
 
     def _handle_smart_entry(self, action):
-        """三重把关之一：新 TV 方向 → 先撤后平再开"""
-        logger.info(f"⚡ 收到建仓信号 [{action}]，启动绝对先平后开机制")
+        """同向智能筛选；反向一律先平后开"""
+        curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+        pos = self._get_active_position()
+
+        if pos and pos["size"] > 0:
+            current_side = pos["side"]
+            if current_side != action:
+                logger.info(f"⚡ 反方向 [{action}] vs 实盘 [{current_side}] → 先平后开")
+                self._full_reentry(action, "反方向指令到达，触发【先平后开】原子对冲换防")
+                self._touch_entry_signal_signature(action)
+                return
+
+            mode, diff_pct, reason, open_atr, tv_atr = self._same_direction_entry_mode(action, pos, curr_px)
+            if mode == "REFRESH_TP":
+                self._same_direction_refresh_tp(action, pos, curr_px, diff_pct, open_atr, tv_atr)
+                self._touch_entry_signal_signature(action)
+                return
+
+            close_msgs = {
+                "atr_changed": f"同向 TV ATR 变化 ({open_atr:.2f}→{tv_atr:.2f})，触发【先平后开】刷新仓位",
+                "regime_changed": "同向 TV 档位变化，触发【先平后开】重入",
+                "spread_ok": f"同向理论价差 {diff_pct:.3f}% 达标，触发【先平后开】重入",
+            }
+            self._report_smart_reentry(action, pos, diff_pct, reason, open_atr, tv_atr)
+            self._full_reentry(action, close_msgs.get(reason, "同方向刷新仓位，触发【先平后开】重入"))
+            self._touch_entry_signal_signature(action)
+            return
+
+        if self._is_duplicate_flat_entry(action, curr_px):
+            ref_px = curr_px or self.tv_price or 1.0
+            diff_pct = self._entry_price_diff_pct(
+                self._last_entry_signal.get("tv_price", 0), self.tv_price, ref_px,
+            )
+            logger.info(f"🧠 空仓短时重复同向 TV [{action}] → 忽略开仓")
+            self._call_dingtalk(
+                dingtalk.report_smart_same_dir_decision,
+                side=action,
+                decision="skip_duplicate_flat",
+                live_entry=0.0,
+                tv_price=self.tv_price,
+                diff_pct=diff_pct,
+                threshold_pct=SAME_DIR_MIN_SPREAD_PCT,
+                open_regime=self.regime,
+                tv_regime=self.regime,
+                open_atr=self._last_entry_signal.get("atr", self.current_atr),
+                tv_atr=self.current_atr,
+                qty=0.0,
+                verify_note=(
+                    f"5分钟内重复 {action} | ATR {self.current_atr:.2f} 未变 | "
+                    f"TV {self.tv_price:.2f} 价差 {diff_pct:.3f}% | 档位 R{self.regime} | 未重复下单"
+                ),
+            )
+            self._touch_entry_signal_signature(action)
+            return
+
+        logger.info(f"⚡ 收到建仓信号 [{action}]，空仓极速开仓")
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
-
-        pos = position_manager.get_position(self.symbol)
-        if pos and float(pos.get("positionAmt", 0)) != 0:
-            current_side = "LONG" if float(pos["positionAmt"]) > 0 else "SHORT"
-            if current_side == action:
-                self._close_all("同方向新指令到达，触发【先平后开】洗清旧阵地")
-            else:
-                self._close_all("反方向指令到达，触发【先平后开】原子对冲换防")
-            time.sleep(1.2)
-            binance_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.5)
-
-        curr_px = binance_client.get_current_price(self.symbol)
+        curr_px = curr_px or binance_client.get_current_price(self.symbol)
         if curr_px > 0:
             self._open_position(action, curr_px)
+        self._touch_entry_signal_signature(action)
 
     def _open_position(self, action, curr_px):
         balance = binance_client.get_available_balance()
@@ -1277,6 +1488,8 @@ class PositionSupervisorBinance:
         pos = self._get_active_position()
         if pos:
             self.current_side = action
+            self.open_regime = self.regime
+            self.open_atr = self.current_atr
             real_qty = pos["size"]
             self.initial_qty = real_qty
             self._protect_and_monitor(real_qty, pos["entry_price"])
@@ -1330,7 +1543,7 @@ class PositionSupervisorBinance:
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
 
-        threading.Thread(target=self._sentinel_loop, daemon=True).start()
+        self._ensure_sentinel_running()
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
         """重启：按现价恢复 best_price / 雷达激活 / 追踪止损位"""
@@ -1514,98 +1727,102 @@ class PositionSupervisorBinance:
 
     def _sentinel_loop(self):
         """哨兵：持仓/TP 防线 + 雷达移动保本（自适应轮询 2~6 秒）"""
+        self._sentinel_active = True
         last_px = 0.0
-        while self.monitoring:
-            try:
-                if not self._lock.acquire(timeout=2.0):
-                    continue
+        try:
+            while self.monitoring:
                 try:
-                    pos = self._get_active_position()
-                    real_amt = pos["size"] if pos else 0.0
-                    actual_side = pos["side"] if pos else None
+                    if not self._lock.acquire(timeout=2.0):
+                        continue
+                    try:
+                        pos = self._get_active_position()
+                        real_amt = pos["size"] if pos else 0.0
+                        actual_side = pos["side"] if pos else None
 
-                    if not pos or real_amt == 0:
-                        if self.watched_qty > 0:
-                            self._handle_manual_flat_detected(
+                        if not pos or real_amt == 0:
+                            if self.watched_qty > 0:
+                                self._handle_manual_flat_detected(
+                                    "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
+                                )
+                            break
+
+                        if self.watched_qty > 0 and self._should_finalize_tp_victory(real_amt):
+                            self._sweep_dust_and_finalize(
                                 "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
                             )
-                        break
+                            break
 
-                    if self.watched_qty > 0 and self._should_finalize_tp_victory(real_amt):
-                        self._sweep_dust_and_finalize(
-                            "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
-                        )
-                        break
+                        if actual_side != self.last_tv_side:
+                            reason = f"致命方向背离：实盘({actual_side}) vs TV({self.last_tv_side})"
+                            self._close_all(reason, force_align=(actual_side, self.last_tv_side))
+                            break
 
-                    if actual_side != self.last_tv_side:
-                        reason = f"致命方向背离：实盘({actual_side}) vs TV({self.last_tv_side})"
-                        self._close_all(reason, force_align=(actual_side, self.last_tv_side))
-                        break
+                        curr_px = binance_client.get_current_price(self.symbol)
+                        if curr_px <= 0:
+                            curr_px = last_px
+                        elif curr_px > 0:
+                            last_px = curr_px
+                        if curr_px > 0:
+                            if self.current_side == "LONG":
+                                self.best_price = max(self.best_price, curr_px)
+                            else:
+                                self.best_price = min(self.best_price, curr_px)
 
-                    curr_px = binance_client.get_current_price(self.symbol)
-                    if curr_px <= 0:
-                        curr_px = last_px
-                    elif curr_px > 0:
-                        last_px = curr_px
-                    if curr_px > 0:
-                        if self.current_side == "LONG":
-                            self.best_price = max(self.best_price, curr_px)
-                        else:
-                            self.best_price = min(self.best_price, curr_px)
-
-                    qty_changed = abs(real_amt - self.watched_qty) > 0.001
-                    if qty_changed:
-                        old_qty = self.watched_qty
-                        self.watched_qty = real_amt
-                        self.watched_entry = pos["entry_price"]
-                        pct = abs(real_amt - old_qty) / old_qty if old_qty > 0 else 1.0
-                        action_msg = (
-                            "手动加仓" if real_amt > old_qty
-                            else "部分止盈吃单 / 手动减仓"
-                        )
-                        logger.info(
-                            f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {real_amt} ({pct:.1%})，智能重对齐"
-                        )
-                        self._bump_best_on_tp_fill(old_qty, real_amt, curr_px)
-                        self._sync_radar_sl_from_best(curr_px)
-                        sl_to_pass = self._radar_sl_to_pass()
-                        result = self._smart_realign_defenses(
-                            real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
-                            reason=f"人工异动: {action_msg}",
-                        )
-                        self._save_state()
-                        self._report_qty_change_dingtalk(old_qty, real_amt, result)
-
-                    self._scan_ticks += 1
-                    if not qty_changed and self._scan_ticks % 10 == 0:
-                        audit = self._audit_tp_levels(real_amt)
-                        if audit["issues"]:
+                        qty_changed = abs(real_amt - self.watched_qty) > 0.001
+                        if qty_changed:
+                            old_qty = self.watched_qty
+                            self.watched_qty = real_amt
+                            self.watched_entry = pos["entry_price"]
+                            pct = abs(real_amt - old_qty) / old_qty if old_qty > 0 else 1.0
+                            action_msg = (
+                                "手动加仓" if real_amt > old_qty
+                                else "部分止盈吃单 / 手动减仓"
+                            )
                             logger.info(
-                                f"🔍 定期扫描发现异常: {audit['issues']}，触发智能补挂"
+                                f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {real_amt} ({pct:.1%})，智能重对齐"
                             )
+                            self._bump_best_on_tp_fill(old_qty, real_amt, curr_px)
+                            self._sync_radar_sl_from_best(curr_px)
                             sl_to_pass = self._radar_sl_to_pass()
-                            self._smart_realign_defenses(
+                            result = self._smart_realign_defenses(
                                 real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
-                                reason="定期防线扫描",
+                                reason=f"人工异动: {action_msg}",
                             )
+                            self._save_state()
+                            self._report_qty_change_dingtalk(old_qty, real_amt, result)
 
-                    if curr_px <= 0:
-                        continue
+                        self._scan_ticks += 1
+                        if not qty_changed and self._scan_ticks % 10 == 0:
+                            audit = self._audit_tp_levels(real_amt)
+                            if audit["issues"]:
+                                logger.info(
+                                    f"🔍 定期扫描发现异常: {audit['issues']}，触发智能补挂"
+                                )
+                                sl_to_pass = self._radar_sl_to_pass()
+                                self._smart_realign_defenses(
+                                    real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
+                                    reason="定期防线扫描",
+                                )
 
-                    progress = self._radar_activation_progress(curr_px)
-                    if self._should_radar_trail(curr_px):
-                        self._process_radar_trailing(real_amt, curr_px)
-                    elif progress >= 0.5 and self._scan_ticks % 5 == 0:
-                        logger.info(
-                            f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
-                            f"轮询 {SENTINEL_POLL_ARMING}s"
-                        )
-                finally:
-                    self._lock.release()
-            except Exception as e:
-                logger.error(f"哨兵异常: {e}")
-            if self.monitoring:
-                time.sleep(self._sentinel_poll_sec(last_px))
+                        if curr_px <= 0:
+                            continue
+
+                        progress = self._radar_activation_progress(curr_px)
+                        if self._should_radar_trail(curr_px):
+                            self._process_radar_trailing(real_amt, curr_px)
+                        elif progress >= 0.5 and self._scan_ticks % 5 == 0:
+                            logger.info(
+                                f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
+                                f"轮询 {SENTINEL_POLL_ARMING}s"
+                            )
+                    finally:
+                        self._lock.release()
+                except Exception as e:
+                    logger.error(f"哨兵异常: {e}")
+                if self.monitoring:
+                    time.sleep(self._sentinel_poll_sec(last_px))
+        finally:
+            self._sentinel_active = False
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
@@ -1720,6 +1937,8 @@ class PositionSupervisorBinance:
                     self.watched_entry = s.get("watched_entry", 0.0)
                     self.initial_qty = s.get("initial_qty", 0.0)
                     self.last_tv_signal = s.get("last_tv_signal")
+                    self.open_regime = int(s.get("open_regime", s.get("regime", 3)) or 3)
+                    self.open_atr = float(s.get("open_atr", s.get("current_atr", 30.0)) or 30.0)
 
             if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
                 return
@@ -1744,6 +1963,10 @@ class PositionSupervisorBinance:
                 self.watched_qty = real_amt
                 self.initial_qty = saved_initial
                 self.watched_entry = pos["entry_price"]
+                if not getattr(self, "open_regime", None):
+                    self.open_regime = self.regime
+                if not getattr(self, "open_atr", None):
+                    self.open_atr = self.current_atr
                 qty_change = reconcile.get("qty_manual_change")
 
                 curr_px = binance_client.get_current_price(self.symbol)
