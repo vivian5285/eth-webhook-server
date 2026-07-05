@@ -1,8 +1,8 @@
 # 币安 Binance · ETH 永续 Webhook 交易系统
 
-**当前版本：`v13.4.3-ws-radar`**
+**当前版本：`v13.4.6-flat-reconcile`**
 
-TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 VPS 逻辑对齐，单位按 **ETH** 计算，钉钉为 **黄金主题**。
+TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 VPS 逻辑对齐，单位按 **ETH** 计算，实盘 **8 倍杠杆**，钉钉为 **黄金主题**。
 
 ---
 
@@ -12,6 +12,7 @@ TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 V
 |------|-----|
 | 目录 | `~/binance-engine` |
 | 端口 | **5003** |
+| 杠杆 | **8x**（开仓前自动 set-leverage） |
 | 健康检查 | `GET /health` |
 | 主日志 | `logs/binance_brain.log` |
 | 部署脚本 | `bash deploy_binance.sh` |
@@ -30,6 +31,7 @@ position_supervisor_binance.py（智慧大脑）
 ├── 重启闪电接管 + TV 对账
 ├── TP123 比例审计 + 增量/核武补挂
 ├── 雷达移动保本（WS 推价 + STOP_MARKET）
+├── 空仓对账 + 蚂蚁仓扫尾（flat-reconcile）
 └── 哨兵循环（持仓/人工异动/定期扫描）
         ↓
 binance_client.py（REST 交易 + 公开 WS 行情）
@@ -45,9 +47,13 @@ dingtalk.py（黄金钉钉播报）
 
 ### 1. 重启闪电接管
 - 读取 `binance_vps_state.json` + **TV 日志** + **开仓日志**
-- 对账：实盘方向 / 入场价 / 最新 TV 信号
+- **TV 方向强制对齐**：`last_tv_side` 始终同步 TV 日志最新 LONG/SHORT
+- **方向背离 / TV 已 CLOSE** → 核武清场，不盲目接管
+- **人工加减仓**：账本 ETH ≠ 实盘 → 写开仓日志 + 钉钉 + 按比例重挂 TP
 - TP123 **价位 + 数量** 严格审计（regime 比例）
+- **雷达恢复**：按现价刷新 `best_price` / 激活状态 → 补挂 STOP_MARKET
 - 已齐全 → **跳过补挂**；不齐 → 增量补挂 → 仍失败 → **核武清场重挂**
+- 启动 **WS 推价** + **哨兵循环**（与运行中一致）
 
 ### 2. 限价止盈 TP123
 - 比例随档位（regime 1~4）变化，例如 3 档：`18% / 32% / 50%`
@@ -66,7 +72,13 @@ dingtalk.py（黄金钉钉播报）
 - 人工全平 → 撤单复位 + 钉钉
 - 方向与 TV 背离 → 核武全平
 
-### 5. 日志与审计
+### 5. 空仓对账与蚂蚁仓扫尾（v13.4.6）
+- **重启首检**：≤0.004 ETH 蚂蚁仓，或 TP 吃完后残量 ≤12% 且无 TP 单 → 自动 reduceOnly 扫尾
+- **宕机补发**：服务重启期间已全平但账本仍有仓 → 补发「完美胜利」钉钉
+- **空闲巡检**：空仓待命时每 30s 扫描，发现孤立残量自动扫平
+- 平仓钉钉带 REST 核查重试，避免误报
+
+### 6. 日志与审计
 | 文件 | 说明 |
 |------|------|
 | `logs/binance_tv_journal.jsonl` | 每条 TV 信号 |
@@ -135,7 +147,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 # 版本门控
-grep v13.4.3-ws-radar binance_client.py position_supervisor_binance.py
+grep v13.4.6-flat-reconcile binance_client.py position_supervisor_binance.py
 
 pip3 install -r requirements.txt   # 含 websocket-client
 bash deploy_binance.sh
@@ -148,7 +160,8 @@ curl -s http://127.0.0.1:5003/health
 **部署成功日志示例：**
 
 ```
-🧠 币安 VPS [v13.4.3-ws-radar] 军师托管版已加载
+🟢 Binance Client v13.4.6-flat-reconcile 已加载
+🧠 币安 VPS [v13.4.6-flat-reconcile] 军师托管版已加载
 📡 币安公开 WS 启动: ETHUSDT@markPrice@1s
 Websocket connected
 🔄 [系统重启点火] 检测到实盘持仓 SHORT 0.406 ETH ...
@@ -158,7 +171,7 @@ Websocket connected
 **健康检查响应：**
 
 ```json
-{"service":"binance_webhook","status":"ok","version":"v13.4.3-ws-radar"}
+{"service":"binance_webhook","status":"ok","version":"v13.4.6-flat-reconcile"}
 ```
 
 ---
@@ -168,11 +181,12 @@ Websocket connected
 | 项目 | 币安 | 深币 |
 |------|------|------|
 | 单位 | ETH | 张 |
+| 杠杆 | **8x** | **8x** |
 | 端口 | 5003 | 5004 |
 | 钉钉主题 | 黄金 | 紫金 |
 | 止损类型 | STOP_MARKET | 条件单 trigger |
 | WS 频道 | markPrice@1s | market-latest |
-| 杠杆 | 15x | 15x |
+| 空仓对账 | v13.4.6 蚂蚁仓扫尾 | v13.4.6 蚂蚁仓扫尾 |
 
 ---
 
@@ -184,7 +198,8 @@ Websocket connected
 | v13.4-nuclear-guard | 核武清场重挂（重复单/0-3 对齐失败） |
 | v13.4.1-qtyfix | 深币张数 `'1.000000'` 解析修复 |
 | v13.4.2-radar-live | 雷达自适应轮询 2~6s |
-| **v13.4.3-ws-radar** | **WS 推价 + REST 限频兜底** |
+| v13.4.3-ws-radar | WS 推价 + REST 限频兜底 |
+| **v13.4.6-flat-reconcile** | **空仓对账、蚂蚁仓扫尾、宕机补发钉钉** |
 
 ---
 
@@ -195,6 +210,7 @@ Websocket connected
 3. 重启后钉钉「闪电接管报告」应显示 TP **3/3 比例审计 ✅**。
 4. 仅同时持有一个方向；新信号 **先撤单 → 平仓 → 再开仓**。
 5. 建议 one-way 持仓模式，ETHUSDT 永续。
+6. 开仓量按 `余额 × regime.margin × 8x ÷ 价格` 取整，步长 0.001 ETH。
 
 ---
 
