@@ -2,7 +2,7 @@
 
 **当前版本：`v13.4.6-flat-reconcile`**
 
-TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 VPS 逻辑对齐，单位按 **ETH** 计算，实盘 **8 倍杠杆**，钉钉为 **黄金主题**。
+TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 VPS 逻辑对齐，单位按 **ETH** 计算，实盘 **10 倍杠杆**，钉钉为 **黄金主题**。
 
 ---
 
@@ -12,7 +12,7 @@ TradingView Webhook → 币安 ETHUSDT 永续合约自动化引擎。与深币 V
 |------|-----|
 | 目录 | `~/binance-engine` |
 | 端口 | **5003** |
-| 杠杆 | **8x**（开仓前自动 set-leverage） |
+| 杠杆 | **10x**（开仓前自动 set-leverage） |
 | 健康检查 | `GET /health` |
 | 主日志 | `logs/binance_brain.log` |
 | 部署脚本 | `bash deploy_binance.sh` |
@@ -181,7 +181,7 @@ Websocket connected
 | 项目 | 币安 | 深币 |
 |------|------|------|
 | 单位 | ETH | 张 |
-| 杠杆 | **8x** | **8x** |
+| 杠杆 | **10x** | **10x** |
 | 端口 | 5003 | 5004 |
 | 钉钉主题 | 黄金 | 紫金 |
 | 止损类型 | STOP_MARKET | 条件单 trigger |
@@ -210,7 +210,7 @@ Websocket connected
 3. 重启后钉钉「闪电接管报告」应显示 TP **3/3 比例审计 ✅**。
 4. 仅同时持有一个方向；新信号 **先撤单 → 平仓 → 再开仓**。
 5. 建议 one-way 持仓模式，ETHUSDT 永续。
-6. 开仓量按 `余额 × regime.margin × 8x ÷ 价格` 取整，步长 0.001 ETH。
+6. 开仓量按 `余额 × regime.margin × 10x ÷ 价格` 取整，步长 0.001 ETH。
 
 ---
 
