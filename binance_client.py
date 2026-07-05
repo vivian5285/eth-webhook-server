@@ -67,7 +67,7 @@ class BinanceClient:
             p = round(round(p / tick) * tick, 8)
         return f"{p:.2f}" if tick <= 0.01 else str(p)
 
-    def set_leverage(self, symbol="ETHUSDT", leverage=8):
+    def set_leverage(self, symbol="ETHUSDT", leverage=10):
         """设置指定交易对的杠杆倍数"""
         try:
             result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
