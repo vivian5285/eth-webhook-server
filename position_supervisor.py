@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.5-scorch-verify"
+BINANCE_VPS_VERSION = "v13.5.6-recover-race"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -71,6 +71,8 @@ class PositionSupervisorBinance:
         self.open_regime = 3
         self.open_atr = 30.0
         self._last_entry_signal = None
+        self._recover_in_progress = False
+        self._recover_tp_unconfirmed = False
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -1000,6 +1002,8 @@ class PositionSupervisorBinance:
         """
         if real_amt <= 0 or not self.monitoring:
             return None
+        if getattr(self, "_recover_in_progress", False):
+            return None
         audit = self._audit_tp_levels(real_amt)
         sl = self._radar_sl_to_pass()
         if not self._defense_needs_immediate_fix(audit) and self._defenses_fully_ok(real_amt, sl):
@@ -1030,6 +1034,19 @@ class PositionSupervisorBinance:
                 f"{new_audit['matched_full']}/{new_audit['expected']} | "
                 f"{self._format_audit_summary(new_audit)}"
             )
+            if getattr(self, "_recover_tp_unconfirmed", False):
+                self._recover_tp_unconfirmed = False
+                self._call_dingtalk(
+                    dingtalk.report_radar_guardian_realigned,
+                    side=self.current_side,
+                    qty=real_amt,
+                    tp_audit=new_audit,
+                    verify_note=(
+                        f"重启接管竞态后雷达已纠偏 | "
+                        f"{new_audit['matched_full']}/{new_audit['expected']} | "
+                        f"{self._format_audit_summary(new_audit)}"
+                    ),
+                )
         return result
 
 
@@ -1136,6 +1153,18 @@ class PositionSupervisorBinance:
                 return matched, pending
             time.sleep(delay)
         return matched, pending
+
+    def _wait_defense_settled(self, live_qty, dynamic_sl=None, retries=8, delay=0.75):
+        """给撤单/重挂留 REST 同步窗口，避免接管未完成时误报"""
+        sl = dynamic_sl if dynamic_sl is not None else self._radar_sl_to_pass()
+        last = self._audit_tp_levels(live_qty)
+        for i in range(retries):
+            if not self._defense_needs_immediate_fix(last) and self._defenses_fully_ok(live_qty, sl):
+                return last
+            if i + 1 < retries:
+                time.sleep(delay)
+                last = self._audit_tp_levels(live_qty)
+        return last
 
     def _has_stop_sl_near(self, sl_price, tolerance=2.0):
         target = round(float(sl_price), 2)
@@ -2134,61 +2163,139 @@ class PositionSupervisorBinance:
 
             pos = self._get_active_position()
             if pos:
-                reconcile = self._reconcile_context_on_recover(pos)
-                reconcile_notes = reconcile["notes"]
-                real_amt = pos["size"]
-                side = pos["side"]
-                self.current_side = side
+                self._recover_in_progress = True
+                if not self._lock.acquire(timeout=120.0):
+                    logger.error("❌ 重启接管无法获取锁，跳过")
+                    self._recover_in_progress = False
+                    return
+                try:
+                    reconcile = self._reconcile_context_on_recover(pos)
+                    reconcile_notes = reconcile["notes"]
+                    real_amt = pos["size"]
+                    side = pos["side"]
+                    self.current_side = side
 
-                align_notes = self._apply_recover_live_alignment(side, reconcile)
-                reconcile_notes.extend(align_notes)
+                    align_notes = self._apply_recover_live_alignment(side, reconcile)
+                    reconcile_notes.extend(align_notes)
 
-                saved_initial = float(self.initial_qty or 0)
-                if saved_initial <= 0:
-                    saved_initial = real_amt
-                self.watched_qty = real_amt
-                self.initial_qty = saved_initial
-                self.watched_entry = pos["entry_price"]
-                if not getattr(self, "open_regime", None):
-                    self.open_regime = self.regime
-                if not getattr(self, "open_atr", None):
-                    self.open_atr = self.current_atr
-                qty_change = reconcile.get("qty_manual_change")
+                    saved_initial = float(self.initial_qty or 0)
+                    if saved_initial <= 0:
+                        saved_initial = real_amt
+                    self.watched_qty = real_amt
+                    self.initial_qty = saved_initial
+                    self.watched_entry = pos["entry_price"]
+                    if not getattr(self, "open_regime", None):
+                        self.open_regime = self.regime
+                    if not getattr(self, "open_atr", None):
+                        self.open_atr = self.current_atr
+                    qty_change = reconcile.get("qty_manual_change")
 
-                curr_px = binance_client.get_current_price(self.symbol)
-                self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
+                    curr_px = binance_client.get_current_price(self.symbol)
+                    self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
 
-                radar_active = self._is_radar_active()
-                saved_sl = self.current_sl if radar_active else None
+                    radar_active = self._is_radar_active()
+                    saved_sl = self.current_sl if radar_active else None
 
-                logger.info(
-                    f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} ETH @ "
-                    f"{self.watched_entry:.2f} | 雷达={'已激活' if radar_active else '待命'} | "
-                    f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
-                )
+                    logger.info(
+                        f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} ETH @ "
+                        f"{self.watched_entry:.2f} | 雷达={'已激活' if radar_active else '待命'} | "
+                        f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
+                    )
 
-                result = self._enforce_defense_alignment(
-                    real_amt, self.watched_entry, dynamic_sl=None,
-                    reason="重启闪电接管 · 核武撤单重挂",
-                    rounds=4, recover_mode=True,
-                )
-                if saved_sl and radar_active:
-                    sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
-                else:
-                    sl_ok = True
+                    result = self._enforce_defense_alignment(
+                        real_amt, self.watched_entry, dynamic_sl=None,
+                        reason="重启闪电接管 · 核武撤单重挂",
+                        rounds=4, recover_mode=True,
+                    )
+                    if saved_sl and radar_active:
+                        sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
+                    else:
+                        sl_ok = True
 
-                matched = result["matched"]
-                expected = result["expected"]
-                pending_prices = result["pending_prices"]
-                _rebuilt = result["rebuilt"]
-                audit = result["audit"]
+                    _rebuilt = result["rebuilt"]
+                    audit = self._wait_defense_settled(
+                        real_amt, saved_sl if radar_active else None,
+                    )
+                    matched = audit["matched_full"]
+                    expected = audit["expected"]
 
-                self.monitoring = True
-                self._save_state()
-                self._ensure_price_ws()
-                self._record_open_log(
-                    self.current_side, real_amt, self.watched_entry, source="recover",
-                )
+                    self.monitoring = True
+                    self._save_state()
+                    self._ensure_price_ws()
+                    self._record_open_log(
+                        self.current_side, real_amt, self.watched_entry, source="recover",
+                    )
+
+                    verified = self._wait_verify(
+                        lambda: self._verify_position_qty(real_amt, self.current_side),
+                        retries=8,
+                        delay=0.5,
+                    )
+                    entry_px = float(
+                        (verified or pos)["entry_price"]
+                    )
+                    tv_note = ""
+                    if self.last_tv_signal:
+                        tv_note = (
+                            f" | 最新TV: {self.last_tv_signal.get('action')} "
+                            f"@{self.last_tv_signal.get('ts', '')}"
+                        )
+                    reconcile_txt = (" | " + " ; ".join(reconcile_notes)) if reconcile_notes else ""
+                    skip_note = " | 盘口已齐全，未重复补挂" if not _rebuilt else ""
+                    verify_note = (
+                        f"接管 {real_amt} ETH @ {entry_px:.2f} | "
+                        f"TV方向 {self.last_tv_side} | "
+                        f"止盈 {matched}/{expected} 档 | "
+                        f"{self._format_audit_summary(audit)}{skip_note}{tv_note}{reconcile_txt}"
+                    )
+                    if not verified:
+                        verify_note += " | REST 同步略延迟"
+                    self._call_dingtalk(
+                        dingtalk.report_recover_takeover,
+                        side=self.current_side,
+                        qty=real_amt,
+                        entry=entry_px,
+                        tv_tps=self.tv_tps,
+                        regime=self.regime,
+                        radar_active=radar_active,
+                        sl_price=self.current_sl,
+                        verify_note=verify_note,
+                        tp_matched=matched,
+                        tp_expected=expected,
+                        tp_audit=audit,
+                        last_tv_signal=self.last_tv_signal,
+                        radar_sl_ok=sl_ok,
+                    )
+                    if qty_change:
+                        old_q, new_q, action_msg = qty_change
+                        self._call_dingtalk(
+                            dingtalk.report_manual_position_change,
+                            action_type=action_msg,
+                            old_qty=old_q,
+                            new_qty=new_q,
+                            new_entry_price=entry_px,
+                            verify_note=f"重启接管检测 | {verify_note}",
+                            tp_audit=audit,
+                            verified=bool(verified),
+                        )
+                    if expected > 0 and matched < expected:
+                        dupes = [lv for lv in audit.get("levels", []) if lv.get("status") == "duplicate"]
+                        hint = (
+                            "重复 TP 占满可减仓额度→TP3 无法挂 | 非 API 权限问题"
+                            if dupes else "请查 logs/binance_brain.log 是否有 [撤单失败]/[限价单失败]"
+                        )
+                        self._recover_tp_unconfirmed = True
+                        dingtalk.report_system_alert(
+                            "重启接管后限价止盈未对齐",
+                            f"{self.current_side} {real_amt} ETH @ {entry_px:.2f} | "
+                            f"仅 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
+                            f"{hint} | 雷达哨兵将接力纠偏；仍失败请 APP 手动全撤后重启",
+                        )
+
+                    logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
+                finally:
+                    self._recover_in_progress = False
+                    self._lock.release()
 
                 if radar_active:
                     logger.info(
@@ -2196,74 +2303,10 @@ class PositionSupervisorBinance:
                         f"止损={'已挂/已确认' if sl_ok else '待哨兵补挂'}"
                     )
 
-                threading.Thread(target=self._sentinel_loop, daemon=True).start()
-
-                verified = self._wait_verify(
-                    lambda: self._verify_position_qty(real_amt, self.current_side),
-                    retries=8,
-                    delay=0.5,
-                )
-                entry_px = float(
-                    (verified or pos)["entry_price"]
-                )
-                tv_note = ""
-                if self.last_tv_signal:
-                    tv_note = (
-                        f" | 最新TV: {self.last_tv_signal.get('action')} "
-                        f"@{self.last_tv_signal.get('ts', '')}"
-                    )
-                reconcile_txt = (" | " + " ; ".join(reconcile_notes)) if reconcile_notes else ""
-                skip_note = " | 盘口已齐全，未重复补挂" if not _rebuilt else ""
-                verify_note = (
-                    f"接管 {real_amt} ETH @ {entry_px:.2f} | "
-                    f"TV方向 {self.last_tv_side} | "
-                    f"止盈 {matched}/{expected} 档 | "
-                    f"{self._format_audit_summary(audit)}{skip_note}{tv_note}{reconcile_txt}"
-                )
-                if not verified:
-                    verify_note += " | REST 同步略延迟"
-                self._call_dingtalk(
-                    dingtalk.report_recover_takeover,
-                    side=self.current_side,
-                    qty=real_amt,
-                    entry=entry_px,
-                    tv_tps=self.tv_tps,
-                    regime=self.regime,
-                    radar_active=radar_active,
-                    sl_price=self.current_sl,
-                    verify_note=verify_note,
-                    tp_matched=matched,
-                    tp_expected=expected,
-                    tp_audit=audit,
-                    last_tv_signal=self.last_tv_signal,
-                    radar_sl_ok=sl_ok,
-                )
-                if qty_change:
-                    old_q, new_q, action_msg = qty_change
-                    self._call_dingtalk(
-                        dingtalk.report_manual_position_change,
-                        action_type=action_msg,
-                        old_qty=old_q,
-                        new_qty=new_q,
-                        new_entry_price=entry_px,
-                        verify_note=f"重启接管检测 | {verify_note}",
-                        tp_audit=audit,
-                        verified=bool(verified),
-                    )
-                if expected > 0 and matched < expected:
-                    dupes = [lv for lv in audit.get("levels", []) if lv.get("status") == "duplicate"]
-                    hint = (
-                        "重复 TP 占满可减仓额度→TP3 无法挂 | 非 API 权限问题"
-                        if dupes else "请查 logs/binance_brain.log 是否有 [撤单失败]/[限价单失败]"
-                    )
-                    dingtalk.report_system_alert(
-                        "重启接管后限价止盈未对齐",
-                        f"{self.current_side} {real_amt} ETH @ {entry_px:.2f} | "
-                        f"仅 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
-                        f"{hint} | 仍失败请币安 APP 手动「撤销全部挂单」后重启",
-                    )
-
-                logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
+                if not self._sentinel_active:
+                    threading.Thread(
+                        target=self._sentinel_loop, daemon=True, name="sentinel",
+                    ).start()
             else:
                 binance_client.cancel_all_open_orders(self.symbol)
                 logger.info("🔄 [系统重启点火] 盘口干净无持仓，账本复位为空仓待命。")
