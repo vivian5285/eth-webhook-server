@@ -362,6 +362,61 @@ def report_recover_standby(verify_note="", version=""):
     send_alert("🔄 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
 
 
+def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pct, threshold_pct,
+                                   open_regime, tv_regime, open_atr, tv_atr, qty,
+                                   tp_audit=None, verify_note=""):
+    atr_txt = f"持仓 `{open_atr:.2f}` · TV `{tv_atr:.2f}`"
+    atr_changed = abs(float(open_atr or 0) - float(tv_atr or 0)) > 0 and (
+        max(abs(open_atr), abs(tv_atr), 1) == 0 or
+        abs(float(open_atr) - float(tv_atr)) / max(abs(open_atr), abs(tv_atr), 1) > 0.03
+    )
+
+    if decision == "skip_duplicate_flat":
+        title = "🧠 智能筛选：短时重复同向 · 已忽略"
+        status = _g(
+            f"**5 分钟内** ATR 未变 ({atr_txt})，价差 **{diff_pct:.3f}%** < **{threshold_pct}%**，"
+            f"档位 **R{tv_regime}** → **未重复下单**。",
+            G_ACCENT,
+        )
+    elif decision.startswith("reentry_"):
+        reason_map = {
+            "reentry_atr_changed": f"**① ATR 变化** ({atr_txt}) → **先平后开** 刷新仓位",
+            "reentry_regime_changed": f"**② 档位** R{open_regime}→R{tv_regime} → **先平后开** 刷新仓位",
+            "reentry_spread_ok": (
+                f"**③ 理论价差** **{diff_pct:.3f}%** ≥ **{threshold_pct}%** "
+                f"(ATR 未变 {atr_txt}) → **先平后开**"
+            ),
+        }
+        title = "🧠 智能筛选：同向持仓 · 刷新仓位"
+        status = _g(reason_map.get(decision, "同向刷新仓位 → **先平后开**"), G_TITLE)
+    else:
+        title = "🧠 智能筛选：同向持仓 · 仅刷新止盈"
+        status = _g(
+            f"**① ATR 未变** ({atr_txt}) + **③ 价差** **{diff_pct:.3f}%** < **{threshold_pct}%** "
+            f"(档位 R{open_regime}) → **未再开仓**，已核实持仓并按新 TV 价刷新 TP123。",
+            G_LIGHT,
+        )
+    data = {
+        "📊 智能决策": status,
+        "🎯 TV方向": _g(side, G_MAIN),
+        "💰 实盘成本": _g(f"`{live_entry:.2f}` USDT" if live_entry > 0 else "空仓", G_MUTED),
+        "📡 TV理论价": _g(f"`{tv_price:.2f}` USDT", G_MUTED),
+        "🌊 ATR (优先)": _g(
+            f"{atr_txt}" + (" ⚡已变化" if atr_changed and decision == "reentry_atr_changed" else " ✓未变"),
+            G_ACCENT if atr_changed else G_MUTED,
+        ),
+        "📏 理论价差": _g(f"{diff_pct:.3f}% / 阈值 {threshold_pct}%", G_ACCENT),
+        "🔢 档位": _g(f"开仓 R{open_regime} · TV R{tv_regime}", G_MUTED),
+        "📦 持有": _g(f"**{qty}** {UNIT_LABEL}" if qty > 0 else "无持仓", G_ACCENT),
+    }
+    if tp_audit:
+        data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    color = G_ACCENT if decision in ("skip_duplicate_flat",) else G_TITLE
+    send_alert(title, data, color)
+
+
 def report_system_alert(title, detail):
     send_alert(f"⚠️ 系统告警：{title}", {
         "⚠️ 告警级别": _g("最高级别 (CRITICAL)", G_DEEP),
