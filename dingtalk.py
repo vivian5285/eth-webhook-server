@@ -422,3 +422,18 @@ def report_system_alert(title, detail):
         "⚠️ 告警级别": _g("最高级别 (CRITICAL)", G_DEEP),
         "📝 核心详情": _g(f"**{detail}**", G_ACCENT),
     }, G_TITLE)
+
+
+def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL}", G_MAIN),
+        "🕸️ TP123 比例审计": _g(
+            _format_tp_audit(tp_audit, None) if tp_audit else "已对齐",
+            G_MAIN,
+        ),
+        "✅ 纠偏结果": _g("雷达守护已完成止盈对齐（重启接管竞态后补报）", G_MAIN),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("📡 雷达守护 · 止盈已重新对齐", data, G_MAIN)
