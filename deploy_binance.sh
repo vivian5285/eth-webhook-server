@@ -7,9 +7,9 @@
 
 set -uo pipefail
 
-DEPLOY_SCRIPT_VERSION="v13.1-daemon2"
-# 接受 v13.4.6 / v13.4.7 / v13.4.8 等（手动同步 GitHub 时版本号可能不同步）
-MIN_SUPERVISOR_VERSION_PREFIX="v13.4."
+DEPLOY_SCRIPT_VERSION="v13.2-deploy-audit"
+# 接受 v13.4.6+ 与 v13.5+（含 -atr-priority 等后缀标签）
+MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|[5-9][0-9]*\.)'
 
 PORT=5003
 WORKERS=1
@@ -152,25 +152,30 @@ install_deps() {
     find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
 
     SUPERVISOR_VER="$(grep 'BINANCE_VPS_VERSION' "$DIR/position_supervisor_binance.py" 2>/dev/null | head -1 || true)"
-    if echo "$SUPERVISOR_VER" | grep -qE 'BINANCE_VPS_VERSION.*v13\.4\.(6|7|8|9)'; then
-        log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
-    elif echo "$SUPERVISOR_VER" | grep -q "${MIN_SUPERVISOR_VERSION_PREFIX}"; then
+    if echo "$SUPERVISOR_VER" | grep -qE "BINANCE_VPS_VERSION.*\"${MIN_SUPERVISOR_VERSION_RE}"; then
         log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
     else
-        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
+        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ / v13.5+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
         return 1
+    fi
+
+    if grep -q "report_smart_same_dir_decision" "$DIR/dingtalk.py" 2>/dev/null \
+        && grep -q "open_atr" "$DIR/dingtalk.py" 2>/dev/null \
+        && grep -q "tv_atr" "$DIR/dingtalk.py" 2>/dev/null; then
+        log_ok "dingtalk.py 智能同向筛选 (open_atr/tv_atr) 已就绪"
+    elif echo "$SUPERVISOR_VER" | grep -qE 'v13\.5\.'; then
+        log_fail "dingtalk.py 未同步！v13.5+ 需 report_smart_same_dir_decision(open_atr,tv_atr)，否则运行时报 TypeError"
+        return 1
+    elif grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
+        log_ok "dingtalk.py 金色主题已就绪"
+    else
+        log_warn "dingtalk.py 可能不是最新版"
     fi
 
     if grep -qE 'v13\.4\.(6|7|8)|Binance Client v13\.4' "$DIR/binance_client.py" 2>/dev/null; then
         log_ok "binance_client.py 版本已就绪"
     else
         log_warn "binance_client.py 可能不是最新版（建议含 v13.4.x 标识）"
-    fi
-
-    if grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
-        log_ok "dingtalk.py 金色主题已就绪"
-    else
-        log_warn "dingtalk.py 可能不是最新金色主题"
     fi
 
     if grep -q "\-\-daemon" "$DIR/deploy_binance.sh" 2>/dev/null; then
@@ -183,7 +188,7 @@ install_deps() {
     python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
         "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" 2>/dev/null \
         && log_ok "核心 Python 文件语法检查通过" \
-        || log_warn "语法预检跳过（非致命）"
+        || { log_fail "Python 语法检查失败（请检查 dingtalk.py / supervisor）"; return 1; }
 }
 
 get_gunicorn_master_pid() {
@@ -286,8 +291,8 @@ health_check() {
     fi
 
     sleep 2
-    if grep -qE 'v13\.4\.(6|7|8|9)' "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 v13.4.6+ 已成功加载"
+    if grep -qE 'v13\.(4\.[6-9]|[5-9])' "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.4.6+ / v13.5+ 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
         log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.6+）"
     elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
