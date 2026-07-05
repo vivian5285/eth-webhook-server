@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.3-radar-guardian"
+BINANCE_VPS_VERSION = "v13.5.5-scorch-verify"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -585,8 +585,15 @@ class PositionSupervisorBinance:
         tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
         return sum(1 for t in tp_pxs if t > 0)
 
+    def _tp_split_regime(self):
+        """止盈比例以开仓档位为准（open_regime），避免 TV 档位变化导致比例算错"""
+        if self.watched_qty and self.watched_qty > 0:
+            return int(getattr(self, "open_regime", self.regime) or self.regime)
+        return int(self.regime)
+
     def _expected_tp_levels(self, live_qty):
-        ratios = self.regime_settings[self.regime]["ratios"]
+        regime = self._tp_split_regime()
+        ratios = self.regime_settings[regime]["ratios"]
         q1, q2, q3 = self._split_tp_quantities(live_qty, ratios)
         return [
             {"level": 1, "qty": q1, "price": self.tv_tps[0]},
@@ -750,7 +757,7 @@ class PositionSupervisorBinance:
             return dynamic_sl is None or self._has_stop_sl_near(dynamic_sl, tolerance)
 
         orders = self._collect_tp_limit_orders()
-        ratios = self.regime_settings[self.regime]["ratios"]
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
         qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
         levels = [(qty1, tp_pxs[0]), (qty2, tp_pxs[1]), (qty3, tp_pxs[2])]
 
@@ -786,7 +793,7 @@ class PositionSupervisorBinance:
             logger.warning("补挂跳过：检测到重复/缺失/偏差，改走核武对齐")
             return 0
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        ratios = self.regime_settings[self.regime]["ratios"]
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
         qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
         levels = [(qty1, self.tv_tps[0]), (qty2, self.tv_tps[1]), (qty3, self.tv_tps[2])]
         placed = 0
@@ -831,20 +838,46 @@ class PositionSupervisorBinance:
             return True
         return False
 
-    def _cancel_all_tp_limit_orders(self):
-        """撤销全部限价止盈（不动 STOP 雷达止损）"""
-        cancelled = 0
-        for o in binance_client.get_open_orders(self.symbol):
-            if not self._is_tp_limit_order(o):
-                continue
-            oid = o.get("orderId")
-            if oid:
-                binance_client.cancel_order(self.symbol, oid)
-                cancelled += 1
-                time.sleep(0.15)
-        if cancelled:
-            logger.info(f"🧹 已撤销全部限价止盈 {cancelled} 张")
-        return cancelled
+    def _cancel_all_tp_limit_orders(self, max_rounds=4):
+        """撤销全部限价止盈（不动 STOP）；多轮直到盘口无残留 TP"""
+        total = 0
+        for round_i in range(max_rounds):
+            orders = [
+                o for o in binance_client.get_open_orders(self.symbol)
+                if self._is_tp_limit_order(o)
+            ]
+            if not orders:
+                break
+            for o in orders:
+                oid = o.get("orderId")
+                if oid:
+                    binance_client.cancel_order(self.symbol, oid)
+                    total += 1
+                    time.sleep(0.12)
+            logger.info(f"🧹 撤限价止盈 第{round_i + 1}轮: {len(orders)} 张")
+            time.sleep(0.6)
+        if total:
+            logger.info(f"🧹 已撤销限价止盈合计 {total} 张")
+        return total
+
+    def _scorched_earth_cancel_for_recover(self):
+        """重启接管：撤净全部挂单（含重复 TP），随后由核武重挂 TP + 雷达 SL"""
+        for attempt in range(6):
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.8)
+            self._cancel_all_tp_limit_orders(max_rounds=4)
+            time.sleep(0.6)
+            remaining = self._collect_tp_limit_orders()
+            if not remaining:
+                logger.info(f"☢️ 重启撤单完成，限价止盈已清零 (第 {attempt + 1} 轮)")
+                return True
+            remain_txt = ", ".join(f"{o['qty']}@{o['price']}" for o in remaining[:4])
+            logger.warning(
+                f"⚠️ 撤单后仍剩 {len(remaining)} 张限价止盈 ({remain_txt}) "
+                f"→ 重试 {attempt + 1}/6"
+            )
+        logger.error("❌ 重启撤单未净：重复 TP 可能残留，非权限问题时请币安 APP 手动全撤后重启")
+        return False
 
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None):
         if not dynamic_sl:
@@ -900,10 +933,11 @@ class PositionSupervisorBinance:
                 return True
         return bool(audit.get("issues") or audit.get("orphans"))
 
-    def _enforce_defense_alignment(self, live_qty, entry, dynamic_sl=None, reason="", rounds=3):
+    def _enforce_defense_alignment(self, live_qty, entry, dynamic_sl=None, reason="", rounds=3,
+                                   recover_mode=False):
         """
         防线对齐总线：先撤净限价 TP → 审计 → 核武重挂 → 仍失败再补一轮。
-        开仓/异动/雷达守护统一走此入口，避免 rebuild + patch 叠单。
+        recover_mode=True 时先核武撤全部挂单，避免重启后重复 TP 残留。
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
@@ -915,7 +949,10 @@ class PositionSupervisorBinance:
         if reason:
             logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} ETH")
 
-        self._cancel_all_tp_limit_orders()
+        if recover_mode:
+            self._scorched_earth_cancel_for_recover()
+        else:
+            self._cancel_all_tp_limit_orders()
         time.sleep(0.45)
         audit = self._audit_tp_levels(live_qty)
         if self._defenses_fully_ok(live_qty, dynamic_sl) and not audit.get("orphans"):
@@ -931,15 +968,22 @@ class PositionSupervisorBinance:
                 "nuclear": False,
             }
 
-        sl_preserve = dynamic_sl if dynamic_sl and self._is_radar_active() else dynamic_sl
+        sl_preserve = dynamic_sl if (dynamic_sl and self._is_radar_active() and not recover_mode) else None
         audit = self._nuclear_realign_tp(
             live_qty, entry, dynamic_sl=sl_preserve, rounds=rounds,
         )
         if audit["matched_full"] < audit["expected"]:
-            logger.warning("☢️ 首轮核武未齐，雷达守护追加一轮重挂")
+            logger.warning("☢️ 首轮核武未齐，追加一轮重挂")
+            if recover_mode:
+                self._scorched_earth_cancel_for_recover()
+            else:
+                self._cancel_all_tp_limit_orders(max_rounds=4)
+            time.sleep(0.6)
             audit = self._nuclear_realign_tp(
-                live_qty, entry, dynamic_sl=sl_preserve, rounds=2,
+                live_qty, entry, dynamic_sl=sl_preserve, rounds=max(2, rounds - 1),
             )
+        if dynamic_sl and not recover_mode and not self._has_stop_sl_near(dynamic_sl):
+            self._ensure_radar_sl(dynamic_sl, live_qty)
         return {
             "matched": audit["matched_full"],
             "expected": audit["expected"],
@@ -1949,7 +1993,7 @@ class PositionSupervisorBinance:
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        ratios = self.regime_settings[self.regime]["ratios"]
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
 
         live_qty = self._resolve_live_qty(qty)
         if live_qty <= 0:
@@ -1969,7 +2013,7 @@ class PositionSupervisorBinance:
 
         logger.info(
             f"🕸️ 补挂 TP123: 总 {live_qty} ETH → TP1={qty1} TP2={qty2} TP3={qty3} "
-            f"(合计 {round(qty1 + qty2 + qty3, 3)})"
+            f"(R{self._tp_split_regime()} 比例 {ratios})"
         )
 
         for q, px in ((qty1, tp_pxs[0]), (qty2, tp_pxs[1]), (qty3, tp_pxs[2])):
@@ -2115,7 +2159,7 @@ class PositionSupervisorBinance:
                 self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
 
                 radar_active = self._is_radar_active()
-                sl_to_pass = self.current_sl if radar_active else None
+                saved_sl = self.current_sl if radar_active else None
 
                 logger.info(
                     f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} ETH @ "
@@ -2123,12 +2167,16 @@ class PositionSupervisorBinance:
                     f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
                 )
 
-                result = self._smart_realign_defenses(
-                    real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
-                    reason="重启闪电接管" + (
-                        f" | {qty_change[2]}" if qty_change else ""
-                    ),
+                result = self._enforce_defense_alignment(
+                    real_amt, self.watched_entry, dynamic_sl=None,
+                    reason="重启闪电接管 · 核武撤单重挂",
+                    rounds=4, recover_mode=True,
                 )
+                if saved_sl and radar_active:
+                    sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
+                else:
+                    sl_ok = True
+
                 matched = result["matched"]
                 expected = result["expected"]
                 pending_prices = result["pending_prices"]
@@ -2142,9 +2190,7 @@ class PositionSupervisorBinance:
                     self.current_side, real_amt, self.watched_entry, source="recover",
                 )
 
-                sl_ok = True
                 if radar_active:
-                    sl_ok = self._ensure_radar_sl(self.current_sl, real_amt)
                     logger.info(
                         f"📡 [重启] 雷达哨兵已点火 | SL={self.current_sl:.2f} | "
                         f"止损={'已挂/已确认' if sl_ok else '待哨兵补挂'}"
@@ -2205,11 +2251,16 @@ class PositionSupervisorBinance:
                         verified=bool(verified),
                     )
                 if expected > 0 and matched < expected:
+                    dupes = [lv for lv in audit.get("levels", []) if lv.get("status") == "duplicate"]
+                    hint = (
+                        "重复 TP 占满可减仓额度→TP3 无法挂 | 非 API 权限问题"
+                        if dupes else "请查 logs/binance_brain.log 是否有 [撤单失败]/[限价单失败]"
+                    )
                     dingtalk.report_system_alert(
                         "重启接管后限价止盈未对齐",
                         f"{self.current_side} {real_amt} ETH @ {entry_px:.2f} | "
                         f"仅 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
-                        f"请查 logs/binance_brain.log",
+                        f"{hint} | 仍失败请币安 APP 手动「撤销全部挂单」后重启",
                     )
 
                 logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
