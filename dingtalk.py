@@ -20,7 +20,7 @@ DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
 EXCHANGE_LABEL = "币安 Binance"
-LEVERAGE_LABEL = "20x"
+LEVERAGE_LABEL = "8x"
 UNIT_LABEL = "ETH"
 
 # 币安专属金色色板（与深币 #4B0082 紫金完全区分）
