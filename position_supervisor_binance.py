@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.8-shield-345pct"
+BINANCE_VPS_VERSION = "v13.6.9-shield-single-set"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -43,6 +43,8 @@ SHIELD_ACTIVATION_PCT = 0.03  # ETH 现价相对开仓价浮亏 ≥3% 才激活�
 SHIELD_TIER_PCTS = (0.03, 0.04, 0.05)  # 以开仓价为基准挂限价止损：-3% / -4% / -5%
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
 SHIELD_STOP_TOLERANCE = 2.0
+SHIELD_PLACE_COOLDOWN_SEC = 30
+SHIELD_MAX_TIER_ORDERS = 1
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
@@ -98,6 +100,7 @@ class PositionSupervisorBinance:
         self._last_regime_cap_ts = 0.0
         self.shield_active = False
         self.shield_tiers_consumed = []
+        self._last_shield_place_ts = 0.0
         self.sizing_principal = 0.0
 
         self.state_file = 'binance_vps_state.json'
@@ -1122,6 +1125,47 @@ class PositionSupervisorBinance:
                 return True
         return False
 
+    def _shield_orders_at_tiers(self, tier_prices):
+        """统计各档位价位上的 reduceOnly 止损单"""
+        buckets = {i: [] for i in range(len(tier_prices))}
+        for o in binance_client.get_open_orders(self.symbol):
+            if o.get("type") not in ("STOP", "STOP_MARKET"):
+                continue
+            if str(o.get("closePosition", "")).lower() == "true":
+                continue
+            px = self._order_stop_price(o)
+            if px is None:
+                continue
+            for i, tp in enumerate(tier_prices):
+                if abs(px - tp) <= SHIELD_STOP_TOLERANCE:
+                    oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
+                    buckets[i].append({"order": o, "qty": oqty})
+                    break
+        return buckets
+
+    def _purge_shield_stop_orders(self, tier_prices=None):
+        """撤净防护盾档位上的全部止损（含重复叠单）"""
+        tier_prices = tier_prices or self._shield_tier_prices()
+        if not tier_prices:
+            return 0
+        cancelled = 0
+        for o in binance_client.get_open_orders(self.symbol):
+            if o.get("type") not in ("STOP", "STOP_MARKET"):
+                continue
+            if str(o.get("closePosition", "")).lower() == "true":
+                continue
+            px = self._order_stop_price(o)
+            if px is None:
+                continue
+            if not any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices):
+                continue
+            oid = o.get("orderId")
+            if oid:
+                binance_client.cancel_order(self.symbol, oid)
+                cancelled += 1
+                time.sleep(0.15)
+        return cancelled
+
     def _split_shield_quantities(self, qty):
         q1 = round(qty * SHIELD_TIER_RATIOS[0], 3)
         q2 = round(qty * SHIELD_TIER_RATIOS[1], 3)
@@ -1137,30 +1181,23 @@ class PositionSupervisorBinance:
         if live_qty <= 0:
             return False
         qty_map = self._shield_quantities_for_remaining(live_qty)
-        qty_tol = 0.005
-        matched = 0
+        qty_tol = 0.008
+        buckets = self._shield_orders_at_tiers(tier_prices)
         for idx in remaining:
             q = qty_map.get(idx, 0)
-            tp = tier_prices[idx]
             if q <= 0:
                 continue
-            found = False
-            for o in binance_client.get_open_orders(self.symbol):
-                if o.get("type") not in ("STOP_MARKET", "STOP"):
-                    continue
-                if not self._is_shield_stop_order(o, tier_prices):
-                    continue
-                px = self._order_stop_price(o)
-                if px is None or abs(px - tp) > SHIELD_STOP_TOLERANCE:
-                    continue
-                oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
-                if abs(oqty - q) <= qty_tol:
-                    found = True
-                    break
-            if found:
-                matched += 1
-        expected = sum(1 for idx in remaining if qty_map.get(idx, 0) > 0)
-        return matched >= expected
+            orders = buckets.get(idx, [])
+            if len(orders) != SHIELD_MAX_TIER_ORDERS:
+                return False
+            if abs(orders[0]["qty"] - q) > qty_tol:
+                return False
+        for idx, orders in buckets.items():
+            if idx in remaining and orders:
+                continue
+            if orders:
+                return False
+        return True
 
     def _disarm_shield(self, reason=""):
         n = self._cancel_stop_orders(scope="shield")
@@ -1184,30 +1221,41 @@ class PositionSupervisorBinance:
             self.shield_active = False
             self._save_state()
             return True
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+
+        now = time.time()
+        if (
+            self._shield_orders_ok(live_qty, entry)
+            and now - getattr(self, "_last_shield_place_ts", 0) < SHIELD_PLACE_COOLDOWN_SEC
+        ):
+            return True
+
         qty_map = self._shield_quantities_for_remaining(live_qty)
+        total_shield_qty = round(sum(qty_map.get(i, 0) for i in remaining), 3)
+        purged = self._purge_shield_stop_orders(tier_prices)
+        if purged:
+            logger.warning(
+                f"🛡️ 撤净防护盾旧单 {purged} 笔 → 按实盘 {live_qty} ETH 重挂 "
+                f"({total_shield_qty} ETH 分 {len(remaining)} 档)"
+            )
+            time.sleep(0.6)
+
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         placed = 0
         for idx in remaining:
             q = qty_map.get(idx, 0)
             tp = tier_prices[idx]
             if q <= 0:
                 continue
-            already = False
-            for o in binance_client.get_open_orders(self.symbol):
-                if not self._is_shield_stop_order(o, tier_prices):
-                    continue
-                px = self._order_stop_price(o)
-                if px is not None and abs(px - tp) <= SHIELD_STOP_TOLERANCE:
-                    oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
-                    if abs(oqty - q) <= 0.005:
-                        already = True
-                        break
-            if already:
-                continue
             res = binance_client.place_stop_limit_order(close_side, q, tp)
             if res:
                 placed += 1
+                logger.info(
+                    f"🛡️ 防护盾 TP{idx + 1} -{SHIELD_TIER_PCTS[idx]:.0%}: "
+                    f"{q} ETH @ stop {tp:.2f} (实盘 {live_qty} ETH)"
+                )
             time.sleep(0.35)
+
+        self._last_shield_place_ts = now
         ok = self._shield_orders_ok(live_qty, entry)
         if ok:
             was_new = not getattr(self, "shield_active", False)
@@ -1221,7 +1269,7 @@ class PositionSupervisorBinance:
             logger.warning(
                 f"🛡️ [逆势防护盾] {'激活' if was_new else '维护'} | "
                 f"浮亏 {adverse:.1%} | 档位 {active_tiers} @ {tier_txt} | "
-                f"新挂 {placed} 笔"
+                f"新挂 {placed} 笔 | 实盘 {live_qty} ETH"
             )
             if was_new and not getattr(self, "shield_tiers_consumed", []):
                 self._call_dingtalk(
@@ -1232,8 +1280,18 @@ class PositionSupervisorBinance:
                     adverse_pct=adverse,
                     tier_prices=tier_prices,
                     tier_pcts=SHIELD_TIER_PCTS,
-                    verify_note=reason or f"浮亏达 {adverse:.1%}，VPS 分批止损已武装",
+                    verify_note=(
+                        (reason or f"浮亏达 {adverse:.1%}，VPS 分批止损已武装")
+                        + f" | 实盘 {live_qty} ETH 分 {len(remaining)} 档共 {total_shield_qty} ETH"
+                    ),
                 )
+        elif placed > 0:
+            dingtalk.report_system_alert(
+                "防护盾挂单未对齐",
+                f"已撤旧单 {purged} 笔、新挂 {placed} 笔，但核实未通过 | "
+                f"实盘 {live_qty} ETH | 请人工核查币安止损挂单",
+                suggestion="可手动撤重复 STOP 单，系统下轮哨兵会重试",
+            )
         return ok
 
     def _process_adverse_shield(self, real_amt, curr_px):
