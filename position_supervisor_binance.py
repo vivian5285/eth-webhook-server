@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.4-qty-drift-tolerance"
+BINANCE_VPS_VERSION = "v13.6.5-regime-cap-tolerance"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -520,11 +520,25 @@ class PositionSupervisorBinance:
         qty, balance, margin_usdt, margin_pct, _ = self._regime_cap_target_qty(curr_px, self.regime)
         return qty, balance, margin_usdt, margin_pct
 
+    def _regime_cap_tolerance(self, target_qty):
+        """档位上限容忍：至少 0.001 ETH，或目标 × 1.5%（取较大者）"""
+        target = float(target_qty or 0)
+        if target <= 0:
+            return REGIME_CAP_TOLERANCE_ETH
+        return max(REGIME_CAP_TOLERANCE_ETH, target * QTY_DRIFT_TOLERANCE_PCT)
+
     def _is_oversize_for_regime(self, live_qty, curr_px, regime=None):
         target, _, _, margin_pct, reg = self._regime_cap_target_qty(curr_px, regime)
         if target <= 0 or live_qty <= 0:
             return False, target, margin_pct, reg
-        return live_qty > target + REGIME_CAP_TOLERANCE_ETH, target, margin_pct, reg
+        tol = self._regime_cap_tolerance(target)
+        excess = float(live_qty) - target
+        if excess > REGIME_CAP_TOLERANCE_ETH and excess <= tol:
+            logger.info(
+                f"📎 [档位限额] 微超 {live_qty} > {target} ETH "
+                f"(+{excess:.3f}, {excess / target:.2%} ≤ {QTY_DRIFT_TOLERANCE_PCT:.1%} 容忍)，跳过裁减"
+            )
+        return live_qty > target + tol, target, margin_pct, reg
 
     def _trim_position_to_target(self, target_qty, action, reason_tag="叠仓Remediation"):
         """叠仓Remediation：仅裁减 excess=实盘-目标，带安全校验与多轮核实"""
@@ -533,7 +547,8 @@ class PositionSupervisorBinance:
         if not pos or target_qty <= 0:
             return pos["size"] if pos else 0.0
         live = float(pos["size"])
-        if live <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+        cap_tol = self._regime_cap_tolerance(target_qty)
+        if live <= target_qty + cap_tol:
             return live
         trim_qty = round(live - target_qty, 3)
         plan_err = self._validate_cap_trim_plan(live, target_qty, trim_qty)
@@ -562,7 +577,7 @@ class PositionSupervisorBinance:
             if not pos or pos["size"] <= 0:
                 break
             cur = float(pos["size"])
-            if cur <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+            if cur <= target_qty + cap_tol:
                 new_sz = cur
                 break
             slice_trim = round(cur - target_qty, 3)
@@ -577,7 +592,7 @@ class PositionSupervisorBinance:
                 delay=0.5,
             )
             new_sz = float(verified["size"]) if verified else cur
-            if new_sz <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+            if new_sz <= target_qty + cap_tol:
                 break
         if new_sz < target_qty * 0.5 and live > target_qty * 1.5:
             dingtalk.report_system_alert(
