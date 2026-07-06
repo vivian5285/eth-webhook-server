@@ -192,21 +192,25 @@ class BinanceClient:
             logger.error(f"[账户概览失败] {e}")
             return {}
 
-    def get_cap_equity_balance(self, asset="USDT"):
-        """档位额度用总权益口径，绝不用 depleted available"""
+    def get_principal_wallet_balance(self, asset="USDT"):
+        """
+        USDT 合约本金余额（walletBalance）— 唯一合法的档位额度基数。
+        禁止用 available / marginBalance / 浮盈放大权益。
+        """
         summary = self.get_futures_account_summary(asset)
-        for key in (
-            "total_margin_balance", "total_wallet_balance",
-            "wallet_balance", "cross_wallet_balance", "margin_balance",
-        ):
+        for key in ("wallet_balance", "cross_wallet_balance", "total_wallet_balance"):
             val = float(summary.get(key, 0) or 0)
             if val > 0:
                 return val
-        return float(summary.get("available_balance", 0) or 0)
+        return 0.0
+
+    def get_cap_equity_balance(self, asset="USDT"):
+        """档位额度基数 = 本金 walletBalance（兼容旧名）"""
+        return self.get_principal_wallet_balance(asset)
 
     def get_sizing_balance(self, asset="USDT"):
-        """本金口径（总权益），用于 regime 仓位预算"""
-        return self.get_cap_equity_balance(asset)
+        """本金口径（walletBalance），用于 regime 仓位预算"""
+        return self.get_principal_wallet_balance(asset)
 
     def get_available_balance(self, asset="USDT"):
         try:
