@@ -437,3 +437,71 @@ def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
     send_alert("📡 雷达守护 · 止盈已重新对齐", data, G_MAIN)
+
+
+def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, margin_pct,
+                                 tp_audit=None, verify_note=""):
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📊 TV档位上限": _g(
+            f"**R{regime}** · 保证金 **{margin_pct:.0%}** · 目标 **{target_qty}** {UNIT_LABEL}",
+            G_ACCENT,
+        ),
+        "✂️ 裁减结果": _g(f"`{old_qty}` ➔ `{new_qty}` {UNIT_LABEL}", G_MAIN),
+        "🕸️ TP123 重挂": _g(
+            _format_tp_audit(tp_audit, None) if tp_audit else "已按新仓位重挂",
+            G_MAIN,
+        ),
+        "✅ 纠偏结果": _g(
+            "雷达最高权限：超标裁减至档位额度 → TP123 已对齐 · 移动止损逻辑不变",
+            G_MAIN,
+        ),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("📡 雷达守护 · 档位限额强制对齐", data, G_TITLE)
+
+
+def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices, tier_pcts,
+                                verify_note=""):
+    tier_lines = []
+    for pct, px in zip(tier_pcts, tier_prices):
+        tier_lines.append(f"**-{pct:.0%}** → `{px:.2f}` USDT")
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
+        "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "📉 当前浮亏": _g(f"**{adverse_pct:.1%}** (≥2% 激活)", G_ACCENT),
+        "🛡️ 分批止损线": _g(" · ".join(tier_lines), G_MAIN),
+        "✅ 风控动作": _g(
+            "VPS 逆势防护盾：2%/3%/5% 限价止损已挂 · 最多承受 5% 波动 · 转有利后切换雷达保本",
+            G_MAIN,
+        ),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("🛡️ 逆势防护盾 · 分批止损已武装", data, G_TITLE)
+
+
+def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, entry_px,
+                            remaining_tiers=None, verify_note=""):
+    remain_txt = "无"
+    if remaining_tiers:
+        if isinstance(remaining_tiers[0], (int, float)) and remaining_tiers[0] <= 3:
+            # legacy index list [0,1,2] — ignore, use pct labels from caller via verify_note
+            remain_txt = verify_note.split("仍挂:")[-1].strip() if "仍挂:" in verify_note else "见明细"
+        else:
+            remain_txt = "/".join(f"-{p:.0%}" for p in remaining_tiers)
+    elif remaining_tiers is not None and len(remaining_tiers) == 0:
+        remain_txt = "无（已全部触发或转雷达）"
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "🛡️ 触发档位": _g(f"**-{tier_pct:.0%}** @ `{tier_price:.2f}` USDT", G_ACCENT),
+        "✂️ 本次止损": _g(f"`{filled_qty}` {UNIT_LABEL}", G_MAIN),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
+        "📌 仍挂档位": _g(remain_txt, G_LIGHT),
+        "✅ 风控动作": _g("防护盾层级成交 → TP123 已重算 → 剩余档位继续守护", G_MAIN),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("🛡️ 防护盾 · 分批止损成交", data, G_TITLE)
