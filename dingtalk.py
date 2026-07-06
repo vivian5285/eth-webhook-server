@@ -568,3 +568,26 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
     send_alert("🛡️ 防护盾 · 分批止损成交", data, G_TITLE)
+
+
+def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
+                           radar_progress=0.0, verify_note=""):
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
+        "📦 剩余头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "📈 价格方向": _g("转 **TP/盈利** 方向", G_LIGHT),
+        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔防护盾分批止损", G_ACCENT),
+        "📡 雷达状态": _g(
+            "已激活移动保本" if radar_progress >= 1.0
+            else f"预热 {radar_progress:.0%}，达 TP1 距离后自动推升止损",
+            G_MAIN,
+        ),
+        "✅ 风控动作": _g(
+            reason or "ETH 价格转 TP 方向 → 撤防护盾 → 交棒雷达动态保本",
+            G_MAIN,
+        ),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("🛡️ 防护盾 · 已撤销（转雷达）", data, G_TITLE)

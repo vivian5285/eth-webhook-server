@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.7.0-shield-smart"
+BINANCE_VPS_VERSION = "v13.8.0-shield-directional"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -40,6 +40,8 @@ CAP_TRIM_MAX_ROUNDS = 4
 QTY_DRIFT_TOLERANCE_PCT = 0.015  # 微漂 ≤1.5%：仅同步账本，不对齐
 QTY_ALIGN_MIN_PCT = 0.10         # 偏离 ≥10% 才视为离谱，触发对齐/档位裁减
 SHIELD_ACTIVATION_PCT = 0.03  # ETH 现价相对开仓价浮亏 ≥3% 才激活防护盾
+SHIELD_DISARM_ADVERSE_PCT = 0.015  # 浮亏回落 <1.5% 视为转 TP 方向，撤防护盾
+SHIELD_FAVORABLE_PROGRESS_DISARM = 0.10  # 向 TP1 激活线推进 ≥10% 也撤防护盾
 SHIELD_TIER_PCTS = (0.03, 0.04, 0.05)  # 以开仓价为基准挂限价止损：-3% / -4% / -5%
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
 SHIELD_STOP_TOLERANCE = 2.0
@@ -48,6 +50,7 @@ SHIELD_FAIL_BACKOFF_BASE_SEC = 45
 SHIELD_FAIL_BACKOFF_MAX_SEC = 300
 SHIELD_QTY_TOLERANCE_PCT = 0.04
 SHIELD_MAX_TIER_ORDERS = 1
+RADAR_DINGTALK_COOLDOWN_SEC = 120
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
@@ -106,6 +109,10 @@ class PositionSupervisorBinance:
         self._last_shield_maintain_ts = 0.0
         self._shield_fail_streak = 0
         self._last_shield_fail_ts = 0.0
+        self._shield_arm_notified = False
+        self.shield_sized_qty = 0.0
+        self._last_radar_report_ts = 0.0
+        self._last_radar_report_sl = 0.0
         self.sizing_principal = 0.0
 
         self.state_file = 'binance_vps_state.json'
@@ -384,6 +391,7 @@ class PositionSupervisorBinance:
                     "open_atr": self.open_atr,
                     "shield_active": getattr(self, "shield_active", False),
                     "shield_tiers_consumed": list(getattr(self, "shield_tiers_consumed", []) or []),
+                    "shield_sized_qty": float(getattr(self, "shield_sized_qty", 0) or 0),
                     "sizing_principal": float(getattr(self, "sizing_principal", 0) or 0),
                 }, f)
         except Exception as e:
@@ -1091,6 +1099,82 @@ class PositionSupervisorBinance:
             return max(0.0, (curr_px - entry) / entry)
         return 0.0
 
+    def _favorable_move_pct(self, curr_px):
+        entry = self.watched_entry
+        if not entry or curr_px <= 0:
+            return 0.0
+        if self.current_side == "LONG":
+            return max(0.0, (curr_px - entry) / entry)
+        if self.current_side == "SHORT":
+            return max(0.0, (entry - curr_px) / entry)
+        return 0.0
+
+    def _resolve_defense_regime(self, curr_px):
+        """实盘方向：FAVORABLE=TP/雷达 | ADVERSE=防护盾 | NEUTRAL=观望"""
+        if curr_px <= 0 or not self.watched_entry:
+            return "NEUTRAL"
+        if self._is_radar_active() or self._should_radar_trail(curr_px):
+            return "FAVORABLE"
+        if self._radar_activation_progress(curr_px) >= SHIELD_FAVORABLE_PROGRESS_DISARM:
+            return "FAVORABLE"
+        if self._adverse_move_pct(curr_px) >= SHIELD_ACTIVATION_PCT:
+            return "ADVERSE"
+        return "NEUTRAL"
+
+    def _should_disarm_shield_for_favorable(self, curr_px):
+        """价格朝 TP 方向走 → 撤净防护盾止损，交棒雷达"""
+        tier_prices = self._shield_tier_prices()
+        buckets = self._shield_orders_at_tiers(tier_prices) if tier_prices else {}
+        has_shield_orders = any(buckets.get(i) for i in range(len(SHIELD_TIER_PCTS)))
+        if not getattr(self, "shield_active", False) and not has_shield_orders:
+            return False
+        if self._is_radar_active() or self._should_radar_trail(curr_px):
+            return True
+        if self._radar_activation_progress(curr_px) >= SHIELD_FAVORABLE_PROGRESS_DISARM:
+            return True
+        if self._adverse_move_pct(curr_px) < SHIELD_DISARM_ADVERSE_PCT:
+            return True
+        return False
+
+    def _shield_needs_exchange_action(self, live_qty, audit):
+        """是否值得动 API：叠单/缺档/仓位离谱变化才动，微漂不动"""
+        status = audit.get("status")
+        if status == "duplicate":
+            return True
+        if status == "missing":
+            return True
+        if status == "qty_mismatch":
+            sized = float(getattr(self, "shield_sized_qty", 0) or 0)
+            if sized > 0 and self._qty_change_ratio(sized, live_qty) < QTY_ALIGN_MIN_PCT:
+                return False
+            return audit.get("max_drift_pct", 1.0) > SHIELD_QTY_TOLERANCE_PCT
+        return False
+
+    def _process_directional_defenses(self, real_amt, curr_px):
+        """
+        方向智能防线：TP 方向 → 撤盾 + 雷达保本；浮亏方向 → 防护盾只挂一次；
+        中性区 → 只读盘口同步，不重复撤挂。
+        """
+        regime = self._resolve_defense_regime(curr_px)
+        if regime == "FAVORABLE":
+            if self._should_disarm_shield_for_favorable(curr_px):
+                self._disarm_shield(
+                    "价格转 TP 方向，撤防护盾 → 等待/启动雷达移动保本",
+                    notify=True,
+                )
+            self._process_radar_trailing(real_amt, curr_px)
+            return
+        if regime == "ADVERSE":
+            self._process_adverse_shield(real_amt, curr_px)
+            return
+        if getattr(self, "shield_active", False):
+            live_qty = self._resolve_live_qty(real_amt)
+            audit = self._audit_shield_orders(live_qty)
+            if self._shield_orders_adequate(audit):
+                return
+            if self._shield_needs_exchange_action(live_qty, audit):
+                self._process_adverse_shield(real_amt, curr_px)
+
     def _should_activate_shield(self, curr_px):
         if not self.watched_entry or curr_px <= 0 or not self.current_side:
             return False
@@ -1296,6 +1380,8 @@ class PositionSupervisorBinance:
         if self._shield_orders_adequate(audit):
             self.shield_active = True
             self._shield_fail_streak = 0
+            self.shield_sized_qty = live_qty
+            self._shield_arm_notified = True
             logger.info(
                 f"🛡️ 重启：盘口防护盾已齐 ({len(audit['remaining'])} 档)，跳过重挂"
             )
@@ -1319,16 +1405,40 @@ class PositionSupervisorBinance:
             )
             self._save_state()
 
-    def _disarm_shield(self, reason=""):
+    def _disarm_shield(self, reason="", notify=False):
         n = self._cancel_stop_orders(scope="shield")
         had = getattr(self, "shield_active", False) or bool(
             getattr(self, "shield_tiers_consumed", [])
         )
+        live_qty = self._resolve_live_qty(self.watched_qty or 0)
+        entry = self.watched_entry
         self.shield_active = False
         self.shield_tiers_consumed = []
+        self.shield_sized_qty = 0.0
+        self._shield_arm_notified = False
         self._save_state()
         if reason and (had or n):
             logger.info(f"🛡️ [防护盾解除] {reason} | 撤销 {n} 张分批止损")
+        if notify and n > 0:
+            progress = 0.0
+            try:
+                curr_px = binance_client.get_current_price(self.symbol) or 0
+                progress = self._radar_activation_progress(curr_px)
+            except Exception:
+                curr_px = 0
+            self._call_dingtalk(
+                dingtalk.report_shield_disarmed,
+                side=self.current_side,
+                live_qty=live_qty,
+                entry=entry,
+                cancelled_count=n,
+                reason=reason,
+                radar_progress=progress,
+                verify_note=(
+                    f"撤 {n} 笔防护盾止损 | "
+                    f"{'已达雷达激活区，启动移动保本' if progress >= 1.0 else f'雷达预热 {progress:.0%}，达标后自动推升止损'}"
+                ),
+            )
 
     def _place_shield_stops(self, live_qty, entry=None, reason="", force=False):
         entry = float(entry or self.watched_entry or 0)
@@ -1344,12 +1454,16 @@ class PositionSupervisorBinance:
 
         audit = self._audit_shield_orders(live_qty, entry)
         if self._shield_orders_adequate(audit):
-            if not getattr(self, "shield_active", False):
-                logger.info(
-                    f"🛡️ 防护盾：盘口已齐 ({len(remaining)} 档 / {live_qty} ETH)，跳过撤挂"
-                )
             self.shield_active = True
             self._shield_fail_streak = 0
+            if not getattr(self, "shield_sized_qty", 0):
+                self.shield_sized_qty = live_qty
+            self._save_state()
+            return True
+
+        if not self._shield_needs_exchange_action(live_qty, audit) and not force:
+            self.shield_active = True
+            self.shield_sized_qty = live_qty
             self._save_state()
             return True
 
@@ -1394,8 +1508,8 @@ class PositionSupervisorBinance:
         ok = self._shield_orders_adequate(post_audit)
         self._record_shield_maintain(success=ok)
         if ok:
-            was_new = not getattr(self, "shield_active", False)
             self.shield_active = True
+            self.shield_sized_qty = live_qty
             self._save_state()
             adverse = self._adverse_move_pct(
                 binance_client.get_current_price(self.symbol) or entry,
@@ -1403,11 +1517,12 @@ class PositionSupervisorBinance:
             active_tiers = "/".join(f"-{SHIELD_TIER_PCTS[i]:.0%}" for i in remaining)
             tier_txt = " / ".join(f"{tier_prices[i]:.2f}" for i in remaining)
             logger.warning(
-                f"🛡️ [逆势防护盾] {'激活' if was_new else '维护'} | "
+                f"🛡️ [逆势防护盾] 武装 | "
                 f"浮亏 {adverse:.1%} | 档位 {active_tiers} @ {tier_txt} | "
                 f"新挂 {placed} 笔 | 实盘 {live_qty} ETH"
             )
-            if was_new and not getattr(self, "shield_tiers_consumed", []):
+            if not getattr(self, "_shield_arm_notified", False):
+                self._shield_arm_notified = True
                 self._call_dingtalk(
                     dingtalk.report_adverse_shield_armed,
                     side=self.current_side,
@@ -1417,8 +1532,8 @@ class PositionSupervisorBinance:
                     tier_prices=tier_prices,
                     tier_pcts=SHIELD_TIER_PCTS,
                     verify_note=(
-                        (reason or f"浮亏达 {adverse:.1%}，VPS 分批止损已武装")
-                        + f" | 实盘 {live_qty} ETH 分 {len(remaining)} 档共 {total_shield_qty} ETH"
+                        (reason or f"浮亏达 {adverse:.1%}，按实盘 {live_qty} ETH 挂 3 档止损")
+                        + f" | 分 {len(remaining)} 档共 {total_shield_qty} ETH · 仅播报一次"
                     ),
                 )
         elif placed > 0:
@@ -1426,32 +1541,31 @@ class PositionSupervisorBinance:
                 "防护盾挂单未对齐",
                 f"已撤旧单 {purged} 笔、新挂 {placed} 笔，但核实未通过 | "
                 f"实盘 {live_qty} ETH | {', '.join(post_audit.get('issues', []))}",
-                suggestion="系统已退避冷却，请勿手动重复挂；下轮哨兵会自动重试",
+                suggestion="系统已退避冷却，下轮自动重试；请勿手动重复挂",
             )
         return ok
 
     def _process_adverse_shield(self, real_amt, curr_px):
-        """逆势防护盾：先查盘口 → 已齐则不动 → 叠单只撤 → 缺档才按实盘补挂"""
+        """浮亏方向：先查实盘盘口 → 已齐则静默 → 仅缺档/叠单/离谱变仓才动"""
         if real_amt <= 0 or curr_px <= 0 or not self.watched_entry:
             return False
-        if self._is_radar_active() or self._should_radar_trail(curr_px):
-            if getattr(self, "shield_active", False):
-                self._disarm_shield("行情转有利，切换雷达保本")
-            return False
-        if not self._should_activate_shield(curr_px):
+        if self._resolve_defense_regime(curr_px) != "ADVERSE":
             return False
 
         live_qty = self._resolve_live_qty(real_amt)
         audit = self._audit_shield_orders(live_qty)
 
         if self._shield_orders_adequate(audit):
-            if not getattr(self, "shield_active", False):
-                logger.info(
-                    f"🛡️ 防护盾：接管盘口已有止损 ({len(audit['remaining'])} 档 / "
-                    f"{live_qty} ETH)，无需重挂"
-                )
             self.shield_active = True
             self._shield_fail_streak = 0
+            if not getattr(self, "shield_sized_qty", 0):
+                self.shield_sized_qty = live_qty
+            self._save_state()
+            return True
+
+        if not self._shield_needs_exchange_action(live_qty, audit):
+            self.shield_active = True
+            self.shield_sized_qty = live_qty
             self._save_state()
             return True
 
@@ -2146,7 +2260,7 @@ class PositionSupervisorBinance:
             logger.info(
                 f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} → 雷达推进"
             )
-            self._disarm_shield(f"{levels} 成交，切换雷达追踪")
+            self._disarm_shield(f"{levels} 成交，切换雷达追踪", notify=True)
             sl_to_pass = self._advance_radar_on_tp_fill(
                 change["tp_fills"], curr_px, new_qty,
             )
@@ -2211,9 +2325,11 @@ class PositionSupervisorBinance:
                 new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
                 reason=f"人工异动: {action_msg}",
             )
-            if self._should_radar_trail(curr_px):
-                self._disarm_shield("行情转有利，切换雷达保本")
-            elif self._should_activate_shield(curr_px) or getattr(self, "shield_active", False):
+            if self._should_disarm_shield_for_favorable(curr_px):
+                self._disarm_shield("行情转有利，切换雷达保本", notify=True)
+            elif self._resolve_defense_regime(curr_px) == "ADVERSE" or getattr(
+                self, "shield_active", False,
+            ):
                 self._process_adverse_shield(new_qty, curr_px)
 
         self._save_state()
@@ -2282,7 +2398,13 @@ class PositionSupervisorBinance:
             )
 
     def _report_radar_intervention(self, real_amt, new_sl, action_msg, sl_placed=True):
-        """雷达推止损后推送钉钉：REST 核查重试；挂单已成功则核查延迟仍播报。"""
+        """雷达推止损后推送钉钉：同价位冷却期内不重复播报"""
+        now = time.time()
+        if (
+            abs(new_sl - getattr(self, "_last_radar_report_sl", 0)) < 2.0
+            and now - getattr(self, "_last_radar_report_ts", 0) < RADAR_DINGTALK_COOLDOWN_SEC
+        ):
+            return
         verified = self._wait_verify(
             lambda: self._has_stop_sl_near(new_sl),
             retries=8,
@@ -2308,6 +2430,8 @@ class PositionSupervisorBinance:
             verify_note=verify_note,
             verified=verified,
         )
+        self._last_radar_report_ts = now
+        self._last_radar_report_sl = new_sl
 
     def _wait_verify(self, checks_fn, retries=3, delay=0.6):
         for _ in range(retries):
@@ -3073,14 +3197,13 @@ class PositionSupervisorBinance:
                         if curr_px <= 0:
                             continue
 
+                        self._process_directional_defenses(real_amt, curr_px)
                         progress = self._radar_activation_progress(curr_px)
-                        if self._should_radar_trail(curr_px):
-                            if getattr(self, "shield_active", False):
-                                self._disarm_shield("行情转有利，切换雷达保本")
-                            self._process_radar_trailing(real_amt, curr_px)
-                        elif not self._is_radar_active():
-                            self._process_adverse_shield(real_amt, curr_px)
-                        elif progress >= 0.5 and self._scan_ticks % 5 == 0:
+                        if (
+                            progress >= 0.5
+                            and not self._is_radar_active()
+                            and self._scan_ticks % 5 == 0
+                        ):
                             logger.info(
                                 f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
                                 f"轮询 {SENTINEL_POLL_ARMING}s"
@@ -3233,6 +3356,9 @@ class PositionSupervisorBinance:
                     self.open_atr = float(s.get("open_atr", s.get("current_atr", 30.0)) or 30.0)
                     self.shield_active = bool(s.get("shield_active", False))
                     self.shield_tiers_consumed = list(s.get("shield_tiers_consumed", []) or [])
+                    self.shield_sized_qty = float(s.get("shield_sized_qty", 0) or 0)
+                    if self.shield_sized_qty > 0:
+                        self._shield_arm_notified = True
                     self.sizing_principal = float(s.get("sizing_principal", 0) or 0)
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
