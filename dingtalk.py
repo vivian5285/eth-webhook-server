@@ -533,10 +533,11 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
-        "📉 当前浮亏": _g(f"**{adverse_pct:.1%}** (≥2% 激活)", G_ACCENT),
+        "📉 当前浮亏": _g(f"**{adverse_pct:.1%}** (相对开仓价浮亏 ≥3% 激活)", G_ACCENT),
         "🛡️ 分批止损线": _g(" · ".join(tier_lines), G_MAIN),
         "✅ 风控动作": _g(
-            "VPS 逆势防护盾：2%/3%/5% 限价止损已挂 · 最多承受 5% 波动 · 转有利后切换雷达保本",
+            "VPS 逆势防护盾：以开仓价为基准 3%/4%/5% 限价止损已挂 · "
+            "最多承受 5% 波动 · 转有利后切换雷达保本 · 止损后若回 TP 方向仍走雷达",
             G_MAIN,
         ),
     }
