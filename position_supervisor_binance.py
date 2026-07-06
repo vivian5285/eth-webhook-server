@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.2-cap-safe"
+BINANCE_VPS_VERSION = "v13.6.3-principal-snapshot"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -413,23 +413,38 @@ class PositionSupervisorBinance:
             return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
         return False
 
-    def _resolve_cap_sizing_base(self, equity_balance):
-        """档位额度本金锚点：禁止用 depleted available 把 max_qty 算成灰尘"""
-        equity = max(0.0, float(equity_balance or 0))
+    def _snapshot_sizing_principal(self, reason=""):
+        """全平/开仓前：锁定 USDT 合约本金余额，供本周期开仓与超标核查共用"""
+        principal = binance_client.get_principal_wallet_balance()
+        if principal > 0:
+            self.sizing_principal = principal
+            self._save_state()
+            logger.info(f"📸 本金快照 {principal:.2f} USDT ({reason})")
+        return principal
+
+    def _resolve_cap_sizing_base(self, wallet_balance=None):
+        """
+        档位额度唯一基数：sizing_principal 快照 × TV 档位%。
+        亏损导致 wallet 低于快照时，用实时 wallet 下限（不放大浮盈）。
+        """
+        wallet = float(
+            wallet_balance if wallet_balance is not None
+            else binance_client.get_principal_wallet_balance()
+        )
         principal = float(getattr(self, "sizing_principal", 0) or 0)
         if principal > 0:
-            if equity > 0 and equity < principal:
-                return equity
+            if wallet > 0 and wallet < principal:
+                return wallet
             return principal
-        return equity
+        return wallet
 
     def _regime_cap_target_qty(self, curr_px, regime=None):
-        """按 TV 档位 regime 保证金比例 × 杠杆 × 本金锚点，计算仓位上限 ETH"""
+        """按 TV 档位：本金快照 × margin% × 杠杆 → 仓位上限 ETH"""
         regime = int(regime if regime is not None else self.regime)
         if regime not in self.regime_settings:
             regime = 3
-        equity = binance_client.get_cap_equity_balance()
-        balance = self._resolve_cap_sizing_base(equity)
+        wallet = binance_client.get_principal_wallet_balance()
+        balance = self._resolve_cap_sizing_base(wallet)
         margin_pct = self.regime_settings[regime]["margin"]
         margin_usdt = balance * margin_pct
         if curr_px <= 0:
@@ -2375,9 +2390,7 @@ class PositionSupervisorBinance:
             return
         self._open_in_progress = True
         try:
-            equity = binance_client.get_cap_equity_balance()
-            if equity > 0:
-                self.sizing_principal = equity
+            self._snapshot_sizing_principal(f"开仓前 R{self.regime}")
             qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
             if qty <= 0:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
@@ -2865,6 +2878,7 @@ class PositionSupervisorBinance:
                 self.current_side = None
                 self.shield_active = False
                 self.shield_tiers_consumed = []
+                self._snapshot_sizing_principal("全平后本金重置")
             else:
                 residual = self._get_active_position()
                 if residual:
@@ -2923,7 +2937,7 @@ class PositionSupervisorBinance:
                     self.shield_tiers_consumed = list(s.get("shield_tiers_consumed", []) or [])
                     self.sizing_principal = float(s.get("sizing_principal", 0) or 0)
                     if self.sizing_principal <= 0:
-                        eq = binance_client.get_cap_equity_balance()
+                        eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
                             self.sizing_principal = eq
 
