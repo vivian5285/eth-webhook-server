@@ -1,348 +1,439 @@
-#!/usr/bin/env bash
-# ==========================================
-# 币安 Binance — 工业级干净重部署脚本
-# 版本: v13.1-daemon2  (使用 gunicorn --daemon，勿用 nohup)
-# 流程: 强制核武清场 → 确认端口空闲 → 依赖 → 启动 → 多重健康审计
-# ==========================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""币安专用钉钉 — 全金色主题，与深币紫金播报区分"""
+import os
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
+import logging
+import requests
+from datetime import datetime
+from dotenv import load_dotenv
 
-set -uo pipefail
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+logger = logging.getLogger(__name__)
 
-DEPLOY_SCRIPT_VERSION="v13.2-deploy-audit"
-# 接受 v13.4.6+ 与 v13.5+（含 -atr-priority 等后缀标签）
-MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|[5-9][0-9]*\.)'
+DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
+DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
-PORT=5003
-WORKERS=1
-THREADS=10
-BIND_HOST="0.0.0.0"
-MAX_CLEANUP_ROUNDS=5
-HEALTH_WAIT_SEC=5
-HEALTH_RETRIES=6
+EXCHANGE_LABEL = "币安 Binance"
+LEVERAGE_LABEL = "10x"
+UNIT_LABEL = "ETH"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$DIR"
+# 币安专属金色色板（与深币 #4B0082 紫金完全区分）
+G_TITLE = "#F3BA2F"
+G_MAIN = "#E8B923"
+G_DEEP = "#B8860B"
+G_LIGHT = "#FFE566"
+G_ACCENT = "#F0B90B"
+G_MUTED = "#C9A227"
 
-LOG_DIR="$DIR/logs"
-LOG_FILE="$LOG_DIR/supervisor_binance.log"
-BRAIN_LOG="$LOG_DIR/binance_brain.log"
-PID_FILE="$LOG_DIR/gunicorn_binance.pid"
+FOOTER = "*🔶 Quant AI · 币安黄金趋势大波段引擎*"
+VERIFY_TAG = "✅ 实盘核查通过"
+VERIFY_DELAY_MARK = "REST 同步略延迟"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[1;36m'
-NC='\033[0m'
 
-DEPLOY_OK=1
+def _g(text, color=G_MAIN):
+    return f'<font color="{color}">{text}</font>'
 
-log_step() { echo -e "${YELLOW}$1${NC}"; }
-log_ok()   { echo -e "  ${GREEN}✅ $1${NC}"; }
-log_warn() { echo -e "  ${YELLOW}⚠️  $1${NC}"; }
-log_fail() { echo -e "  ${RED}❌ $1${NC}"; DEPLOY_OK=0; }
 
-load_env() {
-    if [ -f "$DIR/.env" ]; then
-        set -a
-        # shellcheck disable=SC1091
-        source "$DIR/.env"
-        set +a
-        log_ok "已加载 .env 配置"
-    else
-        log_warn "未找到 .env，将使用默认/环境变量"
-    fi
-    WEBHOOK_SECRET="${WEBHOOK_SECRET:-528586}"
-}
+def _verify_line(verify_note, ok_message, delay_message=None, ok_color=G_MAIN, delay_color=G_ACCENT):
+    """根据 verify_note 是否含 REST 延迟标记，切换核查文案"""
+    if verify_note and VERIFY_DELAY_MARK in verify_note:
+        msg = delay_message or f"⏳ 已提交，{VERIFY_DELAY_MARK} | 盘口稍后对齐"
+        return _g(msg, delay_color)
+    return _g(ok_message, ok_color)
 
-kill_by_port() {
-    local port=$1
-    if command -v fuser >/dev/null 2>&1; then
-        fuser -k -9 "${port}/tcp" 2>/dev/null || true
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    fi
-    if command -v ss >/dev/null 2>&1; then
-        ss -lptn "sport = :${port}" 2>/dev/null \
-            | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
-            | sort -u | xargs -r kill -9 2>/dev/null || true
-    fi
-}
 
-kill_residual_processes() {
-    pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
-    pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
-    pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
-    pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
-    pkill -9 -f "position_supervisor.py"        2>/dev/null || true
-    if [ -f "$PID_FILE" ]; then
-        OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-        if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-            kill -9 "$OLD_PID" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
-}
+def _classify_close(reason, verify_note="", swept_dust=False):
+    """平仓/收网播报主题分类"""
+    r = reason or ""
+    note = verify_note or ""
+    is_dust_ctx = swept_dust or "蚂蚁仓" in note or "蚂蚁仓" in r or "重启扫描" in r or "扫尾" in r
 
-port_in_use() {
-    if command -v lsof >/dev/null 2>&1 && lsof -Pi :"${PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-        return 0
-    fi
-    if command -v ss >/dev/null 2>&1 && ss -lnt "sport = :${PORT}" 2>/dev/null | grep -q LISTEN; then
-        return 0
-    fi
-    if command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":${PORT} "; then
-        return 0
-    fi
-    return 1
-}
+    if "TP3" in r or "完美胜利" in r or "止盈" in r or "重启对账" in note:
+        return {
+            "title": "🏆 完美胜利：币安大趋势吃满收网",
+            "status": _g(
+                "三档网格已全部吃掉，暴利安全落袋。"
+                + ("（含蚂蚁仓扫尾）" if is_dust_ctx else "")
+                + ("（重启对账补发）" if "重启对账" in note else ""),
+                G_LIGHT,
+            ),
+            "header": G_TITLE,
+        }
+    if "保护" in r:
+        return {
+            "title": "🛡️ 战术防守：保护平仓机制触发",
+            "status": _g("趋势警报解除，多空网格全撤，打扫战场空仓待命。", G_ACCENT),
+            "header": G_ACCENT,
+        }
+    if is_dust_ctx:
+        return {
+            "title": "🐜 扫尾收网：币安蚂蚁仓/残量已清零",
+            "status": _g("止盈残量或蚂蚁仓已 reduceOnly 扫平，账本复位待命。", G_LIGHT),
+            "header": G_DEEP,
+        }
+    return {
+        "title": "🧹 先平后开 / 常规清场",
+        "status": _g("旧阵地已原子级爆破，账本归零等待新指令。", G_MUTED),
+        "header": G_MUTED,
+    }
 
-show_port_holders() {
-    log_warn "端口 ${PORT} 仍被占用，当前监听进程:"
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -Pi :"${PORT}" -sTCP:LISTEN 2>/dev/null || true
-    elif command -v ss >/dev/null 2>&1; then
-        ss -lptn "sport = :${PORT}" 2>/dev/null || true
-    elif command -v netstat >/dev/null 2>&1; then
-        netstat -tulnp 2>/dev/null | grep ":${PORT} " || true
-    fi
-}
 
-force_cleanup() {
-    log_step "[1/6] 强制核武清场：端口 ${PORT} + 全部币安残留进程..."
-    local round=1
-    while [ "$round" -le "$MAX_CLEANUP_ROUNDS" ]; do
-        echo "  -> 清场第 ${round}/${MAX_CLEANUP_ROUNDS} 轮..."
-        kill_residual_processes
-        kill_by_port "$PORT"
-        sleep 1.2
-        if ! port_in_use; then
-            log_ok "端口 ${PORT} 已完全释放，清场成功"
-            return 0
-        fi
-        round=$((round + 1))
-    done
-    show_port_holders
-    log_fail "经过 ${MAX_CLEANUP_ROUNDS} 轮清场，端口 ${PORT} 仍被占用，部署中止"
-    return 1
-}
+def _get_signed_url():
+    if not DINGTALK_WEBHOOK:
+        return ""
+    if not DINGTALK_SECRET:
+        return DINGTALK_WEBHOOK
+    ts = str(round(time.time() * 1000))
+    hmac_code = hmac.new(
+        DINGTALK_SECRET.encode('utf-8'),
+        f'{ts}\n{DINGTALK_SECRET}'.encode('utf-8'),
+        hashlib.sha256,
+    ).digest()
+    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+    return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={sign}"
 
-install_deps() {
-    log_step "[2/6] 检查 Python 环境与依赖..."
-    if [ -d "$DIR/venv" ]; then
-        # shellcheck disable=SC1091
-        source "$DIR/venv/bin/activate"
-        log_ok "已激活 venv"
-    else
-        log_warn "未找到 venv，使用系统 Python"
-    fi
-    if ! command -v python3 >/dev/null 2>&1; then
-        log_fail "未找到 python3"
-        return 1
-    fi
-    if ! command -v pip >/dev/null 2>&1 && ! command -v pip3 >/dev/null 2>&1; then
-        log_fail "未找到 pip"
-        return 1
-    fi
-    PIP_CMD="pip"
-    command -v pip3 >/dev/null 2>&1 && PIP_CMD="pip3"
-    $PIP_CMD install -q -r "$DIR/requirements.txt"
-    log_ok "requirements.txt 依赖已就绪"
 
-    find "$DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
+def send_alert(title, data_dict, header_color=G_TITLE):
+    signed_url = _get_signed_url()
+    if not signed_url:
+        return
 
-    SUPERVISOR_VER="$(grep 'BINANCE_VPS_VERSION' "$DIR/position_supervisor_binance.py" 2>/dev/null | head -1 || true)"
-    if echo "$SUPERVISOR_VER" | grep -qE "BINANCE_VPS_VERSION.*\"${MIN_SUPERVISOR_VERSION_RE}"; then
-        log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
-    else
-        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ / v13.5+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
-        return 1
-    fi
+    text_lines = [f"- **{k}** : {v}" for k, v in data_dict.items()]
+    body_text = "\n".join(text_lines)
+    now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    if grep -q "report_smart_same_dir_decision" "$DIR/dingtalk.py" 2>/dev/null \
-        && grep -q "open_atr" "$DIR/dingtalk.py" 2>/dev/null \
-        && grep -q "tv_atr" "$DIR/dingtalk.py" 2>/dev/null; then
-        log_ok "dingtalk.py 智能同向筛选 (open_atr/tv_atr) 已就绪"
-    elif echo "$SUPERVISOR_VER" | grep -qE 'v13\.5\.'; then
-        log_fail "dingtalk.py 未同步！v13.5+ 需 report_smart_same_dir_decision(open_atr,tv_atr)，否则运行时报 TypeError"
-        return 1
-    elif grep -q "币安黄金" "$DIR/dingtalk.py" 2>/dev/null; then
-        log_ok "dingtalk.py 金色主题已就绪"
-    else
-        log_warn "dingtalk.py 可能不是最新版"
-    fi
+    markdown_text = f"""### <font color="{header_color}">{title}</font>
+> **⏰ 军区时间**：`{now_time}`
+> **📍 阵地标识**：[ {EXCHANGE_LABEL} · 主力进攻阵地 ]
+> **🔶 主题色带**：`币安黄金`（与深币紫金播报区分）
 
-    if grep -qE 'v13\.4\.(6|7|8)|Binance Client v13\.4' "$DIR/binance_client.py" 2>/dev/null; then
-        log_ok "binance_client.py 版本已就绪"
-    else
-        log_warn "binance_client.py 可能不是最新版（建议含 v13.4.x 标识）"
-    fi
+---
+{body_text}
 
-    if grep -q "\-\-daemon" "$DIR/deploy_binance.sh" 2>/dev/null; then
-        log_ok "deploy_binance.sh ${DEPLOY_SCRIPT_VERSION}（daemon 模式）"
-    else
-        log_fail "deploy_binance.sh 仍是旧版（含 nohup）！请 git pull 最新代码"
-        return 1
-    fi
+---
+{FOOTER}
+"""
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
+    try:
+        requests.post(signed_url, json=payload, timeout=6)
+    except Exception as e:
+        logger.error(f"钉钉发送失败: {e}")
 
-    python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
-        "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" 2>/dev/null \
-        && log_ok "核心 Python 文件语法检查通过" \
-        || { log_fail "Python 语法检查失败（请检查 dingtalk.py / supervisor）"; return 1; }
-}
 
-get_gunicorn_master_pid() {
-    local pid=""
-    if [ -f "$PID_FILE" ]; then
-        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "$pid"
-            return 0
-        fi
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-        pid="$(lsof -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "$pid"
-            return 0
-        fi
-    fi
-    return 1
-}
+def get_regime_name(regime_code):
+    names = {
+        1: "🧊 [1档] 极弱震荡 (保守防守)",
+        2: "🚶 [2档] 弱势波段 (稳健推升)",
+        3: "🏃 [3档] 中势推升 (标准波段)",
+        4: "🚀 [4档] 强势单边 (趋势吃满)",
+    }
+    shade = [G_MUTED, G_LIGHT, G_MAIN, G_ACCENT]
+    idx = regime_code if 1 <= regime_code <= 4 else 0
+    return _g(names.get(regime_code, "未知状态"), shade[idx - 1] if idx else G_MUTED)
 
-start_service() {
-    log_step "[3/6] 启动 Gunicorn 网关 (workers=${WORKERS}, threads=${THREADS})..."
-    mkdir -p "$LOG_DIR"
-    : > "$LOG_FILE"
-    rm -f "$PID_FILE"
 
-    # 使用 --daemon 正式脱离终端，避免 nohup & 被 shell 作业控制 SIGKILL
-    gunicorn \
-        --workers "$WORKERS" \
-        --threads "$THREADS" \
-        --timeout 120 \
-        --graceful-timeout 30 \
-        --bind "${BIND_HOST}:${PORT}" \
-        --pid "$PID_FILE" \
-        --log-file "$LOG_FILE" \
-        --access-logfile "$LOG_DIR/gunicorn_access.log" \
-        --error-logfile "$LOG_DIR/gunicorn_error.log" \
-        --capture-output \
-        --daemon \
-        app:app
+def _format_tp_compare(tp_pxs, tv_tps=None):
+    tp_str = ""
+    for i, px in enumerate(tp_pxs):
+        if px <= 0:
+            continue
+        prefix = "" if tp_str == "" else "\n\n  ➔ "
+        line = f"{prefix}TP{i + 1} 物理挂单 `{px:.2f}`"
+        if tv_tps and i < len(tv_tps) and tv_tps[i] > 0:
+            diff = px - tv_tps[i]
+            line += f" | TV理论 `{tv_tps[i]:.2f}` (偏差 {diff:+.2f})"
+        tp_str += line
+    return tp_str or "暂无有效 TP 价格"
 
-    sleep 2
-    GUNICORN_PID="$(get_gunicorn_master_pid || true)"
-    if [ -z "$GUNICORN_PID" ]; then
-        log_fail "Gunicorn 启动失败，请检查日志"
-        tail -n 30 "$LOG_FILE" 2>/dev/null || true
-        tail -n 15 "$LOG_DIR/gunicorn_error.log" 2>/dev/null || true
-        return 1
-    fi
-    log_ok "Gunicorn 已启动 PID=${GUNICORN_PID}"
-}
 
-wait_for_listen() {
-    log_step "[4/6] 等待端口 ${PORT} 进入 LISTEN 状态..."
-    local i=1
-    while [ "$i" -le "$HEALTH_RETRIES" ]; do
-        if port_in_use; then
-            log_ok "端口 ${PORT} 已开始监听 (第 ${i} 次检测)"
-            return 0
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-    log_fail "Gunicorn 进程存在但端口 ${PORT} 未监听"
-    tail -n 20 "$LOG_FILE" 2>/dev/null || true
-    return 1
-}
+def _format_tp_audit(audit, tv_tps=None):
+    """按档位展示：期望数量@TV价 vs 实盘状态"""
+    if not audit or not audit.get("levels"):
+        return _format_tp_compare(tv_tps or [], tv_tps)
+    lines = []
+    for lv in audit["levels"]:
+        if lv.get("price", 0) <= 0:
+            continue
+        prefix = "" if not lines else "\n\n  ➔ "
+        if lv.get("status") == "ok":
+            lines.append(
+                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` ETH @ `{lv['price']:.2f}` "
+                f"(比例期望 `{lv['qty']}`)"
+            )
+        else:
+            lines.append(
+                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` @ `{lv['price']:.2f}` "
+                f"→ 状态 `{lv['status']}`"
+                + (f" 实盘 `{lv.get('actual_qty', 0)}`" if lv.get("actual_qty") else "")
+            )
+    return "".join(lines) or "暂无有效 TP 审计"
 
-health_check() {
-    log_step "[5/6] 多重健康审计..."
-    sleep "$HEALTH_WAIT_SEC"
 
-    HEALTH_BODY="$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "")"
-    HEALTH_OK=0
-    if echo "$HEALTH_BODY" | grep -q "binance_webhook"; then
-        HEALTH_OK=1
-        log_ok "GET /health 正常 → ${HEALTH_BODY}"
-    else
-        log_fail "GET /health 异常 → ${HEALTH_BODY:-无响应}"
-    fi
+def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
+                           verify_note="", tp_audit=None, verified=True):
+    side_str = _g("🔶 开多 (LONG)", G_LIGHT) if side == "LONG" else _g("🟤 开空 (SHORT)", G_DEEP)
+    slip_txt = (
+        f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
+        if tv_price > 0 else "未知"
+    )
 
-    HTTP_STATUS="$(curl -s -o /dev/null -w "%{http_code}" \
-        -X POST "http://127.0.0.1:${PORT}/webhook" \
-        -H "Content-Type: application/json" \
-        -d "{\"secret\":\"${WEBHOOK_SECRET}\",\"action\":\"PING\"}" 2>/dev/null || echo "000")"
-    if [ "$HTTP_STATUS" = "200" ]; then
-        log_ok "POST /webhook 回路 200 OK（secret 校验通过）"
-    else
-        log_fail "POST /webhook 异常 HTTP=${HTTP_STATUS}"
-    fi
+    data = {
+        "🎛️ 趋势方向": side_str,
+        "📊 市场强度": get_regime_name(regime),
+        "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
+        "📦 唯一头寸": _g(f"**{qty}** {UNIT_LABEL} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
+        "🕸️ 止盈布防比对": _g(
+            _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tp_pxs, tv_tps),
+            G_LIGHT,
+        ),
+        "📏 波动参考": _g(f"ATR = {atr:.4f}", G_MUTED),
+        "📡 哨兵状态": _verify_line(
+            verify_note if not verified else "",
+            f"🟢 {VERIFY_TAG} | 限价 TP123 已挂，雷达待命",
+            "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🔶 战神出击：币安大级别阵地建立", data)
 
-    GUNICORN_PID="$(get_gunicorn_master_pid || true)"
-    if [ -n "$GUNICORN_PID" ] && kill -0 "$GUNICORN_PID" 2>/dev/null; then
-        log_ok "Gunicorn 主进程存活 PID=${GUNICORN_PID}"
-    elif [ "$HEALTH_OK" -eq 1 ] && [ "$HTTP_STATUS" = "200" ]; then
-        log_warn "PID 文件进程已变，但 HTTP 健康检查全部通过（服务正常运行）"
-    else
-        log_fail "Gunicorn 主进程已退出且 HTTP 检查未通过"
-    fi
 
-    sleep 2
-    if grep -qE 'v13\.(4\.[6-9]|[5-9])' "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 v13.4.6+ / v13.5+ 已成功加载"
-    elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
-        log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.6+）"
-    elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "闪电接管已执行（binance_brain.log）"
-    else
-        log_warn "日志中暂未看到大脑/雷达启动字样（请 tail -f logs/binance_brain.log 确认）"
-    fi
+def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verified=True):
+    data = {
+        "🛡️ 战术动作": _g(action_msg, G_ACCENT),
+        "📦 利润头寸": _g(f"`{qty}` {UNIT_LABEL}", G_MAIN),
+        "💰 原始成本": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
+        "🔒 最新硬防线": _g(f"**{new_sl:.2f}** USDT (物理保本单已挂)", G_LIGHT),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | 移动保本机制已触发",
+            "⏳ 止损已提交，REST 同步略延迟 | 移动保本机制已触发",
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("📈 捷报：追踪雷达锁死趋势利润", data, G_DEEP)
 
-    if grep -q "哨兵" "$BRAIN_LOG" 2>/dev/null || grep -q "monitoring" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "雷达哨兵监控已启动或待命"
-    fi
 
-    echo -e "  ${CYAN}→ 当前本目录 Gunicorn 进程:${NC}"
-    ps -ef 2>/dev/null | grep "${DIR}" | grep gunicorn | grep -v grep \
-        | awk '{print "     PID="$2" CMD="$8" "$9" "$10}' || true
+def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
+                   verify_note="", verified=True):
+    data = {
+        "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
+        "📦 本次止盈": _g(f"`{filled_qty}` {UNIT_LABEL}", G_ACCENT),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
+        "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
+        "🧭 方向/档位": _g(f"{side} | Regime {regime}", G_MUTED),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | TP{tp_level} 限价止盈已成交",
+            "⏳ 止盈已成交，REST 同步略延迟 | 哨兵持续对齐",
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert(f"🎯 捷报：币安 TP{tp_level} 止盈成交", data, G_DEEP)
 
-    # HTTP 全通过则视为部署成功（不因 PID 文件瞬变误报失败）
-    if [ "$HEALTH_OK" -eq 1 ] && [ "$HTTP_STATUS" = "200" ]; then
-        DEPLOY_OK=1
-    fi
-}
 
-print_summary() {
-    log_step "[6/6] 部署结果汇总"
-    echo ""
-    if [ "$DEPLOY_OK" -eq 1 ]; then
-        echo -e "${GREEN}=== 🔶 币安(Binance) 干净重部署成功 ===${NC}"
-        echo -e "  网关地址: http://${BIND_HOST}:${PORT}/webhook"
-        echo -e "  健康检查: http://127.0.0.1:${PORT}/health"
-        echo -e "  大脑日志: tail -f ${BRAIN_LOG}"
-        echo -e "  访问日志: tail -f ${LOG_DIR}/gunicorn_access.log"
-        echo -e "  错误日志: tail -f ${LOG_DIR}/gunicorn_error.log"
-    else
-        echo -e "${RED}=== ❌ 币安部署未完全通过，请排查上述失败项 ===${NC}"
-        echo -e "  最近日志:"
-        tail -n 15 "$LOG_FILE" 2>/dev/null || true
-        exit 1
-    fi
-    echo ""
-}
+def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
+                                  verify_note="", tp_audit=None, verified=True):
+    action_txt = _g("手动增仓", G_LIGHT) if "加仓" in action_type else _g("手动部分减仓", G_ACCENT)
+    data = {
+        "触发机制": _g("🛡️ 智慧大脑态势感知同步", G_MAIN),
+        "实盘动作": action_txt,
+        "数量变化": _g(f"`{old_qty}` ➔ `{new_qty}` {UNIT_LABEL}", G_ACCENT),
+        "最新均价": _g(f"**{new_entry_price:.2f}** USDT", G_MAIN),
+        "后续动作": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123",
+            "⏳ 重挂已提交，REST 同步略延迟 | 哨兵持续对齐",
+        ),
+    }
+    if tp_audit:
+        data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🔄 币安阵地异动重置", data, G_ACCENT)
 
-echo -e "\n${CYAN}=== 币安系统 · 干净重部署开始 [${DEPLOY_SCRIPT_VERSION}] ===${NC}"
-echo -e "  工作目录: ${DIR}"
-echo -e "  目标端口: ${PORT}"
-echo ""
 
-load_env
-force_cleanup || exit 1
-install_deps || exit 1
-start_service || exit 1
-wait_for_listen || exit 1
-health_check
-print_summary
+def report_force_align(real_side, expected_side, verify_note="", verified=True):
+    data = {
+        "🚨 异常状况": _g("**实盘方向与 TV 战略指令发生严重背离！**", G_DEEP),
+        "🕵️ 现场方向": _g(real_side, G_ACCENT),
+        "🧠 策略指令": _g(expected_side, G_LIGHT),
+        "⚡ 仲裁结果": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | 已核武全平，账本归零",
+            "⏳ 强平已提交，REST 同步略延迟 | 账本复位中",
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🚨 严重警告：方向强行物理对齐", data, G_TITLE)
+
+
+def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False):
+    theme = _classify_close(reason, verify_note, swept_dust=swept_dust)
+    ok_verify = f"{VERIFY_TAG} | 盘口已无持仓"
+    delay_verify = "⏳ 扫尾/平仓已提交，REST 同步略延迟 | 盘口对齐中"
+    if swept_dust or "蚂蚁仓" in (verify_note or ""):
+        ok_verify = f"{VERIFY_TAG} | 蚂蚁仓已扫平，盘口已无持仓"
+        delay_verify = "⏳ 蚂蚁仓扫尾已提交，REST 同步略延迟 | 盘口对齐中"
+
+    data = {
+        "📋 平仓原理解析": _g(f"**{reason}**", G_MAIN),
+        "✅ 账本状态": theme["status"],
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            ok_verify,
+            delay_verify,
+        ),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert(theme["title"], data, theme["header"])
+
+
+def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
+                            verify_note="", tp_matched=0, tp_expected=0, tp_audit=None,
+                            last_tv_signal=None, radar_sl_ok=True):
+    expected = tp_expected or sum(1 for t in tv_tps if t > 0)
+    if expected > 0 and tp_matched >= expected:
+        action_txt = f"{VERIFY_TAG} | 头寸+TV对账 → 比例 TP123 已对齐 → 恢复哨兵"
+        action_color = G_MAIN
+    elif tp_matched > 0:
+        action_txt = f"⚠️ 部分对齐 | 止盈 {tp_matched}/{expected} 档 (价量审计未全过) → 恢复哨兵"
+        action_color = G_ACCENT
+    elif expected > 0:
+        action_txt = "❌ 止盈补挂失败 | 持仓已接管但限价 TP 未对齐，请人工核查"
+        action_color = G_DEEP
+    else:
+        action_txt = f"{VERIFY_TAG} | 已接管 → 恢复哨兵（无 TP 价格记录，请等 TV 信号）"
+        action_color = G_MAIN
+
+    if radar_active:
+        sl_state = "止损已挂/已确认" if radar_sl_ok else "止损待哨兵补挂"
+        radar_txt = _g(
+            f"已激活 · 哨兵已点火 | 硬防线 `{sl_price:.2f}` | 轮询 2s | {sl_state}",
+            G_LIGHT,
+        )
+        action_txt += " · 雷达哨兵已点火"
+    else:
+        radar_txt = _g("待命 (未达 TP1 激活阈值)", G_MUTED)
+
+    tv_ref = ""
+    if last_tv_signal:
+        tv_ref = (
+            f"{last_tv_signal.get('action', '?')} "
+            f"R{last_tv_signal.get('regime', '?')} "
+            f"@{last_tv_signal.get('ts', '')}"
+        )
+
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
+        "📊 恢复档位": get_regime_name(regime),
+        "📡 最新 TV 信号": _g(tv_ref or "无日志记录", G_MUTED),
+        "🕸️ TP123 比例审计": _g(
+            _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tv_tps, tv_tps),
+            G_ACCENT,
+        ),
+        "📡 雷达状态": radar_txt,
+        "✅ 接管动作": _g(action_txt, action_color),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🔄 币安 VPS 重启 · 闪电接管报告", data)
+
+
+def report_recover_standby(verify_note="", version=""):
+    data = {
+        "📡 实盘核查": _g(f"{VERIFY_TAG} | 盘口无持仓", G_MAIN),
+        "✅ 系统状态": _g("空仓待命 · 挂单已清空 · 雷达/哨兵复位", G_LIGHT),
+        "🔮 版本": _g(version or "binance_webhook", G_MUTED),
+    }
+    if verify_note:
+        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
+    send_alert("🔄 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
+
+
+def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pct, threshold_pct,
+                                   open_regime, tv_regime, open_atr, tv_atr, qty,
+                                   tp_audit=None, verify_note=""):
+    atr_txt = f"持仓 `{open_atr:.2f}` · TV `{tv_atr:.2f}`"
+    atr_changed = abs(float(open_atr or 0) - float(tv_atr or 0)) > 0 and (
+        max(abs(open_atr), abs(tv_atr), 1) == 0 or
+        abs(float(open_atr) - float(tv_atr)) / max(abs(open_atr), abs(tv_atr), 1) > 0.03
+    )
+
+    if decision == "skip_duplicate_flat":
+        title = "🧠 智能筛选：短时重复同向 · 已忽略"
+        status = _g(
+            f"**5 分钟内** ATR 未变 ({atr_txt})，价差 **{diff_pct:.3f}%** < **{threshold_pct}%**，"
+            f"档位 **R{tv_regime}** → **未重复下单**。",
+            G_ACCENT,
+        )
+    elif decision.startswith("reentry_"):
+        reason_map = {
+            "reentry_atr_changed": f"**① ATR 变化** ({atr_txt}) → **先平后开** 刷新仓位",
+            "reentry_regime_changed": f"**② 档位** R{open_regime}→R{tv_regime} → **先平后开** 刷新仓位",
+            "reentry_spread_ok": (
+                f"**③ 理论价差** **{diff_pct:.3f}%** ≥ **{threshold_pct}%** "
+                f"(ATR 未变 {atr_txt}) → **先平后开**"
+            ),
+        }
+        title = "🧠 智能筛选：同向持仓 · 刷新仓位"
+        status = _g(reason_map.get(decision, "同向刷新仓位 → **先平后开**"), G_TITLE)
+    else:
+        title = "🧠 智能筛选：同向持仓 · 仅刷新止盈"
+        status = _g(
+            f"**① ATR 未变** ({atr_txt}) + **③ 价差** **{diff_pct:.3f}%** < **{threshold_pct}%** "
+            f"(档位 R{open_regime}) → **未再开仓**，已核实持仓并按新 TV 价刷新 TP123。",
+            G_LIGHT,
+        )
+    data = {
+        "📊 智能决策": status,
+        "🎯 TV方向": _g(side, G_MAIN),
+        "💰 实盘成本": _g(f"`{live_entry:.2f}` USDT" if live_entry > 0 else "空仓", G_MUTED),
+        "📡 TV理论价": _g(f"`{tv_price:.2f}` USDT", G_MUTED),
+        "🌊 ATR (优先)": _g(
+            f"{atr_txt}" + (" ⚡已变化" if atr_changed and decision == "reentry_atr_changed" else " ✓未变"),
+            G_ACCENT if atr_changed else G_MUTED,
+        ),
+        "📏 理论价差": _g(f"{diff_pct:.3f}% / 阈值 {threshold_pct}%", G_ACCENT),
+        "🔢 档位": _g(f"开仓 R{open_regime} · TV R{tv_regime}", G_MUTED),
+        "📦 持有": _g(f"**{qty}** {UNIT_LABEL}" if qty > 0 else "无持仓", G_ACCENT),
+    }
+    if tp_audit:
+        data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    color = G_ACCENT if decision in ("skip_duplicate_flat",) else G_TITLE
+    send_alert(title, data, color)
+
+
+def report_system_alert(title, detail):
+    send_alert(f"⚠️ 系统告警：{title}", {
+        "⚠️ 告警级别": _g("最高级别 (CRITICAL)", G_DEEP),
+        "📝 核心详情": _g(f"**{detail}**", G_ACCENT),
+    }, G_TITLE)
+
+
+def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL}", G_MAIN),
+        "🕸️ TP123 比例审计": _g(
+            _format_tp_audit(tp_audit, None) if tp_audit else "已对齐",
+            G_MAIN,
+        ),
+        "✅ 纠偏结果": _g("雷达守护已完成止盈对齐（重启接管竞态后补报）", G_MAIN),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("📡 雷达守护 · 止盈已重新对齐", data, G_MAIN)
