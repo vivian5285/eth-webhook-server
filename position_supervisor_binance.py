@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.7-open-guard"
+BINANCE_VPS_VERSION = "v13.5.8-tp-stable"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -31,6 +31,8 @@ DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.06
 SIGNAL_DEDUP_SEC = 45
+DEFENSE_ALIGN_COOLDOWN_SEC = 60
+SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
@@ -79,6 +81,10 @@ class PositionSupervisorBinance:
         self._open_tp_unconfirmed = False
         self._last_signal_fp = None
         self._last_signal_fp_ts = 0.0
+        self._defense_align_in_progress = False
+        self._last_defense_align_ok_ts = 0.0
+        self._guardian_bad_streak = 0
+        self._sentinel_grace_until = 0.0
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -987,6 +993,20 @@ class PositionSupervisorBinance:
             time.sleep(1.5)
         return last_audit
 
+    def _tp_audit_ok(self, audit):
+        expected = audit.get("expected", 0)
+        if expected <= 0:
+            return True
+        return (
+            audit.get("matched_full", 0) >= expected
+            and not audit.get("orphans")
+            and not self._defense_needs_immediate_fix(audit)
+        )
+
+    def _mark_defense_align_ok(self):
+        self._last_defense_align_ok_ts = time.time()
+        self._guardian_bad_streak = 0
+
     def _defense_needs_immediate_fix(self, audit):
         """重复/缺失/数量偏差/孤儿单 → 必须撤单重算重挂（禁止增量叠单）"""
         if self._audit_requires_nuclear(audit):
@@ -999,7 +1019,7 @@ class PositionSupervisorBinance:
     def _enforce_defense_alignment(self, live_qty, entry, dynamic_sl=None, reason="", rounds=3,
                                    recover_mode=False):
         """
-        防线对齐总线：先撤净限价 TP → 审计 → 核武重挂 → 仍失败再补一轮。
+        防线对齐总线：先审计 → 已齐则不动 TP → 异常才撤净重挂。
         recover_mode=True 时先核武撤全部挂单，避免重启后重复 TP 残留。
         """
         live_qty = self._resolve_live_qty(live_qty)
@@ -1012,54 +1032,75 @@ class PositionSupervisorBinance:
         if reason:
             logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} ETH")
 
-        if recover_mode:
-            self._scorched_earth_cancel_for_recover()
-        else:
-            self._cancel_all_tp_limit_orders()
-        time.sleep(0.45)
-        audit = self._audit_tp_levels(live_qty)
-        if self._defenses_fully_ok(live_qty, dynamic_sl) and not audit.get("orphans"):
-            logger.info(f"✅ 防线已齐: {self._format_audit_summary(audit)}")
-            if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+        self._defense_align_in_progress = True
+        try:
+            audit = self._audit_tp_levels(live_qty)
+            if not recover_mode and self._tp_audit_ok(audit):
+                logger.info(f"✅ TP 已齐，跳过撤单: {self._format_audit_summary(audit)}")
+                if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+                    self._ensure_radar_sl(dynamic_sl, live_qty)
+                self._mark_defense_align_ok()
+                return {
+                    "matched": audit["matched_full"],
+                    "expected": audit["expected"],
+                    "pending_prices": audit["pending_prices"],
+                    "rebuilt": False,
+                    "audit": audit,
+                    "nuclear": False,
+                }
+
+            if recover_mode:
+                self._scorched_earth_cancel_for_recover()
+            else:
+                self._cancel_all_tp_limit_orders()
+            time.sleep(0.45)
+            audit = self._audit_tp_levels(live_qty)
+            if self._tp_audit_ok(audit):
+                logger.info(f"✅ 撤单后 TP 已齐: {self._format_audit_summary(audit)}")
+                if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+                    self._ensure_radar_sl(dynamic_sl, live_qty)
+                self._mark_defense_align_ok()
+                return {
+                    "matched": audit["matched_full"],
+                    "expected": audit["expected"],
+                    "pending_prices": audit["pending_prices"],
+                    "rebuilt": False,
+                    "audit": audit,
+                    "nuclear": False,
+                }
+
+            sl_preserve = dynamic_sl if (dynamic_sl and self._is_radar_active() and not recover_mode) else None
+            audit = self._nuclear_realign_tp(
+                live_qty, entry, dynamic_sl=sl_preserve, rounds=rounds,
+            )
+            if audit["matched_full"] < audit["expected"]:
+                logger.warning("☢️ 首轮核武未齐，追加一轮重挂")
+                if recover_mode:
+                    self._scorched_earth_cancel_for_recover()
+                else:
+                    self._cancel_all_tp_limit_orders(max_rounds=4)
+                time.sleep(0.6)
+                audit = self._nuclear_realign_tp(
+                    live_qty, entry, dynamic_sl=sl_preserve, rounds=max(2, rounds - 1),
+                )
+            if dynamic_sl and not recover_mode and not self._has_stop_sl_near(dynamic_sl):
                 self._ensure_radar_sl(dynamic_sl, live_qty)
+            if self._tp_audit_ok(audit):
+                self._mark_defense_align_ok()
             return {
                 "matched": audit["matched_full"],
                 "expected": audit["expected"],
                 "pending_prices": audit["pending_prices"],
-                "rebuilt": False,
+                "rebuilt": True,
                 "audit": audit,
-                "nuclear": False,
+                "nuclear": True,
             }
-
-        sl_preserve = dynamic_sl if (dynamic_sl and self._is_radar_active() and not recover_mode) else None
-        audit = self._nuclear_realign_tp(
-            live_qty, entry, dynamic_sl=sl_preserve, rounds=rounds,
-        )
-        if audit["matched_full"] < audit["expected"]:
-            logger.warning("☢️ 首轮核武未齐，追加一轮重挂")
-            if recover_mode:
-                self._scorched_earth_cancel_for_recover()
-            else:
-                self._cancel_all_tp_limit_orders(max_rounds=4)
-            time.sleep(0.6)
-            audit = self._nuclear_realign_tp(
-                live_qty, entry, dynamic_sl=sl_preserve, rounds=max(2, rounds - 1),
-            )
-        if dynamic_sl and not recover_mode and not self._has_stop_sl_near(dynamic_sl):
-            self._ensure_radar_sl(dynamic_sl, live_qty)
-        return {
-            "matched": audit["matched_full"],
-            "expected": audit["expected"],
-            "pending_prices": audit["pending_prices"],
-            "rebuilt": True,
-            "audit": audit,
-            "nuclear": True,
-        }
+        finally:
+            self._defense_align_in_progress = False
 
     def _radar_guardian_audit(self, real_amt, curr_px):
         """
-        雷达最高权限：每轮哨兵实时审计 TP123 比例与挂单。
-        异常 → 撤单重算重挂；雷达移动止损逻辑不受影响。
+        雷达守护：仅 TP 异常才撤单重挂；止损缺失单独补挂，禁止动已齐 TP。
         """
         if real_amt <= 0 or not self.monitoring:
             return None
@@ -1067,9 +1108,32 @@ class PositionSupervisorBinance:
             return None
         if getattr(self, "_open_in_progress", False):
             return None
+        if getattr(self, "_defense_align_in_progress", False):
+            return None
+
         audit = self._audit_tp_levels(real_amt)
         sl = self._radar_sl_to_pass()
-        if not self._defense_needs_immediate_fix(audit) and self._defenses_fully_ok(real_amt, sl):
+
+        if self._tp_audit_ok(audit):
+            self._guardian_bad_streak = 0
+            if sl and not self._has_stop_sl_near(sl):
+                self._ensure_radar_sl(sl, real_amt)
+            return None
+
+        self._guardian_bad_streak += 1
+        now = time.time()
+        severe = self._defense_needs_immediate_fix(audit)
+        in_grace = now < getattr(self, "_sentinel_grace_until", 0)
+        in_cooldown = (
+            now - getattr(self, "_last_defense_align_ok_ts", 0)
+            < DEFENSE_ALIGN_COOLDOWN_SEC
+        )
+        if (in_grace or in_cooldown) and not severe and self._guardian_bad_streak < 2:
+            logger.info(
+                f"📡 [雷达守护] TP 审计波动，暂不重挂 "
+                f"({'重启宽限期' if in_grace else '冷却期'}) | "
+                f"{self._format_audit_summary(audit)}"
+            )
             return None
 
         logger.warning(
@@ -1140,7 +1204,7 @@ class PositionSupervisorBinance:
         return audit["matched_full"], audit["pending_prices"], audit["expected"]
 
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
-        """雷达推升：先确保 TP 对齐，再只换止损（保留雷达动态保本）"""
+        """雷达推升：TP 异常才核武；止损单独换，不动已齐 TP"""
         self._cancel_stop_orders()
         time.sleep(0.35)
         audit = self._audit_tp_levels(live_qty)
@@ -1148,11 +1212,6 @@ class PositionSupervisorBinance:
             self._enforce_defense_alignment(
                 live_qty, entry, dynamic_sl=new_sl,
                 reason="雷达推升前 TP 纠偏", rounds=2,
-            )
-        elif not self._defenses_fully_ok(live_qty, dynamic_sl=None):
-            self._enforce_defense_alignment(
-                live_qty, entry, dynamic_sl=new_sl,
-                reason="雷达推升前 TP 补齐", rounds=2,
             )
         sl_placed = self._ensure_radar_sl(new_sl, live_qty)
         if not sl_placed:
@@ -2418,6 +2477,10 @@ class PositionSupervisorBinance:
                             f"仅 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
                             f"{hint} | 雷达哨兵将接力纠偏；仍失败请 APP 手动全撤后重启",
                         )
+                    else:
+                        self._mark_defense_align_ok()
+
+                    self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_RECOVER_SEC
 
                     logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
                 finally:
