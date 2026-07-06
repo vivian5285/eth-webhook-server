@@ -23,13 +23,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.6-qty-align-threshold"
+BINANCE_VPS_VERSION = "v13.6.7-qty-align-10pct"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
-OPEN_OVERSIZE_RATIO = 1.05  # 与 QTY_ALIGN_MIN_PCT 一致：仅离谱超标才裁减
+OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
 SIGNAL_DEDUP_SEC = 45
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
@@ -38,7 +38,7 @@ REGIME_CAP_TOLERANCE_ETH = 0.001
 CAP_MIN_RETAIN_RATIO = 0.25
 CAP_TRIM_MAX_ROUNDS = 4
 QTY_DRIFT_TOLERANCE_PCT = 0.015  # 微漂 ≤1.5%：仅同步账本，不对齐
-QTY_ALIGN_MIN_PCT = 0.05         # 偏离 ≥5% 才视为离谱，触发对齐/档位裁减
+QTY_ALIGN_MIN_PCT = 0.10         # 偏离 ≥10% 才视为离谱，触发对齐/档位裁减
 SHIELD_ACTIVATION_PCT = 0.02
 SHIELD_TIER_PCTS = (0.02, 0.03, 0.05)
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
@@ -391,7 +391,7 @@ class PositionSupervisorBinance:
     def _is_material_qty_change(self, old_qty, new_qty):
         """
         离谱级异动：偏离 ≥ QTY_ALIGN_MIN_PCT 才触发对齐/钉钉。
-        微漂（1.5%~5%）由哨兵静默同步账本，不打扰。
+        微漂（1.5%~10%）由哨兵静默同步账本，不打扰。
         """
         old = float(old_qty or 0)
         new = float(new_qty or 0)
@@ -522,7 +522,7 @@ class PositionSupervisorBinance:
         return qty, balance, margin_usdt, margin_pct
 
     def _regime_cap_tolerance(self, target_qty):
-        """档位裁减容忍：离谱才管 — 超标 ≤5% 不裁"""
+        """档位裁减容忍：离谱才管 — 超标 ≤10% 不裁"""
         target = float(target_qty or 0)
         if target <= 0:
             return REGIME_CAP_TOLERANCE_ETH
