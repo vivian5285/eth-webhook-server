@@ -420,6 +420,25 @@ class PositionSupervisorBinance:
             self.sizing_principal = principal
             self._save_state()
             logger.info(f"📸 本金快照 {principal:.2f} USDT ({reason})")
+            if reason and ("全平" in reason or "开仓前" in reason):
+                target_qty = None
+                margin_pct = None
+                if self.regime in self.regime_settings and "开仓前" in reason:
+                    margin_pct = self.regime_settings[self.regime]["margin"]
+                    if self.tv_price > 0:
+                        t, _, _, _, _ = self._regime_cap_target_qty(self.tv_price, self.regime)
+                        target_qty = t
+                try:
+                    dingtalk.report_principal_snapshot(
+                        reason=reason,
+                        principal=principal,
+                        regime=self.regime if "开仓前" in reason else None,
+                        margin_pct=margin_pct,
+                        target_qty=target_qty,
+                        leverage=self.leverage,
+                    )
+                except Exception as e:
+                    logger.warning(f"本金快照钉钉跳过: {e}")
         return principal
 
     def _resolve_cap_sizing_base(self, wallet_balance=None):
@@ -458,23 +477,23 @@ class PositionSupervisorBinance:
         target = float(target_qty or 0)
         trim = float(trim_qty or 0)
         if live <= 0 or target <= 0:
-            return "invalid_qty"
+            return "数量无效，无法裁减"
         if trim <= 0:
             return None
         retain = target / live
         if retain < CAP_MIN_RETAIN_RATIO and live > target * 2:
             return (
-                f"unsafe_retain_ratio={retain:.3f}: target {target:.4f} vs live {live:.4f} "
-                f"(sizing base likely skewed by depleted available)"
+                f"目标仅相当于实盘的 {retain:.1%}，疑似误用「可用保证金」而非「本金快照」"
+                f"（目标 {target:.4f} ETH vs 实盘 {live:.4f} ETH）"
             )
         if trim > live * 0.85 and target < live * 0.15:
             return (
-                f"unsafe_trim_ratio: would cut {trim:.4f} of {live:.4f}, "
-                f"retaining only {target:.4f}"
+                f"裁减幅度过大：将平掉 {trim:.4f} ETH，仅保留 {target:.4f} ETH，"
+                f"疑似额度基数算错"
             )
         expected = round(live - target, 3)
         if abs(trim - expected) > max(live * 0.05, 0.01):
-            return f"trim_mismatch: trim={trim:.4f} expected={expected:.4f}"
+            return f"裁减量不符：计划 {trim:.4f} ETH，应为 {expected:.4f} ETH"
         return None
 
     def _calc_target_open_qty(self, curr_px):
@@ -501,8 +520,11 @@ class PositionSupervisorBinance:
         if plan_err:
             logger.error(f"✂️ {reason_tag} 中止: {plan_err} | live={live} target={target_qty}")
             dingtalk.report_system_alert(
-                "档位裁减中止(安全校验)",
-                f"{reason_tag} | 实盘 {live} ETH | 目标 {target_qty} ETH | {plan_err}",
+                "档位裁减已中止（安全保护）",
+                f"场景：{reason_tag}\n"
+                f"实盘：**{live}** ETH → 目标：**{target_qty}** ETH\n"
+                f"原因：{plan_err}",
+                suggestion="请核对本金快照与 TV 档位是否一致；勿手动干预，待下一 TV 信号或人工核查后重试",
             )
             return live
         close_side = "SELL" if action == "LONG" else "BUY"
@@ -609,7 +631,8 @@ class PositionSupervisorBinance:
 
         self._last_regime_cap_ts = now
         verify_note = (
-            f"R{regime} 上限 {target} ETH (保证金 {margin_usdt:.0f}U) | "
+            f"本金 {balance:.2f}U × R{regime} {margin_pct:.0%} × {self.leverage}x "
+            f"= 保证金 {margin_usdt:.0f}U → 上限 {target} ETH | "
             f"裁减 {old_qty} → {new_qty} ETH | "
             f"TP {result['matched']}/{result['expected']} | "
             f"{self._format_audit_summary(result['audit'])} | "
@@ -625,6 +648,10 @@ class PositionSupervisorBinance:
             margin_pct=margin_pct,
             tp_audit=result["audit"],
             verify_note=verify_note,
+            principal_balance=balance,
+            margin_usdt=margin_usdt,
+            leverage=self.leverage,
+            trim_qty=round(old_qty - new_qty, 3),
         )
         return {"new_qty": new_qty, "target": target, "result": result}
 
@@ -2513,6 +2540,10 @@ class PositionSupervisorBinance:
                 verify_note=verify_note,
                 tp_audit=audit,
                 verified=(expected == 0 or matched >= expected),
+                principal_balance=self.sizing_principal or binance_client.get_principal_wallet_balance(),
+                margin_pct=self.regime_settings.get(self.regime, {}).get("margin"),
+                margin_usdt=(self.sizing_principal or 0) * self.regime_settings.get(self.regime, {}).get("margin", 0),
+                leverage=self.leverage,
             )
             if expected > 0 and matched < expected:
                 self._open_tp_unconfirmed = True
