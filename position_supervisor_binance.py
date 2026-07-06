@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.8-tp-stable"
+BINANCE_VPS_VERSION = "v13.6.1-smart-defense"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -33,6 +33,11 @@ OPEN_OVERSIZE_RATIO = 1.06
 SIGNAL_DEDUP_SEC = 45
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
+REGIME_CAP_COOLDOWN_SEC = 90
+SHIELD_ACTIVATION_PCT = 0.02
+SHIELD_TIER_PCTS = (0.02, 0.03, 0.05)
+SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
+SHIELD_STOP_TOLERANCE = 2.0
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
@@ -85,6 +90,9 @@ class PositionSupervisorBinance:
         self._last_defense_align_ok_ts = 0.0
         self._guardian_bad_streak = 0
         self._sentinel_grace_until = 0.0
+        self._last_regime_cap_ts = 0.0
+        self.shield_active = False
+        self.shield_tiers_consumed = []
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -360,6 +368,8 @@ class PositionSupervisorBinance:
                     "last_tv_signal": self.last_tv_signal,
                     "open_regime": self.open_regime,
                     "open_atr": self.open_atr,
+                    "shield_active": getattr(self, "shield_active", False),
+                    "shield_tiers_consumed": list(getattr(self, "shield_tiers_consumed", []) or []),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -398,17 +408,30 @@ class PositionSupervisorBinance:
             return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
         return False
 
-    def _calc_target_open_qty(self, curr_px):
-        """按 regime 保证金比例 × 杠杆，基于 walletBalance 计算目标 ETH 数量"""
+    def _regime_cap_target_qty(self, curr_px, regime=None):
+        """按 TV 档位 regime 保证金比例 × 杠杆 × 本金，计算仓位上限 ETH"""
+        regime = int(regime if regime is not None else self.regime)
+        if regime not in self.regime_settings:
+            regime = 3
         balance = binance_client.get_sizing_balance()
-        margin_pct = self.regime_settings[self.regime]["margin"]
+        margin_pct = self.regime_settings[regime]["margin"]
         margin_usdt = balance * margin_pct
         if curr_px <= 0:
-            return 0.0, balance, margin_usdt, margin_pct
+            return 0.0, balance, margin_usdt, margin_pct, regime
         qty = round((margin_usdt * self.leverage) / curr_px, 3)
+        return qty, balance, margin_usdt, margin_pct, regime
+
+    def _calc_target_open_qty(self, curr_px):
+        qty, balance, margin_usdt, margin_pct, _ = self._regime_cap_target_qty(curr_px, self.regime)
         return qty, balance, margin_usdt, margin_pct
 
-    def _trim_position_to_target(self, target_qty, action):
+    def _is_oversize_for_regime(self, live_qty, curr_px, regime=None):
+        target, _, _, margin_pct, reg = self._regime_cap_target_qty(curr_px, regime)
+        if target <= 0 or live_qty <= 0:
+            return False, target, margin_pct, reg
+        return live_qty > target * OPEN_OVERSIZE_RATIO, target, margin_pct, reg
+
+    def _trim_position_to_target(self, target_qty, action, reason_tag="叠仓Remediation"):
         """叠仓Remediation：实盘超标时 reduceOnly 裁减至目标仓位"""
         pos = self._get_active_position()
         if not pos or pos["size"] <= target_qty * OPEN_OVERSIZE_RATIO:
@@ -418,7 +441,7 @@ class PositionSupervisorBinance:
             return pos["size"]
         close_side = "SELL" if action == "LONG" else "BUY"
         logger.warning(
-            f"✂️ 叠仓Remediation: 裁减 {excess} ETH "
+            f"✂️ {reason_tag}: 裁减 {excess} ETH "
             f"(实盘 {pos['size']} → 目标 {target_qty})"
         )
         binance_client.cancel_all_open_orders(self.symbol)
@@ -439,6 +462,85 @@ class PositionSupervisorBinance:
                 f"目标 {target_qty} ETH，裁减后仍 {new_sz} ETH，请人工核查",
             )
         return new_sz
+
+    def _radar_enforce_regime_cap(self, live_qty, curr_px, force=False):
+        """
+        雷达最高权限：实盘超过 TV 档位保证金上限 → reduceOnly 裁减 → 重挂 TP123。
+        雷达移动止损位不变，仅补挂缺失 STOP。
+        """
+        if live_qty <= 0 or not self.current_side:
+            return None
+        if not force and (
+            getattr(self, "_open_in_progress", False)
+            or getattr(self, "_recover_in_progress", False)
+        ):
+            return None
+
+        oversize, target, margin_pct, regime = self._is_oversize_for_regime(
+            live_qty, curr_px, self.regime,
+        )
+        if not oversize:
+            return None
+
+        now = time.time()
+        severe = live_qty > target * 1.35
+        if (
+            not severe
+            and now - getattr(self, "_last_regime_cap_ts", 0) < REGIME_CAP_COOLDOWN_SEC
+        ):
+            logger.info(
+                f"📡 [雷达档位限额] 超标 {live_qty}>{target} ETH 但冷却中 "
+                f"(R{regime} {margin_pct:.0%})"
+            )
+            return None
+
+        _, balance, margin_usdt, margin_pct, regime = self._regime_cap_target_qty(curr_px, regime)
+        old_qty = live_qty
+        logger.warning(
+            f"📡 [雷达档位限额] R{regime} 上限 {target} ETH "
+            f"(本金 {balance:.0f}U×{margin_pct:.0%}×{self.leverage}x) | "
+            f"实盘 {live_qty} ETH 超标 → 强制裁减"
+        )
+
+        new_qty = self._trim_position_to_target(
+            target, self.current_side, reason_tag=f"雷达R{regime}档位限额",
+        )
+        pos = self._get_active_position()
+        entry = pos["entry_price"] if pos else self.watched_entry
+        self.watched_qty = new_qty
+        self.initial_qty = new_qty
+        if pos:
+            self.watched_entry = entry
+        self._save_state()
+
+        sl = self._radar_sl_to_pass()
+        result = self._enforce_defense_alignment(
+            new_qty, entry, dynamic_sl=sl,
+            reason=f"雷达档位限额 R{regime} 裁减后 TP 对齐", rounds=3,
+        )
+        if sl and not self._has_stop_sl_near(sl):
+            self._ensure_radar_sl(sl, new_qty)
+
+        self._last_regime_cap_ts = now
+        verify_note = (
+            f"R{regime} 上限 {target} ETH (保证金 {margin_usdt:.0f}U) | "
+            f"裁减 {old_qty} → {new_qty} ETH | "
+            f"TP {result['matched']}/{result['expected']} | "
+            f"{self._format_audit_summary(result['audit'])} | "
+            f"雷达SL={'已保留/已补' if sl else '待命'}"
+        )
+        self._call_dingtalk(
+            dingtalk.report_radar_regime_cap_trim,
+            side=self.current_side,
+            old_qty=old_qty,
+            new_qty=new_qty,
+            target_qty=target,
+            regime=regime,
+            margin_pct=margin_pct,
+            tp_audit=result["audit"],
+            verify_note=verify_note,
+        )
+        return {"new_qty": new_qty, "target": target, "result": result}
 
     def _is_dust_qty(self, qty):
         """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
@@ -762,10 +864,15 @@ class PositionSupervisorBinance:
             logger.info(f"🧹 撤销 {cancelled} 张孤儿止盈单")
         return cancelled
 
-    def _cancel_stop_orders(self):
+    def _cancel_stop_orders(self, scope="all"):
+        """scope: all | radar | shield"""
         cancelled = 0
         for o in binance_client.get_open_orders(self.symbol):
             if o.get("type") not in ("STOP_MARKET", "STOP"):
+                continue
+            if scope == "radar" and not self._is_radar_stop_order(o):
+                continue
+            if scope == "shield" and not self._is_shield_stop_order(o):
                 continue
             oid = o.get("orderId")
             if oid:
@@ -773,6 +880,229 @@ class PositionSupervisorBinance:
                 cancelled += 1
                 time.sleep(0.2)
         return cancelled
+
+    @staticmethod
+    def _order_stop_price(o):
+        for key in ("stopPrice", "triggerPrice", "activatePrice"):
+            val = o.get(key)
+            if val is None or str(val).strip() in ("", "0"):
+                continue
+            try:
+                return round(float(val), 2)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _shield_tier_prices(self, entry=None):
+        entry = float(entry or self.watched_entry or 0)
+        if entry <= 0:
+            return []
+        out = []
+        for pct in SHIELD_TIER_PCTS:
+            if self.current_side == "LONG":
+                out.append(round(entry * (1 - pct), 2))
+            elif self.current_side == "SHORT":
+                out.append(round(entry * (1 + pct), 2))
+        return out
+
+    def _is_shield_stop_order(self, o, tier_prices=None):
+        if str(o.get("closePosition", "")).lower() == "true":
+            return False
+        px = self._order_stop_price(o)
+        if px is None:
+            return False
+        tier_prices = tier_prices or self._shield_tier_prices()
+        return any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices)
+
+    def _is_radar_stop_order(self, o):
+        if str(o.get("closePosition", "")).lower() == "true":
+            return True
+        if not self._is_radar_active():
+            return False
+        px = self._order_stop_price(o)
+        if px is None:
+            return False
+        return abs(px - round(float(self.current_sl), 2)) <= SHIELD_STOP_TOLERANCE
+
+    def _adverse_move_pct(self, curr_px):
+        entry = self.watched_entry
+        if not entry or curr_px <= 0:
+            return 0.0
+        if self.current_side == "LONG":
+            return max(0.0, (entry - curr_px) / entry)
+        if self.current_side == "SHORT":
+            return max(0.0, (curr_px - entry) / entry)
+        return 0.0
+
+    def _should_activate_shield(self, curr_px):
+        if not self.watched_entry or curr_px <= 0 or not self.current_side:
+            return False
+        if self._is_radar_active() or self._should_radar_trail(curr_px):
+            return False
+        return self._adverse_move_pct(curr_px) >= SHIELD_ACTIVATION_PCT
+
+    def _remaining_shield_tier_indices(self):
+        consumed = set(getattr(self, "shield_tiers_consumed", []) or [])
+        return [i for i, pct in enumerate(SHIELD_TIER_PCTS) if pct not in consumed]
+
+    def _shield_quantities_for_remaining(self, live_qty):
+        remaining = self._remaining_shield_tier_indices()
+        live_qty = self._resolve_live_qty(live_qty)
+        if not remaining or live_qty <= 0:
+            return {}
+        if len(remaining) == 1:
+            return {remaining[0]: live_qty}
+        weights = [SHIELD_TIER_RATIOS[i] for i in remaining]
+        wsum = sum(weights) or 1.0
+        out = {}
+        budget = live_qty
+        for j, idx in enumerate(remaining[:-1]):
+            q = round(live_qty * weights[j] / wsum, 3)
+            out[idx] = q
+            budget -= q
+        out[remaining[-1]] = round(budget, 3)
+        return out
+
+    def _has_shield_stop_at_price(self, tp, tier_prices=None):
+        tier_prices = tier_prices or self._shield_tier_prices()
+        for o in binance_client.get_open_orders(self.symbol):
+            if not self._is_shield_stop_order(o, tier_prices):
+                continue
+            px = self._order_stop_price(o)
+            if px is not None and abs(px - tp) <= SHIELD_STOP_TOLERANCE:
+                return True
+        return False
+
+    def _split_shield_quantities(self, qty):
+        q1 = round(qty * SHIELD_TIER_RATIOS[0], 3)
+        q2 = round(qty * SHIELD_TIER_RATIOS[1], 3)
+        q3 = round(qty - q1 - q2, 3)
+        return q1, q2, q3
+
+    def _shield_orders_ok(self, live_qty, entry=None):
+        tier_prices = self._shield_tier_prices(entry)
+        live_qty = self._resolve_live_qty(live_qty)
+        remaining = self._remaining_shield_tier_indices()
+        if not remaining:
+            return live_qty <= 0
+        if live_qty <= 0:
+            return False
+        qty_map = self._shield_quantities_for_remaining(live_qty)
+        qty_tol = 0.005
+        matched = 0
+        for idx in remaining:
+            q = qty_map.get(idx, 0)
+            tp = tier_prices[idx]
+            if q <= 0:
+                continue
+            found = False
+            for o in binance_client.get_open_orders(self.symbol):
+                if o.get("type") not in ("STOP_MARKET", "STOP"):
+                    continue
+                if not self._is_shield_stop_order(o, tier_prices):
+                    continue
+                px = self._order_stop_price(o)
+                if px is None or abs(px - tp) > SHIELD_STOP_TOLERANCE:
+                    continue
+                oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
+                if abs(oqty - q) <= qty_tol:
+                    found = True
+                    break
+            if found:
+                matched += 1
+        expected = sum(1 for idx in remaining if qty_map.get(idx, 0) > 0)
+        return matched >= expected
+
+    def _disarm_shield(self, reason=""):
+        n = self._cancel_stop_orders(scope="shield")
+        had = getattr(self, "shield_active", False) or bool(
+            getattr(self, "shield_tiers_consumed", [])
+        )
+        self.shield_active = False
+        self.shield_tiers_consumed = []
+        self._save_state()
+        if reason and (had or n):
+            logger.info(f"🛡️ [防护盾解除] {reason} | 撤销 {n} 张分批止损")
+
+    def _place_shield_stops(self, live_qty, entry=None, reason=""):
+        entry = float(entry or self.watched_entry or 0)
+        live_qty = self._resolve_live_qty(live_qty)
+        if live_qty <= 0 or entry <= 0 or not self.current_side:
+            return False
+        tier_prices = self._shield_tier_prices(entry)
+        remaining = self._remaining_shield_tier_indices()
+        if not remaining:
+            self.shield_active = False
+            self._save_state()
+            return True
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        qty_map = self._shield_quantities_for_remaining(live_qty)
+        placed = 0
+        for idx in remaining:
+            q = qty_map.get(idx, 0)
+            tp = tier_prices[idx]
+            if q <= 0:
+                continue
+            already = False
+            for o in binance_client.get_open_orders(self.symbol):
+                if not self._is_shield_stop_order(o, tier_prices):
+                    continue
+                px = self._order_stop_price(o)
+                if px is not None and abs(px - tp) <= SHIELD_STOP_TOLERANCE:
+                    oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
+                    if abs(oqty - q) <= 0.005:
+                        already = True
+                        break
+            if already:
+                continue
+            res = binance_client.place_stop_limit_order(close_side, q, tp)
+            if res:
+                placed += 1
+            time.sleep(0.35)
+        ok = self._shield_orders_ok(live_qty, entry)
+        if ok:
+            was_new = not getattr(self, "shield_active", False)
+            self.shield_active = True
+            self._save_state()
+            adverse = self._adverse_move_pct(
+                binance_client.get_current_price(self.symbol) or entry,
+            )
+            active_tiers = "/".join(f"-{SHIELD_TIER_PCTS[i]:.0%}" for i in remaining)
+            tier_txt = " / ".join(f"{tier_prices[i]:.2f}" for i in remaining)
+            logger.warning(
+                f"🛡️ [逆势防护盾] {'激活' if was_new else '维护'} | "
+                f"浮亏 {adverse:.1%} | 档位 {active_tiers} @ {tier_txt} | "
+                f"新挂 {placed} 笔"
+            )
+            if was_new and not getattr(self, "shield_tiers_consumed", []):
+                self._call_dingtalk(
+                    dingtalk.report_adverse_shield_armed,
+                    side=self.current_side,
+                    entry=entry,
+                    live_qty=live_qty,
+                    adverse_pct=adverse,
+                    tier_prices=tier_prices,
+                    tier_pcts=SHIELD_TIER_PCTS,
+                    verify_note=reason or f"浮亏达 {adverse:.1%}，VPS 分批止损已武装",
+                )
+        return ok
+
+    def _process_adverse_shield(self, real_amt, curr_px):
+        if real_amt <= 0 or curr_px <= 0 or not self.watched_entry:
+            return False
+        if self._is_radar_active() or self._should_radar_trail(curr_px):
+            if getattr(self, "shield_active", False):
+                self._disarm_shield("行情转有利，切换雷达保本")
+            return False
+        if not self._should_activate_shield(curr_px):
+            return False
+        if getattr(self, "shield_active", False) and self._shield_orders_ok(real_amt):
+            return True
+        adverse = self._adverse_move_pct(curr_px)
+        return self._place_shield_stops(
+            real_amt,
+            reason=f"浮亏 {adverse:.1%} ≥ {SHIELD_ACTIVATION_PCT:.0%} 激活防护盾",
+        )
 
     def _is_radar_active(self):
         if not self.watched_entry or not self.current_sl:
@@ -1111,6 +1441,12 @@ class PositionSupervisorBinance:
         if getattr(self, "_defense_align_in_progress", False):
             return None
 
+        cap = self._radar_enforce_regime_cap(real_amt, curr_px)
+        if cap:
+            real_amt = cap["new_qty"]
+            if self._tp_audit_ok(cap["result"]["audit"]):
+                return cap
+
         audit = self._audit_tp_levels(real_amt)
         sl = self._radar_sl_to_pass()
 
@@ -1204,8 +1540,8 @@ class PositionSupervisorBinance:
         return audit["matched_full"], audit["pending_prices"], audit["expected"]
 
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
-        """雷达推升：TP 异常才核武；止损单独换，不动已齐 TP"""
-        self._cancel_stop_orders()
+        """雷达推升：TP 异常才核武；止损单独换，不动已齐 TP / 防护盾"""
+        self._cancel_stop_orders(scope="radar")
         time.sleep(0.35)
         audit = self._audit_tp_levels(live_qty)
         if self._defense_needs_immediate_fix(audit):
@@ -1344,6 +1680,176 @@ class PositionSupervisorBinance:
                 fills.append({"level": level, "price": tp_px, "qty": round(fill_qty, 3)})
                 budget -= fill_qty
         return fills
+
+    def _detect_shield_fills(self, old_qty, new_qty, curr_px):
+        if not getattr(self, "shield_active", False):
+            return []
+        if new_qty >= old_qty - 0.0005:
+            return []
+        tier_prices = self._shield_tier_prices()
+        q1, q2, q3 = self._split_shield_quantities(old_qty)
+        consumed = set(getattr(self, "shield_tiers_consumed", []) or [])
+        budget = old_qty - new_qty
+        fills = []
+        for tier_no, (pct, tp, slice_qty) in enumerate(
+            zip(SHIELD_TIER_PCTS, tier_prices, (q1, q2, q3)), start=1,
+        ):
+            if pct in consumed or slice_qty <= 0.0005 or budget <= 0.0005:
+                continue
+            if not self._has_shield_stop_at_price(tp, tier_prices):
+                if budget >= slice_qty - 0.001:
+                    fill_qty = min(budget, slice_qty)
+                    fills.append({
+                        "tier": tier_no, "pct": pct, "price": tp,
+                        "qty": round(fill_qty, 3),
+                    })
+                    budget -= fill_qty
+        return fills
+
+    def _classify_position_change(self, old_qty, new_qty, curr_px):
+        if new_qty > old_qty + 0.0005:
+            return {"kind": "add", "tp_fills": [], "shield_fills": []}
+        if new_qty >= old_qty - 0.0005:
+            return {"kind": "unchanged", "tp_fills": [], "shield_fills": []}
+        tp_fills = self._detect_tp_fills(old_qty, new_qty)
+        shield_fills = self._detect_shield_fills(old_qty, new_qty, curr_px)
+        adverse = self._adverse_move_pct(curr_px) if curr_px > 0 else 0.0
+        favorable = (
+            self._is_radar_active()
+            or (curr_px > 0 and self._radar_activation_progress(curr_px) >= 0.25)
+        )
+        if tp_fills and shield_fills:
+            if favorable and adverse < SHIELD_ACTIVATION_PCT:
+                shield_fills = []
+            elif adverse >= SHIELD_ACTIVATION_PCT * 0.85:
+                tp_fills = []
+        if tp_fills:
+            return {"kind": "tp_fill", "tp_fills": tp_fills, "shield_fills": []}
+        if shield_fills:
+            return {"kind": "shield_fill", "tp_fills": [], "shield_fills": shield_fills}
+        return {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
+
+    def _advance_radar_on_tp_fill(self, tp_fills, curr_px, live_qty):
+        if not tp_fills:
+            return None
+        for f in tp_fills:
+            px = f["price"]
+            if self.current_side == "LONG":
+                self.best_price = max(self.best_price, px, curr_px or 0)
+            else:
+                bp = curr_px if curr_px and curr_px > 0 else px
+                self.best_price = min(self.best_price, px, bp)
+        max_level = max(f["level"] for f in tp_fills)
+        tp3 = self.tv_tps[2] if len(self.tv_tps) > 2 else 0.0
+        new_sl = self._compute_radar_sl()
+        if new_sl is not None:
+            fee_buffer = self.watched_entry * 0.0015
+            if self.current_side == "LONG":
+                floor = self.watched_entry + fee_buffer
+                self.current_sl = max(self.current_sl or floor, new_sl, floor)
+            else:
+                ceiling = self.watched_entry - fee_buffer
+                self.current_sl = min(self.current_sl or ceiling, new_sl, ceiling)
+        note = f"TP{max_level}成交"
+        if max_level >= 2 and tp3 > 0:
+            note += f" → 雷达止损向 TP3({tp3:.2f}) 动态收紧"
+        logger.info(
+            f"📈 [雷达推进] {note} | SL={self.current_sl:.2f} | best={self.best_price:.2f}"
+        )
+        self._save_state()
+        return self.current_sl if self._is_radar_active() else None
+
+    def _handle_smart_qty_change(self, old_qty, new_qty, curr_px):
+        """按减仓原因分流：TP成交→雷达推进；防护盾成交→保留剩余档位；其他→通用对齐"""
+        change = self._classify_position_change(old_qty, new_qty, curr_px)
+        kind = change["kind"]
+        result = None
+        sl_to_pass = None
+
+        if kind == "add":
+            logger.info(f"🔄 [智慧大脑] 加仓 {old_qty} ➔ {new_qty}")
+            sl_to_pass = self._radar_sl_to_pass()
+            result = self._smart_realign_defenses(
+                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
+                reason="加仓后防线对齐",
+            )
+        elif kind == "tp_fill":
+            levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"])
+            logger.info(
+                f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} → 雷达推进"
+            )
+            self._disarm_shield(f"{levels} 成交，切换雷达追踪")
+            sl_to_pass = self._advance_radar_on_tp_fill(
+                change["tp_fills"], curr_px, new_qty,
+            )
+            if sl_to_pass and not self._is_radar_active():
+                sl_to_pass = self._radar_sl_to_pass()
+            result = self._smart_realign_defenses(
+                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
+                reason=f"{levels} 成交智能对齐",
+            )
+            if sl_to_pass and not self._has_stop_sl_near(sl_to_pass):
+                self._ensure_radar_sl(sl_to_pass, new_qty)
+        elif kind == "shield_fill":
+            tier_txt = "/".join(f"-{f['pct']:.0%}" for f in change["shield_fills"])
+            logger.warning(
+                f"🛡️ [智慧大脑] 防护盾 {tier_txt} 成交 {old_qty} ➔ {new_qty} "
+                f"→ 维护剩余档位"
+            )
+            if not hasattr(self, "shield_tiers_consumed") or self.shield_tiers_consumed is None:
+                self.shield_tiers_consumed = []
+            for f in change["shield_fills"]:
+                if f["pct"] not in self.shield_tiers_consumed:
+                    self.shield_tiers_consumed.append(f["pct"])
+            self.shield_active = True
+            result = self._smart_realign_defenses(
+                new_qty, self.watched_entry, dynamic_sl=None,
+                reason=f"防护盾{tier_txt}成交后 TP 重算",
+            )
+            self._place_shield_stops(
+                new_qty, reason=f"防护盾 {tier_txt} 成交，维护剩余止损",
+            )
+            for f in change["shield_fills"]:
+                remain_pcts = [SHIELD_TIER_PCTS[i] for i in self._remaining_shield_tier_indices()]
+                self._call_dingtalk(
+                    dingtalk.report_shield_tier_fill,
+                    side=self.current_side,
+                    tier_pct=f["pct"],
+                    tier_price=f["price"],
+                    filled_qty=f["qty"],
+                    remain_qty=new_qty,
+                    entry_px=self.watched_entry,
+                    remaining_tiers=remain_pcts,
+                    verify_note=(
+                        f"防护盾 -{f['pct']:.0%} @ {f['price']:.2f} 成交 | "
+                        f"仍挂: {'/'.join(f'-{p:.0%}' for p in remain_pcts) or '无'}"
+                    ),
+                )
+        else:
+            pct = abs(new_qty - old_qty) / old_qty if old_qty > 0 else 1.0
+            action_msg = (
+                "手动加仓" if new_qty > old_qty
+                else "部分止盈吃单 / 手动减仓"
+            )
+            logger.info(
+                f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {new_qty} ({pct:.1%})，通用重对齐"
+            )
+            self._bump_best_on_tp_fill(old_qty, new_qty, curr_px)
+            self._sync_radar_sl_from_best(curr_px)
+            sl_to_pass = self._radar_sl_to_pass()
+            result = self._smart_realign_defenses(
+                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
+                reason=f"人工异动: {action_msg}",
+            )
+            if self._should_radar_trail(curr_px):
+                self._disarm_shield("行情转有利，切换雷达保本")
+            elif self._should_activate_shield(curr_px) or getattr(self, "shield_active", False):
+                self._place_shield_stops(
+                    new_qty, reason=f"仓位变化 {old_qty}→{new_qty} ETH，防护盾重算",
+                )
+
+        self._save_state()
+        return change, result
 
     def _report_qty_change_dingtalk(self, old_qty, new_qty, realign_result):
         verified_pos = self._wait_verify(
@@ -1868,6 +2374,8 @@ class PositionSupervisorBinance:
         tp_pxs = self.tv_tps
         self.current_sl = entry_price
         self.best_price = entry_price
+        self.shield_active = False
+        self.shield_tiers_consumed = []
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
@@ -2076,11 +2584,14 @@ class PositionSupervisorBinance:
         return max(0.0, min(1.0, (self.watched_entry - curr_px) / span))
 
     def _sentinel_poll_sec(self, curr_px=0.0):
-        """雷达已激活=2s；接近激活=3s；常态=6s"""
+        """雷达已激活=2s；接近激活/逆势逼近=3s；常态=6s"""
         if self._is_radar_active():
             return SENTINEL_POLL_RADAR
-        if curr_px > 0 and self._radar_activation_progress(curr_px) >= 0.5:
-            return SENTINEL_POLL_ARMING
+        if curr_px > 0:
+            if self._radar_activation_progress(curr_px) >= 0.5:
+                return SENTINEL_POLL_ARMING
+            if self._adverse_move_pct(curr_px) >= SHIELD_ACTIVATION_PCT * 0.75:
+                return SENTINEL_POLL_ARMING
         return SENTINEL_POLL_NORMAL
 
     def _process_radar_trailing(self, real_amt, curr_px):
@@ -2164,23 +2675,11 @@ class PositionSupervisorBinance:
                             old_qty = self.watched_qty
                             self.watched_qty = real_amt
                             self.watched_entry = pos["entry_price"]
-                            pct = abs(real_amt - old_qty) / old_qty if old_qty > 0 else 1.0
-                            action_msg = (
-                                "手动加仓" if real_amt > old_qty
-                                else "部分止盈吃单 / 手动减仓"
+                            change, result = self._handle_smart_qty_change(
+                                old_qty, real_amt, curr_px,
                             )
-                            logger.info(
-                                f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {real_amt} ({pct:.1%})，智能重对齐"
-                            )
-                            self._bump_best_on_tp_fill(old_qty, real_amt, curr_px)
-                            self._sync_radar_sl_from_best(curr_px)
-                            sl_to_pass = self._radar_sl_to_pass()
-                            result = self._smart_realign_defenses(
-                                real_amt, self.watched_entry, dynamic_sl=sl_to_pass,
-                                reason=f"人工异动: {action_msg}",
-                            )
-                            self._save_state()
-                            self._report_qty_change_dingtalk(old_qty, real_amt, result)
+                            if result:
+                                self._report_qty_change_dingtalk(old_qty, real_amt, result)
 
                         self._scan_ticks += 1
                         if not qty_changed:
@@ -2191,7 +2690,11 @@ class PositionSupervisorBinance:
 
                         progress = self._radar_activation_progress(curr_px)
                         if self._should_radar_trail(curr_px):
+                            if getattr(self, "shield_active", False):
+                                self._disarm_shield("行情转有利，切换雷达保本")
                             self._process_radar_trailing(real_amt, curr_px)
+                        elif not self._is_radar_active():
+                            self._process_adverse_shield(real_amt, curr_px)
                         elif progress >= 0.5 and self._scan_ticks % 5 == 0:
                             logger.info(
                                 f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
@@ -2286,6 +2789,8 @@ class PositionSupervisorBinance:
                 self.monitoring = False
                 self.watched_qty = 0.0
                 self.current_side = None
+                self.shield_active = False
+                self.shield_tiers_consumed = []
             else:
                 residual = self._get_active_position()
                 if residual:
@@ -2340,6 +2845,8 @@ class PositionSupervisorBinance:
                     self.last_tv_signal = s.get("last_tv_signal")
                     self.open_regime = int(s.get("open_regime", s.get("regime", 3)) or 3)
                     self.open_atr = float(s.get("open_atr", s.get("current_atr", 30.0)) or 30.0)
+                    self.shield_active = bool(s.get("shield_active", False))
+                    self.shield_tiers_consumed = list(s.get("shield_tiers_consumed", []) or [])
 
             if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
                 return
@@ -2387,6 +2894,14 @@ class PositionSupervisorBinance:
                         f"{self.watched_entry:.2f} | 雷达={'已激活' if radar_active else '待命'} | "
                         f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
                     )
+
+                    cap = self._radar_enforce_regime_cap(real_amt, curr_px, force=True)
+                    if cap:
+                        real_amt = cap["new_qty"]
+                        pos = self._get_active_position() or pos
+                        if pos:
+                            self.watched_qty = real_amt
+                            self.initial_qty = real_amt
 
                     result = self._enforce_defense_alignment(
                         real_amt, self.watched_entry, dynamic_sl=None,
