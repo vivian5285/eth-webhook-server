@@ -167,20 +167,46 @@ class BinanceClient:
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
 
-    def get_sizing_balance(self, asset="USDT"):
-        """本金口径（walletBalance），用于 regime 仓位预算，不含浮盈放大"""
+    def get_futures_account_summary(self, asset="USDT"):
+        """合约账户概览：用于本金锚点，禁止用 depleted available 算档位额度"""
         try:
             account = self.client.futures_account()
+            out = {
+                "wallet_balance": 0.0,
+                "cross_wallet_balance": 0.0,
+                "margin_balance": 0.0,
+                "available_balance": 0.0,
+                "total_margin_balance": float(account.get("totalMarginBalance", 0) or 0),
+                "total_wallet_balance": float(account.get("totalWalletBalance", 0) or 0),
+            }
             for a in account.get("assets", []):
-                if a.get("asset") == asset:
-                    wallet = float(a.get("walletBalance", 0.0) or 0.0)
-                    if wallet > 0:
-                        return wallet
-                    return float(a.get("availableBalance", 0.0) or 0.0)
-            return 0.0
+                if a.get("asset") != asset:
+                    continue
+                out["wallet_balance"] = float(a.get("walletBalance", 0) or 0)
+                out["cross_wallet_balance"] = float(a.get("crossWalletBalance", 0) or 0)
+                out["margin_balance"] = float(a.get("marginBalance", 0) or 0)
+                out["available_balance"] = float(a.get("availableBalance", 0) or 0)
+                break
+            return out
         except Exception as e:
-            logger.error(f"[查询本金余额失败] {e}")
-            return 0.0
+            logger.error(f"[账户概览失败] {e}")
+            return {}
+
+    def get_cap_equity_balance(self, asset="USDT"):
+        """档位额度用总权益口径，绝不用 depleted available"""
+        summary = self.get_futures_account_summary(asset)
+        for key in (
+            "total_margin_balance", "total_wallet_balance",
+            "wallet_balance", "cross_wallet_balance", "margin_balance",
+        ):
+            val = float(summary.get(key, 0) or 0)
+            if val > 0:
+                return val
+        return float(summary.get("available_balance", 0) or 0)
+
+    def get_sizing_balance(self, asset="USDT"):
+        """本金口径（总权益），用于 regime 仓位预算"""
+        return self.get_cap_equity_balance(asset)
 
     def get_available_balance(self, asset="USDT"):
         try:

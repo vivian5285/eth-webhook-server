@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.1-smart-defense"
+BINANCE_VPS_VERSION = "v13.6.2-cap-safe"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -34,6 +34,9 @@ SIGNAL_DEDUP_SEC = 45
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 REGIME_CAP_COOLDOWN_SEC = 90
+REGIME_CAP_TOLERANCE_ETH = 0.001
+CAP_MIN_RETAIN_RATIO = 0.25
+CAP_TRIM_MAX_ROUNDS = 4
 SHIELD_ACTIVATION_PCT = 0.02
 SHIELD_TIER_PCTS = (0.02, 0.03, 0.05)
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
@@ -93,6 +96,7 @@ class PositionSupervisorBinance:
         self._last_regime_cap_ts = 0.0
         self.shield_active = False
         self.shield_tiers_consumed = []
+        self.sizing_principal = 0.0
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -370,6 +374,7 @@ class PositionSupervisorBinance:
                     "open_atr": self.open_atr,
                     "shield_active": getattr(self, "shield_active", False),
                     "shield_tiers_consumed": list(getattr(self, "shield_tiers_consumed", []) or []),
+                    "sizing_principal": float(getattr(self, "sizing_principal", 0) or 0),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -408,18 +413,54 @@ class PositionSupervisorBinance:
             return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
         return False
 
+    def _resolve_cap_sizing_base(self, equity_balance):
+        """档位额度本金锚点：禁止用 depleted available 把 max_qty 算成灰尘"""
+        equity = max(0.0, float(equity_balance or 0))
+        principal = float(getattr(self, "sizing_principal", 0) or 0)
+        if principal > 0:
+            if equity > 0 and equity < principal:
+                return equity
+            return principal
+        return equity
+
     def _regime_cap_target_qty(self, curr_px, regime=None):
-        """按 TV 档位 regime 保证金比例 × 杠杆 × 本金，计算仓位上限 ETH"""
+        """按 TV 档位 regime 保证金比例 × 杠杆 × 本金锚点，计算仓位上限 ETH"""
         regime = int(regime if regime is not None else self.regime)
         if regime not in self.regime_settings:
             regime = 3
-        balance = binance_client.get_sizing_balance()
+        equity = binance_client.get_cap_equity_balance()
+        balance = self._resolve_cap_sizing_base(equity)
         margin_pct = self.regime_settings[regime]["margin"]
         margin_usdt = balance * margin_pct
         if curr_px <= 0:
             return 0.0, balance, margin_usdt, margin_pct, regime
         qty = round((margin_usdt * self.leverage) / curr_px, 3)
         return qty, balance, margin_usdt, margin_pct, regime
+
+    def _validate_cap_trim_plan(self, live_qty, target_qty, trim_qty):
+        """裁减前安全校验：防止 target 被错误算成灰尘导致几乎全平"""
+        live = float(live_qty or 0)
+        target = float(target_qty or 0)
+        trim = float(trim_qty or 0)
+        if live <= 0 or target <= 0:
+            return "invalid_qty"
+        if trim <= 0:
+            return None
+        retain = target / live
+        if retain < CAP_MIN_RETAIN_RATIO and live > target * 2:
+            return (
+                f"unsafe_retain_ratio={retain:.3f}: target {target:.4f} vs live {live:.4f} "
+                f"(sizing base likely skewed by depleted available)"
+            )
+        if trim > live * 0.85 and target < live * 0.15:
+            return (
+                f"unsafe_trim_ratio: would cut {trim:.4f} of {live:.4f}, "
+                f"retaining only {target:.4f}"
+            )
+        expected = round(live - target, 3)
+        if abs(trim - expected) > max(live * 0.05, 0.01):
+            return f"trim_mismatch: trim={trim:.4f} expected={expected:.4f}"
+        return None
 
     def _calc_target_open_qty(self, curr_px):
         qty, balance, margin_usdt, margin_pct, _ = self._regime_cap_target_qty(curr_px, self.regime)
@@ -429,34 +470,64 @@ class PositionSupervisorBinance:
         target, _, _, margin_pct, reg = self._regime_cap_target_qty(curr_px, regime)
         if target <= 0 or live_qty <= 0:
             return False, target, margin_pct, reg
-        return live_qty > target * OPEN_OVERSIZE_RATIO, target, margin_pct, reg
+        return live_qty > target + REGIME_CAP_TOLERANCE_ETH, target, margin_pct, reg
 
     def _trim_position_to_target(self, target_qty, action, reason_tag="叠仓Remediation"):
-        """叠仓Remediation：实盘超标时 reduceOnly 裁减至目标仓位"""
+        """叠仓Remediation：仅裁减 excess=实盘-目标，带安全校验与多轮核实"""
+        target_qty = float(target_qty or 0)
         pos = self._get_active_position()
-        if not pos or pos["size"] <= target_qty * OPEN_OVERSIZE_RATIO:
+        if not pos or target_qty <= 0:
             return pos["size"] if pos else 0.0
-        excess = round(pos["size"] - target_qty, 3)
-        if excess <= 0:
-            return pos["size"]
+        live = float(pos["size"])
+        if live <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+            return live
+        trim_qty = round(live - target_qty, 3)
+        plan_err = self._validate_cap_trim_plan(live, target_qty, trim_qty)
+        if plan_err:
+            logger.error(f"✂️ {reason_tag} 中止: {plan_err} | live={live} target={target_qty}")
+            dingtalk.report_system_alert(
+                "档位裁减中止(安全校验)",
+                f"{reason_tag} | 实盘 {live} ETH | 目标 {target_qty} ETH | {plan_err}",
+            )
+            return live
         close_side = "SELL" if action == "LONG" else "BUY"
         logger.warning(
-            f"✂️ {reason_tag}: 裁减 {excess} ETH "
-            f"(实盘 {pos['size']} → 目标 {target_qty})"
+            f"✂️ {reason_tag}: 裁减 {trim_qty} ETH "
+            f"(实盘 {live} → 目标 {target_qty})"
         )
         binance_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         self._cancel_all_tp_limit_orders(max_rounds=3)
         time.sleep(0.3)
-        binance_client.place_market_order(close_side, excess, reduce_only=True)
-        time.sleep(1.5)
-        verified = self._wait_verify(
-            lambda: self._get_active_position(),
-            retries=6,
-            delay=0.5,
-        )
-        new_sz = verified["size"] if verified else target_qty
-        if new_sz > target_qty * OPEN_OVERSIZE_RATIO:
+        new_sz = live
+        for round_i in range(CAP_TRIM_MAX_ROUNDS):
+            pos = self._get_active_position()
+            if not pos or pos["size"] <= 0:
+                break
+            cur = float(pos["size"])
+            if cur <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+                new_sz = cur
+                break
+            slice_trim = round(cur - target_qty, 3)
+            if slice_trim <= 0:
+                new_sz = cur
+                break
+            binance_client.place_market_order(close_side, slice_trim, reduce_only=True)
+            time.sleep(1.0)
+            verified = self._wait_verify(
+                lambda: self._get_active_position(),
+                retries=6,
+                delay=0.5,
+            )
+            new_sz = float(verified["size"]) if verified else cur
+            if new_sz <= target_qty + REGIME_CAP_TOLERANCE_ETH:
+                break
+        if new_sz < target_qty * 0.5 and live > target_qty * 1.5:
+            dingtalk.report_system_alert(
+                "档位裁减过度",
+                f"目标 {target_qty} ETH，裁减后仅 {new_sz} ETH（原 {live}），请人工核查",
+            )
+        elif new_sz > target_qty * OPEN_OVERSIZE_RATIO:
             dingtalk.report_system_alert(
                 "叠仓裁减未达标",
                 f"目标 {target_qty} ETH，裁减后仍 {new_sz} ETH，请人工核查",
@@ -2304,6 +2375,9 @@ class PositionSupervisorBinance:
             return
         self._open_in_progress = True
         try:
+            equity = binance_client.get_cap_equity_balance()
+            if equity > 0:
+                self.sizing_principal = equity
             qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
             if qty <= 0:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
@@ -2847,6 +2921,11 @@ class PositionSupervisorBinance:
                     self.open_atr = float(s.get("open_atr", s.get("current_atr", 30.0)) or 30.0)
                     self.shield_active = bool(s.get("shield_active", False))
                     self.shield_tiers_consumed = list(s.get("shield_tiers_consumed", []) or [])
+                    self.sizing_principal = float(s.get("sizing_principal", 0) or 0)
+                    if self.sizing_principal <= 0:
+                        eq = binance_client.get_cap_equity_balance()
+                        if eq > 0:
+                            self.sizing_principal = eq
 
             if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
                 return
