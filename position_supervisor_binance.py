@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.3-principal-snapshot"
+BINANCE_VPS_VERSION = "v13.6.4-qty-drift-tolerance"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -37,6 +37,7 @@ REGIME_CAP_COOLDOWN_SEC = 90
 REGIME_CAP_TOLERANCE_ETH = 0.001
 CAP_MIN_RETAIN_RATIO = 0.25
 CAP_TRIM_MAX_ROUNDS = 4
+QTY_DRIFT_TOLERANCE_PCT = 0.015  # 开仓后 ETH 价波动致仓位微漂 ≤1.5% 视为正常，不对齐
 SHIELD_ACTIVATION_PCT = 0.02
 SHIELD_TIER_PCTS = (0.02, 0.03, 0.05)
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
@@ -329,7 +330,7 @@ class PositionSupervisorBinance:
                     f"入场偏差: 开仓日志 {open_entry:.2f} vs 实盘 {pos['entry_price']:.2f}"
                 )
 
-        if saved_watched > 0 and abs(saved_watched - real_amt) > 0.001:
+        if saved_watched > 0 and self._is_material_qty_change(saved_watched, real_amt):
             action_msg = (
                 "手动加仓" if real_amt > saved_watched
                 else "部分止盈吃单 / 手动减仓"
@@ -379,8 +380,27 @@ class PositionSupervisorBinance:
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
 
-    @staticmethod
-    def _sanitize_tp_prices(tp_list):
+    def _qty_change_ratio(self, old_qty, new_qty):
+        old = float(old_qty or 0)
+        new = float(new_qty or 0)
+        if old <= 0 and new <= 0:
+            return 0.0
+        return abs(new - old) / max(old, new, 1e-9)
+
+    def _is_material_qty_change(self, old_qty, new_qty):
+        """
+        仅当变化超过允许波动比例时才视为真实异动。
+        ETH 价格波动导致保证金/持仓读数微漂（如 1.365→1.363）应忽略。
+        """
+        old = float(old_qty or 0)
+        new = float(new_qty or 0)
+        delta = abs(new - old)
+        if delta <= REGIME_CAP_TOLERANCE_ETH:
+            return False
+        ratio = self._qty_change_ratio(old, new)
+        return ratio >= QTY_DRIFT_TOLERANCE_PCT
+
+    def _sanitize_tp_prices(self, tp_list):
         out = []
         for t in tp_list:
             try:
@@ -2788,16 +2808,27 @@ class PositionSupervisorBinance:
                             else:
                                 self.best_price = min(self.best_price, curr_px)
 
-                        qty_changed = abs(real_amt - self.watched_qty) > 0.001
-                        if qty_changed:
-                            old_qty = self.watched_qty
-                            self.watched_qty = real_amt
-                            self.watched_entry = pos["entry_price"]
-                            change, result = self._handle_smart_qty_change(
-                                old_qty, real_amt, curr_px,
-                            )
-                            if result:
-                                self._report_qty_change_dingtalk(old_qty, real_amt, result)
+                        qty_changed = False
+                        if abs(real_amt - self.watched_qty) > REGIME_CAP_TOLERANCE_ETH:
+                            if self._is_material_qty_change(self.watched_qty, real_amt):
+                                qty_changed = True
+                                old_qty = self.watched_qty
+                                self.watched_qty = real_amt
+                                self.watched_entry = pos["entry_price"]
+                                change, result = self._handle_smart_qty_change(
+                                    old_qty, real_amt, curr_px,
+                                )
+                                if result:
+                                    self._report_qty_change_dingtalk(old_qty, real_amt, result)
+                            else:
+                                drift = self._qty_change_ratio(self.watched_qty, real_amt)
+                                logger.info(
+                                    f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} ETH "
+                                    f"({drift:.2%} < {QTY_DRIFT_TOLERANCE_PCT:.1%} 容忍)，仅同步账本"
+                                )
+                                self.watched_qty = real_amt
+                                self.watched_entry = pos["entry_price"]
+                                self._save_state()
 
                         self._scan_ticks += 1
                         if not qty_changed:
