@@ -23,12 +23,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.5.6-recover-race"
+BINANCE_VPS_VERSION = "v13.5.7-open-guard"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
+OPEN_OVERSIZE_RATIO = 1.06
+SIGNAL_DEDUP_SEC = 45
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
@@ -73,6 +75,10 @@ class PositionSupervisorBinance:
         self._last_entry_signal = None
         self._recover_in_progress = False
         self._recover_tp_unconfirmed = False
+        self._open_in_progress = False
+        self._open_tp_unconfirmed = False
+        self._last_signal_fp = None
+        self._last_signal_fp_ts = 0.0
 
         self.state_file = 'binance_vps_state.json'
         logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
@@ -140,9 +146,32 @@ class PositionSupervisorBinance:
             finally:
                 self._signal_queue.task_done()
 
+    def _signal_fingerprint(self, payload):
+        return (
+            str(payload.get("action", "")).strip().upper(),
+            self._safe_int(payload.get("regime"), 3),
+            round(self._safe_float(payload.get("price"), 0), 2),
+            round(self._safe_float(payload.get("atr"), 0), 2),
+        )
+
     def enqueue_signal(self, payload):
+        fp = self._signal_fingerprint(payload)
+        action = fp[0] or "?"
+        now = time.time()
+        if (
+            fp == self._last_signal_fp
+            and now - self._last_signal_fp_ts < SIGNAL_DEDUP_SEC
+        ):
+            logger.warning(
+                f"📬 TV信号去重忽略: {action} | {SIGNAL_DEDUP_SEC}s 内重复推送"
+            )
+            return
+        if self._open_in_progress and action in ("LONG", "SHORT"):
+            logger.warning(f"📬 开仓进行中，忽略重复建仓信号 {action}")
+            return
+        self._last_signal_fp = fp
+        self._last_signal_fp_ts = now
         depth = self._signal_queue.qsize()
-        action = (payload.get("action") or "?").upper()
         self._signal_queue.put(payload)
         logger.info(f"📬 TV信号入队: {action} | 队列深度 {depth + 1}")
 
@@ -372,6 +401,38 @@ class PositionSupervisorBinance:
             return 0.0, balance, margin_usdt, margin_pct
         qty = round((margin_usdt * self.leverage) / curr_px, 3)
         return qty, balance, margin_usdt, margin_pct
+
+    def _trim_position_to_target(self, target_qty, action):
+        """叠仓Remediation：实盘超标时 reduceOnly 裁减至目标仓位"""
+        pos = self._get_active_position()
+        if not pos or pos["size"] <= target_qty * OPEN_OVERSIZE_RATIO:
+            return pos["size"] if pos else 0.0
+        excess = round(pos["size"] - target_qty, 3)
+        if excess <= 0:
+            return pos["size"]
+        close_side = "SELL" if action == "LONG" else "BUY"
+        logger.warning(
+            f"✂️ 叠仓Remediation: 裁减 {excess} ETH "
+            f"(实盘 {pos['size']} → 目标 {target_qty})"
+        )
+        binance_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.5)
+        self._cancel_all_tp_limit_orders(max_rounds=3)
+        time.sleep(0.3)
+        binance_client.place_market_order(close_side, excess, reduce_only=True)
+        time.sleep(1.5)
+        verified = self._wait_verify(
+            lambda: self._get_active_position(),
+            retries=6,
+            delay=0.5,
+        )
+        new_sz = verified["size"] if verified else target_qty
+        if new_sz > target_qty * OPEN_OVERSIZE_RATIO:
+            dingtalk.report_system_alert(
+                "叠仓裁减未达标",
+                f"目标 {target_qty} ETH，裁减后仍 {new_sz} ETH，请人工核查",
+            )
+        return new_sz
 
     def _is_dust_qty(self, qty):
         """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
@@ -1004,6 +1065,8 @@ class PositionSupervisorBinance:
             return None
         if getattr(self, "_recover_in_progress", False):
             return None
+        if getattr(self, "_open_in_progress", False):
+            return None
         audit = self._audit_tp_levels(real_amt)
         sl = self._radar_sl_to_pass()
         if not self._defense_needs_immediate_fix(audit) and self._defenses_fully_ok(real_amt, sl):
@@ -1043,6 +1106,19 @@ class PositionSupervisorBinance:
                     tp_audit=new_audit,
                     verify_note=(
                         f"重启接管竞态后雷达已纠偏 | "
+                        f"{new_audit['matched_full']}/{new_audit['expected']} | "
+                        f"{self._format_audit_summary(new_audit)}"
+                    ),
+                )
+            elif getattr(self, "_open_tp_unconfirmed", False):
+                self._open_tp_unconfirmed = False
+                self._call_dingtalk(
+                    dingtalk.report_radar_guardian_realigned,
+                    side=self.current_side,
+                    qty=real_amt,
+                    tp_audit=new_audit,
+                    verify_note=(
+                        f"开仓后雷达已纠偏 | "
                         f"{new_audit['matched_full']}/{new_audit['expected']} | "
                         f"{self._format_audit_summary(new_audit)}"
                     ),
@@ -1374,7 +1450,12 @@ class PositionSupervisorBinance:
             return
 
         try:
-            self.monitoring = False
+            is_close = (
+                raw_action in ("CLOSE", "CLOSE_PROTECT", "CLOSE_TP3")
+                or raw_action.startswith("CLOSE")
+            )
+            if is_close:
+                self.monitoring = False
             if raw_action == "CLOSE_PROTECT" or raw_action.startswith("CLOSE_PROTECT"):
                 extra = ""
                 if close_side:
@@ -1653,37 +1734,62 @@ class PositionSupervisorBinance:
         self._touch_entry_signal_signature(action)
 
     def _open_position(self, action, curr_px):
-        qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
-        if qty <= 0:
-            logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
+        if self._open_in_progress:
+            logger.error(f"开仓中止：已有开仓流程进行中，拒绝叠仓 [{action}]")
             return
+        self._open_in_progress = True
+        try:
+            qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
+            if qty <= 0:
+                logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
+                return
 
-        binance_client.set_leverage(self.symbol, leverage=self.leverage)
-        notional = qty * curr_px
-        logger.info(
-            f"📐 仓位预算 R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
-            f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH "
-            f"(名义 ~{notional:.0f}U)"
-        )
+            binance_client.set_leverage(self.symbol, leverage=self.leverage)
+            notional = qty * curr_px
+            logger.info(
+                f"📐 仓位预算 R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
+                f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH "
+                f"(名义 ~{notional:.0f}U)"
+            )
 
-        open_side = "BUY" if action == "LONG" else "SELL"
-        logger.info(f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 个ETH | 档位 {self.regime}")
-        binance_client.place_market_order(action, qty)
-        time.sleep(2.0)
+            if not self._wait_verify(self._verify_flat, retries=4, delay=0.35):
+                logger.error("开仓中止：市价下单前盘口仍非空")
+                dingtalk.report_system_alert(
+                    "开仓中止 · 下单前盘口非空",
+                    f"TV {action} 目标 {qty} ETH，下单前 REST 仍显示持仓，已拒绝叠仓",
+                )
+                return
 
-        pos = self._get_active_position()
-        if pos:
+            open_side = "BUY" if action == "LONG" else "SELL"
+            logger.info(f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 个ETH | 档位 {self.regime}")
+            order = binance_client.place_market_order(action, qty)
+            if not order:
+                logger.error("开仓失败：市价单未成交")
+                dingtalk.report_system_alert("开仓失败", f"TV {action} {qty} ETH 市价单失败")
+                return
+            time.sleep(2.0)
+
+            pos = self._get_active_position()
+            if not pos or pos["size"] <= 0:
+                logger.error("开仓失败：成交后 REST 无持仓")
+                return
+
             real_qty = pos["size"]
-            if real_qty > qty * 1.06:
+            if real_qty > qty * OPEN_OVERSIZE_RATIO:
                 logger.error(
                     f"🚨 持仓超标: 目标 {qty} ETH，实盘 {real_qty} ETH "
-                    f"(>{qty * 1.06:.3f})，疑似未平干净叠仓"
+                    f"(>{qty * OPEN_OVERSIZE_RATIO:.3f})，启动裁减"
                 )
                 dingtalk.report_system_alert(
-                    "持仓超标 · 疑似叠仓",
-                    f"目标 {qty} ETH (保证金预算 {margin_usdt:.0f}U)，"
-                    f"实盘 {real_qty} ETH @ {pos['entry_price']:.2f}，请人工核查",
+                    "持仓超标 · 自动裁减",
+                    f"目标 {qty} ETH (保证金 {margin_usdt:.0f}U)，"
+                    f"实盘 {real_qty} ETH @ {pos['entry_price']:.2f}，正在 reduceOnly 裁减",
                 )
+                real_qty = self._trim_position_to_target(qty, action)
+                pos = self._get_active_position()
+                if pos:
+                    pos["size"] = real_qty
+
             self.current_side = action
             self.open_regime = self.regime
             self.open_atr = self.current_atr
@@ -1696,6 +1802,8 @@ class PositionSupervisorBinance:
                 ),
                 target_qty=qty,
             )
+        finally:
+            self._open_in_progress = False
 
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0):
         tp_pxs = self.tv_tps
@@ -1708,42 +1816,61 @@ class PositionSupervisorBinance:
 
         verified = self._wait_verify(lambda: self._verify_position(self.current_side))
         if verified:
-            result = self._enforce_defense_alignment(
-                verified["size"], verified["entry_price"],
-                dynamic_sl=None, reason="开仓后防线对齐", rounds=3,
+            live_qty = verified["size"]
+            if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
+                live_qty = self._trim_position_to_target(target_qty, self.current_side)
+                verified = self._get_active_position() or verified
+                if verified:
+                    verified = dict(verified)
+                    verified["size"] = live_qty
+                self.watched_qty = live_qty
+                self.initial_qty = live_qty
+                self._save_state()
+
+            self._scorched_earth_cancel_for_recover()
+            self._enforce_defense_alignment(
+                live_qty, verified["entry_price"],
+                dynamic_sl=None, reason="开仓后防线对齐", rounds=4,
+                recover_mode=True,
             )
-            matched, expected = result["matched"], result["expected"]
-            audit = result["audit"]
+            audit = self._wait_defense_settled(live_qty)
+            matched, expected = audit["matched_full"], audit["expected"]
             verify_note = (
                 f"{budget_note} | " if budget_note else ""
             ) + (
-                f"持仓 {verified['size']} ETH @ {verified['entry_price']:.2f} | "
+                f"持仓 {live_qty} ETH @ {verified['entry_price']:.2f} | "
                 f"限价止盈 {matched}/{expected} 档 | {self._format_audit_summary(audit)}"
             )
-            if target_qty > 0 and verified["size"] > target_qty * 1.06:
+            if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
                 verify_note += f" | ⚠️ 超标目标 {target_qty} ETH"
             self._record_open_log(
-                self.current_side, verified["size"], verified["entry_price"], source="open",
+                self.current_side, live_qty, verified["entry_price"], source="open",
             )
             self._call_dingtalk(
                 dingtalk.report_supervisor_open,
                 side=self.current_side,
                 entry_price=verified['entry_price'],
                 tv_price=self.tv_price,
-                qty=verified['size'],
+                qty=live_qty,
                 tp_pxs=tp_pxs,
                 atr=self.current_atr,
                 regime=self.regime,
                 tv_tps=self.tv_tps,
                 verify_note=verify_note,
                 tp_audit=audit,
-                verified=True,
+                verified=(expected == 0 or matched >= expected),
             )
             if expected > 0 and matched < expected:
+                self._open_tp_unconfirmed = True
+                dupes = [lv for lv in audit.get("levels", []) if lv.get("status") == "duplicate"]
+                hint = (
+                    "重复 TP 占满可减仓额度 | 雷达将接力纠偏"
+                    if dupes else "请查 logs/binance_brain.log"
+                )
                 dingtalk.report_system_alert(
                     "开仓后限价止盈未全部挂上",
-                    f"{self.current_side} {verified['size']} ETH | 仅 {matched}/{expected} 档 | "
-                    f"{self._format_audit_summary(audit)}",
+                    f"{self.current_side} {live_qty} ETH | 仅 {matched}/{expected} 档 | "
+                    f"{self._format_audit_summary(audit)} | {hint}",
                 )
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
