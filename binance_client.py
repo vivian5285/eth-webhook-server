@@ -254,18 +254,55 @@ class BinanceClient:
             logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
             return None
 
-    def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT"):
+    def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT", quantity=None):
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
-                "stopPrice": str(round(stop_price, 2)), "closePosition": "true"
+                "stopPrice": str(round(stop_price, 2)),
             }
+            if quantity is not None:
+                qty = self.format_quantity(quantity, symbol)
+                if qty <= 0:
+                    logger.error(f"[止损单跳过] 数量无效 {quantity}")
+                    return None
+                params["quantity"] = qty
+                params["reduceOnly"] = True
+            else:
+                params["closePosition"] = "true"
             order = self.client.futures_create_order(**params)
-            logger.info(f"[止损单成功] {side} Stop @ {stop_price}")
+            tag = f"{quantity} " if quantity is not None else "全仓 "
+            logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price}")
             return order
         except Exception as e:
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
+            return None
+
+    def place_stop_limit_order(self, side, quantity, stop_price, limit_price=None,
+                               symbol="ETHUSDT", reduce_only=True):
+        """STOP 限价止损：触发价 stopPrice，挂单价 price（reduceOnly 分批保护）"""
+        qty = self.format_quantity(quantity, symbol)
+        if qty <= 0:
+            logger.error(f"[限价止损跳过] 数量无效 {quantity}")
+            return None
+        stop_str = self.format_price(stop_price, symbol)
+        if limit_price is None:
+            limit_price = stop_price * (0.9995 if side.upper() in ("SELL", "SHORT") else 1.0005)
+        px_str = self.format_price(limit_price, symbol)
+        try:
+            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            params = {
+                "symbol": symbol, "side": binance_side, "type": "STOP",
+                "timeInForce": "GTC", "quantity": qty,
+                "price": px_str, "stopPrice": stop_str,
+            }
+            if reduce_only:
+                params["reduceOnly"] = True
+            order = self.client.futures_create_order(**params)
+            logger.info(f"[限价止损成功] {side} {qty} stop@{stop_str} limit@{px_str}")
+            return order
+        except Exception as e:
+            logger.error(f"[限价止损失败] {side} {qty} stop@{stop_price}: {e}")
             return None
 
     def cancel_order(self, symbol="ETHUSDT", order_id=None):
