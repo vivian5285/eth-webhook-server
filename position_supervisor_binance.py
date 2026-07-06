@@ -23,13 +23,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.5-regime-cap-tolerance"
+BINANCE_VPS_VERSION = "v13.6.6-qty-align-threshold"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
-OPEN_OVERSIZE_RATIO = 1.06
+OPEN_OVERSIZE_RATIO = 1.05  # 与 QTY_ALIGN_MIN_PCT 一致：仅离谱超标才裁减
 SIGNAL_DEDUP_SEC = 45
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
@@ -37,7 +37,8 @@ REGIME_CAP_COOLDOWN_SEC = 90
 REGIME_CAP_TOLERANCE_ETH = 0.001
 CAP_MIN_RETAIN_RATIO = 0.25
 CAP_TRIM_MAX_ROUNDS = 4
-QTY_DRIFT_TOLERANCE_PCT = 0.015  # 开仓后 ETH 价波动致仓位微漂 ≤1.5% 视为正常，不对齐
+QTY_DRIFT_TOLERANCE_PCT = 0.015  # 微漂 ≤1.5%：仅同步账本，不对齐
+QTY_ALIGN_MIN_PCT = 0.05         # 偏离 ≥5% 才视为离谱，触发对齐/档位裁减
 SHIELD_ACTIVATION_PCT = 0.02
 SHIELD_TIER_PCTS = (0.02, 0.03, 0.05)
 SHIELD_TIER_RATIOS = (0.33, 0.33, 0.34)
@@ -389,8 +390,8 @@ class PositionSupervisorBinance:
 
     def _is_material_qty_change(self, old_qty, new_qty):
         """
-        仅当变化超过允许波动比例时才视为真实异动。
-        ETH 价格波动导致保证金/持仓读数微漂（如 1.365→1.363）应忽略。
+        离谱级异动：偏离 ≥ QTY_ALIGN_MIN_PCT 才触发对齐/钉钉。
+        微漂（1.5%~5%）由哨兵静默同步账本，不打扰。
         """
         old = float(old_qty or 0)
         new = float(new_qty or 0)
@@ -398,7 +399,7 @@ class PositionSupervisorBinance:
         if delta <= REGIME_CAP_TOLERANCE_ETH:
             return False
         ratio = self._qty_change_ratio(old, new)
-        return ratio >= QTY_DRIFT_TOLERANCE_PCT
+        return ratio >= QTY_ALIGN_MIN_PCT
 
     def _sanitize_tp_prices(self, tp_list):
         out = []
@@ -521,11 +522,11 @@ class PositionSupervisorBinance:
         return qty, balance, margin_usdt, margin_pct
 
     def _regime_cap_tolerance(self, target_qty):
-        """档位上限容忍：至少 0.001 ETH，或目标 × 1.5%（取较大者）"""
+        """档位裁减容忍：离谱才管 — 超标 ≤5% 不裁"""
         target = float(target_qty or 0)
         if target <= 0:
             return REGIME_CAP_TOLERANCE_ETH
-        return max(REGIME_CAP_TOLERANCE_ETH, target * QTY_DRIFT_TOLERANCE_PCT)
+        return max(REGIME_CAP_TOLERANCE_ETH, target * QTY_ALIGN_MIN_PCT)
 
     def _is_oversize_for_regime(self, live_qty, curr_px, regime=None):
         target, _, _, margin_pct, reg = self._regime_cap_target_qty(curr_px, regime)
@@ -536,7 +537,7 @@ class PositionSupervisorBinance:
         if excess > REGIME_CAP_TOLERANCE_ETH and excess <= tol:
             logger.info(
                 f"📎 [档位限额] 微超 {live_qty} > {target} ETH "
-                f"(+{excess:.3f}, {excess / target:.2%} ≤ {QTY_DRIFT_TOLERANCE_PCT:.1%} 容忍)，跳过裁减"
+                f"(+{excess:.3f}, {excess / target:.2%} ≤ {QTY_ALIGN_MIN_PCT:.0%} 容忍)，跳过裁减"
             )
         return live_qty > target + tol, target, margin_pct, reg
 
@@ -2837,10 +2838,11 @@ class PositionSupervisorBinance:
                                     self._report_qty_change_dingtalk(old_qty, real_amt, result)
                             else:
                                 drift = self._qty_change_ratio(self.watched_qty, real_amt)
-                                logger.info(
-                                    f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} ETH "
-                                    f"({drift:.2%} < {QTY_DRIFT_TOLERANCE_PCT:.1%} 容忍)，仅同步账本"
-                                )
+                                if drift >= QTY_DRIFT_TOLERANCE_PCT:
+                                    logger.info(
+                                        f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} ETH "
+                                        f"({drift:.2%}，未达 {QTY_ALIGN_MIN_PCT:.0%} 对齐阈值)，仅同步账本"
+                                    )
                                 self.watched_qty = real_amt
                                 self.watched_entry = pos["entry_price"]
                                 self._save_state()
