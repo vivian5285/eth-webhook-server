@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.8.4-recover-guard"
+BINANCE_VPS_VERSION = "v13.8.5-shield-closepos"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -1161,23 +1161,29 @@ class PositionSupervisorBinance:
         return [px] if px else []
 
     def _is_shield_stop_order(self, o, tier_prices=None):
-        if str(o.get("closePosition", "")).lower() == "true":
-            return False
         px = self._order_stop_price(o)
         if px is None:
             return False
         tier_prices = tier_prices or self._shield_tier_prices()
-        return any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices)
-
-    def _is_radar_stop_order(self, o):
+        if not any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices):
+            return False
         if str(o.get("closePosition", "")).lower() == "true":
             return True
-        if not self._is_radar_active():
+        if o.get("type") not in ("STOP", "STOP_MARKET"):
+            return False
+        return True
+
+    def _is_radar_stop_order(self, o):
+        if o.get("type") not in ("STOP", "STOP_MARKET"):
             return False
         px = self._order_stop_price(o)
         if px is None:
             return False
-        return abs(px - round(float(self.current_sl), 2)) <= SHIELD_STOP_TOLERANCE
+        if not self._is_radar_active():
+            return False
+        if abs(px - round(float(self.current_sl), 2)) <= SHIELD_STOP_TOLERANCE:
+            return True
+        return False
 
     def _adverse_move_pct(self, curr_px):
         entry = self.watched_entry
@@ -1289,38 +1295,35 @@ class PositionSupervisorBinance:
         return False
 
     def _shield_orders_at_tiers(self, tier_prices):
-        """统计各档位价位上的 reduceOnly 止损单"""
+        """统计各档位价位上的硬止损单（含 closePosition 全平）"""
+        live_qty = self._resolve_live_qty(self.watched_qty or 0)
         buckets = {i: [] for i in range(len(tier_prices))}
         for o in binance_client.get_open_orders(self.symbol):
             if o.get("type") not in ("STOP", "STOP_MARKET"):
                 continue
-            if str(o.get("closePosition", "")).lower() == "true":
-                continue
             px = self._order_stop_price(o)
             if px is None:
                 continue
+            if not self._is_shield_stop_order(o, tier_prices):
+                continue
+            if str(o.get("closePosition", "")).lower() == "true":
+                oqty = live_qty
+            else:
+                oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
             for i, tp in enumerate(tier_prices):
                 if abs(px - tp) <= SHIELD_STOP_TOLERANCE:
-                    oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
                     buckets[i].append({"order": o, "qty": oqty})
                     break
         return buckets
 
     def _purge_shield_stop_orders(self, tier_prices=None):
-        """撤净防护盾档位上的全部止损（含重复叠单）"""
+        """撤净防护盾档位上的全部止损（含 closePosition 全平）"""
         tier_prices = tier_prices or self._shield_tier_prices()
         if not tier_prices:
             return 0
         cancelled = 0
         for o in binance_client.get_open_orders(self.symbol):
-            if o.get("type") not in ("STOP", "STOP_MARKET"):
-                continue
-            if str(o.get("closePosition", "")).lower() == "true":
-                continue
-            px = self._order_stop_price(o)
-            if px is None:
-                continue
-            if not any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices):
+            if not self._is_shield_stop_order(o, tier_prices):
                 continue
             oid = o.get("orderId")
             if oid:
@@ -1332,14 +1335,22 @@ class PositionSupervisorBinance:
     def _split_shield_quantities(self, qty):
         return (round(qty * SHIELD_TIER_RATIOS[0], 3),)
 
-    def _can_maintain_shield_now(self, force=False):
-        """限频：重启宽限期 + 维护冷却 + 失败指数退避，避免每轮哨兵都撤挂"""
+    def _can_maintain_shield_now(self, force=False, audit=None):
+        """限频：重启宽限期 + 维护冷却 + 失败指数退避；缺硬止损时宽限期内仍允许补挂"""
         if force:
             return True
         now = time.time()
+        audit = audit or {}
+        missing_shield = audit.get("status") == "missing"
         if now < getattr(self, "_sentinel_grace_until", 0):
+            if missing_shield:
+                if now - getattr(self, "_last_shield_maintain_ts", 0) < 12:
+                    return False
+                return True
             return False
         if now - getattr(self, "_last_shield_maintain_ts", 0) < SHIELD_MAINTAIN_COOLDOWN_SEC:
+            if missing_shield and now - getattr(self, "_last_shield_maintain_ts", 0) >= 12:
+                return True
             return False
         streak = getattr(self, "_shield_fail_streak", 0)
         if streak > 0:
@@ -1348,8 +1359,22 @@ class PositionSupervisorBinance:
                 SHIELD_FAIL_BACKOFF_MAX_SEC,
             )
             if now - getattr(self, "_last_shield_fail_ts", 0) < backoff:
+                if missing_shield and now - getattr(self, "_last_shield_fail_ts", 0) >= 12:
+                    return True
                 return False
         return True
+
+    def _wait_shield_audit_ok(self, live_qty, entry=None, retries=10, delay=0.45):
+        """挂单后 REST 延迟：轮询直到硬止损核实通过"""
+        entry = float(entry or self.watched_entry or 0)
+        live_qty = self._resolve_live_qty(live_qty)
+
+        def _probe():
+            audit = self._audit_shield_orders(live_qty, entry)
+            return audit if self._shield_orders_adequate(audit) else None
+
+        verified = self._wait_verify(_probe, retries=retries, delay=delay)
+        return verified or self._audit_shield_orders(live_qty, entry)
 
     def _record_shield_maintain(self, success):
         self._last_shield_maintain_ts = time.time()
@@ -1550,7 +1575,13 @@ class PositionSupervisorBinance:
             elif sl:
                 actions.append(f"雷达止损已齐@{sl:.2f}")
         else:
-            ok = self._maintain_hard_shield(real_amt, curr_px, force=True)
+            ok = self._place_shield_stops(
+                real_amt,
+                reason=f"重启 {health.get('pnl_label', '')} → 补挂硬止损",
+                force=True,
+                recover_mode=True,
+                suppress_alert=True,
+            )
             stop_px = self._shield_stop_price()
             if ok:
                 actions.append(
@@ -1635,7 +1666,8 @@ class PositionSupervisorBinance:
                 ),
             )
 
-    def _place_shield_stops(self, live_qty, entry=None, reason="", force=False):
+    def _place_shield_stops(self, live_qty, entry=None, reason="", force=False,
+                            recover_mode=False, suppress_alert=False):
         entry = float(entry or self.watched_entry or 0)
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or entry <= 0 or not self.current_side:
@@ -1662,7 +1694,7 @@ class PositionSupervisorBinance:
             self._save_state()
             return True
 
-        if not self._can_maintain_shield_now(force=force):
+        if not self._can_maintain_shield_now(force=force, audit=audit):
             return getattr(self, "shield_active", False)
 
         if audit["status"] == "duplicate" and not force:
@@ -1673,8 +1705,6 @@ class PositionSupervisorBinance:
             )
             return False
 
-        qty_map = self._shield_quantities_for_remaining(live_qty)
-        total_shield_qty = round(sum(qty_map.get(i, 0) for i in remaining), 3)
         purged = self._purge_shield_stop_orders(tier_prices)
         if purged:
             logger.warning(
@@ -1685,20 +1715,24 @@ class PositionSupervisorBinance:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         placed = 0
         for idx in remaining:
-            q = qty_map.get(idx, 0)
             tp = tier_prices[idx]
-            if q <= 0:
+            if tp <= 0:
                 continue
-            res = binance_client.place_stop_market_order(close_side, tp, quantity=q)
+            # closePosition 全平：不与 TP123 reduceOnly 额度冲突
+            res = binance_client.place_stop_market_order(close_side, tp, quantity=None)
             if res:
                 placed += 1
                 logger.info(
                     f"🛡️ 硬止损 -{SHIELD_HARD_STOP_PCT:.0%}: "
-                    f"{q} ETH @ {tp:.2f} 全平 (实盘 {live_qty} ETH)"
+                    f"closePosition 全平 @ {tp:.2f} (实盘 {live_qty} ETH)"
                 )
             time.sleep(0.35)
 
-        post_audit = self._audit_shield_orders(live_qty, entry)
+        post_audit = self._wait_shield_audit_ok(
+            live_qty, entry,
+            retries=12 if recover_mode else 8,
+            delay=0.5,
+        )
         ok = self._shield_orders_adequate(post_audit)
         self._record_shield_maintain(success=ok)
         if ok:
@@ -1707,7 +1741,7 @@ class PositionSupervisorBinance:
             self._save_state()
             stop_px = tier_prices[0] if tier_prices else entry
             logger.warning(
-                f"🛡️ [10%硬止损] 已挂 | {live_qty} ETH @ {stop_px:.2f} | "
+                f"🛡️ [10%硬止损] 已挂 | closePosition @ {stop_px:.2f} | "
                 f"新挂 {placed} 笔 | 雷达激活后自动撤销"
             )
             if not getattr(self, "_shield_arm_notified", False):
@@ -1722,15 +1756,20 @@ class PositionSupervisorBinance:
                     tier_pcts=SHIELD_TIER_PCTS,
                     verify_note=(
                         (reason or f"开仓价 ±{SHIELD_HARD_STOP_PCT:.0%} 硬止损全平")
-                        + f" | 实盘 {live_qty} ETH @ {stop_px:.2f} | 仅播报一次"
+                        + f" | closePosition @ {stop_px:.2f} | 仅播报一次"
                     ),
                 )
-        elif placed > 0:
+        elif placed > 0 and not suppress_alert:
             dingtalk.report_system_alert(
                 "10%硬止损未对齐",
                 f"已撤旧单 {purged} 笔、新挂 {placed} 笔，但核实未通过 | "
                 f"实盘 {live_qty} ETH | {', '.join(post_audit.get('issues', []))}",
                 suggestion="系统已退避冷却，下轮自动重试；请勿手动重复挂",
+            )
+        elif placed > 0:
+            logger.warning(
+                f"🛡️ 硬止损核实延迟 | 新挂 {placed} 笔 | "
+                f"{', '.join(post_audit.get('issues', []))} | 哨兵将继续补核实"
             )
         return ok
 
@@ -1761,7 +1800,7 @@ class PositionSupervisorBinance:
             self._save_state()
             return True
 
-        if not self._can_maintain_shield_now(force=force):
+        if not self._can_maintain_shield_now(force=force, audit=audit):
             return getattr(self, "shield_active", False)
 
         if audit["status"] == "duplicate" and not force:

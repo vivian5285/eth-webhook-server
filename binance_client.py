@@ -289,7 +289,7 @@ class BinanceClient:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
-                "stopPrice": str(round(stop_price, 2)),
+                "stopPrice": self.format_price(stop_price, symbol),
             }
             if quantity is not None:
                 qty = self.format_quantity(quantity, symbol)
