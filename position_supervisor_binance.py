@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.8.9-tp-recover-repair"
+BINANCE_VPS_VERSION = "v13.8.10-tp-consumed-fix"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -374,6 +374,23 @@ class PositionSupervisorBinance:
         for n in notes:
             logger.warning(f"🔎 重启对账: {n}")
         return reconcile
+
+    def _resolve_open_initial_qty(self, live_qty):
+        """开单原始头寸：state initial_qty 优先，否则开仓日志（部分止盈后现仓 < 开单）"""
+        live_qty = float(live_qty or 0)
+        saved = float(self.initial_qty or 0)
+        if saved > live_qty + 0.001:
+            return saved
+        last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+        if last_open:
+            jq = float(last_open.get("qty", 0) or 0)
+            if jq > live_qty + 0.001:
+                logger.info(
+                    f"📖 开单头寸取自开仓日志 {jq} ETH "
+                    f"(state initial={saved}, 现仓 {live_qty})"
+                )
+                return jq
+        return saved if saved > 0 else live_qty
 
     def _save_state(self):
         try:
@@ -937,20 +954,104 @@ class PositionSupervisorBinance:
             return int(getattr(self, "open_regime", self.regime) or self.regime)
         return int(self.regime)
 
+    def _tp_slices_for_initial(self, initial_qty):
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
+        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
+        return [
+            {"level": 1, "price": self.tv_tps[0], "qty": o1},
+            {"level": 2, "price": self.tv_tps[1], "qty": o2},
+            {"level": 3, "price": self.tv_tps[2], "qty": o3},
+        ]
+
+    @staticmethod
+    def _sequential_tp_prefix(levels):
+        """已成交档必须是顺序前缀：不可出现 [1,3] 而无 2"""
+        out = []
+        for lv in (1, 2, 3):
+            if lv in levels:
+                out.append(lv)
+            else:
+                break
+        return out
+
+    def _infer_tp_consumed_sequential(self, initial_qty, live_qty, curr_px=0.0):
+        """
+        按开单→现仓累计减仓，顺序推断已 fully 成交的 TP 档。
+        例：1.234→0.405 减 0.829 → 覆盖 TP1+TP2，未覆盖 TP3 → [1,2]
+        """
+        initial_qty = float(initial_qty or 0)
+        live_qty = float(live_qty or 0)
+        if initial_qty <= live_qty + 0.001:
+            return []
+
+        reduced = round(initial_qty - live_qty, 3)
+        consumed = []
+        cum = 0.0
+
+        for sl in self._tp_slices_for_initial(initial_qty):
+            if sl["qty"] <= 0.0005 or sl["price"] <= 0:
+                continue
+            cum = round(cum + sl["qty"], 3)
+            tol = max(0.003, sl["qty"] * 0.08)
+            if reduced >= cum - tol:
+                consumed.append(sl["level"])
+                continue
+            break
+
+        return self._sequential_tp_prefix(consumed)
+
+    def _sanitize_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
+        """纠正 tp_levels_consumed：全标已成交但仍有仓 / 非顺序前缀 → 按减仓重算"""
+        live_qty = float(live_qty or 0)
+        initial_qty = float(initial_qty or 0)
+        if live_qty <= DUST_QTY_ETH:
+            self.tp_levels_consumed = []
+            self._save_state()
+            return []
+
+        saved = self._sequential_tp_prefix(getattr(self, "tp_levels_consumed", []) or [])
+        inferred = self._infer_tp_consumed_sequential(initial_qty, live_qty, curr_px)
+
+        if len(saved) >= 3 and live_qty > DUST_QTY_ETH:
+            logger.warning(
+                f"⚠️ tp_levels_consumed={saved} 但仍有 {live_qty} ETH → "
+                f"按开单 {initial_qty} 重算为 TP{inferred or '无'}"
+            )
+            saved = inferred
+        elif inferred and (not saved or len(inferred) < len(saved)):
+            if saved != inferred:
+                logger.info(
+                    f"🎯 已成交档修正: TP{saved or '无'} → TP{inferred} "
+                    f"(开单 {initial_qty} → 现仓 {live_qty})"
+                )
+            saved = inferred
+        elif saved and inferred and saved != inferred:
+            logger.info(
+                f"🎯 已成交档以减仓为准: TP{saved} → TP{inferred}"
+            )
+            saved = inferred
+
+        if saved != list(getattr(self, "tp_levels_consumed", []) or []):
+            self.tp_levels_consumed = saved
+            self._save_state()
+        return saved
+
     def _mark_tp_levels_consumed(self, levels):
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         for lv in levels:
             consumed.add(int(lv))
-        self.tp_levels_consumed = sorted(consumed)
+        self.tp_levels_consumed = self._sequential_tp_prefix(sorted(consumed))
         self._save_state()
 
     def _split_remaining_tp_quantities(self, live_qty, ratios=None):
-        """已成交档位跳过，剩余仓位按剩余比例重分"""
+        """已成交档跳过；剩余仓位 → 多档按比例，仅余一档则全给该档"""
         ratios = ratios or self.regime_settings[self._tp_split_regime()]["ratios"]
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         remaining = [i for i in range(3) if (i + 1) not in consumed]
         if not remaining or live_qty <= 0:
             return {}
+        if len(remaining) == 1:
+            return {remaining[0] + 1: round(float(live_qty), 3)}
         rem_weights = [ratios[i] for i in remaining]
         wsum = sum(rem_weights) or 1.0
         out = {}
@@ -2602,37 +2703,25 @@ class PositionSupervisorBinance:
         return False
 
     def _detect_tp_fills(self, old_qty, new_qty, curr_px=0.0):
-        """识别 TP 成交：盘口单消失 + 减仓量匹配 + 价格穿越（REST 延迟兜底）"""
+        """识别 TP 成交：按 initial 累计减仓顺序推断新成交档"""
         if new_qty >= old_qty - 0.0005:
             return []
-        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
-        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-        o1, o2, o3 = self._split_tp_quantities(old_qty, ratios)
+        initial = float(getattr(self, "initial_qty", 0) or old_qty)
+        consumed_before = set(getattr(self, "tp_levels_consumed", []) or [])
+        new_consumed = self._infer_tp_consumed_sequential(initial, new_qty, curr_px)
+        slices = {sl["level"]: sl for sl in self._tp_slices_for_initial(initial)}
         fills = []
-        budget = round(old_qty - new_qty, 3)
-
-        for level, tp_px, slice_qty in (
-            (1, self.tv_tps[0], o1),
-            (2, self.tv_tps[1], o2),
-            (3, self.tv_tps[2], o3),
-        ):
-            if level in consumed:
+        for lv in new_consumed:
+            if lv in consumed_before:
                 continue
-            if tp_px <= 0 or slice_qty <= 0.0005 or budget <= 0.0005:
+            sl = slices.get(lv)
+            if not sl or sl["price"] <= 0:
                 continue
-            tol = max(0.002, slice_qty * 0.06)
-            qty_match = budget >= slice_qty - tol
-            order_gone = not self._has_tp_limit_at_price(tp_px)
-            price_crossed = False
-            if curr_px and curr_px > 0:
-                if self.current_side == "LONG":
-                    price_crossed = curr_px >= tp_px - 1.0
-                elif self.current_side == "SHORT":
-                    price_crossed = curr_px <= tp_px + 1.0
-            if qty_match and (order_gone or price_crossed or abs(budget - slice_qty) <= tol):
-                fill_qty = min(budget, slice_qty)
-                fills.append({"level": level, "price": tp_px, "qty": round(fill_qty, 3)})
-                budget = round(budget - fill_qty, 3)
+            fills.append({
+                "level": lv,
+                "price": sl["price"],
+                "qty": round(sl["qty"], 3),
+            })
         return fills
 
     def _cancel_tp_orders_at_levels(self, levels):
@@ -2677,39 +2766,21 @@ class PositionSupervisorBinance:
         return cancelled
 
     def _detect_stale_consumed_tp_levels(self, initial_qty, live_qty, curr_px=0.0):
-        """
-        对比开单头寸 vs 现仓 + 盘口：
-        - 减仓量匹配某档 → 该档已成交
-        - 已成交档限价仍在盘口 → 标记多余（如重复 TP1）
-        """
+        """开单 vs 现仓 → 顺序推断已成交档；撤已成交档残留限价"""
         initial_qty = float(initial_qty or 0)
         live_qty = float(live_qty or 0)
-        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         if initial_qty <= 0 or live_qty <= 0:
-            return sorted(consumed)
-
-        if initial_qty > live_qty + 0.001:
-            for f in self._detect_tp_fills(initial_qty, live_qty, curr_px):
-                consumed.add(f["level"])
-
-        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
-        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
-        reduced = round(initial_qty - live_qty, 3)
-        for level, px, slice_qty in (
-            (1, self.tv_tps[0], o1),
-            (2, self.tv_tps[1], o2),
-            (3, self.tv_tps[2], o3),
-        ):
-            if px <= 0 or slice_qty <= 0.0005:
-                continue
-            tol = max(0.002, slice_qty * 0.06)
-            if reduced >= slice_qty - tol and self._has_tp_limit_at_price(px):
-                consumed.add(level)
+            return []
+        consumed = self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
+        for lv in consumed:
+            idx = int(lv) - 1
+            px = self.tv_tps[idx] if 0 <= idx < len(self.tv_tps) else 0
+            if px > 0 and self._has_tp_limit_at_price(px):
                 logger.warning(
-                    f"⚠️ 检测到多余 TP{level} @{px:.2f} "
+                    f"⚠️ 多余 TP{lv} @{px:.2f} "
                     f"(开单 {initial_qty} → 现仓 {live_qty}，该档应已成交)"
                 )
-        return sorted(consumed)
+        return consumed
 
     def _repair_partial_tp_on_recover(self, live_qty, entry, initial_qty, curr_px=0.0):
         """
@@ -2719,21 +2790,42 @@ class PositionSupervisorBinance:
         initial_qty = float(initial_qty or live_qty or 0)
         actions = []
 
+        self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
         stale_levels = self._detect_stale_consumed_tp_levels(
             initial_qty, live_qty, curr_px,
         )
         if stale_levels:
             prev = set(getattr(self, "tp_levels_consumed", []) or [])
-            merged = sorted(set(stale_levels) | prev)
-            if merged != sorted(prev):
-                self._mark_tp_levels_consumed(merged)
+            if stale_levels != sorted(prev):
+                self.tp_levels_consumed = stale_levels
+                self._save_state()
             actions.append(
-                f"已成交档 TP{merged} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
+                f"已成交档 TP{stale_levels} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
             )
 
         consumed = getattr(self, "tp_levels_consumed", []) or []
+        if not consumed and initial_qty > live_qty + 0.001:
+            inferred = self._infer_tp_consumed_sequential(
+                initial_qty, live_qty, curr_px,
+            )
+            if inferred:
+                self.tp_levels_consumed = inferred
+                self._save_state()
+                consumed = inferred
+                actions.append(f"推断已成交 TP{inferred}")
         if not consumed:
             return {"repaired": False, "actions": actions, "result": None, "consumed": []}
+
+        # 有现仓且仍有未成交档 → 必须 repair（含仅余 TP3 全仓 0.405 的情况）
+        if live_qty > DUST_QTY_ETH and self._expected_tp_count() == 0:
+            self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
+            consumed = getattr(self, "tp_levels_consumed", []) or []
+            if self._expected_tp_count() == 0 and live_qty > DUST_QTY_ETH:
+                logger.warning(
+                    f"⚠️ 仍有 {live_qty} ETH 但无待挂 TP 档 → 强制挂最后一档 TP3"
+                )
+                self.tp_levels_consumed = [1, 2]
+                self._save_state()
 
         n_stale = self._cancel_tp_orders_at_levels(consumed)
         if n_stale:
@@ -4089,7 +4181,7 @@ class PositionSupervisorBinance:
                     align_notes = self._apply_recover_live_alignment(side, reconcile)
                     reconcile_notes.extend(align_notes)
 
-                    saved_initial = float(self.initial_qty or 0)
+                    saved_initial = self._resolve_open_initial_qty(real_amt)
                     if saved_initial <= 0:
                         saved_initial = real_amt
                     self.watched_qty = real_amt
@@ -4128,7 +4220,8 @@ class PositionSupervisorBinance:
                         pos = self._get_active_position() or pos
                         if pos:
                             self.watched_qty = real_amt
-                            self.initial_qty = real_amt
+                            if float(self.initial_qty or 0) <= real_amt + 0.001:
+                                self.initial_qty = real_amt
 
                     if tp_repair.get("repaired") and tp_repair.get("result"):
                         result = tp_repair["result"]
