@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/10x 适配）
+# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/15x 适配）
 import logging
 import time
 import threading
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.8.1-recover-smart"
+BINANCE_VPS_VERSION = "v13.8.2-lev15x"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -71,7 +71,7 @@ class PositionSupervisorBinance:
             3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.60, "trail_offset": 0.90},
             4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.70, "trail_offset": 1.30},
         }
-        self.leverage = 10
+        self.leverage = 15
 
         self.regime = 3
         self.current_atr = 30.0
@@ -116,7 +116,10 @@ class PositionSupervisorBinance:
         self.sizing_principal = 0.0
 
         self.state_file = 'binance_vps_state.json'
-        logger.info(f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载：双轨智慧雷达部署完毕！")
+        logger.info(
+            f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载："
+            f"双轨智慧雷达 · {self.leverage}x 杠杆"
+        )
         self._start_signal_worker()
         self._start_idle_flat_patrol()
 
