@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.8.7-radar-handoff"
+BINANCE_VPS_VERSION = "v13.8.9-tp-recover-repair"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -106,6 +106,7 @@ class PositionSupervisorBinance:
         self._last_regime_cap_ts = 0.0
         self.shield_active = False
         self.shield_tiers_consumed = []
+        self.tp_levels_consumed = []
         self._last_shield_maintain_ts = 0.0
         self._shield_fail_streak = 0
         self._last_shield_fail_ts = 0.0
@@ -395,6 +396,7 @@ class PositionSupervisorBinance:
                     "open_atr": self.open_atr,
                     "shield_active": getattr(self, "shield_active", False),
                     "shield_tiers_consumed": list(getattr(self, "shield_tiers_consumed", []) or []),
+                    "tp_levels_consumed": list(getattr(self, "tp_levels_consumed", []) or []),
                     "shield_sized_qty": float(getattr(self, "shield_sized_qty", 0) or 0),
                     "sizing_principal": float(getattr(self, "sizing_principal", 0) or 0),
                 }, f)
@@ -923,7 +925,11 @@ class PositionSupervisorBinance:
 
     def _expected_tp_count(self, tp_pxs=None):
         tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
-        return sum(1 for t in tp_pxs if t > 0)
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        return sum(
+            1 for i, t in enumerate(tp_pxs)
+            if t > 0 and (i + 1) not in consumed
+        )
 
     def _tp_split_regime(self):
         """止盈比例以开仓档位为准（open_regime），避免 TV 档位变化导致比例算错"""
@@ -931,15 +937,43 @@ class PositionSupervisorBinance:
             return int(getattr(self, "open_regime", self.regime) or self.regime)
         return int(self.regime)
 
+    def _mark_tp_levels_consumed(self, levels):
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        for lv in levels:
+            consumed.add(int(lv))
+        self.tp_levels_consumed = sorted(consumed)
+        self._save_state()
+
+    def _split_remaining_tp_quantities(self, live_qty, ratios=None):
+        """已成交档位跳过，剩余仓位按剩余比例重分"""
+        ratios = ratios or self.regime_settings[self._tp_split_regime()]["ratios"]
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        remaining = [i for i in range(3) if (i + 1) not in consumed]
+        if not remaining or live_qty <= 0:
+            return {}
+        rem_weights = [ratios[i] for i in remaining]
+        wsum = sum(rem_weights) or 1.0
+        out = {}
+        budget = float(live_qty)
+        for j, idx in enumerate(remaining[:-1]):
+            level = idx + 1
+            q = round(live_qty * rem_weights[j] / wsum, 3)
+            out[level] = q
+            budget -= q
+        out[remaining[-1] + 1] = round(budget, 3)
+        return out
+
     def _expected_tp_levels(self, live_qty):
-        regime = self._tp_split_regime()
-        ratios = self.regime_settings[regime]["ratios"]
-        q1, q2, q3 = self._split_tp_quantities(live_qty, ratios)
-        return [
-            {"level": 1, "qty": q1, "price": self.tv_tps[0]},
-            {"level": 2, "qty": q2, "price": self.tv_tps[1]},
-            {"level": 3, "qty": q3, "price": self.tv_tps[2]},
-        ]
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        qty_map = self._split_remaining_tp_quantities(live_qty)
+        levels = []
+        for level in (1, 2, 3):
+            if level in consumed:
+                continue
+            price = self.tv_tps[level - 1]
+            qty = qty_map.get(level, 0.0)
+            levels.append({"level": level, "qty": qty, "price": price})
+        return levels
 
     def _audit_tp_levels(self, live_qty, tolerance=1.0, qty_tol=0.005):
         """严格审计：每档价位唯一 + 数量符合 regime 比例 + 无孤儿单"""
@@ -2008,31 +2042,29 @@ class PositionSupervisorBinance:
         return True
 
     def _patch_missing_tp_levels(self, live_qty, tolerance=1.0, qty_tol=0.005):
-        """只补缺失档；重复/偏差交核武，禁止叠单"""
+        """只补缺失档；重复/偏差交核武，禁止叠单；已成交档位不再补挂"""
         live_qty = self._resolve_live_qty(live_qty)
         audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
         if self._defense_needs_immediate_fix(audit):
             logger.warning("补挂跳过：检测到重复/缺失/偏差，改走核武对齐")
             return 0
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
-        qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
-        levels = [(qty1, self.tv_tps[0]), (qty2, self.tv_tps[1]), (qty3, self.tv_tps[2])]
         placed = 0
 
-        for q, px in levels:
+        for lv in self._expected_tp_levels(live_qty):
+            q, px = lv["qty"], lv["price"]
             if q <= 0 or px <= 0:
                 continue
             orders = self._collect_tp_limit_orders()
             at_px = [o for o in orders if abs(o["price"] - px) <= tolerance]
             if len(at_px) == 1 and abs(at_px[0]["qty"] - q) <= qty_tol:
-                logger.info(f"  ✓ TP @ {px:.2f} 已存在 {at_px[0]['qty']} ETH，跳过")
+                logger.info(f"  ✓ TP{lv['level']} @ {px:.2f} 已存在 {at_px[0]['qty']} ETH，跳过")
                 continue
             for o in at_px:
                 if o.get("orderId"):
                     binance_client.cancel_order(self.symbol, o["orderId"])
                     time.sleep(0.25)
-            logger.info(f"  + 补挂 TP @ {px:.2f} qty={q} ETH")
+            logger.info(f"  + 补挂 TP{lv['level']} @ {px:.2f} qty={q} ETH")
             if binance_client.place_limit_order(close_side, q, px, reduce_only=True):
                 placed += 1
             time.sleep(0.4)
@@ -2569,25 +2601,226 @@ class PositionSupervisorBinance:
                 return True
         return False
 
-    def _detect_tp_fills(self, old_qty, new_qty):
+    def _detect_tp_fills(self, old_qty, new_qty, curr_px=0.0):
+        """识别 TP 成交：盘口单消失 + 减仓量匹配 + 价格穿越（REST 延迟兜底）"""
         if new_qty >= old_qty - 0.0005:
             return []
-        ratios = self.regime_settings[self.regime]["ratios"]
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         o1, o2, o3 = self._split_tp_quantities(old_qty, ratios)
         fills = []
-        budget = old_qty - new_qty
+        budget = round(old_qty - new_qty, 3)
+
         for level, tp_px, slice_qty in (
             (1, self.tv_tps[0], o1),
             (2, self.tv_tps[1], o2),
             (3, self.tv_tps[2], o3),
         ):
+            if level in consumed:
+                continue
             if tp_px <= 0 or slice_qty <= 0.0005 or budget <= 0.0005:
                 continue
-            if not self._has_tp_limit_at_price(tp_px) and budget >= slice_qty - 0.001:
+            tol = max(0.002, slice_qty * 0.06)
+            qty_match = budget >= slice_qty - tol
+            order_gone = not self._has_tp_limit_at_price(tp_px)
+            price_crossed = False
+            if curr_px and curr_px > 0:
+                if self.current_side == "LONG":
+                    price_crossed = curr_px >= tp_px - 1.0
+                elif self.current_side == "SHORT":
+                    price_crossed = curr_px <= tp_px + 1.0
+            if qty_match and (order_gone or price_crossed or abs(budget - slice_qty) <= tol):
                 fill_qty = min(budget, slice_qty)
                 fills.append({"level": level, "price": tp_px, "qty": round(fill_qty, 3)})
-                budget -= fill_qty
+                budget = round(budget - fill_qty, 3)
         return fills
+
+    def _cancel_tp_orders_at_levels(self, levels):
+        """撤掉已成交档位的残留限价单（防 REST 延迟导致误判未成交）"""
+        cancelled = 0
+        for level in levels:
+            idx = int(level) - 1
+            if idx < 0 or idx >= len(self.tv_tps):
+                continue
+            px = self.tv_tps[idx]
+            if px <= 0:
+                continue
+            for o in self._collect_tp_limit_orders():
+                if abs(o["price"] - px) <= 1.0 and o.get("orderId"):
+                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    cancelled += 1
+                    time.sleep(0.2)
+        if cancelled:
+            logger.info(f"🧹 撤净已成交 TP 残留单 {cancelled} 笔")
+        return cancelled
+
+    def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=1.0, qty_tol=0.005):
+        """撤掉剩余档数量与当前仓位比例不符的旧单（部分止盈后常见）"""
+        cancelled = 0
+        for lv in self._expected_tp_levels(live_qty):
+            px, target_q = lv["price"], lv["qty"]
+            if px <= 0 or target_q <= 0:
+                continue
+            at_px = [
+                o for o in self._collect_tp_limit_orders()
+                if abs(o["price"] - px) <= tolerance
+            ]
+            for o in at_px:
+                if abs(o["qty"] - target_q) > qty_tol and o.get("orderId"):
+                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    cancelled += 1
+                    time.sleep(0.2)
+                    logger.info(
+                        f"🔧 撤偏差 TP{lv['level']} @{px:.2f}: "
+                        f"盘口 {o['qty']} → 应 {target_q} ETH"
+                    )
+        return cancelled
+
+    def _detect_stale_consumed_tp_levels(self, initial_qty, live_qty, curr_px=0.0):
+        """
+        对比开单头寸 vs 现仓 + 盘口：
+        - 减仓量匹配某档 → 该档已成交
+        - 已成交档限价仍在盘口 → 标记多余（如重复 TP1）
+        """
+        initial_qty = float(initial_qty or 0)
+        live_qty = float(live_qty or 0)
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        if initial_qty <= 0 or live_qty <= 0:
+            return sorted(consumed)
+
+        if initial_qty > live_qty + 0.001:
+            for f in self._detect_tp_fills(initial_qty, live_qty, curr_px):
+                consumed.add(f["level"])
+
+        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
+        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
+        reduced = round(initial_qty - live_qty, 3)
+        for level, px, slice_qty in (
+            (1, self.tv_tps[0], o1),
+            (2, self.tv_tps[1], o2),
+            (3, self.tv_tps[2], o3),
+        ):
+            if px <= 0 or slice_qty <= 0.0005:
+                continue
+            tol = max(0.002, slice_qty * 0.06)
+            if reduced >= slice_qty - tol and self._has_tp_limit_at_price(px):
+                consumed.add(level)
+                logger.warning(
+                    f"⚠️ 检测到多余 TP{level} @{px:.2f} "
+                    f"(开单 {initial_qty} → 现仓 {live_qty}，该档应已成交)"
+                )
+        return sorted(consumed)
+
+    def _repair_partial_tp_on_recover(self, live_qty, entry, initial_qty, curr_px=0.0):
+        """
+        重启修复：开单头寸 + 部分止盈 → 撤多余已成交档，现仓=TP2+TP3 重分。
+        """
+        live_qty = self._resolve_live_qty(live_qty)
+        initial_qty = float(initial_qty or live_qty or 0)
+        actions = []
+
+        stale_levels = self._detect_stale_consumed_tp_levels(
+            initial_qty, live_qty, curr_px,
+        )
+        if stale_levels:
+            prev = set(getattr(self, "tp_levels_consumed", []) or [])
+            merged = sorted(set(stale_levels) | prev)
+            if merged != sorted(prev):
+                self._mark_tp_levels_consumed(merged)
+            actions.append(
+                f"已成交档 TP{merged} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
+            )
+
+        consumed = getattr(self, "tp_levels_consumed", []) or []
+        if not consumed:
+            return {"repaired": False, "actions": actions, "result": None, "consumed": []}
+
+        n_stale = self._cancel_tp_orders_at_levels(consumed)
+        if n_stale:
+            actions.append(f"撤多余已成交档 {n_stale} 笔")
+
+        n_mismatch = self._cancel_mismatched_remaining_tps(live_qty)
+        if n_mismatch:
+            actions.append(f"撤偏差 TP2/TP3 {n_mismatch} 笔")
+
+        time.sleep(0.4)
+
+        sl_to_pass = self._radar_sl_to_pass()
+        if sl_to_pass is None and curr_px and curr_px > 0:
+            top_level = max(consumed)
+            px = self.tv_tps[top_level - 1] if top_level <= len(self.tv_tps) else 0
+            if px > 0:
+                sl_to_pass = self._advance_radar_on_tp_fill(
+                    [{"level": top_level, "price": px, "qty": 0}],
+                    curr_px, live_qty,
+                )
+
+        result = self._realign_remaining_tps_after_fill(
+            live_qty, dynamic_sl=sl_to_pass, reason="重启部分止盈修复",
+        )
+        audit = result.get("audit") or {}
+        rem_levels = self._expected_tp_levels(live_qty)
+        rem_sum = round(sum(lv["qty"] for lv in rem_levels), 3)
+        actions.append(
+            f"剩余 TP 重分 {rem_sum}/{live_qty} ETH | "
+            f"对齐 {audit.get('matched_full', 0)}/{audit.get('expected', 0)} 档"
+        )
+        return {
+            "repaired": True,
+            "actions": actions,
+            "result": result,
+            "consumed": consumed,
+            "initial_qty": initial_qty,
+            "rem_sum": rem_sum,
+        }
+
+    def _realign_remaining_tps_after_fill(self, live_qty, dynamic_sl=None, reason=""):
+        """
+        TP 成交后：只维护剩余 TP2/TP3，不重挂已成交 TP1；同步雷达止损。
+        """
+        live_qty = self._resolve_live_qty(live_qty)
+        if live_qty <= 0:
+            audit = self._audit_tp_levels(live_qty)
+            return {
+                "matched": 0, "expected": 0, "pending_prices": [],
+                "rebuilt": False, "audit": audit, "nuclear": False,
+            }
+        consumed = getattr(self, "tp_levels_consumed", []) or []
+        logger.info(
+            f"🎯 TP 成交后静默对齐: 剩余 {live_qty} ETH | "
+            f"已成交 TP{consumed} | 只补未成交档"
+        )
+        self._cancel_tp_orders_at_levels(consumed)
+        time.sleep(0.35)
+        n_fix = self._cancel_mismatched_remaining_tps(live_qty)
+        if n_fix:
+            logger.info(f"🔧 TP 成交对齐：撤偏差剩余档 {n_fix} 笔")
+            time.sleep(0.35)
+        placed = self._patch_missing_tp_levels(live_qty)
+        time.sleep(0.5)
+        audit = self._audit_tp_levels(live_qty)
+        if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
+            self._ensure_radar_sl(dynamic_sl, live_qty)
+        if placed == 0 and self._tp_audit_ok(audit):
+            logger.info(
+                f"✅ TP 成交后盘口已齐 ({audit['matched_full']}/{audit['expected']})，"
+                f"未重挂已成交档"
+            )
+        elif not self._tp_audit_ok(audit):
+            logger.warning(
+                f"⚠️ TP 成交后仍不齐 → 增量修复 | {self._format_audit_summary(audit)}"
+            )
+            repaired, _ = self._surgical_repair_tp_defenses(live_qty, self.watched_entry)
+            audit = repaired
+        self._mark_defense_align_ok()
+        return {
+            "matched": audit["matched_full"],
+            "expected": audit["expected"],
+            "pending_prices": audit["pending_prices"],
+            "rebuilt": placed > 0,
+            "audit": audit,
+            "nuclear": False,
+        }
 
     def _detect_shield_fills(self, old_qty, new_qty, curr_px):
         if not getattr(self, "shield_active", False):
@@ -2614,7 +2847,7 @@ class PositionSupervisorBinance:
             return {"kind": "add", "tp_fills": [], "shield_fills": []}
         if new_qty >= old_qty - 0.0005:
             return {"kind": "unchanged", "tp_fills": [], "shield_fills": []}
-        tp_fills = self._detect_tp_fills(old_qty, new_qty)
+        tp_fills = self._detect_tp_fills(old_qty, new_qty, curr_px)
         shield_fills = self._detect_shield_fills(old_qty, new_qty, curr_px)
         favorable = (
             self._is_radar_active()
@@ -2641,22 +2874,32 @@ class PositionSupervisorBinance:
         max_level = max(f["level"] for f in tp_fills)
         tp3 = self.tv_tps[2] if len(self.tv_tps) > 2 else 0.0
         new_sl = self._compute_radar_sl()
+        fee_buffer = self.watched_entry * 0.0015
         if new_sl is not None:
-            fee_buffer = self.watched_entry * 0.0015
             if self.current_side == "LONG":
                 floor = self.watched_entry + fee_buffer
                 self.current_sl = max(self.current_sl or floor, new_sl, floor)
             else:
                 ceiling = self.watched_entry - fee_buffer
                 self.current_sl = min(self.current_sl or ceiling, new_sl, ceiling)
+        elif max_level >= 1:
+            if self.current_side == "LONG":
+                self.current_sl = max(self.current_sl or 0, self.watched_entry + fee_buffer)
+            else:
+                self.current_sl = min(
+                    self.current_sl or self.watched_entry,
+                    self.watched_entry - fee_buffer,
+                )
         note = f"TP{max_level}成交"
         if max_level >= 2 and tp3 > 0:
             note += f" → 雷达止损向 TP3({tp3:.2f}) 动态收紧"
+        elif max_level == 1:
+            note += " → 雷达保本启动，静默守 TP2/TP3"
         logger.info(
             f"📈 [雷达推进] {note} | SL={self.current_sl:.2f} | best={self.best_price:.2f}"
         )
         self._save_state()
-        return self.current_sl if self._is_radar_active() else None
+        return self.current_sl if self.current_sl else None
 
     def _handle_smart_qty_change(self, old_qty, new_qty, curr_px):
         """按减仓原因分流：TP成交→雷达推进；防护盾成交→保留剩余档位；其他→通用对齐"""
@@ -2677,20 +2920,29 @@ class PositionSupervisorBinance:
         elif kind == "tp_fill":
             levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"])
             logger.info(
-                f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} → 雷达推进"
+                f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} → 雷达推进 + 守剩余TP"
             )
-            self._disarm_shield(f"{levels} 成交，切换雷达追踪", notify=True)
+            self._mark_tp_levels_consumed([f["level"] for f in change["tp_fills"]])
+            curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
+            self._force_disarm_shield_before_radar(
+                curr_px_safe,
+                reason=f"{levels} 成交，交棒雷达保本",
+                notify=True,
+            )
             sl_to_pass = self._advance_radar_on_tp_fill(
                 change["tp_fills"], curr_px, new_qty,
             )
-            if sl_to_pass and not self._is_radar_active():
-                sl_to_pass = self._radar_sl_to_pass()
-            result = self._smart_realign_defenses(
-                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
-                reason=f"{levels} 成交智能对齐",
+            result = self._realign_remaining_tps_after_fill(
+                new_qty, dynamic_sl=sl_to_pass,
+                reason=f"{levels} 成交静默对齐",
             )
             if sl_to_pass and not self._has_stop_sl_near(sl_to_pass):
                 self._ensure_radar_sl(sl_to_pass, new_qty)
+            if sl_to_pass and not getattr(self, "_radar_activation_notified", False):
+                self._report_radar_first_activation(
+                    new_qty, curr_px_safe, sl_to_pass,
+                    self._has_stop_sl_near(sl_to_pass),
+                )
         elif kind == "shield_fill":
             f = change["shield_fills"][0]
             logger.warning(
@@ -2719,6 +2971,11 @@ class PositionSupervisorBinance:
             )
         else:
             pct = abs(new_qty - old_qty) / old_qty if old_qty > 0 else 1.0
+            retry_fills = self._detect_tp_fills(old_qty, new_qty, curr_px)
+            if retry_fills:
+                change = {"kind": "tp_fill", "tp_fills": retry_fills, "shield_fills": []}
+                self._save_state()
+                return self._handle_smart_qty_change(old_qty, new_qty, curr_px)
             action_msg = (
                 "手动加仓" if new_qty > old_qty
                 else "部分止盈吃单 / 手动减仓"
@@ -2741,7 +2998,7 @@ class PositionSupervisorBinance:
         self._save_state()
         return change, result
 
-    def _report_qty_change_dingtalk(self, old_qty, new_qty, realign_result):
+    def _report_qty_change_dingtalk(self, old_qty, new_qty, realign_result, change=None):
         verified_pos = self._wait_verify(
             lambda: self._verify_position(self.current_side),
             retries=8,
@@ -2763,7 +3020,11 @@ class PositionSupervisorBinance:
         if not verified:
             verify_note += " | REST 同步略延迟"
 
-        fills = self._detect_tp_fills(old_qty, new_qty)
+        fills = []
+        if change and change.get("kind") == "tp_fill":
+            fills = change.get("tp_fills") or []
+        if not fills:
+            fills = self._detect_tp_fills(old_qty, new_qty)
         if fills:
             for fill in fills:
                 self._call_dingtalk(
@@ -3275,6 +3536,7 @@ class PositionSupervisorBinance:
         self.best_price = entry_price
         self.shield_active = False
         self.shield_tiers_consumed = []
+        self.tp_levels_consumed = []
         self._radar_activation_notified = False
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
@@ -3612,7 +3874,9 @@ class PositionSupervisorBinance:
                                     old_qty, real_amt, curr_px,
                                 )
                                 if result:
-                                    self._report_qty_change_dingtalk(old_qty, real_amt, result)
+                                    self._report_qty_change_dingtalk(
+                                        old_qty, real_amt, result, change=change,
+                                    )
                             else:
                                 drift = self._qty_change_ratio(self.watched_qty, real_amt)
                                 if drift >= QTY_DRIFT_TOLERANCE_PCT:
@@ -3653,7 +3917,6 @@ class PositionSupervisorBinance:
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
 
         live_qty = self._resolve_live_qty(qty)
         if live_qty <= 0:
@@ -3667,16 +3930,16 @@ class PositionSupervisorBinance:
             self.watched_qty = live_qty
             self._save_state()
 
-        qty1, qty2, qty3 = self._split_tp_quantities(live_qty, ratios)
-        tp_pxs = self.tv_tps
+        consumed = getattr(self, "tp_levels_consumed", []) or []
         placed = 0
 
         logger.info(
-            f"🕸️ 补挂 TP123: 总 {live_qty} ETH → TP1={qty1} TP2={qty2} TP3={qty3} "
-            f"(R{self._tp_split_regime()} 比例 {ratios})"
+            f"🕸️ 补挂 TP: 总 {live_qty} ETH | 已成交 TP{consumed or '无'} | "
+            f"R{self._tp_split_regime()} 剩余档"
         )
 
-        for q, px in ((qty1, tp_pxs[0]), (qty2, tp_pxs[1]), (qty3, tp_pxs[2])):
+        for lv in self._expected_tp_levels(live_qty):
+            q, px = lv["qty"], lv["price"]
             if q > 0 and px > 0:
                 res = binance_client.place_limit_order(close_side, q, px, reduce_only=True)
                 if res:
@@ -3733,6 +3996,7 @@ class PositionSupervisorBinance:
                 self.current_side = None
                 self.shield_active = False
                 self.shield_tiers_consumed = []
+                self.tp_levels_consumed = []
                 self._snapshot_sizing_principal("全平后本金重置")
             else:
                 residual = self._get_active_position()
@@ -3792,6 +4056,7 @@ class PositionSupervisorBinance:
                     self.open_atr = float(s.get("open_atr", s.get("current_atr", 30.0)) or 30.0)
                     self.shield_active = bool(s.get("shield_active", False))
                     self.shield_tiers_consumed = list(s.get("shield_tiers_consumed", []) or [])
+                    self.tp_levels_consumed = list(s.get("tp_levels_consumed", []) or [])
                     self.shield_sized_qty = float(s.get("shield_sized_qty", 0) or 0)
                     if self.shield_sized_qty > 0:
                         self._shield_arm_notified = True
@@ -3837,14 +4102,23 @@ class PositionSupervisorBinance:
                     qty_change = reconcile.get("qty_manual_change")
 
                     curr_px = binance_client.get_current_price(self.symbol)
+                    tp_repair = self._repair_partial_tp_on_recover(
+                        real_amt, self.watched_entry, saved_initial, curr_px or 0,
+                    )
+                    tp_repair_note = ""
                     self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
+                    if tp_repair.get("repaired"):
+                        tp_repair_note = " | TP修复: " + " · ".join(tp_repair["actions"])
+                        logger.info(f"🎯 重启部分止盈修复: {tp_repair_note}")
 
                     radar_active = self._is_radar_active()
                     saved_sl = self.current_sl if radar_active else None
 
                     logger.info(
                         f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} ETH @ "
-                        f"{self.watched_entry:.2f} | 雷达={'已激活' if radar_active else '待命'} | "
+                        f"{self.watched_entry:.2f} | 开单 {saved_initial} ETH | "
+                        f"已成交 TP{getattr(self, 'tp_levels_consumed', []) or '无'} | "
+                        f"雷达={'已激活' if radar_active else '待命'} | "
                         f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
                     )
 
@@ -3856,15 +4130,25 @@ class PositionSupervisorBinance:
                             self.watched_qty = real_amt
                             self.initial_qty = real_amt
 
-                    result = self._enforce_defense_alignment(
-                        real_amt, self.watched_entry, dynamic_sl=None,
-                        reason="重启闪电接管 · 核武撤单重挂",
-                        rounds=4, recover_mode=True,
-                    )
-                    if saved_sl and radar_active:
-                        sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
+                    if tp_repair.get("repaired") and tp_repair.get("result"):
+                        result = tp_repair["result"]
+                        sl = self._radar_sl_to_pass()
+                        if sl and not self._has_stop_sl_near(sl):
+                            sl_ok = self._ensure_radar_sl(sl, real_amt)
+                        elif saved_sl and radar_active:
+                            sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
+                        else:
+                            sl_ok = True
                     else:
-                        sl_ok = True
+                        result = self._enforce_defense_alignment(
+                            real_amt, self.watched_entry, dynamic_sl=None,
+                            reason="重启闪电接管 · 核武撤单重挂",
+                            rounds=4, recover_mode=True,
+                        )
+                        if saved_sl and radar_active:
+                            sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
+                        else:
+                            sl_ok = True
 
                     _rebuilt = result["rebuilt"]
                     audit = self._wait_defense_settled(
@@ -3898,13 +4182,15 @@ class PositionSupervisorBinance:
                     skip_note = " | 盘口已齐全，未重复补挂" if not _rebuilt else ""
                     verify_note = (
                         f"接管 {real_amt} ETH @ {entry_px:.2f} | "
+                        f"开单 {saved_initial} ETH | "
+                        f"已成交 TP{getattr(self, 'tp_levels_consumed', []) or '无'} | "
                         f"TV方向 {self.last_tv_side} | "
                         f"止盈 {matched}/{expected} 档 | "
-                        f"{self._format_audit_summary(audit)}{skip_note}{tv_note}{reconcile_txt}"
+                        f"{self._format_audit_summary(audit)}{skip_note}{tp_repair_note}{tv_note}{reconcile_txt}"
                     )
                     if not verified:
                         verify_note += " | REST 同步略延迟"
-                    if qty_change:
+                    if qty_change and not tp_repair.get("repaired"):
                         old_q, new_q, action_msg = qty_change
                         self._call_dingtalk(
                             dingtalk.report_manual_position_change,
@@ -3958,6 +4244,19 @@ class PositionSupervisorBinance:
 
                     self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_RECOVER_SEC
 
+                    if tp_repair.get("repaired"):
+                        self._call_dingtalk(
+                            dingtalk.report_recover_tp_repair,
+                            side=self.current_side,
+                            initial_qty=saved_initial,
+                            live_qty=real_amt,
+                            entry=entry_px,
+                            consumed_levels=tp_repair.get("consumed") or [],
+                            tp_audit=audit,
+                            verify_note=" · ".join(tp_repair.get("actions") or []),
+                            verified=bool(verified),
+                        )
+
                     self._call_dingtalk(
                         dingtalk.report_recover_takeover,
                         side=self.current_side,
@@ -3979,6 +4278,8 @@ class PositionSupervisorBinance:
                         radar_progress=health["radar_progress"],
                         tv_aligned=health["tv_match"],
                         qty_aligned=health["qty_match"],
+                        initial_qty=saved_initial,
+                        tp_consumed_levels=getattr(self, "tp_levels_consumed", []) or [],
                     )
                     logger.info(
                         f"  -> 🎉 实盘阵地接管完毕 | {health['pnl_label']} | "

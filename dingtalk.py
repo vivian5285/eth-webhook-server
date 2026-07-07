@@ -343,11 +343,40 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
     send_alert(theme["title"], data, theme["header"])
 
 
+def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels,
+                             tp_audit=None, verify_note="", verified=True):
+    """重启：部分止盈后撤多余档 + 剩余 TP 重分"""
+    consumed_txt = ", ".join(f"TP{lv}" for lv in (consumed_levels or [])) or "无"
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📦 开单头寸": _g(f"**{initial_qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MUTED),
+        "📦 现仓剩余": _g(f"**{live_qty}** {UNIT_LABEL} (= TP2+TP3)", G_MAIN),
+        "✂️ 已成交档": _g(consumed_txt, G_ACCENT),
+        "🕸️ 剩余止盈审计": _g(
+            _format_tp_audit(tp_audit, []) if tp_audit else "核查中",
+            G_MAIN,
+        ),
+        "✅ 修复动作": _g(
+            "撤多余已成交档 → 按现仓重分 TP2/TP3 → 雷达保本接力",
+            G_MAIN,
+        ),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | 部分止盈修复完成",
+            f"⏳ 修复已提交，{VERIFY_DELAY_MARK}",
+        ),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("🎯 重启 · 部分止盈修复", data, G_TITLE)
+
+
 def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
                             verify_note="", tp_matched=0, tp_expected=0, tp_audit=None,
                             last_tv_signal=None, radar_sl_ok=True,
                             pnl_label="", defense_plan="", shield_status="",
-                            radar_progress=0.0, tv_aligned=True, qty_aligned=True):
+                            radar_progress=0.0, tv_aligned=True, qty_aligned=True,
+                            initial_qty=0.0, tp_consumed_levels=None):
     expected = tp_expected or sum(1 for t in tv_tps if t > 0)
     if expected > 0 and tp_matched >= expected:
         action_txt = f"{VERIFY_TAG} | 头寸+TV对账 → 比例 TP123 已对齐 → 恢复哨兵"
@@ -390,6 +419,12 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
+    }
+    if initial_qty and float(initial_qty) > float(qty) + 0.001:
+        consumed_txt = ", ".join(f"TP{lv}" for lv in (tp_consumed_levels or [])) or "推断中"
+        data["📦 开单原始"] = _g(f"**{initial_qty}** {UNIT_LABEL}", G_MUTED)
+        data["✂️ 已成交档"] = _g(consumed_txt, G_ACCENT)
+    data.update({
         "📡 最新 TV 信号": _g(f"{tv_ref or '无日志记录'} ({tv_align_txt})", G_MUTED),
         "⚖️ 仓位核对": _g(qty_align_txt, G_MAIN if qty_aligned else G_ACCENT),
         "📈 盈亏态势": _g(pnl_label or "核查中", G_ACCENT if "浮亏" in (pnl_label or "") else G_MAIN),
@@ -401,7 +436,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "📡 雷达状态": radar_txt,
         "🧭 防线路由": _g(defense_plan or "哨兵接力维护", G_LIGHT),
         "✅ 接管动作": _g(action_txt, action_color),
-    }
+    })
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
     send_alert("🔄 币安 VPS 重启 · 闪电接管报告", data)
