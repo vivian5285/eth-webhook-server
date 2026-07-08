@@ -633,21 +633,26 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
 
 
 def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
-                           radar_progress=0.0, verify_note=""):
+                           radar_progress=0.0, verify_note="", verified=True):
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 剩余头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
-        "📈 价格方向": _g("达 **TP1 激活比例** → 转雷达", G_LIGHT),
+        "📈 价格方向": _g("朝 **TP1 激活线** 浮盈推进 → 交棒雷达", G_LIGHT),
         "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 10% 硬止损", G_ACCENT),
         "📡 雷达状态": _g(
             "已激活移动保本" if radar_progress >= 1.0
-            else f"进度 {radar_progress:.0%}，专注雷达推升止损",
+            else f"进度 {radar_progress:.0%}，准备挂雷达保本",
             G_MAIN,
         ),
         "✅ 风控动作": _g(
             reason or "雷达接管 → 撤 10% 硬止损 → 移动保本防利润回吐",
             G_MAIN,
+        ),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | 硬止损已净，可挂雷达保本",
+            f"⏳ 撤单已提交，{VERIFY_DELAY_MARK} | 哨兵继续清理",
         ),
     }
     if verify_note:

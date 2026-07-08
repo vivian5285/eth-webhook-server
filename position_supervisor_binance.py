@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.9.2-algo-shield-audit"
+BINANCE_VPS_VERSION = "v13.9.3-radar-shield-handoff"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -112,6 +112,7 @@ class PositionSupervisorBinance:
         self._shield_fail_streak = 0
         self._last_shield_fail_ts = 0.0
         self._shield_arm_notified = False
+        self._shield_handoff_notified = False
         self.shield_sized_qty = 0.0
         self._radar_activation_notified = False
         self._last_radar_report_ts = 0.0
@@ -1400,14 +1401,15 @@ class PositionSupervisorBinance:
 
     def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
         """
-        雷达接管前强制撤净 10% 硬止损（含 closePosition）。
+        雷达接管前强制撤净 10% 硬止损（含 closePosition / Algo 条件单）。
         Binance 同一方向仅允许一个 closePosition，必须先撤硬止损再挂雷达保本。
+        返回: dict(cancelled, cleared, verified)
         """
         stop_px = self._shield_stop_price()
         had_flag = getattr(self, "shield_active", False)
         had_exchange = self._shield_present_on_exchange()
         if not had_flag and not had_exchange:
-            return 0
+            return {"cancelled": 0, "cleared": True, "verified": True}
 
         n = self._cancel_stop_orders(scope="shield")
         if self._shield_present_on_exchange():
@@ -1416,7 +1418,7 @@ class PositionSupervisorBinance:
         if self._shield_present_on_exchange():
             n += self._purge_shield_stop_orders()
             time.sleep(0.5)
-        self._wait_shield_cleared(retries=6, delay=0.35)
+        cleared = self._wait_shield_cleared(retries=8, delay=0.4)
 
         self.shield_active = False
         self.shield_tiers_consumed = []
@@ -1425,19 +1427,21 @@ class PositionSupervisorBinance:
         self._save_state()
 
         still_there = self._shield_present_on_exchange()
+        verified = cleared and not still_there
+        progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
         if reason and (had_flag or had_exchange or n):
             logger.info(
                 f"🛡️ [雷达交棒] {reason} | 撤 {n} 笔硬止损"
-                + (f" | ⚠️ 盘口仍检测到硬止损" if still_there else "")
+                + (f" | ⚠️ 盘口仍检测到硬止损" if still_there else " | 硬止损已净")
+                + f" | 雷达进度 {progress:.0%}"
             )
-        if notify and (n > 0 or had_exchange):
-            progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
+        if notify and (n > 0 or ((had_flag or had_exchange) and not getattr(self, "_shield_handoff_notified", False))):
             verify_note = (
                 f"撤 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 硬止损 @ {stop_px:.2f}"
                 if stop_px else f"撤 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 硬止损"
             )
             if still_there:
-                verify_note += " | ⚠️ 盘口仍残留，哨兵将继续清理"
+                verify_note += " | ⚠️ 盘口仍残留，雷达挂止损暂缓"
             else:
                 verify_note += " | 硬止损已净，交棒雷达移动保本"
             verify_note += (
@@ -1452,8 +1456,10 @@ class PositionSupervisorBinance:
                 reason=reason or "雷达激活前撤硬止损",
                 radar_progress=progress,
                 verify_note=verify_note,
+                verified=verified,
             )
-        return n
+            self._shield_handoff_notified = True
+        return {"cancelled": n, "cleared": not still_there, "verified": verified}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
         """雷达达到 TP1 激活比例 → 撤 10% 硬止损，交棒移动保本"""
@@ -1488,11 +1494,20 @@ class PositionSupervisorBinance:
         if self._resolve_defense_regime(curr_px) == "FAVORABLE":
             if self._should_radar_trail(curr_px) or self._is_radar_active():
                 progress = self._radar_activation_progress(curr_px)
-                self._force_disarm_shield_before_radar(
+                handoff = self._force_disarm_shield_before_radar(
                     curr_px,
-                    reason=f"雷达激活(进度 {progress:.0%})，先撤 {SHIELD_HARD_STOP_PCT:.0%} 硬止损",
+                    reason=(
+                        f"浮盈朝TP1推进({progress:.0%})，"
+                        f"先撤 {SHIELD_HARD_STOP_PCT:.0%} 硬止损再挂雷达保本"
+                    ),
                     notify=True,
                 )
+                if not handoff.get("cleared"):
+                    logger.warning(
+                        f"📡 雷达挂止损暂缓：硬止损未净 | 进度 {progress:.0%} | "
+                        f"现价 {curr_px:.2f} | 下轮哨兵重试"
+                    )
+                    return
             self._process_radar_trailing(real_amt, curr_px)
             return
         self._maintain_hard_shield(real_amt, curr_px)
@@ -2274,11 +2289,14 @@ class PositionSupervisorBinance:
             return True
         if self._shield_present_on_exchange():
             curr_px = binance_client.get_current_price(self.symbol) or 0
-            self._force_disarm_shield_before_radar(
+            handoff = self._force_disarm_shield_before_radar(
                 curr_px,
                 reason="挂雷达保本前撤硬止损(兜底)",
                 notify=False,
             )
+            if not handoff.get("cleared"):
+                logger.warning("挂雷达保本阻塞：硬止损仍未净")
+                return False
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         res = binance_client.place_stop_market_order(close_side, dynamic_sl)
         time.sleep(0.35)
@@ -2711,10 +2729,14 @@ class PositionSupervisorBinance:
                 last = self._audit_tp_levels(live_qty)
         return last
 
-    def _has_stop_sl_near(self, sl_price, tolerance=2.0):
+    def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=True):
         target = round(float(sl_price), 2)
+        shield_prices = self._shield_tier_prices() if exclude_shield else []
         for o in binance_client.get_open_orders(self.symbol):
-            if o.get("type") not in ("STOP_MARKET", "STOP"):
+            order_type = str(o.get("type") or o.get("orderType") or "").upper()
+            if order_type not in ("STOP_MARKET", "STOP"):
+                continue
+            if exclude_shield and shield_prices and self._is_shield_stop_order(o, shield_prices):
                 continue
             for key in ("stopPrice", "triggerPrice", "activatePrice"):
                 val = o.get(key)
@@ -3049,7 +3071,7 @@ class PositionSupervisorBinance:
             )
             self._mark_tp_levels_consumed([f["level"] for f in change["tp_fills"]])
             curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
-            self._force_disarm_shield_before_radar(
+            handoff = self._force_disarm_shield_before_radar(
                 curr_px_safe,
                 reason=f"{levels} 成交，交棒雷达保本",
                 notify=True,
@@ -3061,9 +3083,13 @@ class PositionSupervisorBinance:
                 new_qty, dynamic_sl=sl_to_pass,
                 reason=f"{levels} 成交静默对齐",
             )
-            if sl_to_pass and not self._has_stop_sl_near(sl_to_pass):
+            if sl_to_pass and handoff.get("cleared") and not self._has_stop_sl_near(sl_to_pass):
                 self._ensure_radar_sl(sl_to_pass, new_qty)
-            if sl_to_pass and not getattr(self, "_radar_activation_notified", False):
+            if (
+                sl_to_pass
+                and handoff.get("cleared")
+                and not getattr(self, "_radar_activation_notified", False)
+            ):
                 self._report_radar_first_activation(
                     new_qty, curr_px_safe, sl_to_pass,
                     self._has_stop_sl_near(sl_to_pass),
@@ -3739,6 +3765,7 @@ class PositionSupervisorBinance:
         self.shield_tiers_consumed = []
         self.tp_levels_consumed = []
         self._radar_activation_notified = False
+        self._shield_handoff_notified = False
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
@@ -3979,6 +4006,12 @@ class PositionSupervisorBinance:
     def _process_radar_trailing(self, real_amt, curr_px):
         """实时雷达：跟踪 best_price，推升/下压保本止损"""
         if not self._should_radar_trail(curr_px):
+            return False
+        if self._shield_present_on_exchange():
+            logger.warning(
+                f"📡 雷达 trailing 跳过：硬止损仍在盘口 @ "
+                f"{self._shield_stop_price() or '?'}"
+            )
             return False
         new_sl = self._compute_radar_sl()
         if new_sl is None:
