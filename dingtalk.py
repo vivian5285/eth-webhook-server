@@ -11,7 +11,17 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
-from webhook_parser import format_tv_field_sources
+from webhook_parser import (
+    format_tv_field_sources,
+    classify_tv_close,
+    close_type_display_label,
+    CLOSE_TYPE_TP3,
+    CLOSE_TYPE_PROTECT,
+    CLOSE_TYPE_BREAKEVEN,
+    CLOSE_TYPE_HARD_SL,
+    CLOSE_TYPE_VPS_SHIELD,
+    CLOSE_TYPE_GENERIC,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -50,43 +60,63 @@ def _verify_line(verify_note, ok_message, delay_message=None, ok_color=G_MAIN, d
     return _g(ok_message, ok_color)
 
 
-def _classify_close(reason, verify_note="", swept_dust=False):
-    """平仓/收网播报主题分类"""
+def _classify_close(reason, verify_note="", swept_dust=False, close_type="", close_action="",
+                    tv_reason=""):
+    """平仓/收网播报主题 — 与 Pine v6.9.75 四标签对齐"""
     r = reason or ""
     note = verify_note or ""
     is_dust_ctx = swept_dust or "蚂蚁仓" in note or "蚂蚁仓" in r or "重启扫描" in r or "扫尾" in r
+    ct = close_type or classify_tv_close(close_action, tv_reason or r)
 
-    if "TP3" in r or "完美胜利" in r or "止盈" in r or "重启对账" in note:
+    if ct == CLOSE_TYPE_TP3:
         return {
-            "title": "🏆 完美胜利：币安大趋势吃满收网",
+            "title": "🏆 TP3止盈 · 完美收网",
+            "tag": _g("**TP3止盈**", G_LIGHT),
             "status": _g(
-                "三档网格已全部吃掉，暴利安全落袋。"
+                "三档网格全部吃尽，暴利安全落袋。"
                 + ("（含蚂蚁仓扫尾）" if is_dust_ctx else "")
                 + ("（重启对账补发）" if "重启对账" in note else ""),
                 G_LIGHT,
             ),
             "header": G_TITLE,
         }
-    if "被动止损" in r or "STOPLOSS" in r or "保本线" in r or "硬止损" in r:
+    if ct == CLOSE_TYPE_PROTECT:
         return {
-            "title": "🛑 被动止损：硬止损或追踪保本触发",
-            "status": _g("策略被动离场，多空网格全撤，账本复位待命。", G_ACCENT),
-            "header": G_DEEP,
-        }
-    if "保护" in r:
-        return {
-            "title": "🛡️ 战术防守：保护平仓机制触发",
-            "status": _g("趋势警报解除，多空网格全撤，打扫战场空仓待命。", G_ACCENT),
+            "title": "🛡️ 风控拦截 · 保护性全平",
+            "tag": _g("**风控拦截**", G_ACCENT),
+            "status": _g("策略风控触发，多空网格全撤，空仓待命。", G_ACCENT),
             "header": G_ACCENT,
+        }
+    if ct == CLOSE_TYPE_BREAKEVEN:
+        return {
+            "title": "💚 防回吐保本 · 全平收网",
+            "tag": _g("**防回吐保本**", G_LIGHT),
+            "status": _g("追踪保本/微利护体触发，利润锁死离场。", G_MAIN),
+            "header": G_LIGHT,
+        }
+    if ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD):
+        title = (
+            "🛡️ VPS 10%硬止损 · 全平"
+            if ct == CLOSE_TYPE_VPS_SHIELD
+            else "🛑 硬止损 · 全平离场"
+        )
+        tag_txt = "VPS 10%硬止损" if ct == CLOSE_TYPE_VPS_SHIELD else "硬止损"
+        return {
+            "title": title,
+            "tag": _g(f"**{tag_txt}**", G_DEEP),
+            "status": _g("止损触发全平，多空网格全撤，账本复位待命。", G_DEEP),
+            "header": G_DEEP,
         }
     if is_dust_ctx:
         return {
-            "title": "🐜 扫尾收网：币安蚂蚁仓/残量已清零",
+            "title": "🐜 扫尾收网：蚂蚁仓/残量已清零",
+            "tag": _g("**扫尾收网**", G_MUTED),
             "status": _g("止盈残量或蚂蚁仓已 reduceOnly 扫平，账本复位待命。", G_LIGHT),
             "header": G_DEEP,
         }
     return {
         "title": "🧹 先平后开 / 常规清场",
+        "tag": _g("**常规清场**", G_MUTED),
         "status": _g("旧阵地已原子级爆破，账本归零等待新指令。", G_MUTED),
         "header": G_MUTED,
     }
@@ -332,16 +362,23 @@ def report_force_align(real_side, expected_side, verify_note="", verified=True):
 
 def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False,
                             tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
-                            tv_regime=None, tv_atr=None, tv_field_sources=None):
-    theme = _classify_close(reason, verify_note, swept_dust=swept_dust)
-    ok_verify = f"{VERIFY_TAG} | 盘口已无持仓"
-    delay_verify = "⏳ 扫尾/平仓已提交，REST 同步略延迟 | 盘口对齐中"
+                            tv_regime=None, tv_atr=None, tv_field_sources=None,
+                            close_type="", tv_reason="", entry_px=None, closed_qty=None,
+                            live_exit_px=None):
+    theme = _classify_close(
+        reason, verify_note, swept_dust=swept_dust,
+        close_type=close_type, close_action=close_action, tv_reason=tv_reason or reason,
+    )
+    ok_verify = f"{VERIFY_TAG} | 盘口已无持仓 | 挂单已清空"
+    delay_verify = f"⏳ 全平已提交，{VERIFY_DELAY_MARK} | 盘口对齐中"
     if swept_dust or "蚂蚁仓" in (verify_note or ""):
         ok_verify = f"{VERIFY_TAG} | 蚂蚁仓已扫平，盘口已无持仓"
-        delay_verify = "⏳ 蚂蚁仓扫尾已提交，REST 同步略延迟 | 盘口对齐中"
+        delay_verify = f"⏳ 蚂蚁仓扫尾已提交，{VERIFY_DELAY_MARK} | 盘口对齐中"
 
+    ct = close_type or classify_tv_close(close_action, tv_reason or reason, tv_pnl_pct)
     data = {
-        "📋 平仓原理解析": _g(f"**{reason}**", G_MAIN),
+        "🏷️ 收网类型": theme.get("tag") or _g(close_type_display_label(ct, reason), G_MAIN),
+        "📋 策略原由": _g(f"**{tv_reason or reason}**", G_MAIN),
         "✅ 账本状态": theme["status"],
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
@@ -352,12 +389,18 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
     if close_action:
         data["📡 TV动作"] = _g(close_action, G_MUTED)
     if tv_side:
-        data["🎛️ TV方向"] = _g(tv_side, G_LIGHT if tv_side == "LONG" else G_DEEP)
-    if tv_price is not None and float(tv_price or 0) > 0:
-        data["💹 TV价格"] = _g(f"`{float(tv_price):.2f}`", G_MUTED)
+        data["🎛️ 方向"] = _g(tv_side, G_LIGHT if tv_side == "LONG" else G_DEEP)
+    if entry_px is not None and float(entry_px or 0) > 0:
+        data["💰 开仓成本"] = _g(f"`{float(entry_px):.2f}` USDT", G_MUTED)
+    if closed_qty is not None and float(closed_qty or 0) > 0:
+        data["📦 平仓数量"] = _g(f"**{float(closed_qty):.3f}** {UNIT_LABEL}", G_MAIN)
+    if live_exit_px is not None and float(live_exit_px or 0) > 0:
+        data["💹 平仓价格"] = _g(f"`{float(live_exit_px):.2f}` USDT", G_ACCENT)
+    elif tv_price is not None and float(tv_price or 0) > 0:
+        data["💹 TV价格"] = _g(f"`{float(tv_price):.2f}` USDT", G_MUTED)
     if tv_pnl_pct is not None and tv_pnl_pct != "":
         pnl = float(tv_pnl_pct)
-        data["📈 TV盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
+        data["📈 盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
     if tv_regime is not None:
         data["📊 TV档位"] = get_regime_name(int(tv_regime))
     if tv_atr is not None and float(tv_atr or 0) > 0:
