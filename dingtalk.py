@@ -66,6 +66,12 @@ def _classify_close(reason, verify_note="", swept_dust=False):
             ),
             "header": G_TITLE,
         }
+    if "被动止损" in r or "STOPLOSS" in r or "保本线" in r or "硬止损" in r:
+        return {
+            "title": "🛑 被动止损：硬止损或追踪保本触发",
+            "status": _g("策略被动离场，多空网格全撤，账本复位待命。", G_ACCENT),
+            "header": G_DEEP,
+        }
     if "保护" in r:
         return {
             "title": "🛡️ 战术防守：保护平仓机制触发",
@@ -321,7 +327,8 @@ def report_force_align(real_side, expected_side, verify_note="", verified=True):
     send_alert("🚨 严重警告：方向强行物理对齐", data, G_TITLE)
 
 
-def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False):
+def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False,
+                            tv_pnl_pct=None, tv_side="", tv_price=None, close_action=""):
     theme = _classify_close(reason, verify_note, swept_dust=swept_dust)
     ok_verify = f"{VERIFY_TAG} | 盘口已无持仓"
     delay_verify = "⏳ 扫尾/平仓已提交，REST 同步略延迟 | 盘口对齐中"
@@ -338,6 +345,15 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
             delay_verify,
         ),
     }
+    if close_action:
+        data["📡 TV动作"] = _g(close_action, G_MUTED)
+    if tv_side:
+        data["🎛️ TV方向"] = _g(tv_side, G_LIGHT if tv_side == "LONG" else G_DEEP)
+    if tv_price is not None and float(tv_price or 0) > 0:
+        data["💹 TV价格"] = _g(f"`{float(tv_price):.2f}`", G_MUTED)
+    if tv_pnl_pct is not None and tv_pnl_pct != "":
+        pnl = float(tv_pnl_pct)
+        data["📈 TV盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
     send_alert(theme["title"], data, theme["header"])

@@ -370,4 +370,20 @@ class BinanceClient:
             logger.error(f"[市价平仓失败] {symbol}: {e}")
             return None
 
+    def fetch_atr_14(self, symbol="ETHUSDT", interval="15m", period=14):
+        """REST K 线计算 ATR(14)，失败时回退公开接口。"""
+        try:
+            from webhook_parser import compute_atr_from_klines
+            klines = self.client.futures_klines(
+                symbol=symbol, interval=interval, limit=period + 20,
+            )
+            atr = compute_atr_from_klines(klines, period)
+            if atr > 0:
+                return atr
+        except Exception as e:
+            logger.warning(f"[ATR] {symbol} REST 计算失败: {e}")
+        from webhook_parser import fetch_eth_atr_14_public
+        return fetch_eth_atr_14_public(period)
+
+
 binance_client = BinanceClient()
