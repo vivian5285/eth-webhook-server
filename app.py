@@ -51,7 +51,7 @@ def health():
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
-        "version": "v13.9.1-tv-full-payload",
+        "version": "v13.9.2-algo-shield-audit",
         "tv_strategy": TV_STRATEGY_VERSION,
         "leverage": 15,
     }), 200

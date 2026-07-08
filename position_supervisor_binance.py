@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.9.1-tv-full-payload"
+BINANCE_VPS_VERSION = "v13.9.2-algo-shield-audit"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -1192,7 +1192,7 @@ class PositionSupervisorBinance:
         cancelled = 0
         for o in audit["orphans"]:
             if o.get("orderId"):
-                binance_client.cancel_order(self.symbol, o["orderId"])
+                binance_client.cancel_order(self.symbol, order=o)
                 cancelled += 1
                 time.sleep(0.2)
         if cancelled:
@@ -1238,7 +1238,7 @@ class PositionSupervisorBinance:
                 for o in at_px:
                     if o["orderId"] == keep["orderId"]:
                         continue
-                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    binance_client.cancel_order(self.symbol, order=o)
                     actions += 1
                     time.sleep(0.2)
                 logger.info(
@@ -1295,7 +1295,7 @@ class PositionSupervisorBinance:
                 continue
             oid = o.get("orderId")
             if oid:
-                binance_client.cancel_order(self.symbol, oid)
+                binance_client.cancel_order(self.symbol, order=o)
                 cancelled += 1
                 time.sleep(0.2)
         return cancelled
@@ -1332,13 +1332,14 @@ class PositionSupervisorBinance:
         if px is None:
             return False
         tier_prices = tier_prices or self._shield_tier_prices()
-        if not any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices):
+        if not any(abs(px - tp) <= SHIELD_STOP_TOLERANCE for tp in tier_prices if tp):
             return False
-        if str(o.get("closePosition", "")).lower() == "true":
+        order_type = str(o.get("type") or o.get("orderType") or "").upper()
+        if binance_client._truthy_close_position(o.get("closePosition")):
             return True
-        if o.get("type") not in ("STOP", "STOP_MARKET"):
-            return False
-        return True
+        if order_type in ("STOP", "STOP_MARKET"):
+            return True
+        return False
 
     def _is_radar_stop_order(self, o):
         if o.get("type") not in ("STOP", "STOP_MARKET"):
@@ -1541,19 +1542,20 @@ class PositionSupervisorBinance:
         live_qty = self._resolve_live_qty(self.watched_qty or 0)
         buckets = {i: [] for i in range(len(tier_prices))}
         for o in binance_client.get_open_orders(self.symbol):
-            if o.get("type") not in ("STOP", "STOP_MARKET"):
+            order_type = str(o.get("type") or o.get("orderType") or "").upper()
+            if order_type not in ("STOP", "STOP_MARKET"):
                 continue
             px = self._order_stop_price(o)
             if px is None:
                 continue
             if not self._is_shield_stop_order(o, tier_prices):
                 continue
-            if str(o.get("closePosition", "")).lower() == "true":
+            if binance_client._truthy_close_position(o.get("closePosition")):
                 oqty = live_qty
             else:
                 oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
             for i, tp in enumerate(tier_prices):
-                if abs(px - tp) <= SHIELD_STOP_TOLERANCE:
+                if tp and abs(px - tp) <= SHIELD_STOP_TOLERANCE:
                     buckets[i].append({"order": o, "qty": oqty})
                     break
         return buckets
@@ -1569,7 +1571,7 @@ class PositionSupervisorBinance:
                 continue
             oid = o.get("orderId")
             if oid:
-                binance_client.cancel_order(self.symbol, oid)
+                binance_client.cancel_order(self.symbol, order=o)
                 cancelled += 1
                 time.sleep(0.15)
         return cancelled
@@ -2194,7 +2196,7 @@ class PositionSupervisorBinance:
                 continue
             for o in at_px:
                 if o.get("orderId"):
-                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    binance_client.cancel_order(self.symbol, order=o)
                     time.sleep(0.25)
             logger.info(f"  + 补挂 TP{lv['level']} @ {px:.2f} qty={q} ETH")
             if binance_client.place_limit_order(close_side, q, px, reduce_only=True):
@@ -2767,7 +2769,7 @@ class PositionSupervisorBinance:
                 continue
             for o in self._collect_tp_limit_orders():
                 if abs(o["price"] - px) <= 1.0 and o.get("orderId"):
-                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    binance_client.cancel_order(self.symbol, order=o)
                     cancelled += 1
                     time.sleep(0.2)
         if cancelled:
@@ -2787,7 +2789,7 @@ class PositionSupervisorBinance:
             ]
             for o in at_px:
                 if abs(o["qty"] - target_q) > qty_tol and o.get("orderId"):
-                    binance_client.cancel_order(self.symbol, o["orderId"])
+                    binance_client.cancel_order(self.symbol, order=o)
                     cancelled += 1
                     time.sleep(0.2)
                     logger.info(
@@ -3772,6 +3774,21 @@ class PositionSupervisorBinance:
             )
             if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
                 verify_note += f" | ⚠️ 超标目标 {target_qty} ETH"
+            curr_px = binance_client.get_current_price(self.symbol) or entry_price
+            if self._should_activate_shield(curr_px):
+                shield_ok = self._maintain_hard_shield(live_qty, curr_px, force=True)
+                stop_px = self._shield_stop_price(verified["entry_price"])
+                if shield_ok:
+                    verify_note += (
+                        f" | 10%硬止损已核实"
+                        + (f" @ {stop_px:.2f}" if stop_px else "")
+                    )
+                else:
+                    shield_audit = self._audit_shield_orders(live_qty, verified["entry_price"])
+                    verify_note += (
+                        f" | 10%硬止损待核实"
+                        + (f" ({','.join(shield_audit.get('issues', []))})" if shield_audit.get("issues") else "")
+                    )
             self._record_open_log(
                 self.current_side, live_qty, verified["entry_price"], source="open",
             )
@@ -3805,12 +3822,6 @@ class PositionSupervisorBinance:
                     "开仓后限价止盈未全部挂上",
                     f"{self.current_side} {live_qty} ETH | 仅 {matched}/{expected} 档 | "
                     f"{self._format_audit_summary(audit)} | {hint}",
-                )
-            curr_px = binance_client.get_current_price(self.symbol) or entry_price
-            if self._should_activate_shield(curr_px):
-                self._maintain_hard_shield(
-                    live_qty, curr_px,
-                    force=True,
                 )
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")

@@ -28,7 +28,92 @@ class BinanceClient:
         self._pub_ws_symbol = None
         self._rest_price_min_interval = 30
         self._last_rest_price_fetch = 0.0
-        logger.info("🟢 Binance Client v13.4.6-flat-reconcile 已加载")
+        logger.info("🟢 Binance Client v13.9.2-algo-shield-audit 已加载")
+
+    @staticmethod
+    def _is_algo_switch_error(err):
+        text = str(err or "")
+        return "-4120" in text or "STOP_ORDER_SWITCH_ALGO" in text or "algo" in text.lower()
+
+    @staticmethod
+    def _truthy_close_position(val):
+        if val is True:
+            return True
+        return str(val or "").strip().lower() in ("true", "1", "yes")
+
+    def _futures_signed_request(self, method, path, params=None):
+        params = dict(params or {})
+        return self.client._request_futures_api(
+            method.lower(), path, signed=True, data=params,
+        )
+
+    def _normalize_algo_order(self, raw):
+        """Algo 条件单 → 与普通 open order 兼容的结构（供硬止损/雷达审计）"""
+        if not isinstance(raw, dict):
+            return None
+        order_type = raw.get("orderType") or raw.get("type") or ""
+        trigger = raw.get("triggerPrice") or raw.get("stopPrice")
+        algo_id = raw.get("algoId") or raw.get("orderId")
+        if not algo_id:
+            return None
+        return {
+            "orderId": algo_id,
+            "algoId": algo_id,
+            "isAlgoOrder": True,
+            "type": order_type,
+            "stopPrice": trigger,
+            "triggerPrice": trigger,
+            "closePosition": raw.get("closePosition"),
+            "side": raw.get("side"),
+            "origQty": raw.get("quantity") or raw.get("origQty") or "0",
+            "quantity": raw.get("quantity") or raw.get("origQty") or "0",
+            "reduceOnly": raw.get("reduceOnly"),
+            "status": raw.get("algoStatus") or raw.get("status"),
+            "positionSide": raw.get("positionSide"),
+        }
+
+    def get_open_algo_orders(self, symbol="ETHUSDT"):
+        """币安 2025+ 条件单（含 closePosition 硬止损）在 Algo 通道"""
+        try:
+            rows = self._futures_signed_request(
+                "get", "openAlgoOrders", {"symbol": symbol},
+            )
+            if not isinstance(rows, list):
+                return []
+            out = []
+            for row in rows:
+                norm = self._normalize_algo_order(row)
+                if norm:
+                    out.append(norm)
+            return out
+        except Exception as e:
+            logger.warning(f"[Algo挂单查询] {symbol}: {e}")
+            return []
+
+    def get_open_orders(self, symbol="ETHUSDT", include_algo=True):
+        try:
+            orders = list(self.client.futures_get_open_orders(symbol=symbol) or [])
+        except Exception as e:
+            logger.error(f"[获取挂单失败] {symbol}: {e}")
+            orders = []
+        if not include_algo:
+            return orders
+        algo_orders = self.get_open_algo_orders(symbol)
+        if not algo_orders:
+            return orders
+        seen = {str(o.get("orderId")) for o in orders if o.get("orderId")}
+        merged = list(orders)
+        for ao in algo_orders:
+            aid = str(ao.get("algoId") or ao.get("orderId") or "")
+            if aid and aid not in seen:
+                merged.append(ao)
+                seen.add(aid)
+        if algo_orders:
+            logger.debug(
+                f"[挂单合并] {symbol} 普通 {len(orders)} + Algo {len(algo_orders)} "
+                f"→ 合计 {len(merged)}"
+            )
+        return merged
 
     def _load_symbol_filters(self, symbol="ETHUSDT"):
         if symbol in self._symbol_filters:
@@ -234,14 +319,6 @@ class BinanceClient:
             logger.error(f"[查询持仓失败] {symbol}: {e}")
             return None
 
-    def get_open_orders(self, symbol="ETHUSDT"):
-        try:
-            orders = self.client.futures_get_open_orders(symbol=symbol)
-            return orders
-        except Exception as e:
-            logger.error(f"[获取挂单失败] {symbol}: {e}")
-            return []
-
     def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False):
         qty = self.format_quantity(quantity, symbol)
         if qty <= 0:
@@ -284,6 +361,31 @@ class BinanceClient:
             logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
             return None
 
+    def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT", close_position=True):
+        """Algo 通道 STOP_MARKET（closePosition 全平硬止损）"""
+        try:
+            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            params = {
+                "algoType": "CONDITIONAL",
+                "symbol": symbol,
+                "side": binance_side,
+                "type": "STOP_MARKET",
+                "triggerPrice": self.format_price(stop_price, symbol),
+            }
+            if close_position:
+                params["closePosition"] = "true"
+            order = self._futures_signed_request("post", "algoOrder", params)
+            logger.info(
+                f"[Algo止损成功] {side} closePosition Stop @ {stop_price} "
+                f"algoId={order.get('algoId', '') if isinstance(order, dict) else '?'}"
+            )
+            if isinstance(order, dict):
+                order.setdefault("isAlgoOrder", True)
+            return order
+        except Exception as e:
+            logger.error(f"[Algo止损失败] {side} Stop @ {stop_price}: {e}")
+            return None
+
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT", quantity=None):
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
@@ -305,6 +407,13 @@ class BinanceClient:
             logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price}")
             return order
         except Exception as e:
+            if quantity is None and self._is_algo_switch_error(e):
+                logger.info(
+                    f"[止损单] 普通通道不可用({e}) → 切换 Algo closePosition @ {stop_price}"
+                )
+                return self.place_algo_stop_market_order(
+                    side, stop_price, symbol=symbol, close_position=True,
+                )
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 
@@ -335,7 +444,26 @@ class BinanceClient:
             logger.error(f"[限价止损失败] {side} {qty} stop@{stop_price}: {e}")
             return None
 
-    def cancel_order(self, symbol="ETHUSDT", order_id=None):
+    def cancel_algo_order(self, symbol="ETHUSDT", algo_id=None):
+        if not algo_id:
+            return None
+        try:
+            res = self._futures_signed_request(
+                "delete", "algoOrder", {"symbol": symbol, "algoId": int(algo_id)},
+            )
+            logger.info(f"[Algo撤单成功] {symbol} algoId={algo_id}")
+            return res
+        except Exception as e:
+            logger.error(f"[Algo撤单失败] {symbol} algoId={algo_id}: {e}")
+            return None
+
+    def cancel_order(self, symbol="ETHUSDT", order_id=None, order=None):
+        if order and isinstance(order, dict):
+            if order.get("isAlgoOrder") or order.get("algoId"):
+                return self.cancel_algo_order(
+                    symbol, order.get("algoId") or order.get("orderId"),
+                )
+            order_id = order.get("orderId") or order_id
         if not order_id:
             return None
         try:
@@ -343,15 +471,23 @@ class BinanceClient:
             logger.info(f"[撤单成功] {symbol} orderId={order_id}")
             return res
         except Exception as e:
+            err = str(e)
+            if "-2011" in err or "Unknown order" in err or "Order does not exist" in err:
+                return self.cancel_algo_order(symbol, order_id)
             logger.error(f"[撤单失败] {symbol} orderId={order_id}: {e}")
             return None
 
     def cancel_all_open_orders(self, symbol="ETHUSDT"):
         try:
             self.client.futures_cancel_all_open_orders(symbol=symbol)
-            logger.info(f"[撤单成功] {symbol} 全部挂单已撤销")
+            logger.info(f"[撤单成功] {symbol} 全部普通挂单已撤销")
         except Exception as e:
-            logger.error(f"[撤单失败] {symbol}: {e}")
+            logger.error(f"[撤单失败] {symbol} 普通挂单: {e}")
+        try:
+            self._futures_signed_request("delete", "algoOpenOrders", {"symbol": symbol})
+            logger.info(f"[撤单成功] {symbol} 全部 Algo 条件单已撤销")
+        except Exception as e:
+            logger.warning(f"[撤单] {symbol} Algo 条件单: {e}")
 
     def close_all_positions(self, symbol="ETHUSDT"):
         try:
