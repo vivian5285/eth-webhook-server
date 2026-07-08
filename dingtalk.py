@@ -11,6 +11,7 @@ import logging
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+from webhook_parser import format_tv_field_sources
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -220,7 +221,8 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
 
 def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
                            verify_note="", tp_audit=None, verified=True,
-                           principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None):
+                           principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None,
+                           tv_field_sources=None):
     side_str = _g("🔶 开多 (LONG)", G_LIGHT) if side == "LONG" else _g("🟤 开空 (SHORT)", G_DEEP)
     slip_txt = (
         f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
@@ -238,6 +240,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
             G_LIGHT,
         ),
         "📏 波动参考": _g(f"ATR = {atr:.4f}", G_MUTED),
+        "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
             f"🟢 {VERIFY_TAG} | 限价 TP123 已挂，雷达待命",
@@ -328,7 +331,8 @@ def report_force_align(real_side, expected_side, verify_note="", verified=True):
 
 
 def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False,
-                            tv_pnl_pct=None, tv_side="", tv_price=None, close_action=""):
+                            tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
+                            tv_regime=None, tv_atr=None, tv_field_sources=None):
     theme = _classify_close(reason, verify_note, swept_dust=swept_dust)
     ok_verify = f"{VERIFY_TAG} | 盘口已无持仓"
     delay_verify = "⏳ 扫尾/平仓已提交，REST 同步略延迟 | 盘口对齐中"
@@ -354,6 +358,12 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
     if tv_pnl_pct is not None and tv_pnl_pct != "":
         pnl = float(tv_pnl_pct)
         data["📈 TV盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
+    if tv_regime is not None:
+        data["📊 TV档位"] = get_regime_name(int(tv_regime))
+    if tv_atr is not None and float(tv_atr or 0) > 0:
+        data["📏 TV ATR"] = _g(f"`{float(tv_atr):.4f}`", G_MUTED)
+    if tv_field_sources:
+        data["📡 TV字段"] = _g(format_tv_field_sources(tv_field_sources), G_MUTED)
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
     send_alert(theme["title"], data, theme["header"])
