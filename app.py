@@ -31,6 +31,13 @@ def webhook():
         return jsonify({"status": "error", "message": "Missing or invalid action"}), 400
 
     raw_action = data.get("action", "UNKNOWN")
+    if raw_action == "PING":
+        return jsonify({
+            "status": "success",
+            "message": "pong",
+            "action": "PING",
+            "schema": TV_STRATEGY_VERSION,
+        }), 200
     logger.info(f"[Webhook] {format_webhook_log(data)}")
 
     try:
@@ -51,7 +58,7 @@ def health():
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
-        "version": "v13.9.3-radar-shield-handoff",
+        "version": "v13.9.4-webhook-ping-health",
         "tv_strategy": TV_STRATEGY_VERSION,
         "leverage": 15,
     }), 200
