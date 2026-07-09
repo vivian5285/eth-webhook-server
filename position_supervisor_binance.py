@@ -37,7 +37,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.10.0-tv-proportional"
+BINANCE_VPS_VERSION = "v13.11.0-tv-pure-sl"
+EXCHANGE_LEVERAGE = 5  # 交易所实盘固定 5x；TV payload leverage 仅用于比例 sizing
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -55,7 +56,7 @@ CAP_MIN_RETAIN_RATIO = 0.25
 CAP_TRIM_MAX_ROUNDS = 4
 QTY_DRIFT_TOLERANCE_PCT = 0.015  # 微漂 ≤1.5%：仅同步账本，不对齐
 QTY_ALIGN_MIN_PCT = 0.10         # 偏离 ≥10% 才视为离谱，触发对齐/档位裁减
-SHIELD_HARD_STOP_PCT = 0.10  # 开仓价 ±10% 硬止损全平（开单即挂，雷达激活后撤）
+SHIELD_HARD_STOP_PCT = 0.10  # 历史常量（仅哨兵成交分类标签）；止损价 exclusively TV tv_sl
 SHIELD_TIER_PCTS = (SHIELD_HARD_STOP_PCT,)
 SHIELD_TIER_RATIOS = (1.0,)
 SHIELD_STOP_TOLERANCE = 2.0
@@ -85,7 +86,8 @@ class PositionSupervisorBinance:
             3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.60, "trail_offset": 0.90},
             4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.70, "trail_offset": 1.30},
         }
-        self.leverage = 15
+        self.leverage = EXCHANGE_LEVERAGE
+        self.tv_sizing_leverage = EXCHANGE_LEVERAGE
 
         self.regime = 3
         self.current_atr = 30.0
@@ -314,6 +316,19 @@ class PositionSupervisorBinance:
             + sizing_note
             + (f" | pnl={payload.get('pnl_pct')}%" if payload.get("pnl_pct") is not None else "")
         )
+        self._call_dingtalk(
+            dingtalk.report_tv_signal_received,
+            action=raw_action,
+            entry_type=payload.get("entry_type"),
+            price=self.tv_price,
+            regime=self.regime,
+            atr=self.current_atr,
+            tv_sl=payload.get("tv_sl"),
+            risk_pct=payload.get("risk_pct"),
+            leverage=payload.get("leverage"),
+            qty_ratio=payload.get("qty_ratio"),
+            reason=payload.get("reason", ""),
+        )
 
     def _record_open_log(self, side, qty, entry, source="open"):
         self._append_journal(OPEN_JOURNAL, {
@@ -483,6 +498,10 @@ class PositionSupervisorBinance:
                     "tv_risk_pct": float(getattr(self, "tv_risk_pct", 0) or 0),
                     "tv_qty_ratio": float(getattr(self, "tv_qty_ratio", 1.0) or 1.0),
                     "tv_entry_type": getattr(self, "tv_entry_type", ENTRY_TYPE_OPEN),
+                    "leverage": EXCHANGE_LEVERAGE,
+                    "tv_sizing_leverage": float(
+                        getattr(self, "tv_sizing_leverage", EXCHANGE_LEVERAGE) or EXCHANGE_LEVERAGE
+                    ),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -631,10 +650,10 @@ class PositionSupervisorBinance:
         return risk > 0
 
     def _apply_tv_sizing_params(self, payload):
-        """v6.9.85：解析 risk_pct / leverage / qty_ratio / entry_type"""
+        """v6.9.85：解析 risk_pct / qty_ratio / entry_type；TV leverage 仅用于 sizing"""
         lev = self._safe_float(payload.get("leverage"), 0)
         if lev > 0:
-            self.leverage = max(1, int(round(lev)))
+            self.tv_sizing_leverage = max(1, int(round(lev)))
         risk = self._safe_float(payload.get("risk_pct"), 0)
         if risk > 0:
             self.tv_risk_pct = risk
@@ -644,10 +663,11 @@ class PositionSupervisorBinance:
         elif normalize_entry_type(payload.get("entry_type")) == ENTRY_TYPE_OPEN:
             self.tv_qty_ratio = 1.0
         self.tv_entry_type = normalize_entry_type(payload.get("entry_type"))
+        self.leverage = EXCHANGE_LEVERAGE
         self._save_state()
         logger.info(
-            f"📐 TV比例参数: {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio)} "
-            f"| type={self.tv_entry_type}"
+            f"📐 TV比例参数: {format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio)} "
+            f"| type={self.tv_entry_type} | 交易所杠杆={EXCHANGE_LEVERAGE}x"
         )
 
     def _calc_tv_target_qty(self, curr_px, qty_ratio=None, tv_sl=None):
@@ -664,7 +684,7 @@ class PositionSupervisorBinance:
         qty, meta = compute_tv_order_qty(
             principal,
             getattr(self, "tv_risk_pct", 0),
-            self.leverage,
+            getattr(self, "tv_sizing_leverage", EXCHANGE_LEVERAGE),
             ratio,
             px,
             sl,
@@ -1448,22 +1468,13 @@ class PositionSupervisorBinance:
         return None
 
     def _legacy_shield_stop_price(self, entry=None):
-        """无 TV tv_sl 透传时的 fallback：开仓价 ±10%"""
-        entry = float(entry or self.watched_entry or 0)
-        if entry <= 0:
-            return None
-        if self.current_side == "LONG":
-            return round(entry * (1 - SHIELD_HARD_STOP_PCT), 2)
-        if self.current_side == "SHORT":
-            return round(entry * (1 + SHIELD_HARD_STOP_PCT), 2)
+        """已废弃：止损价 exclusively 来自 TV tv_sl"""
         return None
 
     def _shield_stop_price(self, entry=None):
-        """TV tv_sl 优先；无透传时 fallback entry±10%"""
+        """TV tv_sl 为唯一硬止损价"""
         tv = round(float(getattr(self, "tv_sl", 0) or 0), 2)
-        if tv > 0:
-            return tv
-        return self._legacy_shield_stop_price(entry)
+        return tv if tv > 0 else None
 
     def _apply_tv_sl_from_payload(self, payload, source=""):
         """解析并持久化 TV 动态硬止损价"""
@@ -1691,7 +1702,7 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _resolve_defense_regime(self, curr_px):
-        """FAVORABLE=雷达已/应激活 | SHIELD=维护10%硬止损"""
+        """FAVORABLE=雷达已/应激活 | SHIELD=维护 TV tv_sl 硬止损"""
         if curr_px <= 0 or not self.watched_entry:
             return "SHIELD"
         if self._is_radar_active() or self._should_radar_trail(curr_px):
@@ -1717,8 +1728,7 @@ class PositionSupervisorBinance:
 
     def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
         """
-        雷达接管前强制撤净 10% 硬止损（含 closePosition / Algo 条件单）。
-        Binance 同一方向仅允许一个 closePosition，必须先撤硬止损再挂雷达保本。
+        雷达接管前强制撤净 TV 硬止损 closePosition 单，再挂雷达移动保本。
         返回: dict(cancelled, cleared, verified)
         """
         stop_px = self._shield_stop_price()
@@ -1753,8 +1763,8 @@ class PositionSupervisorBinance:
             )
         if notify and (n > 0 or ((had_flag or had_exchange) and not getattr(self, "_shield_handoff_notified", False))):
             verify_note = (
-                f"撤 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 硬止损 @ {stop_px:.2f}"
-                if stop_px else f"撤 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 硬止损"
+                f"撤 {n} 笔 TV硬止损 @ {stop_px:.2f}"
+                if stop_px else f"撤 {n} 笔 TV硬止损"
             )
             if still_there:
                 verify_note += " | ⚠️ 盘口仍残留，雷达挂止损暂缓"
@@ -1778,7 +1788,7 @@ class PositionSupervisorBinance:
         return {"cancelled": n, "cleared": not still_there, "verified": verified}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
-        """雷达达到 TP1 激活比例 → 撤 10% 硬止损，交棒移动保本"""
+        """雷达达到 TP1 激活比例 → 撤 TV 硬止损，交棒移动保本"""
         stop_px = self._shield_stop_price()
         has_shield = bool(
             getattr(self, "shield_active", False)
@@ -2160,7 +2170,7 @@ class PositionSupervisorBinance:
         tv_note = (
             f"TV硬止损"
             if getattr(self, "tv_sl", 0) > 0
-            else f"fallback±{SHIELD_HARD_STOP_PCT:.0%}"
+            else "TV tv_sl 缺失"
         )
         tag = (
             f"合并止损@{stop_px:.2f}"
@@ -2225,7 +2235,7 @@ class PositionSupervisorBinance:
         self._shield_arm_notified = False
         self._save_state()
         if reason and (had or n):
-            logger.info(f"🛡️ [硬止损解除] {reason} | 撤销 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 止损")
+            logger.info(f"🛡️ [硬止损解除] {reason} | 撤销 {n} 笔 TV硬止损")
         if notify and n > 0:
             progress = 0.0
             try:
@@ -2242,7 +2252,7 @@ class PositionSupervisorBinance:
                 reason=reason,
                 radar_progress=progress,
                 verify_note=(
-                    f"撤 {n} 笔 {SHIELD_HARD_STOP_PCT:.0%} 硬止损 | "
+                    f"撤 {n} 笔 TV硬止损 | "
                     f"{'雷达已激活，专注移动保本' if progress >= 1.0 else f'雷达进度 {progress:.0%}，推升止损防回吐'}"
                 ),
             )
@@ -2289,7 +2299,7 @@ class PositionSupervisorBinance:
         purged = self._purge_shield_stop_orders(tier_prices)
         if purged:
             logger.warning(
-                f"🛡️ 撤净旧硬止损 {purged} 笔 → 按实盘 {live_qty} ETH 重挂 @ -{SHIELD_HARD_STOP_PCT:.0%}"
+                f"🛡️ 撤净旧硬止损 {purged} 笔 → 按实盘 {live_qty} ETH 重挂 @ tv_sl"
             )
             time.sleep(0.6)
 
@@ -2304,7 +2314,7 @@ class PositionSupervisorBinance:
             if res:
                 placed += 1
                 logger.info(
-                    f"🛡️ 硬止损 -{SHIELD_HARD_STOP_PCT:.0%}: "
+                    f"🛡️ TV硬止损: "
                     f"closePosition 全平 @ {tp:.2f} (实盘 {live_qty} ETH)"
                 )
             time.sleep(0.35)
@@ -2322,7 +2332,7 @@ class PositionSupervisorBinance:
             self._save_state()
             stop_px = tier_prices[0] if tier_prices else entry
             logger.warning(
-                f"🛡️ [10%硬止损] 已挂 | closePosition @ {stop_px:.2f} | "
+                f"🛡️ [TV硬止损] 已挂 | closePosition @ {stop_px:.2f} | "
                 f"新挂 {placed} 笔 | 雷达激活后自动撤销"
             )
             if not getattr(self, "_shield_arm_notified", False):
@@ -2332,17 +2342,17 @@ class PositionSupervisorBinance:
                     side=self.current_side,
                     entry=entry,
                     live_qty=live_qty,
-                    adverse_pct=SHIELD_HARD_STOP_PCT,
+                    adverse_pct=0,
                     tier_prices=[stop_px],
                     tier_pcts=SHIELD_TIER_PCTS,
                     verify_note=(
-                        (reason or f"开仓价 ±{SHIELD_HARD_STOP_PCT:.0%} 硬止损全平")
+                        (reason or f"TV硬止损 tv_sl @ {stop_px:.2f}")
                         + f" | closePosition @ {stop_px:.2f} | 仅播报一次"
                     ),
                 )
         elif placed > 0 and not suppress_alert:
             dingtalk.report_system_alert(
-                "10%硬止损未对齐",
+                "TV硬止损未对齐",
                 f"已撤旧单 {purged} 笔、新挂 {placed} 笔，但核实未通过 | "
                 f"实盘 {live_qty} ETH | {', '.join(post_audit.get('issues', []))}",
                 suggestion="系统已退避冷却，下轮自动重试；请勿手动重复挂",
@@ -2374,39 +2384,15 @@ class PositionSupervisorBinance:
                 force=force,
             ).get("ok", False)
 
-        live_qty = self._resolve_live_qty(real_amt)
-        audit = self._audit_shield_orders(live_qty)
-
-        if self._shield_orders_adequate(audit):
-            self.shield_active = True
-            self._shield_fail_streak = 0
-            if not getattr(self, "shield_sized_qty", 0):
-                self.shield_sized_qty = live_qty
-            self._save_state()
-            return True
-
-        if not force and not self._shield_needs_exchange_action(live_qty, audit):
-            self.shield_active = True
-            self.shield_sized_qty = live_qty
-            self._save_state()
-            return True
-
-        if not self._can_maintain_shield_now(force=force, audit=audit):
-            return getattr(self, "shield_active", False)
-
-        if audit["status"] == "duplicate" and not force:
-            purged = self._purge_shield_stop_orders(audit["tier_prices"])
-            self._record_shield_maintain(success=False)
-            logger.warning(
-                f"🛡️ 硬止损叠单清理：撤 {purged} 笔，冷却后再按实盘 {live_qty} ETH 补挂"
+        if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
+            logger.error("维护TV硬止损失败：缺少 tv_sl，拒绝 fallback 旧逻辑")
+            dingtalk.report_system_alert(
+                "TV硬止损缺失",
+                f"持仓 {real_amt} ETH 但未收到 tv_sl，无法挂止损",
+                suggestion="请确认 TV 策略已透传 tv_sl，或发送 UPDATE_SL",
             )
-            return False
-
-        return self._place_shield_stops(
-            live_qty,
-            reason=f"维护 {SHIELD_HARD_STOP_PCT:.0%} 硬止损 fallback",
-            force=force,
-        )
+            self._tv_sl_missing_alerted = True
+        return False
 
     def _process_adverse_shield(self, real_amt, curr_px):
         """兼容旧调用 → 维护硬止损"""
@@ -3390,7 +3376,7 @@ class PositionSupervisorBinance:
         elif kind == "shield_fill":
             f = change["shield_fills"][0]
             logger.warning(
-                f"🛡️ [智慧大脑] {SHIELD_HARD_STOP_PCT:.0%}硬止损成交 "
+                f"🛡️ [智慧大脑] TV硬止损成交 "
                 f"{old_qty} ➔ {new_qty} @ {f['price']:.2f}"
             )
             if new_qty <= 0.0005 or self._is_dust_qty(new_qty):
@@ -3398,10 +3384,10 @@ class PositionSupervisorBinance:
                     "CLOSE_STOPLOSS",
                     self.current_side,
                     self._estimate_pnl_pct(curr_px),
-                    "触碰硬止损平仓（VPS 10%硬止损）",
+                    "触碰硬止损平仓（TV tv_sl）",
                 )
                 flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
-                self._disarm_shield("10%硬止损全平", notify=False)
+                self._disarm_shield("TV硬止损全平", notify=False)
                 self._handle_manual_flat_detected(
                     flat_meta["tv_reason"],
                     close_meta=flat_meta,
@@ -3409,7 +3395,7 @@ class PositionSupervisorBinance:
                 )
                 self._save_state()
                 return change, None
-            self._disarm_shield("10%硬止损成交", notify=True)
+            self._disarm_shield("TV硬止损成交", notify=True)
             self.shield_tiers_consumed = []
             result = self._smart_realign_defenses(
                 new_qty, self.watched_entry, dynamic_sl=None,
@@ -3674,7 +3660,7 @@ class PositionSupervisorBinance:
             est = self._estimate_pnl_pct(curr_px)
             return self._build_close_meta(
                 "CLOSE_STOPLOSS", self.current_side, est,
-                "触碰硬止损平仓（VPS 10%硬止损）",
+                "触碰硬止损平仓（TV tv_sl）",
             )
         return self._build_close_meta("CLOSE", self.current_side, None, hint_reason or "仓位归零")
 
@@ -4040,14 +4026,14 @@ class PositionSupervisorBinance:
             logger.error(f"{entry_type} 跳过：计算加仓量无效 {meta}")
             dingtalk.report_system_alert(
                 f"{entry_type} 数量无效",
-                f"比例计算失败: {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance)}",
+                f"比例计算失败: {format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio, balance)}",
             )
             return
 
-        binance_client.set_leverage(self.symbol, leverage=self.leverage)
+        binance_client.set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)
         logger.info(
             f"➕ [{entry_type}] {action} 追加 {add_qty} ETH | "
-            f"{format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, add_qty)}"
+            f"{format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio, balance, add_qty)}"
         )
         order = binance_client.place_market_order(action, add_qty)
         if not order:
@@ -4078,7 +4064,7 @@ class PositionSupervisorBinance:
         sl_ok = self._maintain_hard_shield(new_qty, curr_px, force=True)
         type_label = "浮盈加仓" if entry_type == ENTRY_TYPE_PROFIT_ADD else "金字塔加仓"
         verify_note = (
-            f"{type_label} | {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, add_qty)} "
+            f"{type_label} | {format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio, balance, add_qty)} "
             f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {new_entry:.2f} "
             f"| tv_sl={getattr(self, 'tv_sl', 0):.2f} "
             f"| {'止损已核实' if sl_ok else '止损待核实'}"
@@ -4094,7 +4080,7 @@ class PositionSupervisorBinance:
             new_entry=new_entry,
             tv_sl=getattr(self, "tv_sl", 0),
             risk_pct=self.tv_risk_pct,
-            leverage=self.leverage,
+            leverage=self.tv_sizing_leverage,
             qty_ratio=self.tv_qty_ratio,
             verify_note=verify_note,
             verified=sl_ok,
@@ -4216,11 +4202,11 @@ class PositionSupervisorBinance:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
                 return
 
-            binance_client.set_leverage(self.symbol, leverage=self.leverage)
+            binance_client.set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)
             notional = qty * curr_px
             if self._uses_tv_proportional_sizing(payload):
                 budget_txt = (
-                    f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, qty)} "
+                    f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio, balance, qty)} "
                     f"| stop_dist→qty"
                 )
             else:
@@ -4275,7 +4261,7 @@ class PositionSupervisorBinance:
             self._protect_and_monitor(
                 real_qty, pos["entry_price"],
                 budget_note=(
-                    (f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, qty)} | "
+                    (f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.tv_sizing_leverage, self.tv_qty_ratio, balance, qty)} | "
                      if self._uses_tv_proportional_sizing(payload) else
                      f"本金 {balance:.0f}U | R{self.regime} {margin_pct:.0%} "
                      f"→ 保证金 {margin_usdt:.0f}U | 目标 {qty} ETH | ")
@@ -4336,7 +4322,7 @@ class PositionSupervisorBinance:
                 tv_sl_note = (
                     f"TV硬止损 @ {self.tv_sl:.2f}"
                     if getattr(self, "tv_sl", 0) > 0
-                    else f"fallback ±{SHIELD_HARD_STOP_PCT:.0%}"
+                    else "TV tv_sl 待透传"
                 )
                 if shield_ok:
                     verify_note += (
@@ -4848,9 +4834,11 @@ class PositionSupervisorBinance:
                     self.tv_risk_pct = float(s.get("tv_risk_pct", 0) or 0)
                     self.tv_qty_ratio = float(s.get("tv_qty_ratio", 1.0) or 1.0)
                     self.tv_entry_type = s.get("tv_entry_type", ENTRY_TYPE_OPEN)
-                    lev_saved = int(s.get("leverage", 0) or 0)
-                    if lev_saved > 0:
-                        self.leverage = lev_saved
+                    self.tv_sizing_leverage = float(
+                        s.get("tv_sizing_leverage", s.get("leverage", EXCHANGE_LEVERAGE))
+                        or EXCHANGE_LEVERAGE
+                    )
+                    self.leverage = EXCHANGE_LEVERAGE
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:

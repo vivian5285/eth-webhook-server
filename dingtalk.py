@@ -16,6 +16,8 @@ from webhook_parser import (
     classify_tv_close,
     close_type_display_label,
     format_tv_sizing_note,
+    normalize_entry_type,
+    ENTRY_TYPE_OPEN,
     ENTRY_TYPE_PYRAMID,
     ENTRY_TYPE_PROFIT_ADD,
     CLOSE_TYPE_TP3,
@@ -34,8 +36,9 @@ DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
 EXCHANGE_LABEL = "币安 Binance"
-LEVERAGE_LABEL = "15x"
-DEFAULT_LEVERAGE = 15
+LEVERAGE_LABEL = "5x"
+DEFAULT_LEVERAGE = 5
+EXCHANGE_LEVERAGE = 5
 UNIT_LABEL = "ETH"
 
 # 币安专属金色色板（与深币 #4B0082 紫金完全区分）
@@ -99,11 +102,11 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
         }
     if ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD):
         title = (
-            "🛡️ VPS 10%硬止损 · 全平"
+            "🛡️ TV硬止损 · 全平"
             if ct == CLOSE_TYPE_VPS_SHIELD
             else "🛑 硬止损 · 全平离场"
         )
-        tag_txt = "VPS 10%硬止损" if ct == CLOSE_TYPE_VPS_SHIELD else "硬止损"
+        tag_txt = "TV硬止损" if ct == CLOSE_TYPE_VPS_SHIELD else "硬止损"
         return {
             "title": title,
             "tag": _g(f"**{tag_txt}**", G_DEEP),
@@ -500,7 +503,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "📡 最新 TV 信号": _g(f"{tv_ref or '无日志记录'} ({tv_align_txt})", G_MUTED),
         "⚖️ 仓位核对": _g(qty_align_txt, G_MAIN if qty_aligned else G_ACCENT),
         "📈 盈亏态势": _g(pnl_label or "核查中", G_ACCENT if "浮亏" in (pnl_label or "") else G_MAIN),
-        "🛡️ 10%硬止损": _g(shield_status or "核查中", G_MAIN),
+        "🛡️ TV硬止损": _g(shield_status or "核查中", G_MAIN),
         "🕸️ TP123 比例审计": _g(
             _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tv_tps, tv_tps),
             G_ACCENT,
@@ -644,6 +647,46 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
     send_alert("📡 雷达守护 · 档位限额强制对齐", data, G_TITLE)
 
 
+def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
+                              tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
+                              reason=""):
+    """TV Webhook 信号到达（接收确认，非成交核实）"""
+    act = str(action or "").upper()
+    et = normalize_entry_type(entry_type)
+    type_map = {
+        ENTRY_TYPE_OPEN: "首次开仓 OPEN",
+        ENTRY_TYPE_PYRAMID: "金字塔加仓 PYRAMID",
+        ENTRY_TYPE_PROFIT_ADD: "浮盈加仓 PROFIT_ADD",
+    }
+    type_txt = type_map.get(et, et or "—")
+    close_actions = {
+        "CLOSE_PROTECT": "保护性全平",
+        "CLOSE_TP3": "TP3 收网",
+        "CLOSE_STOPLOSS": "止损/保本平仓",
+        "UPDATE_SL": "动态止损 UPDATE_SL",
+        "CLOSE": "换防清场",
+    }
+    if act in close_actions:
+        type_txt = close_actions[act]
+    data = {
+        "📡 信号类型": _g(f"**{act}** · {type_txt}", G_ACCENT),
+        "💹 TV价格": _g(f"`{float(price or 0):.2f}` USDT", G_MUTED),
+        "📊 档位": get_regime_name(regime),
+        "📡 ATR": _g(f"`{float(atr or 0):.2f}`", G_MUTED),
+    }
+    if tv_sl and float(tv_sl) > 0:
+        data["📡 tv_sl"] = _g(f"`{float(tv_sl):.2f}`", G_LIGHT)
+    if risk_pct and float(risk_pct) > 0:
+        data["📐 比例参数"] = _g(
+            format_tv_sizing_note(risk_pct, leverage or DEFAULT_LEVERAGE, qty_ratio),
+            G_MUTED,
+        )
+    if reason:
+        data["📝 原因"] = _g(str(reason)[:120], G_MUTED)
+    data["✅ 状态"] = _g("信号已入队 · 等待实盘核实后二次播报", G_MAIN)
+    send_alert(f"📡 TV信号接收 · {act}", data, G_MUTED)
+
+
 def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
                          radar_active=False, radar_sl=None, regime=3,
                          verify_note="", verified=True):
@@ -741,16 +784,16 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL} 全平", G_MAIN),
-        "🛡️ 硬止损线": _g(f"**-{pct:.0%}** → `{stop_px:.2f}` USDT", G_ACCENT),
+        "🛡️ TV硬止损": _g(f"`{stop_px:.2f}` USDT", G_ACCENT),
         "✅ 风控动作": _g(
-            "开单即挂：以开仓价为基准 ±10% STOP 硬止损全平 · "
-            "价格达 TP1 激活比例后撤硬止损 → 切换雷达移动保本防回吐",
+            "开单即挂：TV 透传 tv_sl 条件止损全平 · "
+            "价格达 TP1 激活比例后撤 TV 硬止损 → 切换雷达移动保本防回吐",
             G_MAIN,
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ 10%硬止损 · 已武装", data, G_TITLE)
+    send_alert("🛡️ TV硬止损 · 已武装", data, G_TITLE)
 
 
 def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, entry_px,
@@ -760,11 +803,11 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
         "🛡️ 触发止损": _g(f"**-{tier_pct:.0%}** 硬止损 @ `{tier_price:.2f}` USDT", G_ACCENT),
         "✂️ 本次平仓": _g(f"`{filled_qty}` {UNIT_LABEL}", G_MAIN),
         "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
-        "✅ 风控动作": _g("10% 硬止损成交 → TP123 已重算", G_MAIN),
+        "✅ 风控动作": _g("TV硬止损成交 → TP123 已重算", G_MAIN),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ 10%硬止损 · 成交", data, G_TITLE)
+    send_alert("🛡️ TV硬止损 · 成交", data, G_TITLE)
 
 
 def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
@@ -774,14 +817,14 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 剩余头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
         "📈 价格方向": _g("朝 **TP1 激活线** 浮盈推进 → 交棒雷达", G_LIGHT),
-        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 10% 硬止损", G_ACCENT),
+        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 TV硬止损", G_ACCENT),
         "📡 雷达状态": _g(
             "已激活移动保本" if radar_progress >= 1.0
             else f"进度 {radar_progress:.0%}，准备挂雷达保本",
             G_MAIN,
         ),
         "✅ 风控动作": _g(
-            reason or "雷达接管 → 撤 10% 硬止损 → 移动保本防利润回吐",
+            reason or "雷达接管 → 撤 TV 硬止损 → 移动保本防利润回吐",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -792,7 +835,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ 10%硬止损 · 已撤销（转雷达）", data, G_TITLE)
+    send_alert("🛡️ TV硬止损 · 已撤销（转雷达）", data, G_TITLE)
 
 
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
@@ -805,7 +848,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (closePosition)", G_LIGHT),
         "✅ 风控动作": _g(
-            "先撤 10% 硬止损 → 挂雷达移动保本 → 专注推升止损防利润回吐",
+            "先撤 TV 硬止损 → 挂雷达移动保本 → 专注推升止损防利润回吐",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
