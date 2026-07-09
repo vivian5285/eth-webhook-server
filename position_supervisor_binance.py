@@ -16,6 +16,12 @@ from webhook_parser import (
     enrich_signal_fields,
     format_tv_field_sources,
     classify_tv_close,
+    compute_tv_order_qty,
+    normalize_entry_type,
+    format_tv_sizing_note,
+    ENTRY_TYPE_OPEN,
+    ENTRY_TYPE_PYRAMID,
+    ENTRY_TYPE_PROFIT_ADD,
     CLOSE_TYPE_TP3,
     CLOSE_TYPE_BREAKEVEN,
     CLOSE_TYPE_VPS_SHIELD,
@@ -31,7 +37,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.9.6-tv-sl-sync"
+BINANCE_VPS_VERSION = "v13.10.0-tv-proportional"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -127,6 +133,9 @@ class PositionSupervisorBinance:
         self.sizing_principal = 0.0
         self.tv_sl = 0.0
         self._last_applied_exchange_sl = 0.0
+        self.tv_risk_pct = 0.0
+        self.tv_qty_ratio = 1.0
+        self.tv_entry_type = ENTRY_TYPE_OPEN
 
         self.state_file = 'binance_vps_state.json'
         logger.info(
@@ -206,6 +215,21 @@ class PositionSupervisorBinance:
                 round(self._safe_float(payload.get("price"), 0), 2),
                 round(self._safe_float(payload.get("pnl_pct"), 0), 2),
             )
+        if action == "UPDATE_SL":
+            return (
+                action,
+                str(payload.get("side", "")).upper(),
+                round(self._safe_float(payload.get("tv_sl"), 0), 2),
+            )
+        if action in ("LONG", "SHORT"):
+            return (
+                action,
+                normalize_entry_type(payload.get("entry_type")),
+                round(self._safe_float(payload.get("tv_sl"), 0), 2),
+                round(self._safe_float(payload.get("risk_pct"), 0), 3),
+                round(self._safe_float(payload.get("qty_ratio"), 1.0), 3),
+                round(self._safe_float(payload.get("price"), 0), 2),
+            )
         return (
             action,
             self._safe_int(payload.get("regime"), 3),
@@ -269,13 +293,25 @@ class PositionSupervisorBinance:
             "side": payload.get("side", ""),
             "pnl_pct": payload.get("pnl_pct"),
             "tv_sl": payload.get("tv_sl"),
+            "entry_type": payload.get("entry_type"),
+            "risk_pct": payload.get("risk_pct"),
+            "leverage": payload.get("leverage"),
+            "qty_ratio": payload.get("qty_ratio"),
             "ts": time.time(),
         }
         self.last_tv_signal = entry
         self._append_journal(TV_JOURNAL, entry)
+        sizing_note = ""
+        if payload.get("risk_pct"):
+            sizing_note = " | " + format_tv_sizing_note(
+                payload.get("risk_pct"),
+                payload.get("leverage") or self.leverage,
+                payload.get("qty_ratio", 1.0),
+            )
         logger.info(
             f"📡 TV日志: {raw_action} R{self.regime} @ {self.tv_price:.2f} "
             f"TP={self.tv_tps}"
+            + sizing_note
             + (f" | pnl={payload.get('pnl_pct')}%" if payload.get("pnl_pct") is not None else "")
         )
 
@@ -444,6 +480,9 @@ class PositionSupervisorBinance:
                     "last_applied_exchange_sl": float(
                         getattr(self, "_last_applied_exchange_sl", 0) or 0
                     ),
+                    "tv_risk_pct": float(getattr(self, "tv_risk_pct", 0) or 0),
+                    "tv_qty_ratio": float(getattr(self, "tv_qty_ratio", 1.0) or 1.0),
+                    "tv_entry_type": getattr(self, "tv_entry_type", ENTRY_TYPE_OPEN),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -584,7 +623,65 @@ class PositionSupervisorBinance:
             return f"裁减量不符：计划 {trim:.4f} ETH，应为 {expected:.4f} ETH"
         return None
 
-    def _calc_target_open_qty(self, curr_px):
+    def _uses_tv_proportional_sizing(self, payload=None):
+        payload = payload or {}
+        risk = self._safe_float(payload.get("risk_pct"), 0)
+        if risk <= 0:
+            risk = float(getattr(self, "tv_risk_pct", 0) or 0)
+        return risk > 0
+
+    def _apply_tv_sizing_params(self, payload):
+        """v6.9.85：解析 risk_pct / leverage / qty_ratio / entry_type"""
+        lev = self._safe_float(payload.get("leverage"), 0)
+        if lev > 0:
+            self.leverage = max(1, int(round(lev)))
+        risk = self._safe_float(payload.get("risk_pct"), 0)
+        if risk > 0:
+            self.tv_risk_pct = risk
+        ratio = self._safe_float(payload.get("qty_ratio"), 0)
+        if ratio > 0:
+            self.tv_qty_ratio = ratio
+        elif normalize_entry_type(payload.get("entry_type")) == ENTRY_TYPE_OPEN:
+            self.tv_qty_ratio = 1.0
+        self.tv_entry_type = normalize_entry_type(payload.get("entry_type"))
+        self._save_state()
+        logger.info(
+            f"📐 TV比例参数: {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio)} "
+            f"| type={self.tv_entry_type}"
+        )
+
+    def _calc_tv_target_qty(self, curr_px, qty_ratio=None, tv_sl=None):
+        """v6.9.85 比例下单量"""
+        principal = self._resolve_cap_sizing_base()
+        px = float(curr_px or self.tv_price or 0)
+        sl = float(
+            tv_sl if tv_sl is not None else getattr(self, "tv_sl", 0) or 0
+        )
+        ratio = float(
+            qty_ratio if qty_ratio is not None
+            else getattr(self, "tv_qty_ratio", 1.0) or 1.0
+        )
+        qty, meta = compute_tv_order_qty(
+            principal,
+            getattr(self, "tv_risk_pct", 0),
+            self.leverage,
+            ratio,
+            px,
+            sl,
+        )
+        meta["principal"] = principal
+        return qty, principal, meta
+
+    def _calc_target_open_qty(self, curr_px, payload=None):
+        """TV 比例优先；无 risk_pct 时 fallback 档位 margin%"""
+        if self._uses_tv_proportional_sizing(payload):
+            qty, principal, meta = self._calc_tv_target_qty(curr_px)
+            margin_usdt = meta.get("numerator_usdt", 0)
+            margin_pct = float(getattr(self, "tv_risk_pct", 0) or 0) / 100.0
+            return qty, principal, margin_usdt, margin_pct
+        return self._calc_regime_margin_qty(curr_px)
+
+    def _calc_regime_margin_qty(self, curr_px):
         qty, balance, margin_usdt, margin_pct, _ = self._regime_cap_target_qty(curr_px, self.regime)
         return qty, balance, margin_usdt, margin_pct
 
@@ -3723,9 +3820,11 @@ class PositionSupervisorBinance:
                 self._handle_tv_sl_update(payload)
             elif raw_action in ["LONG", "SHORT"]:
                 self._apply_tv_sl_from_payload(payload, source=f"{raw_action}开仓")
+                if self._uses_tv_proportional_sizing(payload):
+                    self._apply_tv_sizing_params(payload)
                 self.last_tv_side = raw_action
                 self._save_state()
-                self._handle_smart_entry(raw_action)
+                self._handle_smart_entry(raw_action, payload)
             else:
                 logger.warning(f"未识别的 TV action: {raw_action}")
         finally:
@@ -3919,8 +4018,121 @@ class PositionSupervisorBinance:
             curr_px=curr_px,
         )
 
-    def _handle_smart_entry(self, action):
-        """同向智能筛选；反向一律先平后开"""
+    def _add_to_position(self, action, payload):
+        """v6.9.85 PYRAMID / PROFIT_ADD：只追加，不改 TP，更新 tv_sl"""
+        entry_type = normalize_entry_type(payload.get("entry_type"))
+        pos = self._get_active_position()
+        if not pos or pos.get("size", 0) <= 0:
+            logger.warning(f"{entry_type} 到达但盘口无持仓，已忽略")
+            return
+        if pos["side"] != action:
+            dingtalk.report_system_alert(
+                f"{entry_type} 方向不符",
+                f"TV {action} vs 实盘 {pos['side']}，已拒绝加仓",
+            )
+            return
+
+        curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+        old_qty = float(pos["size"])
+        old_entry = float(pos["entry_price"])
+        add_qty, balance, meta = self._calc_tv_target_qty(curr_px)
+        if add_qty <= 0:
+            logger.error(f"{entry_type} 跳过：计算加仓量无效 {meta}")
+            dingtalk.report_system_alert(
+                f"{entry_type} 数量无效",
+                f"比例计算失败: {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance)}",
+            )
+            return
+
+        binance_client.set_leverage(self.symbol, leverage=self.leverage)
+        logger.info(
+            f"➕ [{entry_type}] {action} 追加 {add_qty} ETH | "
+            f"{format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, add_qty)}"
+        )
+        order = binance_client.place_market_order(action, add_qty)
+        if not order:
+            dingtalk.report_system_alert(
+                f"{entry_type} 下单失败",
+                f"{action} 追加 {add_qty} ETH 市价单未成交",
+            )
+            return
+        time.sleep(1.5)
+
+        new_pos = self._get_active_position()
+        if not new_pos or new_pos["size"] <= old_qty + 0.0005:
+            dingtalk.report_system_alert(
+                f"{entry_type} 核实失败",
+                f"追加 {add_qty} ETH 后实盘未增长",
+            )
+            return
+
+        new_qty = float(new_pos["size"])
+        new_entry = float(new_pos["entry_price"])
+        self.watched_qty = new_qty
+        self.watched_entry = new_entry
+        self.initial_qty = new_qty
+        self.current_side = action
+        self.monitoring = True
+        self._save_state()
+
+        sl_ok = self._maintain_hard_shield(new_qty, curr_px, force=True)
+        type_label = "浮盈加仓" if entry_type == ENTRY_TYPE_PROFIT_ADD else "金字塔加仓"
+        verify_note = (
+            f"{type_label} | {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, add_qty)} "
+            f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {new_entry:.2f} "
+            f"| tv_sl={getattr(self, 'tv_sl', 0):.2f} "
+            f"| {'止损已核实' if sl_ok else '止损待核实'}"
+        )
+        self._call_dingtalk(
+            dingtalk.report_tv_position_add,
+            side=action,
+            entry_type=entry_type,
+            add_qty=add_qty,
+            old_qty=old_qty,
+            new_qty=new_qty,
+            old_entry=old_entry,
+            new_entry=new_entry,
+            tv_sl=getattr(self, "tv_sl", 0),
+            risk_pct=self.tv_risk_pct,
+            leverage=self.leverage,
+            qty_ratio=self.tv_qty_ratio,
+            verify_note=verify_note,
+            verified=sl_ok,
+        )
+        self._ensure_sentinel_running()
+
+    def _handle_smart_entry(self, action, payload=None):
+        """v6.9.85 比例模式：OPEN 先平后开；PYRAMID/PROFIT_ADD 只追加；legacy 走智能筛选"""
+        payload = payload or {}
+        entry_type = normalize_entry_type(payload.get("entry_type"))
+
+        if self._uses_tv_proportional_sizing(payload):
+            if entry_type in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
+                self._add_to_position(action, payload)
+                self._touch_entry_signal_signature(action)
+                return
+            if entry_type == ENTRY_TYPE_OPEN:
+                pos = self._get_active_position()
+                if pos and pos.get("size", 0) > 0:
+                    logger.info(f"📡 TV OPEN → 先平后开 [{action}]")
+                    self._full_reentry(action, "TV OPEN 先平后开")
+                    self._touch_entry_signal_signature(action)
+                    return
+                if self._is_duplicate_flat_entry(action, binance_client.get_current_price(self.symbol) or self.tv_price):
+                    logger.info(f"🧠 TV OPEN 短时重复 [{action}] → 忽略")
+                    self._touch_entry_signal_signature(action)
+                    return
+                if not self._ensure_flat_before_open("TV OPEN"):
+                    dingtalk.report_system_alert("TV OPEN 中止", "盘口非空，拒绝叠仓")
+                    return
+                binance_client.cancel_all_open_orders(self.symbol)
+                time.sleep(0.5)
+                curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+                if curr_px > 0:
+                    self._open_position(action, curr_px, payload=payload)
+                self._touch_entry_signal_signature(action)
+                return
+
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
         pos = self._get_active_position()
 
@@ -3986,28 +4198,37 @@ class PositionSupervisorBinance:
         time.sleep(0.5)
         curr_px = curr_px or binance_client.get_current_price(self.symbol)
         if curr_px > 0:
-            self._open_position(action, curr_px)
+            self._open_position(action, curr_px, payload=payload)
         self._touch_entry_signal_signature(action)
 
-    def _open_position(self, action, curr_px):
+    def _open_position(self, action, curr_px, payload=None):
+        payload = payload or {}
         if self._open_in_progress:
             logger.error(f"开仓中止：已有开仓流程进行中，拒绝叠仓 [{action}]")
             return
         self._open_in_progress = True
         try:
-            self._snapshot_sizing_principal(f"开仓前 R{self.regime}")
-            qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px)
+            self._snapshot_sizing_principal(
+                f"开仓前 {normalize_entry_type(payload.get('entry_type'))} R{self.regime}"
+            )
+            qty, balance, margin_usdt, margin_pct = self._calc_target_open_qty(curr_px, payload=payload)
             if qty <= 0:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
                 return
 
             binance_client.set_leverage(self.symbol, leverage=self.leverage)
             notional = qty * curr_px
-            logger.info(
-                f"📐 仓位预算 R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
-                f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH "
-                f"(名义 ~{notional:.0f}U)"
-            )
+            if self._uses_tv_proportional_sizing(payload):
+                budget_txt = (
+                    f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, qty)} "
+                    f"| stop_dist→qty"
+                )
+            else:
+                budget_txt = (
+                    f"R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
+                    f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH"
+                )
+            logger.info(f"📐 仓位预算: {budget_txt} (名义 ~{notional:.0f}U)")
 
             if not self._wait_verify(self._verify_flat, retries=4, delay=0.35):
                 logger.error("开仓中止：市价下单前盘口仍非空")
@@ -4054,8 +4275,10 @@ class PositionSupervisorBinance:
             self._protect_and_monitor(
                 real_qty, pos["entry_price"],
                 budget_note=(
-                    f"本金 {balance:.0f}U | R{self.regime} {margin_pct:.0%} "
-                    f"→ 保证金 {margin_usdt:.0f}U | 目标 {qty} ETH"
+                    (f"TV比例 {format_tv_sizing_note(self.tv_risk_pct, self.leverage, self.tv_qty_ratio, balance, qty)} | "
+                     if self._uses_tv_proportional_sizing(payload) else
+                     f"本金 {balance:.0f}U | R{self.regime} {margin_pct:.0%} "
+                     f"→ 保证金 {margin_usdt:.0f}U | 目标 {qty} ETH | ")
                 ),
                 target_qty=qty,
             )
@@ -4622,6 +4845,12 @@ class PositionSupervisorBinance:
                     self._last_applied_exchange_sl = float(
                         s.get("last_applied_exchange_sl", 0) or 0
                     )
+                    self.tv_risk_pct = float(s.get("tv_risk_pct", 0) or 0)
+                    self.tv_qty_ratio = float(s.get("tv_qty_ratio", 1.0) or 1.0)
+                    self.tv_entry_type = s.get("tv_entry_type", ENTRY_TYPE_OPEN)
+                    lev_saved = int(s.get("leverage", 0) or 0)
+                    if lev_saved > 0:
+                        self.leverage = lev_saved
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
