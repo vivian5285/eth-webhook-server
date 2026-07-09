@@ -11,7 +11,7 @@ TV_STRATEGY_VERSION = "v6.9.75"
 
 VALID_ACTIONS = frozenset({
     "LONG", "SHORT", "CLOSE", "CLOSE_PROTECT", "CLOSE_TP3", "CLOSE_STOPLOSS",
-    "PING",
+    "UPDATE_SL", "PING",
 })
 
 ACTION_ALIASES = {
@@ -243,6 +243,7 @@ def normalize_tv_payload(data):
     tv_tp1 = _to_float(src.get("tv_tp1") or src.get("tp1") or src.get("TP1"))
     tv_tp2 = _to_float(src.get("tv_tp2") or src.get("tp2") or src.get("TP2"))
     tv_tp3 = _to_float(src.get("tv_tp3") or src.get("tp3") or src.get("TP3"))
+    tv_sl = _to_float(src.get("tv_sl") or src.get("stop") or src.get("sl"))
 
     reason = str(
         src.get("reason")
@@ -269,6 +270,8 @@ def normalize_tv_payload(data):
         out["tv_tp2"] = tv_tp2
     if tv_tp3 is not None:
         out["tv_tp3"] = tv_tp3
+    if tv_sl is not None and tv_sl > 0:
+        out["tv_sl"] = round(tv_sl, 2)
     if reason:
         out["reason"] = reason
     if secret:
@@ -463,6 +466,8 @@ def format_webhook_log(data):
     if data.get("atr"):
         a_src = data.get("_atr_source", "tv")
         parts.append(f"ATR={float(data['atr']):.2f}({a_src})")
+    if data.get("tv_sl"):
+        parts.append(f"tv_sl={float(data['tv_sl']):.2f}")
     tps = [data.get(f"tv_tp{i}") for i in (1, 2, 3)]
     if any(_has_positive_float(t) for t in tps):
         tp_txt = "/".join(

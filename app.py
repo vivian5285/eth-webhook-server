@@ -58,7 +58,7 @@ def health():
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
-        "version": "v13.9.5-tv-close-alerts",
+        "version": "v13.9.6-tv-sl-sync",
         "tv_strategy": TV_STRATEGY_VERSION,
         "leverage": 15,
     }), 200
