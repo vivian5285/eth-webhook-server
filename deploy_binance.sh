@@ -17,9 +17,9 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v13.2-deploy-audit"
-# 接受 v13.4.6+ 与 v13.5+（含 -atr-priority 等后缀标签）
-MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|[5-9][0-9]*\.)'
+DEPLOY_SCRIPT_VERSION="v13.3-deploy-audit"
+# 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl 等后缀标签）
+MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+)\.)'
 
 PORT=5003
 WORKERS=1
@@ -166,7 +166,16 @@ install_deps() {
     if echo "$SUPERVISOR_VER" | grep -qE "BINANCE_VPS_VERSION.*\"${MIN_SUPERVISOR_VERSION_RE}"; then
         log_ok "position_supervisor_binance.py 版本已就绪 (${SUPERVISOR_VER})"
     else
-        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ / v13.5+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
+        log_fail "position_supervisor_binance.py 版本异常！需要 v13.4.6+ / v13.10+ ，当前: ${SUPERVISOR_VER:-未找到 BINANCE_VPS_VERSION}"
+        return 1
+    fi
+
+    if grep -q "report_tv_signal_received" "$DIR/dingtalk.py" 2>/dev/null \
+        && grep -q "report_tv_position_add" "$DIR/dingtalk.py" 2>/dev/null \
+        && grep -q "EXCHANGE_LEVERAGE" "$DIR/position_supervisor_binance.py" 2>/dev/null; then
+        log_ok "v13.10+ TV比例/纯tv_sl/信号接收钉钉 已就绪"
+    elif echo "$SUPERVISOR_VER" | grep -qE 'v13\.(10|11)\.'; then
+        log_fail "v13.10+ 需 report_tv_signal_received + report_tv_position_add + EXCHANGE_LEVERAGE"
         return 1
     fi
 
@@ -302,8 +311,8 @@ health_check() {
     fi
 
     sleep 2
-    if grep -qE 'v13\.(4\.[6-9]|[5-9])' "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑 v13.4.6+ / v13.5+ 已成功加载"
+    if grep -qE 'v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+))' "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.4.6+ / v13.10+ 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
         log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.6+）"
     elif grep -q "系统重启点火" "$BRAIN_LOG" 2>/dev/null; then
