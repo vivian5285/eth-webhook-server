@@ -17,7 +17,7 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v13.21-deploy-audit"
+DEPLOY_SCRIPT_VERSION="v13.22-deploy-audit"
 # 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl 等后缀标签）
 MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+)\.)'
 
@@ -233,6 +233,9 @@ get_gunicorn_master_pid() {
 start_service() {
     log_step "[3/6] 启动 Gunicorn 网关 (workers=${WORKERS}, threads=${THREADS})..."
     mkdir -p "$LOG_DIR"
+    touch "$BRAIN_LOG" 2>/dev/null || true
+    chmod 664 "$BRAIN_LOG" 2>/dev/null || true
+    chmod 775 "$LOG_DIR" 2>/dev/null || true
     : > "$LOG_FILE"
     rm -f "$PID_FILE"
 
@@ -343,6 +346,7 @@ print_summary() {
         echo -e "  网关地址: http://${BIND_HOST}:${PORT}/webhook"
         echo -e "  健康检查: http://127.0.0.1:${PORT}/health"
         echo -e "  大脑日志: tail -f ${BRAIN_LOG}"
+        echo -e "  (勿直接输入文件名；须用 tail -f 查看)"
         echo -e "  访问日志: tail -f ${LOG_DIR}/gunicorn_access.log"
         echo -e "  错误日志: tail -f ${LOG_DIR}/gunicorn_error.log"
     else
