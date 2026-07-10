@@ -17,7 +17,7 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v13.3-deploy-audit"
+DEPLOY_SCRIPT_VERSION="v13.21-deploy-audit"
 # 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl 等后缀标签）
 MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+)\.)'
 
@@ -192,7 +192,7 @@ install_deps() {
         log_warn "dingtalk.py 可能不是最新版"
     fi
 
-    if grep -qE 'v13\.4\.(6|7|8)|Binance Client v13\.4' "$DIR/binance_client.py" 2>/dev/null; then
+    if grep -qE 'v13\.(4\.(6|7|8)|21|20|10)|Binance Client v13' "$DIR/binance_client.py" 2>/dev/null; then
         log_ok "binance_client.py 版本已就绪"
     else
         log_warn "binance_client.py 可能不是最新版（建议含 v13.4.x 标识）"
