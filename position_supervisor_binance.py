@@ -20,6 +20,8 @@ from webhook_parser import (
     compute_vps_add_qty,
     format_vps_sizing_note,
     VPS_RISK_PCT,
+    ADD_QTY_RATIO,
+    MAX_ADD_TIMES,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
     ENTRY_TYPE_PYRAMID,
@@ -39,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.13.0-vps-base-qty"
+BINANCE_VPS_VERSION = "v13.14.0-adaptive-recover"
 EXCHANGE_LEVERAGE = 5  # 交易所实盘固定 5x；TV payload leverage 仅用于比例 sizing
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
@@ -113,6 +115,7 @@ class PositionSupervisorBinance:
         self._last_entry_signal = None
         self._recover_in_progress = False
         self._recover_tp_unconfirmed = False
+        self._post_recover_radar_pulse = False
         self._open_in_progress = False
         self._open_tp_unconfirmed = False
         self._last_signal_fp = None
@@ -141,6 +144,7 @@ class PositionSupervisorBinance:
         self.tv_qty_ratio = 1.0
         self.tv_entry_type = ENTRY_TYPE_OPEN
         self.base_qty = 0.0
+        self.add_count = 0
 
         self.state_file = 'binance_vps_state.json'
         logger.info(
@@ -312,8 +316,7 @@ class PositionSupervisorBinance:
             _, sm = self._calc_vps_open_qty(self.tv_price)
             sizing_note = " | " + format_vps_sizing_note(sm, entry_type=ENTRY_TYPE_OPEN)
         elif et in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
-            ratio = self._safe_float(payload.get("qty_ratio"), 0) or self.tv_qty_ratio
-            _, sm = self._calc_vps_add_qty(ratio)
+            _, sm = self._calc_vps_add_qty()
             sizing_note = " | " + format_vps_sizing_note(sm, entry_type=et)
         logger.info(
             f"📡 TV日志: {raw_action} R{self.regime} @ {self.tv_price:.2f} "
@@ -508,6 +511,7 @@ class PositionSupervisorBinance:
                         getattr(self, "tv_sizing_leverage", EXCHANGE_LEVERAGE) or EXCHANGE_LEVERAGE
                     ),
                     "base_qty": float(getattr(self, "base_qty", 0) or 0),
+                    "add_count": int(getattr(self, "add_count", 0) or 0),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -646,18 +650,18 @@ class PositionSupervisorBinance:
         return None
 
     def _apply_tv_sizing_params(self, payload):
-        """解析 entry_type / qty_ratio；TV risk_pct 不参与 sizing"""
-        ratio = self._safe_float(payload.get("qty_ratio"), 0)
-        if ratio > 0:
-            self.tv_qty_ratio = ratio
-        elif normalize_entry_type(payload.get("entry_type")) == ENTRY_TYPE_OPEN:
-            self.tv_qty_ratio = 1.0
+        """解析 entry_type；加仓固定 ADD_QTY_RATIO，TV risk_pct/qty_ratio 不参与 sizing"""
         self.tv_entry_type = normalize_entry_type(payload.get("entry_type"))
+        self.tv_qty_ratio = ADD_QTY_RATIO if self.tv_entry_type in (
+            ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD,
+        ) else 1.0
         self.leverage = EXCHANGE_LEVERAGE
         self._save_state()
         logger.info(
-            f"📐 TV参数: type={self.tv_entry_type} ratio={self.tv_qty_ratio} "
-            f"| VPS风险={VPS_RISK_PCT}% R{self.regime} | 交易所={EXCHANGE_LEVERAGE}x"
+            f"📐 TV参数: type={self.tv_entry_type} "
+            f"| VPS风险={VPS_RISK_PCT}% R{self.regime} "
+            f"| 加仓固定={ADD_QTY_RATIO}×base (最多{MAX_ADD_TIMES}次) "
+            f"| 交易所={EXCHANGE_LEVERAGE}x"
         )
 
     def _calc_vps_open_qty(self, curr_px, regime=None):
@@ -672,15 +676,13 @@ class PositionSupervisorBinance:
         return float(qty or 0), meta
 
     def _calc_vps_add_qty(self, qty_ratio=None):
-        ratio = float(
-            qty_ratio if qty_ratio is not None
-            else getattr(self, "tv_qty_ratio", 0.5) or 0.5
-        )
         base = float(getattr(self, "base_qty", 0) or 0)
         if base <= 0:
             base = float(getattr(self, "initial_qty", 0) or getattr(self, "watched_qty", 0) or 0)
-        qty, meta = compute_vps_add_qty(base, ratio)
+        qty, meta = compute_vps_add_qty(base, ADD_QTY_RATIO)
         meta["principal"] = self._resolve_cap_sizing_base()
+        meta["add_count"] = int(getattr(self, "add_count", 0) or 0)
+        meta["max_add_times"] = MAX_ADD_TIMES
         return float(qty or 0), meta
 
     def _tv_sizing_note(self, qty, meta=None, entry_type="OPEN"):
@@ -962,6 +964,7 @@ class PositionSupervisorBinance:
             time.sleep(1.0)
         self.watched_qty = 0.0
         self.base_qty = 0.0
+        self.add_count = 0
         self.current_side = None
         self._save_state()
         binance_client.cancel_all_open_orders(self.symbol)
@@ -1059,6 +1062,7 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self.watched_qty = 0.0
         self.base_qty = 0.0
+        self.add_count = 0
         self.current_side = None
         self.initial_qty = 0.0
         self._save_state()
@@ -2174,6 +2178,54 @@ class PositionSupervisorBinance:
         )
         actions.append(f"{tag}已齐" if ok else f"{tag}待补")
         return actions
+
+    def _bootstrap_live_defenses_after_recover(self, real_amt, curr_px, audit=None):
+        """
+        重启/关机后全域自适应：核查 TP123+止损 → 缺则补挂不重复 → 雷达立即干活锁利。
+        """
+        if real_amt <= 0 or not self.current_side:
+            return {"actions": [], "audit": audit or {}}
+
+        curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
+        actions = []
+        audit = audit or self._audit_tp_levels(real_amt)
+
+        if not self._tp_audit_ok(audit):
+            repaired, n_actions = self._surgical_repair_tp_defenses(
+                real_amt, self.watched_entry,
+            )
+            if n_actions > 0:
+                actions.append(f"智能补挂TP({n_actions}步)")
+                audit = repaired
+
+        self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
+        health = self._build_recover_health_report(
+            {"side": self.current_side, "size": real_amt, "entry_price": self.watched_entry},
+            curr_px, audit,
+        )
+        actions.extend(self._apply_recover_defense_policy(real_amt, curr_px, health))
+
+        if curr_px > 0 and (health.get("should_radar") or health.get("radar_active")):
+            self._process_radar_trailing(real_amt, curr_px)
+            sl = self._radar_sl_to_pass()
+            if sl and not self._has_stop_sl_near(sl):
+                if self._ensure_radar_sl(sl, real_amt):
+                    actions.append(f"雷达SL@{sl:.2f}")
+            if self._is_radar_active() and not getattr(self, "_radar_activation_notified", False):
+                self._report_radar_first_activation(
+                    real_amt, curr_px, self._clamp_radar_to_tv_floor(self.current_sl),
+                    self._has_stop_sl_near(self.current_sl),
+                )
+            actions.append(f"雷达激活·进度{health.get('radar_progress', 0):.0%}")
+
+        self._radar_guardian_audit(real_amt, curr_px)
+        self._post_recover_radar_pulse = True
+        self._save_state()
+        logger.info(
+            f"📡 [重启全域核查] {' · '.join(actions) if actions else '盘口已齐，雷达待命'} | "
+            f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)}"
+        )
+        return {"actions": actions, "audit": audit, "health": health}
 
     def _reconcile_shield_on_recover(self, live_qty, curr_px):
         """重启接管：只读盘口同步状态，不抢在 TP 对齐前反复撤挂"""
@@ -3990,6 +4042,7 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self.watched_qty = 0.0
         self.base_qty = 0.0
+        self.add_count = 0
         self.current_side = None
         binance_client.cancel_all_open_orders(self.symbol)
         self._save_state()
@@ -4000,7 +4053,7 @@ class PositionSupervisorBinance:
         )
 
     def _add_to_position(self, action, payload):
-        """v6.9.85 PYRAMID / PROFIT_ADD：只追加，不改 TP，更新 tv_sl"""
+        """PYRAMID / PROFIT_ADD：固定 base×0.5 追加，只更新 tv_sl，不改 TP123"""
         entry_type = normalize_entry_type(payload.get("entry_type"))
         pos = self._get_active_position()
         if not pos or pos.get("size", 0) <= 0:
@@ -4012,11 +4065,22 @@ class PositionSupervisorBinance:
                 f"TV {action} vs 实盘 {pos['side']}，已拒绝加仓",
             )
             return
+        if int(getattr(self, "add_count", 0) or 0) >= MAX_ADD_TIMES:
+            logger.warning(
+                f"{entry_type} 跳过：已达最大加仓次数 {MAX_ADD_TIMES} "
+                f"(base={getattr(self, 'base_qty', 0):.3f})"
+            )
+            dingtalk.report_system_alert(
+                f"{entry_type} 加仓跳过",
+                f"已达最大加仓 {MAX_ADD_TIMES} 次 | base={getattr(self, 'base_qty', 0):.3f} "
+                f"| 现仓 {pos['size']} ETH",
+            )
+            return
 
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
         old_qty = float(pos["size"])
         old_entry = float(pos["entry_price"])
-        add_qty, meta = self._calc_vps_add_qty(self._safe_float(payload.get("qty_ratio"), 0) or self.tv_qty_ratio)
+        add_qty, meta = self._calc_vps_add_qty()
         if add_qty <= 0:
             logger.error(f"{entry_type} 跳过：计算加仓量无效 {meta}")
             dingtalk.report_system_alert(
@@ -4056,10 +4120,13 @@ class PositionSupervisorBinance:
         self._save_state()
 
         sl_ok = self._maintain_hard_shield(new_qty, curr_px, force=True)
+        self.add_count = int(getattr(self, "add_count", 0) or 0) + 1
+        self._save_state()
         type_label = "浮盈加仓" if entry_type == ENTRY_TYPE_PROFIT_ADD else "金字塔加仓"
         verify_note = (
             f"{type_label} | {self._tv_sizing_note(add_qty, meta, entry_type=entry_type)} "
             f"| base={getattr(self, 'base_qty', 0):.3f} "
+            f"| 加仓次数 {self.add_count}/{MAX_ADD_TIMES} "
             f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {new_entry:.2f} "
             f"| tv_sl={getattr(self, 'tv_sl', 0):.2f} "
             f"| {'止损已核实' if sl_ok else '止损待核实'}"
@@ -4076,9 +4143,11 @@ class PositionSupervisorBinance:
             tv_sl=getattr(self, "tv_sl", 0),
             risk_pct=self.tv_risk_pct,
             leverage=self.tv_sizing_leverage,
-            qty_ratio=self.tv_qty_ratio,
+            qty_ratio=ADD_QTY_RATIO,
             base_qty=getattr(self, "base_qty", 0),
             vps_sizing_meta=meta,
+            add_count=self.add_count,
+            max_add_times=MAX_ADD_TIMES,
             verify_note=verify_note,
             verified=sl_ok,
         )
@@ -4250,6 +4319,7 @@ class PositionSupervisorBinance:
             self.open_atr = self.current_atr
             self.initial_qty = real_qty
             self.base_qty = float(real_qty)
+            self.add_count = 0
             self._protect_and_monitor(
                 real_qty, pos["entry_price"],
                 budget_note=f"{budget_txt} | ",
@@ -4644,7 +4714,13 @@ class PositionSupervisorBinance:
                                 self._save_state()
 
                         self._scan_ticks += 1
-                        if not qty_changed:
+                        if getattr(self, "_post_recover_radar_pulse", False):
+                            self._post_recover_radar_pulse = False
+                            if curr_px > 0:
+                                self._process_radar_trailing(real_amt, curr_px)
+                            self._radar_guardian_audit(real_amt, curr_px)
+                            logger.info("📡 [哨兵] 重启后立即雷达脉冲完成")
+                        elif not qty_changed:
                             self._radar_guardian_audit(real_amt, curr_px)
 
                         if curr_px <= 0:
@@ -4749,6 +4825,7 @@ class PositionSupervisorBinance:
                 self.monitoring = False
                 self.watched_qty = 0.0
                 self.base_qty = 0.0
+                self.add_count = 0
                 self.current_side = None
                 self.shield_active = False
                 self.shield_tiers_consumed = []
@@ -4830,6 +4907,7 @@ class PositionSupervisorBinance:
                     )
                     self.leverage = EXCHANGE_LEVERAGE
                     self.base_qty = float(s.get("base_qty", 0) or 0)
+                    self.add_count = int(s.get("add_count", 0) or 0)
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
@@ -5002,13 +5080,12 @@ class PositionSupervisorBinance:
                         {"side": self.current_side, "size": real_amt, "entry_price": entry_px},
                         curr_px, audit,
                     )
-                    policy_actions = self._apply_recover_defense_policy(
-                        real_amt, curr_px, health,
+                    bootstrap = self._bootstrap_live_defenses_after_recover(
+                        real_amt, curr_px, audit=audit,
                     )
-                    health = self._build_recover_health_report(
-                        {"side": self.current_side, "size": real_amt, "entry_price": entry_px},
-                        curr_px, audit,
-                    )
+                    audit = bootstrap.get("audit") or audit
+                    health = bootstrap.get("health") or health
+                    policy_actions = bootstrap.get("actions") or []
                     radar_active = health["radar_active"] or health["should_radar"]
                     sl_ok = (
                         not radar_active
@@ -5085,6 +5162,7 @@ class PositionSupervisorBinance:
                 self.monitoring = False
                 self.watched_qty = 0.0
                 self.base_qty = 0.0
+                self.add_count = 0
                 self.current_side = None
                 self._save_state()
                 flat_ok = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
