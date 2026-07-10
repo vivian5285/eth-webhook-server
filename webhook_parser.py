@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.9.86"
 
+# 交易所实盘杠杆（头寸倍数）；保证金美元口径仍用 VPS_MARGIN_LEVERAGE 保持 R4≈200U@1000U
+EXCHANGE_LEVERAGE = 15
+VPS_MARGIN_LEVERAGE = 5
+
 # VPS 自主风控（与 TV risk_pct / qty_ratio 完全脱钩）
 VPS_RISK_PCT = 3.0
 VPS_GLOBAL_SCALE = 1.0
@@ -208,19 +212,18 @@ def _normalize_stop_dist(price, tv_sl):
     return stop_dist
 
 
-def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=5,
+def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
                          global_scale=None, qty_step=0.001, min_qty=None,
                          face_value=None, max_position=None):
     """
-    首次开仓 OPEN（开发清单最终版）：
-    保证金 = 本金 × VPS_RISK_PCT% × LEVERAGE × REGIME_SCALE
-    头寸价值 = 保证金 × LEVERAGE
+    首次开仓 OPEN：
+    保证金 = 本金 × VPS_RISK_PCT% × VPS_MARGIN_LEVERAGE × REGIME_SCALE（美元口径不变）
+    头寸价值 = 保证金 × EXCHANGE_LEVERAGE（15x → 1000U R4 ≈ 200U 保证金 / 3000U 头寸）
     张数 = 头寸价值 / price
-    tv_sl 仅用于挂止损，不参与张数计算。
     """
     principal = float(principal or 0)
     price = float(price or 0)
-    leverage = float(leverage or 1)
+    leverage = float(leverage if leverage is not None else EXCHANGE_LEVERAGE)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
 
@@ -231,6 +234,7 @@ def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=5,
         "price": price,
         "tv_sl": float(tv_sl or 0),
         "leverage": leverage,
+        "margin_leverage": VPS_MARGIN_LEVERAGE,
         "sizing_mode": "VPS_OPEN",
         **risk_meta,
     }
@@ -238,7 +242,7 @@ def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=5,
         meta["error"] = "invalid_inputs"
         return 0.0, meta
 
-    margin = principal * (VPS_RISK_PCT / 100.0) * leverage * regime_scale
+    margin = principal * (VPS_RISK_PCT / 100.0) * VPS_MARGIN_LEVERAGE * regime_scale
     position_value = margin * leverage
     meta["margin"] = round(margin, 2)
     meta["order_amount"] = round(position_value, 2)
@@ -331,7 +335,7 @@ def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
     parts = [
         f"VPS风险={eff:.3f}%",
         f"R{int(meta.get('regime', 3))}×{float(meta.get('regime_scale', 1)):.2f}",
-        f"lev={int(round(float(meta.get('leverage', 5))))}x",
+        f"lev={int(round(float(meta.get('leverage', EXCHANGE_LEVERAGE))))}x",
     ]
     if meta.get("margin"):
         parts.append(f"保证金={float(meta['margin']):.1f}U")
@@ -352,7 +356,7 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
     eff_meta, _ = compute_vps_effective_risk(regime or 3)
     parts = [
         f"VPS风险={eff_meta:.3f}%",
-        f"lev={int(round(float(leverage or 5)))}x",
+        f"lev={int(round(float(leverage or EXCHANGE_LEVERAGE)))}x",
     ]
     if qty_ratio is not None:
         parts.append(f"ratio={float(qty_ratio):.2f}")
