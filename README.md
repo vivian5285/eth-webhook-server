@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.25.0-dynamic-add`**
+**当前版本：`v13.26.0-add-tp-radar-realign`**
 
 TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
@@ -14,7 +14,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version: v13.25.0-dynamic-add
+# 期望 version: v13.26.0-add-tp-radar-realign
 ```
 
 ---
@@ -180,7 +180,7 @@ TP1 实盘成交验证通过
 | action | 行为 |
 |--------|------|
 | `LONG` / `SHORT` | 同向筛选 或 反向先平后开 |
-| `UPDATE_SL` | 仅更新 `tv_sl` 并换挂 STOP（PYRAMID/PROFIT_ADD 不重建 TP123） |
+| `UPDATE_SL` | 仅更新 `tv_sl` 并换挂 STOP（不单独重挂 TP123） |
 | `CLOSE` / `CLOSE_PROTECT` / `CLOSE_TP3` | 撤单 → 全平 → 复位 |
 
 ### 反向信号
@@ -217,7 +217,18 @@ TP1 实盘成交验证通过
 | R3 | 50% | 2 |
 | R4 | 70% | 3 |
 
-加仓后：**只更新 tv_sl + 钉钉实盘核实**，TP123 与雷达状态机不变（继续守首仓 open_regime 比例）。
+加仓后：**撤旧 TP → 按 TV `tv_tp1/2/3` 价格 + 新总头寸重挂 TP123**（`open_regime` 比例，已成交档跳过），并同步 **tv_sl + 雷达**（TP1 后推升保本线），钉钉实盘核实。
+
+```
+_add_to_position()
+  → 市价加仓核实
+  → _realign_after_position_add()
+     ① 刷新 TV TP 价格
+     ② 撤全部旧 TP 限价单（数量已过期）
+     ③ _enforce_defense_alignment() 按新仓重挂
+     ④ 未齐 → 核武重挂
+     ⑤ _maintain_hard_shield() + 雷达推升（TP1 后）
+```
 
 ### 人工 / orphan 持仓（空闲巡检 12s）
 
@@ -225,7 +236,7 @@ VPS 账本空仓但交易所有仓：
 
 - **同向** → `_perform_live_takeover()`：`_ensure_full_defense_stack()` 挂 TP123 + tv_sl + 雷达待命  
 - **反向 TV** → 强制全平 + 钉钉  
-- **加减仓** → 按比例重算 TP123，PYRAMID 只更新 SL  
+- **加减仓** → 按比例重算 TP123；TV 加仓信号走 `_realign_after_position_add()`  
 
 ### 误清场防护（v13.21+）
 
@@ -337,7 +348,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 # 版本门控
-grep 'v13.25.0-dynamic-add' position_supervisor_binance.py
+grep 'v13.26.0-add-tp-radar-realign' position_supervisor_binance.py
 grep 'DEPLOY_SCRIPT_VERSION' deploy_binance.sh
 
 source venv/bin/activate    # 如有 venv
@@ -433,6 +444,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 | v13.23 | `_tp1_filled_verified` 雷达门控；伪 TP 解除 |
 | **v13.24** | **安全雷达交棒：先挂保本、mark gap、失败回滚 tv_sl** |
 | **v13.25** | **动态加仓：首仓 VPS sizing，加仓 base×TV qty_ratio + 档位次数上限** |
+| **v13.26** | **加仓后 TP123 按新总头寸重挂 + 雷达/tv_sl 同步** |
 
 ---
 
@@ -449,4 +461,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.25.0-dynamic-add*
+*GEMINI Quant · 双轨智慧雷达 · v13.26.0-add-tp-radar-realign*
