@@ -21,8 +21,8 @@ from webhook_parser import (
     format_vps_sizing_note,
     enrich_entry_tp_prices,
     VPS_RISK_PCT,
-    ADD_QTY_RATIO,
-    MAX_ADD_TIMES,
+    get_regime_max_add_times,
+    resolve_tv_add_qty_ratio,
     EXCHANGE_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.24.0-radar-handoff-safe"
+BINANCE_VPS_VERSION = "v13.25.0-dynamic-add"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -1448,20 +1448,43 @@ class PositionSupervisorBinance:
             return f"裁减量不符：计划 {trim:.4f} ETH，应为 {expected:.4f} ETH"
         return None
 
+    def _max_add_times_for_regime(self, regime=None):
+        """TV v6.9.93：加仓次数上限跟当前信号档位"""
+        return get_regime_max_add_times(int(regime if regime is not None else self.regime or 3))
+
     def _apply_tv_sizing_params(self, payload):
-        """解析 entry_type；加仓固定 ADD_QTY_RATIO，TV risk_pct/qty_ratio 不参与 sizing"""
+        """解析 entry_type：OPEN 由 VPS 自主 sizing；加仓用 TV qty_ratio × 首仓 base_qty"""
         self.tv_entry_type = normalize_entry_type(payload.get("entry_type"))
-        self.tv_qty_ratio = ADD_QTY_RATIO if self.tv_entry_type in (
-            ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD,
-        ) else 1.0
+        if self.tv_entry_type in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
+            self.tv_qty_ratio = resolve_tv_add_qty_ratio(
+                self.regime,
+                self._safe_float(payload.get("qty_ratio"), None),
+            )
+        else:
+            self.tv_qty_ratio = 1.0
         self.leverage = EXCHANGE_LEVERAGE
         self._save_state()
+        max_add = self._max_add_times_for_regime()
         logger.info(
             f"📐 TV参数: type={self.tv_entry_type} "
             f"| VPS风险={VPS_RISK_PCT}% R{self.regime} "
-            f"| 加仓固定={ADD_QTY_RATIO}×base (最多{MAX_ADD_TIMES}次) "
+            f"| 加仓=base×{self.tv_qty_ratio:.2f}(TV) 最多{max_add}次 "
             f"| 交易所={EXCHANGE_LEVERAGE}x"
         )
+
+    def _calc_vps_add_qty(self, qty_ratio=None):
+        base = float(getattr(self, "base_qty", 0) or 0)
+        if base <= 0:
+            base = float(getattr(self, "initial_qty", 0) or getattr(self, "watched_qty", 0) or 0)
+        ratio = resolve_tv_add_qty_ratio(
+            self.regime,
+            qty_ratio if qty_ratio is not None else getattr(self, "tv_qty_ratio", None),
+        )
+        qty, meta = compute_vps_add_qty(base, ratio, regime=self.regime)
+        meta["principal"] = self._resolve_cap_sizing_base()
+        meta["add_count"] = int(getattr(self, "add_count", 0) or 0)
+        meta["max_add_times"] = self._max_add_times_for_regime()
+        return float(qty or 0), meta
 
     def _calc_vps_open_qty(self, curr_px, regime=None):
         principal = self._resolve_cap_sizing_base()
@@ -1472,16 +1495,6 @@ class PositionSupervisorBinance:
             leverage=EXCHANGE_LEVERAGE,
         )
         meta["principal"] = principal
-        return float(qty or 0), meta
-
-    def _calc_vps_add_qty(self, qty_ratio=None):
-        base = float(getattr(self, "base_qty", 0) or 0)
-        if base <= 0:
-            base = float(getattr(self, "initial_qty", 0) or getattr(self, "watched_qty", 0) or 0)
-        qty, meta = compute_vps_add_qty(base, ADD_QTY_RATIO)
-        meta["principal"] = self._resolve_cap_sizing_base()
-        meta["add_count"] = int(getattr(self, "add_count", 0) or 0)
-        meta["max_add_times"] = MAX_ADD_TIMES
         return float(qty or 0), meta
 
     def _tv_sizing_note(self, qty, meta=None, entry_type="OPEN"):
@@ -5028,8 +5041,10 @@ class PositionSupervisorBinance:
         )
 
     def _add_to_position(self, action, payload):
-        """PYRAMID / PROFIT_ADD：固定 base×0.5 追加，只更新 tv_sl，不改 TP123"""
+        """PYRAMID / PROFIT_ADD：base_qty × TV qty_ratio 追加，只更新 tv_sl，不改 TP123"""
         entry_type = normalize_entry_type(payload.get("entry_type"))
+        max_add = self._max_add_times_for_regime()
+        tv_ratio = float(getattr(self, "tv_qty_ratio", 0) or 0)
         pos = self._get_active_position()
         if not pos or pos.get("size", 0) <= 0:
             logger.warning(f"{entry_type} 到达但盘口无持仓，已忽略")
@@ -5040,14 +5055,24 @@ class PositionSupervisorBinance:
                 f"TV {action} vs 实盘 {pos['side']}，已拒绝加仓",
             )
             return
-        if int(getattr(self, "add_count", 0) or 0) >= MAX_ADD_TIMES:
+        if tv_ratio <= 0:
             logger.warning(
-                f"{entry_type} 跳过：已达最大加仓次数 {MAX_ADD_TIMES} "
+                f"{entry_type} 跳过：R{self.regime} TV加仓比例={tv_ratio:.2f}（档位禁止加仓）"
+            )
+            dingtalk.report_system_alert(
+                f"{entry_type} 加仓跳过",
+                f"R{self.regime} TV qty_ratio={tv_ratio:.2f} ≤ 0 | "
+                f"base={getattr(self, 'base_qty', 0):.3f} ETH",
+            )
+            return
+        if int(getattr(self, "add_count", 0) or 0) >= max_add:
+            logger.warning(
+                f"{entry_type} 跳过：已达 R{self.regime} 最大加仓次数 {max_add} "
                 f"(base={getattr(self, 'base_qty', 0):.3f})"
             )
             dingtalk.report_system_alert(
                 f"{entry_type} 加仓跳过",
-                f"已达最大加仓 {MAX_ADD_TIMES} 次 | base={getattr(self, 'base_qty', 0):.3f} "
+                f"R{self.regime} 已达最大加仓 {max_add} 次 | base={getattr(self, 'base_qty', 0):.3f} "
                 f"| 现仓 {pos['size']} ETH",
             )
             return
@@ -5055,7 +5080,7 @@ class PositionSupervisorBinance:
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
         old_qty = float(pos["size"])
         old_entry = float(pos["entry_price"])
-        add_qty, meta = self._calc_vps_add_qty()
+        add_qty, meta = self._calc_vps_add_qty(tv_ratio)
         if add_qty <= 0:
             logger.error(f"{entry_type} 跳过：计算加仓量无效 {meta}")
             dingtalk.report_system_alert(
@@ -5101,7 +5126,7 @@ class PositionSupervisorBinance:
         verify_note = (
             f"{type_label} | {self._tv_sizing_note(add_qty, meta, entry_type=entry_type)} "
             f"| base={getattr(self, 'base_qty', 0):.3f} "
-            f"| 加仓次数 {self.add_count}/{MAX_ADD_TIMES} "
+            f"| 加仓次数 {self.add_count}/{max_add} "
             f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {new_entry:.2f} "
             f"| tv_sl={getattr(self, 'tv_sl', 0):.2f} "
             f"| {'止损已核实' if sl_ok else '止损待核实'}"
@@ -5118,11 +5143,12 @@ class PositionSupervisorBinance:
             tv_sl=getattr(self, "tv_sl", 0),
             risk_pct=self.tv_risk_pct,
             leverage=self.tv_sizing_leverage,
-            qty_ratio=ADD_QTY_RATIO,
+            qty_ratio=tv_ratio,
             base_qty=getattr(self, "base_qty", 0),
             vps_sizing_meta=meta,
             add_count=self.add_count,
-            max_add_times=MAX_ADD_TIMES,
+            max_add_times=max_add,
+            regime=self.regime,
             verify_note=verify_note,
             verified=sl_ok,
         )

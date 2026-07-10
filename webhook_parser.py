@@ -8,7 +8,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-TV_STRATEGY_VERSION = "v6.9.86"
+TV_STRATEGY_VERSION = "v6.9.93"
 
 # 交易所实盘杠杆（头寸倍数）；保证金美元口径仍用 VPS_MARGIN_LEVERAGE 保持 R4≈200U@1000U
 EXCHANGE_LEVERAGE = 15
@@ -28,9 +28,19 @@ MIN_RISK_PCT = 0.5
 MAX_POSITION_SIZE = 9999.0
 MIN_QTY_DEFAULT = 0.001
 
-# 加仓：固定首仓 50%，最多 2 次（PYRAMID / PROFIT_ADD 一视同仁）
-ADD_QTY_RATIO = 0.5
-MAX_ADD_TIMES = 2
+# TV v6.9.93 动态加仓：TV qty_ratio 优先；缺失时按档位默认值
+ADD_QTY_RATIO_BY_REGIME = {
+    1: 0.0,   # R1 不加仓
+    2: 0.3,
+    3: 0.5,
+    4: 0.7,
+}
+MAX_ADD_TIMES_BY_REGIME = {
+    1: 1,
+    2: 2,
+    3: 2,
+    4: 3,
+}
 
 # 兼容旧引用
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
@@ -164,6 +174,31 @@ def _to_int(val, default=None):
         return default
 
 
+def get_regime_add_qty_ratio(regime):
+    """TV v6.9.93 档位默认加仓比例（相对首仓 base_qty）"""
+    return float(ADD_QTY_RATIO_BY_REGIME.get(int(regime or 3), ADD_QTY_RATIO_BY_REGIME[3]))
+
+
+def get_regime_max_add_times(regime):
+    """TV v6.9.93 档位最大加仓次数"""
+    return int(MAX_ADD_TIMES_BY_REGIME.get(int(regime or 3), MAX_ADD_TIMES_BY_REGIME[3]))
+
+
+def resolve_tv_add_qty_ratio(regime, tv_qty_ratio=None):
+    """
+    加仓比例解析：TV webhook qty_ratio 为准；缺失/无效时回退档位默认。
+    OPEN 始终为 1.0，由调用方处理。
+    """
+    if tv_qty_ratio is not None:
+        try:
+            ratio = float(tv_qty_ratio)
+            if ratio >= 0:
+                return ratio
+        except (TypeError, ValueError):
+            pass
+    return get_regime_add_qty_ratio(regime)
+
+
 def normalize_entry_type(val, default=ENTRY_TYPE_OPEN):
     """OPEN | PYRAMID | PROFIT_ADD"""
     raw = str(val or default).strip().upper()
@@ -276,24 +311,30 @@ def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
     return qty, meta
 
 
-def compute_vps_add_qty(base_qty, qty_ratio=None, qty_step=0.001, min_qty=None,
+def compute_vps_add_qty(base_qty, qty_ratio=None, regime=None, qty_step=0.001, min_qty=None,
                         face_value=None, max_position=None):
-    """加仓 PYRAMID/PROFIT_ADD：add_qty = base_qty × ADD_QTY_RATIO（固定，忽略 TV qty_ratio）"""
+    """
+    加仓 PYRAMID/PROFIT_ADD：
+    add_qty = base_qty × TV qty_ratio（首仓 VPS 自主 sizing，加仓跟 TV 系数）
+    """
     base_qty = float(base_qty or 0)
-    qty_ratio = float(ADD_QTY_RATIO if qty_ratio is None else qty_ratio)
+    ratio = resolve_tv_add_qty_ratio(regime, qty_ratio)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
     meta = {
         "base_qty": base_qty,
-        "qty_ratio": qty_ratio,
-        "add_qty_ratio_fixed": ADD_QTY_RATIO,
+        "qty_ratio": ratio,
+        "regime": int(regime or 3),
+        "regime_add_ratio_default": get_regime_add_qty_ratio(regime),
+        "max_add_times": get_regime_max_add_times(regime),
         "sizing_mode": "VPS_ADD",
+        "ratio_source": "tv" if qty_ratio is not None else "regime_default",
     }
-    if base_qty <= 0 or qty_ratio <= 0:
+    if base_qty <= 0 or ratio <= 0:
         meta["error"] = "invalid_base_or_ratio"
         return 0.0, meta
 
-    raw = base_qty * qty_ratio
+    raw = base_qty * ratio
     if face_value and float(face_value) > 0:
         qty = max(1, int(raw))
         qty = min(qty, int(max_position))
@@ -326,10 +367,12 @@ def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
     meta = meta or {}
     mode = meta.get("sizing_mode", "VPS_OPEN")
     if mode == "VPS_ADD":
+        src = "TV" if meta.get("ratio_source") == "tv" else "档位默认"
         return (
-            f"base={float(meta.get('base_qty', 0)):.3f} "
-            f"× ratio={float(meta.get('qty_ratio', 0)):.2f} "
-            f"→ add={float(qty or meta.get('raw_qty', 0)):.3f}"
+            f"首仓base={float(meta.get('base_qty', 0)):.3f} "
+            f"× TV比例={float(meta.get('qty_ratio', 0)):.2f}({src}) "
+            f"→ add={float(qty or meta.get('raw_qty', 0)):.3f} "
+            f"| R{int(meta.get('regime', 3))} 最多{int(meta.get('max_add_times', 2))}次"
         )
     eff = float(meta.get("effective_risk_pct", VPS_RISK_PCT))
     parts = [
@@ -519,10 +562,12 @@ def normalize_tv_payload(data):
             out["risk_pct"] = round(risk_pct, 4)
         if leverage is not None and leverage > 0:
             out["leverage"] = round(leverage, 2)
-        if qty_ratio is not None and qty_ratio > 0:
+        if qty_ratio is not None and qty_ratio >= 0:
             out["qty_ratio"] = round(qty_ratio, 4)
         elif entry_type == ENTRY_TYPE_OPEN:
             out["qty_ratio"] = 1.0
+        elif entry_type in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
+            out["qty_ratio"] = round(get_regime_add_qty_ratio(regime), 4)
     if reason:
         out["reason"] = reason
     if secret:

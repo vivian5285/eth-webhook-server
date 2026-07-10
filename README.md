@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.24.0-radar-handoff-safe`**
+**当前版本：`v13.25.0-dynamic-add`**
 
 TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
@@ -14,7 +14,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version: v13.24.0-radar-handoff-safe
+# 期望 version: v13.25.0-dynamic-add
 ```
 
 ---
@@ -198,6 +198,27 @@ TP1 实盘成交验证通过
 
 空仓 5 分钟内重复同向信号 → 忽略 + 钉钉。
 
+### 动态加仓（v6.9.93 / v13.25）
+
+对齐 TV **gemini止损_动态加仓**：
+
+| 类型 | sizing 规则 |
+|------|-------------|
+| **OPEN** | VPS 自主计算（`VPS_RISK_PCT` × 档位系数 × 15x），**不以 TV risk_pct 为准** |
+| **PYRAMID** | `add_qty = base_qty × TV qty_ratio`（首仓 base 不变） |
+| **PROFIT_ADD** | 同上，比例由 TV 按档位动态下发 |
+
+**档位默认加仓比例 / 次数上限**（TV 未传 qty_ratio 时回退）：
+
+| 档位 | 加仓比例 | 最多次数 |
+|------|----------|----------|
+| R1 | 0%（禁止） | 1 |
+| R2 | 30% | 2 |
+| R3 | 50% | 2 |
+| R4 | 70% | 3 |
+
+加仓后：**只更新 tv_sl + 钉钉实盘核实**，TP123 与雷达状态机不变（继续守首仓 open_regime 比例）。
+
 ### 人工 / orphan 持仓（空闲巡检 12s）
 
 VPS 账本空仓但交易所有仓：
@@ -316,7 +337,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 # 版本门控
-grep 'v13.24.0-radar-handoff-safe' position_supervisor_binance.py
+grep 'v13.25.0-dynamic-add' position_supervisor_binance.py
 grep 'DEPLOY_SCRIPT_VERSION' deploy_binance.sh
 
 source venv/bin/activate    # 如有 venv
@@ -411,6 +432,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 | v13.22 | `_trusted_initial_qty`；2/2 TP 审计拒绝 |
 | v13.23 | `_tp1_filled_verified` 雷达门控；伪 TP 解除 |
 | **v13.24** | **安全雷达交棒：先挂保本、mark gap、失败回滚 tv_sl** |
+| **v13.25** | **动态加仓：首仓 VPS sizing，加仓 base×TV qty_ratio + 档位次数上限** |
 
 ---
 
@@ -427,4 +449,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.24.0-radar-handoff-safe*
+*GEMINI Quant · 双轨智慧雷达 · v13.25.0-dynamic-add*
