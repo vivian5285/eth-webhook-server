@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.23.0-radar-tp1-gate"
+BINANCE_VPS_VERSION = "v13.24.0-radar-handoff-safe"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -87,6 +87,8 @@ TV_TRAIL_TP2_ATR = TV_TRAIL_TIGHT * 0.32   # ≈0.20 ATR — TP1 成交后
 TV_TRAIL_TP3_ATR = TV_TRAIL_TIGHT * 0.48   # ≈0.30 ATR — TP2 成交后
 TV_BOOT_SL_ATR = 0.40                      # strongBull 保本底线 entry ± 0.4 ATR
 RADAR_FEE_BUFFER_PCT = 0.0015
+RADAR_STOP_MIN_GAP_USD = 2.5
+RADAR_STOP_MIN_GAP_PCT = 0.0012
 MIN_TP_LEG_QTY = 0.001
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
@@ -2542,66 +2544,169 @@ class PositionSupervisorBinance:
 
         return bool(self._wait_verify(_probe, retries=retries, delay=delay))
 
-    def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
-        """
-        雷达接管前强制撤净 TV 硬止损 closePosition 单，再挂雷达移动保本。
-        返回: dict(cancelled, cleared, verified)
-        """
+    def _radar_min_stop_gap(self, curr_px=0.0):
+        """交易所 STOP 与现价的最小安全距离，防「刚挂就触发」"""
+        px = float(curr_px or 0)
+        if px <= 0:
+            try:
+                px = float(binance_client.get_current_price(self.symbol) or 0)
+            except Exception:
+                px = 0.0
+        if px <= 0:
+            return RADAR_STOP_MIN_GAP_USD
+        return max(RADAR_STOP_MIN_GAP_USD, px * RADAR_STOP_MIN_GAP_PCT)
+
+    def _clamp_radar_sl_for_market(self, curr_px, sl):
+        """LONG: SL 必须低于 mark-gap；SHORT: 高于 mark+gap；再与 tv_sl 合并"""
+        if not sl or curr_px <= 0:
+            return sl
+        gap = self._radar_min_stop_gap(curr_px)
+        sl = round(float(sl), 2)
+        if self.current_side == "LONG":
+            safe_cap = round(curr_px - gap, 2)
+            if sl >= safe_cap:
+                sl = safe_cap
+            merged = self._clamp_radar_to_tv_floor(sl)
+            if merged and merged > safe_cap:
+                sl = safe_cap
+            else:
+                sl = merged or sl
+        elif self.current_side == "SHORT":
+            safe_cap = round(curr_px + gap, 2)
+            if sl <= safe_cap:
+                sl = safe_cap
+            merged = self._clamp_radar_to_tv_floor(sl)
+            if merged and merged < safe_cap:
+                sl = safe_cap
+            else:
+                sl = merged or sl
+        return sl
+
+    def _can_safely_place_radar_sl(self, curr_px, sl):
+        """False = 止损价贴市价，交易所会立即触发 closePosition 全平"""
+        if curr_px <= 0 or not sl:
+            return False
+        gap = self._radar_min_stop_gap(curr_px)
+        sl = float(sl)
+        if self.current_side == "LONG":
+            return sl <= curr_px - gap
+        if self.current_side == "SHORT":
+            return sl >= curr_px + gap
+        return False
+
+    def _notify_shield_handoff_to_radar(self, real_amt, curr_px, new_sl, reason="",
+                                        sl_verified=False, cancelled_hint=0):
+        """保本止损已核实后推送交棒钉钉（禁止先撤硬止损再裸奔）"""
+        if getattr(self, "_shield_handoff_notified", False):
+            return
+        real_amt = float(self._resolve_live_qty(real_amt) or 0)
+        if real_amt <= 0:
+            return
         stop_px = self._shield_stop_price()
-        had_flag = getattr(self, "shield_active", False)
-        had_exchange = self._shield_present_on_exchange()
-        if not had_flag and not had_exchange:
-            return {"cancelled": 0, "cleared": True, "verified": True}
-
-        n = self._cancel_stop_orders(scope="shield")
-        if self._shield_present_on_exchange():
-            n += self._purge_shield_stop_orders()
-            time.sleep(0.5)
-        if self._shield_present_on_exchange():
-            n += self._purge_shield_stop_orders()
-            time.sleep(0.5)
-        cleared = self._wait_shield_cleared(retries=8, delay=0.4)
-
-        self.shield_active = False
-        self.shield_tiers_consumed = []
-        self.shield_sized_qty = 0.0
-        self._shield_arm_notified = False
+        progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 1.0
+        verify_note = (
+            f"先挂雷达保本 @ {new_sl:.2f} 已核实"
+            + (f" | 替换 TV硬止损 @ {stop_px:.2f}" if stop_px else "")
+            + f" | 持仓 {real_amt} ETH"
+        )
+        if not sl_verified:
+            verify_note += f" | {dingtalk.VERIFY_DELAY_MARK}"
+        self._call_dingtalk(
+            dingtalk.report_shield_disarmed,
+            side=self.current_side,
+            live_qty=real_amt,
+            entry=self.watched_entry,
+            cancelled_count=max(cancelled_hint, 1),
+            reason=reason or "雷达交棒 · 先挂保本再撤 tv_sl",
+            radar_progress=progress,
+            verify_note=verify_note,
+            verified=sl_verified,
+        )
+        self._shield_handoff_notified = True
         self._save_state()
 
-        still_there = self._shield_present_on_exchange()
-        verified = cleared and not still_there
-        progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
-        if reason and (had_flag or had_exchange or n):
+    def _perform_radar_handoff(self, real_amt, curr_px, reason=""):
+        """
+        原子雷达交棒：先挂安全保本 STOP 并核实 → 再钉钉。
+        禁止先撤 tv_sl 导致裸奔；禁止 SL 贴市价立即全平。
+        """
+        real_amt = float(self._resolve_live_qty(real_amt) or 0)
+        if real_amt <= 0:
+            return False
+        if not self._should_radar_trail(curr_px):
+            return False
+
+        new_sl = self._compute_radar_sl()
+        if new_sl is None:
+            return False
+
+        boot_sl = self._radar_breakeven_floor()
+        if self.current_side == "LONG":
+            boot_sl = max(new_sl or 0, boot_sl)
+            if boot_sl > float(self.current_sl or 0):
+                self.current_sl = boot_sl
+        else:
+            boot_sl = min(new_sl or boot_sl, boot_sl)
+            if boot_sl < float(self.current_sl or 999999) or float(self.current_sl or 0) >= self.watched_entry:
+                self.current_sl = boot_sl
+
+        safe_sl = self._clamp_radar_sl_for_market(curr_px, self.current_sl)
+        if not self._can_safely_place_radar_sl(curr_px, safe_sl):
+            gap = self._radar_min_stop_gap(curr_px)
             logger.info(
-                f"🛡️ [雷达交棒] {reason} | 撤 {n} 笔硬止损"
-                + (f" | ⚠️ 盘口仍检测到硬止损" if still_there else " | 硬止损已净")
-                + f" | 雷达进度 {progress:.0%}"
+                f"📡 雷达交棒延迟：保本 {safe_sl:.2f} 距现价 {curr_px:.2f} "
+                f"不足 {gap:.2f} USDT，保留 tv_sl 呼吸空间"
             )
-        if notify and (n > 0 or ((had_flag or had_exchange) and not getattr(self, "_shield_handoff_notified", False))):
-            verify_note = (
-                f"撤 {n} 笔 TV硬止损 @ {stop_px:.2f}"
-                if stop_px else f"撤 {n} 笔 TV硬止损"
+            return False
+
+        had_tv_shield = (
+            getattr(self, "shield_active", False)
+            or self._shield_present_on_exchange()
+        )
+        old_tv = self._shield_stop_price()
+        self.current_sl = safe_sl
+        self._save_state()
+
+        sl_placed = self._ensure_radar_sl(safe_sl, real_amt)
+        sl_verified = sl_placed and self._wait_verify(
+            lambda: self._has_stop_sl_near(safe_sl, exclude_shield=False),
+            retries=10,
+            delay=0.45,
+        )
+        if not sl_verified:
+            logger.warning(
+                f"📡 雷达交棒中止：保本 @ {safe_sl:.2f} 未核实，不撤 tv_sl 不交棒"
             )
-            if still_there:
-                verify_note += " | ⚠️ 盘口仍残留，雷达挂止损暂缓"
-            else:
-                verify_note += " | 硬止损已净，交棒雷达移动保本"
-            verify_note += (
-                f" | {'雷达已激活' if progress >= 1.0 else f'雷达进度 {progress:.0%}'}"
+            if had_tv_shield and old_tv:
+                self._maintain_hard_shield(real_amt, curr_px, force=True, radar_sl=None)
+            return False
+
+        logger.info(
+            f"📡 雷达交棒成功：保本 @ {safe_sl:.2f} | best={self.best_price:.2f} | "
+            f"现价 {curr_px:.2f} | 距 mark {self._radar_min_stop_gap(curr_px):.2f}"
+        )
+        if had_tv_shield and not getattr(self, "_shield_handoff_notified", False):
+            self._notify_shield_handoff_to_radar(
+                real_amt, curr_px, safe_sl,
+                reason=reason or "雷达交棒 · 先挂保本再撤 tv_sl",
+                sl_verified=True,
+                cancelled_hint=1 if old_tv else 0,
             )
-            self._call_dingtalk(
-                dingtalk.report_shield_disarmed,
-                side=self.current_side,
-                live_qty=self._resolve_live_qty(self.watched_qty or 0),
-                entry=self.watched_entry,
-                cancelled_count=n,
-                reason=reason or "雷达激活前撤硬止损",
-                radar_progress=progress,
-                verify_note=verify_note,
-                verified=verified,
+        if not getattr(self, "_radar_activation_notified", False):
+            self._report_radar_first_activation(
+                real_amt, curr_px, safe_sl, sl_placed,
             )
-            self._shield_handoff_notified = True
-        return {"cancelled": n, "cleared": not still_there, "verified": verified}
+        return True
+
+    def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
+        """兼容旧调用 → 统一走原子交棒（先挂保本，禁止先撤硬止损）"""
+        real_amt = self._resolve_live_qty(self.watched_qty or 0)
+        if real_amt <= 0:
+            return {"cancelled": 0, "cleared": True, "verified": True}
+        ok = self._perform_radar_handoff(
+            real_amt, curr_px, reason=reason or "雷达接管",
+        )
+        return {"cancelled": 1 if ok else 0, "cleared": ok, "verified": ok}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
         """TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本（TP1 前保留宽硬止损）"""
@@ -3101,7 +3206,7 @@ class PositionSupervisorBinance:
         had = getattr(self, "shield_active", False) or bool(
             getattr(self, "shield_tiers_consumed", [])
         ) or self._shield_present_on_exchange()
-        live_qty = self._resolve_live_qty(self.watched_qty or 0)
+        live_qty = float(self._resolve_live_qty(self.watched_qty or 0) or 0)
         entry = self.watched_entry
         self.shield_active = False
         self.shield_tiers_consumed = []
@@ -3110,7 +3215,7 @@ class PositionSupervisorBinance:
         self._save_state()
         if reason and (had or n):
             logger.info(f"🛡️ [硬止损解除] {reason} | 撤销 {n} 笔 TV硬止损")
-        if notify and n > 0:
+        if notify and n > 0 and live_qty > 0:
             progress = 0.0
             try:
                 curr_px = binance_client.get_current_price(self.symbol) or 0
@@ -4254,19 +4359,16 @@ class PositionSupervisorBinance:
                 new_qty, dynamic_sl=sl_to_pass,
                 reason=f"{levels} 成交静默对齐",
             )
-            if sl_to_pass:
-                clamped = self._clamp_radar_to_tv_floor(sl_to_pass)
-                self._ensure_radar_sl(clamped, new_qty)
-            if (
-                sl_to_pass
-                and not getattr(self, "_radar_activation_notified", False)
-            ):
-                self._report_radar_first_activation(
-                    new_qty, curr_px_safe, self._clamp_radar_to_tv_floor(sl_to_pass),
-                    self._has_stop_sl_near(
-                        self._clamp_radar_to_tv_floor(sl_to_pass), exclude_shield=False,
-                    ),
+            if sl_to_pass and not getattr(self, "_radar_activation_notified", False):
+                self._perform_radar_handoff(
+                    new_qty, curr_px_safe, reason=f"{levels} 成交雷达接管",
                 )
+            elif sl_to_pass:
+                clamped = self._clamp_radar_sl_for_market(
+                    curr_px_safe, self._clamp_radar_to_tv_floor(sl_to_pass),
+                )
+                if self._can_safely_place_radar_sl(curr_px_safe, clamped):
+                    self._ensure_radar_sl(clamped, new_qty)
         elif kind == "shield_fill":
             f = change["shield_fills"][0]
             logger.warning(
@@ -4331,7 +4433,9 @@ class PositionSupervisorBinance:
                 reason=f"人工异动: {action_msg}",
             )
             if self._should_disarm_shield_for_favorable(curr_px):
-                self._disarm_shield("行情转有利，切换雷达保本", notify=True)
+                self._perform_radar_handoff(
+                    new_qty, curr_px, reason="TP后切换雷达保本",
+                )
             elif self._should_activate_shield(curr_px) or getattr(self, "shield_active", False):
                 self._maintain_hard_shield(new_qty, curr_px, force=True)
 
@@ -4561,10 +4665,18 @@ class PositionSupervisorBinance:
                 "CLOSE_TP3", self.current_side,
                 self._estimate_pnl_pct(curr_px), "TP3完美收网",
             )
-        if getattr(self, "_radar_activation_notified", False) or self._is_radar_active():
+        if getattr(self, "_shield_handoff_notified", False) or getattr(
+            self, "_radar_activation_notified", False
+        ) or self._is_radar_active():
             est = self._estimate_pnl_pct(curr_px)
+            sl = float(
+                getattr(self, "_last_applied_exchange_sl", 0)
+                or getattr(self, "current_sl", 0)
+                or 0
+            )
             return self._build_close_meta(
-                "CLOSE_STOPLOSS", self.current_side, est, "防回吐保本平仓",
+                "CLOSE_STOPLOSS", self.current_side, est,
+                f"雷达保本止损触发 @ {sl:.2f} | {hint_reason}",
             )
         if getattr(self, "shield_active", False):
             est = self._estimate_pnl_pct(curr_px)
@@ -5428,10 +5540,12 @@ class PositionSupervisorBinance:
         if progress >= self.regime_settings[self.regime]["activation"]:
             if self.current_side == "LONG":
                 trail_sl = max(round(self.best_price - trail_offset, 2), floor_px)
+                trail_sl = self._clamp_radar_sl_for_market(curr_px, trail_sl)
                 if not self._is_radar_active() or trail_sl > self.current_sl:
                     self.current_sl = max(self.current_sl or entry, trail_sl)
             else:
                 trail_sl = min(round(self.best_price + trail_offset, 2), floor_px)
+                trail_sl = self._clamp_radar_sl_for_market(curr_px, trail_sl)
                 if not self._is_radar_active() or trail_sl < self.current_sl:
                     self.current_sl = min(self.current_sl or entry, trail_sl)
             logger.info(
@@ -5565,31 +5679,21 @@ class PositionSupervisorBinance:
         """实时雷达：跟踪 best_price，推升/下压保本止损（不低于 TV tv_sl）"""
         if not self._should_radar_trail(curr_px):
             return False
-        new_sl = self._compute_radar_sl()
-        if new_sl is None:
+        real_amt = float(self._resolve_live_qty(real_amt) or 0)
+        if real_amt <= 0:
             return False
 
         if not self._is_radar_active():
-            boot_sl = self._radar_breakeven_floor()
-            if self.current_side == "LONG":
-                boot_sl = max(new_sl or 0, boot_sl)
-                if boot_sl > self.current_sl:
-                    self.current_sl = boot_sl
-            else:
-                boot_sl = min(new_sl or boot_sl, boot_sl)
-                if boot_sl < self.current_sl or self.current_sl >= self.watched_entry:
-                    self.current_sl = boot_sl
-            self._save_state()
-            sl_placed = False
-            if not self._has_stop_sl_near(self.current_sl):
-                sl_placed = self._ensure_radar_sl(self.current_sl, real_amt)
-            logger.info(
-                f"📡 雷达首次激活：保本止损 @ {self.current_sl:.2f} | best={self.best_price:.2f}"
+            return self._perform_radar_handoff(
+                real_amt, curr_px, reason="雷达激活 · 移动保本",
             )
-            self._report_radar_first_activation(
-                real_amt, curr_px, self.current_sl, sl_placed,
-            )
-            return True
+
+        new_sl = self._compute_radar_sl()
+        if new_sl is None:
+            return False
+        new_sl = self._clamp_radar_sl_for_market(curr_px, new_sl)
+        if not self._can_safely_place_radar_sl(curr_px, new_sl):
+            return False
 
         moved = False
 
