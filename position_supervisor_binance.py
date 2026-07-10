@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.22.0-trusted-initial-tp123"
+BINANCE_VPS_VERSION = "v13.23.0-radar-tp1-gate"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -939,7 +939,7 @@ class PositionSupervisorBinance:
         if radar_sl and float(radar_sl) > 0:
             return float(radar_sl)
         tracked = self._radar_sl_to_pass()
-        if tracked and self._tp_level_consumed(1):
+        if tracked and self._tp1_filled_verified():
             return tracked
         return self._shield_stop_price()
 
@@ -978,6 +978,7 @@ class PositionSupervisorBinance:
         if manual_fresh:
             self._reset_fresh_takeover_state()
 
+        self._disarm_premature_radar(live_qty, curr_px, source=source)
         self._reconcile_stale_tp_consumed(
             self._trusted_initial_qty(live_qty, entry), live_qty, curr_px,
         )
@@ -1023,7 +1024,7 @@ class PositionSupervisorBinance:
             notes.append(f"TP修复跳过:{e}")
 
         self._refresh_radar_state_on_recover(curr_px, entry)
-        radar_sl = self._radar_sl_to_pass() if self._tp_level_consumed(1) else None
+        radar_sl = self._radar_sl_to_pass() if self._tp1_filled_verified() else None
 
         if tp_repair.get("repaired") and tp_repair.get("result"):
             result = tp_repair["result"]
@@ -1056,7 +1057,7 @@ class PositionSupervisorBinance:
             curr_px, audit,
         )
 
-        if self._tp_level_consumed(1) and (
+        if self._tp1_filled_verified(live_qty, curr_px) and (
             health.get("should_radar") or health.get("radar_active")
         ):
             self._process_radar_trailing(live_qty, curr_px)
@@ -1681,6 +1682,8 @@ class PositionSupervisorBinance:
         if self._is_dust_qty(real_amt):
             return True
         if self._collect_limit_tp_prices():
+            return False
+        if self._expected_tp_count() > 0 and not self._tp1_filled_verified(real_amt):
             return False
         ref = self.initial_qty or self.watched_qty
         if ref > 0 and real_amt <= ref * TP_COMPLETE_RESIDUAL_RATIO:
@@ -2602,7 +2605,7 @@ class PositionSupervisorBinance:
 
     def _should_disarm_shield_for_favorable(self, curr_px):
         """TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本（TP1 前保留宽硬止损）"""
-        if not self._tp_level_consumed(1):
+        if not self._tp1_filled_verified():
             return False
         stop_px = self._shield_stop_price()
         has_shield = bool(
@@ -2632,6 +2635,7 @@ class PositionSupervisorBinance:
         双层风控：雷达移动保本（VPS）+ TV tv_sl 硬止损底线（合并为单 closePosition）。
         雷达线不得低于 tv_sl；UPDATE_SL 只更新底线，雷达逻辑独立运行。
         """
+        self._disarm_premature_radar(real_amt, curr_px, source="哨兵防线")
         radar_sl = None
         if self._resolve_defense_regime(curr_px) == "FAVORABLE":
             if self._should_radar_trail(curr_px) or self._is_radar_active():
@@ -3271,6 +3275,8 @@ class PositionSupervisorBinance:
     def _is_radar_active(self):
         if not self.watched_entry or not self.current_sl:
             return False
+        if not self._tp1_filled_verified():
+            return False
         if self.current_side == "LONG":
             return self.current_sl > self.watched_entry
         if self.current_side == "SHORT":
@@ -3278,6 +3284,8 @@ class PositionSupervisorBinance:
         return False
 
     def _radar_sl_to_pass(self):
+        if not self._tp1_filled_verified():
+            return None
         return self.current_sl if self._is_radar_active() else None
 
     def _collect_tp_limit_orders(self):
@@ -4519,6 +4527,22 @@ class PositionSupervisorBinance:
 
     def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
         """哨兵/重启推断全平类型（无 fresh TV 信号时）"""
+        if self._likely_exchange_stop_exit(curr_px) and not getattr(
+            self, "_radar_activation_notified", False
+        ):
+            est = self._estimate_pnl_pct(curr_px)
+            sl = float(
+                getattr(self, "_last_applied_exchange_sl", 0)
+                or getattr(self, "tv_sl", 0)
+                or 0
+            )
+            return self._build_close_meta(
+                "CLOSE_STOPLOSS",
+                self.current_side,
+                est,
+                f"交易所止损触发 @ {sl:.2f} (TP1前宽止损/非雷达保本钉钉) | {hint_reason}",
+            )
+
         last = self.last_tv_signal or {}
         if (
             last.get("action") in ("CLOSE_TP3", "CLOSE_PROTECT", "CLOSE_STOPLOSS")
@@ -5275,11 +5299,89 @@ class PositionSupervisorBinance:
     def _tp_level_consumed(self, level):
         return level in (getattr(self, "tp_levels_consumed", []) or [])
 
+    def _tp_filled_verified(self, level, live_qty=None, curr_px=0.0):
+        """账本标记 + 减仓证据 + 该档限价已不在盘口 → 才认定 TP 真正成交"""
+        level = int(level)
+        if not self._tp_level_consumed(level):
+            return False
+        live_qty = float(live_qty if live_qty is not None else self.watched_qty or 0)
+        initial = self._trusted_initial_qty(live_qty)
+        inferred = self._infer_tp_consumed_sequential(initial, live_qty, curr_px)
+        if level not in inferred:
+            return False
+        idx = level - 1
+        if 0 <= idx < len(self.tv_tps) and self.tv_tps[idx] > 0:
+            if self._has_tp_limit_at_price(self.tv_tps[idx]):
+                return False
+        return True
+
+    def _tp1_filled_verified(self, live_qty=None, curr_px=0.0):
+        return self._tp_filled_verified(1, live_qty, curr_px)
+
+    def _likely_exchange_stop_exit(self, curr_px=0.0):
+        """现价贴近最后挂出的止损价 → 多为交易所 STOP 触发（非 VPS 市价全平）"""
+        px = float(
+            curr_px or binance_client.get_current_price(self.symbol) or 0
+        )
+        sl = float(
+            getattr(self, "_last_applied_exchange_sl", 0)
+            or getattr(self, "tv_sl", 0)
+            or 0
+        )
+        if sl <= 0 or px <= 0:
+            return False
+        return abs(px - sl) <= max(2.5, px * 0.002)
+
+    def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
+        """
+        伪 TP1 / 过早保本线 → 清标记、恢复 tv_sl 宽止损，避免微盈被扫出。
+        """
+        live_qty = float(live_qty or self.watched_qty or 0)
+        if self._tp1_filled_verified(live_qty, curr_px):
+            return False
+
+        disarmed = False
+        stale = list(getattr(self, "tp_levels_consumed", []) or [])
+        tv = float(getattr(self, "tv_sl", 0) or 0)
+        entry = float(self.watched_entry or 0)
+
+        if stale:
+            self.tp_levels_consumed = []
+            disarmed = True
+
+        if entry > 0 and self.current_sl:
+            if self.current_side == "LONG" and float(self.current_sl) > entry + 0.01:
+                self.current_sl = tv if tv > 0 else float(self.current_sl)
+                disarmed = True
+            elif self.current_side == "SHORT" and float(self.current_sl) < entry - 0.01:
+                self.current_sl = tv if tv > 0 else float(self.current_sl)
+                disarmed = True
+
+        if not disarmed:
+            return False
+
+        self._radar_activation_notified = False
+        self._shield_handoff_notified = False
+        self._save_state()
+        logger.warning(
+            f"📡 [{source or '雷达'}] 解除过早雷达/伪TP{stale or '标记'} "
+            f"→ 恢复 tv_sl={tv:.2f} 宽止损 | entry={entry:.2f}"
+        )
+        dingtalk.report_system_alert(
+            "雷达解除·恢复呼吸空间",
+            f"{self.current_side} {live_qty} ETH @ {entry:.2f} | "
+            f"清除伪TP{stale or '标记'} | tv_sl={tv:.2f} | "
+            f"TP1 未实盘成交前禁止移动保本止损",
+        )
+        if live_qty > 0 and tv > 0:
+            self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=None)
+        return True
+
     def _radar_tv_trail_atr_mult(self):
         """TV trailTight×offset：TP1 后 0.20 ATR，TP2 后 0.30 ATR"""
-        if self._tp_level_consumed(2):
+        if self._tp_filled_verified(2):
             return TV_TRAIL_TP3_ATR
-        if self._tp_level_consumed(1):
+        if self._tp1_filled_verified():
             return TV_TRAIL_TP2_ATR
         return TV_TRAIL_TP2_ATR
 
@@ -5311,7 +5413,7 @@ class PositionSupervisorBinance:
         else:
             self.best_price = min(self.best_price, curr_px)
 
-        if not self._tp_level_consumed(1):
+        if not self._tp1_filled_verified():
             if self.current_sl == 0.0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             logger.info(
@@ -5360,8 +5462,8 @@ class PositionSupervisorBinance:
             return True
         if curr_px <= 0 or not self.watched_entry:
             return False
-        # 对齐 TV：TP1 未成交前不做移动保本，保留 tv_sl 呼吸空间
-        if not self._tp_level_consumed(1):
+        # 对齐 TV：TP1 未实盘成交前不做移动保本，保留 tv_sl 呼吸空间
+        if not self._tp1_filled_verified():
             return False
         if self.current_side == "LONG":
             return curr_px >= self._radar_activation_price()
