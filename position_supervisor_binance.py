@@ -19,6 +19,7 @@ from webhook_parser import (
     compute_vps_open_qty,
     compute_vps_add_qty,
     format_vps_sizing_note,
+    enrich_entry_tp_prices,
     VPS_RISK_PCT,
     ADD_QTY_RATIO,
     MAX_ADD_TIMES,
@@ -41,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.14.0-adaptive-recover"
+BINANCE_VPS_VERSION = "v13.15.0-manual-recover-smart"
 EXCHANGE_LEVERAGE = 5  # 交易所实盘固定 5x；TV payload leverage 仅用于比例 sizing
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
@@ -369,6 +370,103 @@ class PositionSupervisorBinance:
                     last_open = entry
         return last_open
 
+    def _journal_tp_prices(self, entry):
+        """从日志条目解析 TP123（支持 tv_tps 列表或 tv_tp1/2/3 字段）"""
+        if not entry:
+            return [0.0, 0.0, 0.0]
+        if entry.get("tv_tps"):
+            return self._sanitize_tp_prices(entry.get("tv_tps", []))
+        return self._sanitize_tp_prices([
+            entry.get("tv_tp1"), entry.get("tv_tp2"), entry.get("tv_tp3"),
+        ])
+
+    def _hydrate_tv_defense_context(self, pos):
+        """
+        人工开仓 / 重启接管：从 TV 日志补全 tp/sl/regime/atr，避免字段缺失导致接管异常。
+        """
+        notes = []
+        side = pos.get("side") or self.current_side
+        entry = float(pos.get("entry_price", 0) or self.watched_entry or 0)
+        if not side:
+            return notes
+
+        self.current_side = side
+        if not self.last_tv_side:
+            self.last_tv_side = side
+
+        sources = [
+            self.last_tv_signal,
+            self._load_last_journal_entry(TV_JOURNAL),
+            self._load_last_tv_open_signal(),
+            self._load_last_journal_entry(OPEN_JOURNAL),
+        ]
+
+        for src in sources:
+            if not src:
+                continue
+            if src.get("regime"):
+                self.regime = int(src["regime"])
+            if src.get("atr"):
+                self.current_atr = float(src["atr"])
+            if float(self.tv_price or 0) <= 0 and float(src.get("price", 0) or 0) > 0:
+                self.tv_price = float(src["price"])
+
+        tp_ok = sum(1 for t in (self.tv_tps or []) if t > 0)
+        if tp_ok < 3:
+            for src in sources:
+                tps = self._journal_tp_prices(src)
+                if sum(1 for t in tps if t > 0) >= 3:
+                    self.tv_tps = tps
+                    notes.append(f"补全TP123 {tps}")
+                    break
+
+        if sum(1 for t in (self.tv_tps or []) if t > 0) < 3 and entry > 0 and self.current_atr > 0:
+            payload = enrich_entry_tp_prices(
+                side, entry, self.current_atr, self.regime, {},
+            )
+            tps = self._sanitize_tp_prices([
+                payload.get("tv_tp1"), payload.get("tv_tp2"), payload.get("tv_tp3"),
+            ])
+            if sum(1 for t in tps if t > 0) >= 3:
+                self.tv_tps = tps
+                notes.append(f"ATR本地补全TP {tps}")
+
+        if float(getattr(self, "tv_sl", 0) or 0) <= 0:
+            for src in sources:
+                sl = float(src.get("tv_sl", 0) or 0)
+                if sl > 0:
+                    self.tv_sl = sl
+                    notes.append(f"补全tv_sl={sl:.2f}")
+                    break
+
+        if float(getattr(self, "tv_sl", 0) or 0) <= 0 and entry > 0 and self.current_atr > 0:
+            sl_m = {1: 0.9, 2: 1.05, 3: 1.10, 4: 1.25}.get(int(self.regime or 3), 1.10)
+            if side == "LONG":
+                self.tv_sl = round(entry - self.current_atr * sl_m, 2)
+            else:
+                self.tv_sl = round(entry + self.current_atr * sl_m, 2)
+            notes.append(f"ATR估算tv_sl={self.tv_sl:.2f}")
+
+        self.monitoring = True
+        self._save_state()
+        for n in notes:
+            logger.info(f"💧 接管上下文补全: {n}")
+        return notes
+
+    def _smart_recover_defenses(self, real_amt, entry, dynamic_sl=None):
+        """重启智能补挂：审计齐全则跳过，缺档增量补，避免重复挂单"""
+        matched, pending, expected, rebuilt = self._ensure_defenses_on_recover(
+            real_amt, entry, dynamic_sl=dynamic_sl,
+        )
+        audit = self._audit_tp_levels(real_amt)
+        return {
+            "matched": matched,
+            "expected": expected,
+            "pending_prices": pending,
+            "rebuilt": rebuilt,
+            "audit": audit,
+        }
+
     def _reconcile_context_on_recover(self, pos):
         """重启对账：实盘头寸 vs 账本 vs 最新 TV / 开仓日志"""
         notes = []
@@ -433,6 +531,15 @@ class PositionSupervisorBinance:
                 notes.append(
                     f"入场偏差: 开仓日志 {open_entry:.2f} vs 实盘 {pos['entry_price']:.2f}"
                 )
+
+        if saved_watched <= 0 and real_amt > 0:
+            reconcile["manual_open"] = True
+            self.initial_qty = real_amt
+            if float(getattr(self, "base_qty", 0) or 0) <= 0:
+                self.base_qty = real_amt
+            notes.append(
+                f"人工开仓(重启): 账本空仓 → 实盘 {real_amt} ETH {side}，已接管为基准仓"
+            )
 
         if saved_watched > 0 and self._is_material_qty_change(saved_watched, real_amt):
             action_msg = (
@@ -2188,37 +2295,44 @@ class PositionSupervisorBinance:
 
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         actions = []
-        audit = audit or self._audit_tp_levels(real_amt)
+        try:
+            audit = audit or self._audit_tp_levels(real_amt)
 
-        if not self._tp_audit_ok(audit):
-            repaired, n_actions = self._surgical_repair_tp_defenses(
-                real_amt, self.watched_entry,
-            )
-            if n_actions > 0:
-                actions.append(f"智能补挂TP({n_actions}步)")
-                audit = repaired
-
-        self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
-        health = self._build_recover_health_report(
-            {"side": self.current_side, "size": real_amt, "entry_price": self.watched_entry},
-            curr_px, audit,
-        )
-        actions.extend(self._apply_recover_defense_policy(real_amt, curr_px, health))
-
-        if curr_px > 0 and (health.get("should_radar") or health.get("radar_active")):
-            self._process_radar_trailing(real_amt, curr_px)
-            sl = self._radar_sl_to_pass()
-            if sl and not self._has_stop_sl_near(sl):
-                if self._ensure_radar_sl(sl, real_amt):
-                    actions.append(f"雷达SL@{sl:.2f}")
-            if self._is_radar_active() and not getattr(self, "_radar_activation_notified", False):
-                self._report_radar_first_activation(
-                    real_amt, curr_px, self._clamp_radar_to_tv_floor(self.current_sl),
-                    self._has_stop_sl_near(self.current_sl),
+            if not self._tp_audit_ok(audit):
+                repaired, n_actions = self._surgical_repair_tp_defenses(
+                    real_amt, self.watched_entry,
                 )
-            actions.append(f"雷达激活·进度{health.get('radar_progress', 0):.0%}")
+                if n_actions > 0:
+                    actions.append(f"智能补挂TP({n_actions}步)")
+                    audit = repaired
 
-        self._radar_guardian_audit(real_amt, curr_px)
+            self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
+            health = self._build_recover_health_report(
+                {"side": self.current_side, "size": real_amt, "entry_price": self.watched_entry},
+                curr_px, audit,
+            )
+            actions.extend(self._apply_recover_defense_policy(real_amt, curr_px, health))
+
+            if curr_px > 0 and (health.get("should_radar") or health.get("radar_active")):
+                self._process_radar_trailing(real_amt, curr_px)
+                sl = self._radar_sl_to_pass()
+                if sl and not self._has_stop_sl_near(sl):
+                    if self._ensure_radar_sl(sl, real_amt):
+                        actions.append(f"雷达SL@{sl:.2f}")
+                if self._is_radar_active() and not getattr(self, "_radar_activation_notified", False):
+                    self._report_radar_first_activation(
+                        real_amt, curr_px, self._clamp_radar_to_tv_floor(self.current_sl),
+                        self._has_stop_sl_near(self.current_sl),
+                    )
+                actions.append(f"雷达激活·进度{health.get('radar_progress', 0):.0%}")
+
+            self._radar_guardian_audit(real_amt, curr_px)
+        except Exception as e:
+            logger.error(f"重启全域核查部分失败(继续哨兵): {e}")
+            actions.append(f"核查异常:{e}")
+            audit = audit or self._audit_tp_levels(real_amt)
+            health = {}
+
         self._post_recover_radar_pulse = True
         self._save_state()
         logger.info(
@@ -4930,9 +5044,17 @@ class PositionSupervisorBinance:
             pos = self._get_active_position()
             if pos:
                 self._recover_in_progress = True
+                recover_ok = False
+                recover_err = ""
+                radar_active = False
+                sl_ok = False
                 if not self._lock.acquire(timeout=120.0):
                     logger.error("❌ 重启接管无法获取锁，跳过")
                     self._recover_in_progress = False
+                    dingtalk.report_system_alert(
+                        "重启接管失败",
+                        "无法获取仓位锁（120s超时），请稍后重启或检查是否有僵死进程",
+                    )
                     return
                 try:
                     reconcile = self._reconcile_context_on_recover(pos)
@@ -4940,6 +5062,9 @@ class PositionSupervisorBinance:
                     real_amt = pos["size"]
                     side = pos["side"]
                     self.current_side = side
+
+                    hydrate_notes = self._hydrate_tv_defense_context(pos)
+                    reconcile_notes.extend(hydrate_notes)
 
                     align_notes = self._apply_recover_live_alignment(side, reconcile)
                     reconcile_notes.extend(align_notes)
@@ -4959,9 +5084,15 @@ class PositionSupervisorBinance:
                     qty_change = reconcile.get("qty_manual_change")
 
                     curr_px = binance_client.get_current_price(self.symbol)
-                    tp_repair = self._repair_partial_tp_on_recover(
-                        real_amt, self.watched_entry, saved_initial, curr_px or 0,
-                    )
+                    tp_repair = {"repaired": False}
+                    try:
+                        tp_repair = self._repair_partial_tp_on_recover(
+                            real_amt, self.watched_entry, saved_initial, curr_px or 0,
+                        )
+                    except Exception as e:
+                        logger.error(f"重启TP修复跳过: {e}")
+                        reconcile_notes.append(f"TP修复跳过:{e}")
+
                     tp_repair_note = ""
                     self._refresh_radar_state_on_recover(curr_px, self.watched_entry)
                     if tp_repair.get("repaired"):
@@ -4979,15 +5110,19 @@ class PositionSupervisorBinance:
                         f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
                     )
 
-                    cap = self._radar_enforce_regime_cap(real_amt, curr_px, force=True)
-                    if cap:
-                        real_amt = cap["new_qty"]
-                        pos = self._get_active_position() or pos
-                        if pos:
-                            self.watched_qty = real_amt
-                            if float(self.initial_qty or 0) <= real_amt + 0.001:
-                                self.initial_qty = real_amt
+                    try:
+                        cap = self._radar_enforce_regime_cap(real_amt, curr_px, force=True)
+                        if cap:
+                            real_amt = cap["new_qty"]
+                            pos = self._get_active_position() or pos
+                            if pos:
+                                self.watched_qty = real_amt
+                                if float(self.initial_qty or 0) <= real_amt + 0.001:
+                                    self.initial_qty = real_amt
+                    except Exception as e:
+                        logger.warning(f"重启档位限额跳过: {e}")
 
+                    sl_ok = True
                     if tp_repair.get("repaired") and tp_repair.get("result"):
                         result = tp_repair["result"]
                         sl = self._radar_sl_to_pass()
@@ -4995,25 +5130,22 @@ class PositionSupervisorBinance:
                             sl_ok = self._ensure_radar_sl(sl, real_amt)
                         elif saved_sl and radar_active:
                             sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
-                        else:
-                            sl_ok = True
                     else:
-                        result = self._enforce_defense_alignment(
-                            real_amt, self.watched_entry, dynamic_sl=None,
-                            reason="重启闪电接管 · 核武撤单重挂",
-                            rounds=4, recover_mode=True,
+                        result = self._smart_recover_defenses(
+                            real_amt, self.watched_entry,
+                            dynamic_sl=self._radar_sl_to_pass(),
                         )
-                        if saved_sl and radar_active:
+                        if saved_sl and radar_active and not self._has_stop_sl_near(saved_sl):
                             sl_ok = self._ensure_radar_sl(saved_sl, real_amt)
-                        else:
-                            sl_ok = True
+                        elif float(getattr(self, "tv_sl", 0) or 0) > 0:
+                            sl_ok = self._maintain_hard_shield(real_amt, curr_px, force=True)
 
-                    _rebuilt = result["rebuilt"]
+                    _rebuilt = result.get("rebuilt", False)
                     audit = self._wait_defense_settled(
                         real_amt, saved_sl if radar_active else None,
                     )
-                    matched = audit["matched_full"]
-                    expected = audit["expected"]
+                    matched = audit.get("matched_full", 0)
+                    expected = audit.get("expected", 0)
 
                     self.monitoring = True
                     self._save_state()
@@ -5027,9 +5159,23 @@ class PositionSupervisorBinance:
                         retries=8,
                         delay=0.5,
                     )
-                    entry_px = float(
-                        (verified or pos)["entry_price"]
-                    )
+                    entry_px = float((verified or pos)["entry_price"])
+
+                    if reconcile.get("manual_open"):
+                        self._call_dingtalk(
+                            dingtalk.report_manual_position_change,
+                            action_type="人工开仓 · 重启接管",
+                            old_qty=0.0,
+                            new_qty=real_amt,
+                            new_entry_price=entry_px,
+                            verify_note=(
+                                f"TV方向 {self.last_tv_side} | TP123 {self.tv_tps} | "
+                                f"tv_sl={getattr(self, 'tv_sl', 0):.2f}"
+                            ),
+                            tp_audit=audit,
+                            verified=bool(verified),
+                        )
+
                     tv_note = ""
                     if self.last_tv_signal:
                         tv_note = (
@@ -5086,16 +5232,16 @@ class PositionSupervisorBinance:
                     audit = bootstrap.get("audit") or audit
                     health = bootstrap.get("health") or health
                     policy_actions = bootstrap.get("actions") or []
-                    radar_active = health["radar_active"] or health["should_radar"]
+                    radar_active = health.get("radar_active") or health.get("should_radar") or self._is_radar_active()
                     sl_ok = (
                         not radar_active
                         or self._has_stop_sl_near(self.current_sl)
                     )
                     policy_txt = " | 防线: " + " · ".join(policy_actions) if policy_actions else ""
                     health_txt = (
-                        f" | 盈亏态 {health['pnl_label']} | "
-                        f"硬止损 {health['shield_status']} | "
-                        f"策略 {health['defense_plan']}"
+                        f" | 盈亏态 {health.get('pnl_label', '未知')} | "
+                        f"硬止损 {health.get('shield_status', '待核实')} | "
+                        f"策略 {health.get('defense_plan', 'TP123+硬止损')}"
                     )
                     verify_note = verify_note + health_txt + policy_txt
 
@@ -5129,24 +5275,35 @@ class PositionSupervisorBinance:
                         tp_audit=audit,
                         last_tv_signal=self.last_tv_signal,
                         radar_sl_ok=sl_ok,
-                        pnl_label=health["pnl_label"],
-                        defense_plan=health["defense_plan"],
-                        shield_status=health["shield_status"],
-                        radar_progress=health["radar_progress"],
-                        tv_aligned=health["tv_match"],
-                        qty_aligned=health["qty_match"],
+                        pnl_label=health.get("pnl_label", ""),
+                        defense_plan=health.get("defense_plan", ""),
+                        shield_status=health.get("shield_status", ""),
+                        radar_progress=health.get("radar_progress", 0),
+                        tv_aligned=health.get("tv_match", True),
+                        qty_aligned=health.get("qty_match", True),
                         initial_qty=saved_initial,
                         tp_consumed_levels=getattr(self, "tp_levels_consumed", []) or [],
                     )
                     logger.info(
-                        f"  -> 🎉 实盘阵地接管完毕 | {health['pnl_label']} | "
+                        f"  -> 🎉 实盘阵地接管完毕 | {health.get('pnl_label', '')} | "
                         f"防线 {' · '.join(policy_actions) if policy_actions else '已核实'}"
+                    )
+                    recover_ok = True
+                except Exception as e:
+                    import traceback
+                    recover_err = f"{e}\n{traceback.format_exc()[-800:]}"
+                    logger.error(f"❌ 重启接管步骤异常: {recover_err}")
+                    self.monitoring = True
+                    self._save_state()
+                    dingtalk.report_system_alert(
+                        "重启接管部分失败",
+                        f"实盘仍有仓，已尽力启动哨兵接力 | {recover_err}",
                     )
                 finally:
                     self._recover_in_progress = False
                     self._lock.release()
 
-                if radar_active:
+                if recover_ok and radar_active:
                     logger.info(
                         f"📡 [重启] 雷达哨兵已点火 | SL={self.current_sl:.2f} | "
                         f"止损={'已挂/已确认' if sl_ok else '待哨兵补挂'}"
@@ -5156,6 +5313,8 @@ class PositionSupervisorBinance:
                     threading.Thread(
                         target=self._sentinel_loop, daemon=True, name="sentinel",
                     ).start()
+                elif recover_err:
+                    self._post_recover_radar_pulse = True
             else:
                 binance_client.cancel_all_open_orders(self.symbol)
                 logger.info("🔄 [系统重启点火] 盘口干净无持仓，账本复位为空仓待命。")
@@ -5176,8 +5335,18 @@ class PositionSupervisorBinance:
                     version=BINANCE_VPS_VERSION,
                 )
         except Exception as e:
-            logger.error(f"❌ 闪电接管异常: {e}")
-            dingtalk.report_system_alert("重启接管失败", str(e))
+            import traceback
+            err_detail = traceback.format_exc()[-1200:]
+            logger.error(f"❌ 闪电接管异常: {e}\n{err_detail}")
+            pos = self._get_active_position()
+            if pos:
+                self.monitoring = True
+                self._post_recover_radar_pulse = True
+                if not self._sentinel_active:
+                    threading.Thread(
+                        target=self._sentinel_loop, daemon=True, name="sentinel",
+                    ).start()
+            dingtalk.report_system_alert("重启接管失败", f"{e}\n{err_detail[-400:]}")
 
 
 position_supervisor = PositionSupervisorBinance()
