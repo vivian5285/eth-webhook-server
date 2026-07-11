@@ -17,6 +17,7 @@ from webhook_parser import (
     close_type_display_label,
     format_vps_sizing_note,
     format_tv_sizing_note,
+    format_regime_tp_ratios_label,
     VPS_RISK_PCT,
     VPS_REGIME_SCALE,
     EXCHANGE_LEVERAGE,
@@ -210,12 +211,12 @@ def _format_tp_audit(audit, tv_tps=None):
         prefix = "" if not lines else "\n\n  ➔ "
         if lv.get("status") == "ok":
             lines.append(
-                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` ETH @ `{lv['price']:.2f}` "
-                f"(比例期望 `{lv['qty']}`)"
+                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` {UNIT_LABEL} @ `{lv['price']:.2f}` "
+                f"(比例期望 `{lv['qty']}` {UNIT_LABEL})"
             )
         else:
             lines.append(
-                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` @ `{lv['price']:.2f}` "
+                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` {UNIT_LABEL} @ `{lv['price']:.2f}` "
                 f"→ 状态 `{lv['status']}`"
                 + (f" 实盘 `{lv.get('actual_qty', 0)}`" if lv.get("actual_qty") else "")
             )
@@ -299,6 +300,10 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     data = {
         "🎛️ 趋势方向": side_str,
         "📊 市场强度": get_regime_name(regime),
+        "🕸️ TP123 比例": _g(
+            f"开仓 R{regime} → **{format_regime_tp_ratios_label(regime)}%** (对齐 TV qty_percent)",
+            G_LIGHT,
+        ),
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
         "📦 唯一头寸": _g(f"**{qty}** {UNIT_LABEL} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
         "🕸️ 止盈布防比对": _g(
@@ -778,7 +783,8 @@ def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
 def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entry, new_entry,
                            tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
                            verify_note="", verified=True, base_qty=0, vps_sizing_meta=None,
-                           add_count=0, max_add_times=2, regime=3, tp_audit="", radar_note=""):
+                           add_count=0, max_add_times=2, regime=3, tp_audit="", radar_note="",
+                           open_regime=None, tp_ratio_label=""):
     """PYRAMID / PROFIT_ADD 加仓核实 — 首仓×TV比例 + 新总头寸重挂 TP123/雷达"""
     type_label = {
         ENTRY_TYPE_PYRAMID: "金字塔加仓 PYRAMID",
@@ -789,6 +795,10 @@ def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entr
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📡 加仓类型": _g(type_label, G_ACCENT),
         "📊 档位": get_regime_name(regime),
+        "🕸️ TP123 比例": _g(
+            f"开仓 R{int(open_regime or regime)} → **{tp_ratio_label or format_regime_tp_ratios_label(open_regime or regime)}%**",
+            G_LIGHT,
+        ),
         "➕ 追加数量": _g(f"**+{add_qty}** {UNIT_LABEL}", G_MAIN),
         "📦 持仓变化": _g(
             f"`{old_qty}` → **`{new_qty}`** {UNIT_LABEL}",

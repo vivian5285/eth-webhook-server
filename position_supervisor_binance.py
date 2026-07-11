@@ -23,6 +23,8 @@ from webhook_parser import (
     VPS_RISK_PCT,
     get_regime_max_add_times,
     resolve_tv_add_qty_ratio,
+    get_regime_tp_ratios,
+    format_regime_tp_ratios_label,
     EXCHANGE_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -106,10 +108,10 @@ class PositionSupervisorBinance:
 
         self.regime_settings = {
             # activation：TP1 后雷达参考进度（0.92≈接近 TP1）；trail_offset 仅兼容旧日志
-            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "activation": 0.92, "trail_offset": TV_TRAIL_TP2_ATR},
-            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "activation": 0.92, "trail_offset": TV_TRAIL_TP2_ATR},
-            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.95, "trail_offset": TV_TRAIL_TP3_ATR},
-            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.95, "trail_offset": TV_TRAIL_TP3_ATR},
+            1: {"margin": 0.15, "ratios": get_regime_tp_ratios(1), "activation": 0.92, "trail_offset": TV_TRAIL_TP2_ATR},
+            2: {"margin": 0.25, "ratios": get_regime_tp_ratios(2), "activation": 0.92, "trail_offset": TV_TRAIL_TP2_ATR},
+            3: {"margin": 0.35, "ratios": get_regime_tp_ratios(3), "activation": 0.95, "trail_offset": TV_TRAIL_TP3_ATR},
+            4: {"margin": 0.50, "ratios": get_regime_tp_ratios(4), "activation": 0.95, "trail_offset": TV_TRAIL_TP3_ATR},
         }
         self.leverage = EXCHANGE_LEVERAGE
         self.tv_sizing_leverage = EXCHANGE_LEVERAGE
@@ -2119,7 +2121,7 @@ class PositionSupervisorBinance:
                 actual_qty = at_px[0]["qty"]
                 issues.append(
                     f"TP{lv['level']} 数量 {actual_qty} ≠ 期望 {lv['qty']} "
-                    f"({self.regime_settings[self.regime]['ratios']})"
+                    f"({self.regime_settings[self._tp_split_regime()]['ratios']})"
                 )
             else:
                 matched_full += 1
@@ -5230,6 +5232,8 @@ class PositionSupervisorBinance:
             regime=self.regime,
             tp_audit=tp_summary,
             radar_note=realign.get("radar_note", ""),
+            open_regime=self._tp_split_regime(),
+            tp_ratio_label=format_regime_tp_ratios_label(self._tp_split_regime()),
             verify_note=verify_note,
             verified=sl_ok and self._tp_audit_ok(audit),
         )
@@ -5486,7 +5490,7 @@ class PositionSupervisorBinance:
                 qty=live_qty,
                 tp_pxs=tp_pxs,
                 atr=self.current_atr,
-                regime=self.regime,
+                regime=self.open_regime,
                 tv_tps=self.tv_tps,
                 verify_note=verify_note,
                 tp_audit=audit,
