@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/15x 适配）
+# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/20x 适配）
 import logging
 import time
 import threading
