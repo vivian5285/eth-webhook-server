@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.26.0-add-tp-radar-realign`**
+**当前版本：`v13.27.0-tp-radar-takeover-fix`**
 
 TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
@@ -448,6 +448,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 | v13.23 | `_tp1_filled_verified` 雷达门控；伪 TP 解除 |
 | **v13.24** | **安全雷达交棒：先挂保本、mark gap、失败回滚 tv_sl** |
 | **v13.25** | **动态加仓：首仓 VPS sizing，加仓 base×TV qty_ratio + 档位次数上限** |
+| **v13.27** | **TP方向校验/接管重载、TP成交识别增强、屏蔽5x误播、开仓核武重试** |
 | **v13.26** | **加仓后 TP123 按新总头寸重挂 + 雷达/tv_sl 同步** |
 
 ---
@@ -465,4 +466,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.26.0-add-tp-radar-realign*
+*GEMINI Quant · 双轨智慧雷达 · v13.27.0-tp-radar-takeover-fix*
