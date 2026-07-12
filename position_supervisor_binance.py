@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.28.0-manual-open-radar-guard"
+BINANCE_VPS_VERSION = "v13.29.0-flat-purge-tp123"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -1851,7 +1851,7 @@ class PositionSupervisorBinance:
         """哨兵检测：止盈后蚂蚁仓/无 TP 残量 → 撤单 + reduceOnly 扫尾 + 完美胜利钉钉"""
         logger.warning(f"🐜 止盈扫尾：检测到残量，启动蚂蚁仓强平 → {reason}")
         self.monitoring = False
-        binance_client.cancel_all_open_orders(self.symbol)
+        self._purge_all_defense_orders_on_flat(f"蚂蚁仓扫尾·{reason}")
         time.sleep(0.4)
         for round_i in range(4):
             pos = self._get_active_position()
@@ -1869,7 +1869,7 @@ class PositionSupervisorBinance:
         self.shield_active = False
         self.current_side = None
         self._save_state()
-        binance_client.cancel_all_open_orders(self.symbol)
+        self._purge_all_defense_orders_on_flat(f"扫尾完成·{reason}")
         self._report_flat_close(reason, swept_dust=True)
 
     def _apply_recover_live_alignment(self, side, reconcile):
@@ -3658,6 +3658,67 @@ class PositionSupervisorBinance:
         logger.error("❌ 重启撤单未净：重复 TP 可能残留，非权限问题时请币安 APP 手动全撤后重启")
         return False
 
+    def _remaining_open_order_count(self):
+        try:
+            return len(binance_client.get_open_orders(self.symbol) or [])
+        except Exception:
+            return -1
+
+    def _purge_all_defense_orders_on_flat(self, reason="", max_rounds=6):
+        """
+        全平/人工平仓后：多轮撤净 TP123 + tv_sl/雷达 STOP + Algo 条件单。
+        防止残留 reduceOnly 止盈在空仓后成交 → 反向开 orphan 仓。
+        """
+        tag = reason or "全平撤单"
+        tp_cancelled = 0
+        for attempt in range(max_rounds):
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.35)
+            tp_cancelled += self._cancel_all_tp_limit_orders(max_rounds=3)
+            purged_stops = self._purge_all_close_position_stops()
+            time.sleep(0.45)
+            remaining = self._remaining_open_order_count()
+            tp_left = self._collect_tp_limit_orders()
+            if remaining == 0 and not tp_left:
+                logger.info(
+                    f"🧹 [{tag}] 挂单已清零 (第 {attempt + 1} 轮) | "
+                    f"撤 TP {tp_cancelled} 张"
+                )
+                return {
+                    "ok": True,
+                    "rounds": attempt + 1,
+                    "tp_cancelled": tp_cancelled,
+                    "remaining": 0,
+                }
+            if tp_left:
+                remain_txt = ", ".join(
+                    f"{o['qty']}@{o['price']}" for o in tp_left[:4]
+                )
+                logger.warning(
+                    f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮后仍剩 "
+                    f"{len(tp_left)} 张 TP ({remain_txt}) | 全盘 {remaining} 单"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮后仍剩 "
+                    f"{remaining} 张挂单"
+                )
+        tp_left = self._collect_tp_limit_orders()
+        remaining = self._remaining_open_order_count()
+        ok = remaining == 0 and not tp_left
+        if not ok:
+            logger.error(
+                f"❌ [{tag}] 全平后挂单未净：剩余 {remaining} 单 | "
+                f"TP {len(tp_left)} 张"
+            )
+        return {
+            "ok": ok,
+            "rounds": max_rounds,
+            "tp_cancelled": tp_cancelled,
+            "remaining": remaining,
+            "tp_remaining": len(tp_left),
+        }
+
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None):
         if not dynamic_sl:
             return False
@@ -5204,6 +5265,9 @@ class PositionSupervisorBinance:
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
         """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉"""
+        purge = self._purge_all_defense_orders_on_flat(
+            reason or "感知空仓·抢先撤TP123",
+        )
         meta = self._enrich_close_meta_live(
             close_meta or self._infer_flat_close_meta(curr_px, hint_reason=reason),
             curr_px,
@@ -5217,8 +5281,20 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self.shield_active = False
         self.current_side = None
-        binance_client.cancel_all_open_orders(self.symbol)
+        self.tv_tps = [0.0, 0.0, 0.0]
+        if not purge.get("ok"):
+            dingtalk.report_system_alert(
+                "全平后挂单未净 · 请人工核查",
+                f"{reason or '感知空仓'} | 剩余挂单 {purge.get('remaining', '?')} | "
+                f"残留 TP {purge.get('tp_remaining', '?')} 张 | "
+                "未撤净的 TP 可能在空仓后反向成交",
+            )
         self._save_state()
+        verify_note = ""
+        if purge.get("tp_cancelled"):
+            verify_note = f"已撤 TP {purge['tp_cancelled']} 张"
+        if not purge.get("ok"):
+            verify_note += (" | " if verify_note else "") + "⚠️ 挂单未完全清零"
         self._report_flat_close(
             meta.get("tv_reason") or reason or "仓位归零",
             close_meta=meta,
@@ -6103,6 +6179,9 @@ class PositionSupervisorBinance:
                                 )
                                 continue
                             if self.watched_qty > 0:
+                                self._purge_all_defense_orders_on_flat(
+                                    "哨兵感知空仓·抢先撤TP123",
+                                )
                                 if not self._confirm_position_flat():
                                     logger.warning(
                                         "⚠️ [哨兵] 首次无仓但复核仍有持仓 → 跳过误清场"
@@ -6162,6 +6241,10 @@ class PositionSupervisorBinance:
                             if self._is_material_qty_change(self.watched_qty, real_amt):
                                 qty_changed = True
                                 old_qty = self.watched_qty
+                                if real_amt <= DUST_QTY_ETH:
+                                    self._purge_all_defense_orders_on_flat(
+                                        "仓位归零·抢先撤TP123",
+                                    )
                                 self.watched_qty = real_amt
                                 self.watched_entry = pos["entry_price"]
                                 change, result = self._handle_smart_qty_change(
@@ -6254,10 +6337,7 @@ class PositionSupervisorBinance:
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):
         """先撤全部挂单再阶梯强平；返回是否已空仓"""
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
-        self._cancel_all_tp_limit_orders()
-        time.sleep(0.3)
+        self._purge_all_defense_orders_on_flat(reason or "强平前撤单")
         closed_successfully = False
 
         for round_i in range(6):
@@ -6313,7 +6393,13 @@ class PositionSupervisorBinance:
                     )
             self._save_state()
 
-        binance_client.cancel_all_open_orders(self.symbol)
+        purge = self._purge_all_defense_orders_on_flat(reason or "强平后撤单")
+        if closed_successfully and not purge.get("ok"):
+            dingtalk.report_system_alert(
+                "强平后挂单未净",
+                f"{reason} | 剩余 {purge.get('remaining', '?')} 单 | "
+                f"TP {purge.get('tp_remaining', '?')} 张",
+            )
 
         if reason and closed_successfully:
             if force_align:
