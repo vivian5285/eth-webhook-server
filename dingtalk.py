@@ -535,7 +535,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         action_txt += " · 雷达哨兵已点火"
     else:
         radar_txt = _g(
-            f"待命 (雷达进度 {radar_progress:.0%}，达 TP1 激活比后推升止损)",
+            f"待命 (朝TP1推进 {radar_progress:.0%} 达55%后预热保本)",
             G_MUTED,
         )
 
@@ -881,7 +881,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "🛡️ TV硬止损": _g(f"`{stop_px:.2f}` USDT", G_ACCENT),
         "✅ 风控动作": _g(
             "开单即挂：TV 透传 tv_sl 条件止损全平 · "
-            "价格达 TP1 激活比例后撤 TV 硬止损 → 切换雷达移动保本防回吐",
+            "价格朝 TP1 推进达55%后雷达预热保本 · 92~95%全武装防回吐",
             G_MAIN,
         ),
     }
@@ -914,7 +914,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
         "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 TV硬止损", G_ACCENT),
         "📡 雷达状态": _g(
             "已激活移动保本" if radar_progress >= 1.0
-            else f"进度 {radar_progress:.0%}，准备挂雷达保本",
+            else f"进度 {radar_progress:.0%}，价格推进中挂雷达保本",
             G_MAIN,
         ),
         "✅ 风控动作": _g(
@@ -938,7 +938,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (达 TP1 激活比)", G_ACCENT),
+        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (朝 TP1 激活线推进)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (closePosition)", G_LIGHT),
         "✅ 风控动作": _g(

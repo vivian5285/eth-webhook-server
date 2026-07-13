@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.29.0-flat-purge-tp123"
+BINANCE_VPS_VERSION = "v13.30.0-radar-price-progress"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -92,6 +92,7 @@ TV_BOOT_SL_ATR = 0.40                      # strongBull 保本底线 entry ± 0.
 RADAR_FEE_BUFFER_PCT = 0.0015
 RADAR_STOP_MIN_GAP_USD = 2.5
 RADAR_STOP_MIN_GAP_PCT = 0.0012
+RADAR_WARMUP_TP1_RATIO = 0.55  # 对齐 TV beTriggerLong：朝 TP1 推进 55% 即预热保本
 MIN_TP_LEG_QTY = 0.001
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
@@ -1001,11 +1002,11 @@ class PositionSupervisorBinance:
         return ok
 
     def _resolve_defense_stop_for_audit(self, radar_sl=None):
-        """审计用止损价：TP1 前仅 tv_sl；TP1 后雷达+tv_sl 合并"""
+        """审计用止损价：雷达已激活则合并线；否则 tv_sl"""
         if radar_sl and float(radar_sl) > 0:
             return float(radar_sl)
         tracked = self._radar_sl_to_pass()
-        if tracked and self._tp1_filled_verified():
+        if tracked:
             return tracked
         return self._shield_stop_price()
 
@@ -1034,7 +1035,8 @@ class PositionSupervisorBinance:
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
         """
-        全链防线：TP123 比例限价 + TV tv_sl 硬止损；TP1 成交前雷达待命（呼吸空间）。
+        全链防线：TP123 比例限价 + TV tv_sl 硬止损；
+        雷达按朝 TP1 价格推进比例激活（55% 预热 / 92~95% 全武装），TP 成交后持续收紧。
         """
         notes = []
         live_qty = float(self._resolve_live_qty(live_qty) or live_qty)
@@ -1094,7 +1096,7 @@ class PositionSupervisorBinance:
             notes.append(f"TP修复跳过:{e}")
 
         self._refresh_radar_state_on_recover(curr_px, entry)
-        radar_sl = self._radar_sl_to_pass() if self._tp1_filled_verified() else None
+        radar_sl = self._radar_sl_to_pass()
 
         if tp_repair.get("repaired") and tp_repair.get("result"):
             result = tp_repair["result"]
@@ -1105,7 +1107,7 @@ class PositionSupervisorBinance:
             )
 
         stop_check = self._resolve_defense_stop_for_audit(radar_sl)
-        if not self._tp1_filled_verified(live_qty, curr_px):
+        if not self._radar_legitimately_armed(live_qty, curr_px):
             radar_sl = None
             self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
             stop_check = self._shield_stop_price()
@@ -1131,7 +1133,7 @@ class PositionSupervisorBinance:
             curr_px, audit,
         )
 
-        if self._tp1_filled_verified(live_qty, curr_px) and (
+        if self._radar_legitimately_armed(live_qty, curr_px) and (
             health.get("should_radar") or health.get("radar_active")
         ):
             self._process_radar_trailing(live_qty, curr_px)
@@ -1140,8 +1142,10 @@ class PositionSupervisorBinance:
                 self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=sl)
         else:
             progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
+            tp1_prog = self._tp1_direction_progress(curr_px) if curr_px > 0 else 0.0
             logger.info(
-                f"📡 [{source}] 雷达待命(TP1未成交) 进度{progress:.0%} | "
+                f"📡 [{source}] 雷达待命 激活进度{progress:.0%} "
+                f"朝TP1{tp1_prog:.0%} | "
                 f"tv_sl={float(getattr(self, 'tv_sl', 0) or 0):.2f} | "
                 f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)}"
             )
@@ -2741,7 +2745,7 @@ class PositionSupervisorBinance:
         if new_sl is None:
             return False
 
-        boot_sl = self._radar_breakeven_floor()
+        boot_sl = self._radar_progressive_floor(curr_px)
         if self.current_side == "LONG":
             boot_sl = max(new_sl or 0, boot_sl)
             if boot_sl > float(self.current_sl or 0):
@@ -2810,8 +2814,8 @@ class PositionSupervisorBinance:
         return {"cancelled": 1 if ok else 0, "cleared": ok, "verified": ok}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
-        """TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本（TP1 前保留宽硬止损）"""
-        if not self._tp1_filled_verified():
+        """价格达激活线或 TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本"""
+        if not (self._tp1_filled_verified() or self._radar_price_armed(curr_px)):
             return False
         stop_px = self._shield_stop_price()
         has_shield = bool(
@@ -3130,8 +3134,17 @@ class PositionSupervisorBinance:
             pnl_label = f"浮亏 {adverse:.1%}"
             defense_plan = "持有 TP123 + TV硬止损全平"
         elif favorable > 0.001:
-            pnl_label = f"微盈 {favorable:.1%}·未达雷达激活"
-            defense_plan = "持有 TP123 + TV硬止损 (朝TP1迈进中)"
+            tp1_prog = self._tp1_direction_progress(curr_px)
+            pnl_label = (
+                f"浮盈 {favorable:.1%}·朝TP1 {tp1_prog:.0%}"
+                if tp1_prog < RADAR_WARMUP_TP1_RATIO
+                else f"浮盈·雷达预热区 (朝TP1 {tp1_prog:.0%})"
+            )
+            defense_plan = (
+                "持有 TP123 + TV硬止损 (朝TP1迈进中)"
+                if tp1_prog < RADAR_WARMUP_TP1_RATIO
+                else "雷达预热保本 + TV硬止损底线"
+            )
         else:
             pnl_label = "保本附近"
             defense_plan = "持有 TP123 + TV硬止损"
@@ -3483,19 +3496,18 @@ class PositionSupervisorBinance:
         return self._maintain_hard_shield(real_amt, curr_px)
 
     def _is_radar_active(self):
+        """止损已推过 entry → 雷达移动保本已武装（不要求 TP1 限价成交）"""
         if not self.watched_entry or not self.current_sl:
             return False
-        if not self._tp1_filled_verified():
-            return False
+        sl = float(self.current_sl)
+        entry = float(self.watched_entry)
         if self.current_side == "LONG":
-            return self.current_sl > self.watched_entry
+            return sl > entry + 0.01
         if self.current_side == "SHORT":
-            return self.current_sl < self.watched_entry
+            return sl < entry - 0.01
         return False
 
     def _radar_sl_to_pass(self):
-        if not self._tp1_filled_verified():
-            return None
         return self.current_sl if self._is_radar_active() else None
 
     def _collect_tp_limit_orders(self):
@@ -3734,12 +3746,12 @@ class PositionSupervisorBinance:
         return result.get("ok", False)
 
     def _report_radar_first_activation(self, real_amt, curr_px, new_sl, sl_placed):
-        """雷达首次激活：核实实盘后推送（硬止损已撤 + 保本止损已挂）"""
+        """雷达首次激活：核实实盘后推送（价格推进或 TP 成交触发）"""
         if getattr(self, "_radar_activation_notified", False):
             return
-        if not self._tp1_filled_verified(real_amt, curr_px):
+        if not self._radar_legitimately_armed(real_amt, curr_px):
             logger.warning(
-                f"📡 雷达激活钉钉跳过：TP1 未实盘成交 "
+                f"📡 雷达激活钉钉跳过：未达价格推进阈值 "
                 f"(entry={self.watched_entry:.2f} sl={new_sl:.2f})"
             )
             return
@@ -3759,9 +3771,12 @@ class PositionSupervisorBinance:
             delay=0.45,
         )
         progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 1.0
+        tp1_prog = self._tp1_direction_progress(curr_px) if curr_px > 0 else 0.0
         tv_floor = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+        trigger = "TP成交" if self._tp1_filled_verified(real_amt, curr_px) else "价格推进"
         verify_note = (
-            f"雷达进度 {progress:.0%} | 合并止损 @ {new_sl:.2f} | "
+            f"雷达{trigger} | 激活进度 {progress:.0%} | 朝TP1 {tp1_prog:.0%} | "
+            f"合并止损 @ {new_sl:.2f} | "
             f"TV底线 tv_sl={tv_floor or 'fallback'} | "
             f"持仓 {real_amt} ETH @ {self.watched_entry:.2f}"
         )
@@ -5314,8 +5329,8 @@ class PositionSupervisorBinance:
         consumed = list(getattr(self, "tp_levels_consumed", []) or [])
 
         sl_to_pass = None
-        radar_note = "雷达待命(TP1前)"
-        if self._tp1_filled_verified(new_qty, curr_px):
+        radar_note = "雷达待命(未达激活比)"
+        if self._radar_legitimately_armed(new_qty, curr_px):
             self._refresh_radar_state_on_recover(curr_px, new_entry)
             sl_to_pass = self._radar_sl_to_pass()
             radar_note = (
@@ -5351,7 +5366,7 @@ class PositionSupervisorBinance:
         shield_ok = self._maintain_hard_shield(
             new_qty, curr_px, force=True, radar_sl=sl_to_pass,
         )
-        if self._tp1_filled_verified(new_qty, curr_px):
+        if self._radar_legitimately_armed(new_qty, curr_px):
             self._process_radar_trailing(new_qty, curr_px)
             sl = self._radar_sl_to_pass()
             if sl:
@@ -5826,10 +5841,13 @@ class PositionSupervisorBinance:
 
     def _enforce_pre_tp1_radar_standby(self, live_qty=None, curr_px=0.0, source=""):
         """
-        TP1 未成交：强制雷达待命，止损仅 tv_sl 宽线（禁止 entry 上方伪保本）。
-        人工首仓 / 陈旧 OPEN 日志误判 TP 时必跑。
+        未达价格推进阈值：强制雷达待命，止损仅 tv_sl 宽线。
+        价格朝 TP1 推进达 55%+ 时禁止压回 tv_sl（对齐 TV 防回吐）。
         """
         if self._tp1_filled_verified(live_qty, curr_px):
+            return False
+        curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
+        if self._radar_legitimately_armed(live_qty, curr_px):
             return False
 
         tv = float(getattr(self, "tv_sl", 0) or 0)
@@ -5883,10 +5901,13 @@ class PositionSupervisorBinance:
 
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
         """
-        伪 TP1 / 过早保本线 → 清标记、恢复 tv_sl 宽止损，避免微盈被扫出。
+        伪 TP1 / 过早保本线 → 清标记、恢复 tv_sl 宽止损（价格未达推进阈值时）。
         """
         live_qty = float(live_qty or self.watched_qty or 0)
+        curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         if self._tp1_filled_verified(live_qty, curr_px):
+            return False
+        if self._radar_legitimately_armed(live_qty, curr_px):
             return False
 
         disarmed = False
@@ -5920,7 +5941,7 @@ class PositionSupervisorBinance:
             "雷达解除·恢复呼吸空间",
             f"{self.current_side} {live_qty} ETH @ {entry:.2f} | "
             f"清除伪TP{stale or '标记'} | tv_sl={tv:.2f} | "
-            f"TP1 未实盘成交前禁止移动保本止损",
+            f"价格未达朝TP1推进阈值({RADAR_WARMUP_TP1_RATIO:.0%})",
         )
         if live_qty > 0 and tv > 0:
             self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=None)
@@ -5951,7 +5972,7 @@ class PositionSupervisorBinance:
         return float(self.current_atr or 30.0) * self._radar_tv_trail_atr_mult()
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
-        """重启：按现价恢复 best_price；仅 TP1 已成交才恢复雷达追踪位"""
+        """重启：按现价恢复 best_price；价格达激活比或 TP 成交后恢复雷达追踪位"""
         if curr_px <= 0 or not entry:
             return
 
@@ -5962,19 +5983,21 @@ class PositionSupervisorBinance:
         else:
             self.best_price = min(self.best_price, curr_px)
 
-        if not self._tp1_filled_verified():
+        armed = self._radar_legitimately_armed(curr_px=curr_px)
+        if not armed:
             if self.current_sl == 0.0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             logger.info(
-                f"📡 重启雷达待命: TP1 未成交，保留 tv_sl 宽止损 "
-                f"(进度 {self._radar_activation_progress(curr_px):.0%})"
+                f"📡 重启雷达待命: 价格未达激活比，保留 tv_sl 宽止损 "
+                f"(进度 {self._radar_activation_progress(curr_px):.0%} | "
+                f"朝TP1 {self._tp1_direction_progress(curr_px):.0%})"
             )
             return
 
         progress = self._radar_activation_progress(curr_px)
         trail_offset = self._radar_trail_offset_price()
-        floor_px = self._radar_breakeven_floor()
-        if progress >= self.regime_settings[self.regime]["activation"]:
+        floor_px = self._radar_progressive_floor(curr_px)
+        if progress >= self.regime_settings[self.regime]["activation"] or self._tp1_filled_verified():
             if self.current_side == "LONG":
                 trail_sl = max(round(self.best_price - trail_offset, 2), floor_px)
                 trail_sl = self._clamp_radar_sl_for_market(curr_px, trail_sl)
@@ -5985,8 +6008,9 @@ class PositionSupervisorBinance:
                 trail_sl = self._clamp_radar_sl_for_market(curr_px, trail_sl)
                 if not self._is_radar_active() or trail_sl < self.current_sl:
                     self.current_sl = min(self.current_sl or entry, trail_sl)
+            trigger = "TP成交" if self._tp1_filled_verified() else "价格推进"
             logger.info(
-                f"📡 重启雷达恢复: TP1已成交 进度 {progress:.0%} | best={self.best_price:.2f} | "
+                f"📡 重启雷达恢复({trigger}): 进度 {progress:.0%} | best={self.best_price:.2f} | "
                 f"SL={self.current_sl:.2f} | 追踪 {self._radar_tv_trail_atr_mult():.2f}ATR"
             )
         elif self.current_sl == 0.0:
@@ -6001,6 +6025,59 @@ class PositionSupervisorBinance:
             return abs(self.tv_tps[0] - self.watched_entry)
         return self.current_atr * 1.5
 
+    def _tp1_direction_progress(self, curr_px):
+        """0~1：现价朝 TP1 价位的推进比例"""
+        if curr_px <= 0 or not self.watched_entry:
+            return 0.0
+        tp1_dist = self._tp1_distance()
+        if tp1_dist <= 0:
+            return 0.0
+        if self.current_side == "LONG":
+            return max(0.0, min(1.0, (curr_px - self.watched_entry) / tp1_dist))
+        if self.current_side == "SHORT":
+            return max(0.0, min(1.0, (self.watched_entry - curr_px) / tp1_dist))
+        return 0.0
+
+    def _radar_price_armed(self, curr_px):
+        """达档位激活比（R1/R2=92%, R3/R4=95% 朝 TP1）"""
+        if curr_px <= 0:
+            return False
+        activation = self.regime_settings[self.regime]["activation"]
+        return self._tp1_direction_progress(curr_px) >= activation
+
+    def _radar_legitimately_armed(self, live_qty=None, curr_px=0.0):
+        """TP 成交或价格朝 TP1 推进达预热阈值 → 允许雷达移动保本"""
+        if self._tp1_filled_verified(live_qty, curr_px):
+            return True
+        curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
+        if curr_px <= 0:
+            return False
+        return self._tp1_direction_progress(curr_px) >= RADAR_WARMUP_TP1_RATIO
+
+    def _radar_progressive_floor(self, curr_px=0.0):
+        """对齐 TV：55% 微保本 → 激活比全保本底线 entry±0.4ATR"""
+        entry = float(self.watched_entry or 0)
+        if entry <= 0:
+            return self._radar_breakeven_floor()
+        full_floor = self._radar_breakeven_floor()
+        if curr_px <= 0:
+            curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        tp1_prog = self._tp1_direction_progress(curr_px)
+        activation = self.regime_settings[self.regime]["activation"]
+        if tp1_prog >= activation or self._tp1_filled_verified(curr_px=curr_px):
+            return full_floor
+        if tp1_prog >= RADAR_WARMUP_TP1_RATIO:
+            span = max(activation - RADAR_WARMUP_TP1_RATIO, 0.01)
+            t = max(0.0, min(1.0, (tp1_prog - RADAR_WARMUP_TP1_RATIO) / span))
+            cushion = max(entry * 0.0003, 0.5)
+            if self.current_side == "LONG":
+                micro = round(entry + cushion, 2)
+                return round(micro + (full_floor - micro) * t, 2)
+            if self.current_side == "SHORT":
+                micro = round(entry - cushion, 2)
+                return round(micro - (micro - full_floor) * t, 2)
+        return entry
+
     def _radar_activation_price(self):
         activation_ratio = self.regime_settings[self.regime]["activation"]
         tp1_dist = self._tp1_distance()
@@ -6013,18 +6090,21 @@ class PositionSupervisorBinance:
             return True
         if curr_px <= 0 or not self.watched_entry:
             return False
-        # 对齐 TV：TP1 未实盘成交前不做移动保本，保留 tv_sl 呼吸空间
-        if not self._tp1_filled_verified():
-            return False
-        if self.current_side == "LONG":
-            return curr_px >= self._radar_activation_price()
-        return curr_px <= self._radar_activation_price()
+        # 对齐 TV：朝 TP1 推进达比例即启动防回吐（不要求 TP1 限价成交）
+        if self._tp1_direction_progress(curr_px) >= RADAR_WARMUP_TP1_RATIO:
+            return True
+        if self._tp1_filled_verified():
+            if self.current_side == "LONG":
+                return curr_px >= self._radar_activation_price()
+            return curr_px <= self._radar_activation_price()
+        return False
 
     def _compute_radar_sl(self):
         if not self.watched_entry or self.best_price <= 0:
             return None
         trail_offset = self._radar_trail_offset_price()
-        floor_px = self._radar_breakeven_floor()
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        floor_px = self._radar_progressive_floor(curr_px)
         if self.current_side == "LONG":
             raw = max(round(self.best_price - trail_offset, 2), floor_px)
         elif self.current_side == "SHORT":
@@ -6108,7 +6188,7 @@ class PositionSupervisorBinance:
         if self._is_radar_active():
             return SENTINEL_POLL_RADAR
         if curr_px > 0:
-            if self._radar_activation_progress(curr_px) >= 0.5:
+            if self._tp1_direction_progress(curr_px) >= RADAR_WARMUP_TP1_RATIO:
                 return SENTINEL_POLL_ARMING
         return SENTINEL_POLL_NORMAL
 
@@ -6280,14 +6360,15 @@ class PositionSupervisorBinance:
 
                         self._process_directional_defenses(real_amt, curr_px)
                         progress = self._radar_activation_progress(curr_px)
+                        tp1_prog = self._tp1_direction_progress(curr_px)
                         if (
-                            progress >= 0.5
+                            tp1_prog >= RADAR_WARMUP_TP1_RATIO
                             and not self._is_radar_active()
                             and self._scan_ticks % 5 == 0
                         ):
                             logger.info(
-                                f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
-                                f"轮询 {SENTINEL_POLL_ARMING}s"
+                                f"📡 雷达预热: 激活进度 {progress:.0%} | 朝TP1 {tp1_prog:.0%} | "
+                                f"现价 {curr_px:.2f} | 轮询 {SENTINEL_POLL_ARMING}s"
                             )
                     finally:
                         self._lock.release()
