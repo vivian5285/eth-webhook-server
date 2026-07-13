@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.35.0-hard-sl-4regime-stoplimit"
+BINANCE_VPS_VERSION = "v13.36.0-radar-no-retreat"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -2909,7 +2909,11 @@ class PositionSupervisorBinance:
 
     def _should_disarm_shield_for_favorable(self, curr_px):
         """价格达激活线或 TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本"""
-        if not (self._tp1_filled_verified() or self._radar_stage(curr_px) >= 1):
+        if not (
+            self._tp1_filled_verified()
+            or self._is_radar_active()
+            or self._radar_stage(curr_px) >= 1
+        ):
             return False
         stop_px = self._shield_stop_price()
         has_shield = bool(
@@ -6089,9 +6093,11 @@ class PositionSupervisorBinance:
     def _enforce_pre_tp1_radar_standby(self, live_qty=None, curr_px=0.0, source=""):
         """
         未达价格推进阈值：强制雷达待命，止损仅 tv_sl 宽线。
-        价格朝 TP1 推进达 55%+ 时禁止压回 tv_sl（对齐 TV 防回吐）。
+        已武装雷达不因价格回撤压回硬止损。
         """
         if self._tp1_filled_verified(live_qty, curr_px):
+            return False
+        if self._is_radar_active():
             return False
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         if self._radar_legitimately_armed(live_qty, curr_px):
@@ -6148,11 +6154,14 @@ class PositionSupervisorBinance:
 
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
         """
-        伪 TP1 / 过早保本线 → 清标记、恢复 tv_sl 宽止损（价格未达推进阈值时）。
+        伪 TP1 / 过早保本线 → 清标记、恢复 tv_sl 宽止损（仅雷达未武装时）。
+        已武装雷达禁止因价格朝开仓价回撤而解除。
         """
         live_qty = float(live_qty or self.watched_qty or 0)
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         if self._tp1_filled_verified(live_qty, curr_px):
+            return False
+        if self._is_radar_active():
             return False
         if self._radar_legitimately_armed(live_qty, curr_px):
             return False
@@ -6328,11 +6337,21 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _radar_legitimately_armed(self, live_qty=None, curr_px=0.0):
-        """阶段1+（到 TP1 距离 70%）或 TP 成交 → 允许雷达移动保本"""
+        """阶段1+（到 TP1 距离 70%）或 TP 成交 → 允许雷达移动保本；已武装后不因回撤解除"""
         if self._tp1_filled_verified(live_qty, curr_px):
+            return True
+        if self._is_radar_active():
             return True
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         return self._radar_stage(curr_px) >= 1
+
+    def _effective_radar_stage(self, curr_px):
+        """雷达阶段：已武装后只升不降（价格回撤不解除雷达）"""
+        stage = self._radar_stage(curr_px)
+        if not self._is_radar_active():
+            return stage
+        latched = int(getattr(self, "_radar_stage_last", 0) or 0)
+        return max(stage, latched, 1)
 
     def _radar_activation_progress(self, curr_px):
         """0~1：雷达阶段进度（8 阶段制）"""
@@ -6349,7 +6368,7 @@ class PositionSupervisorBinance:
         if not self.watched_entry or self.best_price <= 0:
             return None
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
-        stage = self._radar_stage(curr_px)
+        stage = self._effective_radar_stage(curr_px)
         if stage < 1:
             return None
         raw = self._compute_radar_sl_for_stage(stage, curr_px)
