@@ -204,7 +204,7 @@ TP1 实盘成交验证通过
 
 | 类型 | sizing 规则 |
 |------|-------------|
-| **OPEN** | VPS 自主计算（`VPS_RISK_PCT` × 档位系数 × 20x 头寸系数，交易所 25x），**不以 TV risk_pct 为准** |
+| **OPEN** | VPS 自主计算（`VPS_RISK_PCT` × 档位系数 × 25x），**不以 TV risk_pct 为准** |
 | **PYRAMID** | `add_qty = base_qty × TV qty_ratio`（首仓 base 不变） |
 | **PROFIT_ADD** | 同上，比例由 TV 按档位动态下发 |
 
