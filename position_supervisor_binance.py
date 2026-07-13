@@ -20,6 +20,7 @@ from webhook_parser import (
     compute_vps_add_qty,
     compute_vps_hard_sl,
     compute_vps_hard_sl_distance,
+    compute_vps_hard_sl_limit_price,
     format_vps_hard_sl_note,
     format_tv_vps_sl_compare,
     get_vps_hard_sl_params,
@@ -60,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.34.0-leverage-25x-sizing"
+BINANCE_VPS_VERSION = "v13.35.0-hard-sl-4regime-stoplimit"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -2583,6 +2584,20 @@ class PositionSupervisorBinance:
                 time.sleep(0.12)
         return cancelled
 
+    def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=True):
+        """VPS 缓冲硬止损：默认 Stop-Limit（防跳空）；雷达合并档用 Stop-Market closePosition"""
+        live_qty = self._resolve_live_qty(live_qty)
+        trigger_px = round(float(trigger_px or 0), 2)
+        if live_qty <= 0 or trigger_px <= 0 or not self.current_side:
+            return None
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        if use_stop_limit:
+            limit_px = compute_vps_hard_sl_limit_price(self.current_side, trigger_px)
+            return binance_client.place_stop_limit_order(
+                close_side, live_qty, trigger_px, limit_price=limit_px,
+            )
+        return binance_client.place_stop_market_order(close_side, trigger_px, quantity=None)
+
     def _sync_exchange_stop(self, live_qty, radar_sl=None, reason="", force=False):
         """
         挂/更新交易所 closePosition 止损。
@@ -2607,12 +2622,19 @@ class PositionSupervisorBinance:
             return {"ok": True, "skipped": True, "target": target, "reason": "idempotent"}
 
         purged = self._purge_all_close_position_stops()
+        purged += self._purge_shield_stop_orders()
         if purged:
-            logger.info(f"🛡️ 撤旧 closePosition 止损 {purged} 笔 → 重挂 @ {target:.2f}")
+            logger.info(f"🛡️ 撤旧止损 {purged} 笔 → 重挂 @ {target:.2f}")
             time.sleep(0.5)
 
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        res = binance_client.place_stop_market_order(close_side, target, quantity=None)
+        floor = round(float(self._shield_stop_price() or 0), 2)
+        use_limit = (
+            floor > 0
+            and abs(target - floor) <= SHIELD_STOP_TOLERANCE
+        )
+        res = self._place_vps_hard_sl_order(
+            live_qty, target, use_stop_limit=use_limit,
+        )
         time.sleep(0.35)
         ok = res is not None and self._has_stop_sl_near(target, exclude_shield=False)
         if ok:
@@ -2622,95 +2644,26 @@ class PositionSupervisorBinance:
             self._shield_fail_streak = 0
             self._save_state()
             tv_floor = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+            order_tag = "Stop-Limit" if use_limit else "Stop-Market closePosition"
             logger.warning(
-                f"🛡️ [TV硬止损/合并] {reason or '同步止损'} | closePosition @ {target:.2f} "
-                f"| tv_sl={tv_floor or 'fallback'} | 撤 {purged} 笔"
+                f"🛡️ [VPS硬止损/合并] {reason or '同步止损'} | {order_tag} @ {target:.2f} "
+                f"| vps_sl={tv_floor or 'fallback'} | 撤 {purged} 笔"
             )
         else:
             self._record_shield_maintain(success=False)
         return {"ok": ok, "skipped": False, "target": target, "purged": purged}
 
     def _handle_tv_sl_update(self, payload):
-        """UPDATE_SL：TV tv_sl 仅参考，VPS 按 regime+atr 重算硬止损后同步盘口"""
-        side = str(payload.get("side") or "").strip().upper()
-        if payload.get("regime"):
-            self.regime = self._safe_int(payload.get("regime"), self.regime)
-        if payload.get("atr"):
-            self.current_atr = self._safe_float(payload.get("atr"), self.current_atr)
-        entry = float(self.watched_entry or self.tv_price or 0)
-        if not self._refresh_vps_hard_sl(
-            entry=entry,
-            side=side or self.current_side,
-            regime=self.regime,
-            atr=self.current_atr,
-            tv_sl_ref=payload.get("tv_sl"),
-            source="UPDATE_SL",
-        ):
-            logger.warning("UPDATE_SL：VPS 硬止损重算失败")
-            return
-
-        pos = self._get_active_position()
-        if not pos or pos.get("size", 0) <= 0:
-            logger.info("UPDATE_SL 到达但盘口已空仓 → 仅更新账本 tv_sl")
-            return
-        if side and side != pos["side"]:
-            logger.warning(f"UPDATE_SL side={side} 与实盘 {pos['side']} 不符，已忽略")
-            return
-
-        radar_sl = None
-        if self._is_radar_active() or self._should_radar_trail(
-            binance_client.get_current_price(self.symbol) or 0
-        ):
-            radar_sl = self._clamp_radar_to_tv_floor(self.current_sl)
-
-        result = self._sync_exchange_stop(
-            pos["size"],
-            radar_sl=radar_sl,
-            reason=f"VPS硬止损 @ {self.tv_sl:.2f}",
-            force=True,
+        """UPDATE_SL：仅记录 TV 紧止损参考，不挂撤单（VPS 自主硬止损 + 雷达）"""
+        ref = round(self._safe_float(payload.get("tv_sl"), 0), 2)
+        if ref > 0:
+            self.tv_sl_ref = ref
+            self._save_state()
+        vps_sl = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+        logger.info(
+            f"UPDATE_SL 已忽略盘口动作 | TV参考 tv_sl={ref or 'N/A'} "
+            f"| VPS硬止损 `{vps_sl:.2f}` 由 regime+atr 自主管理"
         )
-        if result.get("skipped") and result.get("reason") == "idempotent":
-            logger.info(f"UPDATE_SL 幂等跳过 tv_sl={self.tv_sl:.2f} 已在盘口")
-        elif result.get("ok"):
-            exchange_stop = float(
-                result.get("target")
-                or self._effective_exchange_stop(radar_sl)
-                or self.tv_sl
-            )
-            verified = self._wait_verify(
-                lambda: self._has_stop_sl_near(exchange_stop, exclude_shield=False),
-                retries=8,
-                delay=0.4,
-            )
-            verify_note = (
-                format_vps_hard_sl_note(
-                    self.current_side or pos["side"],
-                    self.watched_entry, self.current_atr, self.regime,
-                    tv_sl_ref=getattr(self, "tv_sl_ref", 0),
-                )
-                + (f" → 合并 @ {exchange_stop:.2f}" if radar_sl else "")
-                + f" | 持仓 {pos['size']} ETH @ {self.watched_entry:.2f}"
-            )
-            if not verified:
-                verify_note += f" | {dingtalk.VERIFY_DELAY_MARK}"
-            self._call_dingtalk(
-                dingtalk.report_tv_sl_updated,
-                side=self.current_side or pos["side"],
-                live_qty=pos["size"],
-                entry=self.watched_entry,
-                tv_sl=self.tv_sl,
-                exchange_stop=exchange_stop,
-                radar_active=self._is_radar_active(),
-                radar_sl=radar_sl,
-                regime=self.regime,
-                verify_note=verify_note,
-                verified=verified,
-            )
-        else:
-            dingtalk.report_system_alert(
-                "TV硬止损更新失败",
-                f"UPDATE_SL tv_sl={self.tv_sl:.2f} | 核实未通过，哨兵将继续重试",
-            )
 
     def _shield_tier_prices(self, entry=None):
         px = self._shield_stop_price(entry)
@@ -3541,19 +3494,18 @@ class PositionSupervisorBinance:
             )
             time.sleep(0.6)
 
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         placed = 0
         for idx in remaining:
             tp = tier_prices[idx]
             if tp <= 0:
                 continue
-            # closePosition 全平：不与 TP123 reduceOnly 额度冲突
-            res = binance_client.place_stop_market_order(close_side, tp, quantity=None)
+            res = self._place_vps_hard_sl_order(live_qty, tp, use_stop_limit=True)
             if res:
                 placed += 1
+                limit_px = compute_vps_hard_sl_limit_price(self.current_side, tp)
                 logger.info(
-                    f"🛡️ TV硬止损: "
-                    f"closePosition 全平 @ {tp:.2f} (实盘 {live_qty} ETH)"
+                    f"🛡️ VPS硬止损: Stop-Limit 触发@{tp:.2f} 限价@{limit_px:.2f} "
+                    f"(实盘 {live_qty} ETH)"
                 )
             time.sleep(0.35)
 
@@ -3570,8 +3522,8 @@ class PositionSupervisorBinance:
             self._save_state()
             stop_px = tier_prices[0] if tier_prices else entry
             logger.warning(
-                f"🛡️ [TV硬止损] 已挂 | closePosition @ {stop_px:.2f} | "
-                f"新挂 {placed} 笔 | 雷达激活后自动撤销"
+                f"🛡️ [VPS硬止损] 已挂 | Stop-Limit @ {stop_px:.2f} | "
+                f"新挂 {placed} 笔 | 雷达激活后合并为移动止损"
             )
             if not getattr(self, "_shield_arm_notified", False):
                 self._shield_arm_notified = True
@@ -3591,7 +3543,7 @@ class PositionSupervisorBinance:
                     ),
                     verify_note=(
                         (reason or f"VPS硬止损 @ {stop_px:.2f}")
-                        + f" | closePosition @ {stop_px:.2f} | 仅播报一次"
+                        + f" | Stop-Limit 触发@{stop_px:.2f} | 仅播报一次"
                     ),
                 )
         elif placed > 0 and not suppress_alert:
@@ -3609,7 +3561,7 @@ class PositionSupervisorBinance:
         return ok
 
     def _maintain_hard_shield(self, real_amt, curr_px=None, force=False, radar_sl=None):
-        """维护 TV tv_sl 硬止损；雷达激活时合并为 max/min(雷达, tv_sl) 单 closePosition"""
+        """维护 VPS 硬止损 Stop-Limit；雷达激活时合并为 max/min(雷达, vps_sl)"""
         if real_amt <= 0 or not self.watched_entry:
             return False
         curr_px = float(curr_px or 0)

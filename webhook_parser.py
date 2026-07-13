@@ -157,10 +157,11 @@ def format_regime_tp_ratios_label(regime):
     return "/".join(str(int(round(x * 100))) for x in get_regime_tp_ratios(regime))
 
 
-# VPS 自主硬止损：同比均匀呼吸空间（需求文档 v6.9.103）
+# VPS 自主硬止损：四档均匀递增呼吸空间（ATR≈16 → R1≈30U … R4≈100U）
 VPS_HARD_SL_M = {1: 0.9, 2: 1.05, 3: 1.10, 4: 1.25}
-VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.8}
+VPS_REGIME_BREATH_MULT = {1: 2.0, 2: 3.0, 3: 4.0, 4: 5.0}
 VPS_HARD_SL_EXTRA_RELAX = 0.0  # 极端强趋势额外放宽 0~0.10
+VPS_HARD_SL_LIMIT_OFFSET = 0.5  # Stop-Limit 限价相对触发价缓冲（U）
 
 # 雷达 8 阶段（按价格朝 TP1/TP2/TP3 推进）
 RADAR_STAGE1_TP1_RATIO = 0.70   # 阶段1：到 TP1 距离 70%
@@ -224,16 +225,36 @@ def compute_vps_hard_sl(side, entry, atr, regime, extra_relax=None):
     return 0.0
 
 
+def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
+    """
+    VPS 缓冲止损 Stop-Limit 限价：
+    多头平仓(SELL)：限价 = 触发价 − offset
+    空头平仓(BUY)：限价 = 触发价 + offset
+    """
+    trigger_px = float(trigger_px or 0)
+    if trigger_px <= 0:
+        return 0.0
+    offset = VPS_HARD_SL_LIMIT_OFFSET if offset is None else float(offset or 0)
+    side = str(side or "").strip().upper()
+    if side == "LONG":
+        return round(trigger_px - offset, 2)
+    if side == "SHORT":
+        return round(trigger_px + offset, 2)
+    return round(trigger_px, 2)
+
+
 def format_vps_hard_sl_note(side, entry, atr, regime, tv_sl_ref=0, extra_relax=None):
     """钉钉/日志：VPS 硬止损计算明细"""
     params = get_vps_hard_sl_params(regime)
     dist = compute_vps_hard_sl_distance(atr, regime, extra_relax)
     vps_sl = compute_vps_hard_sl(side, entry, atr, regime, extra_relax)
+    limit_px = compute_vps_hard_sl_limit_price(side, vps_sl)
     ref = f" | TV参考 `{float(tv_sl_ref):.2f}`" if tv_sl_ref and float(tv_sl_ref) > 0 else ""
     return (
         f"VPS硬止损 `{vps_sl:.2f}` | R{regime} "
-        f"sl_m={params['sl_m']}×档位{params['breath_mult']}="
-        f"{params['final_mult']:.2f}× | 呼吸空间 **{dist:.2f}U**{ref}"
+        f"ATR×sl_m×档位={params['sl_m']}×{params['breath_mult']}="
+        f"{params['final_mult']:.2f}× | 呼吸 **{dist:.2f}U**"
+        f" | Stop-Limit 触发@{vps_sl:.2f} 限价@{limit_px:.2f}{ref}"
     )
 
 

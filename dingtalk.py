@@ -891,11 +891,11 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL} 全平", G_MAIN),
         "🛡️ VPS硬止损": _g(
-            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition",
+            vps_hard_sl_note or f"`{stop_px:.2f}` USDT Stop-Limit",
             G_ACCENT,
         ),
         "✅ 风控动作": _g(
-            "VPS自主计算硬止损并挂单 · "
+            "VPS自主计算硬止损(Stop-Limit) · CLOSE_STOPLOSS=TV第一指令市价全平 · "
             f"朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起雷达8阶段防回吐",
             G_MAIN,
         ),
