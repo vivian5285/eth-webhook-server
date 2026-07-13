@@ -7,6 +7,7 @@ import threading
 from binance.client import Client
 import os
 from dotenv import load_dotenv
+from webhook_parser import EXCHANGE_LEVERAGE
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -153,7 +154,8 @@ class BinanceClient:
             p = round(round(p / tick) * tick, 8)
         return f"{p:.2f}" if tick <= 0.01 else str(p)
 
-    def set_leverage(self, symbol="ETHUSDT", leverage=20):
+    def set_leverage(self, symbol="ETHUSDT", leverage=None):
+        leverage = int(leverage or EXCHANGE_LEVERAGE)
         """设置指定交易对的杠杆倍数"""
         try:
             result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)

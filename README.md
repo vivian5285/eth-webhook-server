@@ -6,8 +6,8 @@ TradingView Webhook → 交易所永续自动化引擎。**币安**与**深币**
 
 | 工厂 | GitHub | VPS 目录 | 端口 | 单位 | 杠杆 | 钉钉 |
 |------|--------|----------|------|------|------|------|
-| **币安** | `vivian5285/eth-webhook-server` | `~/binance-engine` | **5003** | ETH | **20x** | 黄金 |
-| **深币** | `vivian5285/deepcoin-hft-server-main` | `~/deepcoin-hft-server` | **5004** | 张 (0.1 ETH) | **20x** | 紫金 |
+| **币安** | `vivian5285/eth-webhook-server` | `~/binance-engine` | **5003** | ETH | **25x** | 黄金 |
+| **深币** | `vivian5285/deepcoin-hft-server-main` | `~/deepcoin-hft-server` | **5004** | 张 (0.1 ETH) | **25x** | 紫金 |
 
 **健康检查：**
 
@@ -204,7 +204,7 @@ TP1 实盘成交验证通过
 
 | 类型 | sizing 规则 |
 |------|-------------|
-| **OPEN** | VPS 自主计算（`VPS_RISK_PCT` × 档位系数 × 20x），**不以 TV risk_pct 为准** |
+| **OPEN** | VPS 自主计算（`VPS_RISK_PCT` × 档位系数 × 20x 头寸系数，交易所 25x），**不以 TV risk_pct 为准** |
 | **PYRAMID** | `add_qty = base_qty × TV qty_ratio`（首仓 base 不变） |
 | **PROFIT_ADD** | 同上，比例由 TV 按档位动态下发 |
 

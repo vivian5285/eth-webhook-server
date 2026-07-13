@@ -25,6 +25,7 @@ from webhook_parser import (
     VPS_RISK_PCT,
     VPS_REGIME_SCALE,
     VPS_MARGIN_LEVERAGE,
+    VPS_SIZING_LEVERAGE,
     EXCHANGE_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -236,9 +237,10 @@ def _format_vps_sizing_basis(principal, meta=None, leverage=None):
     scale = float(meta.get("regime_scale", VPS_REGIME_SCALE.get(regime, 0.95)) or 0.95)
     margin = float(meta.get("margin", 0) or 0)
     order_amount = float(meta.get("order_amount", 0) or meta.get("position_value", 0) or 0)
-    exch_lev = int(round(float(
-        leverage or meta.get("leverage") or EXCHANGE_LEVERAGE
+    sizing_lev = int(round(float(
+        meta.get("sizing_leverage") or meta.get("leverage") or VPS_SIZING_LEVERAGE
     )))
+    exch_lev = int(round(float(meta.get("exchange_leverage") or EXCHANGE_LEVERAGE)))
     lines = [
         f"本金快照 **{float(principal):.2f}** USDT × **{VPS_RISK_PCT:.0f}%** "
         f"× **{VPS_MARGIN_LEVERAGE}** × R{regime}系数 **{scale:.2f}** "
@@ -248,8 +250,12 @@ def _format_vps_sizing_basis(principal, meta=None, leverage=None):
     ]
     if order_amount > 0:
         lines.append(
-            f"→ 保证金 × **{exch_lev}x** 杠杆 = 头寸 **{order_amount:.2f}** USDT"
+            f"→ 保证金 × **{sizing_lev}x** 头寸系数 = 头寸 **{order_amount:.2f}** USDT"
         )
+        if sizing_lev != exch_lev:
+            lines.append(
+                f"（交易所实盘杠杆 **{exch_lev}x**，数量权重不变）"
+            )
     stop_dist = float(meta.get("stop_dist", 0) or 0)
     if stop_dist > 0:
         lines.append(f"（TV tv_sl 止损距离 **{stop_dist:.2f}**，仅挂止损用，不参与 sizing）")
@@ -754,7 +760,7 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     elif risk_pct and float(risk_pct) > 0:
         data["📐 比例参数"] = _g(
             format_tv_sizing_note(
-                risk_pct, EXCHANGE_LEVERAGE, qty_ratio, regime=regime,
+                risk_pct, VPS_SIZING_LEVERAGE, qty_ratio, regime=regime,
             ),
             G_MUTED,
         )

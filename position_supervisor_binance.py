@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/20x 适配）
+# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/25x 实盘·20x 头寸系数）
 import logging
 import time
 import threading
@@ -31,6 +31,7 @@ from webhook_parser import (
     get_regime_tp_ratios,
     format_regime_tp_ratios_label,
     EXCHANGE_LEVERAGE,
+    VPS_SIZING_LEVERAGE,
     validate_tp_prices_for_side,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -60,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.32.0-orphan-tp-radar-merge"
+BINANCE_VPS_VERSION = "v13.33.0-leverage-25x"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -119,7 +120,7 @@ class PositionSupervisorBinance:
             4: {"margin": 0.50, "ratios": get_regime_tp_ratios(4)},
         }
         self.leverage = EXCHANGE_LEVERAGE
-        self.tv_sizing_leverage = EXCHANGE_LEVERAGE
+        self.tv_sizing_leverage = VPS_SIZING_LEVERAGE
 
         self.regime = 3
         self.current_atr = 30.0
@@ -1475,7 +1476,7 @@ class PositionSupervisorBinance:
                     "tv_entry_type": getattr(self, "tv_entry_type", ENTRY_TYPE_OPEN),
                     "leverage": EXCHANGE_LEVERAGE,
                     "tv_sizing_leverage": float(
-                        getattr(self, "tv_sizing_leverage", EXCHANGE_LEVERAGE) or EXCHANGE_LEVERAGE
+                        getattr(self, "tv_sizing_leverage", VPS_SIZING_LEVERAGE) or VPS_SIZING_LEVERAGE
                     ),
                     "base_qty": float(getattr(self, "base_qty", 0) or 0),
                     "add_count": int(getattr(self, "add_count", 0) or 0),
@@ -1637,7 +1638,7 @@ class PositionSupervisorBinance:
             f"📐 TV参数: type={self.tv_entry_type} "
             f"| VPS风险={VPS_RISK_PCT}% R{self.regime} "
             f"| 加仓=base×{self.tv_qty_ratio:.2f}(TV) 最多{max_add}次 "
-            f"| 交易所={EXCHANGE_LEVERAGE}x"
+            f"| 交易所={EXCHANGE_LEVERAGE}x·头寸系数={VPS_SIZING_LEVERAGE}x"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
@@ -1660,7 +1661,7 @@ class PositionSupervisorBinance:
         sl = float(getattr(self, "tv_sl", 0) or 0)
         qty, meta = compute_vps_open_qty(
             principal, px, sl, int(regime if regime is not None else self.regime),
-            leverage=EXCHANGE_LEVERAGE,
+            leverage=VPS_SIZING_LEVERAGE,
         )
         meta["principal"] = principal
         return float(qty or 0), meta
@@ -6845,8 +6846,8 @@ class PositionSupervisorBinance:
                     self.tv_qty_ratio = float(s.get("tv_qty_ratio", 1.0) or 1.0)
                     self.tv_entry_type = s.get("tv_entry_type", ENTRY_TYPE_OPEN)
                     self.tv_sizing_leverage = float(
-                        s.get("tv_sizing_leverage", s.get("leverage", EXCHANGE_LEVERAGE))
-                        or EXCHANGE_LEVERAGE
+                        s.get("tv_sizing_leverage", s.get("leverage", VPS_SIZING_LEVERAGE))
+                        or VPS_SIZING_LEVERAGE
                     )
                     self.leverage = EXCHANGE_LEVERAGE
                     self.base_qty = float(s.get("base_qty", 0) or 0)
