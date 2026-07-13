@@ -16,8 +16,11 @@ from webhook_parser import (
     classify_tv_close,
     close_type_display_label,
     format_vps_sizing_note,
+    format_vps_hard_sl_note,
     format_tv_sizing_note,
     format_regime_tp_ratios_label,
+    RADAR_STAGE1_TP1_RATIO,
+    RADAR_STAGE_LABELS,
     VPS_RISK_PCT,
     VPS_REGIME_SCALE,
     VPS_MARGIN_LEVERAGE,
@@ -399,7 +402,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     }
     if is_manual_open:
         data["📡 雷达/止损"] = _g(
-            "TP1 成交前 **仅 tv_sl 宽止损** · 雷达 **待命**（禁止提前保本）",
+            f"阶段0仅 VPS硬止损 | 朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起雷达8阶段保本",
             G_MUTED,
         )
     if tp_audit:
@@ -535,7 +538,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         action_txt += " · 雷达哨兵已点火"
     else:
         radar_txt = _g(
-            f"待命 (朝TP1推进 {radar_progress:.0%} 达55%后预热保本)",
+            f"待命 (朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起8阶段雷达保本)",
             G_MUTED,
         )
 
@@ -708,7 +711,7 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
 
 def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
                               tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
-                              reason="", vps_sizing_meta=None):
+                              reason="", vps_sizing_meta=None, vps_hard_sl_note=""):
     """TV Webhook 信号到达（接收确认，非成交核实）"""
     act = str(action or "").upper()
     et = normalize_entry_type(entry_type)
@@ -734,7 +737,9 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
         "📡 ATR": _g(f"`{float(atr or 0):.2f}`", G_MUTED),
     }
     if tv_sl and float(tv_sl) > 0:
-        data["📡 tv_sl"] = _g(f"`{float(tv_sl):.2f}`", G_LIGHT)
+        data["📡 TV参考tv_sl"] = _g(f"`{float(tv_sl):.2f}` (仅参考)", G_MUTED)
+    if vps_hard_sl_note:
+        data["🛡️ VPS硬止损"] = _g(vps_hard_sl_note, G_LIGHT)
     if et == ENTRY_TYPE_OPEN and vps_sizing_meta:
         data["📐 VPS预算"] = _g(
             format_vps_sizing_note(vps_sizing_meta, entry_type=ENTRY_TYPE_OPEN),
@@ -871,17 +876,19 @@ def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entr
 
 
 def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices, tier_pcts,
-                                verify_note=""):
+                                verify_note="", vps_hard_sl_note=""):
     stop_px = tier_prices[0] if tier_prices else entry
-    pct = tier_pcts[0] if tier_pcts else adverse_pct
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL} 全平", G_MAIN),
-        "🛡️ TV硬止损": _g(f"`{stop_px:.2f}` USDT", G_ACCENT),
+        "🛡️ VPS硬止损": _g(
+            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition",
+            G_ACCENT,
+        ),
         "✅ 风控动作": _g(
-            "开单即挂：TV 透传 tv_sl 条件止损全平 · "
-            "价格朝 TP1 推进达55%后雷达预热保本 · 92~95%全武装防回吐",
+            "VPS自主计算硬止损并挂单 · "
+            f"朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起雷达8阶段防回吐",
             G_MAIN,
         ),
     }
@@ -938,11 +945,11 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (朝 TP1 激活线推进)", G_ACCENT),
+        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (8阶段制·朝TP1推进)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (closePosition)", G_LIGHT),
         "✅ 风控动作": _g(
-            "先撤 TV 硬止损 → 挂雷达移动保本 → 专注推升止损防利润回吐",
+            "VPS硬止损已挂 → 雷达8阶段移动保本防利润回吐",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(

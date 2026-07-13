@@ -157,6 +157,86 @@ def format_regime_tp_ratios_label(regime):
     return "/".join(str(int(round(x * 100))) for x in get_regime_tp_ratios(regime))
 
 
+# VPS 自主硬止损：同比均匀呼吸空间（需求文档 v6.9.103）
+VPS_HARD_SL_M = {1: 0.9, 2: 1.05, 3: 1.10, 4: 1.25}
+VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.8, 3: 3.0, 4: 4.8}
+VPS_HARD_SL_EXTRA_RELAX = 0.0  # 极端强趋势额外放宽 0~0.10
+
+# 雷达 8 阶段（按价格朝 TP1/TP2/TP3 推进）
+RADAR_STAGE1_TP1_RATIO = 0.70   # 阶段1：到 TP1 距离 70%
+RADAR_STAGE2_TP1_RATIO = 0.85   # 阶段2：到 TP1 距离 85%
+RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 阶段1：成本 ±0.1%
+RADAR_STAGE_ATR_MULT = {
+    2: 1.8, 3: 1.2, 4: 1.0, 5: 0.8, 6: 0.6, 7: 0.5, 8: 0.3,
+}
+RADAR_STAGE_LABELS = {
+    0: "硬止损防守",
+    1: "提前保本(70%→TP1)",
+    2: "早追踪(85%→TP1)",
+    3: "达TP1标准追踪",
+    4: "TP1→TP2 25%",
+    5: "TP1→TP2 50%",
+    6: "TP1→TP2 75%",
+    7: "达TP2深度锁利",
+    8: "TP2→TP3 80%极限保护",
+}
+
+
+def get_vps_hard_sl_params(regime):
+    """返回档位硬止损参数：sl_m、呼吸倍数、最终倍数"""
+    regime = int(regime or 3)
+    sl_m = VPS_HARD_SL_M.get(regime, 1.10)
+    breath_mult = VPS_REGIME_BREATH_MULT.get(regime, 3.0)
+    return {
+        "regime": regime,
+        "sl_m": sl_m,
+        "breath_mult": breath_mult,
+        "final_mult": round(sl_m * breath_mult, 4),
+    }
+
+
+def compute_vps_hard_sl_distance(atr, regime, extra_relax=None):
+    """硬止损距离 = ATR × sl_m × 档位倍数"""
+    atr = float(atr or 0)
+    if atr <= 0:
+        return 0.0
+    params = get_vps_hard_sl_params(regime)
+    relax = VPS_HARD_SL_EXTRA_RELAX if extra_relax is None else float(extra_relax or 0)
+    dist = atr * params["sl_m"] * params["breath_mult"]
+    if relax > 0:
+        dist *= (1.0 + relax)
+    return round(dist, 2)
+
+
+def compute_vps_hard_sl(side, entry, atr, regime, extra_relax=None):
+    """VPS 自主硬止损价（TV tv_sl 仅作参考，不直接使用）"""
+    entry = float(entry or 0)
+    if entry <= 0:
+        return 0.0
+    dist = compute_vps_hard_sl_distance(atr, regime, extra_relax)
+    if dist <= 0:
+        return 0.0
+    side = str(side or "").strip().upper()
+    if side == "LONG":
+        return round(entry - dist, 2)
+    if side == "SHORT":
+        return round(entry + dist, 2)
+    return 0.0
+
+
+def format_vps_hard_sl_note(side, entry, atr, regime, tv_sl_ref=0, extra_relax=None):
+    """钉钉/日志：VPS 硬止损计算明细"""
+    params = get_vps_hard_sl_params(regime)
+    dist = compute_vps_hard_sl_distance(atr, regime, extra_relax)
+    vps_sl = compute_vps_hard_sl(side, entry, atr, regime, extra_relax)
+    ref = f" | TV参考 `{float(tv_sl_ref):.2f}`" if tv_sl_ref and float(tv_sl_ref) > 0 else ""
+    return (
+        f"VPS硬止损 `{vps_sl:.2f}` | R{regime} "
+        f"sl_m={params['sl_m']}×档位{params['breath_mult']}="
+        f"{params['final_mult']:.2f}× | 呼吸空间 **{dist:.2f}U**{ref}"
+    )
+
+
 # Pine v6.9.75 四档 ATR 倍数（与策略脚本一致）
 TV_REGIME_TP_MULT = {
     1: (0.75, 1.4, 2.0),
