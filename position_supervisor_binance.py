@@ -21,6 +21,7 @@ from webhook_parser import (
     compute_vps_hard_sl,
     compute_vps_hard_sl_distance,
     format_vps_hard_sl_note,
+    format_tv_vps_sl_compare,
     get_vps_hard_sl_params,
     format_vps_sizing_note,
     enrich_entry_tp_prices,
@@ -59,7 +60,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.31.0-vps-hard-sl-radar-8stage"
+BINANCE_VPS_VERSION = "v13.32.0-orphan-tp-radar-merge"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -102,6 +103,7 @@ SAME_DIR_DEDUP_SEC = 300
 ATR_SIMILAR_RATIO = 0.03  # 持仓 ATR 与 TV ATR 偏差 ≤3% 视为未变
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
+EXCHANGE_JOURNAL = "logs/binance_exchange_journal.jsonl"
 
 
 class PositionSupervisorBinance:
@@ -601,6 +603,54 @@ class PositionSupervisorBinance:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def _log_exchange_api(self, action, detail="", result=None):
+        """记录交易所 API 动作与响应摘要"""
+        note = str(detail or "")
+        if result is not None:
+            if isinstance(result, dict):
+                snippet = json.dumps(result, ensure_ascii=False)[:800]
+            else:
+                snippet = str(result)[:800]
+            note = f"{note} | resp={snippet}" if note else f"resp={snippet}"
+        logger.info(f"🔌 [交易所] {action}" + (f" | {note}" if note else ""))
+        self._append_journal(EXCHANGE_JOURNAL, {
+            "action": action,
+            "detail": detail,
+            "result": result if isinstance(result, (dict, list, str, int, float, bool)) else str(result),
+        })
+
+    def _log_radar_update(self, stage, old_sl, new_sl, action, curr_px=0.0, extra=""):
+        """雷达阶段/止损变更结构化日志"""
+        stage = int(stage or 0)
+        old_sl = float(old_sl or 0)
+        new_sl = float(new_sl or 0)
+        label = self._radar_stage_label(stage)
+        compare = ""
+        if self.watched_entry and self.current_side:
+            compare = format_tv_vps_sl_compare(
+                self.current_side, self.watched_entry,
+                self.current_atr, self.regime,
+                tv_sl_ref=getattr(self, "tv_sl_ref", 0),
+            )
+        logger.info(
+            f"📡 [雷达] 阶段{stage} {label} | SL {old_sl:.2f}→{new_sl:.2f} | "
+            f"{action} | 现价 {float(curr_px or 0):.2f}"
+            + (f" | {compare}" if compare else "")
+            + (f" | {extra}" if extra else "")
+        )
+        self._append_journal(EXCHANGE_JOURNAL, {
+            "kind": "radar_update",
+            "stage": stage,
+            "stage_label": label,
+            "old_sl": old_sl,
+            "new_sl": new_sl,
+            "action": action,
+            "curr_px": float(curr_px or 0),
+            "best_price": float(self.best_price or 0),
+            "entry": float(self.watched_entry or 0),
+            "side": self.current_side,
+        })
+
     def _load_last_journal_entry(self, path):
         if not os.path.exists(path):
             return None
@@ -616,6 +666,7 @@ class PositionSupervisorBinance:
         return last
 
     def _record_tv_signal(self, payload, raw_action):
+        full_payload = dict(payload or {})
         entry = {
             "action": raw_action,
             "regime": self.regime,
@@ -630,10 +681,16 @@ class PositionSupervisorBinance:
             "risk_pct": payload.get("risk_pct"),
             "leverage": payload.get("leverage"),
             "qty_ratio": payload.get("qty_ratio"),
+            "payload": full_payload,
             "ts": time.time(),
         }
         self.last_tv_signal = entry
         self._append_journal(TV_JOURNAL, entry)
+        try:
+            payload_txt = json.dumps(full_payload, ensure_ascii=False)[:1800]
+        except (TypeError, ValueError):
+            payload_txt = str(full_payload)[:1800]
+        logger.info(f"📥 [TV警报全文] {raw_action} | {payload_txt}")
         sizing_note = ""
         et = normalize_entry_type(payload.get("entry_type"))
         open_sizing_meta = None
@@ -663,7 +720,7 @@ class PositionSupervisorBinance:
             reason=payload.get("reason", ""),
             vps_sizing_meta=open_sizing_meta,
             vps_hard_sl_note=(
-                format_vps_hard_sl_note(
+                format_tv_vps_sl_compare(
                     raw_action, self.tv_price, self.current_atr, self.regime,
                     tv_sl_ref=payload.get("tv_sl"),
                 )
@@ -2453,7 +2510,7 @@ class PositionSupervisorBinance:
         params = get_vps_hard_sl_params(regime)
         dist = compute_vps_hard_sl_distance(atr, regime)
         ref_txt = (
-            f" | TV参考 {self.tv_sl_ref:.2f}"
+            f" | {format_tv_vps_sl_compare(side, entry, atr, regime, tv_sl_ref=self.tv_sl_ref)}"
             if getattr(self, "tv_sl_ref", 0) > 0 else ""
         )
         logger.info(
@@ -2879,6 +2936,12 @@ class PositionSupervisorBinance:
             self._report_radar_first_activation(
                 real_amt, curr_px, safe_sl, sl_placed,
             )
+        stage = self._radar_stage(curr_px)
+        self._log_radar_update(
+            stage, old_tv or float(getattr(self, "tv_sl", 0) or 0),
+            safe_sl, reason or "雷达交棒", curr_px,
+        )
+        self._cancel_stale_tp_beyond_radar(safe_sl, real_amt)
         return True
 
     def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
@@ -4407,6 +4470,99 @@ class PositionSupervisorBinance:
             logger.info(f"🧹 撤净已成交 TP 残留单 {cancelled} 笔")
         return cancelled
 
+    def _cancel_stale_tp_beyond_radar(self, radar_sl, live_qty=None, tolerance=1.5):
+        """
+        雷达止损已越过 TP1/TP2 → 撤销无意义的限价止盈（防孤儿单干扰）。
+        多头：雷达价 ≥ TP 价；空头：雷达价 ≤ TP 价。
+        """
+        radar_sl = float(radar_sl or 0)
+        if radar_sl <= 0 or not self.current_side:
+            return 0
+        live_qty = float(live_qty if live_qty is not None else self.watched_qty or 0)
+        cancelled = 0
+        stale_levels = []
+        for level in (1, 2):
+            idx = level - 1
+            if idx >= len(self.tv_tps) or float(self.tv_tps[idx] or 0) <= 0:
+                continue
+            tp_px = float(self.tv_tps[idx])
+            stale = False
+            if self.current_side == "LONG" and radar_sl >= tp_px - tolerance:
+                stale = True
+            elif self.current_side == "SHORT" and radar_sl <= tp_px + tolerance:
+                stale = True
+            if not stale:
+                continue
+            for o in self._collect_tp_limit_orders():
+                if abs(o["price"] - tp_px) > tolerance:
+                    continue
+                oid = o.get("orderId")
+                if oid:
+                    res = binance_client.cancel_order(self.symbol, order_id=oid)
+                    self._log_exchange_api(
+                        f"撤孤儿TP{level}",
+                        f"雷达SL={radar_sl:.2f} 越过 TP{level}@{tp_px:.2f}",
+                        res,
+                    )
+                    cancelled += 1
+                    time.sleep(0.15)
+            stale_levels.append(level)
+        if cancelled:
+            logger.warning(
+                f"🧹 雷达越过 TP{stale_levels} → 撤孤儿限价止盈 {cancelled} 笔 "
+                f"(雷达SL={radar_sl:.2f})"
+            )
+            dingtalk.report_system_alert(
+                "雷达孤儿TP清理",
+                f"{self.current_side} {live_qty} ETH | 雷达SL `{radar_sl:.2f}` | "
+                f"已撤 TP{stale_levels} 限价 {cancelled} 笔 | "
+                f"等止盈已无意义，改由雷达锁利",
+            )
+        return cancelled
+
+    def _merge_wider_vps_hard_sl(self, old_sl, new_sl):
+        """加仓合并：宽止损取更宽者（多头更低、空头更高）"""
+        old_sl = float(old_sl or 0)
+        new_sl = float(new_sl or 0)
+        if old_sl <= 0:
+            return new_sl
+        if new_sl <= 0:
+            return old_sl
+        if self.current_side == "LONG":
+            return min(old_sl, new_sl)
+        if self.current_side == "SHORT":
+            return max(old_sl, new_sl)
+        return new_sl
+
+    def _sweep_orphan_reverse_after_flat(self, prev_side=None, reason=""):
+        """全平后复核：残留限价反向成交 → 反向蚂蚁仓扫尾"""
+        prev_side = (prev_side or self.current_side or "").upper()
+        time.sleep(1.0)
+        pos = self._get_active_position()
+        if not pos or float(pos.get("size", 0) or 0) <= 0:
+            return False
+        amt = float(pos["size"])
+        side = pos["side"]
+        if prev_side and side != prev_side:
+            logger.warning(
+                f"🐜 孤儿单反向成交: 原{prev_side} → 现{side} {amt} ETH | {reason}"
+            )
+            dingtalk.report_system_alert(
+                "孤儿单反向蚂蚁仓",
+                f"全平后检测到反向持仓 {side} {amt} ETH @ {pos['entry_price']:.2f} | "
+                f"疑似残留 TP 成交 → 立即扫尾",
+            )
+            close_side = "SELL" if side == "LONG" else "BUY"
+            res = binance_client.place_market_order(close_side, amt, reduce_only=True)
+            self._log_exchange_api("孤儿反向扫尾", f"{close_side} {amt} ETH", res)
+            time.sleep(1.0)
+            self._purge_all_defense_orders_on_flat("孤儿反向扫尾后撤单")
+            return self._verify_flat()
+        if self._is_dust_qty(amt):
+            self._sweep_dust_and_finalize(reason or "全平后蚂蚁仓扫尾")
+            return True
+        return False
+
     def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=1.0, qty_tol=0.005):
         """撤掉剩余档数量与当前仓位比例不符的旧单（部分止盈后常见）"""
         cancelled = 0
@@ -5165,6 +5321,17 @@ class PositionSupervisorBinance:
             elif raw_action == "CLOSE_STOPLOSS":
                 pos = self._get_active_position()
                 tv_reason = close_reason or "被动止损/保本"
+                sl_compare = ""
+                if self.watched_entry and self.current_side:
+                    sl_compare = format_tv_vps_sl_compare(
+                        self.current_side, self.watched_entry,
+                        self.current_atr, self.regime,
+                        tv_sl_ref=payload.get("tv_sl") or getattr(self, "tv_sl_ref", 0),
+                    )
+                logger.warning(
+                    f"🛑 [TV第一指令] CLOSE_STOPLOSS 立即全平 | {tv_reason}"
+                    + (f" | {sl_compare}" if sl_compare else "")
+                )
                 if not pos or pos.get("size", 0) <= 0:
                     self._handle_manual_flat_detected(
                         tv_reason,
@@ -5175,10 +5342,10 @@ class PositionSupervisorBinance:
                     tag = (
                         "防回吐保本"
                         if close_meta.get("close_type") == CLOSE_TYPE_BREAKEVEN
-                        else "硬止损"
+                        else "TV紧止损"
                     )
                     self._close_all(
-                        f"🛑 {tag}：{tv_reason}{close_extra}",
+                        f"🛑 {tag}·TV第一指令全平：{tv_reason}{close_extra}",
                         close_meta=close_meta,
                     )
             elif raw_action == "CLOSE":
@@ -5368,6 +5535,7 @@ class PositionSupervisorBinance:
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
         """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉"""
+        prev_side = self.current_side
         purge = self._purge_all_defense_orders_on_flat(
             reason or "感知空仓·抢先撤TP123",
         )
@@ -5403,11 +5571,21 @@ class PositionSupervisorBinance:
             close_meta=meta,
             curr_px=curr_px,
         )
+        self._sweep_orphan_reverse_after_flat(
+            prev_side=prev_side,
+            reason=meta.get("tv_reason") or reason,
+        )
 
-    def _realign_after_position_add(self, new_qty, new_entry, curr_px, entry_type):
+    def _realign_after_position_add(self, new_qty, new_entry, curr_px, entry_type,
+                                    old_entry=None, old_qty=None, old_vps_sl=None):
         """
-        加仓成功后：按 TV TP123 价格 + 新总头寸重挂止盈，重算 VPS 硬止损，重置雷达追踪。
+        加仓成功后：加权均价(交易所) + 合并宽止损 + 重置雷达 + 替换 TP123。
         """
+        old_entry = float(old_entry if old_entry is not None else self.watched_entry or 0)
+        old_qty = float(old_qty if old_qty is not None else 0)
+        old_vps_sl = float(old_vps_sl if old_vps_sl is not None else getattr(self, "tv_sl", 0) or 0)
+
+        self.watched_entry = new_entry
         self._refresh_vps_hard_sl(
             entry=new_entry, side=self.current_side,
             regime=int(getattr(self, "open_regime", None) or self.regime or 3),
@@ -5415,8 +5593,26 @@ class PositionSupervisorBinance:
             tv_sl_ref=getattr(self, "tv_sl_ref", 0) or None,
             source=f"{entry_type}加仓",
         )
+        new_vps_sl = float(self.tv_sl or 0)
+        merged_sl = self._merge_wider_vps_hard_sl(old_vps_sl, new_vps_sl)
+        if merged_sl > 0 and abs(merged_sl - new_vps_sl) > 0.01:
+            self.tv_sl = merged_sl
+            self._last_applied_exchange_sl = 0.0
+            logger.info(
+                f"🛡️ 加仓合并宽止损: 旧{old_vps_sl:.2f} + 新{new_vps_sl:.2f} → {merged_sl:.2f} "
+                f"(取更宽)"
+            )
         self.best_price = new_entry
+        self.current_sl = merged_sl if merged_sl > 0 else new_vps_sl
         self._radar_stage_last = 0
+        self._radar_activation_notified = False
+        self._shield_handoff_notified = False
+
+        if old_qty > 0 and old_entry > 0:
+            logger.info(
+                f"➕ 加仓合并: {old_qty:.3f}@{old_entry:.2f} + 追加 → "
+                f"加权均价 {new_entry:.2f} | 总仓 {new_qty:.3f} ETH"
+            )
         self._ensure_tp123_prices_from_tv(new_entry)
         tp_txt = "/".join(
             f"{float(p):.0f}" for p in (self.tv_tps or []) if float(p or 0) > 0
@@ -5522,6 +5718,7 @@ class PositionSupervisorBinance:
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
         old_qty = float(pos["size"])
         old_entry = float(pos["entry_price"])
+        old_vps_sl = float(getattr(self, "tv_sl", 0) or 0)
         add_qty, meta = self._calc_vps_add_qty(tv_ratio)
         if add_qty <= 0:
             logger.error(f"{entry_type} 跳过：计算加仓量无效 {meta}")
@@ -5563,6 +5760,7 @@ class PositionSupervisorBinance:
 
         realign = self._realign_after_position_add(
             new_qty, new_entry, curr_px, entry_type,
+            old_entry=old_entry, old_qty=old_qty, old_vps_sl=old_vps_sl,
         )
         sl_ok = realign.get("shield_ok", False)
         audit = realign.get("audit") or {}
@@ -5574,12 +5772,12 @@ class PositionSupervisorBinance:
             f"{type_label} | {self._tv_sizing_note(add_qty, meta, entry_type=entry_type)} "
             f"| base={getattr(self, 'base_qty', 0):.3f} "
             f"| 加仓次数 {self.add_count}/{max_add} "
-            f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {new_entry:.2f} "
+            f"| 持仓 {old_qty:.3f}→{new_qty:.3f} ETH @ {old_entry:.2f}→{new_entry:.2f} "
             f"| TV TP={realign.get('tp_prices', '—')} "
             f"| TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} "
             f"| {tp_summary} "
             f"| {realign.get('radar_note', '')} "
-            f"| tv_sl={getattr(self, 'tv_sl', 0):.2f} "
+            f"| {format_tv_vps_sl_compare(action, new_entry, self.current_atr, self.regime, getattr(self, 'tv_sl_ref', 0))} "
             f"| {'防线已核实' if sl_ok and self._tp_audit_ok(audit) else '防线待核实'}"
         )
         self._call_dingtalk(
@@ -6305,23 +6503,33 @@ class PositionSupervisorBinance:
 
         if self.current_side == "LONG":
             if new_sl > self.current_sl + 1.0:
+                old_sl = float(self.current_sl or 0)
                 self.current_sl = new_sl
                 self._save_state()
                 sl_placed = self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                stage = self._radar_stage(curr_px)
+                self._log_radar_update(stage, old_sl, new_sl, "实时跟踪推升", curr_px)
+                self._cancel_stale_tp_beyond_radar(new_sl, real_amt)
                 self._report_radar_intervention(
                     real_amt, new_sl,
-                    f"🚀 档位{self.regime} 雷达实时跟踪：保本盾推升至 {new_sl:.2f}",
+                    f"🚀 R{self.regime} 阶段{stage} {self._radar_stage_label(stage)} "
+                    f"雷达推升至 {new_sl:.2f}",
                     sl_placed=sl_placed,
                 )
                 moved = True
         else:
             if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
+                old_sl = float(self.current_sl or 0)
                 self.current_sl = new_sl
                 self._save_state()
                 sl_placed = self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                stage = self._radar_stage(curr_px)
+                self._log_radar_update(stage, old_sl, new_sl, "实时跟踪下压", curr_px)
+                self._cancel_stale_tp_beyond_radar(new_sl, real_amt)
                 self._report_radar_intervention(
                     real_amt, new_sl,
-                    f"🚀 档位{self.regime} 雷达实时跟踪：保本顶线下压至 {new_sl:.2f}",
+                    f"🚀 R{self.regime} 阶段{stage} {self._radar_stage_label(stage)} "
+                    f"雷达下压至 {new_sl:.2f}",
                     sl_placed=sl_placed,
                 )
                 moved = True
@@ -6509,6 +6717,7 @@ class PositionSupervisorBinance:
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):
         """先撤全部挂单再阶梯强平；返回是否已空仓"""
+        prev_side = self.current_side
         self._purge_all_defense_orders_on_flat(reason or "强平前撤单")
         closed_successfully = False
 
@@ -6589,6 +6798,9 @@ class PositionSupervisorBinance:
                 )
             else:
                 self._report_flat_close(reason, close_meta=close_meta)
+
+        if closed_successfully:
+            self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=reason)
 
         return closed_successfully
 

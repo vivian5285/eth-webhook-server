@@ -237,6 +237,31 @@ def format_vps_hard_sl_note(side, entry, atr, regime, tv_sl_ref=0, extra_relax=N
     )
 
 
+def format_tv_vps_sl_compare(side, entry, atr, regime, tv_sl_ref=0, extra_relax=None):
+    """TV 紧止损 vs VPS 宽止损对比（实盘挂单价以 VPS 为准）"""
+    entry = float(entry or 0)
+    if entry <= 0:
+        return ""
+    side = str(side or "").strip().upper()
+    vps_sl = compute_vps_hard_sl(side, entry, atr, regime, extra_relax)
+    ref = float(tv_sl_ref or 0)
+    vps_dist = abs(entry - vps_sl) if vps_sl > 0 else 0
+    if ref <= 0:
+        return format_vps_hard_sl_note(side, entry, atr, regime)
+    tv_dist = abs(entry - ref)
+    if vps_dist > tv_dist + 0.5:
+        wider = "VPS更宽(挂单)"
+    elif tv_dist > vps_dist + 0.5:
+        wider = "TV更紧(仅警报)"
+    else:
+        wider = "宽度接近"
+    return (
+        f"TV紧止损 `{ref:.2f}` 距入场 {tv_dist:.2f}U · "
+        f"VPS宽止损 `{vps_sl:.2f}` 距入场 {vps_dist:.2f}U · "
+        f"**实盘挂单价=VPS** · {wider} | CLOSE_STOPLOSS=TV第一指令立即全平"
+    )
+
+
 # Pine v6.9.75 四档 ATR 倍数（与策略脚本一致）
 TV_REGIME_TP_MULT = {
     1: (0.75, 1.4, 2.0),

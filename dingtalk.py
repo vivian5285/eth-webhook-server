@@ -17,6 +17,7 @@ from webhook_parser import (
     close_type_display_label,
     format_vps_sizing_note,
     format_vps_hard_sl_note,
+    format_tv_vps_sl_compare,
     format_tv_sizing_note,
     format_regime_tp_ratios_label,
     RADAR_STAGE1_TP1_RATIO,
@@ -739,7 +740,12 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     if tv_sl and float(tv_sl) > 0:
         data["📡 TV参考tv_sl"] = _g(f"`{float(tv_sl):.2f}` (仅参考)", G_MUTED)
     if vps_hard_sl_note:
-        data["🛡️ VPS硬止损"] = _g(vps_hard_sl_note, G_LIGHT)
+        data["🛡️ 止损分工"] = _g(vps_hard_sl_note, G_LIGHT)
+    if act == "CLOSE_STOPLOSS":
+        data["⚡ TV第一指令"] = _g(
+            "收到 CLOSE_STOPLOSS → **立即市价全平**（优先于 VPS 宽止损挂单）",
+            G_ACCENT,
+        )
     if et == ENTRY_TYPE_OPEN and vps_sizing_meta:
         data["📐 VPS预算"] = _g(
             format_vps_sizing_note(vps_sizing_meta, entry_type=ENTRY_TYPE_OPEN),
