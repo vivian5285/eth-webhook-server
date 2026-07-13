@@ -163,23 +163,24 @@ VPS_REGIME_BREATH_MULT = {1: 2.0, 2: 3.0, 3: 4.0, 4: 5.0}
 VPS_HARD_SL_EXTRA_RELAX = 0.0  # 极端强趋势额外放宽 0~0.10
 VPS_HARD_SL_LIMIT_OFFSET = 0.5  # Stop-Limit 限价相对触发价缓冲（U）
 
-# 雷达 8 阶段（按价格朝 TP1/TP2/TP3 推进）
-RADAR_STAGE1_TP1_RATIO = 0.70   # 阶段1：到 TP1 距离 70%
-RADAR_STAGE2_TP1_RATIO = 0.85   # 阶段2：到 TP1 距离 85%
-RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 阶段1：成本 ±0.1%
+# 雷达 5 阶段（全档位统一：TP1 成交后才激活；TP1 前仅 VPS 宽硬止损）
+# 兼容旧 import：进度阈值已废弃，恒为 1.0（永不因「朝 TP1 推进」提前激活）
+RADAR_STAGE1_TP1_RATIO = 1.0
+RADAR_STAGE2_TP1_RATIO = 1.0
+RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 激活：成本 ±0.1%
 RADAR_STAGE_ATR_MULT = {
-    2: 1.8, 3: 1.2, 4: 1.0, 5: 0.8, 6: 0.6, 7: 0.5, 8: 0.3,
+    2: 1.0,  # TP1→TP2 50%
+    3: 0.6,  # 达 TP2
+    4: 0.5,  # TP2→TP3 50%
+    5: 0.3,  # 达 TP3
 }
 RADAR_STAGE_LABELS = {
-    0: "硬止损防守",
-    1: "提前保本(70%→TP1)",
-    2: "早追踪(85%→TP1)",
-    3: "达TP1标准追踪",
-    4: "TP1→TP2 25%",
-    5: "TP1→TP2 50%",
-    6: "TP1→TP2 75%",
-    7: "达TP2深度锁利",
-    8: "TP2→TP3 80%极限保护",
+    0: "硬止损防守(TP1前)",
+    1: "TP1成交·成本保本",
+    2: "TP1→TP2 50%追踪",
+    3: "达TP2锁利",
+    4: "TP2→TP3 50%追踪",
+    5: "达TP3极限保护",
 }
 
 

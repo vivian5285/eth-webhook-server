@@ -20,7 +20,6 @@ from webhook_parser import (
     format_tv_vps_sl_compare,
     format_tv_sizing_note,
     format_regime_tp_ratios_label,
-    RADAR_STAGE1_TP1_RATIO,
     RADAR_STAGE_LABELS,
     VPS_RISK_PCT,
     VPS_REGIME_SCALE,
@@ -405,7 +404,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     }
     if is_manual_open:
         data["📡 雷达/止损"] = _g(
-            f"阶段0仅 VPS硬止损 | 朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起雷达8阶段保本",
+            "阶段0仅 VPS硬止损 | TP1限价成交后激活雷达5阶段保本",
             G_MUTED,
         )
     if tp_audit:
@@ -541,7 +540,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         action_txt += " · 雷达哨兵已点火"
     else:
         radar_txt = _g(
-            f"待命 (朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起8阶段雷达保本)",
+            "待命 (TP1限价成交后激活雷达5阶段保本)",
             G_MUTED,
         )
 
@@ -896,7 +895,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         ),
         "✅ 风控动作": _g(
             "VPS自主计算硬止损(Stop-Limit) · CLOSE_STOPLOSS=TV第一指令市价全平 · "
-            f"朝TP1达{RADAR_STAGE1_TP1_RATIO:.0%}起雷达8阶段防回吐",
+            "TP1限价成交后激活雷达5阶段防回吐",
             G_MAIN,
         ),
     }
@@ -925,15 +924,15 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 剩余头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
-        "📈 价格方向": _g("朝 **TP1 激活线** 浮盈推进 → 交棒雷达", G_LIGHT),
-        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 TV硬止损", G_ACCENT),
+        "📈 价格方向": _g("**TP1 限价成交** → 交棒雷达保本", G_LIGHT),
+        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 VPS硬止损", G_ACCENT),
         "📡 雷达状态": _g(
-            "已激活移动保本" if radar_progress >= 1.0
-            else f"进度 {radar_progress:.0%}，价格推进中挂雷达保本",
+            "已激活移动保本" if radar_progress >= 0.2
+            else f"进度 {radar_progress:.0%}，TP1后挂雷达保本",
             G_MAIN,
         ),
         "✅ 风控动作": _g(
-            reason or "雷达接管 → 撤 TV 硬止损 → 移动保本防利润回吐",
+            reason or "TP1成交 → 雷达接管 · 成本±0.1%保本 · 硬止损退居次级",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -953,11 +952,11 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (8阶段制·朝TP1推进)", G_ACCENT),
+        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段制·TP1成交后)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
-        "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (closePosition)", G_LIGHT),
+        "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%起)", G_LIGHT),
         "✅ 风控动作": _g(
-            "VPS硬止损已挂 → 雷达8阶段移动保本防利润回吐",
+            "TP1成交 → 雷达5阶段移动保本 · 止损只向有利方向 · 永不回退",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
