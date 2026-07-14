@@ -894,14 +894,15 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
             G_ACCENT,
         ),
         "✅ 风控动作": _g(
-            "VPS自主计算硬止损(Stop-Limit) · CLOSE_STOPLOSS=TV第一指令市价全平 · "
+            "VPS按开仓价×档位%计算硬止损(Stop-Limit) · "
+            "CLOSE_STOPLOSS=TV第一指令市价全平 · "
             "TP1限价成交后激活雷达5阶段防回吐",
             G_MAIN,
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ TV硬止损 · 已武装", data, G_TITLE)
+    send_alert("🛡️ VPS硬止损 · 已武装", data, G_TITLE)
 
 
 def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, entry_px,

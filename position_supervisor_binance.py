@@ -59,7 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.37.0-radar-tp1-only-5stage"
+BINANCE_VPS_VERSION = "v13.38.0-hard-sl-entry-pct"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -2480,20 +2480,20 @@ class PositionSupervisorBinance:
     def _refresh_vps_hard_sl(self, entry=None, side=None, regime=None, atr=None,
                              tv_sl_ref=None, source=""):
         """
-        VPS 自主计算硬止损：ATR × sl_m × 档位倍数。
+        VPS 自主硬止损：开仓价 × 档位百分比（等比呼吸，与 ETH 价格缩放）。
         TV tv_sl 仅作参考存入 tv_sl_ref，不直接挂单。
+        持仓期间不随波动重算；仅开仓/接管等 source 触发时刷新。
         """
         entry = float(entry or self.watched_entry or self.tv_price or 0)
         side = (side or self.current_side or "").strip().upper()
         regime = int(regime if regime is not None else self.regime or 3)
-        atr = float(atr if atr is not None else self.current_atr or 30)
 
         if tv_sl_ref is not None:
             ref = round(self._safe_float(tv_sl_ref, 0), 2)
             if ref > 0:
                 self.tv_sl_ref = ref
 
-        if entry <= 0 or side not in ("LONG", "SHORT") or atr <= 0:
+        if entry <= 0 or side not in ("LONG", "SHORT"):
             return False
 
         vps_sl = compute_vps_hard_sl(side, entry, atr, regime)
@@ -2507,15 +2507,14 @@ class PositionSupervisorBinance:
         self._save_state()
 
         params = get_vps_hard_sl_params(regime)
-        dist = compute_vps_hard_sl_distance(atr, regime)
+        dist = compute_vps_hard_sl_distance(entry, regime)
         ref_txt = (
             f" | {format_tv_vps_sl_compare(side, entry, atr, regime, tv_sl_ref=self.tv_sl_ref)}"
             if getattr(self, "tv_sl_ref", 0) > 0 else ""
         )
         logger.info(
-            f"🛡️ VPS硬止损 R{regime} sl_m={params['sl_m']}×"
-            f"档位{params['breath_mult']}={params['final_mult']:.2f}× | "
-            f"呼吸 {dist:.2f}U → {vps_sl:.2f}"
+            f"🛡️ VPS硬止损 R{regime} 开仓×{params['pct_label']} | "
+            f"呼吸 {dist:.2f}U ({params['pct_label']}) → {vps_sl:.2f}"
             + (f" ({source})" if source else "")
             + ref_txt
             + (f" | 原 {old:.2f}" if old > 0 and abs(vps_sl - old) > SHIELD_STOP_TOLERANCE else "")
@@ -2523,7 +2522,7 @@ class PositionSupervisorBinance:
         return True
 
     def _apply_tv_sl_from_payload(self, payload, source=""):
-        """TV tv_sl 仅参考；挂单价由 VPS 按 regime+atr 重算"""
+        """TV tv_sl 仅参考；挂单价由 VPS 按 开仓价×档位% 重算"""
         tv_ref = payload.get("tv_sl")
         if tv_ref is None or tv_ref == "":
             return self._refresh_vps_hard_sl(source=source or "信号")
