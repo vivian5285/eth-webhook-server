@@ -13,7 +13,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.39.0-ws-userdata"
+BINANCE_CLIENT_VERSION = "v13.41.0-tp-fill-trade-verify"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
 
@@ -492,6 +492,16 @@ class BinanceClient:
             logger.error(f"[查询持仓失败] {symbol}: {e}")
             stale = self._get_pos_cache(symbol, max_age=60.0)
             return stale
+
+    def get_recent_user_trades(self, symbol="ETHUSDT", limit=50):
+        """最近用户成交（核对 TP 限价成交 vs 手工减仓）"""
+        try:
+            limit = max(1, min(int(limit or 50), 100))
+            rows = self.client.futures_account_trades(symbol=symbol, limit=limit)
+            return list(rows or [])
+        except Exception as e:
+            logger.warning(f"[成交历史] {symbol}: {e}")
+            return []
 
     def find_protective_stop_prices(self, symbol="ETHUSDT"):
         """盘口已挂 STOP / STOP_MARKET（含 Algo）的触发价列表"""
