@@ -13,8 +13,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.29.0"
+BINANCE_CLIENT_VERSION = "v13.39.0-ws-userdata"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
+WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
 
 
 class BinanceClient:
@@ -30,7 +31,16 @@ class BinanceClient:
         self._pub_ws_symbol = None
         self._rest_price_min_interval = 30
         self._last_rest_price_fetch = 0.0
-        logger.info("🟢 Binance Client v13.9.2-algo-shield-audit 已加载")
+        # 私有 User Data Stream：持仓 / 订单实时同步
+        self._ud_ws_running = False
+        self._ud_ws_symbol = None
+        self._listen_key = None
+        self._ud_event_cb = None
+        self._pos_cache = {}
+        self._pos_cache_ts = {}
+        self._pos_lock = threading.Lock()
+        self._last_order_event_ts = 0.0
+        logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
 
     @staticmethod
     def _is_algo_switch_error(err):
@@ -229,6 +239,155 @@ class BinanceClient:
             if self._pub_ws_running:
                 time.sleep(3)
 
+    def _create_listen_key(self):
+        try:
+            if hasattr(self.client, "futures_stream_get_listen_key"):
+                key = self.client.futures_stream_get_listen_key()
+            else:
+                key = self._futures_signed_request("post", "listenKey", {})
+            if isinstance(key, dict):
+                key = key.get("listenKey") or key.get("listen_key")
+            key = str(key or "").strip()
+            return key or None
+        except Exception as e:
+            logger.error(f"[listenKey创建失败] {e}")
+            return None
+
+    def _keepalive_listen_key(self):
+        key = self._listen_key
+        if not key:
+            return False
+        try:
+            if hasattr(self.client, "futures_stream_keepalive"):
+                self.client.futures_stream_keepalive(listenKey=key)
+            else:
+                self._futures_signed_request("put", "listenKey", {"listenKey": key})
+            return True
+        except Exception as e:
+            logger.warning(f"[listenKey续期失败] {e}")
+            return False
+
+    def _set_pos_cache(self, symbol, position_amt, entry_price):
+        with self._pos_lock:
+            self._pos_cache[symbol] = {
+                "symbol": symbol,
+                "positionAmt": float(position_amt or 0),
+                "entryPrice": float(entry_price or 0),
+            }
+            self._pos_cache_ts[symbol] = time.time()
+
+    def _get_pos_cache(self, symbol, max_age=8.0):
+        with self._pos_lock:
+            row = self._pos_cache.get(symbol)
+            ts = self._pos_cache_ts.get(symbol, 0.0)
+        if row and (time.time() - ts) <= max_age:
+            return dict(row)
+        return None
+
+    def start_user_data_ws(self, symbol="ETHUSDT", on_event=None):
+        """合约 User Data Stream：持仓/订单推送，钉钉与哨兵对齐实盘"""
+        self._ud_ws_symbol = symbol
+        if on_event is not None:
+            self._ud_event_cb = on_event
+        if self._ud_ws_running:
+            return
+        self._ud_ws_running = True
+        threading.Thread(
+            target=self._user_data_ws_loop, args=(symbol,), daemon=True,
+            name="binance-ud-ws",
+        ).start()
+        logger.info(f"📡 币安私有 WS 启动: User Data Stream ({symbol})")
+
+    def _user_data_ws_loop(self, symbol):
+        try:
+            import websocket
+        except ImportError:
+            logger.warning("未安装 websocket-client，用户流不可用")
+            self._ud_ws_running = False
+            return
+
+        last_keepalive = 0.0
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                et = str(data.get("e") or "")
+                if et == "ACCOUNT_UPDATE":
+                    for p in (data.get("a") or {}).get("P") or []:
+                        if str(p.get("s") or "").upper() != symbol.upper():
+                            continue
+                        self._set_pos_cache(
+                            symbol,
+                            p.get("pa") or p.get("positionAmt"),
+                            p.get("ep") or p.get("entryPrice"),
+                        )
+                elif et == "ORDER_TRADE_UPDATE":
+                    self._last_order_event_ts = time.time()
+                    o = data.get("o") or {}
+                    if str(o.get("s") or "").upper() == symbol.upper():
+                        # 用成交后仓位字段刷新（若有）
+                        pa = o.get("pa")
+                        if pa is not None:
+                            self._set_pos_cache(
+                                symbol, pa,
+                                o.get("ap") or o.get("avgPrice") or 0,
+                            )
+                elif et == "listenKeyExpired":
+                    logger.warning("listenKey 已过期，准备重建")
+                    self._listen_key = None
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                if self._ud_event_cb and et:
+                    try:
+                        self._ud_event_cb(et, data)
+                    except Exception as cb_e:
+                        logger.debug(f"UD WS 回调: {cb_e}")
+            except Exception as e:
+                logger.debug(f"UD WS 解析: {e}")
+
+        def on_error(ws, error):
+            logger.warning(f"币安私有 WS 错误: {error}")
+
+        def on_close(ws, code, msg):
+            logger.warning(f"币安私有 WS 断开: {code} {msg}")
+
+        while self._ud_ws_running:
+            key = self._listen_key or self._create_listen_key()
+            if not key:
+                time.sleep(5)
+                continue
+            self._listen_key = key
+            url = f"{WS_PRIVATE_BASE}/{key}"
+            try:
+                ws = websocket.WebSocketApp(
+                    url, on_message=on_message, on_error=on_error, on_close=on_close,
+                )
+                last_keepalive = time.time()
+
+                def _ping():
+                    nonlocal last_keepalive
+                    while self._ud_ws_running and self._listen_key == key:
+                        time.sleep(20)
+                        if time.time() - last_keepalive >= 25 * 60:
+                            if self._keepalive_listen_key():
+                                last_keepalive = time.time()
+                            else:
+                                self._listen_key = None
+                                try:
+                                    ws.close()
+                                except Exception:
+                                    pass
+                                break
+
+                threading.Thread(target=_ping, daemon=True).start()
+                ws.run_forever(ping_interval=180, ping_timeout=30)
+            except Exception as e:
+                logger.error(f"币安私有 WS 异常: {e}")
+            if self._ud_ws_running:
+                time.sleep(3)
+
     def get_current_price(self, symbol="ETHUSDT", prefer_ws=True):
         """优先 WS 缓存；REST 仅作兜底且限频（有 WS 时 ≥30s 一次）"""
         if prefer_ws:
@@ -314,13 +473,45 @@ class BinanceClient:
             logger.error(f"[查询余额失败] {e}")
             return 0.0
 
-    def get_position(self, symbol="ETHUSDT"):
+    def get_position(self, symbol="ETHUSDT", prefer_ws=True):
+        if prefer_ws:
+            cached = self._get_pos_cache(symbol, max_age=8.0)
+            if cached is not None:
+                return cached
         try:
             positions = self.client.futures_position_information(symbol=symbol)
-            return positions[0] if positions else None
+            pos = positions[0] if positions else None
+            if pos:
+                self._set_pos_cache(
+                    symbol,
+                    pos.get("positionAmt"),
+                    pos.get("entryPrice"),
+                )
+            return pos
         except Exception as e:
             logger.error(f"[查询持仓失败] {symbol}: {e}")
-            return None
+            stale = self._get_pos_cache(symbol, max_age=60.0)
+            return stale
+
+    def find_protective_stop_prices(self, symbol="ETHUSDT"):
+        """盘口已挂 STOP / STOP_MARKET（含 Algo）的触发价列表"""
+        out = []
+        for o in self.get_open_orders(symbol, include_algo=True):
+            order_type = str(o.get("type") or o.get("orderType") or "").upper()
+            if order_type not in ("STOP", "STOP_MARKET"):
+                continue
+            for key in ("stopPrice", "triggerPrice", "activatePrice"):
+                val = o.get(key)
+                if val is None or str(val).strip() in ("", "0"):
+                    continue
+                try:
+                    px = round(float(val), 2)
+                except (TypeError, ValueError):
+                    continue
+                if px > 0:
+                    out.append(px)
+                break
+        return out
 
     def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False):
         qty = self.format_quantity(quantity, symbol)

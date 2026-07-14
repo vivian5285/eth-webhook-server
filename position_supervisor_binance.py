@@ -59,7 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.38.0-hard-sl-entry-pct"
+BINANCE_VPS_VERSION = "v13.39.0-ws-realtime-shield"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -175,14 +175,21 @@ class PositionSupervisorBinance:
         self.base_qty = 0.0
         self.add_count = 0
         self._last_idle_takeover_ts = 0.0
+        self._ws_defense_pulse = False
+        self._tv_sl_missing_alerted = False
 
         self.state_file = os.path.join(_BASE_DIR, 'binance_vps_state.json')
         logger.info(
             f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载："
-            f"TP1成交后雷达5阶段 · {self.leverage}x 杠杆"
+            f"WS实时盘口+TP1雷达5阶段 · {self.leverage}x 杠杆"
         )
         self._start_signal_worker()
         self._start_idle_flat_patrol()
+        # 启动即订阅行情/私有流，避免首仓前钉钉与盘口不同步
+        try:
+            self._ensure_price_ws()
+        except Exception as e:
+            logger.warning(f"启动 WS 订阅跳过: {e}")
 
     def _start_idle_flat_patrol(self):
         """空仓待命时激进实盘巡检：反向强平 / 同向接管 / 人工异动 / 漏报全平 / 蚂蚁扫尾"""
@@ -979,7 +986,8 @@ class PositionSupervisorBinance:
                     notes.append(f"TV参考tv_sl={sl:.2f}")
                     break
 
-        if entry > 0 and self.current_atr > 0 and side in ("LONG", "SHORT"):
+        # v13.38+：硬止损按开仓价×档位%，不依赖 ATR
+        if entry > 0 and side in ("LONG", "SHORT"):
             if self._refresh_vps_hard_sl(
                 entry=entry, side=side,
                 regime=self.regime, atr=self.current_atr,
@@ -990,6 +998,10 @@ class PositionSupervisorBinance:
                     side, entry, self.current_atr, self.regime,
                     tv_sl_ref=getattr(self, "tv_sl_ref", 0),
                 ))
+            else:
+                adopted = self._adopt_exchange_hard_sl(source="接管盘口采纳")
+                if adopted:
+                    notes.append(f"盘口采纳硬止损@{adopted:.2f}")
 
         self.monitoring = True
         self._save_state()
@@ -3551,6 +3563,62 @@ class PositionSupervisorBinance:
             )
         return ok
 
+    def _adopt_exchange_hard_sl(self, source=""):
+        """
+        实盘已有 STOP/STOP_MARKET 时，把触发价写回账本 tv_sl，避免钉钉误报「缺失」。
+        """
+        entry = float(self.watched_entry or 0)
+        side = (self.current_side or "").upper()
+        stops = binance_client.find_protective_stop_prices(self.symbol)
+        if not stops:
+            return 0.0
+        chosen = None
+        if side == "LONG" and entry > 0:
+            below = [p for p in stops if p < entry - 0.01]
+            chosen = min(below) if below else min(stops)
+        elif side == "SHORT" and entry > 0:
+            above = [p for p in stops if p > entry + 0.01]
+            chosen = max(above) if above else max(stops)
+        else:
+            chosen = stops[0]
+        chosen = round(float(chosen), 2)
+        if chosen <= 0:
+            return 0.0
+        old = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+        self.tv_sl = chosen
+        if not self.current_sl or float(self.current_sl) <= 0:
+            self.current_sl = chosen
+        self.shield_active = True
+        self._tv_sl_missing_alerted = False
+        self._last_applied_exchange_sl = chosen
+        self._save_state()
+        logger.info(
+            f"🛡️ 盘口采纳硬止损 @{chosen:.2f}"
+            + (f" (原账本 {old:.2f})" if old and abs(old - chosen) > 0.01 else "")
+            + (f" | {source}" if source else "")
+            + f" | 盘口STOP{stops}"
+        )
+        return chosen
+
+    def _ensure_hard_sl_ledger(self, live_qty=0, source=""):
+        """账本无 tv_sl 时：先按开仓价×档位%重算，再核对盘口挂单"""
+        if float(getattr(self, "tv_sl", 0) or 0) > 0:
+            return True
+        entry = float(self.watched_entry or 0)
+        side = (self.current_side or "").upper()
+        if entry > 0 and side in ("LONG", "SHORT"):
+            if self._refresh_vps_hard_sl(
+                entry=entry, side=side,
+                regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+                atr=float(getattr(self, "open_atr", None) or self.current_atr or 0),
+                tv_sl_ref=getattr(self, "tv_sl_ref", 0) or None,
+                source=source or "账本自愈",
+            ):
+                self._tv_sl_missing_alerted = False
+                return True
+        adopted = self._adopt_exchange_hard_sl(source=source or "账本自愈·盘口")
+        return adopted > 0
+
     def _maintain_hard_shield(self, real_amt, curr_px=None, force=False, radar_sl=None):
         """维护 VPS 硬止损 Stop-Limit；雷达激活时合并为 max/min(雷达, vps_sl)"""
         if real_amt <= 0 or not self.watched_entry:
@@ -3561,22 +3629,40 @@ class PositionSupervisorBinance:
         ):
             radar_sl = self._clamp_radar_to_tv_floor(self.current_sl)
 
+        if float(getattr(self, "tv_sl", 0) or 0) <= 0 and not radar_sl:
+            self._ensure_hard_sl_ledger(real_amt, source="维护硬止损自愈")
+
         if getattr(self, "tv_sl", 0) > 0 or radar_sl:
             if not force and not self._can_maintain_shield_now(force=force):
                 return getattr(self, "shield_active", False)
             return self._sync_exchange_stop(
                 real_amt,
                 radar_sl=radar_sl,
-                reason="维护TV硬止损/雷达合并",
+                reason="维护VPS硬止损/雷达合并",
                 force=force,
             ).get("ok", False)
 
+        # 最终核对：盘口已有 STOP → 采纳，禁止误报「缺失」
+        live_stops = binance_client.find_protective_stop_prices(self.symbol)
+        if live_stops:
+            self._adopt_exchange_hard_sl(source="维护核对·盘口已有")
+            logger.warning(
+                f"🛡️ 账本缺tv_sl但盘口已有STOP{live_stops} → 已采纳，跳过缺失告警"
+            )
+            self._tv_sl_missing_alerted = False
+            return True
+
         if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
-            logger.error("维护TV硬止损失败：缺少 tv_sl，拒绝 fallback 旧逻辑")
+            logger.error(
+                f"维护硬止损失败：持仓 {real_amt} ETH | entry={self.watched_entry} "
+                f"| side={self.current_side} | regime={self.regime} | 盘口无STOP"
+            )
             dingtalk.report_system_alert(
                 "VPS硬止损缺失",
-                f"持仓 {real_amt} ETH 但无法计算硬止损（缺 entry/atr/regime）",
-                suggestion="请确认 TV 已透传 regime+atr，或等待下一开仓信号",
+                f"持仓 {real_amt} ETH · 账本与盘口均无硬止损 "
+                f"(entry={self.watched_entry or '空'} side={self.current_side or '空'} "
+                f"R{int(getattr(self, 'open_regime', None) or self.regime or 0)})",
+                suggestion="哨兵将重算开仓价×档位%并补挂；若盘口已有请忽略本条",
             )
             self._tv_sl_missing_alerted = True
         return False
@@ -6306,8 +6392,27 @@ class PositionSupervisorBinance:
         )
 
     def _ensure_price_ws(self):
-        """雷达/哨兵用 WebSocket 推价，REST 仅兜底"""
+        """雷达/哨兵：公开行情 WS + 私有 User Data Stream（持仓/订单）"""
         binance_client.start_public_price_ws(self.symbol)
+        binance_client.start_user_data_ws(
+            self.symbol, on_event=self._on_user_data_ws_event,
+        )
+
+    def _on_user_data_ws_event(self, event_type, data):
+        """WS 事件脉冲：下一轮哨兵立即对齐盘口，钉钉与实盘同步"""
+        et = str(event_type or "")
+        if et in ("ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "CONDITIONAL_ORDER_TRIGGER",
+                  "listenKeyExpired"):
+            self._ws_defense_pulse = True
+            if et == "ORDER_TRADE_UPDATE":
+                o = (data or {}).get("o") or {}
+                otype = str(o.get("o") or o.get("orderType") or "").upper()
+                if otype in ("STOP", "STOP_MARKET") and str(o.get("X") or "").upper() in (
+                    "NEW", "PARTIALLY_FILLED", "FILLED",
+                ):
+                    # 盘口止损变动 → 允许重新播报状态
+                    self._tv_sl_missing_alerted = False
+            logger.debug(f"📡 UD-WS 脉冲 {et}")
 
     def _tp1_distance(self):
         if self.tv_tps[0] > 0 and self.watched_entry:
@@ -6500,8 +6605,9 @@ class PositionSupervisorBinance:
         return moved
 
     def _sentinel_loop(self):
-        """哨兵：持仓/TP 防线 + 雷达移动保本（自适应轮询 5~8 秒）"""
+        """哨兵：持仓/TP 防线 + 雷达移动保本（WS推送优先，5~8 秒轮询兜底）"""
         self._sentinel_active = True
+        self._ensure_price_ws()
         last_px = 0.0
         try:
             while self.monitoring:
@@ -6509,6 +6615,10 @@ class PositionSupervisorBinance:
                     if not self._lock.acquire(timeout=2.0):
                         continue
                     try:
+                        ws_pulse = bool(getattr(self, "_ws_defense_pulse", False))
+                        if ws_pulse:
+                            self._ws_defense_pulse = False
+                            self._ws_fast_poll = True
                         pos = self._get_active_position()
                         real_amt = pos["size"] if pos else 0.0
                         actual_side = pos["side"] if pos else None
@@ -6634,7 +6744,11 @@ class PositionSupervisorBinance:
                 except Exception as e:
                     logger.error(f"哨兵异常: {e}")
                 if self.monitoring:
-                    time.sleep(self._sentinel_poll_sec(last_px))
+                    if getattr(self, "_ws_fast_poll", False):
+                        self._ws_fast_poll = False
+                        time.sleep(1.5)
+                    else:
+                        time.sleep(self._sentinel_poll_sec(last_px))
         finally:
             self._sentinel_active = False
 
