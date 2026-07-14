@@ -728,6 +728,7 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
         "CLOSE_TP3": "TP3 收网",
         "CLOSE_STOPLOSS": "止损/保本平仓",
         "UPDATE_SL": "动态止损 UPDATE_SL",
+        "UPDATE_TP": "动能止盈升级 UPDATE_TP",
         "CLOSE": "换防清场",
     }
     if act in close_actions:
@@ -818,6 +819,49 @@ def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
     send_alert("📡 TV硬止损 · UPDATE_SL 已同步", data, G_TITLE)
+
+
+def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
+                         placed=0, regime=3, verify_note="", verified=True, curr_px=0):
+    """TV UPDATE_TP 动能止盈升级：只换限价 TP，不动硬止损/雷达"""
+    old_tps = old_tps or []
+    new_tps = new_tps or []
+
+    def _fmt(tps):
+        parts = []
+        for i, t in enumerate(tps[:3]):
+            try:
+                v = float(t or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            parts.append(f"TP{i + 1}=`{v:.2f}`" if v > 0 else f"TP{i + 1}=—")
+        return " / ".join(parts) if parts else "—"
+
+    data = {
+        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
+        "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "💰 开仓成本": _g(f"`{float(entry or 0):.2f}` USDT", G_MUTED),
+        "📊 档位": get_regime_name(regime),
+        "📉 原 TP123": _g(_fmt(old_tps), G_MUTED),
+        "🚀 新 TP123": _g(_fmt(new_tps), G_ACCENT),
+        "📌 新挂档数": _g(f"**{int(placed or 0)}** 笔限价止盈", G_LIGHT),
+        "💹 参考市价": _g(
+            f"`{float(curr_px or 0):.2f}` USDT" if float(curr_px or 0) > 0 else "—",
+            G_MUTED,
+        ),
+        "✅ 风控动作": _g(
+            "动能 UPDATE_TP → 仅替换限价 TP123 · 硬止损与雷达 STOP 未触碰",
+            G_MAIN,
+        ),
+        "📡 实盘核查": _verify_line(
+            verify_note if not verified else "",
+            f"{VERIFY_TAG} | UPDATE_TP 止盈已在盘口对齐",
+            f"⏳ 止盈已提交，{VERIFY_DELAY_MARK} | 哨兵将继续核实",
+        ),
+    }
+    if verify_note:
+        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
+    send_alert("🚀 动能止盈 · UPDATE_TP 已同步", data, G_TITLE)
 
 
 def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entry, new_entry,

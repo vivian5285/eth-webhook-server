@@ -8,7 +8,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-TV_STRATEGY_VERSION = "v6.9.93"
+TV_STRATEGY_VERSION = "v6.9.108"
 
 # 交易所实盘杠杆（API set_leverage / 头寸计算 / 钉钉展示）
 EXCHANGE_LEVERAGE = 25
@@ -55,7 +55,7 @@ VALID_ENTRY_TYPES = frozenset({
 
 VALID_ACTIONS = frozenset({
     "LONG", "SHORT", "CLOSE", "CLOSE_PROTECT", "CLOSE_TP3", "CLOSE_STOPLOSS",
-    "UPDATE_SL", "PING",
+    "UPDATE_SL", "UPDATE_TP", "PING",
 })
 
 ACTION_ALIASES = {
@@ -71,6 +71,8 @@ ACTION_ALIASES = {
     "CLOSE_SL": "CLOSE_STOPLOSS",
     "STOP": "CLOSE_STOPLOSS",
     "CLOSE_STOP": "CLOSE_STOPLOSS",
+    "UPDATE_TAKE_PROFIT": "UPDATE_TP",
+    "TP_UPDATE": "UPDATE_TP",
 }
 
 # Pine v6.9.75 四种全平收网类型（与图表标签 / 钉钉标题对齐）
