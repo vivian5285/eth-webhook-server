@@ -59,7 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.39.0-ws-realtime-shield"
+BINANCE_VPS_VERSION = "v13.40.0-unify-hard-sl"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -1002,6 +1002,27 @@ class PositionSupervisorBinance:
                 adopted = self._adopt_exchange_hard_sl(source="接管盘口采纳")
                 if adopted:
                     notes.append(f"盘口采纳硬止损@{adopted:.2f}")
+
+            # 重启叠单（例如 1697+1747）→ 强制统一为当前 VPS 计算价
+            live_stops = binance_client.find_protective_stop_prices(self.symbol)
+            uniq = sorted({round(float(p), 2) for p in live_stops if float(p) > 0})
+            target = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+            if target > 0 and (
+                len(uniq) > 1
+                or (uniq and all(abs(p - target) > SHIELD_STOP_TOLERANCE for p in uniq))
+            ):
+                qty = float(pos.get("size") or pos.get("positionAmt") or self.watched_qty or 0)
+                qty = abs(qty)
+                if qty <= 0:
+                    qty = float(self.watched_qty or 0)
+                if qty > 0:
+                    sync = self._sync_exchange_stop(
+                        qty, radar_sl=None, reason="接管统一硬止损", force=True,
+                    )
+                    if sync.get("ok"):
+                        notes.append(
+                            f"统一硬止损@{sync.get('target'):.2f}(撤{sync.get('purged', 0)})"
+                        )
 
         self.monitoring = True
         self._save_state()
@@ -2593,6 +2614,32 @@ class PositionSupervisorBinance:
                 time.sleep(0.12)
         return cancelled
 
+    def _purge_all_protective_stops(self, keep_near=None, tolerance=None):
+        """
+        撤净全部保护性 STOP / STOP_MARKET（含 Stop-Limit reduceOnly + Algo closePosition）。
+        keep_near: 若给出目标价，保留触发价贴近该价的单仓位；其余一律撤（统一硬止损）。
+        """
+        keep_near = float(keep_near or 0)
+        tol = float(tolerance if tolerance is not None else SHIELD_STOP_TOLERANCE)
+        cancelled = 0
+        for o in binance_client.get_open_orders(self.symbol, include_algo=True):
+            order_type = str(o.get("type") or o.get("orderType") or "").upper()
+            if order_type not in ("STOP", "STOP_MARKET"):
+                continue
+            px = self._order_stop_price(o)
+            if keep_near > 0 and px is not None and abs(px - keep_near) <= tol:
+                continue
+            oid = o.get("orderId") or o.get("algoId")
+            if not oid:
+                continue
+            binance_client.cancel_order(self.symbol, order=o)
+            cancelled += 1
+            time.sleep(0.12)
+        return cancelled
+
+    def _count_protective_stops(self):
+        return binance_client.find_protective_stop_prices(self.symbol)
+
     def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=True):
         """VPS 缓冲硬止损：默认 Stop-Limit（防跳空）；雷达合并档用 Stop-Market closePosition"""
         live_qty = self._resolve_live_qty(live_qty)
@@ -2609,8 +2656,7 @@ class PositionSupervisorBinance:
 
     def _sync_exchange_stop(self, live_qty, radar_sl=None, reason="", force=False):
         """
-        挂/更新交易所 closePosition 止损。
-        单槽合并：effective = max/min(雷达, tv_sl)。
+        统一交易所保护止损为单槽：先撤残余 STOP，再按 effective 挂 1 笔。
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
@@ -2621,19 +2667,32 @@ class PositionSupervisorBinance:
             return {"ok": False, "skipped": True, "reason": "no_stop_price"}
         target = round(float(target), 2)
 
-        last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
-        if (
-            not force
-            and last > 0
-            and abs(target - last) <= SHIELD_STOP_TOLERANCE
-            and self._has_stop_sl_near(target, exclude_shield=False)
-        ):
-            return {"ok": True, "skipped": True, "target": target, "reason": "idempotent"}
+        live_stops = self._count_protective_stops()
+        near = [p for p in live_stops if abs(p - target) <= SHIELD_STOP_TOLERANCE]
+        orphans = [p for p in live_stops if abs(p - target) > SHIELD_STOP_TOLERANCE]
 
-        purged = self._purge_all_close_position_stops()
-        purged += self._purge_shield_stop_orders()
+        last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
+        # 已统一为唯一目标价 → 幂等跳过（含 force，避免重启对账反复重挂）
+        if not orphans and len(near) == 1:
+            self._last_applied_exchange_sl = target
+            self.shield_active = True
+            self.shield_sized_qty = live_qty
+            self._tv_sl_missing_alerted = False
+            if abs(last - target) > SHIELD_STOP_TOLERANCE:
+                self._save_state()
+            return {
+                "ok": True, "skipped": True, "target": target,
+                "reason": "idempotent_unified",
+            }
+
+        # 有孤儿价（如重启残留 1697 + 新 1747）或缺失 → 先清净再挂唯一
+        purged = self._purge_all_protective_stops(keep_near=0)
         if purged:
-            logger.info(f"🛡️ 撤旧止损 {purged} 笔 → 重挂 @ {target:.2f}")
+            logger.warning(
+                f"🛡️ 统一硬止损：撤净保护STOP {purged} 笔 "
+                f"(原盘口{live_stops} → 目标 @{target:.2f})"
+                + (f" | 孤儿{orphans}" if orphans else "")
+            )
             time.sleep(0.5)
 
         floor = round(float(self._shield_stop_price() or 0), 2)
@@ -2644,18 +2703,29 @@ class PositionSupervisorBinance:
         res = self._place_vps_hard_sl_order(
             live_qty, target, use_stop_limit=use_limit,
         )
-        time.sleep(0.35)
+        time.sleep(0.45)
         ok = res is not None and self._has_stop_sl_near(target, exclude_shield=False)
+        # 二次清：若仍有非目标价 STOP，再扫一遍孤儿
+        leftovers = [
+            p for p in self._count_protective_stops()
+            if abs(p - target) > SHIELD_STOP_TOLERANCE
+        ]
+        if leftovers:
+            extra = self._purge_all_protective_stops(keep_near=target)
+            purged += extra
+            logger.warning(f"🛡️ 二次清孤儿STOP{leftovers} 撤 {extra} 笔")
+
         if ok:
             self._last_applied_exchange_sl = target
             self.shield_active = True
             self.shield_sized_qty = live_qty
             self._shield_fail_streak = 0
+            self._tv_sl_missing_alerted = False
             self._save_state()
             tv_floor = round(float(getattr(self, "tv_sl", 0) or 0), 2)
             order_tag = "Stop-Limit" if use_limit else "Stop-Market closePosition"
             logger.warning(
-                f"🛡️ [VPS硬止损/合并] {reason or '同步止损'} | {order_tag} @ {target:.2f} "
+                f"🛡️ [VPS硬止损/统一] {reason or '同步止损'} | {order_tag} @ {target:.2f} "
                 f"| vps_sl={tv_floor or 'fallback'} | 撤 {purged} 笔"
             )
         else:
@@ -3148,6 +3218,17 @@ class PositionSupervisorBinance:
                 has_duplicate = True
                 result["issues"].append(f"tier{idx + 1}_orphan:{len(orders)}")
 
+        # 盘口任意非目标价 STOP（如重启残留旧档位%）→ 视为叠单，触发统一
+        target_px = float(tier_prices[0] or 0) if tier_prices else 0.0
+        live_stops = binance_client.find_protective_stop_prices(self.symbol)
+        orphan_px = [
+            p for p in live_stops
+            if target_px <= 0 or abs(float(p) - target_px) > SHIELD_STOP_TOLERANCE
+        ]
+        if len(live_stops) > 1 or orphan_px:
+            has_duplicate = True
+            result["issues"].append(f"orphan_stops:{orphan_px or live_stops}")
+
         result["max_drift_pct"] = max_drift_pct
         if has_duplicate:
             result["status"] = "duplicate"
@@ -3483,17 +3564,17 @@ class PositionSupervisorBinance:
             return getattr(self, "shield_active", False)
 
         if audit["status"] == "duplicate" and not force:
-            purged = self._purge_shield_stop_orders(tier_prices)
+            purged = self._purge_all_protective_stops(keep_near=0)
             self._record_shield_maintain(success=False)
             logger.warning(
-                f"🛡️ 防护盾叠单清理：撤 {purged} 笔，冷却后再按实盘 {live_qty} ETH 补挂"
+                f"🛡️ 防护盾叠单/孤儿清理：撤 {purged} 笔，冷却后再按实盘 {live_qty} ETH 补挂唯一硬止损"
             )
             return False
 
-        purged = self._purge_shield_stop_orders(tier_prices)
+        purged = self._purge_all_protective_stops(keep_near=0)
         if purged:
             logger.warning(
-                f"🛡️ 撤净旧硬止损 {purged} 笔 → 按实盘 {live_qty} ETH 重挂 @ tv_sl"
+                f"🛡️ 撤净旧硬止损 {purged} 笔 → 按实盘 {live_qty} ETH 重挂唯一 @ tv_sl"
             )
             time.sleep(0.6)
 
@@ -3565,24 +3646,24 @@ class PositionSupervisorBinance:
 
     def _adopt_exchange_hard_sl(self, source=""):
         """
-        实盘已有 STOP/STOP_MARKET 时，把触发价写回账本 tv_sl，避免钉钉误报「缺失」。
+        实盘已有唯一 STOP 时写回账本；若多笔（重启叠单）则拒采纳，交统一同步清理。
         """
         entry = float(self.watched_entry or 0)
         side = (self.current_side or "").upper()
         stops = binance_client.find_protective_stop_prices(self.symbol)
         if not stops:
             return 0.0
-        chosen = None
-        if side == "LONG" and entry > 0:
-            below = [p for p in stops if p < entry - 0.01]
-            chosen = min(below) if below else min(stops)
-        elif side == "SHORT" and entry > 0:
-            above = [p for p in stops if p > entry + 0.01]
-            chosen = max(above) if above else max(stops)
-        else:
-            chosen = stops[0]
-        chosen = round(float(chosen), 2)
-        if chosen <= 0:
+        uniq = sorted({round(float(p), 2) for p in stops if float(p) > 0})
+        if len(uniq) > 1:
+            logger.warning(
+                f"🛡️ 盘口多笔硬止损 STOP{uniq} → 拒单笔采纳，强制统一"
+                + (f" | {source}" if source else "")
+            )
+            return 0.0
+        chosen = uniq[0]
+        if side == "LONG" and entry > 0 and chosen >= entry - 0.01:
+            return 0.0
+        if side == "SHORT" and entry > 0 and chosen <= entry + 0.01:
             return 0.0
         old = round(float(getattr(self, "tv_sl", 0) or 0), 2)
         self.tv_sl = chosen
@@ -3596,7 +3677,6 @@ class PositionSupervisorBinance:
             f"🛡️ 盘口采纳硬止损 @{chosen:.2f}"
             + (f" (原账本 {old:.2f})" if old and abs(old - chosen) > 0.01 else "")
             + (f" | {source}" if source else "")
-            + f" | 盘口STOP{stops}"
         )
         return chosen
 
