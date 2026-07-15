@@ -59,7 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.42.0-update-tp-momentum"
+BINANCE_VPS_VERSION = "v13.43.0-block-open-reentry-flatten"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -99,6 +99,7 @@ MIN_TP_LEG_QTY = 0.001
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
+OPEN_SAME_DIR_COOLDOWN_SEC = 180  # 同向重复 OPEN：开仓后冷却期内禁止先平后开
 ATR_SIMILAR_RATIO = 0.03  # 持仓 ATR 与 TV ATR 偏差 ≤3% 视为未变
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
@@ -4021,7 +4022,12 @@ class PositionSupervisorBinance:
         return self._maintain_hard_shield(real_amt, curr_px)
 
     def _is_radar_active(self):
-        """止损已推过 entry → 雷达移动保本已武装（不要求 TP1 限价成交）"""
+        """
+        雷达移动保本已武装：必须 stage≥1（TP1 交棒后），且止损已越过成本。
+        禁止仅靠 current_sl≈entry 误判为雷达（开仓后曾把 current_sl 设成成本价）。
+        """
+        if int(getattr(self, "_radar_stage_last", 0) or 0) < 1:
+            return False
         if not self.watched_entry or not self.current_sl:
             return False
         sl = float(self.current_sl)
@@ -6355,8 +6361,41 @@ class PositionSupervisorBinance:
         )
         self._ensure_sentinel_running()
 
+    def _is_fresh_open_cooldown(self, pos=None, cooldown_sec=None):
+        """刚开仓同向冷却窗：重复 OPEN 禁止立刻先平后开"""
+        cooldown_sec = float(
+            cooldown_sec if cooldown_sec is not None else OPEN_SAME_DIR_COOLDOWN_SEC
+        )
+        if cooldown_sec <= 0:
+            return False
+        now = time.time()
+        sig = getattr(self, "_last_entry_signal", None) or {}
+        if (
+            self.monitoring
+            and self.current_side
+            and (not pos or pos.get("side") == self.current_side)
+            and float(sig.get("ts") or 0) > 0
+            and now - float(sig["ts"]) < cooldown_sec
+        ):
+            return True
+        last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+        if not last_open:
+            return False
+        side = str(last_open.get("side") or "").upper()
+        if pos and side and side != str(pos.get("side") or "").upper():
+            return False
+        ts_raw = last_open.get("ts")
+        try:
+            if isinstance(ts_raw, (int, float)):
+                age = now - float(ts_raw)
+            else:
+                age = now - datetime.strptime(str(ts_raw), "%Y-%m-%d %H:%M:%S").timestamp()
+            return 0 <= age < cooldown_sec
+        except Exception:
+            return False
+
     def _handle_smart_entry(self, action, payload=None):
-        """VPS sizing：OPEN 先平后开；PYRAMID/PROFIT_ADD 追加并重挂 TP123+雷达"""
+        """VPS sizing：OPEN 同向智能；反向/确需刷新才先平后开；加仓重挂 TP123"""
         payload = payload or {}
         entry_type = normalize_entry_type(payload.get("entry_type"))
 
@@ -6368,8 +6407,59 @@ class PositionSupervisorBinance:
         if entry_type == ENTRY_TYPE_OPEN:
             pos = self._get_active_position()
             if pos and pos.get("size", 0) > 0:
-                logger.info(f"📡 TV OPEN → 先平后开 [{action}]")
-                self._full_reentry(action, "TV OPEN 先平后开")
+                if pos["side"] != action:
+                    logger.info(
+                        f"⚡ 反方向 OPEN [{action}] vs 实盘 [{pos['side']}] → 先平后开"
+                    )
+                    self._full_reentry(
+                        action, "反方向 OPEN 到达，触发【先平后开】原子对冲换防",
+                    )
+                    self._touch_entry_signal_signature(action)
+                    return
+
+                curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+                # 刚开仓冷却：同向重复 OPEN 禁止市价清仓（这是“开单立刻被平”的主因）
+                if self._is_fresh_open_cooldown(pos):
+                    logger.warning(
+                        f"🛡️ 同向 OPEN 冷却 {OPEN_SAME_DIR_COOLDOWN_SEC:.0f}s 内 "
+                        f"→ 禁止先平后开，仅刷新 TP123 [{action}]"
+                    )
+                    mode, diff_pct, reason, open_atr, tv_atr = (
+                        self._same_direction_entry_mode(action, pos, curr_px)
+                    )
+                    self._same_direction_refresh_tp(
+                        action, pos, curr_px, diff_pct, open_atr, tv_atr,
+                    )
+                    self._touch_entry_signal_signature(action)
+                    return
+
+                mode, diff_pct, reason, open_atr, tv_atr = (
+                    self._same_direction_entry_mode(action, pos, curr_px)
+                )
+                if mode == "REFRESH_TP":
+                    self._same_direction_refresh_tp(
+                        action, pos, curr_px, diff_pct, open_atr, tv_atr,
+                    )
+                    self._touch_entry_signal_signature(action)
+                    return
+
+                close_msgs = {
+                    "atr_changed": (
+                        f"同向 TV ATR 变化 ({open_atr:.2f}→{tv_atr:.2f})，"
+                        f"触发【先平后开】刷新仓位"
+                    ),
+                    "regime_changed": "同向 TV 档位变化，触发【先平后开】重入",
+                    "spread_ok": (
+                        f"同向理论价差 {diff_pct:.3f}% 达标，触发【先平后开】重入"
+                    ),
+                }
+                self._report_smart_reentry(
+                    action, pos, diff_pct, reason, open_atr, tv_atr,
+                )
+                self._full_reentry(
+                    action,
+                    close_msgs.get(reason, "同方向刷新仓位，触发【先平后开】重入"),
+                )
                 self._touch_entry_signal_signature(action)
                 return
             curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
@@ -6533,11 +6623,21 @@ class PositionSupervisorBinance:
 
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0, sizing_meta=None):
         tp_pxs = self.tv_tps
-        self.current_sl = entry_price
+        # 开仓后 current_sl 必须是 VPS 宽硬止损，绝不能写成成本价（否则会被当成雷达）
+        self._refresh_vps_hard_sl(
+            entry=entry_price, side=self.current_side,
+            regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+            atr=float(getattr(self, "open_atr", None) or self.current_atr or 30),
+            tv_sl_ref=getattr(self, "tv_sl_ref", 0) or None,
+            source="开仓保护",
+        )
+        vps_sl = float(getattr(self, "tv_sl", 0) or 0)
+        self.current_sl = vps_sl if vps_sl > 0 else 0.0
         self.best_price = entry_price
         self.shield_active = False
         self.shield_tiers_consumed = []
         self.tp_levels_consumed = []
+        self._radar_stage_last = 0
         self._radar_activation_notified = False
         self._shield_handoff_notified = False
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -6559,6 +6659,9 @@ class PositionSupervisorBinance:
                 self._save_state()
 
             self._scorched_earth_cancel_for_recover()
+            self._enforce_pre_tp1_radar_standby(
+                live_qty, verified["entry_price"], source="开仓保护",
+            )
             self._enforce_defense_alignment(
                 live_qty, verified["entry_price"],
                 dynamic_sl=None, reason="开仓后防线对齐", rounds=4,
