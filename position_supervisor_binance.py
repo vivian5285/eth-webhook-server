@@ -59,7 +59,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.43.0-block-open-reentry-flatten"
+BINANCE_VPS_VERSION = "v13.44.0-tp1-gate-radar"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -163,6 +163,7 @@ class PositionSupervisorBinance:
         self._shield_handoff_notified = False
         self.shield_sized_qty = 0.0
         self._radar_activation_notified = False
+        self._radar_armed_after_tp1 = False
         self._last_radar_report_ts = 0.0
         self._last_radar_report_sl = 0.0
         self.sizing_principal = 0.0
@@ -177,6 +178,7 @@ class PositionSupervisorBinance:
         self.add_count = 0
         self._last_idle_takeover_ts = 0.0
         self._ws_defense_pulse = False
+        self._ws_tp1_fill_hint = False
         self._tv_sl_missing_alerted = False
 
         self.state_file = os.path.join(_BASE_DIR, 'binance_vps_state.json')
@@ -1594,6 +1596,9 @@ class PositionSupervisorBinance:
                     "tv_sl": float(getattr(self, "tv_sl", 0) or 0),
                     "tv_sl_ref": float(getattr(self, "tv_sl_ref", 0) or 0),
                     "radar_stage_last": int(getattr(self, "_radar_stage_last", 0) or 0),
+                    "radar_armed_after_tp1": bool(
+                        getattr(self, "_radar_armed_after_tp1", False)
+                    ),
                     "last_applied_exchange_sl": float(
                         getattr(self, "_last_applied_exchange_sl", 0) or 0
                     ),
@@ -3173,11 +3178,33 @@ class PositionSupervisorBinance:
     def _perform_radar_handoff(self, real_amt, curr_px, reason=""):
         """
         原子雷达交棒：先挂安全保本 STOP 并核实 → 再钉钉。
+        硬闸：仅 TP1 限价实盘成交后才允许；开仓/防线重建中拒绝。
         禁止先撤 tv_sl 导致裸奔；禁止 SL 贴市价立即全平。
         """
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
             return False
+        if getattr(self, "_open_in_progress", False) or getattr(
+            self, "_defense_align_in_progress", False
+        ):
+            logger.info(
+                f"📡 雷达交棒拒绝：开仓/防线重建中 | {reason or ''}"
+            )
+            return False
+        if not self._tp1_filled_verified(real_amt, curr_px):
+            logger.info(
+                f"📡 雷达交棒拒绝：TP1 未核实成交 | {reason or ''}"
+            )
+            return False
+        if not getattr(self, "_radar_armed_after_tp1", False):
+            if not self._price_reached_tp1_zone(curr_px):
+                logger.info(
+                    f"📡 雷达交棒拒绝：价格未达 TP1 区域 | 现价={curr_px:.2f} | "
+                    f"{reason or ''}"
+                )
+                return False
+            self._radar_armed_after_tp1 = True
+            self._save_state()
         if not self._should_radar_trail(curr_px):
             return False
 
@@ -3207,6 +3234,7 @@ class PositionSupervisorBinance:
         )
         old_tv = self._shield_stop_price()
         self.current_sl = safe_sl
+        self._radar_armed_after_tp1 = True
         self._save_state()
 
         sl_placed = self._ensure_radar_sl(safe_sl, real_amt)
@@ -3228,6 +3256,7 @@ class PositionSupervisorBinance:
             f"现价 {curr_px:.2f} | 距 mark {self._radar_min_stop_gap(curr_px):.2f}"
         )
         self._radar_stage_last = max(int(getattr(self, "_radar_stage_last", 0) or 0), 1)
+        self._radar_armed_after_tp1 = True
         self._save_state()
         if had_tv_shield and not getattr(self, "_shield_handoff_notified", False):
             self._notify_shield_handoff_to_radar(
@@ -5293,6 +5322,11 @@ class PositionSupervisorBinance:
             return {"kind": "add", "tp_fills": [], "shield_fills": []}
         if new_qty >= old_qty - 0.0005:
             return {"kind": "unchanged", "tp_fills": [], "shield_fills": []}
+        # 开仓/防线核武重建时 TP 会短暂消失，禁止当成 TP 成交启雷达
+        if getattr(self, "_open_in_progress", False) or getattr(
+            self, "_defense_align_in_progress", False
+        ):
+            return {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
         self._ensure_tv_tps_for_fill_detect()
         # 减仓瞬间抬高开单峰值，避免后续误判人工
         peak = max(float(self.initial_qty or 0), float(old_qty or 0))
@@ -5313,8 +5347,81 @@ class PositionSupervisorBinance:
             return {"kind": "shield_fill", "tp_fills": [], "shield_fills": shield_fills}
         return {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
 
+    def _price_reached_tp1_zone(self, curr_px=0.0, tp1_px=None):
+        """现价或 best 是否已触及/越过 TP1 区域（伪成交拒闸）"""
+        tp1_px = float(
+            tp1_px
+            if tp1_px is not None
+            else ((self.tv_tps[0] if self.tv_tps else 0) or 0)
+        )
+        entry = float(self.watched_entry or 0)
+        if tp1_px <= 0 or entry <= 0:
+            return False
+        px_tol = max(3.0, tp1_px * 0.003)
+        for px in (
+            float(curr_px or 0),
+            float(self.best_price or 0),
+        ):
+            if px <= 0:
+                continue
+            if self.current_side == "LONG" and px >= tp1_px - px_tol:
+                return True
+            if self.current_side == "SHORT" and px <= tp1_px + px_tol:
+                return True
+        return False
+
+    def _tp_fill_ok_to_arm_radar(self, tp_fills, curr_px, old_qty, new_qty):
+        """
+        仅当 TP1 有实盘证据才允许武装雷达。
+        trades / 价到TP1+盘口消失 可信；纯 sequential/reduction 必须价到TP1且非开仓竞态。
+        """
+        if getattr(self, "_open_in_progress", False) or getattr(
+            self, "_defense_align_in_progress", False
+        ):
+            return False
+        fills = list(tp_fills or [])
+        if not fills:
+            return False
+        has_l1 = any(int(f.get("level") or 0) == 1 for f in fills)
+        if not has_l1:
+            # 不允许跳过 TP1 直接靠更高档武装
+            return False
+        f1 = next(f for f in fills if int(f.get("level") or 0) == 1)
+        src = str(f1.get("source") or "")
+        tp1_px = float(
+            f1.get("price")
+            or ((self.tv_tps[0] if self.tv_tps else 0) or 0)
+        )
+        if src == "trades":
+            return True
+        if src == "order_gone":
+            return self._price_reached_tp1_zone(curr_px, tp1_px)
+        if src in ("sequential", "reduction", "price_near"):
+            if not self._price_reached_tp1_zone(curr_px, tp1_px):
+                return False
+            if getattr(self, "_ws_tp1_fill_hint", False):
+                return True
+            if src == "price_near":
+                return True
+            # 软来源再查一次成交史
+            trade_fills = self._detect_tp_fills_from_trades(
+                old_qty, new_qty, lookback_ms=300000,
+            )
+            return bool(
+                trade_fills
+                and any(int(f.get("level") or 0) == 1 for f in trade_fills)
+            )
+        return False
+
     def _advance_radar_on_tp_fill(self, tp_fills, curr_px, live_qty):
         if not tp_fills:
+            return None
+        if not self._tp_fill_ok_to_arm_radar(
+            tp_fills, curr_px, float(self.initial_qty or live_qty), live_qty,
+        ) and not getattr(self, "_radar_armed_after_tp1", False):
+            logger.warning(
+                "📡 [雷达推进] 跳过：TP1 证据不足，保持阶段0宽硬止损"
+            )
             return None
         for f in tp_fills:
             px = f["price"]
@@ -5326,6 +5433,7 @@ class PositionSupervisorBinance:
         max_level = max(f["level"] for f in tp_fills)
         tp3 = self.tv_tps[2] if len(self.tv_tps) > 2 else 0.0
         curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
+        self._radar_armed_after_tp1 = True
         new_sl = self._compute_radar_sl()
         if new_sl is not None:
             if self.current_side == "LONG":
@@ -5367,10 +5475,43 @@ class PositionSupervisorBinance:
                 self._maintain_hard_shield(new_qty, curr_px, force=True)
         elif kind == "tp_fill":
             levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"])
+            evidence_ok = self._tp_fill_ok_to_arm_radar(
+                change["tp_fills"], curr_px, old_qty, new_qty,
+            )
+            if not evidence_ok:
+                logger.warning(
+                    f"🎯 [智慧大脑] {levels} 疑似伪成交"
+                    f"（价未达TP1 / 开仓重建竞态）→ 不标记·不启雷达 | "
+                    f"{old_qty}→{new_qty}"
+                )
+                dingtalk.report_system_alert(
+                    "雷达拒启·伪TP1拦截",
+                    f"{self.current_side} {old_qty}→{new_qty} ETH | {levels} | "
+                    f"现价 {float(curr_px or 0):.2f} | "
+                    f"规则：TP1限价实盘成交前不激活雷达",
+                )
+                # 内联未知减仓：禁止递归（否则会再次判成 tp_fill）
+                pct = abs(new_qty - old_qty) / old_qty if old_qty > 0 else 1.0
+                logger.info(
+                    f"🔄 [智慧大脑] 伪TP拦截后按人工/异动对齐 "
+                    f"{old_qty}→{new_qty} ({pct:.1%})"
+                )
+                result = self._smart_realign_defenses(
+                    new_qty, self.watched_entry, dynamic_sl=None,
+                    reason="伪TP拦截·保宽硬止损",
+                )
+                if self._should_activate_shield(curr_px) or getattr(
+                    self, "shield_active", False
+                ):
+                    self._maintain_hard_shield(new_qty, curr_px, force=True)
+                change = {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
+                self._save_state()
+                return change, result
             logger.info(
                 f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} → 雷达推进 + 守剩余TP"
             )
             self._mark_tp_levels_consumed([f["level"] for f in change["tp_fills"]])
+            self._radar_armed_after_tp1 = True
             curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
             sl_to_pass = self._advance_radar_on_tp_fill(
                 change["tp_fills"], curr_px, new_qty,
@@ -5442,9 +5583,20 @@ class PositionSupervisorBinance:
                     old_qty, new_qty, initial=peak, lookback_ms=300000,
                 )
             if retry_fills:
-                change = {"kind": "tp_fill", "tp_fills": retry_fills, "shield_fills": []}
-                self._save_state()
-                return self._handle_smart_qty_change(old_qty, new_qty, curr_px)
+                if self._tp_fill_ok_to_arm_radar(
+                    retry_fills, curr_px, old_qty, new_qty,
+                ):
+                    change = {
+                        "kind": "tp_fill",
+                        "tp_fills": retry_fills,
+                        "shield_fills": [],
+                    }
+                    self._save_state()
+                    return self._handle_smart_qty_change(old_qty, new_qty, curr_px)
+                logger.warning(
+                    f"🎯 [智慧大脑] 重试判 TP 仍缺证据 "
+                    f"{[f.get('level') for f in retry_fills]} → 不启雷达"
+                )
             action_msg = (
                 "手动加仓" if new_qty > old_qty
                 else "手动减仓（成交史未匹配TP）"
@@ -6639,6 +6791,8 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self._radar_stage_last = 0
         self._radar_activation_notified = False
+        self._radar_armed_after_tp1 = False
+        self._ws_tp1_fill_hint = False
         self._shield_handoff_notified = False
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
@@ -6769,7 +6923,37 @@ class PositionSupervisorBinance:
         return True
 
     def _tp1_filled_verified(self, live_qty=None, curr_px=0.0):
-        return self._tp_filled_verified(1, live_qty, curr_px)
+        """TP1 实盘成交：账本+减仓+盘口无TP1；开仓/重建中一律否。"""
+        if getattr(self, "_open_in_progress", False) or getattr(
+            self, "_defense_align_in_progress", False
+        ):
+            return False
+        if getattr(self, "_radar_armed_after_tp1", False):
+            # 已合法武装：允许价回撤后仍视为 TP1 已成交
+            return True
+        if not self._tp_filled_verified(1, live_qty, curr_px):
+            return False
+        live_qty = float(live_qty if live_qty is not None else self.watched_qty or 0)
+        initial = self._trusted_initial_qty(live_qty)
+        if initial <= live_qty + 0.001:
+            return False
+        slices = {
+            sl["level"]: sl for sl in self._tp_slices_for_initial(initial)
+        }
+        tp1 = slices.get(1)
+        if not tp1 or float(tp1.get("qty") or 0) <= 0.0005:
+            return False
+        reduced = round(initial - live_qty, 3)
+        tol = max(0.003, float(tp1["qty"]) * 0.18)
+        if reduced + 0.001 < float(tp1["qty"]) - tol:
+            return False
+        # 首次认定必须价到 TP1 区，或 WS 限价成交提示
+        if not (
+            self._price_reached_tp1_zone(curr_px, tp1.get("price"))
+            or getattr(self, "_ws_tp1_fill_hint", False)
+        ):
+            return False
+        return True
 
     def _likely_exchange_stop_exit(self, curr_px=0.0):
         """现价贴近最后挂出的止损价 → 多为交易所 STOP 触发（非 VPS 市价全平）"""
@@ -6836,6 +7020,12 @@ class PositionSupervisorBinance:
         if getattr(self, "_shield_handoff_notified", False):
             self._shield_handoff_notified = False
             changed = True
+        if getattr(self, "_radar_armed_after_tp1", False):
+            self._radar_armed_after_tp1 = False
+            changed = True
+        if getattr(self, "_ws_tp1_fill_hint", False):
+            self._ws_tp1_fill_hint = False
+            changed = True
         if int(getattr(self, "_radar_stage_last", 0) or 0) > 0:
             self._radar_stage_last = 0
             changed = True
@@ -6883,6 +7073,8 @@ class PositionSupervisorBinance:
         self._radar_activation_notified = False
         self._shield_handoff_notified = False
         self._radar_stage_last = 0
+        self._radar_armed_after_tp1 = False
+        self._ws_tp1_fill_hint = False
         self._save_state()
         logger.warning(
             f"📡 [{source or '雷达'}] 解除过早雷达/伪TP{fake or stale or '标记'} "
@@ -6917,13 +7109,12 @@ class PositionSupervisorBinance:
         0=TP1前硬止损 · 1=TP1成交保本 · 2=TP1→TP2 50% · 3=达TP2 · 4=TP2→TP3 50% · 5=达TP3
         """
         live_qty = float(self.watched_qty or 0)
-        latched = int(getattr(self, "_radar_stage_last", 0) or 0) >= 1
-        if not self._tp1_filled_verified(live_qty, curr_px) and not (
-            self._is_radar_active() and latched
-        ):
+        # 禁止「stage 软锁存」在无 TP1 证据时自举为阶段≥1
+        if not self._radar_legitimately_armed(live_qty, curr_px):
             return 0
+        latched = int(getattr(self, "_radar_stage_last", 0) or 0) >= 1
         if curr_px <= 0 or not self.watched_entry:
-            return max(1, latched) if latched or self._tp1_filled_verified(live_qty) else 0
+            return max(1, latched) if latched else 1
 
         tp1 = float(self.tv_tps[0] or 0) if self.tv_tps else 0.0
         tp2 = float(self.tv_tps[1] or 0) if len(self.tv_tps) > 1 else 0.0
@@ -6989,12 +7180,15 @@ class PositionSupervisorBinance:
             if self.current_sl == 0.0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             self._radar_stage_last = 0
+            self._radar_armed_after_tp1 = False
+            self._ws_tp1_fill_hint = False
             logger.info(
                 f"📡 重启雷达待命: 阶段0 | 保留 VPS硬止损 "
                 f"(需 TP1 成交后才激活)"
             )
             return
 
+        self._radar_armed_after_tp1 = True
         stage = self._effective_radar_stage(curr_px)
         new_sl = self._compute_radar_sl_for_stage(stage, curr_px)
         if new_sl is None:
@@ -7021,7 +7215,7 @@ class PositionSupervisorBinance:
         )
 
     def _on_user_data_ws_event(self, event_type, data):
-        """WS 事件脉冲：下一轮哨兵立即对齐盘口，钉钉与实盘同步"""
+        """WS 事件脉冲：下一轮哨兵立即对齐盘口；LIMIT 近 TP1 成交仅作提示，不直接启雷达"""
         et = str(event_type or "")
         if et in ("ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "CONDITIONAL_ORDER_TRIGGER",
                   "listenKeyExpired"):
@@ -7029,10 +7223,31 @@ class PositionSupervisorBinance:
             if et == "ORDER_TRADE_UPDATE":
                 o = (data or {}).get("o") or {}
                 otype = str(o.get("o") or o.get("orderType") or "").upper()
-                if otype in ("STOP", "STOP_MARKET") and str(o.get("X") or "").upper() in (
+                status = str(o.get("X") or o.get("status") or "").upper()
+                if otype in ("LIMIT",) and status in (
+                    "FILLED", "PARTIALLY_FILLED",
+                ):
+                    reduce_only = bool(o.get("R") if "R" in o else o.get("reduceOnly"))
+                    try:
+                        px = float(o.get("ap") or o.get("p") or o.get("price") or 0)
+                    except (TypeError, ValueError):
+                        px = 0.0
+                    tp1 = float(self.tv_tps[0] or 0) if self.tv_tps else 0.0
+                    if (
+                        reduce_only
+                        and tp1 > 0
+                        and px > 0
+                        and abs(px - tp1) <= max(1.5, tp1 * 0.0012)
+                    ):
+                        self._ws_tp1_fill_hint = True
+                        logger.info(
+                            f"📡 UD-WS TP1 限价成交提示 @ {px:.2f} "
+                            f"(仍需哨兵减仓核实后才启雷达)"
+                        )
+                elif otype in ("STOP", "STOP_MARKET") and status in (
                     "NEW", "PARTIALLY_FILLED", "FILLED",
                 ):
-                    # 盘口止损变动 → 允许重新播报状态
+                    # 盘口止损变动 → 允许重新播报状态；绝不据此武装雷达
                     self._tv_sl_missing_alerted = False
             logger.debug(f"📡 UD-WS 脉冲 {et}")
 
@@ -7055,14 +7270,14 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _radar_legitimately_armed(self, live_qty=None, curr_px=0.0):
-        """仅 TP1 成交（或成交后已锁存）才允许雷达；未成交绝不武装"""
-        if self._tp1_filled_verified(live_qty, curr_px):
+        """仅 TP1 限价实盘成交并武装后才允许雷达；禁止 stage/current_sl 软锁存自举"""
+        if getattr(self, "_open_in_progress", False):
+            return False
+        if getattr(self, "_radar_armed_after_tp1", False):
             return True
-        # TP1 成交后已激活：锁存，价格回撤也不解除
-        if (
-            self._is_radar_active()
-            and int(getattr(self, "_radar_stage_last", 0) or 0) >= 1
-        ):
+        if self._tp1_filled_verified(live_qty, curr_px):
+            self._radar_armed_after_tp1 = True
+            self._save_state()
             return True
         return False
 
@@ -7339,28 +7554,34 @@ class PositionSupervisorBinance:
                                 self._save_state()
 
                         self._scan_ticks += 1
-                        if getattr(self, "_post_recover_radar_pulse", False):
-                            self._post_recover_radar_pulse = False
-                            if curr_px > 0:
-                                self._process_radar_trailing(real_amt, curr_px)
-                            self._radar_guardian_audit(real_amt, curr_px)
-                            logger.info("📡 [哨兵] 重启后立即雷达脉冲完成")
-                        elif not qty_changed:
-                            self._radar_guardian_audit(real_amt, curr_px)
+                        skip_radar = getattr(self, "_open_in_progress", False) or getattr(
+                            self, "_defense_align_in_progress", False
+                        )
+                        if not skip_radar:
+                            if getattr(self, "_post_recover_radar_pulse", False):
+                                self._post_recover_radar_pulse = False
+                                if curr_px > 0:
+                                    self._process_radar_trailing(real_amt, curr_px)
+                                self._radar_guardian_audit(real_amt, curr_px)
+                                logger.info("📡 [哨兵] 重启后立即雷达脉冲完成")
+                            elif not qty_changed:
+                                self._radar_guardian_audit(real_amt, curr_px)
 
-                        if curr_px <= 0:
+                            if curr_px <= 0:
+                                continue
+
+                            self._process_directional_defenses(real_amt, curr_px)
+                            if (
+                                self._tp1_filled_verified(real_amt, curr_px)
+                                and not self._is_radar_active()
+                                and self._scan_ticks % 5 == 0
+                            ):
+                                logger.info(
+                                    f"📡 雷达待交棒: TP1已成交 | "
+                                    f"现价 {curr_px:.2f} | 轮询 {SENTINEL_POLL_RADAR}s"
+                                )
+                        elif curr_px <= 0:
                             continue
-
-                        self._process_directional_defenses(real_amt, curr_px)
-                        if (
-                            self._tp1_filled_verified(real_amt, curr_px)
-                            and not self._is_radar_active()
-                            and self._scan_ticks % 5 == 0
-                        ):
-                            logger.info(
-                                f"📡 雷达待交棒: TP1已成交 | "
-                                f"现价 {curr_px:.2f} | 轮询 {SENTINEL_POLL_RADAR}s"
-                            )
                     finally:
                         self._lock.release()
                 except Exception as e:
@@ -7534,6 +7755,9 @@ class PositionSupervisorBinance:
                     self.tv_sl = float(s.get("tv_sl", 0) or 0)
                     self.tv_sl_ref = float(s.get("tv_sl_ref", 0) or 0)
                     self._radar_stage_last = int(s.get("radar_stage_last", 0) or 0)
+                    self._radar_armed_after_tp1 = bool(
+                        s.get("radar_armed_after_tp1", False)
+                    )
                     self._last_applied_exchange_sl = float(
                         s.get("last_applied_exchange_sl", 0) or 0
                     )
