@@ -213,6 +213,16 @@ def audit_module3_hard_sl(a: Audit):
         "3.13 雷达必须价格达 TP1",
         "WS hint 不能单独替代" in sup or "必须达标" in sup,
     )
+    a.check(
+        "3.14 硬止损实时算 VPS 不读污染账本",
+        "_looks_like_tv_tight_stop" in sup
+        and "拒绝挂 TV 紧止损" in sup
+        and "_is_valid_radar_sl" in sup,
+    )
+    a.check(
+        "3.15 SHORT 禁止 min 挂 TV 紧价",
+        "拒绝合并伪雷达/TV紧止损" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):

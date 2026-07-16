@@ -309,7 +309,7 @@ def _format_vps_sizing_basis(principal, meta=None, leverage=None):
         )
     stop_dist = float(meta.get("stop_dist", 0) or 0)
     if stop_dist > 0:
-        lines.append(f"（TV tv_sl 止损距离 **{stop_dist:.2f}**，仅挂止损用，不参与 sizing）")
+        lines.append(f"（TV tv_sl 距离 **{stop_dist:.2f}**，**仅日志参考，永不挂盘**）")
     return "\n".join(lines)
 
 
