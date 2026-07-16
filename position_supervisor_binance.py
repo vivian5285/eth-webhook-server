@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.51.0-hardsl-closepos-tp-fix"
+BINANCE_VPS_VERSION = "v13.52.0-vps-sl-radar-triad-strict"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -1290,6 +1290,8 @@ class PositionSupervisorBinance:
             self._hydrate_tv_defense_context({
                 "side": self.current_side, "entry_price": entry, "size": live_qty,
             })
+        # 无论账本是否有价，一律消毒为 VPS 宽止损（防 TV 紧价污染横跳）
+        self._sanitize_vps_hard_sl_ledger(source=f"{source} boot")
         if float(getattr(self, "tv_sl", 0) or 0) <= 0 and entry > 0:
             self._refresh_vps_hard_sl(
                 entry=entry, side=self.current_side,
@@ -2745,9 +2747,81 @@ class PositionSupervisorBinance:
         return None
 
     def _shield_stop_price(self, entry=None):
-        """VPS 自主硬止损价（tv_sl 账本字段存 VPS 计算结果）"""
+        """VPS 自主硬止损价（tv_sl 账本字段只存 VPS 计算结果，绝非 TV 紧止损）"""
         tv = round(float(getattr(self, "tv_sl", 0) or 0), 2)
         return tv if tv > 0 else None
+
+    def _vps_hard_sl_target(self, entry=None, side=None, regime=None):
+        """按开仓价×档位% 实时计算 VPS 宽硬止损（不读污染账本）"""
+        entry = float(entry if entry is not None else (self.watched_entry or 0))
+        side = str(side or self.current_side or "").strip().upper()
+        regime = int(
+            regime if regime is not None
+            else (getattr(self, "open_regime", None) or self.regime or 3)
+        )
+        if entry <= 0 or side not in ("LONG", "SHORT"):
+            return 0.0
+        return round(float(compute_vps_hard_sl(side, entry, None, regime) or 0), 2)
+
+    def _is_exchange_stop_acceptable_as_vps_floor(self, stop_px, entry=None, side=None):
+        """
+        盘口 STOP 仅当贴近或宽于 VPS 计算价才可写回账本。
+        LONG：止损越低越宽；SHORT：止损越高越宽。TV 紧止损一律拒绝。
+        """
+        vps = self._vps_hard_sl_target(entry, side)
+        stop_px = round(float(stop_px or 0), 2)
+        if vps <= 0 or stop_px <= 0:
+            return False
+        side = str(side or self.current_side or "").strip().upper()
+        tol = max(float(SHIELD_STOP_TOLERANCE), vps * 0.002)
+        if side == "LONG":
+            return stop_px <= vps + tol
+        if side == "SHORT":
+            return stop_px >= vps - tol
+        return False
+
+    def _sanitize_vps_hard_sl_ledger(self, source=""):
+        """
+        强制 tv_sl 账本 = VPS 宽止损。
+        污染场景（等于 TV 紧止损 / 过窄 / 空值）一律重算，杜绝 VPS↔TV 横跳挂单。
+        """
+        entry = float(self.watched_entry or 0)
+        side = str(self.current_side or "").strip().upper()
+        if entry <= 0 or side not in ("LONG", "SHORT"):
+            return False
+        vps = self._vps_hard_sl_target(entry, side)
+        if vps <= 0:
+            return False
+        cur = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+        ref = round(float(getattr(self, "tv_sl_ref", 0) or 0), 2)
+        tol = max(float(SHIELD_STOP_TOLERANCE), vps * 0.002)
+        contaminated = cur <= 0
+        if not contaminated and side == "LONG" and cur > vps + tol:
+            contaminated = True
+        if not contaminated and side == "SHORT" and cur < vps - tol:
+            contaminated = True
+        # 账本贴 TV 参考且远离 VPS → 明确污染
+        if (
+            not contaminated
+            and ref > 0
+            and abs(cur - ref) <= tol
+            and abs(cur - vps) > tol
+        ):
+            contaminated = True
+        if not contaminated and abs(cur - vps) <= tol:
+            return True
+        logger.warning(
+            f"🛡️ [{self.symbol}] 硬止损账本消毒 "
+            f"cur={cur or 0:.2f} → VPS={vps:.2f} "
+            f"(ref={ref or 0:.2f}) | {source or 'sanitize'}"
+        )
+        return self._refresh_vps_hard_sl(
+            entry=entry, side=side,
+            regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+            atr=float(getattr(self, "open_atr", None) or self.current_atr or 0),
+            tv_sl_ref=getattr(self, "tv_sl_ref", 0) or None,
+            source=source or "账本消毒",
+        )
 
     def _refresh_vps_hard_sl(self, entry=None, side=None, regime=None, atr=None,
                              tv_sl_ref=None, source=""):
@@ -2812,7 +2886,8 @@ class PositionSupervisorBinance:
         )
 
     def _effective_exchange_stop(self, radar_sl=None):
-        """合并止损：LONG 取 max(雷达, tv_sl)；SHORT 取 min"""
+        """合并止损：LONG 取 max(雷达, VPS宽底)；SHORT 取 min。底线永远是 VPS，绝非 TV 紧止损。"""
+        self._sanitize_vps_hard_sl_ledger(source="合并止损前消毒")
         floor = self._shield_stop_price()
         radar = round(float(radar_sl), 2) if radar_sl and float(radar_sl) > 0 else None
         if not floor and not radar:
@@ -2827,12 +2902,16 @@ class PositionSupervisorBinance:
             return min(radar, floor)
         return floor
 
-    def _clamp_radar_to_tv_floor(self, radar_sl):
-        """雷达保本线不得低于 TV 硬止损底线"""
+    def _clamp_radar_to_vps_floor(self, radar_sl):
+        """雷达保本线不得突破 VPS 宽硬止损底线（向不利方向）。"""
         if not radar_sl:
             return radar_sl
         effective = self._effective_exchange_stop(radar_sl)
         return effective if effective else radar_sl
+
+    def _clamp_radar_to_tv_floor(self, radar_sl):
+        """兼容旧名 → VPS 宽底线夹紧（TV 紧止损永不参与）"""
+        return self._clamp_radar_to_vps_floor(radar_sl)
 
     def _purge_all_close_position_stops(self):
         """撤净所有 closePosition 止损（TV硬止损与雷达共用单槽）"""
@@ -4134,7 +4213,8 @@ class PositionSupervisorBinance:
 
     def _adopt_exchange_hard_sl(self, source=""):
         """
-        实盘已有唯一 STOP 时写回账本；若多笔（重启叠单）则拒采纳，交统一同步清理。
+        实盘已有唯一 STOP 时写回账本；仅当该价贴近/宽于 VPS 计算价。
+        TV 紧止损残留一律拒采纳，交统一同步清掉后挂 VPS 宽止损。
         """
         entry = float(self.watched_entry or 0)
         side = (self.current_side or "").upper()
@@ -4153,24 +4233,34 @@ class PositionSupervisorBinance:
             return 0.0
         if side == "SHORT" and entry > 0 and chosen <= entry + 0.01:
             return 0.0
+        if not self._is_exchange_stop_acceptable_as_vps_floor(chosen, entry, side):
+            vps = self._vps_hard_sl_target(entry, side)
+            logger.warning(
+                f"🛡️ 拒采纳盘口紧止损 @{chosen:.2f}（疑似 TV）| "
+                f"VPS宽止损应为 @{vps:.2f}"
+                + (f" | {source}" if source else "")
+            )
+            return 0.0
         old = round(float(getattr(self, "tv_sl", 0) or 0), 2)
-        self.tv_sl = chosen
+        # 写回时仍归一到 VPS 计算价，避免把略宽盘口价当成永久底线漂移
+        vps = self._vps_hard_sl_target(entry, side) or chosen
+        self.tv_sl = vps
         if not self.current_sl or float(self.current_sl) <= 0:
-            self.current_sl = chosen
+            self.current_sl = vps
         self.shield_active = True
         self._tv_sl_missing_alerted = False
         self._last_applied_exchange_sl = chosen
         self._save_state()
         logger.info(
-            f"🛡️ 盘口采纳硬止损 @{chosen:.2f}"
-            + (f" (原账本 {old:.2f})" if old and abs(old - chosen) > 0.01 else "")
+            f"🛡️ 盘口硬止损可接受 @{chosen:.2f} → 账本归一 VPS @{vps:.2f}"
+            + (f" (原账本 {old:.2f})" if old and abs(old - vps) > 0.01 else "")
             + (f" | {source}" if source else "")
         )
-        return chosen
+        return vps
 
     def _ensure_hard_sl_ledger(self, live_qty=0, source=""):
-        """账本无 tv_sl 时：先按开仓价×档位%重算，再核对盘口挂单"""
-        if float(getattr(self, "tv_sl", 0) or 0) > 0:
+        """账本硬止损必须是 VPS 宽价；污染则重算，绝不保留 TV 紧止损。"""
+        if self._sanitize_vps_hard_sl_ledger(source=source or "账本自愈"):
             return True
         entry = float(self.watched_entry or 0)
         side = (self.current_side or "").upper()
@@ -4188,14 +4278,15 @@ class PositionSupervisorBinance:
         return adopted > 0
 
     def _maintain_hard_shield(self, real_amt, curr_px=None, force=False, radar_sl=None):
-        """维护 VPS 硬止损 Stop-Limit；雷达激活时合并为 max/min(雷达, vps_sl)"""
+        """维护 VPS 宽硬止损 closePosition；雷达激活时合并为 max/min(雷达, VPS底)"""
         if real_amt <= 0 or not self.watched_entry:
             return False
         curr_px = float(curr_px or 0)
+        self._sanitize_vps_hard_sl_ledger(source="维护硬止损消毒")
         if radar_sl is None and (
             self._is_radar_active() or (curr_px > 0 and self._should_radar_trail(curr_px))
         ):
-            radar_sl = self._clamp_radar_to_tv_floor(self.current_sl)
+            radar_sl = self._clamp_radar_to_vps_floor(self.current_sl)
 
         if float(getattr(self, "tv_sl", 0) or 0) <= 0 and not radar_sl:
             self._ensure_hard_sl_ledger(real_amt, source="维护硬止损自愈")
@@ -4210,15 +4301,21 @@ class PositionSupervisorBinance:
                 force=force,
             ).get("ok", False)
 
-        # 最终核对：盘口已有 STOP → 采纳，禁止误报「缺失」
+        # 最终核对：盘口已有可接受的宽 STOP → 采纳；否则按 VPS 重挂
         live_stops = binance_client.find_protective_stop_prices(self.symbol)
         if live_stops:
-            self._adopt_exchange_hard_sl(source="维护核对·盘口已有")
-            logger.warning(
-                f"🛡️ 账本缺tv_sl但盘口已有STOP{live_stops} → 已采纳，跳过缺失告警"
-            )
-            self._tv_sl_missing_alerted = False
-            return True
+            adopted = self._adopt_exchange_hard_sl(source="维护核对·盘口已有")
+            if adopted > 0:
+                logger.warning(
+                    f"🛡️ 账本缺tv_sl但盘口宽STOP可接受{live_stops} → 已归一VPS"
+                )
+                self._tv_sl_missing_alerted = False
+                return True
+            # 盘口是紧止损 → 强制刷成 VPS
+            self._ensure_hard_sl_ledger(real_amt, source="维护核对·拒紧止损")
+            return self._sync_exchange_stop(
+                real_amt, radar_sl=None, reason="拒TV紧止损·改挂VPS", force=True,
+            ).get("ok", False)
 
         if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
             logger.error(
@@ -4517,8 +4614,10 @@ class PositionSupervisorBinance:
             )
         sl_placed = self._ensure_radar_sl(new_sl, live_qty)
         if not sl_placed and not self._has_stop_sl_near(new_sl, exclude_shield=False):
-            close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-            sl_placed = binance_client.place_stop_market_order(close_side, new_sl, symbol=self.symbol) is not None
+            # 禁止裸 place_stop：必须走合并总线（夹 VPS 宽底）
+            sl_placed = self._sync_exchange_stop(
+                live_qty, radar_sl=new_sl, reason="雷达推升兜底", force=True,
+            ).get("ok", False)
         time.sleep(0.4)
         return bool(sl_placed or self._has_stop_sl_near(new_sl, exclude_shield=False))
 
@@ -4908,8 +5007,7 @@ class PositionSupervisorBinance:
                 f"✅ TP123 比例齐全 ({matched}/{expected}) @ {pending_prices}，跳过补挂"
             )
             if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
-                close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-                binance_client.place_stop_market_order(close_side, dynamic_sl, symbol=self.symbol)
+                self._ensure_radar_sl(dynamic_sl, live_qty)
             return matched, pending_prices, expected, False
 
         self._cancel_orphan_tp_orders(live_qty)
@@ -4925,8 +5023,7 @@ class PositionSupervisorBinance:
         if self._defenses_fully_ok(live_qty, dynamic_sl):
             logger.info(f"✅ 增量补挂成功 ({matched}/{expected}) @ {audit['pending_prices']}")
             if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
-                close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-                binance_client.place_stop_market_order(close_side, dynamic_sl, symbol=self.symbol)
+                self._ensure_radar_sl(dynamic_sl, live_qty)
             return matched, audit["pending_prices"], expected, True
 
         logger.warning(
@@ -5639,17 +5736,16 @@ class PositionSupervisorBinance:
 
     def _tp1_triad_ok(self, live_qty=None, curr_px=0.0, require_fresh=False):
         """
-        TP1 三重验证（ETH/XAU/全交易所统一）：
-        ① 价格主判：现价/best 达 TP1 区
-        ② 订单辅判：账本已消费 TP1 + 盘口无 TP1 限价
-        ③ 减仓参考：相对开仓基线明显减仓且匹配 TP1 切片
+        TP1 三重验证（ETH/XAU/全交易所统一）——缺一不可：
+        ① 价格：现价或 best 已达 TP1 区
+        ② 订单：TP1 限价已成交/消失 + 账本核实消费
+        ③ 减仓：相对开仓总头寸快照明显减少且匹配 TP1 切片
         """
         if getattr(self, "_open_in_progress", False) or getattr(
             self, "_defense_align_in_progress", False
         ):
             return False
-        if (not require_fresh) and getattr(self, "_radar_handoff_done", False):
-            return True
+        # 无论是否已交棒，一律新鲜三重；require_fresh 仅保留兼容参数
 
         live_qty = float(live_qty if live_qty is not None else self.watched_qty or 0)
         tp1_px = float(self.tv_tps[0] or 0) if self.tv_tps else 0.0
@@ -5662,21 +5758,14 @@ class PositionSupervisorBinance:
         # ③ 减仓
         if not self._tp1_qty_matches_baseline(live_qty):
             return False
-        # ① 价格（WS hint 仅辅助，不能单独替代）
-        price_ok = self._price_reached_tp1_zone(curr_px, tp1_px)
-        if not price_ok and not getattr(self, "_ws_tp1_fill_hint", False):
+        # ① 价格：必须达标（WS hint 不能单独替代）
+        if not self._price_reached_tp1_zone(curr_px, tp1_px):
             return False
-        if not price_ok and getattr(self, "_ws_tp1_fill_hint", False):
-            # WS 提示必须同时具备订单+减仓（上面已过），才允许
-            logger.info(
-                f"📡 [{self.symbol}] 三重验证：价格未触区但 WS 成交提示+"
-                f"订单/减仓已齐 → 允许"
-            )
         return True
 
     def _tp1_filled_verified(self, live_qty=None, curr_px=0.0):
-        """兼容旧名 → 三重验证（交棒完成后短路）。"""
-        return self._tp1_triad_ok(live_qty, curr_px, require_fresh=False)
+        """兼容旧名 → 三重验证。"""
+        return self._tp1_triad_ok(live_qty, curr_px, require_fresh=True)
 
     def _handle_smart_qty_change(self, old_qty, new_qty, curr_px):
         """按减仓原因分流：TP成交→雷达推进；防护盾成交→保留剩余档位；其他→通用对齐"""
@@ -7274,8 +7363,7 @@ class PositionSupervisorBinance:
 
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
         """
-        TP1 未成交却出现过早保本线 → 恢复 VPS 宽硬止损。
-        TP1 已成交 / 雷达已锁存 → 永不解除。
+        TP1 三重未齐却出现过早保本线 / 污染交棒 → 恢复 VPS 宽硬止损。
         """
         live_qty = float(live_qty or self.watched_qty or 0)
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
@@ -7283,6 +7371,12 @@ class PositionSupervisorBinance:
             return False
 
         disarmed = False
+        # 交棒标记在但三重已失效 → 强制解除
+        if getattr(self, "_radar_handoff_done", False) and not self._tp1_triad_ok(
+            live_qty, curr_px, require_fresh=True,
+        ):
+            disarmed = True
+
         stale = list(getattr(self, "tp_levels_consumed", []) or [])
         tv = float(getattr(self, "tv_sl", 0) or 0)
         entry = float(self.watched_entry or 0)
@@ -7309,6 +7403,10 @@ class PositionSupervisorBinance:
         self._radar_armed_after_tp1 = False
         self._radar_handoff_done = False
         self._ws_tp1_fill_hint = False
+        self._sanitize_vps_hard_sl_ledger(source=source or "解除过早雷达")
+        tv = float(getattr(self, "tv_sl", 0) or 0)
+        if tv > 0:
+            self.current_sl = tv
         self._save_state()
         logger.warning(
             f"📡 [{self.symbol}] [{source or '雷达'}] 解除过早雷达/伪TP{fake or stale or '标记'} "
@@ -7318,7 +7416,7 @@ class PositionSupervisorBinance:
             f"雷达解除·恢复呼吸空间 [{self.symbol}]",
             f"{self.current_side} {live_qty} {self._unit()} @ {entry:.2f} | "
             f"清除伪TP{fake or stale or '标记'} | vps_sl={tv:.2f} | "
-            f"规则：三重验证+安全交棒前不激活雷达",
+            f"规则：价格达TP1+限价成交+减仓匹配 三重通过后才启雷达",
         )
         if live_qty > 0 and tv > 0:
             self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=None)
@@ -7524,13 +7622,12 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _radar_legitimately_armed(self, live_qty=None, curr_px=0.0):
-        """仅交棒核实后才武装；三重证据不足时绝不软锁存。"""
+        """交棒成功且 TP1 三重仍成立，才允许雷达追踪。"""
         if getattr(self, "_open_in_progress", False):
             return False
-        if getattr(self, "_radar_handoff_done", False):
-            return True
-        # 证据齐但尚未安全交棒 → 仍不算武装（避免贴市保本）
-        return False
+        if not getattr(self, "_radar_handoff_done", False):
+            return False
+        return self._tp1_triad_ok(live_qty, curr_px, require_fresh=True)
 
     def _effective_radar_stage(self, curr_px):
         """雷达阶段：已武装后只升不降"""
@@ -7545,8 +7642,8 @@ class PositionSupervisorBinance:
         return min(1.0, self._effective_radar_stage(curr_px) / 5.0)
 
     def _should_radar_trail(self, curr_px):
-        """仅交棒成功后追踪；交棒前即使三重通过也只保留宽硬止损。"""
-        return bool(getattr(self, "_radar_handoff_done", False))
+        """仅三重+交棒成功后追踪；否则只保留 VPS 宽硬止损。"""
+        return self._radar_legitimately_armed(self.watched_qty, curr_px)
 
     def _compute_radar_sl(self):
         if not self.watched_entry or self.best_price <= 0:
@@ -8061,6 +8158,13 @@ class PositionSupervisorBinance:
                     )
                     return
                 try:
+                    # 持仓存在：先消毒硬止损账本，再对账挂 TP123+VPS宽止损（禁止自动强平）
+                    self.watched_entry = float(
+                        pos.get("entry_price") or self.watched_entry or 0
+                    )
+                    self.current_side = pos.get("side") or self.current_side
+                    self._sanitize_vps_hard_sl_ledger(source="重启接管消毒")
+
                     reconcile = self._reconcile_context_on_recover(pos)
                     reconcile_notes = reconcile["notes"]
                     side = pos["side"]
@@ -8073,9 +8177,20 @@ class PositionSupervisorBinance:
                             )
                             self.last_tv_side = side
                             reconcile["direction_mismatch"] = False
-                    elif self._enforce_tv_direction_or_flat(pos, source="VPS重启"):
-                        self._recover_in_progress = False
-                        return
+                    elif self._strict_tv_opposite_side(side):
+                        # 重启禁止自动平仓：只告警并接管补挂 TP123+VPS硬止损
+                        opp = self._strict_tv_opposite_side(side)
+                        logger.error(
+                            f"🚨 [重启] 实盘 {side} vs TV {opp} 反向 → "
+                            f"保留持仓接管，禁止自动强平"
+                        )
+                        dingtalk.report_system_alert(
+                            f"重启方向背离·保留持仓 [{self.symbol}]",
+                            f"实盘 {side} {pos['size']} {self.unit_label} vs 最新TV {opp} | "
+                            f"重启不自动平仓，改为挂齐 TP123 + VPS宽硬止损",
+                            suggestion="若确需反向，请 TV 发 OPEN 反向信号走先平后开",
+                        )
+                        self.last_tv_side = side
 
                     if reconcile.get("manual_open") or float(self.watched_qty or 0) <= 0:
                         logger.info(

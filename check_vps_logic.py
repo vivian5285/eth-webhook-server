@@ -200,6 +200,19 @@ def audit_module3_hard_sl(a: Audit):
         "3.10 开仓禁止 recover 核武连环撤",
         "开仓后防线对齐" in sup and "recover_mode=False" in sup,
     )
+    a.check(
+        "3.11 账本消毒拒 TV 紧止损",
+        "_sanitize_vps_hard_sl_ledger" in sup
+        and "_is_exchange_stop_acceptable_as_vps_floor" in sup,
+    )
+    a.check(
+        "3.12 重启禁止方向背离自动强平",
+        "重启方向背离·保留持仓" in sup,
+    )
+    a.check(
+        "3.13 雷达必须价格达 TP1",
+        "WS hint 不能单独替代" in sup or "必须达标" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):
