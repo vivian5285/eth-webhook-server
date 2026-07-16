@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.50.0-margin-6-12-18-22-cap11"
+BINANCE_VPS_VERSION = "v13.51.0-hardsl-closepos-tp-fix"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -2879,18 +2879,40 @@ class PositionSupervisorBinance:
     def _count_protective_stops(self):
         return binance_client.find_protective_stop_prices(self.symbol)
 
-    def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=True):
-        """VPS 缓冲硬止损：默认 Stop-Limit（防跳空）；雷达合并档用 Stop-Market closePosition"""
+    def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=False):
+        """
+        VPS 硬止损：默认 Stop-Market closePosition（不占 reduceOnly 额度）。
+        禁止全仓 Stop-Limit(reduceOnly)：币安会与 TP123 限价抢额度并撤掉止盈。
+        """
         live_qty = self._resolve_live_qty(live_qty)
         trigger_px = round(float(trigger_px or 0), 2)
         if live_qty <= 0 or trigger_px <= 0 or not self.current_side:
             return None
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        if curr_px > 0:
+            gap = max(2.5, curr_px * 0.0015)
+            if self.current_side == "LONG" and trigger_px >= curr_px - gap:
+                logger.error(
+                    f"🚨 拒绝挂硬止损：LONG 触发价 {trigger_px:.2f} 贴/高于市价 "
+                    f"{curr_px:.2f}（会立刻全平）"
+                )
+                return None
+            if self.current_side == "SHORT" and trigger_px <= curr_px + gap:
+                logger.error(
+                    f"🚨 拒绝挂硬止损：SHORT 触发价 {trigger_px:.2f} 贴/低于市价 "
+                    f"{curr_px:.2f}（会立刻全平）"
+                )
+                return None
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if use_stop_limit:
+            # 仅显式调用时保留；默认路径禁止，避免吞掉 TP123
             limit_px = compute_vps_hard_sl_limit_price(self.current_side, trigger_px)
-            return binance_client.place_stop_limit_order(close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=limit_px,
+            return binance_client.place_stop_limit_order(
+                close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=limit_px,
             )
-        return binance_client.place_stop_market_order(close_side, trigger_px, symbol=self.symbol, quantity=None)
+        return binance_client.place_stop_market_order(
+            close_side, trigger_px, symbol=self.symbol, quantity=None,
+        )
 
     def _sync_exchange_stop(self, live_qty, radar_sl=None, reason="", force=False):
         """
@@ -2933,13 +2955,9 @@ class PositionSupervisorBinance:
             )
             time.sleep(0.5)
 
-        floor = round(float(self._shield_stop_price() or 0), 2)
-        use_limit = (
-            floor > 0
-            and abs(target - floor) <= SHIELD_STOP_TOLERANCE
-        )
+        # 一律 closePosition：全仓 reduceOnly Stop-Limit 会与 TP123 抢额度并撤掉止盈
         res = self._place_vps_hard_sl_order(
-            live_qty, target, use_stop_limit=use_limit,
+            live_qty, target, use_stop_limit=False,
         )
         time.sleep(0.45)
         ok = res is not None and self._has_stop_sl_near(target, exclude_shield=False)
@@ -2961,9 +2979,9 @@ class PositionSupervisorBinance:
             self._tv_sl_missing_alerted = False
             self._save_state()
             tv_floor = round(float(getattr(self, "tv_sl", 0) or 0), 2)
-            order_tag = "Stop-Limit" if use_limit else "Stop-Market closePosition"
             logger.warning(
-                f"🛡️ [VPS硬止损/统一] {reason or '同步止损'} | {order_tag} @ {target:.2f} "
+                f"🛡️ [VPS硬止损/统一] {reason or '同步止损'} | "
+                f"Stop-Market closePosition @ {target:.2f} "
                 f"| vps_sl={tv_floor or 'fallback'} | 撤 {purged} 笔"
             )
         else:
@@ -5742,14 +5760,21 @@ class PositionSupervisorBinance:
                 f"{old_qty} ➔ {new_qty} @ {f['price']:.2f}"
             )
             if new_qty <= 0.0005 or self._is_dust_qty(new_qty):
+                near_sl = self._likely_exchange_stop_exit(curr_px)
+                reason = (
+                    "触碰硬止损平仓（VPS宽止损）"
+                    if near_sl else
+                    "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）"
+                )
                 flat_meta = self._build_close_meta(
-                    "CLOSE_STOPLOSS",
+                    "CLOSE_STOPLOSS" if near_sl else "CLOSE",
                     self.current_side,
                     self._estimate_pnl_pct(curr_px),
-                    "触碰硬止损平仓（TV tv_sl）",
+                    reason,
                 )
-                flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
-                self._disarm_shield("TV硬止损全平", notify=False)
+                if near_sl:
+                    flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
+                self._disarm_shield("硬止损全平" if near_sl else "异动全平", notify=False)
                 self._handle_manual_flat_detected(
                     flat_meta["tv_reason"],
                     close_meta=flat_meta,
@@ -6066,9 +6091,15 @@ class PositionSupervisorBinance:
             )
         if getattr(self, "shield_active", False):
             est = self._estimate_pnl_pct(curr_px)
+            if self._likely_exchange_stop_exit(curr_px):
+                return self._build_close_meta(
+                    "CLOSE_STOPLOSS", self.current_side, est,
+                    "触碰硬止损平仓（VPS宽止损）",
+                )
             return self._build_close_meta(
-                "CLOSE_STOPLOSS", self.current_side, est,
-                "触碰硬止损平仓（TV tv_sl）",
+                "CLOSE", self.current_side, est,
+                hint_reason
+                or "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）",
             )
         return self._build_close_meta("CLOSE", self.current_side, None, hint_reason or "仓位归零")
 
@@ -7040,14 +7071,17 @@ class PositionSupervisorBinance:
                 self._open_settled_qty = float(live_qty)
                 self._save_state()
 
-            self._scorched_earth_cancel_for_recover()
+            # 开仓后只清残留挂单一次；禁止 recover 核武连环撤挂（易与挂 TP/止损竞态）
+            binance_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.4)
             self._enforce_pre_tp1_radar_standby(
                 live_qty, verified["entry_price"], source="开仓保护",
             )
+            # 先挂 TP123，再挂 closePosition 硬止损（不占 reduceOnly 额度）
             self._enforce_defense_alignment(
                 live_qty, verified["entry_price"],
-                dynamic_sl=None, reason="开仓后防线对齐", rounds=4,
-                recover_mode=True,
+                dynamic_sl=None, reason="开仓后防线对齐", rounds=3,
+                recover_mode=False,
             )
             audit = self._wait_defense_settled(live_qty)
             matched, expected = audit["matched_full"], audit["expected"]
@@ -7118,10 +7152,9 @@ class PositionSupervisorBinance:
             )
             if expected > 0 and matched < expected:
                 self._open_tp_unconfirmed = True
-                dupes = [lv for lv in audit.get("levels", []) if lv.get("status") == "duplicate"]
                 hint = (
-                    "重复 TP 占满可减仓额度 | 雷达将接力纠偏"
-                    if dupes else "请查 logs/binance_brain.log"
+                    "硬止损已改 closePosition，不占 reduceOnly | 哨兵将接力补挂 TP | "
+                    "请查 logs/binance_brain.log"
                 )
                 dingtalk.report_system_alert(
                     f"开仓后限价止盈未全部挂上 [{self.symbol}]",

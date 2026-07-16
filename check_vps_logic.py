@@ -186,7 +186,20 @@ def audit_module3_hard_sl(a: Audit):
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     a.check("3.7 tv_sl_ref 参考", "tv_sl_ref" in sup and "仅作参考" in sup)
-    a.check("3.5 STOP-Limit 挂单", "place_stop_limit" in sup or "STOP" in sup)
+    a.check("3.5 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
+    a.check(
+        "3.8 硬止损 closePosition 不抢 TP 额度",
+        "use_stop_limit=False" in sup and "不占 reduceOnly" in sup,
+    )
+    a.check(
+        "3.9 全平勿误标 TV tv_sl",
+        "触碰硬止损平仓（TV tv_sl）" not in sup
+        and "触碰硬止损平仓（VPS宽止损）" in sup,
+    )
+    a.check(
+        "3.10 开仓禁止 recover 核武连环撤",
+        "开仓后防线对齐" in sup and "recover_mode=False" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):

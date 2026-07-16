@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.50.0-margin-6-12-18-22-cap11`**
+**当前版本：`v13.51.0-hardsl-closepos-tp-fix`**
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
@@ -14,7 +14,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version: v13.50.0-margin-6-12-18-22-cap11
+# 期望 version: v13.51.0-hardsl-closepos-tp-fix
 ```
 
 **Cursor / VPS 逻辑自查：**
@@ -469,6 +469,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 | 版本 | 要点 |
 |------|------|
+| **v13.51** | **硬止损改 closePosition（不抢 TP reduceOnly）+ 全平勿误标 TV tv_sl + 开仓禁 recover 核武撤** |
 | **v13.50** | **短周期仓位权重 6/12/18/22% + 名义硬顶 11x（ETH45m/XAU50m）** |
 | **v13.49** | **雷达三重验证加固：理想保本须距市价安全才交棒；禁止贴市毛刺止损；钉钉标题标注 ETH/XAU** |
 | **v13.48** | **钉钉 TP/头寸单位按品种透传 XAU/ETH；缺 symbol 拒绝默念 ETH；全文扫描强化检测** |
@@ -492,4 +493,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.50.0-margin-6-12-18-22-cap11*
+*GEMINI Quant · 双轨智慧雷达 · v13.51.0-hardsl-closepos-tp-fix*

@@ -68,7 +68,7 @@
 | 3.1 | 硬止损 = 开仓价 × 档位% | ✅ | `compute_vps_hard_sl()` |
 | 3.2 | R1~R4 宽止损比例 | ✅ | `VPS_HARD_SL_PCT` |
 | 3.3~3.4 | 多/空方向公式 | ✅ | 开多减 / 开空加 |
-| 3.5 | 开仓成交后立即挂 STOP-Limit | ✅ | `_sync_exchange_stop()` |
+| 3.5 | 开仓成交后立即挂 **closePosition STOP**（不占 reduceOnly，避免撤掉 TP123） | ✅ | `_sync_exchange_stop()` · `use_stop_limit=False` |
 | 3.6 | 硬止损只收紧不放松 | ✅ | 雷达阶段前不动；雷达后只升不降 |
 | 3.7 | TV `tv_sl` 仅日志 | ✅ | 存入 `tv_sl_ref`，挂单用 `tv_sl`(VPS值) |
 
