@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.49.0-radar-triad-xau-safe-handoff"
+BINANCE_VPS_VERSION = "v13.50.0-margin-6-12-18-22-cap11"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5

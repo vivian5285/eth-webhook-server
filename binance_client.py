@@ -503,7 +503,7 @@ class BinanceClient:
     def get_all_usdt_position_notionals(self):
         """
         账户全部 USDT 永续名义敞口（|qty|×mark）。
-        用于双品种 Σnotional ≤ equity×9 硬顶。
+        用于双品种 Σnotional ≤ equity×11 硬顶。
         返回 {symbol: notional, ...} 与 total。
         """
         out = {}

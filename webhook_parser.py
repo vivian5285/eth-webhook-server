@@ -17,14 +17,15 @@ VPS_MARGIN_LEVERAGE = 1
 
 # VPS 自主风控（与 TV risk_pct / qty_ratio 完全脱钩）
 # 双品种文档：各品种独立按账户总本金 × 档位保证金系数
+# 短周期（ETH45m / XAU50m）放大权重，补偿更小 ATR 波幅
 VPS_MARGIN_PCT_BY_REGIME = {
-    1: 0.05,   # 5%
-    2: 0.10,   # 10%
-    3: 0.15,   # 15%
-    4: 0.18,   # 18%
+    1: 0.06,   # 6%  → 名义 1.5x 本金
+    2: 0.12,   # 12% → 名义 3.0x 本金
+    3: 0.18,   # 18% → 名义 4.5x 本金
+    4: 0.22,   # 22% → 名义 5.5x 本金
 }
 # 兼容旧计算路径 / 钉钉展示
-VPS_RISK_PCT = 18.0  # 展示用「最大档」；实际按 VPS_MARGIN_PCT_BY_REGIME
+VPS_RISK_PCT = 22.0  # 展示用「最大档」；实际按 VPS_MARGIN_PCT_BY_REGIME
 VPS_GLOBAL_SCALE = 1.0
 VPS_REGIME_SCALE = {
     1: VPS_MARGIN_PCT_BY_REGIME[1] / VPS_MARGIN_PCT_BY_REGIME[4],
@@ -32,12 +33,12 @@ VPS_REGIME_SCALE = {
     3: VPS_MARGIN_PCT_BY_REGIME[3] / VPS_MARGIN_PCT_BY_REGIME[4],
     4: 1.0,
 }
-MAX_RISK_PCT = 20.0
+MAX_RISK_PCT = 25.0  # 须 ≥ 最大档 22%，避免展示/元数据被误截断
 MIN_RISK_PCT = 1.0
 MAX_POSITION_SIZE = 9999.0
 MIN_QTY_DEFAULT = 0.001
-# 双品种总名义敞口硬顶：Σ notional ≤ TOTAL_EQUITY × 9
-MAX_TOTAL_NOTIONAL_MULT = 9.0
+# 双品种总名义敞口硬顶：Σ notional ≤ TOTAL_EQUITY × 11（双 R4 踩线）
+MAX_TOTAL_NOTIONAL_MULT = 11.0
 
 # TV v6.9.93 动态加仓：TV qty_ratio 优先；缺失时按档位默认值
 ADD_QTY_RATIO_BY_REGIME = {
@@ -434,8 +435,8 @@ def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
                          global_scale=None, qty_step=0.001, min_qty=None,
                          face_value=None, max_position=None):
     """
-    首次开仓 OPEN（双品种文档）：
-    保证金 = TOTAL_EQUITY × 档位保证金系数（R1=5%…R4=18%）
+    首次开仓 OPEN（双品种文档 · 短周期权重）：
+    保证金 = TOTAL_EQUITY × 档位保证金系数（R1=6%…R4=22%）
     名义头寸 = 保证金 × EXCHANGE_LEVERAGE(25)
     qty = 名义 / price（按交易所步进取整）
     """
@@ -502,7 +503,7 @@ def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
 def check_total_notional_cap(equity, existing_notional, new_notional,
                              mult=None):
     """
-    双品种风控硬顶：existing + new ≤ equity × mult（默认 9）。
+    双品种风控硬顶：existing + new ≤ equity × mult（默认 11）。
     返回 (ok, meta)。
     """
     equity = float(equity or 0)
