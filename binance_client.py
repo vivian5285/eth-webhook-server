@@ -484,17 +484,21 @@ class BinanceClient:
             logger.error(f"[账户概览失败] {e}")
             return {}
 
-    def get_principal_wallet_balance(self, asset="USDT"):
+    def get_total_equity(self, asset="USDT"):
         """
-        USDT 合约本金余额（walletBalance）— 唯一合法的档位额度基数。
-        禁止用 available / marginBalance / 浮盈放大权益。
+        账户总权益（marginBalance / totalMarginBalance）— 档位 sizing 与 9x 硬顶基数。
+        含未实现盈亏；禁止用 availableBalance（可用余额）。
         """
         summary = self.get_futures_account_summary(asset)
-        for key in ("wallet_balance", "cross_wallet_balance", "total_wallet_balance"):
+        for key in ("margin_balance", "total_margin_balance", "wallet_balance"):
             val = float(summary.get(key, 0) or 0)
             if val > 0:
                 return val
         return 0.0
+
+    def get_principal_wallet_balance(self, asset="USDT"):
+        """兼容别名 → get_total_equity（清单口径：总权益非可用余额）"""
+        return self.get_total_equity(asset)
 
     def get_all_usdt_position_notionals(self):
         """

@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.46.0-dual-symbol-eth-xau"
+BINANCE_VPS_VERSION = "v13.47.0-vps-checklist-triad-radar"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -1700,8 +1700,8 @@ class PositionSupervisorBinance:
         return False
 
     def _snapshot_sizing_principal(self, reason=""):
-        """全平/开仓前：锁定 USDT 合约本金余额，供本周期开仓与超标核查共用"""
-        principal = binance_client.get_principal_wallet_balance()
+        """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 9x 硬顶共用"""
+        principal = binance_client.get_total_equity()
         if principal > 0:
             self.sizing_principal = principal
             self._save_state()
@@ -1736,7 +1736,7 @@ class PositionSupervisorBinance:
         """
         wallet = float(
             wallet_balance if wallet_balance is not None
-            else binance_client.get_principal_wallet_balance()
+            else binance_client.get_total_equity()
         )
         principal = float(getattr(self, "sizing_principal", 0) or 0)
         if principal > 0:
