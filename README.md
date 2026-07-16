@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.47.0-vps-checklist-triad-radar`**
+**当前版本：`v13.48.0-xau-unit-dingtalk-fix`**
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
@@ -14,7 +14,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version: v13.47.0-vps-checklist-triad-radar
+# 期望 version: v13.48.0-xau-unit-dingtalk-fix
 ```
 
 **Cursor / VPS 逻辑自查：**
@@ -469,6 +469,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 | 版本 | 要点 |
 |------|------|
+| **v13.48** | **钉钉 TP/头寸单位按品种透传 XAU/ETH；缺 symbol 拒绝默念 ETH；全文扫描强化检测** |
 | **v13.47** | **VPS 检查清单 + check_vps_logic.py；总权益 sizing；README 对齐** |
 | **v13.46** | **双品种 ETH+XAU：保证金 sizing、VPS 硬止损、9x 名义硬顶** |
 | v13.45 | TP1 三角对账 — 防 R4 5% 开仓微漂误启雷达 |
@@ -489,4 +490,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.47.0-vps-checklist-triad-radar*
+*GEMINI Quant · 双轨智慧雷达 · v13.48.0-xau-unit-dingtalk-fix*

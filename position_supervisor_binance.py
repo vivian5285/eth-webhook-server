@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.47.0-vps-checklist-triad-radar"
+BINANCE_VPS_VERSION = "v13.48.0-xau-unit-dingtalk-fix"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -547,20 +547,38 @@ class PositionSupervisorBinance:
         if not self.monitoring:
             self._resume_live_monitoring(pos, source="空闲巡检")
 
-    @staticmethod
-    def _call_dingtalk(fn, **kwargs):
-        """兼容 VPS 旧版 dingtalk.py（缺少 verified / swept_dust / radar_sl_ok 等新参数）"""
+    def _dingtalk(self, fn, **kwargs):
+        """钉钉播报：强制绑定本军师品种单位（XAU/ETH）。"""
+        kwargs.setdefault("symbol", self.symbol)
+        kwargs.setdefault("unit_label", self.unit_label)
+        tokens = []
         try:
-            fn(**kwargs)
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            legacy = {
-                k: v for k, v in kwargs.items()
-                if k not in ("verified", "swept_dust", "radar_sl_ok", "action_type")
-            }
-            logger.warning(f"钉钉旧版降级播报 {getattr(fn, '__name__', 'dingtalk')}: {exc}")
-            fn(**legacy)
+            tokens = dingtalk.bind_dingtalk_symbol(
+                symbol=kwargs.get("symbol"),
+                unit_label=kwargs.get("unit_label"),
+            )
+            try:
+                return fn(**kwargs)
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                legacy = {
+                    k: v for k, v in kwargs.items()
+                    if k not in (
+                        "verified", "swept_dust", "radar_sl_ok", "action_type",
+                        "symbol", "unit_label",
+                    )
+                }
+                logger.warning(
+                    f"钉钉旧版降级播报 {getattr(fn, '__name__', 'dingtalk')}: {exc}"
+                )
+                return fn(**legacy)
+        finally:
+            dingtalk.reset_dingtalk_symbol(tokens)
+
+    def _call_dingtalk(self, fn, **kwargs):
+        """兼容旧调用名 → _dingtalk（自动注入 symbol/unit_label）"""
+        return self._dingtalk(fn, **kwargs)
 
     def _start_signal_worker(self):
         if self._signal_worker_started:
@@ -1717,7 +1735,8 @@ class PositionSupervisorBinance:
                 else:
                     vps_meta = None
                 try:
-                    dingtalk.report_principal_snapshot(
+                    self._call_dingtalk(
+                        dingtalk.report_principal_snapshot,
                         reason=reason,
                         principal=principal,
                         regime=self.regime if "开仓前" in reason else None,
@@ -8174,11 +8193,17 @@ def get_supervisor(symbol="ETHUSDT"):
 
 
 def get_supervisor_for_payload(data):
-    """从 TV 载荷路由到对应品种军师；缺省 ETHUSDT。"""
+    """从 TV 载荷路由到对应品种军师；缺 symbol 一律拒绝（禁止默念 ETH）。"""
     from symbol_config import extract_symbol_from_payload, resolve_binance_symbol, active_binance_symbols
     raw = extract_symbol_from_payload(data) if isinstance(data, dict) else ""
-    meta = resolve_binance_symbol(raw or "ETHUSDT")
-    sym = meta["symbol"]
+    if not str(raw or "").strip():
+        logger.warning("[路由] 载荷缺少 symbol/ticker → 拒绝（防 ETH/XAU 误判）")
+        return None, "MISSING_SYMBOL"
+    meta = resolve_binance_symbol(raw, default="")
+    sym = meta.get("symbol") or ""
+    if not sym:
+        logger.warning(f"[路由] 无法识别品种 raw={raw!r} → 拒绝")
+        return None, str(raw or "UNKNOWN")
     allowed = set(active_binance_symbols())
     if sym not in allowed:
         return None, sym

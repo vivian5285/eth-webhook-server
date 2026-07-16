@@ -106,9 +106,29 @@ def audit_module1_symbol(a: Audit):
     routed = resolve_binance_symbol(raw)
     a.check("网关 XAU 路由", routed["symbol"] == "XAUUSDT", routed["symbol"])
 
+    # 缺 symbol 不得默念 ETH
+    empty = resolve_binance_symbol("", default="")
+    a.check("缺 ticker 不默念 ETH", empty.get("symbol") == "", str(empty.get("symbol")))
+
+    # 全文扫描兜底优先 XAU
+    scanned = extract_symbol_from_payload({"action": "SHORT", "note": "BINANCE:XAUUSDT.P trigger"})
+    a.check("全文扫描 XAU", "XAU" in scanned.upper(), scanned)
+
     app_src = _read(os.path.join(ROOT, "app.py"))
-    a.check("1.4 未知品种 400", "Unsupported symbol" in app_src)
+    a.check("1.4 未知品种 400", "Unsupported" in app_src)
     a.check("1.5 信号去重", "SIGNAL_DEDUP_SEC" in _read(os.path.join(ROOT, "position_supervisor_binance.py")))
+
+    # 钉钉单位不得硬编码黄金为 ETH
+    from dingtalk import _resolve_unit, _format_tp_audit, bind_dingtalk_symbol, reset_dingtalk_symbol
+    a.check("钉钉 XAU 单位", _resolve_unit(None, "XAUUSDT") == "XAU")
+    tokens = bind_dingtalk_symbol(symbol="XAUUSDT", unit_label="XAU")
+    try:
+        txt = _format_tp_audit({
+            "levels": [{"level": 1, "price": 4022.85, "qty": 0.073, "actual_qty": 0.073, "status": "ok"}]
+        })
+        a.check("TP 审计写 XAU 不写 ETH", "XAU" in txt and "ETH" not in txt, txt[:80])
+    finally:
+        reset_dingtalk_symbol(tokens)
 
 
 def audit_module2_sizing(a: Audit):

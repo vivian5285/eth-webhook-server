@@ -64,7 +64,8 @@ def webhook(ticker=None):
         logger.warning(f"[Webhook] 不支持的品种: {sym}")
         return jsonify({
             "status": "error",
-            "message": f"Unsupported symbol: {sym}",
+            "message": f"Unsupported or missing symbol: {sym}",
+            "hint": "TV JSON must include symbol/ticker e.g. ETHUSDT.P or XAUUSDT.P",
             "allowed": active_binance_symbols(),
         }), 400
 

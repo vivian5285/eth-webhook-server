@@ -8,6 +8,7 @@ import hashlib
 import base64
 import urllib.parse
 import logging
+import contextvars
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -47,7 +48,60 @@ DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 EXCHANGE_LABEL = "币安 Binance"
 LEVERAGE_LABEL = f"{int(EXCHANGE_LEVERAGE)}x"
 DEFAULT_LEVERAGE = EXCHANGE_LEVERAGE
-UNIT_LABEL = "ETH"
+UNIT_LABEL = "ETH"  # 仅缺省；实盘必须传 unit_label / symbol
+
+_ctx_unit = contextvars.ContextVar("dingtalk_unit", default=None)
+_ctx_symbol = contextvars.ContextVar("dingtalk_symbol", default=None)
+
+
+def _resolve_unit(unit_label=None, symbol=None):
+    """按品种解析数量单位：XAUUSDT → XAU，ETHUSDT → ETH。禁止黄金单显示 ETH。"""
+    if unit_label:
+        u = str(unit_label).strip().upper()
+        if u:
+            return u
+    sym = str(symbol or "").strip().upper().replace(".P", "")
+    if ":" in sym:
+        sym = sym.split(":")[-1]
+    if "XAU" in sym or "GOLD" in sym:
+        return "XAU"
+    if "ETH" in sym:
+        return "ETH"
+    # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
+    ctx_u = _ctx_unit.get()
+    if ctx_u:
+        return str(ctx_u).strip().upper()
+    ctx_s = str(_ctx_symbol.get() or "").strip().upper().replace(".P", "")
+    if ":" in ctx_s:
+        ctx_s = ctx_s.split(":")[-1]
+    if "XAU" in ctx_s or "GOLD" in ctx_s:
+        return "XAU"
+    if "ETH" in ctx_s:
+        return "ETH"
+    return UNIT_LABEL
+
+
+def _u(unit_label=None, symbol=None):
+    """当前播报单位（优先显式参数 → 上下文 → 缺省 ETH）"""
+    return _resolve_unit(unit_label, symbol)
+
+
+def bind_dingtalk_symbol(symbol=None, unit_label=None):
+    """军师播报前绑定品种上下文，避免 TP/雷达文案误写 ETH。"""
+    tokens = []
+    if unit_label:
+        tokens.append(_ctx_unit.set(str(unit_label).strip().upper()))
+    if symbol:
+        tokens.append(_ctx_symbol.set(str(symbol).strip().upper()))
+    return tokens
+
+
+def reset_dingtalk_symbol(tokens):
+    for t in tokens or []:
+        try:
+            t.var.reset(t)
+        except Exception:
+            pass
 
 # 币安专属金色色板（与深币 #4B0082 紫金完全区分）
 G_TITLE = "#F3BA2F"
@@ -190,7 +244,8 @@ def get_regime_name(regime_code):
     return _g(names.get(regime_code, "未知状态"), shade[idx - 1] if idx else G_MUTED)
 
 
-def _format_tp_compare(tp_pxs, tv_tps=None):
+def _format_tp_compare(tp_pxs, tv_tps=None, unit_label=None, symbol=None):
+    unit = _resolve_unit(unit_label, symbol)
     tp_str = ""
     for i, px in enumerate(tp_pxs):
         if px <= 0:
@@ -201,13 +256,14 @@ def _format_tp_compare(tp_pxs, tv_tps=None):
             diff = px - tv_tps[i]
             line += f" | TV理论 `{tv_tps[i]:.2f}` (偏差 {diff:+.2f})"
         tp_str += line
-    return tp_str or "暂无有效 TP 价格"
+    return tp_str or f"暂无有效 TP 价格 ({unit})"
 
 
-def _format_tp_audit(audit, tv_tps=None):
-    """按档位展示：期望数量@TV价 vs 实盘状态"""
+def _format_tp_audit(audit, tv_tps=None, unit_label=None, symbol=None):
+    """按档位展示：期望数量@TV价 vs 实盘状态（单位随品种）"""
+    unit = _resolve_unit(unit_label, symbol)
     if not audit or not audit.get("levels"):
-        return _format_tp_compare(tv_tps or [], tv_tps)
+        return _format_tp_compare(tv_tps or [], tv_tps, unit_label=unit, symbol=symbol)
     lines = []
     for lv in audit["levels"]:
         if lv.get("price", 0) <= 0:
@@ -215,16 +271,16 @@ def _format_tp_audit(audit, tv_tps=None):
         prefix = "" if not lines else "\n\n  ➔ "
         if lv.get("status") == "ok":
             lines.append(
-                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` {UNIT_LABEL} @ `{lv['price']:.2f}` "
-                f"(比例期望 `{lv['qty']}` {UNIT_LABEL})"
+                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` {unit} @ `{lv['price']:.2f}` "
+                f"(比例期望 `{lv['qty']}` {unit})"
             )
         else:
             lines.append(
-                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` {UNIT_LABEL} @ `{lv['price']:.2f}` "
+                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` {unit} @ `{lv['price']:.2f}` "
                 f"→ 状态 `{lv['status']}`"
                 + (f" 实盘 `{lv.get('actual_qty', 0)}`" if lv.get("actual_qty") else "")
             )
-    return "".join(lines) or "暂无有效 TP 审计"
+    return "".join(lines) or f"暂无有效 TP 审计 ({unit})"
 
 
 def _format_vps_sizing_basis(principal, meta=None, leverage=None):
@@ -268,10 +324,12 @@ def _format_sizing_basis(principal, margin_pct, leverage, margin_usdt=None):
 
 
 def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, target_qty=None,
-                              leverage=None, verify_note="", vps_sizing_meta=None):
+                              leverage=None, verify_note="", vps_sizing_meta=None,
+                              symbol=None, unit_label=None):
     """全平/开仓前本金快照 — 管理员可读"""
     lev = leverage or LEVERAGE_LABEL.replace("x", "")
     meta = vps_sizing_meta or {}
+    unit = _resolve_unit(unit_label, symbol)
     data = {
         "📸 快照时机": _g(reason or "本金重置", G_MAIN),
         "💰 合约本金": _g(f"**{float(principal):.2f}** USDT（walletBalance，非可用保证金）", G_ACCENT),
@@ -294,7 +352,7 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
                 G_LIGHT,
             )
     if target_qty is not None and float(target_qty) > 0:
-        data["🎯 目标仓位"] = _g(f"**{target_qty}** {UNIT_LABEL}", G_MAIN)
+        data["🎯 目标仓位"] = _g(f"**{target_qty}** {unit}", G_MAIN)
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
     send_alert("📸 本金快照 · 档位预算基数已锁定", data, G_TITLE)
@@ -310,7 +368,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         if tv_price > 0 else "未知"
     )
     lev = leverage or DEFAULT_LEVERAGE
-    unit = unit_label or UNIT_LABEL
+    unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or "").upper() or "ETHUSDT"
 
     data = {
@@ -324,7 +382,8 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
         "📦 唯一头寸": _g(f"**{qty}** {unit} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
         "🕸️ 止盈布防比对": _g(
-            _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tp_pxs, tv_tps),
+            _format_tp_audit(tp_audit, tv_tps, unit_label=unit, symbol=sym)
+            if tp_audit else _format_tp_compare(tp_pxs, tv_tps, unit_label=unit, symbol=sym),
             G_LIGHT,
         ),
         "📏 波动参考": _g(f"ATR = {atr:.4f}", G_MUTED),
@@ -355,7 +414,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
 def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verified=True):
     data = {
         "🛡️ 战术动作": _g(action_msg, G_ACCENT),
-        "📦 利润头寸": _g(f"`{qty}` {UNIT_LABEL}", G_MAIN),
+        "📦 利润头寸": _g(f"`{qty}` {_u()}", G_MAIN),
         "💰 原始成本": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
         "🔒 最新硬防线": _g(f"**{new_sl:.2f}** USDT (物理保本单已挂)", G_LIGHT),
         "📡 实盘核查": _verify_line(
@@ -373,8 +432,8 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
                    verify_note="", verified=True):
     data = {
         "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
-        "📦 本次止盈": _g(f"`{filled_qty}` {UNIT_LABEL}", G_ACCENT),
-        "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
+        "📦 本次止盈": _g(f"`{filled_qty}` {_u()}", G_ACCENT),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
         "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
         "🧭 方向/档位": _g(f"{side} | TV {regime} 档", G_MUTED),
         "📡 实盘核查": _verify_line(
@@ -397,7 +456,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     data = {
         "触发机制": _g("🛡️ 智慧大脑态势感知同步", G_MAIN),
         "实盘动作": action_txt,
-        "数量变化": _g(f"`{old_qty}` ➔ `{new_qty}` {UNIT_LABEL}", G_ACCENT),
+        "数量变化": _g(f"`{old_qty}` ➔ `{new_qty}` {_u()}", G_ACCENT),
         "最新均价": _g(f"**{new_entry_price:.2f}** USDT", G_MAIN),
         "后续动作": _verify_line(
             verify_note if not verified else "",
@@ -466,7 +525,7 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
     if entry_px is not None and float(entry_px or 0) > 0:
         data["💰 开仓成本"] = _g(f"`{float(entry_px):.2f}` USDT", G_MUTED)
     if closed_qty is not None and float(closed_qty or 0) > 0:
-        data["📦 平仓数量"] = _g(f"**{float(closed_qty):.3f}** {UNIT_LABEL}", G_MAIN)
+        data["📦 平仓数量"] = _g(f"**{float(closed_qty):.3f}** {_u()}", G_MAIN)
     if live_exit_px is not None and float(live_exit_px or 0) > 0:
         data["💹 平仓价格"] = _g(f"`{float(live_exit_px):.2f}` USDT", G_ACCENT)
     elif tv_price is not None and float(tv_price or 0) > 0:
@@ -491,8 +550,8 @@ def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels
     consumed_txt = ", ".join(f"TP{lv}" for lv in (consumed_levels or [])) or "无"
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 开单头寸": _g(f"**{initial_qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MUTED),
-        "📦 现仓剩余": _g(f"**{live_qty}** {UNIT_LABEL} (= TP2+TP3)", G_MAIN),
+        "📦 开单头寸": _g(f"**{initial_qty}** {_u()} @ `{entry:.2f}`", G_MUTED),
+        "📦 现仓剩余": _g(f"**{live_qty}** {_u()} (= TP2+TP3)", G_MAIN),
         "✂️ 已成交档": _g(consumed_txt, G_ACCENT),
         "🕸️ 剩余止盈审计": _g(
             _format_tp_audit(tp_audit, []) if tp_audit else "核查中",
@@ -559,12 +618,12 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
 
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
+        "📦 核实头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
     }
     if initial_qty and float(initial_qty) > float(qty) + 0.001:
         consumed_txt = ", ".join(f"TP{lv}" for lv in (tp_consumed_levels or [])) or "推断中"
-        data["📦 开单原始"] = _g(f"**{initial_qty}** {UNIT_LABEL}", G_MUTED)
+        data["📦 开单原始"] = _g(f"**{initial_qty}** {_u()}", G_MUTED)
         data["✂️ 已成交档"] = _g(consumed_txt, G_ACCENT)
     data.update({
         "📡 最新 TV 信号": _g(f"{tv_ref or '无日志记录'} ({tv_align_txt})", G_MUTED),
@@ -640,7 +699,7 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
         ),
         "📏 理论价差": _g(f"{diff_pct:.3f}% / 阈值 {threshold_pct}%", G_ACCENT),
         "🔢 档位": _g(f"开仓 R{open_regime} · TV R{tv_regime}", G_MUTED),
-        "📦 持有": _g(f"**{qty}** {UNIT_LABEL}" if qty > 0 else "无持仓", G_ACCENT),
+        "📦 持有": _g(f"**{qty}** {_u()}" if qty > 0 else "无持仓", G_ACCENT),
     }
     if tp_audit:
         data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
@@ -664,7 +723,7 @@ def report_system_alert(title, detail, level="紧急", suggestion=""):
 def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 核实头寸": _g(f"**{qty}** {UNIT_LABEL}", G_MAIN),
+        "📦 核实头寸": _g(f"**{qty}** {_u()}", G_MAIN),
         "🕸️ TP123 比例审计": _g(
             _format_tp_audit(tp_audit, None) if tp_audit else "已对齐",
             G_MAIN,
@@ -685,7 +744,7 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📊 TV 档位上限": _g(
-            f"**R{regime}** 档 · 保证金比例 **{margin_pct:.0%}** · 允许持仓 **{target_qty}** {UNIT_LABEL}",
+            f"**R{regime}** 档 · 保证金比例 **{margin_pct:.0%}** · 允许持仓 **{target_qty}** {_u()}",
             G_ACCENT,
         ),
         "📐 核算公式": _g(
@@ -695,11 +754,11 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
             G_LIGHT,
         ),
         "⚖️ 超标情况": _g(
-            f"实盘 **{old_qty}** {UNIT_LABEL} 超出目标 **{excess:.3f}** {UNIT_LABEL}"
-            + (f" · 本次裁减 **{trim_qty}** {UNIT_LABEL}" if trim_qty else ""),
+            f"实盘 **{old_qty}** {_u()} 超出目标 **{excess:.3f}** {_u()}"
+            + (f" · 本次裁减 **{trim_qty}** {_u()}" if trim_qty else ""),
             G_ACCENT,
         ),
-        "✂️ 裁减结果": _g(f"`{old_qty}` ➔ `{new_qty}` {UNIT_LABEL}", G_MAIN),
+        "✂️ 裁减结果": _g(f"`{old_qty}` ➔ `{new_qty}` {_u()}", G_MAIN),
         "🕸️ TP123 重挂": _g(
             _format_tp_audit(tp_audit, None) if tp_audit else "已按新仓位重挂",
             G_MAIN,
@@ -799,7 +858,7 @@ def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
 
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📊 档位": get_regime_name(regime),
         "📡 TV底线 tv_sl": _g(f"**{tv_sl:.2f}** USDT", G_ACCENT),
@@ -842,7 +901,7 @@ def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
 
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{float(entry or 0):.2f}` USDT", G_MUTED),
         "📊 档位": get_regime_name(regime),
         "📉 原 TP123": _g(_fmt(old_tps), G_MUTED),
@@ -886,9 +945,9 @@ def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entr
             f"开仓 R{int(open_regime or regime)} → **{tp_ratio_label or format_regime_tp_ratios_label(open_regime or regime)}%**",
             G_LIGHT,
         ),
-        "➕ 追加数量": _g(f"**+{add_qty}** {UNIT_LABEL}", G_MAIN),
+        "➕ 追加数量": _g(f"**+{add_qty}** {_u()}", G_MAIN),
         "📦 持仓变化": _g(
-            f"`{old_qty}` → **`{new_qty}`** {UNIT_LABEL}",
+            f"`{old_qty}` → **`{new_qty}`** {_u()}",
             G_LIGHT,
         ),
         "💰 均价变化": _g(
@@ -935,7 +994,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
-        "📦 保护头寸": _g(f"**{live_qty}** {UNIT_LABEL} 全平", G_MAIN),
+        "📦 保护头寸": _g(f"**{live_qty}** {_u()} 全平", G_MAIN),
         "🛡️ VPS硬止损": _g(
             vps_hard_sl_note or f"`{stop_px:.2f}` USDT Stop-Limit",
             G_ACCENT,
@@ -957,8 +1016,8 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "🛡️ 触发止损": _g(f"**-{tier_pct:.0%}** 硬止损 @ `{tier_price:.2f}` USDT", G_ACCENT),
-        "✂️ 本次平仓": _g(f"`{filled_qty}` {UNIT_LABEL}", G_MAIN),
-        "📊 剩余头寸": _g(f"`{remain_qty}` {UNIT_LABEL}", G_MAIN),
+        "✂️ 本次平仓": _g(f"`{filled_qty}` {_u()}", G_MAIN),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
         "✅ 风控动作": _g("TV硬止损成交 → TP123 已重算", G_MAIN),
     }
     if verify_note:
@@ -971,7 +1030,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
-        "📦 剩余头寸": _g(f"**{live_qty}** {UNIT_LABEL}", G_MAIN),
+        "📦 剩余头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "📈 价格方向": _g("**TP1 限价成交** → 交棒雷达保本", G_LIGHT),
         "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 VPS硬止损", G_ACCENT),
         "📡 雷达状态": _g(
@@ -998,7 +1057,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
                            shield_cleared=True, verify_note="", verified=True):
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 利润头寸": _g(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", G_MAIN),
+        "📦 利润头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
         "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段制·TP1成交后)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
