@@ -18,6 +18,8 @@ from webhook_parser import (
     classify_tv_close,
     compute_vps_open_qty,
     compute_vps_add_qty,
+    check_total_notional_cap,
+    MAX_TOTAL_NOTIONAL_MULT,
     compute_vps_hard_sl,
     compute_vps_hard_sl_distance,
     compute_vps_hard_sl_limit_price,
@@ -59,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.45.0-tp1-triad-reconcile"
+BINANCE_VPS_VERSION = "v13.46.0-dual-symbol-eth-xau"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -110,16 +112,24 @@ EXCHANGE_JOURNAL = "logs/binance_exchange_journal.jsonl"
 
 
 class PositionSupervisorBinance:
-    def __init__(self):
-        self.symbol = "ETHUSDT"
+    def __init__(self, symbol="ETHUSDT"):
+        from symbol_config import resolve_binance_symbol
+        meta = resolve_binance_symbol(symbol)
+        self.symbol = meta["symbol"]
+        self.unit_label = meta.get("unit") or "ETH"
+        self.qty_step = float(meta.get("qty_step") or 0.001)
+        self.min_qty = float(meta.get("min_qty") or 0.001)
+        self.dust_qty = float(meta.get("dust_qty") or DUST_QTY_ETH)
+        self.atr_fallback_symbol = meta.get("atr_fallback_symbol") or self.symbol
         self.monitoring = False
         self._lock = threading.Lock()
 
+        # 钉钉展示用档位保证金%（与双品种文档一致）
         self.regime_settings = {
-            1: {"margin": 0.15, "ratios": get_regime_tp_ratios(1)},
-            2: {"margin": 0.25, "ratios": get_regime_tp_ratios(2)},
-            3: {"margin": 0.35, "ratios": get_regime_tp_ratios(3)},
-            4: {"margin": 0.50, "ratios": get_regime_tp_ratios(4)},
+            1: {"margin": 0.05, "ratios": get_regime_tp_ratios(1)},
+            2: {"margin": 0.10, "ratios": get_regime_tp_ratios(2)},
+            3: {"margin": 0.15, "ratios": get_regime_tp_ratios(3)},
+            4: {"margin": 0.18, "ratios": get_regime_tp_ratios(4)},
         }
         self.leverage = EXCHANGE_LEVERAGE
         self.tv_sizing_leverage = EXCHANGE_LEVERAGE
@@ -185,10 +195,24 @@ class PositionSupervisorBinance:
         self._ws_tp1_fill_hint = False
         self._tv_sl_missing_alerted = False
 
-        self.state_file = os.path.join(_BASE_DIR, 'binance_vps_state.json')
+        self.state_file = os.path.join(
+            _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
+        )
+        legacy = os.path.join(_BASE_DIR, 'binance_vps_state.json')
+        if (
+            self.symbol == "ETHUSDT"
+            and not os.path.exists(self.state_file)
+            and os.path.exists(legacy)
+        ):
+            try:
+                import shutil
+                shutil.copy2(legacy, self.state_file)
+                logger.info(f"📦 已迁移旧状态 → {self.state_file}")
+            except Exception as e:
+                logger.warning(f"旧状态迁移失败: {e}")
         logger.info(
-            f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] 军师托管版已加载："
-            f"WS实时盘口+TP1雷达5阶段 · {self.leverage}x 杠杆"
+            f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] {self.symbol} 军师已加载："
+            f"双品种·TP1三角对账·雷达5阶段 · {self.leverage}x · {self.unit_label}"
         )
         self._start_signal_worker()
         self._start_idle_flat_patrol()
@@ -1800,9 +1824,59 @@ class PositionSupervisorBinance:
         qty, meta = compute_vps_open_qty(
             principal, px, sl, int(regime if regime is not None else self.regime),
             leverage=EXCHANGE_LEVERAGE,
+            qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
+            min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
         )
         meta["principal"] = principal
+        meta["symbol"] = self.symbol
         return float(qty or 0), meta
+
+    def _other_symbols_notional(self, exclude_symbol=None):
+        """账户其它品种名义敞口合计（不含本品种）。"""
+        exclude = str(exclude_symbol or self.symbol).upper()
+        by_sym, total = binance_client.get_all_usdt_position_notionals()
+        other = 0.0
+        for sym, notion in (by_sym or {}).items():
+            if str(sym).upper() == exclude:
+                continue
+            other += float(notion or 0)
+        return round(other, 2), by_sym, total
+
+    def _assert_notional_cap_or_reject(self, qty, price, sizing_meta=None):
+        """双品种硬顶：其它品种名义 + 本笔名义 ≤ equity×9。"""
+        equity = float(
+            (sizing_meta or {}).get("principal")
+            or self._resolve_cap_sizing_base()
+            or 0
+        )
+        new_notional = float(qty or 0) * float(price or 0)
+        other, by_sym, all_total = self._other_symbols_notional(self.symbol)
+        # 本品种若已有仓，开仓流程本应先平；保守起见从 existing 去掉本品种
+        existing = other
+        ok, meta = check_total_notional_cap(
+            equity, existing, new_notional, mult=MAX_TOTAL_NOTIONAL_MULT,
+        )
+        meta["by_symbol"] = by_sym
+        meta["symbol"] = self.symbol
+        if ok:
+            logger.info(
+                f"📐 敞口校验通过 {self.symbol}: 其它 {existing:.0f}U + 本笔 {new_notional:.0f}U "
+                f"= {meta['total_notional']:.0f}U ≤ 本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}"
+            )
+            return True, meta
+        logger.error(
+            f"🚫 敞口硬顶拦截 {self.symbol}: 其它 {existing:.0f}U + 本笔 {new_notional:.0f}U "
+            f"= {meta['total_notional']:.0f}U > 上限 {meta['cap']:.0f}U "
+            f"(本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}) | 盘口 {by_sym}"
+        )
+        dingtalk.report_system_alert(
+            f"开仓拦截·名义敞口超限 [{self.symbol}]",
+            f"本金 {equity:.0f}U · 上限 {meta['cap']:.0f}U ({MAX_TOTAL_NOTIONAL_MULT:.0f}x)\n"
+            f"其它品种名义 {existing:.0f}U + 本笔 {new_notional:.0f}U "
+            f"= {meta['total_notional']:.0f}U\n"
+            f"盘口名义 {by_sym}",
+        )
+        return False, meta
 
     def _tv_sizing_note(self, qty, meta=None, entry_type="OPEN"):
         return format_vps_sizing_note(meta or {}, qty=qty, entry_type=entry_type)
@@ -1883,7 +1957,7 @@ class PositionSupervisorBinance:
             if slice_trim <= 0:
                 new_sz = cur
                 break
-            binance_client.place_market_order(close_side, slice_trim, reduce_only=True)
+            binance_client.place_market_order(close_side, slice_trim, symbol=self.symbol, reduce_only=True)
             time.sleep(1.0)
             verified = self._wait_verify(
                 lambda: self._get_active_position(),
@@ -2081,7 +2155,7 @@ class PositionSupervisorBinance:
                 break
             close_side = "SELL" if pos["side"] == "LONG" else "BUY"
             logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {pos['size']} ETH reduceOnly")
-            binance_client.place_market_order(close_side, pos["size"], reduce_only=True)
+            binance_client.place_market_order(close_side, pos["size"], symbol=self.symbol, reduce_only=True)
             time.sleep(1.0)
         self.watched_qty = 0.0
         self.initial_qty = 0.0
@@ -2584,8 +2658,7 @@ class PositionSupervisorBinance:
                         binance_client.cancel_order(self.symbol, oid)
                         actions += 1
                         time.sleep(0.3)
-                    res = binance_client.place_limit_order(
-                        close_side, target_q, price, reduce_only=True,
+                    res = binance_client.place_limit_order(close_side, target_q, price, symbol=self.symbol, reduce_only=True,
                     )
                     if res:
                         actions += 1
@@ -2595,8 +2668,7 @@ class PositionSupervisorBinance:
                     time.sleep(0.35)
                 continue
 
-            res = binance_client.place_limit_order(
-                close_side, target_q, price, reduce_only=True,
+            res = binance_client.place_limit_order(close_side, target_q, price, symbol=self.symbol, reduce_only=True,
             )
             if res:
                 actions += 1
@@ -2789,10 +2861,9 @@ class PositionSupervisorBinance:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if use_stop_limit:
             limit_px = compute_vps_hard_sl_limit_price(self.current_side, trigger_px)
-            return binance_client.place_stop_limit_order(
-                close_side, live_qty, trigger_px, limit_price=limit_px,
+            return binance_client.place_stop_limit_order(close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=limit_px,
             )
-        return binance_client.place_stop_market_order(close_side, trigger_px, quantity=None)
+        return binance_client.place_stop_market_order(close_side, trigger_px, symbol=self.symbol, quantity=None)
 
     def _sync_exchange_stop(self, live_qty, radar_sl=None, reason="", force=False):
         """
@@ -2897,8 +2968,7 @@ class PositionSupervisorBinance:
                 continue
             ok = False
             for attempt in range(max(1, retries + 1)):
-                res = binance_client.place_limit_order(
-                    close_side, q, px, reduce_only=True,
+                res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True,
                 )
                 if res:
                     ok = True
@@ -4190,7 +4260,7 @@ class PositionSupervisorBinance:
                     binance_client.cancel_order(self.symbol, order=o)
                     time.sleep(0.25)
             logger.info(f"  + 补挂 TP{lv['level']} @ {px:.2f} qty={q} ETH")
-            if binance_client.place_limit_order(close_side, q, px, reduce_only=True):
+            if binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True):
                 placed += 1
             time.sleep(0.4)
         return placed
@@ -4357,7 +4427,7 @@ class PositionSupervisorBinance:
         sl_placed = self._ensure_radar_sl(new_sl, live_qty)
         if not sl_placed and not self._has_stop_sl_near(new_sl, exclude_shield=False):
             close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-            sl_placed = binance_client.place_stop_market_order(close_side, new_sl) is not None
+            sl_placed = binance_client.place_stop_market_order(close_side, new_sl, symbol=self.symbol) is not None
         time.sleep(0.4)
         return bool(sl_placed or self._has_stop_sl_near(new_sl, exclude_shield=False))
 
@@ -4748,7 +4818,7 @@ class PositionSupervisorBinance:
             )
             if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
                 close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-                binance_client.place_stop_market_order(close_side, dynamic_sl)
+                binance_client.place_stop_market_order(close_side, dynamic_sl, symbol=self.symbol)
             return matched, pending_prices, expected, False
 
         self._cancel_orphan_tp_orders(live_qty)
@@ -4765,7 +4835,7 @@ class PositionSupervisorBinance:
             logger.info(f"✅ 增量补挂成功 ({matched}/{expected}) @ {audit['pending_prices']}")
             if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
                 close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-                binance_client.place_stop_market_order(close_side, dynamic_sl)
+                binance_client.place_stop_market_order(close_side, dynamic_sl, symbol=self.symbol)
             return matched, audit["pending_prices"], expected, True
 
         logger.warning(
@@ -5092,7 +5162,7 @@ class PositionSupervisorBinance:
                 f"疑似残留 TP 成交 → 立即扫尾",
             )
             close_side = "SELL" if side == "LONG" else "BUY"
-            res = binance_client.place_market_order(close_side, amt, reduce_only=True)
+            res = binance_client.place_market_order(close_side, amt, symbol=self.symbol, reduce_only=True)
             self._log_exchange_api("孤儿反向扫尾", f"{close_side} {amt} ETH", res)
             time.sleep(1.0)
             self._purge_all_defense_orders_on_flat("孤儿反向扫尾后撤单")
@@ -6462,7 +6532,7 @@ class PositionSupervisorBinance:
             f"➕ [{entry_type}] {action} 追加 {add_qty} ETH | "
             f"{self._tv_sizing_note(add_qty, meta, entry_type=entry_type)}"
         )
-        order = binance_client.place_market_order(action, add_qty)
+        order = binance_client.place_market_order(action, add_qty, symbol=self.symbol)
         if not order:
             dingtalk.report_system_alert(
                 f"{entry_type} 下单失败",
@@ -6741,22 +6811,34 @@ class PositionSupervisorBinance:
             binance_client.set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
-            logger.info(f"📐 仓位预算: {budget_txt} (名义 ~{notional:.0f}U)")
+            logger.info(f"📐 仓位预算 [{self.symbol}]: {budget_txt} (名义 ~{notional:.0f}U)")
+
+            cap_ok, _cap_meta = self._assert_notional_cap_or_reject(
+                qty, curr_px, sizing_meta=sizing_meta,
+            )
+            if not cap_ok:
+                return
 
             if not self._wait_verify(self._verify_flat, retries=4, delay=0.35):
                 logger.error("开仓中止：市价下单前盘口仍非空")
                 dingtalk.report_system_alert(
-                    "开仓中止 · 下单前盘口非空",
-                    f"TV {action} 目标 {qty} ETH，下单前 REST 仍显示持仓，已拒绝叠仓",
+                    f"开仓中止 · 下单前盘口非空 [{self.symbol}]",
+                    f"TV {action} 目标 {qty} {self.unit_label}，下单前 REST 仍显示持仓，已拒绝叠仓",
                 )
                 return
 
             open_side = "BUY" if action == "LONG" else "SELL"
-            logger.info(f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 个ETH | 档位 {self.regime}")
-            order = binance_client.place_market_order(action, qty)
+            logger.info(
+                f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} {self.unit_label} "
+                f"| {self.symbol} | 档位 {self.regime}"
+            )
+            order = binance_client.place_market_order(action, qty, symbol=self.symbol)
             if not order:
                 logger.error("开仓失败：市价单未成交")
-                dingtalk.report_system_alert("开仓失败", f"TV {action} {qty} ETH 市价单失败")
+                dingtalk.report_system_alert(
+                    f"开仓失败 [{self.symbol}]",
+                    f"TV {action} {qty} {self.unit_label} 市价单失败",
+                )
                 return
             time.sleep(2.0)
 
@@ -6768,13 +6850,13 @@ class PositionSupervisorBinance:
             real_qty = pos["size"]
             if real_qty > qty * OPEN_OVERSIZE_RATIO:
                 logger.error(
-                    f"🚨 持仓超标: 目标 {qty} ETH，实盘 {real_qty} ETH "
+                    f"🚨 持仓超标: 目标 {qty} {self.unit_label}，实盘 {real_qty} "
                     f"(>{qty * OPEN_OVERSIZE_RATIO:.3f})，启动裁减"
                 )
                 dingtalk.report_system_alert(
-                    "持仓超标 · 自动裁减",
-                    f"目标 {qty} ETH (保证金 {margin_usdt:.0f}U)，"
-                    f"实盘 {real_qty} ETH @ {pos['entry_price']:.2f}，正在 reduceOnly 裁减",
+                    f"持仓超标 · 自动裁减 [{self.symbol}]",
+                    f"目标 {qty} {self.unit_label} (保证金 {margin_usdt:.0f}U)，"
+                    f"实盘 {real_qty} @ {pos['entry_price']:.2f}，正在 reduceOnly 裁减",
                 )
                 real_qty = self._trim_position_to_target(qty, action)
                 pos = self._get_active_position()
@@ -6789,7 +6871,7 @@ class PositionSupervisorBinance:
             self.add_count = 0
             self._protect_and_monitor(
                 real_qty, pos["entry_price"],
-                budget_note=f"{budget_txt} | ",
+                budget_note=f"[{self.symbol}] {budget_txt} | ",
                 target_qty=qty,
                 sizing_meta=sizing_meta,
             )
@@ -6917,6 +6999,8 @@ class PositionSupervisorBinance:
                 leverage=EXCHANGE_LEVERAGE,
                 vps_sizing_meta=sizing_meta,
                 tv_field_sources=getattr(self, "_last_tv_field_sources", {}),
+                symbol=self.symbol,
+                unit_label=self.unit_label,
             )
             if expected > 0 and matched < expected:
                 self._open_tp_unconfirmed = True
@@ -6926,8 +7010,8 @@ class PositionSupervisorBinance:
                     if dupes else "请查 logs/binance_brain.log"
                 )
                 dingtalk.report_system_alert(
-                    "开仓后限价止盈未全部挂上",
-                    f"{self.current_side} {live_qty} ETH | 仅 {matched}/{expected} 档 | "
+                    f"开仓后限价止盈未全部挂上 [{self.symbol}]",
+                    f"{self.current_side} {live_qty} {self.unit_label} | 仅 {matched}/{expected} 档 | "
                     f"{self._format_audit_summary(audit)} | {hint}",
                 )
         else:
@@ -7237,8 +7321,14 @@ class PositionSupervisorBinance:
         )
 
     def _on_user_data_ws_event(self, event_type, data):
-        """WS 事件脉冲：下一轮哨兵立即对齐盘口；LIMIT 近 TP1 成交仅作提示，不直接启雷达"""
+        """WS 事件脉冲：仅处理本品种；LIMIT 近 TP1 成交仅作提示，不直接启雷达"""
         et = str(event_type or "")
+        # 多品种共听同一 listenKey：非本品种订单/仓位变动忽略（ACCOUNT 仍可脉冲）
+        if et == "ORDER_TRADE_UPDATE":
+            o = (data or {}).get("o") or {}
+            sym = str(o.get("s") or "").upper()
+            if sym and sym != self.symbol.upper():
+                return
         if et in ("ACCOUNT_UPDATE", "ORDER_TRADE_UPDATE", "CONDITIONAL_ORDER_TRIGGER",
                   "listenKeyExpired"):
             self._ws_defense_pulse = True
@@ -7263,15 +7353,14 @@ class PositionSupervisorBinance:
                     ):
                         self._ws_tp1_fill_hint = True
                         logger.info(
-                            f"📡 UD-WS TP1 限价成交提示 @ {px:.2f} "
+                            f"📡 [{self.symbol}] UD-WS TP1 限价成交提示 @ {px:.2f} "
                             f"(仍需哨兵减仓核实后才启雷达)"
                         )
                 elif otype in ("STOP", "STOP_MARKET") and status in (
                     "NEW", "PARTIALLY_FILLED", "FILLED",
                 ):
-                    # 盘口止损变动 → 允许重新播报状态；绝不据此武装雷达
                     self._tv_sl_missing_alerted = False
-            logger.debug(f"📡 UD-WS 脉冲 {et}")
+            logger.debug(f"📡 [{self.symbol}] UD-WS 脉冲 {et}")
 
     def _tp1_distance(self):
         if self.tv_tps[0] > 0 and self.watched_entry:
@@ -7643,7 +7732,7 @@ class PositionSupervisorBinance:
         for lv in self._expected_tp_levels(live_qty):
             q, px = lv["qty"], lv["price"]
             if q > 0 and px > 0:
-                res = binance_client.place_limit_order(close_side, q, px, reduce_only=True)
+                res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True)
                 if res:
                     placed += 1
                 time.sleep(0.35)
@@ -7670,7 +7759,7 @@ class PositionSupervisorBinance:
             close_side = "SELL" if amt > 0 else "BUY"
             live_sz = round(abs(amt), 3)
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
-            binance_client.place_market_order(close_side, live_sz, reduce_only=True)
+            binance_client.place_market_order(close_side, live_sz, symbol=self.symbol, reduce_only=True)
             time.sleep(1.5)
 
         if not closed_successfully:
@@ -7679,7 +7768,7 @@ class PositionSupervisorBinance:
             if residual_sz > 0 and self._is_dust_qty(residual_sz):
                 close_side = "SELL" if residual["side"] == "LONG" else "BUY"
                 logger.warning(f"🐜 强平后残 {residual_sz} ETH，触发蚂蚁仓扫尾")
-                binance_client.place_market_order(close_side, residual_sz, reduce_only=True)
+                binance_client.place_market_order(close_side, residual_sz, symbol=self.symbol, reduce_only=True)
                 time.sleep(1.0)
                 closed_successfully = self._verify_flat()
             if not closed_successfully:
@@ -8070,7 +8159,48 @@ class PositionSupervisorBinance:
             dingtalk.report_system_alert("重启接管失败", f"{e}\n{err_detail[-400:]}")
 
 
-position_supervisor = PositionSupervisorBinance()
+position_supervisor = None  # 兼容旧 import；见 get_supervisor / SUPERVISORS
+SUPERVISORS = {}
 
-if __name__ != "__main__":
-    position_supervisor.recover_state_on_startup()
+
+def get_supervisor(symbol="ETHUSDT"):
+    """按品种取军师（懒创建）。"""
+    from symbol_config import resolve_binance_symbol
+    meta = resolve_binance_symbol(symbol)
+    sym = meta["symbol"]
+    if sym not in SUPERVISORS:
+        SUPERVISORS[sym] = PositionSupervisorBinance(sym)
+    return SUPERVISORS[sym]
+
+
+def get_supervisor_for_payload(data):
+    """从 TV 载荷路由到对应品种军师；缺省 ETHUSDT。"""
+    from symbol_config import extract_symbol_from_payload, resolve_binance_symbol, active_binance_symbols
+    raw = extract_symbol_from_payload(data) if isinstance(data, dict) else ""
+    meta = resolve_binance_symbol(raw or "ETHUSDT")
+    sym = meta["symbol"]
+    allowed = set(active_binance_symbols())
+    if sym not in allowed:
+        return None, sym
+    return get_supervisor(sym), sym
+
+
+def bootstrap_supervisors():
+    """启动全部活动品种军师并恢复状态。"""
+    from symbol_config import active_binance_symbols
+    global position_supervisor
+    symbols = active_binance_symbols()
+    for sym in symbols:
+        get_supervisor(sym)
+    position_supervisor = SUPERVISORS.get("ETHUSDT") or next(iter(SUPERVISORS.values()), None)
+    if __name__ != "__main__":
+        for sym, sup in SUPERVISORS.items():
+            try:
+                logger.info(f"🔄 启动恢复 [{sym}] …")
+                sup.recover_state_on_startup()
+            except Exception as e:
+                logger.error(f"启动恢复失败 [{sym}]: {e}")
+    return SUPERVISORS
+
+
+bootstrap_supervisors()

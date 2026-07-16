@@ -13,8 +13,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.41.0-tp-fill-trade-verify"
+BINANCE_CLIENT_VERSION = "v13.45.0-dual-symbol-ws"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
+WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
 
 
@@ -28,7 +29,10 @@ class BinanceClient:
         self._price_cache_ts = {}
         self._price_lock = threading.Lock()
         self._pub_ws_running = False
-        self._pub_ws_symbol = None
+        self._pub_ws_symbols = set()
+        self._pub_ws_symbol = None  # 兼容旧字段：最近一次请求的主符号
+        self._pub_ws_lock = threading.Lock()
+        self._pub_ws_restart = False
         self._rest_price_min_interval = 30
         self._last_rest_price_fetch = 0.0
         # 私有 User Data Stream：持仓 / 订单实时同步
@@ -36,6 +40,7 @@ class BinanceClient:
         self._ud_ws_symbol = None
         self._listen_key = None
         self._ud_event_cb = None
+        self._ud_event_cbs = {}
         self._pos_cache = {}
         self._pos_cache_ts = {}
         self._pos_lock = threading.Lock()
@@ -189,18 +194,26 @@ class BinanceClient:
         return None
 
     def start_public_price_ws(self, symbol="ETHUSDT"):
-        """订阅 markPrice@1s — 雷达用 WS 推价，避免 REST 轮询限频"""
-        if self._pub_ws_running and self._pub_ws_symbol == symbol:
-            return
-        self._pub_ws_symbol = symbol
-        if not self._pub_ws_running:
+        """订阅 markPrice@1s；支持多品种合并流（ETH+XAU）。"""
+        symbol = str(symbol or "ETHUSDT").upper()
+        with self._pub_ws_lock:
+            self._pub_ws_symbol = symbol
+            if symbol in self._pub_ws_symbols and self._pub_ws_running:
+                return
+            self._pub_ws_symbols.add(symbol)
+            need_start = not self._pub_ws_running
+            if self._pub_ws_running:
+                self._pub_ws_restart = True
+        if need_start:
             self._pub_ws_running = True
             threading.Thread(
-                target=self._public_price_ws_loop, args=(symbol,), daemon=True,
+                target=self._public_price_ws_loop, daemon=True, name="binance-pub-ws",
             ).start()
-            logger.info(f"📡 币安公开 WS 启动: {symbol}@markPrice@1s")
+            logger.info(f"📡 币安公开 WS 启动: {sorted(self._pub_ws_symbols)}")
+        else:
+            logger.info(f"📡 币安公开 WS 增订: {symbol} → {sorted(self._pub_ws_symbols)}")
 
-    def _public_price_ws_loop(self, symbol):
+    def _public_price_ws_loop(self):
         try:
             import websocket
         except ImportError:
@@ -208,17 +221,20 @@ class BinanceClient:
             self._pub_ws_running = False
             return
 
-        stream = f"{symbol.lower()}@markPrice@1s"
-        url = f"{WS_MARKET_BASE}/{stream}"
-
         def on_message(ws, message):
             try:
                 data = json.loads(message)
+                # combined: {"stream":"...","data":{...}}
                 if isinstance(data, dict) and "data" in data:
-                    data = data["data"]
-                px = float(data.get("p") or data.get("markPrice") or 0)
-                if px > 0:
-                    self._set_ws_price(symbol, px)
+                    payload = data["data"]
+                else:
+                    payload = data
+                if not isinstance(payload, dict):
+                    return
+                sym = str(payload.get("s") or "").upper()
+                px = float(payload.get("p") or payload.get("markPrice") or 0)
+                if sym and px > 0:
+                    self._set_ws_price(sym, px)
             except Exception as e:
                 logger.debug(f"WS 行情解析: {e}")
 
@@ -229,11 +245,33 @@ class BinanceClient:
             logger.warning(f"币安公开 WS 断开: {code} {msg}")
 
         while self._pub_ws_running:
+            with self._pub_ws_lock:
+                symbols = sorted(self._pub_ws_symbols) or ["ETHUSDT"]
+                self._pub_ws_restart = False
             try:
+                if len(symbols) == 1:
+                    url = f"{WS_MARKET_BASE}/{symbols[0].lower()}@markPrice@1s"
+                else:
+                    streams = "/".join(f"{s.lower()}@markPrice@1s" for s in symbols)
+                    url = f"{WS_MARKET_COMBINED}?streams={streams}"
                 ws = websocket.WebSocketApp(
                     url, on_message=on_message, on_error=on_error, on_close=on_close,
                 )
-                ws.run_forever(ping_interval=180, ping_timeout=30)
+                # 允许增订品种时打断重连
+                def _run():
+                    ws.run_forever(ping_interval=180, ping_timeout=30)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+                while t.is_alive() and self._pub_ws_running:
+                    if self._pub_ws_restart:
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
+                        break
+                    time.sleep(0.5)
+                t.join(timeout=5)
             except Exception as e:
                 logger.error(f"币安公开 WS 异常: {e}")
             if self._pub_ws_running:
@@ -285,20 +323,22 @@ class BinanceClient:
         return None
 
     def start_user_data_ws(self, symbol="ETHUSDT", on_event=None):
-        """合约 User Data Stream：持仓/订单推送，钉钉与哨兵对齐实盘"""
+        """合约 User Data Stream：多品种回调注册，持仓/订单推送对齐实盘。"""
+        symbol = str(symbol or "ETHUSDT").upper()
         self._ud_ws_symbol = symbol
         if on_event is not None:
-            self._ud_event_cb = on_event
+            self._ud_event_cbs[symbol] = on_event
+            self._ud_event_cb = on_event  # 兼容单品种
         if self._ud_ws_running:
             return
         self._ud_ws_running = True
         threading.Thread(
-            target=self._user_data_ws_loop, args=(symbol,), daemon=True,
+            target=self._user_data_ws_loop, daemon=True,
             name="binance-ud-ws",
         ).start()
         logger.info(f"📡 币安私有 WS 启动: User Data Stream ({symbol})")
 
-    def _user_data_ws_loop(self, symbol):
+    def _user_data_ws_loop(self):
         try:
             import websocket
         except ImportError:
@@ -314,24 +354,24 @@ class BinanceClient:
                 et = str(data.get("e") or "")
                 if et == "ACCOUNT_UPDATE":
                     for p in (data.get("a") or {}).get("P") or []:
-                        if str(p.get("s") or "").upper() != symbol.upper():
+                        sym = str(p.get("s") or "").upper()
+                        if not sym:
                             continue
                         self._set_pos_cache(
-                            symbol,
+                            sym,
                             p.get("pa") or p.get("positionAmt"),
                             p.get("ep") or p.get("entryPrice"),
                         )
                 elif et == "ORDER_TRADE_UPDATE":
                     self._last_order_event_ts = time.time()
                     o = data.get("o") or {}
-                    if str(o.get("s") or "").upper() == symbol.upper():
-                        # 用成交后仓位字段刷新（若有）
-                        pa = o.get("pa")
-                        if pa is not None:
-                            self._set_pos_cache(
-                                symbol, pa,
-                                o.get("ap") or o.get("avgPrice") or 0,
-                            )
+                    sym = str(o.get("s") or "").upper()
+                    pa = o.get("pa")
+                    if sym and pa is not None:
+                        self._set_pos_cache(
+                            sym, pa,
+                            o.get("ap") or o.get("avgPrice") or 0,
+                        )
                 elif et == "listenKeyExpired":
                     logger.warning("listenKey 已过期，准备重建")
                     self._listen_key = None
@@ -339,9 +379,14 @@ class BinanceClient:
                         ws.close()
                     except Exception:
                         pass
-                if self._ud_event_cb and et:
+                cbs = list(self._ud_event_cbs.values()) or (
+                    [self._ud_event_cb] if self._ud_event_cb else []
+                )
+                for cb in cbs:
+                    if not cb or not et:
+                        continue
                     try:
-                        self._ud_event_cb(et, data)
+                        cb(et, data)
                     except Exception as cb_e:
                         logger.debug(f"UD WS 回调: {cb_e}")
             except Exception as e:
@@ -450,6 +495,44 @@ class BinanceClient:
             if val > 0:
                 return val
         return 0.0
+
+    def get_all_usdt_position_notionals(self):
+        """
+        账户全部 USDT 永续名义敞口（|qty|×mark）。
+        用于双品种 Σnotional ≤ equity×9 硬顶。
+        返回 {symbol: notional, ...} 与 total。
+        """
+        out = {}
+        total = 0.0
+        try:
+            rows = self.client.futures_position_information()
+        except Exception as e:
+            logger.error(f"[全仓名义查询失败] {e}")
+            return out, 0.0
+        for p in rows or []:
+            try:
+                amt = abs(float(p.get("positionAmt") or 0))
+            except (TypeError, ValueError):
+                continue
+            if amt <= 0:
+                continue
+            sym = str(p.get("symbol") or "").upper()
+            try:
+                mark = float(
+                    p.get("markPrice")
+                    or p.get("entryPrice")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                mark = 0.0
+            if mark <= 0:
+                mark = float(self.get_current_price(sym) or 0)
+            notion = amt * mark
+            if notion <= 0:
+                continue
+            out[sym] = round(notion, 2)
+            total += notion
+        return out, round(total, 2)
 
     def get_cap_equity_balance(self, asset="USDT"):
         """档位额度基数 = 本金 walletBalance（兼容旧名）"""
