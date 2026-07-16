@@ -469,6 +469,7 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 | 版本 | 要点 |
 |------|------|
+| **v13.54** | **硬止损锁定 open_regime（禁 UPDATE/recover 改窄）+ 钉钉全面 VPS宽硬止损文案同步** |
 | **v13.53** | **硬止损强制实时 VPS 宽价：拒 TV 紧价挂盘/合并；重启强制清 TV 残留改挂 VPS** |
 | **v13.52** | **硬止损只挂 VPS 宽价（拒 TV 紧止损污染）+ 雷达强制三重价/单/仓 + 重启不自动平仓** |
 | **v13.51** | **硬止损改 closePosition（不抢 TP reduceOnly）+ 全平勿误标 TV tv_sl + 开仓禁 recover 核武撤** |
@@ -495,4 +496,4 @@ grep -E '雷达交棒|交棒延迟|TP1未成交|解除过早雷达|核武|空闲
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.53.0-hardsl-vps-only-enforce*
+*GEMINI Quant · 双轨智慧雷达 · v13.54.0-open-regime-hardsl-dingtalk*

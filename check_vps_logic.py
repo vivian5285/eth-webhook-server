@@ -223,6 +223,22 @@ def audit_module3_hard_sl(a: Audit):
         "3.15 SHORT 禁止 min 挂 TV 紧价",
         "拒绝合并伪雷达/TV紧止损" in sup,
     )
+    a.check(
+        "3.16 硬止损锁定 open_regime",
+        "_resolve_hard_sl_regime" in sup
+        and "_lock_open_regime_from_sources" in sup
+        and "禁止被后续 TV UPDATE" in sup,
+    )
+    a.check(
+        "3.17 开仓日志写 open_regime",
+        '"open_regime": open_r' in sup or '"open_regime": open_r,' in sup
+        or "open_regime\": open_r" in sup,
+    )
+    a.check(
+        "3.18 重启先锁档再挂硬止损",
+        "_lock_open_regime_from_sources" in sup
+        and "重启强制VPS宽硬止损" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):
@@ -281,8 +297,20 @@ def audit_module7_dingtalk(a: Audit):
         "report_tp_fill",
         "report_system_alert",
         "report_supervisor_close",
+        "report_recover_takeover",
+        "report_tv_sl_updated",
     ):
         a.check(f"钉钉 {fn}", f"def {fn}" in dt)
+    a.check(
+        "钉钉不宣称挂 TV硬止损",
+        "send_alert(\"🛡️ TV硬止损" not in dt
+        and "TV硬止损 · UPDATE_SL" not in dt
+        and "VPS宽硬止损" in dt,
+    )
+    a.check(
+        "UPDATE_SL 仅记录参考",
+        "永不挂 TV 紧止损" in dt or "未改盘口硬止损" in dt,
+    )
 
 
 def audit_readme_consistency(a: Audit):
