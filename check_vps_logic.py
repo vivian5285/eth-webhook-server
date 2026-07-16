@@ -239,6 +239,17 @@ def audit_module3_hard_sl(a: Audit):
         "_lock_open_regime_from_sources" in sup
         and "重启强制VPS宽硬止损" in sup,
     )
+    a.check(
+        "3.19 雷达仅TP1后：ensure闸门",
+        "_radar_placement_blocked" in sup
+        and "POST_OPEN_RADAR_BLOCK_SEC" in sup
+        and "拒绝雷达挂单：TP1三重+交棒未通过" in sup,
+    )
+    a.check(
+        "3.20 SHORT保本禁止抬过开仓价",
+        "禁止抬到成本及以上" in sup
+        and "_clamp_radar_sl_for_market" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):
