@@ -411,10 +411,14 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     send_alert(f"🔶 战神出击：币安 {sym} 阵地建立", data)
 
 
-def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verified=True):
+def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verified=True,
+                        symbol=None, unit_label=None):
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🛡️ 战术动作": _g(action_msg, G_ACCENT),
-        "📦 利润头寸": _g(f"`{qty}` {_u()}", G_MAIN),
+        "📦 利润头寸": _g(f"`{qty}` {unit}", G_MAIN),
         "💰 原始成本": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
         "🔒 最新硬防线": _g(f"**{new_sl:.2f}** USDT (物理保本单已挂)", G_LIGHT),
         "📡 实盘核查": _verify_line(
@@ -425,26 +429,29 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verif
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("📈 捷报：追踪雷达锁死趋势利润", data, G_DEEP)
+    send_alert(f"📈 [{sym}] 捷报：追踪雷达锁死趋势利润", data, G_DEEP)
 
 
 def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
-                   verify_note="", verified=True):
+                   verify_note="", verified=True, symbol=None, unit_label=None):
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
-        "📦 本次止盈": _g(f"`{filled_qty}` {_u()}", G_ACCENT),
-        "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
+        "📦 本次止盈": _g(f"`{filled_qty}` {unit}", G_ACCENT),
+        "📊 剩余头寸": _g(f"`{remain_qty}` {unit}", G_MAIN),
         "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
         "🧭 方向/档位": _g(f"{side} | TV {regime} 档", G_MUTED),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | TP{tp_level} 限价止盈已成交",
+            f"{VERIFY_TAG} | {sym} TP{tp_level} 限价止盈已成交",
             "⏳ 止盈已成交，REST 同步略延迟 | 哨兵持续对齐",
         ),
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🎯 捷报：币安 TP{tp_level} 止盈成交", data, G_DEEP)
+    send_alert(f"🎯 [{sym}] 捷报：TP{tp_level} 止盈成交", data, G_DEEP)
 
 
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
@@ -1026,12 +1033,16 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
 
 
 def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
-                           radar_progress=0.0, verify_note="", verified=True):
+                           radar_progress=0.0, verify_note="", verified=True,
+                           symbol=None, unit_label=None):
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
-        "📦 剩余头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
-        "📈 价格方向": _g("**TP1 限价成交** → 交棒雷达保本", G_LIGHT),
+        "📦 剩余头寸": _g(f"**{live_qty}** {unit}", G_MAIN),
+        "📈 价格方向": _g("**TP1 三重验证通过** → 交棒雷达保本", G_LIGHT),
         "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 VPS硬止损", G_ACCENT),
         "📡 雷达状态": _g(
             "已激活移动保本" if radar_progress >= 0.2
@@ -1050,28 +1061,32 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ TV硬止损 · 已撤销（转雷达）", data, G_TITLE)
+    send_alert(f"🛡️ [{sym}] TV硬止损 · 已撤销（转雷达）", data, G_TITLE)
 
 
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
-                           shield_cleared=True, verify_note="", verified=True):
+                           shield_cleared=True, verify_note="", verified=True,
+                           symbol=None, unit_label=None):
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 利润头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
+        "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段制·TP1成交后)", G_ACCENT),
+        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段制·三重验证后)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
-        "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%起)", G_LIGHT),
+        "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
         "✅ 风控动作": _g(
-            "TP1成交 → 雷达5阶段移动保本 · 止损只向有利方向 · 永不回退",
+            "价格达TP1 + 限价成交 + 减仓匹配 → 安全交棒 · 止损只向有利方向",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 雷达移动保本已启动",
+            f"{VERIFY_TAG} | {sym} 雷达移动保本已启动",
             f"⏳ 止损已提交，{VERIFY_DELAY_MARK} | 雷达已启动",
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("📡 雷达 · 移动保本已激活", data, G_DEEP)
+    send_alert(f"📡 [{sym}] 雷达 · 移动保本已激活", data, G_DEEP)

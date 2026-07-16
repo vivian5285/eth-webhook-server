@@ -188,20 +188,28 @@ def audit_module4_radar(a: Audit):
 
     for fn in (
         "_tp1_filled_verified",
+        "_tp1_triad_ok",
         "_tp_filled_verified",
         "_price_reached_tp1_zone",
         "_tp1_qty_matches_baseline",
         "_tp_fill_ok_to_arm_radar",
         "_radar_legitimately_armed",
+        "_ideal_radar_sl_is_safe",
         "_disarm_premature_radar",
     ):
         a.check(f"雷达函数 {fn}", f"def {fn}" in sup)
 
     a.check("4.5 噪声阈值", "TP_FILL_NOISE_VS_OPEN_PCT" in sup)
-    a.check("4.1 三角对账日志", "三角对账" in sup)
+    a.check("4.1 三角对账日志", "三角对账" in sup or "三重" in sup)
+    a.check("交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
+    a.check("交棒后才武装", "_radar_handoff_done" in sup)
 
     from webhook_parser import RADAR_STAGE_COST_BUFFER_PCT
     a.check("4.6 成本缓冲 0.1%", abs(RADAR_STAGE_COST_BUFFER_PCT - 0.001) < 1e-6)
+
+    # 钉钉雷达标题须含品种
+    dt = _read(os.path.join(ROOT, "dingtalk.py"))
+    a.check("钉钉雷达标题含品种", "[sym]" in dt or "[{sym}]" in dt)
 
 
 def audit_module5_risk(a: Audit):
