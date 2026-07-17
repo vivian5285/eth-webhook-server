@@ -486,7 +486,7 @@ class BinanceClient:
 
     def get_total_equity(self, asset="USDT"):
         """
-        账户总权益（marginBalance / totalMarginBalance）— 档位 sizing 与 9x 硬顶基数。
+        账户总权益（marginBalance / totalMarginBalance）— 档位 sizing 与 13x 硬顶基数。
         含未实现盈亏；禁止用 availableBalance（可用余额）。
         """
         summary = self.get_futures_account_summary(asset)
@@ -503,7 +503,7 @@ class BinanceClient:
     def get_all_usdt_position_notionals(self):
         """
         账户全部 USDT 永续名义敞口（|qty|×mark）。
-        用于双品种 Σnotional ≤ equity×11 硬顶。
+        用于双品种 Σnotional ≤ equity×13 硬顶。
         返回 {symbol: notional, ...} 与 total。
         """
         out = {}

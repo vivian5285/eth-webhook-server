@@ -62,7 +62,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.59.0-tv-seq-ordered"
+BINANCE_VPS_VERSION = "v13.60.0-margin-8-14-20-26-cap13x"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -1994,7 +1994,7 @@ class PositionSupervisorBinance:
         return False
 
     def _snapshot_sizing_principal(self, reason=""):
-        """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 9x 硬顶共用"""
+        """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 13x 硬顶共用"""
         principal = binance_client.get_total_equity()
         if principal > 0:
             self.sizing_principal = principal
@@ -2138,7 +2138,7 @@ class PositionSupervisorBinance:
         return round(other, 2), by_sym, total
 
     def _assert_notional_cap_or_reject(self, qty, price, sizing_meta=None):
-        """双品种硬顶：其它品种名义 + 本笔名义 ≤ equity×9。"""
+        """双品种硬顶：其它品种名义 + 本笔名义 ≤ equity×13。"""
         equity = float(
             (sizing_meta or {}).get("principal")
             or self._resolve_cap_sizing_base()

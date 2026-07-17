@@ -159,32 +159,41 @@ def audit_module2_sizing(a: Audit):
         check_total_notional_cap,
     )
 
-    expected_margin = {1: 0.06, 2: 0.12, 3: 0.18, 4: 0.22}
+    expected_margin = {1: 0.08, 2: 0.14, 3: 0.20, 4: 0.26}
     for r, pct in expected_margin.items():
         a.check(f"2.2 R{r} 保证金 {pct*100:.0f}%", VPS_MARGIN_PCT_BY_REGIME.get(r) == pct)
 
     a.check("2.4 杠杆 25x", EXCHANGE_LEVERAGE == 25)
-    a.check("2.7 11x 硬顶", MAX_TOTAL_NOTIONAL_MULT == 11.0)
+    a.check("2.7 13x 硬顶", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
     qty, meta = compute_vps_open_qty(1000, 1800, 1700, regime=3, leverage=25)
-    exp_margin = 1000 * 0.18
+    exp_margin = 1000 * 0.20
     exp_notional = exp_margin * 25
     a.check(
         "2.5~2.6 R3@1000U/1800",
         abs(meta["margin"] - exp_margin) < 1 and abs(meta["position_value"] - exp_notional) < 1,
         f"margin={meta.get('margin')} notional={meta.get('position_value')} qty={qty}",
     )
+    a.check("2.5c R3 ETH qty≈2.78", abs(qty - 2.777) < 0.01, f"qty={qty}")
 
     qty4, meta4 = compute_vps_open_qty(1000, 1800, 1650, regime=4, leverage=25)
     a.check(
-        "2.5 R4 名义 5.5x",
-        abs(meta4["position_value"] - 5500) < 1,
+        "2.5 R4 名义 6.5x",
+        abs(meta4["position_value"] - 6500) < 1,
         f"notional={meta4.get('position_value')} qty={qty4}",
     )
+    a.check("2.5d R4 ETH qty≈3.61", abs(qty4 - 3.611) < 0.01, f"qty={qty4}")
 
-    ok, cap_meta = check_total_notional_cap(1000, 5500, 5500, mult=11)
-    a.check("双品种 R4 踩线 11x", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
-    ok2, _ = check_total_notional_cap(1000, 6000, 5500, mult=11)
+    qty_xau, meta_xau = compute_vps_open_qty(1000, 2500, 2430, regime=1, leverage=25)
+    a.check(
+        "2.5e XAU R1@2500 qty≈0.80",
+        abs(meta_xau["position_value"] - 2000) < 1 and abs(qty_xau - 0.80) < 0.01,
+        f"notional={meta_xau.get('position_value')} qty={qty_xau}",
+    )
+
+    ok, cap_meta = check_total_notional_cap(1000, 6500, 6500, mult=13)
+    a.check("双品种 R4 踩线 13x", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
+    ok2, _ = check_total_notional_cap(1000, 7000, 6500, mult=13)
     a.check("超标拒绝", not ok2)
 
     bc = _read(os.path.join(ROOT, "binance_client.py"))
