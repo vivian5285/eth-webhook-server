@@ -279,6 +279,13 @@ def audit_module3_hard_sl(a: Audit):
         "_matches_any_vps_regime_stop" in sup
         and "不是 TV 紧价" in sup,
     )
+    a.check(
+        "3.23 重启锁按品种隔离",
+        "recover_singleton_{self.symbol}" in sup
+        or ".recover_singleton_" in sup
+        and "_probe_position_for_recover" in sup
+        and "AMBIGUOUS" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):

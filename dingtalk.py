@@ -650,15 +650,17 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     send_alert("🔄 币安 VPS 重启 · 闪电接管报告", data)
 
 
-def report_recover_standby(verify_note="", version=""):
+def report_recover_standby(verify_note="", version="", symbol=None):
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "📡 实盘核查": _g(f"{VERIFY_TAG} | 盘口无持仓", G_MAIN),
         "✅ 系统状态": _g("空仓待命 · 挂单已清空 · 雷达/哨兵复位", G_LIGHT),
         "🔮 版本": _g(version or "binance_webhook", G_MUTED),
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🔄 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
+    send_alert(f"🔄 [{sym}] 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
 
 
 def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pct, threshold_pct,

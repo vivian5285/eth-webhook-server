@@ -61,7 +61,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.56.0-symbol-regime-hardsl-lock"
+BINANCE_VPS_VERSION = "v13.57.0-per-symbol-recover-no-ghost-flat"
+
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -79,7 +80,7 @@ FLAT_CONFIRM_RETRIES = 6
 FLAT_CONFIRM_DELAY_SEC = 0.85
 STARTUP_FLAT_CONFIRM_RETRIES = 10
 STARTUP_FLAT_CONFIRM_DELAY_SEC = 1.0
-RECOVER_LOCK_FILE = "logs/.recover_singleton.lock"
+RECOVER_LOCK_FILE = "logs/.recover_singleton.lock"  # 兼容旧路径；实际按品种隔离
 RECOVER_LOCK_TTL_SEC = 180
 REGIME_CAP_COOLDOWN_SEC = 90
 REGIME_CAP_TOLERANCE_ETH = 0.001
@@ -1850,8 +1851,9 @@ class PositionSupervisorBinance:
                 out.append(0.0)
         return out
 
-    def _get_active_position(self):
-        pos = position_manager.get_position(self.symbol)
+    def _get_active_position(self, prefer_ws=True):
+        # 重启探测必须 prefer_ws=False，避免空缓存误判空仓
+        pos = binance_client.get_position(self.symbol, prefer_ws=prefer_ws)
         if not pos or float(pos.get("positionAmt", 0)) == 0:
             return None
         amt = float(pos["positionAmt"])
@@ -1860,6 +1862,56 @@ class PositionSupervisorBinance:
             "entry_price": round(float(pos.get("entryPrice", 0)), 2),
             "side": "LONG" if amt > 0 else "SHORT",
         }
+
+    def _probe_position_for_recover(self):
+        """
+        重启专用持仓探测：强制 REST 多轮；若仓位空但挂单仍在 → 禁止报空仓/清挂单。
+        返回: dict 持仓 | None 确认空仓 | "AMBIGUOUS" 查询与挂单矛盾
+        """
+        last = None
+        for i in range(6):
+            last = self._get_active_position(prefer_ws=False)
+            if last and float(last.get("size") or 0) > 0:
+                if i > 0:
+                    logger.info(
+                        f"🔄 [{self.symbol}] 重启持仓探测第{i + 1}轮命中 "
+                        f"{last['side']} {last['size']}"
+                    )
+                return last
+            time.sleep(0.55)
+        try:
+            orders = binance_client.get_open_orders(self.symbol, include_algo=True) or []
+        except Exception as e:
+            logger.warning(f"🔄 [{self.symbol}] 重启挂单探测失败: {e}")
+            orders = []
+        if orders:
+            logger.error(
+                f"🚨 [{self.symbol}] 重启：REST 仓位为空但盘口仍有 {len(orders)} 笔挂单 "
+                f"→ 禁止空仓清场，交哨兵接力"
+            )
+            return "AMBIGUOUS"
+        # 账本曾监控：再给一次总账户持仓扫描兜底（防 symbol 瞬时查询抖动）
+        if float(getattr(self, "watched_qty", 0) or 0) > 0 or getattr(
+            self, "current_side", None
+        ):
+            logger.warning(
+                f"🔄 [{self.symbol}] 账本曾有仓但 REST 空+无挂单，再扫一次账户持仓"
+            )
+            try:
+                rows = binance_client.client.futures_position_information()
+                for p in rows or []:
+                    if str(p.get("symbol") or "").upper() != self.symbol.upper():
+                        continue
+                    amt = float(p.get("positionAmt") or 0)
+                    if abs(amt) > 0:
+                        return {
+                            "size": abs(amt),
+                            "entry_price": round(float(p.get("entryPrice", 0) or 0), 2),
+                            "side": "LONG" if amt > 0 else "SHORT",
+                        }
+            except Exception as e:
+                logger.warning(f"账户持仓兜底扫描失败: {e}")
+        return None
 
     def _verify_flat(self):
         pos = self._get_active_position()
@@ -4182,32 +4234,45 @@ class PositionSupervisorBinance:
         return False
 
     def _try_acquire_recover_singleton(self):
-        """多 worker 导入时仅允许一个进程执行重启接管，避免双钉钉/双撤挂"""
+        """同品种多 worker 仅允许一个进程重启接管；ETH/XAU 锁必须隔离。"""
         try:
             os.makedirs("logs", exist_ok=True)
-            if os.path.exists(RECOVER_LOCK_FILE):
-                age = time.time() - os.path.getmtime(RECOVER_LOCK_FILE)
+            lock_path = f"logs/.recover_singleton_{self.symbol}.lock"
+            # 清理旧共享锁误伤：若本品种锁不存在而旧全局锁存在，不阻塞本品种
+            if os.path.exists(lock_path):
+                age = time.time() - os.path.getmtime(lock_path)
                 try:
-                    with open(RECOVER_LOCK_FILE, encoding="utf-8") as f:
+                    with open(lock_path, encoding="utf-8") as f:
                         info = f.read().strip()
                 except Exception:
                     info = "?"
                 holder_alive = self._recover_lock_pid_alive(info)
                 if age < RECOVER_LOCK_TTL_SEC and holder_alive:
                     logger.info(
-                        f"🔄 跳过重复重启接管 (进程 {info} 仍存活, {age:.0f}s 前)"
+                        f"🔄 [{self.symbol}] 跳过重复重启接管 "
+                        f"(进程 {info} 仍存活, {age:.0f}s 前)"
                     )
                     return False
                 if age < RECOVER_LOCK_TTL_SEC and not holder_alive:
                     logger.info(
-                        f"🔄 旧接管锁已失效 (原 {info})，重新执行闪电接管"
+                        f"🔄 [{self.symbol}] 旧接管锁已失效 (原 {info})，重新执行闪电接管"
                     )
-            with open(RECOVER_LOCK_FILE, "w", encoding="utf-8") as f:
-                f.write(f"pid={os.getpid()} ts={datetime.now().isoformat()}")
+            with open(lock_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"pid={os.getpid()} symbol={self.symbol} "
+                    f"ts={datetime.now().isoformat()}"
+                )
             return True
         except Exception as e:
-            logger.warning(f"recover singleton lock: {e}")
+            logger.warning(f"recover singleton lock [{self.symbol}]: {e}")
             return True
+
+    def _ensure_sentinel_running_quiet(self):
+        if not self._sentinel_active:
+            threading.Thread(
+                target=self._sentinel_loop, daemon=True,
+                name=f"sentinel-{self.symbol}",
+            ).start()
 
     def _build_recover_health_report(self, pos, curr_px, tp_audit, shield_audit=None):
         """重启全域核查：实盘头寸 + TV + TP123 + 硬止损 + 浮盈/浮亏防线路由"""
@@ -8388,6 +8453,12 @@ class PositionSupervisorBinance:
     def recover_state_on_startup(self):
         """重启闪电接管：对账 TV/开仓日志 → 核实实盘 → 智能补挂 TP123 → 恢复雷达"""
         if not self._try_acquire_recover_singleton():
+            # 同品种其它 worker 已接管：本进程仍须启动哨兵，禁止漏盯实盘
+            logger.warning(
+                f"🔄 [{self.symbol}] 跳过重复接管进程，仍启动哨兵巡检实盘"
+            )
+            self.monitoring = True
+            self._ensure_sentinel_running_quiet()
             return
         try:
             saved_monitoring = False
@@ -8455,7 +8526,9 @@ class PositionSupervisorBinance:
                     jq = float(last_open.get("qty", 0) or 0)
                     if jq > 0:
                         self.base_qty = jq
-                        logger.info(f"📖 恢复 base_qty 取自开仓日志 {jq} ETH")
+                        logger.info(
+                            f"📖 恢复 base_qty 取自开仓日志 {jq} {self.unit_label}"
+                        )
 
             if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
                 return
@@ -8463,7 +8536,20 @@ class PositionSupervisorBinance:
             if self._recover_missed_flat_on_startup(was_monitoring=saved_monitoring):
                 return
 
-            pos = self._get_active_position()
+            # 强制 REST 多轮探测，禁止 WS 空缓存 / 共享锁导致漏接实盘
+            pos = self._probe_position_for_recover()
+            if pos == "AMBIGUOUS":
+                dingtalk.report_system_alert(
+                    f"重启仓位探测冲突 [{self.symbol}]",
+                    "REST 报空仓但盘口仍有挂单 → 禁止清挂单/禁止报空仓待命；"
+                    "已启动哨兵接力核对 TP123 + VPS硬止损（雷达仅TP1后）",
+                    suggestion="请在币安核对持仓；勿手动乱撤，等待哨兵对齐",
+                )
+                self.monitoring = True
+                self._ensure_sentinel_running_quiet()
+                self._last_idle_takeover_ts = 0.0
+                return
+
             if pos:
                 self._recover_in_progress = True
                 recover_ok = False
@@ -8715,24 +8801,46 @@ class PositionSupervisorBinance:
                 elif recover_err:
                     self._post_recover_radar_pulse = True
             else:
-                binance_client.cancel_all_open_orders(self.symbol)
-                logger.info("🔄 [系统重启点火] 盘口干净无持仓，账本复位为空仓待命。")
+                # 确认空仓：禁止误平仓；仅清理本品种孤儿挂单
+                logger.info(
+                    f"🔄 [{self.symbol}] 系统重启点火：REST确认无持仓，账本复位为空仓待命。"
+                )
                 self.monitoring = False
                 self.watched_qty = 0.0
                 self.base_qty = 0.0
                 self.add_count = 0
                 self.current_side = None
+                self._open_regime_sticky = False
                 self._save_state()
-                flat_ok = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
+                flat_ok = self._wait_verify(
+                    lambda: self._get_active_position(prefer_ws=False) is None,
+                    retries=6,
+                    delay=0.5,
+                )
+                # 空仓后再清挂单；若清场前又冒出持仓 → 立刻改接管
+                resurfaced = self._get_active_position(prefer_ws=False)
+                if resurfaced:
+                    logger.error(
+                        f"🚨 [{self.symbol}] 空仓确认后持仓复现 → 改闪电接管，禁止清场"
+                    )
+                    self._perform_live_takeover(
+                        resurfaced, source="VPS重启·空仓复现", manual_open=True,
+                    )
+                    self._ensure_sentinel_running_quiet()
+                    return
+                binance_client.cancel_all_open_orders(self.symbol)
                 standby_note = (
-                    f"重启完成 | 盘口无持仓 | 挂单已清空 | {BINANCE_VPS_VERSION}"
+                    f"[{self.symbol}] 重启完成 | 盘口无持仓 | 挂单已清空 | "
+                    f"{BINANCE_VPS_VERSION}"
                 )
                 if not flat_ok:
                     standby_note += " | REST 同步略延迟"
                 dingtalk.report_recover_standby(
                     verify_note=standby_note,
                     version=BINANCE_VPS_VERSION,
+                    symbol=self.symbol,
                 )
+                self._ensure_sentinel_running_quiet()
         except Exception as e:
             import traceback
             err_detail = traceback.format_exc()[-1200:]
