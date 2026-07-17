@@ -117,6 +117,24 @@ def audit_module1_symbol(a: Audit):
     app_src = _read(os.path.join(ROOT, "app.py"))
     a.check("1.4 未知品种 400", "Unsupported" in app_src)
     a.check("1.5 信号去重", "SIGNAL_DEDUP_SEC" in _read(os.path.join(ROOT, "position_supervisor_binance.py")))
+    a.check("1.5b TV时序模块", os.path.exists(os.path.join(ROOT, "tv_seq.py")))
+    a.check(
+        "1.5c bar_index/seq 解析",
+        "bar_index" in _read(os.path.join(ROOT, "webhook_parser.py"))
+        and "TVSeqBuffer" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+    )
+    from tv_seq import sort_webhooks_by_seq, make_seq_key
+    ordered = sort_webhooks_by_seq([
+        {"action": "OPEN", "bar_index": 200, "seq": 2},
+        {"action": "CLOSE_PROTECT", "bar_index": 200, "seq": 1},
+        {"action": "OPEN", "bar_index": 301, "seq": 1},
+    ])
+    a.check(
+        "1.5d 时序排序 bar→seq",
+        ordered[0].get("seq") == 1 and ordered[0].get("action") == "CLOSE_PROTECT"
+        and ordered[1].get("seq") == 2 and ordered[2].get("bar_index") == 301,
+    )
+    a.check("1.5e 幂等键格式", make_seq_key("ETHUSDT", 100, 1) == "ETHUSDT_100_1")
 
     # 钉钉单位不得硬编码黄金为 ETH
     from dingtalk import _resolve_unit, _format_tp_audit, bind_dingtalk_symbol, reset_dingtalk_symbol
@@ -354,6 +372,10 @@ def audit_module7_dingtalk(a: Audit):
         "report_tv_sl_updated",
     ):
         a.check(f"钉钉 {fn}", f"def {fn}" in dt)
+    a.check(
+        "钉钉攒批+重试",
+        "DINGTALK_BATCH" in dt and "_post_with_retry" in dt and "WECHAT_WEBHOOK" in dt,
+    )
     a.check(
         "钉钉不宣称挂 TV硬止损",
         "send_alert(\"🛡️ TV硬止损" not in dt

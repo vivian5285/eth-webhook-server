@@ -46,6 +46,7 @@ from webhook_parser import (
     RADAR_STAGE_ATR_MULT,
     RADAR_STAGE_LABELS,
 )
+from tv_seq import TVSeqBuffer, extract_seq_meta
 
 if not os.path.exists('logs'):
     os.makedirs('logs')
@@ -61,7 +62,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.58.0-multi-symbol-recover-harden"
+BINANCE_VPS_VERSION = "v13.59.0-tv-seq-ordered"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -72,7 +73,7 @@ IDLE_TAKEOVER_COOLDOWN_SEC = 30
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
-SIGNAL_DEDUP_SEC = 45
+SIGNAL_DEDUP_SEC = 45  # 无 bar_index/seq 的旧信号指纹去重；有时序时用幂等键
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 # 开仓后禁止雷达/近市保本：只允许 TP123 + VPS 宽硬止损
@@ -160,7 +161,11 @@ class PositionSupervisorBinance:
         self.last_tv_side = None
         self.last_tv_signal = None
         self._scan_ticks = 0
-        self._signal_queue = queue.Queue()
+        self._signal_queue = queue.Queue()  # 锁超时重入 / 旁路，不参与时序排序
+        self._seq_buffer = TVSeqBuffer(
+            self.symbol,
+            on_gap_alert=self._on_tv_seq_gap,
+        )
         self._signal_worker_started = False
         self._sentinel_active = False
         self.open_regime = 3
@@ -598,6 +603,20 @@ class PositionSupervisorBinance:
         """兼容旧调用名 → _dingtalk（自动注入 symbol/unit_label）"""
         return self._dingtalk(fn, **kwargs)
 
+    def _on_tv_seq_gap(self, msg):
+        """乱序等待超时：钉钉告警，缓冲仍按已有 seq 冲刷。"""
+        logger.error(f"⚠️ TV时序缺口: {msg}")
+        try:
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title="TV时序缺口 · 前置seq缺失",
+                detail=str(msg),
+                level="警告",
+                suggestion="检查 TradingView 警报是否漏发；已按已有 bar_index/seq 顺序继续执行",
+            )
+        except Exception as e:
+            logger.warning(f"时序缺口钉钉失败: {e}")
+
     def _start_signal_worker(self):
         if self._signal_worker_started:
             return
@@ -606,13 +625,35 @@ class PositionSupervisorBinance:
 
     def _signal_worker_loop(self):
         while True:
-            payload = self._signal_queue.get()
+            batch = []
             try:
-                self._process_signal(payload)
+                batch.extend(self._seq_buffer.pop_ready(timeout=0.5) or [])
             except Exception as e:
-                logger.error(f"❌ 信号处理异常: {e}", exc_info=True)
-            finally:
-                self._signal_queue.task_done()
+                logger.error(f"时序缓冲 pop 异常: {e}", exc_info=True)
+            # 锁超时重入等旁路队列
+            while True:
+                try:
+                    batch.append(self._signal_queue.get_nowait())
+                except queue.Empty:
+                    break
+            if not batch:
+                continue
+            for payload in batch:
+                try:
+                    bi, sq = extract_seq_meta(payload or {})
+                    act = str((payload or {}).get("action", "")).upper()
+                    if bi is not None:
+                        logger.info(
+                            f"⚙️ [{self.symbol}] 时序消费 bar={bi} seq={sq} action={act}"
+                        )
+                    self._process_signal(payload)
+                except Exception as e:
+                    logger.error(f"❌ 信号处理异常: {e}", exc_info=True)
+                finally:
+                    try:
+                        self._signal_queue.task_done()
+                    except ValueError:
+                        pass
 
     def _signal_fingerprint(self, payload):
         action = str(payload.get("action", "")).strip().upper()
@@ -654,6 +695,21 @@ class PositionSupervisorBinance:
         )
 
     def enqueue_signal(self, payload):
+        payload = dict(payload or {})
+        bi, sq = extract_seq_meta(payload)
+        action = str(payload.get("action", "")).strip().upper() or "?"
+        # 有 bar_index+seq：幂等键去重 + 有序缓冲；不再用 45s 指纹（避免误杀同 bar 不同 seq）
+        if bi is not None and sq is not None:
+            if self._open_in_progress and action in ("LONG", "SHORT"):
+                logger.warning(f"📬 开仓进行中，忽略重复建仓信号 {action} bar={bi} seq={sq}")
+                return
+            status = self._seq_buffer.add(payload)
+            logger.info(
+                f"📬 TV时序入队: {action} bar={bi} seq={sq} → {status} | "
+                f"缓冲深度 {self._seq_buffer.depth()} 旁路 {self._signal_queue.qsize()}"
+            )
+            return
+
         fp = self._signal_fingerprint(payload)
         action = fp[0] or "?"
         now = time.time()
@@ -670,12 +726,14 @@ class PositionSupervisorBinance:
             return
         self._last_signal_fp = fp
         self._last_signal_fp_ts = now
-        depth = self._signal_queue.qsize()
-        self._signal_queue.put(payload)
-        logger.info(f"📬 TV信号入队: {action} | 队列深度 {depth + 1}")
+        status = self._seq_buffer.add(payload)  # legacy 旁路立即可弹
+        logger.info(
+            f"📬 TV信号入队(无时序): {action} → {status} | "
+            f"缓冲深度 {self._seq_buffer.depth()}"
+        )
 
     def signal_queue_depth(self):
-        return self._signal_queue.qsize()
+        return self._seq_buffer.depth() + self._signal_queue.qsize()
 
     def _journal_path(self, kind):
         """kind=open|tv|exchange → 品种隔离路径"""
@@ -819,6 +877,8 @@ class PositionSupervisorBinance:
             "risk_pct": payload.get("risk_pct"),
             "leverage": payload.get("leverage"),
             "qty_ratio": payload.get("qty_ratio"),
+            "bar_index": payload.get("bar_index"),
+            "seq": payload.get("seq"),
             "payload": full_payload,
             "ts": time.time(),
         }
@@ -828,7 +888,9 @@ class PositionSupervisorBinance:
             payload_txt = json.dumps(full_payload, ensure_ascii=False)[:1800]
         except (TypeError, ValueError):
             payload_txt = str(full_payload)[:1800]
-        logger.info(f"📥 [TV警报全文] {raw_action} | {payload_txt}")
+        bi, sq = extract_seq_meta(payload)
+        seq_tag = f" bar={bi} seq={sq}" if bi is not None else ""
+        logger.info(f"📥 [TV警报全文]{seq_tag} {raw_action} | {payload_txt}")
         sizing_note = ""
         et = normalize_entry_type(payload.get("entry_type"))
         open_sizing_meta = None
@@ -839,7 +901,7 @@ class PositionSupervisorBinance:
             _, sm = self._calc_vps_add_qty()
             sizing_note = " | " + format_vps_sizing_note(sm, entry_type=et)
         logger.info(
-            f"📡 TV日志: {raw_action} R{self.regime} @ {self.tv_price:.2f} "
+            f"📡 TV日志: {raw_action}{seq_tag} R{self.regime} @ {self.tv_price:.2f} "
             f"TP={self.tv_tps}"
             + sizing_note
             + (f" | pnl={payload.get('pnl_pct')}%" if payload.get("pnl_pct") is not None else "")
@@ -857,6 +919,8 @@ class PositionSupervisorBinance:
             qty_ratio=payload.get("qty_ratio"),
             reason=payload.get("reason", ""),
             vps_sizing_meta=open_sizing_meta,
+            bar_index=payload.get("bar_index"),
+            seq=payload.get("seq"),
             vps_hard_sl_note=(
                 format_tv_vps_sl_compare(
                     raw_action, self.tv_price, self.current_atr, self.regime,
@@ -6671,7 +6735,7 @@ class PositionSupervisorBinance:
             self._record_tv_signal(payload, raw_action)
 
         if not self._lock.acquire(timeout=120.0):
-            logger.error(f"⏱️ 锁等待 120s 超时，信号 {raw_action} 重新入队")
+            logger.error(f"⏱️ 锁等待 120s 超时，信号 {raw_action} 重新入队(旁路)")
             self._signal_queue.put(payload)
             return
 

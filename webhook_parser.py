@@ -754,6 +754,10 @@ def normalize_tv_payload(data):
 
     secret = str(src.get("secret") or src.get("token") or src.get("key") or "").strip()
 
+    # TV 时序：同 K 线内事件顺序（先 bar_index，再 seq；严禁按到达时间）
+    bar_index = _to_int(src.get("bar_index") or src.get("barIndex") or src.get("bar"))
+    seq = _to_int(src.get("seq") or src.get("sequence") or src.get("seq_no"))
+
     # 双品种：ticker / symbol（TradingView {{ticker}}）
     try:
         from symbol_config import extract_symbol_from_payload
@@ -800,6 +804,10 @@ def normalize_tv_payload(data):
         out["reason"] = reason
     if secret:
         out["secret"] = secret
+    if bar_index is not None and bar_index >= 0:
+        out["bar_index"] = int(bar_index)
+    if seq is not None and seq >= 1:
+        out["seq"] = int(seq)
 
     out["_normalized"] = True
     out["_schema"] = TV_STRATEGY_VERSION

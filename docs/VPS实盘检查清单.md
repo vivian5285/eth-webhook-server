@@ -22,7 +22,9 @@
 | 1.2 | ETH 信号 → 只操作 ETHUSDT | ✅ | `get_supervisor_for_payload()` |
 | 1.3 | XAU 信号 → 只操作 XAUUSDT | ✅ | 同上 |
 | 1.4 | 未知 symbol → 拒绝并记录 | ✅ | `app.py` 返回 400 + `allowed` 列表 |
-| 1.5 | 同 action+price 去重（45s） | ✅ | `SIGNAL_DEDUP_SEC` · 每品种独立队列 |
+| 1.5 | 同 action+price 去重（45s） | ✅ | 无时序旧信号：`SIGNAL_DEDUP_SEC`；有 `bar_index`+`seq`：幂等键 |
+| 1.5b | TV 时序有序消费 | ✅ | `tv_seq.py`：先 `bar_index` 再 `seq`；乱序暂存 `TV_SEQ_PENDING_WAIT` |
+| 1.5c | 钉钉攒批防限流 | ✅ | `DINGTALK_BATCH_*` + 1/2/4s 重试 + `WECHAT_WEBHOOK` 备用 |
 
 ### 实盘场景
 

@@ -9,6 +9,8 @@ import base64
 import urllib.parse
 import logging
 import contextvars
+import queue
+import threading
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -44,6 +46,12 @@ logger = logging.getLogger(__name__)
 
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
+WECHAT_WEBHOOK = os.getenv("WECHAT_WEBHOOK", "").strip()  # 钉钉失败备用（企业微信群机器人）
+DINGTALK_BATCH_MAX = max(1, int(os.getenv("DINGTALK_BATCH_MAX", "8")))
+DINGTALK_BATCH_FLUSH_SEC = float(os.getenv("DINGTALK_BATCH_FLUSH_SEC", "6"))
+DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 EXCHANGE_LABEL = "币安 Binance"
 LEVERAGE_LABEL = f"{int(EXCHANGE_LEVERAGE)}x"
@@ -205,16 +213,78 @@ def _get_signed_url():
     return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={sign}"
 
 
-def send_alert(title, data_dict, header_color=G_TITLE):
+def _post_wechat_markdown(title, markdown_text):
+    """企业微信群机器人备用渠道。"""
+    if not WECHAT_WEBHOOK:
+        return False
+    # 企微 markdown 用 content；截断防超长
+    content = f"**{title}**\n{markdown_text}"
+    if len(content) > 3800:
+        content = content[:3800] + "\n…(截断)"
+    try:
+        r = requests.post(
+            WECHAT_WEBHOOK,
+            json={"msgtype": "markdown", "markdown": {"content": content}},
+            timeout=8,
+        )
+        ok = r.status_code == 200
+        if not ok:
+            logger.error(f"企业微信备用发送失败 HTTP {r.status_code}: {r.text[:200]}")
+        return ok
+    except Exception as e:
+        logger.error(f"企业微信备用发送异常: {e}")
+        return False
+
+
+def _post_dingtalk_once(title, markdown_text):
     signed_url = _get_signed_url()
     if not signed_url:
-        return
+        return False, "no_webhook"
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
+    try:
+        r = requests.post(signed_url, json=payload, timeout=6)
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code} {r.text[:160]}"
+        body = {}
+        try:
+            body = r.json() if r.text else {}
+        except Exception:
+            body = {}
+        # 钉钉限流/错误：errcode != 0
+        err = body.get("errcode", 0)
+        if err not in (0, None):
+            return False, f"errcode={err} {body.get('errmsg', '')}"
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
 
-    text_lines = [f"- **{k}** : {v}" for k, v in data_dict.items()]
+
+def _post_with_retry(title, markdown_text, max_attempts=3):
+    """指数退避 1s/2s/4s；三次失败后改用企业微信。"""
+    delays = (1.0, 2.0, 4.0)
+    last_err = ""
+    for i in range(max_attempts):
+        ok, info = _post_dingtalk_once(title, markdown_text)
+        if ok:
+            _batcher.mark_success()
+            return True
+        last_err = info
+        logger.error(f"钉钉发送失败({i + 1}/{max_attempts}): {info}")
+        if i < max_attempts - 1:
+            time.sleep(delays[i])
+    _batcher.mark_fail()
+    if WECHAT_WEBHOOK:
+        logger.warning(f"钉钉 {max_attempts} 次失败 → 企业微信备用 | 末次: {last_err}")
+        if _post_wechat_markdown(title, markdown_text):
+            return True
+    return False
+
+
+def _build_alert_markdown(title, data_dict, header_color=G_TITLE):
+    text_lines = [f"- **{k}** : {v}" for k, v in (data_dict or {}).items()]
     body_text = "\n".join(text_lines)
     now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    markdown_text = f"""### <font color="{header_color}">{title}</font>
+    return f"""### <font color="{header_color}">{title}</font>
 > **⏰ 军区时间**：`{now_time}`
 > **📍 阵地标识**：[ {EXCHANGE_LABEL} · 主力进攻阵地 ]
 > **🔶 主题色带**：`币安黄金`（与深币紫金播报区分）
@@ -225,11 +295,120 @@ def send_alert(title, data_dict, header_color=G_TITLE):
 ---
 {FOOTER}
 """
-    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
-    try:
-        requests.post(signed_url, json=payload, timeout=6)
-    except Exception as e:
-        logger.error(f"钉钉发送失败: {e}")
+
+
+class _DingTalkBatcher:
+    """攒批推送：默认 6s 或满 8 条合并一条 Markdown，规避 20条/分钟限流。"""
+
+    def __init__(self):
+        self._q = queue.Queue()
+        self._lock = threading.Lock()
+        self._started = False
+        self.success_count = 0
+        self.fail_count = 0
+
+    def mark_success(self):
+        with self._lock:
+            self.success_count += 1
+
+    def mark_fail(self):
+        with self._lock:
+            self.fail_count += 1
+
+    def stats(self):
+        with self._lock:
+            return {
+                "success": self.success_count,
+                "fail": self.fail_count,
+                "pending": self._q.qsize(),
+            }
+
+    def start(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            threading.Thread(
+                target=self._loop, daemon=True, name="dingtalk-batch"
+            ).start()
+            logger.info(
+                f"📬 钉钉攒批已启动：flush={DINGTALK_BATCH_FLUSH_SEC}s "
+                f"max={DINGTALK_BATCH_MAX} 备用企微={'是' if WECHAT_WEBHOOK else '否'}"
+            )
+
+    def enqueue(self, title, data_dict, header_color):
+        self.start()
+        self._q.put((str(title), dict(data_dict or {}), header_color, time.time()))
+
+    def _loop(self):
+        batch = []
+        last_flush = time.time()
+        while True:
+            timeout = max(0.15, DINGTALK_BATCH_FLUSH_SEC - (time.time() - last_flush))
+            try:
+                item = self._q.get(timeout=timeout)
+                batch.append(item)
+            except queue.Empty:
+                pass
+            now = time.time()
+            if batch and (
+                len(batch) >= DINGTALK_BATCH_MAX
+                or now - last_flush >= DINGTALK_BATCH_FLUSH_SEC
+            ):
+                try:
+                    self._flush(batch)
+                except Exception as e:
+                    logger.error(f"钉钉攒批 flush 异常: {e}", exc_info=True)
+                batch = []
+                last_flush = time.time()
+
+    def _flush(self, batch):
+        if not batch:
+            return
+        if len(batch) == 1:
+            title, data, color, _ = batch[0]
+            md = _build_alert_markdown(title, data, color)
+            _post_with_retry(title, md)
+            return
+        parts = []
+        for title, data, color, ts in batch:
+            tstr = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            body = "\n".join(f"- **{k}** : {v}" for k, v in (data or {}).items())
+            parts.append(
+                f'### <font color="{color}">{title}</font> `{tstr}`\n{body}'
+            )
+        now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        merged_title = f"📦 币安播报合并 ×{len(batch)}"
+        markdown_text = f"""### <font color="{G_TITLE}">{merged_title}</font>
+> **⏰ 军区时间**：`{now_time}`
+> **📍 阵地标识**：[ {EXCHANGE_LABEL} · 攒批摘要 ]
+> **📊 条数**：`{len(batch)}`（规避钉钉限流）
+
+---
+{chr(10).join(parts)}
+
+---
+{FOOTER}
+"""
+        _post_with_retry(merged_title, markdown_text)
+
+
+_batcher = _DingTalkBatcher()
+
+
+def dingtalk_batch_stats():
+    return _batcher.stats()
+
+
+def send_alert(title, data_dict, header_color=G_TITLE):
+    """对外统一入口：默认攒批；DINGTALK_BATCH_DISABLE=1 则即时发送。"""
+    if not DINGTALK_WEBHOOK and not WECHAT_WEBHOOK:
+        return
+    if DINGTALK_BATCH_DISABLE:
+        md = _build_alert_markdown(title, data_dict, header_color)
+        _post_with_retry(str(title), md)
+        return
+    _batcher.enqueue(title, data_dict, header_color)
 
 
 def get_regime_name(regime_code):
@@ -784,7 +963,8 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
 
 def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
                               tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
-                              reason="", vps_sizing_meta=None, vps_hard_sl_note=""):
+                              reason="", vps_sizing_meta=None, vps_hard_sl_note="",
+                              bar_index=None, seq=None):
     """TV Webhook 信号到达（接收确认，非成交核实）"""
     act = str(action or "").upper()
     et = normalize_entry_type(entry_type)
@@ -810,6 +990,11 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
         "📊 档位": get_regime_name(regime),
         "📡 ATR": _g(f"`{float(atr or 0):.2f}`", G_MUTED),
     }
+    if bar_index is not None or seq is not None:
+        data["⏱️ 时序"] = _g(
+            f"bar_index=`{bar_index}` · seq=`{seq}`",
+            G_LIGHT,
+        )
     if tv_sl and float(tv_sl) > 0:
         data["📡 TV参考tv_sl"] = _g(f"`{float(tv_sl):.2f}` (仅参考)", G_MUTED)
     if vps_hard_sl_note:
