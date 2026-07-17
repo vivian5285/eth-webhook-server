@@ -286,6 +286,12 @@ def audit_module3_hard_sl(a: Audit):
         and "_probe_position_for_recover" in sup
         and "AMBIGUOUS" in sup,
     )
+    a.check(
+        "3.24 hydrate 过滤 None 信源",
+        "isinstance(s, dict)" in sup
+        and "多品种启动恢复清单" in sup
+        and "重启异常兜底" in sup,
+    )
 
 
 def audit_module4_radar(a: Audit):

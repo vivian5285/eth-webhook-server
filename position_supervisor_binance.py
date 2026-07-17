@@ -61,7 +61,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.57.0-per-symbol-recover-no-ghost-flat"
+BINANCE_VPS_VERSION = "v13.58.0-multi-symbol-recover-harden"
+
 
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
@@ -1129,15 +1130,16 @@ class PositionSupervisorBinance:
             self.last_tv_side = side
 
         sources = [
-            self.last_tv_signal,
-            self._load_last_journal_entry(None, kind="tv"),
-            self._load_last_tv_open_signal(),
-            self._load_last_journal_entry(None, kind="open"),
+            s for s in (
+                self.last_tv_signal,
+                self._load_last_journal_entry(None, kind="tv"),
+                self._load_last_tv_open_signal(),
+                self._load_last_journal_entry(None, kind="open"),
+            )
+            if isinstance(s, dict)
         ]
 
         for src in sources:
-            if not src:
-                continue
             if src.get("regime"):
                 self.regime = int(src["regime"])
             if src.get("atr"):
@@ -1263,14 +1265,15 @@ class PositionSupervisorBinance:
         entry = float(entry or 0)
         side = str(side or "").strip().upper()
         sources = [
-            self.last_tv_signal,
-            self._load_last_journal_entry(None, kind="tv"),
-            self._load_last_tv_open_signal(),
-            self._load_last_journal_entry(None, kind="open"),
+            s for s in (
+                self.last_tv_signal,
+                self._load_last_journal_entry(None, kind="tv"),
+                self._load_last_tv_open_signal(),
+                self._load_last_journal_entry(None, kind="open"),
+            )
+            if isinstance(s, dict)
         ]
         for src in sources:
-            if not src:
-                continue
             src_side = (src.get("action") or src.get("side") or "").upper()
             if src_side in ("LONG", "SHORT") and side and src_side != side:
                 continue
@@ -8777,12 +8780,33 @@ class PositionSupervisorBinance:
                 except Exception as e:
                     import traceback
                     recover_err = f"{e}\n{traceback.format_exc()[-800:]}"
-                    logger.error(f"❌ 重启接管步骤异常: {recover_err}")
+                    logger.error(f"❌ [{self.symbol}] 重启接管步骤异常: {recover_err}")
+                    # 有仓绝不平仓：尽力补挂 TP123+VPS硬止损，哨兵接力
+                    try:
+                        live = self._get_active_position(prefer_ws=False) or pos
+                        if live and float(live.get("size") or 0) > 0:
+                            self.current_side = live.get("side") or self.current_side
+                            self.watched_entry = float(
+                                live.get("entry_price") or self.watched_entry or 0
+                            )
+                            self.watched_qty = float(live.get("size") or 0)
+                            self.monitoring = True
+                            self._open_regime_sticky = True
+                            curr_px = binance_client.get_current_price(self.symbol) or 0
+                            self._ensure_full_defense_stack(
+                                self.watched_qty, self.watched_entry, curr_px,
+                                source=f"{self.symbol}重启异常兜底",
+                                manual_fresh=True,
+                            )
+                            self._save_state()
+                    except Exception as e2:
+                        logger.error(f"❌ [{self.symbol}] 异常兜底防线也失败: {e2}")
                     self.monitoring = True
                     self._save_state()
                     dingtalk.report_system_alert(
-                        "重启接管部分失败",
-                        f"实盘仍有仓，已尽力启动哨兵接力 | {recover_err}",
+                        f"重启接管部分失败 [{self.symbol}]",
+                        f"实盘仍有仓，已尽力挂 TP123+VPS硬止损并启动哨兵 | "
+                        f"禁止自动平仓 | {recover_err}",
                     )
                 finally:
                     self._recover_in_progress = False
@@ -8889,20 +8913,57 @@ def get_supervisor_for_payload(data):
 
 
 def bootstrap_supervisors():
-    """启动全部活动品种军师并恢复状态。"""
+    """启动全部活动品种军师并逐一恢复状态（ETH/XAU 独立核查，互不跳过）。"""
     from symbol_config import active_binance_symbols
     global position_supervisor
     symbols = active_binance_symbols()
+    logger.info(f"🔄 多品种启动恢复清单: {symbols}")
     for sym in symbols:
         get_supervisor(sym)
     position_supervisor = SUPERVISORS.get("ETHUSDT") or next(iter(SUPERVISORS.values()), None)
     if __name__ != "__main__":
+        summaries = []
         for sym, sup in SUPERVISORS.items():
             try:
                 logger.info(f"🔄 启动恢复 [{sym}] …")
+                before = None
+                try:
+                    before = sup._get_active_position(prefer_ws=False)
+                except Exception:
+                    before = None
                 sup.recover_state_on_startup()
+                after = None
+                try:
+                    after = sup._get_active_position(prefer_ws=False)
+                except Exception:
+                    after = None
+                if after:
+                    summaries.append(
+                        f"{sym}:有仓 {after.get('side')} {after.get('size')} "
+                        f"@ {after.get('entry_price')} monitoring={sup.monitoring}"
+                    )
+                elif before:
+                    summaries.append(f"{sym}:探测曾有仓但恢复后REST空 → 哨兵巡检")
+                else:
+                    summaries.append(f"{sym}:空仓待命")
             except Exception as e:
                 logger.error(f"启动恢复失败 [{sym}]: {e}")
+                summaries.append(f"{sym}:恢复异常 {e}")
+                try:
+                    # 单品种失败不影响其它品种；本品种仍启哨兵
+                    if hasattr(sup, "_ensure_sentinel_running_quiet"):
+                        sup.monitoring = True
+                        sup._ensure_sentinel_running_quiet()
+                except Exception:
+                    pass
+        try:
+            dingtalk.report_system_alert(
+                "多品种重启核查汇总",
+                " | ".join(summaries) if summaries else "无品种",
+                suggestion="有仓品种应挂齐 TP123+VPS硬止损；雷达仅TP1后；重启禁止无故平仓",
+            )
+        except Exception as e:
+            logger.warning(f"多品种重启汇总钉钉跳过: {e}")
     return SUPERVISORS
 
 
