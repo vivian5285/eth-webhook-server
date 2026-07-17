@@ -181,6 +181,23 @@ def audit_module3_hard_sl(a: Audit):
     for r, pct in expected.items():
         a.check(f"3.2 R{r} 硬止损 {pct*100:.2f}%", abs(VPS_HARD_SL_PCT[r] - pct) < 0.0001)
 
+    # ETH@1800 绝对距离对照表（用户规格：50/70/100/150U）
+    eth_abs = {1: 50.0, 2: 70.0, 3: 100.0, 4: 150.0}
+    for r, dist in eth_abs.items():
+        sl = compute_vps_hard_sl("SHORT", 1800, regime=r)
+        a.check(
+            f"3.2b ETH@1800 R{r} ≈ +{dist:.0f}U",
+            abs(sl - (1800 + dist)) < 0.2,
+            f"sl={sl}",
+        )
+
+    # XAU 与 ETH 同比例：R3@4003.94 → 4226.56（非 R4 4337）
+    xau_r3 = compute_vps_hard_sl("SHORT", 4003.94, regime=3)
+    xau_r4 = compute_vps_hard_sl("SHORT", 4003.94, regime=4)
+    a.check("3.2c XAU R3@4003.94≈4226.56", abs(xau_r3 - 4226.56) < 0.05, f"sl={xau_r3}")
+    a.check("3.2d XAU R4@4003.94≈4337.47", abs(xau_r4 - 4337.47) < 0.05, f"sl={xau_r4}")
+    a.check("3.2e ETH/XAU 共用同一 PCT 表", "ETH / XAU 同一套" in _read(os.path.join(ROOT, "webhook_parser.py")))
+
     sl_long = compute_vps_hard_sl("LONG", 1800, regime=3)
     a.check("3.3 做多 R3@1800", abs(sl_long - 1800 * (1 - 0.0556)) < 1, f"sl={sl_long}")
 
@@ -249,6 +266,18 @@ def audit_module3_hard_sl(a: Audit):
         "3.20 SHORT保本禁止抬过开仓价",
         "禁止抬到成本及以上" in sup
         and "_clamp_radar_sl_for_market" in sup,
+    )
+    a.check(
+        "3.21 开仓日志按品种隔离",
+        "_journal_path" in sup
+        and "binance_{kind}_journal_" in sup
+        and "_open_regime_sticky" in sup
+        and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
+    )
+    a.check(
+        "3.22 别档VPS宽价不作TV紧价",
+        "_matches_any_vps_regime_stop" in sup
+        and "不是 TV 紧价" in sup,
     )
 
 

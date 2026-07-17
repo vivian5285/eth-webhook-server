@@ -171,9 +171,10 @@ def format_regime_tp_ratios_label(regime):
     return "/".join(str(int(round(x * 100))) for x in get_regime_tp_ratios(regime))
 
 
-# VPS 自主硬止损：按开仓价百分比等比呼吸（与 ETH 价格缩放）
-# Regime → 开仓价百分比：R1 2.8% · R2 3.9% · R3 5.6% · R4 8.3%
-# 硬止损：开仓价百分比（双品种统一；XAU 绝对距离随价格自动变宽）
+# VPS 自主硬止损：按开仓价百分比等比呼吸（ETH / XAU 同一套 1~4 档，无品种分支）
+# Regime → 开仓价百分比：R1 2.78% · R2 3.89% · R3 5.56% · R4 8.33%
+# 对应 ETH@1800 绝对距离约 50/70/100/150U；XAU 同比例随开仓价缩放
+# 硬止损：开仓价百分比（双品种统一；与 TV tv_sl / 周期无关）
 VPS_HARD_SL_PCT = {1: 0.0278, 2: 0.0389, 3: 0.0556, 4: 0.0833}
 VPS_HARD_SL_EXTRA_RELAX = 0.0  # 极端强趋势额外放宽 0~0.10（乘数）
 VPS_HARD_SL_LIMIT_PCT = 0.0015  # Stop-Limit 限价相对触发价缓冲 0.15%（落在 0.1%~0.2%）

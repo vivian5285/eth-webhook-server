@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.55.0-radar-only-after-tp1"
+BINANCE_VPS_VERSION = "v13.56.0-symbol-regime-hardsl-lock"
 SENTINEL_POLL_NORMAL = 8
 SENTINEL_POLL_ARMING = 5
 SENTINEL_POLL_RADAR = 5
@@ -112,9 +112,13 @@ SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
 OPEN_SAME_DIR_COOLDOWN_SEC = 180  # 同向重复 OPEN：开仓后冷却期内禁止先平后开
 ATR_SIMILAR_RATIO = 0.03  # 持仓 ATR 与 TV ATR 偏差 ≤3% 视为未变
+# 旧版共享日志（兼容读取）；新写入一律按品种隔离，禁止 ETH/XAU 串档位
 TV_JOURNAL = "logs/binance_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/binance_open_journal.jsonl"
 EXCHANGE_JOURNAL = "logs/binance_exchange_journal.jsonl"
+# 硬止损同步冷却：同目标禁止反复撤挂（R3/R4 横跳抢权限）
+HARD_SL_SYNC_COOLDOWN_SEC = 45
+OPEN_REGIME_ENTRY_MATCH_PCT = 0.008  # 开仓日志匹配入场价容差 0.8%
 
 
 class PositionSupervisorBinance:
@@ -191,6 +195,8 @@ class PositionSupervisorBinance:
         self.sizing_principal = 0.0
         self.tv_sl = 0.0
         self.tv_sl_ref = 0.0
+        self._open_regime_sticky = False
+        self._last_hard_sl_sync_ts = 0.0
         self._radar_stage_last = 0
         self._last_applied_exchange_sl = 0.0
         self.tv_risk_pct = 0.0
@@ -669,12 +675,60 @@ class PositionSupervisorBinance:
     def signal_queue_depth(self):
         return self._signal_queue.qsize()
 
+    def _journal_path(self, kind):
+        """kind=open|tv|exchange → 品种隔离路径"""
+        return f"logs/binance_{kind}_journal_{self.symbol}.jsonl"
+
+    def _legacy_journal_path(self, kind):
+        return f"logs/binance_{kind}_journal.jsonl"
+
     def _append_journal(self, path, record):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         record = dict(record)
+        record.setdefault("symbol", self.symbol)
         record["ts"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _iter_journal_entries(self, kind, symbol_only=True):
+        """按时间正序读取品种日志；兼容旧共享文件（仅本 symbol 行）。"""
+        paths = [self._journal_path(kind)]
+        legacy = self._legacy_journal_path(kind)
+        if legacy not in paths:
+            paths.append(legacy)
+        entries = []
+        seen = set()
+        for path in paths:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if symbol_only:
+                            sym = str(e.get("symbol") or "").upper()
+                            # 旧共享日志无 symbol：仅当 path 已是品种文件时采纳；共享文件无 symbol 则跳过防串单
+                            if path == legacy and not sym:
+                                continue
+                            if sym and sym != self.symbol.upper():
+                                continue
+                        key = (
+                            e.get("ts"), e.get("source"), e.get("side"),
+                            e.get("entry"), e.get("open_regime"), e.get("regime"),
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        entries.append(e)
+            except Exception:
+                continue
+        return entries
 
     def _log_exchange_api(self, action, detail="", result=None):
         """记录交易所 API 动作与响应摘要"""
@@ -686,7 +740,7 @@ class PositionSupervisorBinance:
                 snippet = str(result)[:800]
             note = f"{note} | resp={snippet}" if note else f"resp={snippet}"
         logger.info(f"🔌 [交易所] {action}" + (f" | {note}" if note else ""))
-        self._append_journal(EXCHANGE_JOURNAL, {
+        self._append_journal(self._journal_path("exchange"), {
             "action": action,
             "detail": detail,
             "result": result if isinstance(result, (dict, list, str, int, float, bool)) else str(result),
@@ -711,7 +765,7 @@ class PositionSupervisorBinance:
             + (f" | {compare}" if compare else "")
             + (f" | {extra}" if extra else "")
         )
-        self._append_journal(EXCHANGE_JOURNAL, {
+        self._append_journal(self._journal_path("exchange"), {
             "kind": "radar_update",
             "stage": stage,
             "stage_label": label,
@@ -724,7 +778,11 @@ class PositionSupervisorBinance:
             "side": self.current_side,
         })
 
-    def _load_last_journal_entry(self, path):
+    def _load_last_journal_entry(self, path, kind=None):
+        """path 可为显式路径；kind=open|tv|exchange 时读品种隔离(+兼容旧文件)。"""
+        if kind:
+            entries = self._iter_journal_entries(kind, symbol_only=True)
+            return entries[-1] if entries else None
         if not os.path.exists(path):
             return None
         last = None
@@ -733,15 +791,20 @@ class PositionSupervisorBinance:
                 line = line.strip()
                 if line:
                     try:
-                        last = json.loads(line)
+                        e = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    sym = str(e.get("symbol") or "").upper()
+                    if sym and sym != self.symbol.upper():
+                        continue
+                    last = e
         return last
 
     def _record_tv_signal(self, payload, raw_action):
         full_payload = dict(payload or {})
         entry = {
             "action": raw_action,
+            "symbol": self.symbol,
             "regime": self.regime,
             "atr": self.current_atr,
             "price": self.tv_price,
@@ -758,7 +821,7 @@ class PositionSupervisorBinance:
             "ts": time.time(),
         }
         self.last_tv_signal = entry
-        self._append_journal(TV_JOURNAL, entry)
+        self._append_journal(self._journal_path("tv"), entry)
         try:
             payload_txt = json.dumps(full_payload, ensure_ascii=False)[:1800]
         except (TypeError, ValueError):
@@ -806,8 +869,9 @@ class PositionSupervisorBinance:
         # 永远写开仓档位 open_regime，禁止 recover 日志把后续 TV UPDATE 的紧档写回锁点
         open_r = int(getattr(self, "open_regime", None) or self.regime or 3)
         open_a = float(getattr(self, "open_atr", None) or self.current_atr or 0)
-        self._append_journal(OPEN_JOURNAL, {
+        self._append_journal(self._journal_path("open"), {
             "source": source,
+            "symbol": self.symbol,
             "side": side,
             "qty": qty,
             "entry": entry,
@@ -817,54 +881,80 @@ class PositionSupervisorBinance:
             "tv_tps": self.tv_tps,
             "tv_price": self.tv_price,
             "last_tv_side": self.last_tv_side,
+            "vps_hard_sl": float(self._vps_hard_sl_target(entry, side, open_r) or 0),
         })
 
-    def _lock_open_regime_from_sources(self):
+    def _lock_open_regime_from_sources(self, force=False):
         """
-        硬止损档位锁定开仓 R：优先开仓日志的 open_regime。
-        跳过仅含当前 regime、无 open_regime 的 recover 行（曾把 R4 锁成 R3）。
+        硬止损档位锁定开仓 R（本品种）：
+        - 持仓监控中已有 open_regime → 粘性锁定，禁止被 ETH 共享日志/其它品种改写成 R4
+        - 仅读取本 symbol 开仓日志；优先匹配当前入场价
+        - 禁止 R3↔R4 横跳导致 4226↔4337 反复撤挂
         """
+        cur = int(getattr(self, "open_regime", None) or 0)
+        # 开仓已粘性锁定：哨兵/维护禁止再改档（否则 XAU R3↔ETH串档R4 → 4226↔4337 横跳）
+        if (
+            not force
+            and cur > 0
+            and (
+                getattr(self, "_open_regime_sticky", False)
+                or (
+                    getattr(self, "monitoring", False)
+                    and (
+                        float(getattr(self, "watched_qty", 0) or 0) > 0
+                        or str(getattr(self, "current_side", "") or "")
+                    )
+                )
+            )
+        ):
+            return cur
+
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        side = str(getattr(self, "current_side", "") or "").upper()
         best = None
         best_src = ""
-        if os.path.exists(OPEN_JOURNAL):
-            entries = []
-            try:
-                with open(OPEN_JOURNAL, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entries.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            continue
-            except Exception:
-                entries = []
-            for e in reversed(entries):
-                src = str(e.get("source") or "").lower()
-                or_field = e.get("open_regime")
-                if or_field:
-                    best = int(or_field)
-                    best_src = src or "open_journal"
-                    break
-                # 无 open_regime 字段的 recover 行不可信（可能是 UPDATE 后的紧档）
-                if src.startswith("recover") or "重启" in src:
-                    continue
-                reg = e.get("regime")
-                if reg:
-                    best = int(reg)
-                    best_src = src or "open_journal"
-                    break
-        if best is None:
-            st = int(getattr(self, "open_regime", None) or 0)
-            if st > 0:
-                best = st
-                best_src = "state"
+        best_score = -1
+        entries = self._iter_journal_entries("open", symbol_only=True)
+        for e in reversed(entries):
+            src = str(e.get("source") or "").lower()
+            or_field = e.get("open_regime")
+            reg = or_field if or_field else e.get("regime")
+            if not reg:
+                continue
+            # 无 open_regime 的 recover 行不可信
+            if not or_field and (src.startswith("recover") or "重启" in src):
+                continue
+            score = 10 if or_field else 5
+            e_side = str(e.get("side") or e.get("last_tv_side") or "").upper()
+            if side and e_side and e_side == side:
+                score += 20
+            e_entry = float(e.get("entry") or 0)
+            if entry > 0 and e_entry > 0:
+                drift = abs(e_entry - entry) / entry
+                if drift <= OPEN_REGIME_ENTRY_MATCH_PCT:
+                    score += 50
+                elif drift > 0.03:
+                    continue  # 入场差过大：别仓/别品种残留
+            if score > best_score:
+                best_score = score
+                best = int(reg)
+                best_src = src or "open_journal"
+
+        if best is None and cur > 0:
+            best = cur
+            best_src = "state"
+        if best is None and self.last_tv_signal:
+            r = int(self.last_tv_signal.get("regime") or 0)
+            if r > 0:
+                best = r
+                best_src = "last_tv_signal"
         if best is None:
             best = int(self.regime or 3)
             best_src = "tv_regime_fallback"
-        old = int(getattr(self, "open_regime", None) or 0)
+
+        old = cur
         self.open_regime = best
+        self._open_regime_sticky = True
         if old and old != best:
             logger.warning(
                 f"🔒 [{self.symbol}] 开仓档位校正 R{old}→R{best} ({best_src})"
@@ -877,18 +967,9 @@ class PositionSupervisorBinance:
 
     def _load_active_tv_direction_from_journal(self):
         """从 TV 日志末尾向前：跳过尾部 CLOSE，取当前活跃周期的 LONG/SHORT"""
-        if not os.path.exists(TV_JOURNAL):
+        entries = self._iter_journal_entries("tv", symbol_only=True)
+        if not entries:
             return None
-        entries = []
-        with open(TV_JOURNAL, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
         for entry in reversed(entries):
             action = (entry.get("action") or "").upper()
             if action.startswith("CLOSE"):
@@ -914,7 +995,7 @@ class PositionSupervisorBinance:
         if self.last_tv_signal:
             add(self.last_tv_signal.get("action"))
             add(self.last_tv_signal.get("side"))
-        last_tv = self._load_last_journal_entry(TV_JOURNAL)
+        last_tv = self._load_last_journal_entry(None, kind="tv")
         if last_tv:
             add(last_tv.get("action"))
             add(last_tv.get("side"))
@@ -928,7 +1009,7 @@ class PositionSupervisorBinance:
 
     def _strict_tv_opposite_side(self, live_side):
         """仅当「最新 TV 指令」与实盘明确反向时才强平（不用陈旧全量扫描）"""
-        for src in (self.last_tv_signal, self._load_last_journal_entry(TV_JOURNAL)):
+        for src in (self.last_tv_signal, self._load_last_journal_entry(None, kind="tv")):
             if not src:
                 continue
             action = (src.get("action") or "").upper()
@@ -941,21 +1022,11 @@ class PositionSupervisorBinance:
 
     def _load_last_tv_open_signal(self):
         """TV 日志中最近一条 LONG/SHORT（CLOSE 之后仍可用于方向对账）"""
-        if not os.path.exists(TV_JOURNAL):
-            return None
         last_open = None
-        with open(TV_JOURNAL, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                action = (entry.get("action") or "").upper()
-                if action in ("LONG", "SHORT"):
-                    last_open = entry
+        for entry in self._iter_journal_entries("tv", symbol_only=True):
+            action = (entry.get("action") or "").upper()
+            if action in ("LONG", "SHORT"):
+                last_open = entry
         return last_open
 
     def _resolve_tv_authoritative_side(self):
@@ -967,7 +1038,7 @@ class PositionSupervisorBinance:
             side = (self.last_tv_signal.get("side") or "").upper()
             if side in ("LONG", "SHORT"):
                 return side
-        last_tv = self._load_last_journal_entry(TV_JOURNAL)
+        last_tv = self._load_last_journal_entry(None, kind="tv")
         if last_tv:
             tv_action = (last_tv.get("action") or "").upper()
             if tv_action in ("LONG", "SHORT"):
@@ -1058,9 +1129,9 @@ class PositionSupervisorBinance:
 
         sources = [
             self.last_tv_signal,
-            self._load_last_journal_entry(TV_JOURNAL),
+            self._load_last_journal_entry(None, kind="tv"),
             self._load_last_tv_open_signal(),
-            self._load_last_journal_entry(OPEN_JOURNAL),
+            self._load_last_journal_entry(None, kind="open"),
         ]
 
         for src in sources:
@@ -1073,8 +1144,8 @@ class PositionSupervisorBinance:
             if float(self.tv_price or 0) <= 0 and float(src.get("price", 0) or 0) > 0:
                 self.tv_price = float(src["price"])
 
-        # 硬止损档位：优先开仓日志锁定，禁止被最新 TV UPDATE / recover 日志改窄
-        hard_regime = self._lock_open_regime_from_sources()
+        # 硬止损档位：本品种开仓日志强制匹配入场价（force 纠正错误 state）
+        hard_regime = self._lock_open_regime_from_sources(force=True)
         notes.append(f"开仓档位锁定 R{hard_regime}")
 
         tp_ok = sum(1 for t in (self.tv_tps or []) if t > 0)
@@ -1192,9 +1263,9 @@ class PositionSupervisorBinance:
         side = str(side or "").strip().upper()
         sources = [
             self.last_tv_signal,
-            self._load_last_journal_entry(TV_JOURNAL),
+            self._load_last_journal_entry(None, kind="tv"),
             self._load_last_tv_open_signal(),
-            self._load_last_journal_entry(OPEN_JOURNAL),
+            self._load_last_journal_entry(None, kind="open"),
         ]
         for src in sources:
             if not src:
@@ -1508,8 +1579,8 @@ class PositionSupervisorBinance:
         saved_watched = float(self.watched_qty or 0)
         saved_initial = float(self.initial_qty or 0)
 
-        last_tv = self._load_last_journal_entry(TV_JOURNAL)
-        last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+        last_tv = self._load_last_journal_entry(None, kind="tv")
+        last_open = self._load_last_journal_entry(None, kind="open")
         last_open_tv = self._load_last_tv_open_signal()
 
         if last_tv:
@@ -1632,7 +1703,7 @@ class PositionSupervisorBinance:
         live_qty = float(live_qty or 0)
         entry = float(entry or self.watched_entry or 0)
         saved = float(self.initial_qty or 0)
-        last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+        last_open = self._load_last_journal_entry(None, kind="open")
         jq = float((last_open or {}).get("qty", 0) or 0)
         je = float((last_open or {}).get("entry", 0) or 0)
         entry_tol = max(3.0, entry * 0.003) if entry > 0 else 3.0
@@ -1733,6 +1804,9 @@ class PositionSupervisorBinance:
                     ),
                     "last_applied_exchange_sl": float(
                         getattr(self, "_last_applied_exchange_sl", 0) or 0
+                    ),
+                    "open_regime_sticky": bool(
+                        getattr(self, "_open_regime_sticky", False)
                     ),
                     "tv_risk_pct": float(getattr(self, "tv_risk_pct", 0) or 0),
                     "tv_qty_ratio": float(getattr(self, "tv_qty_ratio", 1.0) or 1.0),
@@ -2267,6 +2341,7 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self.shield_active = False
         self.current_side = None
+        self._open_regime_sticky = False
         self._save_state()
         self._purge_all_defense_orders_on_flat(f"扫尾完成·{reason}")
         self._report_flat_close(reason, swept_dust=True)
@@ -2343,7 +2418,7 @@ class PositionSupervisorBinance:
             or was_monitoring
         )
         if not had_active_book:
-            last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+            last_open = self._load_last_journal_entry(None, kind="open")
             if last_open and last_open.get("source") in ("open", "recover"):
                 had_active_book = True
                 prev_watched = prev_watched or float(last_open.get("qty", 0) or 0)
@@ -2848,17 +2923,38 @@ class PositionSupervisorBinance:
             return 0.0
         return round(float(compute_vps_hard_sl(side, entry, None, regime) or 0), 2)
 
+    def _matches_any_vps_regime_stop(self, stop_px, entry=None, side=None):
+        """若止损贴近任一档位 VPS 宽价，返回档位号；用于区分「TV紧价」vs「别档宽止损」。"""
+        stop_px = round(float(stop_px or 0), 2)
+        if stop_px <= 0:
+            return 0
+        entry = float(entry if entry is not None else (self.watched_entry or 0))
+        side = str(side or self.current_side or "").strip().upper()
+        if entry <= 0 or side not in ("LONG", "SHORT"):
+            return 0
+        for r in (1, 2, 3, 4):
+            v = round(float(compute_vps_hard_sl(side, entry, None, r) or 0), 2)
+            if v <= 0:
+                continue
+            tol = max(float(SHIELD_STOP_TOLERANCE), v * 0.0025)
+            if abs(stop_px - v) <= tol:
+                return int(r)
+        return 0
+
     def _looks_like_tv_tight_stop(self, stop_px, entry=None, side=None):
         """
         判定 TV 式紧止损（禁止挂盘）：
         1) 贴近 tv_sl_ref 且明显窄于 VPS；或
         2) 在亏损侧、介于 entry 与 VPS 宽价之间（比 VPS 更紧）。
+        注意：其它档位的 VPS 宽价（如 R3 vs R4）不是 TV 紧价，勿当紧价反复撤挂。
         """
         stop_px = round(float(stop_px or 0), 2)
         if stop_px <= 0:
             return False
         entry = float(entry if entry is not None else (self.watched_entry or 0))
         side = str(side or self.current_side or "").strip().upper()
+        if self._matches_any_vps_regime_stop(stop_px, entry, side):
+            return False
         ref = round(float(getattr(self, "tv_sl_ref", 0) or 0), 2)
         vps = self._vps_hard_sl_target(entry, side)
         if vps <= 0:
@@ -3161,6 +3257,9 @@ class PositionSupervisorBinance:
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
             return {"ok": False, "skipped": True, "reason": "no_position"}
 
+        # 持仓中粘性锁定本仓档位，禁止维护路径改 R 导致横跳撤挂
+        self._lock_open_regime_from_sources(force=False)
+
         self._sanitize_vps_hard_sl_ledger(source=reason or "同步止损消毒")
         target = self._effective_exchange_stop(radar_sl)
         if not target or target <= 0:
@@ -3181,7 +3280,7 @@ class PositionSupervisorBinance:
         live_stops = self._count_protective_stops()
         near = [p for p in live_stops if abs(p - target) <= SHIELD_STOP_TOLERANCE]
         orphans = [p for p in live_stops if abs(p - target) > SHIELD_STOP_TOLERANCE]
-        # 盘口任何贴近 TV 参考的 STOP 视为必须清掉
+        # 盘口任何贴近 TV 参考的 STOP 视为必须清掉（不含其它档位 VPS 宽价）
         tv_leftovers = [
             p for p in live_stops if self._looks_like_tv_tight_stop(p)
         ]
@@ -3190,10 +3289,26 @@ class PositionSupervisorBinance:
             near = [p for p in near if not self._looks_like_tv_tight_stop(p)]
 
         last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
+        now = time.time()
+        # 冷却：同目标刚挂过 → 禁止 R3/R4 抢权限反复撤挂
+        if (
+            not force
+            and last > 0
+            and abs(last - target) <= SHIELD_STOP_TOLERANCE
+            and (now - float(getattr(self, "_last_hard_sl_sync_ts", 0) or 0))
+            < HARD_SL_SYNC_COOLDOWN_SEC
+        ):
+            if not orphans and (near or self._has_stop_sl_near(target, exclude_shield=False)):
+                return {
+                    "ok": True, "skipped": True, "target": target,
+                    "reason": "cooldown_same_target",
+                }
+
         # 幂等：仅当盘口唯一 STOP 已是 VPS/合法目标，且无 TV 残留
         if not orphans and len(near) == 1 and not tv_leftovers:
             if not self._looks_like_tv_tight_stop(near[0]):
                 self._last_applied_exchange_sl = target
+                self._last_hard_sl_sync_ts = now
                 self.shield_active = True
                 self.shield_sized_qty = live_qty
                 self._tv_sl_missing_alerted = False
@@ -3231,6 +3346,7 @@ class PositionSupervisorBinance:
 
         if ok:
             self._last_applied_exchange_sl = target
+            self._last_hard_sl_sync_ts = time.time()
             self.shield_active = True
             self.shield_sized_qty = live_qty
             self._shield_fail_streak = 0
@@ -3240,6 +3356,7 @@ class PositionSupervisorBinance:
             logger.warning(
                 f"🛡️ [VPS硬止损/统一] {reason or '同步止损'} | "
                 f"Stop-Market closePosition @ {target:.2f} "
+                f"| 开仓R{self._resolve_hard_sl_regime()} "
                 f"| 实时VPS={vps_floor or '—'} | TV参考仅日志="
                 f"{float(getattr(self, 'tv_sl_ref', 0) or 0) or '—'} | 撤 {purged} 笔"
             )
@@ -7035,7 +7152,7 @@ class PositionSupervisorBinance:
             and now - float(sig["ts"]) < cooldown_sec
         ):
             return True
-        last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+        last_open = self._load_last_journal_entry(None, kind="open")
         if not last_open:
             return False
         side = str(last_open.get("side") or "").upper()
@@ -7278,6 +7395,7 @@ class PositionSupervisorBinance:
             self.current_side = action
             self.open_regime = self.regime
             self.open_atr = self.current_atr
+            self._open_regime_sticky = True
             self.initial_qty = real_qty
             self.base_qty = float(real_qty)
             self.add_count = 0
@@ -8313,6 +8431,9 @@ class PositionSupervisorBinance:
                     self._last_applied_exchange_sl = float(
                         s.get("last_applied_exchange_sl", 0) or 0
                     )
+                    self._open_regime_sticky = bool(
+                        s.get("open_regime_sticky", bool(s.get("open_regime")))
+                    )
                     self.tv_risk_pct = float(s.get("tv_risk_pct", 0) or 0)
                     self.tv_qty_ratio = float(s.get("tv_qty_ratio", 1.0) or 1.0)
                     self.tv_entry_type = s.get("tv_entry_type", ENTRY_TYPE_OPEN)
@@ -8329,7 +8450,7 @@ class PositionSupervisorBinance:
                             self.sizing_principal = eq
 
             if self.base_qty <= 0 and os.path.exists(self.state_file):
-                last_open = self._load_last_journal_entry(OPEN_JOURNAL)
+                last_open = self._load_last_journal_entry(None, kind="open")
                 if last_open:
                     jq = float(last_open.get("qty", 0) or 0)
                     if jq > 0:
