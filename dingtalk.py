@@ -652,7 +652,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     }
     if is_manual_open:
         data["📡 雷达/止损"] = _g(
-            "阶段0仅 VPS硬止损 | TP1限价成交后激活雷达5阶段保本",
+            "阶段0仅 VPS硬止损 | 价触激活线(R1/R2=70% R3=75% R4=80%)后雷达保本",
             G_MUTED,
         )
     if tp_audit:
@@ -788,7 +788,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         action_txt += " · 雷达哨兵已点火"
     else:
         radar_txt = _g(
-            "待命 (TP1限价成交后激活雷达5阶段保本)",
+            "待命 (价触激活线后雷达5阶段保本·R弱70%/强75~80%)",
             G_MUTED,
         )
 
@@ -1184,7 +1184,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "✅ 风控动作": _g(
             "VPS按开仓价×档位%计算硬止损(Stop-Limit) · "
             "CLOSE_STOPLOSS=TV第一指令市价全平 · "
-            "TP1限价成交后激活雷达5阶段防回吐",
+            "价触激活线后雷达5阶段防回吐(弱70%/强75~80%)",
             G_MAIN,
         ),
     }
@@ -1217,15 +1217,15 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 剩余头寸": _g(f"**{live_qty}** {unit}", G_MAIN),
-        "📈 价格方向": _g("**TP1 三重验证通过** → 交棒雷达保本", G_LIGHT),
+        "📈 价格方向": _g("**价触激活线** → 交棒雷达保本", G_LIGHT),
         "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 VPS硬止损", G_ACCENT),
         "📡 雷达状态": _g(
             "已激活移动保本" if radar_progress >= 0.2
-            else f"进度 {radar_progress:.0%}，TP1后挂雷达保本",
+            else f"进度 {radar_progress:.0%}，达激活线后挂雷达保本",
             G_MAIN,
         ),
         "✅ 风控动作": _g(
-            reason or "TP1成交 → 雷达接管 · 成本±0.1%保本 · 硬止损退居次级",
+            reason or "价触激活线 → 雷达接管 · 成本±0.1%保本 · 硬止损退居次级",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -1249,11 +1249,11 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段制·三重验证后)", G_ACCENT),
+        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段·价触激活线启)", G_ACCENT),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
         "✅ 风控动作": _g(
-            "价格达TP1 + 限价成交 + 减仓匹配 → 安全交棒 · 止损只向有利方向",
+            "价触激活线(R弱70%/R强75~80%) → 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(

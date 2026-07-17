@@ -8,7 +8,7 @@
 |---|------|----------|
 | 1 | **TV 只发信号**，开仓/硬止损/仓位计算均由 VPS 自主 | `app.py` 网关不入队决策；`position_supervisor_*.py` |
 | 2 | TV `tv_sl` **仅供日志参考**，绝不作为实盘硬止损挂单 | `_refresh_vps_hard_sl()` · `tv_sl_ref` 字段 |
-| 3 | **雷达移动保本**必须在 TP1 **三重验证**后才启动 | `_tp1_filled_verified()` · `_tp_fill_ok_to_arm_radar()` |
+| 3 | **雷达移动保本**在价触档位激活线后启动（弱70%/强75~80%） | `_price_reached_radar_activation()` · `_perform_radar_handoff()` |
 | 4 | **ETH / XAU** 独立状态，互不串单 | `symbol_config.py` · `SUPERVISORS` 按品种 |
 | 5 | 计算基于 **账户总权益**（marginBalance），非可用余额 | `get_total_equity()` · `_snapshot_sizing_principal()` |
 
@@ -83,45 +83,43 @@
 
 ---
 
-## 模块四：雷达移动保本（三重对账 · TP1 后启动）
+## 模块四：雷达移动保本（价触激活线启动）
 
 | # | 检查项 | 状态 | 说明 |
 |---|--------|------|------|
-| 4.1 | TP1 三重验证后才启动 | ✅ | `_tp1_filled_verified()` |
-| 4.2 | **主判**：WS/现价达 TP1 区 | ✅ | `_price_reached_tp1_zone()` |
-| 4.3 | **辅判**：TP1 限价单已成交/消失 | ✅ | `_tp_filled_verified()` + 盘口无 TP1 |
-| 4.4 | **参考**：相对开仓基线明显减仓 | ✅ | `_tp1_qty_matches_baseline()` |
-| 4.5 | 微漂 <2% 开仓量不作为依据 | ✅ | `TP_FILL_NOISE_VS_OPEN_PCT = 0.02` |
+| 4.1 | **主判**：现价/best 达档位激活线 | ✅ | `_price_reached_radar_activation()` |
+| 4.2 | R1/R2 = **70%** TP1 路程 | ✅ | `RADAR_ACTIVATION_RATIO_BY_REGIME` |
+| 4.3 | R3 = **75%** · R4 = **80%** | ✅ | 强势给趋势空间 |
+| 4.4 | 废除三重强制门槛 | ✅ | 限价成交/减仓仅作伪TP记账 |
+| 4.5 | 微漂 <2% 开仓量不作伪TP依据 | ✅ | `TP_FILL_NOISE_VS_OPEN_PCT = 0.02` |
 | 4.6 | 雷达启动 → 成本 ±0.1% | ✅ | `RADAR_STAGE_COST_BUFFER_PCT` |
 | 4.7 | TP2/TP3 逐级收紧 ATR 追踪 | ✅ | `_radar_stage()` 5 阶段 |
 
-### 三重验证伪代码（已实现 · v13.49）
+### 启动伪代码（v13.61）
 
 ```
-① 价格主判：现价/best 达 TP1 区（容差 0.10%）——WS hint 不能单独替代
-② 订单辅判：TP1 限价消失 + 来源 trades/order_gone + 账本已消费
-③ 减仓参考：相对开仓总头寸快照减仓 ≥ 噪声，且匹配 TP1 切片
-
-三重全部通过后 → 仅当「理想保本线」距现价足够安全才交棒
-  （禁止把止损夹到现价旁被毛刺打掉）
-交棒 STOP 核实成功 → _radar_handoff_done=True → 钉钉标注 [ETHUSDT]/[XAUUSDT]
+主判：现价或 best ≥ entry ± |TP1-entry| × 档位比例
+  R1/R2 → 70% · R3 → 75% · R4 → 80%
+理想保本线距现价足够安全 → 挂保本 STOP 核实 → 交棒
+交棒成功 → _radar_handoff_done=True → 钉钉 [ETHUSDT]/[XAUUSDT]
 否则 → 保留 VPS 宽硬止损，雷达继续待命
+随后 TP1→TP2→TP3 路程推进 → 阶段2~5 逐级锁利
 硬止损盘口价一律 = VPS 开仓×档位%；TV tv_sl 只写 tv_sl_ref，永不挂单
+UPDATE_SL → 仅更新 VPS 止损追踪参考，不用 TV tv_sl 挂单
 ```
 
 ### 防误判场景
 
 | 场景 | 雷达 |
 |------|------|
-| 插针到 TP1 但限价未成交 | ❌ 不启动 |
-| 价格+订单双重确认，减仓 5% | ✅ 启动（且保本线距市价足够才挂） |
-| 三重通过但价距保本过近 | ⏳ 延迟交棒，保留宽硬止损 |
-| 仅浮盈导致保证金变化、数量不变 | ❌ 不启动 |
-| R4 TP1 仅 5%，数量微差 0.002 | ❌ 不启动 |
+| 价达激活线且保本距市价足够 | ✅ 启动 |
+| 价达激活线但保本过近 | ⏳ 延迟交棒，保留宽硬止损 |
+| 价未达激活线（即便伪减仓） | ❌ 不启动 |
+| 达 TP2/TP3 | ✅ 已激活后逐级收紧 |
 
 ---
 
-## 模块五：全局风控（11 倍名义硬顶）
+## 模块五：全局风控（13 倍名义硬顶）
 
 | # | 检查项 | 状态 |
 |---|--------|------|
@@ -196,7 +194,7 @@ python check_vps_logic.py
 curl -s http://127.0.0.1:5003/health | python -m json.tool
 
 # 日志关键词
-grep -E '三角对账|TP1未成交|解除过早雷达|敞口硬顶|tv_sl_ref' logs/binance_brain.log | tail -30
+grep -E '雷达交棒|激活线|解除过早雷达|敞口硬顶|tv_sl_ref' logs/binance_brain.log | tail -30
 ```
 
 ### 优先级
@@ -204,5 +202,5 @@ grep -E '三角对账|TP1未成交|解除过早雷达|敞口硬顶|tv_sl_ref' lo
 | 模块 | 优先级 |
 |------|--------|
 | 品种路由 + 开单 + VPS硬止损 + 13x硬顶 | 🔴 P0 |
-| 雷达三重验证 + 头寸误判防范 | 🟡 P1 |
+| 雷达价触激活线 + TP2/TP3 锁利 | 🟡 P1 |
 | 钉钉 + 日志 | 🟢 P2 |

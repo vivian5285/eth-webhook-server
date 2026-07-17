@@ -254,8 +254,9 @@ def audit_module3_hard_sl(a: Audit):
         "重启方向背离·保留持仓" in sup,
     )
     a.check(
-        "3.13 雷达必须价格达 TP1",
-        "WS hint 不能单独替代" in sup or "必须达标" in sup,
+        "3.13 雷达主判价触激活线",
+        "_price_reached_radar_activation" in sup
+        and "get_radar_activation_ratio" in _read(os.path.join(ROOT, "webhook_parser.py")),
     )
     a.check(
         "3.14 硬止损实时算 VPS 不读污染账本",
@@ -284,10 +285,13 @@ def audit_module3_hard_sl(a: Audit):
         and "重启强制VPS宽硬止损" in sup,
     )
     a.check(
-        "3.19 雷达仅TP1后：ensure闸门",
+        "3.19 雷达激活线：ensure闸门",
         "_radar_placement_blocked" in sup
         and "POST_OPEN_RADAR_BLOCK_SEC" in sup
-        and "拒绝雷达挂单：TP1三重+交棒未通过" in sup,
+        and (
+            "拒绝雷达挂单：未交棒/未达激活线" in sup
+            or "_price_reached_radar_activation" in sup
+        ),
     )
     a.check(
         "3.20 SHORT保本禁止抬过开仓价",
@@ -322,33 +326,44 @@ def audit_module3_hard_sl(a: Audit):
 
 
 def audit_module4_radar(a: Audit):
-    a.section("模块四 · 雷达三重验证")
+    a.section("模块四 · 雷达价触激活线")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
 
     for fn in (
-        "_tp1_filled_verified",
-        "_tp1_triad_ok",
-        "_tp_filled_verified",
-        "_price_reached_tp1_zone",
-        "_tp1_qty_matches_baseline",
-        "_tp_fill_ok_to_arm_radar",
+        "_price_reached_radar_activation",
+        "_radar_activation_price",
+        "_radar_activation_ratio",
         "_radar_legitimately_armed",
         "_ideal_radar_sl_is_safe",
         "_disarm_premature_radar",
+        "_perform_radar_handoff",
+        "_tp1_filled_verified",
     ):
         a.check(f"雷达函数 {fn}", f"def {fn}" in sup)
 
-    a.check("4.5 噪声阈值", "TP_FILL_NOISE_VS_OPEN_PCT" in sup)
-    a.check("4.1 三角对账日志", "三角对账" in sup or "三重" in sup)
+    a.check("4.1 价触激活线主判", "_price_reached_radar_activation" in sup)
     a.check("交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
     a.check("交棒后才武装", "_radar_handoff_done" in sup)
+    a.check("废除三重门槛文案", "废除三重" in sup or "不再要求限价成交+减仓三重" in sup)
 
-    from webhook_parser import RADAR_STAGE_COST_BUFFER_PCT
+    from webhook_parser import (
+        RADAR_STAGE_COST_BUFFER_PCT,
+        RADAR_ACTIVATION_RATIO_BY_REGIME,
+        get_radar_activation_ratio,
+    )
     a.check("4.6 成本缓冲 0.1%", abs(RADAR_STAGE_COST_BUFFER_PCT - 0.001) < 1e-6)
+    expected_act = {1: 0.70, 2: 0.70, 3: 0.75, 4: 0.80}
+    for r, pct in expected_act.items():
+        a.check(
+            f"4.2 R{r} 激活线 {pct*100:.0f}%",
+            abs(RADAR_ACTIVATION_RATIO_BY_REGIME.get(r) - pct) < 1e-9
+            and abs(get_radar_activation_ratio(r) - pct) < 1e-9,
+        )
 
-    # 钉钉雷达标题须含品种
+    # 钉钉雷达标题须含品种 + 新文案
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     a.check("钉钉雷达标题含品种", "[sym]" in dt or "[{sym}]" in dt)
+    a.check("钉钉价触激活线文案", "价触激活线" in dt)
 
 
 def audit_module5_risk(a: Audit):
