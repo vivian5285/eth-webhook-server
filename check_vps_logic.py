@@ -443,8 +443,10 @@ def audit_module4_radar(a: Audit):
         "_reconcile_tp_consumed_from_live_qty" in sup
         and "_qty_reduction_looks_like_tp" in sup
         and "_block_rehang_filled_tps_note" in sup
-        and "禁止把已成交档当漏挂" in sup
-        and "小额减仓疑似TP成交" in sup
+        and "_tp_level_price_and_order_gone" in sup
+        and "_infer_tp_consumed_by_price_and_gone" in sup
+        and "价到+限价消失" in sup
+        and "耐心等" in sup
         and "soft_infer" in sup,
     )
     a.check(
@@ -452,6 +454,13 @@ def audit_module4_radar(a: Audit):
         "_ws_tp_fill_levels" in sup
         and "UD-WS TP" in sup
         and "禁当漏挂补挂" in sup,
+    )
+    a.check(
+        "4.18 三轨不抢份额",
+        "三轨并行" in sup
+        and "reduceOnly" in sup
+        and "closePosition 单槽" in sup
+        and "互不抢份额" in dt,
     )
 
     from webhook_parser import (
@@ -541,7 +550,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.68.0-tp-fill-consume-guard" in readme
+        "v13.69.0-tp-price-gone-lanes" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -549,7 +558,8 @@ def audit_readme_consistency(a: Audit):
         and "85%" in readme
         and "剩15%" in readme
         and "exit_source" in readme
-        and "tp_levels_consumed" in readme,
+        and "价到" in readme
+        and "reduceOnly" in readme,
     )
     a.check(
         "README 雷达激活比例",

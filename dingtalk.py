@@ -575,26 +575,27 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP123已挂 · VPS硬止损已挂 · 雷达待命"
-            f"(价触激活线{act_ratio * 100:.0}%/TP1成交交棒)",
+            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly) · VPS硬止损已挂(closePosition) · "
+            f"雷达待命(距TP1剩{(1 - act_ratio) * 100:.0f}%交棒·独立保本) · 三轨不抢份额",
             "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
         ),
     }
     if hard_sl_px is not None and float(hard_sl_px or 0) > 0:
         data["🛡️ VPS硬止损"] = _g(
-            f"**{float(hard_sl_px):.2f}** USDT (closePosition·激活线前唯一护体)",
+            f"**{float(hard_sl_px):.2f}** USDT (closePosition·与雷达单槽合并)",
             G_DEEP,
         )
     if radar_act_px is not None and float(radar_act_px or 0) > 0:
         data["📡 雷达激活线"] = _g(
             f"**{float(radar_act_px):.2f}** USDT "
-            f"(距TP1剩{(1 - act_ratio) * 100:.0f}%·路程{act_ratio * 100:.0f}%)",
+            f"(距TP1剩{(1 - act_ratio) * 100:.0f}%·与TP123并行不冲突)",
             G_LIGHT,
         )
     data["🔍 头寸对账"] = _g(
         f"实盘 `{qty}` {unit} @ `{entry_price:.2f}` | "
         f"TP审计={'齐' if verified else '待补'} | "
-        f"硬止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'}",
+        f"硬止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'} | "
+        f"成交判据=价到+限价消失(微漂忽略)",
         G_MAIN if verified else G_ACCENT,
     )
     if principal_balance and margin_pct is not None:
@@ -639,6 +640,11 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
                    verify_note="", verified=True, symbol=None, unit_label=None):
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    remain_levels = [lv for lv in (1, 2, 3) if lv > int(tp_level or 0)]
+    wait_txt = (
+        f"耐心等 TP{remain_levels} 限价成交（不再补挂已成交档）"
+        if remain_levels else "TP123 已吃完 · 收网/扫尾"
+    )
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
@@ -646,6 +652,12 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
         "📊 剩余头寸": _g(f"`{remain_qty}` {unit}", G_MAIN),
         "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
         "🧭 方向/档位": _g(f"{side} | TV {regime} 档", G_MUTED),
+        "✅ 判定": _g("**价到 + 限价消失 = 成交**（非头寸微漂）", G_MAIN),
+        "⏳ 后续": _g(wait_txt, G_LIGHT),
+        "🛡️ 三轨": _g(
+            "TP=reduceOnly | 雷达保本+VPS宽硬止损=closePosition单槽 · 互不抢份额",
+            G_MUTED,
+        ),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
             f"{VERIFY_TAG} | {sym} TP{tp_level} 限价止盈已成交",
@@ -1339,8 +1351,13 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🗑️ 硬止损": _g("已撤销/合并" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
         "✅ 风控动作": _g(
-            f"{gate} → 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
+            f"{gate} → 安全交棒 · 与TP123并行(不撤剩余限价) · "
+            f"closePosition单槽合并宽硬止损 · 止损只向有利方向",
             G_MAIN,
+        ),
+        "🛡️ 三轨": _g(
+            "雷达保本独立锁利 | TP23 继续 reduceOnly | 互不抢份额",
+            G_MUTED,
         ),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
