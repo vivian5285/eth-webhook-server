@@ -35,6 +35,8 @@ class BinanceClient:
         self._pub_ws_restart = False
         self._rest_price_min_interval = 30
         self._last_rest_price_fetch = 0.0
+        # markPrice tick 回调：symbol → callable(symbol, price)
+        self._price_tick_cbs = {}
         # 私有 User Data Stream：持仓 / 订单实时同步
         self._ud_ws_running = False
         self._ud_ws_symbol = None
@@ -184,6 +186,12 @@ class BinanceClient:
         with self._price_lock:
             self._price_cache[symbol] = price
             self._price_cache_ts[symbol] = time.time()
+        cb = self._price_tick_cbs.get(str(symbol or "").upper())
+        if cb:
+            try:
+                cb(symbol, price)
+            except Exception as e:
+                logger.debug(f"price tick cb: {e}")
 
     def _get_ws_price(self, symbol, max_age=30.0):
         with self._price_lock:
@@ -193,9 +201,17 @@ class BinanceClient:
             return px
         return None
 
-    def start_public_price_ws(self, symbol="ETHUSDT"):
+    def register_price_tick_callback(self, symbol, callback):
+        """雷达：markPrice@1s 触及激活线时秒级脉冲哨兵。"""
+        sym = str(symbol or "ETHUSDT").upper()
+        if callable(callback):
+            self._price_tick_cbs[sym] = callback
+
+    def start_public_price_ws(self, symbol="ETHUSDT", on_tick=None):
         """订阅 markPrice@1s；支持多品种合并流（ETH+XAU）。"""
         symbol = str(symbol or "ETHUSDT").upper()
+        if on_tick:
+            self.register_price_tick_callback(symbol, on_tick)
         with self._pub_ws_lock:
             self._pub_ws_symbol = symbol
             if symbol in self._pub_ws_symbols and self._pub_ws_running:

@@ -183,17 +183,19 @@ VPS_HARD_SL_M = VPS_HARD_SL_PCT
 VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 VPS_HARD_SL_LIMIT_OFFSET = 0.0  # 已改用百分比缓冲
 
-# 雷达启动：价格朝 TP1 推进达到档位比例即交棒保本（废除「价格+订单+减仓」三重强制门槛）
-# 弱势 R1/R2 更早锁利；强势 R3/R4 略晚，给趋势呼吸空间
+# 雷达启动：距 TP1 还剩 15%（即 entry→TP1 路程已走 85%）即交棒保本防回吐
+# 全档位统一；WS 实时价 + TP1 成交均可触发（废除「价格+订单+减仓」三重强制门槛）
+RADAR_TP1_REMAINING_PCT = 0.15  # 距 TP1 剩余 15%
+RADAR_ACTIVATION_RATIO = 1.0 - RADAR_TP1_REMAINING_PCT  # 0.85
 RADAR_ACTIVATION_RATIO_BY_REGIME = {
-    1: 0.70,  # 弱势：TP1 路程 70%
-    2: 0.70,
-    3: 0.75,  # 强势：75%
-    4: 0.80,  # 极强：80%
+    1: RADAR_ACTIVATION_RATIO,
+    2: RADAR_ACTIVATION_RATIO,
+    3: RADAR_ACTIVATION_RATIO,
+    4: RADAR_ACTIVATION_RATIO,
 }
-# 兼容旧 import（展示/默认取弱势线）
-RADAR_STAGE1_TP1_RATIO = RADAR_ACTIVATION_RATIO_BY_REGIME[1]
-RADAR_STAGE2_TP1_RATIO = RADAR_ACTIVATION_RATIO_BY_REGIME[2]
+# 兼容旧 import（展示/默认）
+RADAR_STAGE1_TP1_RATIO = RADAR_ACTIVATION_RATIO
+RADAR_STAGE2_TP1_RATIO = RADAR_ACTIVATION_RATIO
 RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 激活：成本 ±0.1%
 RADAR_STAGE_ATR_MULT = {
     2: 1.0,  # TP1→TP2 50%
@@ -203,7 +205,7 @@ RADAR_STAGE_ATR_MULT = {
 }
 RADAR_STAGE_LABELS = {
     0: "硬止损防守(激活线前)",
-    1: "达激活线·成本保本",
+    1: "距TP1剩15%·成本保本",
     2: "TP1→TP2 50%追踪",
     3: "达TP2锁利",
     4: "TP2→TP3 50%追踪",
@@ -211,11 +213,9 @@ RADAR_STAGE_LABELS = {
 }
 
 
-def get_radar_activation_ratio(regime):
-    """档位雷达启动比例：相对 entry→TP1 路程。"""
-    return float(
-        RADAR_ACTIVATION_RATIO_BY_REGIME.get(int(regime or 3), 0.75)
-    )
+def get_radar_activation_ratio(regime=None):
+    """雷达启动比例：相对 entry→TP1 路程（全档统一 85%，距TP1剩15%）。"""
+    return float(RADAR_ACTIVATION_RATIO)
 
 
 def get_vps_hard_sl_params(regime):

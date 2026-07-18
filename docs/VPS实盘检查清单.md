@@ -8,7 +8,7 @@
 |---|------|----------|
 | 1 | **TV 只发信号**，开仓/硬止损/仓位计算均由 VPS 自主 | `app.py` 网关不入队决策；`position_supervisor_*.py` |
 | 2 | TV `tv_sl` **仅供日志参考**，绝不作为实盘硬止损挂单 | `_refresh_vps_hard_sl()` · `tv_sl_ref` 字段 |
-| 3 | **雷达移动保本**在价触档位激活线后启动（弱70%/强75~80%） | `_price_reached_radar_activation()` · `_perform_radar_handoff()` |
+| 3 | **雷达移动保本**在距 TP1 剩 15%（路程 85%）或 TP1 成交后启动 | `_radar_ready_to_handoff()` · `_perform_radar_handoff(for_handoff)` |
 | 4 | **ETH / XAU** 独立状态，互不串单 | `symbol_config.py` · `SUPERVISORS` 按品种 |
 | 5 | 计算基于 **账户总权益**（marginBalance），非可用余额 | `get_total_equity()` · `_snapshot_sizing_principal()` |
 
@@ -88,27 +88,29 @@
 
 | # | 检查项 | 状态 | 说明 |
 |---|--------|------|------|
-| 4.1 | **主判**：现价达档位激活线（交棒/重启禁历史 best） | ✅ | `_price_reached_radar_activation(live_only=True)` |
-| 4.2 | R1/R2 = **70%** TP1 路程 | ✅ | `RADAR_ACTIVATION_RATIO_BY_REGIME` |
-| 4.3 | R3 = **75%** · R4 = **80%** | ✅ | 强势给趋势空间 |
+| 4.1 | **主判**：现价达 85% 路程（距TP1剩15%）或 TP1 成交 | ✅ | `_radar_ready_to_handoff()` |
+| 4.2 | 全档统一 **85%** TP1 路程 | ✅ | `RADAR_ACTIVATION_RATIO=0.85` |
+| 4.3 | TP1 成交强制交棒（防回吐） | ✅ | `_tp1_fill_allows_radar` |
 | 4.4 | 废除三重强制门槛 | ✅ | 限价成交/减仓仅作伪TP记账 |
 | 4.5 | 微漂 <2% 开仓量不作伪TP依据 | ✅ | `TP_FILL_NOISE_VS_OPEN_PCT = 0.02` |
 | 4.6 | 雷达启动 → 成本 ±0.1% | ✅ | `RADAR_STAGE_COST_BUFFER_PCT` |
 | 4.7 | TP2/TP3 逐级收紧 ATR 追踪 | ✅ | `_radar_stage()` 5 阶段 |
-| 4.8 | 重启现价未达激活线 → 宽硬止损待命 | ✅ | `_refresh_radar_state_on_recover` |
+| 4.8 | 交棒死锁修复 for_handoff | ✅ | `_ensure_radar_sl(for_handoff=True)` |
+| 4.9 | WS mark@1s 脉冲哨兵 | ✅ | `_on_mark_price_tick` |
+| 4.10 | 硬止损/雷达单槽不抢 TP | ✅ | closePosition 合并 |
 
-### 启动伪代码（v13.64.2）
+### 启动伪代码（v13.65）
 
 ```
-主判（交棒/重启）：现价 ≥ entry ± |TP1-entry| × 档位比例（禁止仅靠历史 best）
-  R1/R2 → 70% · R3 → 75% · R4 → 80%
-理想保本线距现价足够安全 → 挂保本 STOP 核实 → 交棒
+主判：现价 ≥ entry ± |TP1-entry| × 85%（距TP1剩15%）
+     或 TP1 已成交（账本消费 / WS 提示）
+理想保本线距现价足够安全 → for_handoff 挂保本 STOP 核实 → 交棒
 交棒成功 → _radar_handoff_done=True → 钉钉 [ETHUSDT]/[XAUUSDT]
 否则 → 保留 VPS 宽硬止损，雷达继续待命
-重启：曾交棒但现价回撤低于激活线 → 清 handoff，退回 VPS 宽止损（禁贴成本误平）
-随后 TP1→TP2→TP3 路程推进 → 阶段2~5 逐级锁利
-硬止损盘口价一律 = VPS 开仓×档位%；TV tv_sl 只写 tv_sl_ref，永不挂单
-UPDATE_SL → 仅更新 VPS 止损追踪参考，不用 TV tv_sl 挂单
+WS mark 达激活线 / TP1成交 → 脉冲哨兵 1.5s 快轮询锁利
+随后 TP1→TP2→TP3 路程推进 → 阶段2~5 逐级锁利（只升不降）
+硬止损与雷达 = closePosition 单槽；TP123 = reduceOnly（不抢份额）
+UPDATE_SL → 仅更新 TV 参考，不用 TV tv_sl 挂单
 ```
 
 ### 防误判场景

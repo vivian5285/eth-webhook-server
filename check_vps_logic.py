@@ -374,11 +374,12 @@ def audit_module4_radar(a: Audit):
     a.check("交棒后才武装", "_radar_handoff_done" in sup)
     a.check("废除三重门槛文案", "废除三重" in sup or "不再要求限价成交" in sup)
     a.check(
-        "4.8 交棒/重启只用现价激活线",
+        "4.8 交棒/重启现价85%或TP1成交",
         "live_only=True" in sup
-        and "禁止历史 best" in sup
-        and "现价未达激活线" in sup
-        and "忽略历史best" in sup,
+        and "_radar_ready_to_handoff" in sup
+        and "_tp1_fill_allows_radar" in sup
+        and "for_handoff=True" in sup
+        and "修交棒死锁" in sup,
     )
     a.check(
         "4.9 硬止损撤后重试挂单",
@@ -388,6 +389,12 @@ def audit_module4_radar(a: Audit):
         "4.10 开仓滞后核实补挂",
         "开仓滞后核实" in sup and "开仓滞后核实·强制VPS硬止损" in sup,
     )
+    a.check(
+        "4.11 WS mark 脉冲交棒",
+        "_on_mark_price_tick" in sup and "register_price_tick_callback" in (
+            _read(os.path.join(ROOT, "binance_client.py"))
+        ),
+    )
 
     from webhook_parser import (
         RADAR_STAGE_COST_BUFFER_PCT,
@@ -395,13 +402,19 @@ def audit_module4_radar(a: Audit):
         get_radar_activation_ratio,
     )
     a.check("4.6 成本缓冲 0.1%", abs(RADAR_STAGE_COST_BUFFER_PCT - 0.001) < 1e-6)
-    expected_act = {1: 0.70, 2: 0.70, 3: 0.75, 4: 0.80}
+    expected_act = {1: 0.85, 2: 0.85, 3: 0.85, 4: 0.85}
     for r, pct in expected_act.items():
         a.check(
-            f"4.2 R{r} 激活线 {pct*100:.0f}%",
+            f"4.2 R{r} 激活线 {pct*100:.0f}%（距TP1剩15%）",
             abs(RADAR_ACTIVATION_RATIO_BY_REGIME.get(r) - pct) < 1e-9
             and abs(get_radar_activation_ratio(r) - pct) < 1e-9,
         )
+    from webhook_parser import RADAR_TP1_REMAINING_PCT, RADAR_ACTIVATION_RATIO
+    a.check(
+        "4.2b 距TP1剩余15%",
+        abs(RADAR_TP1_REMAINING_PCT - 0.15) < 1e-9
+        and abs(RADAR_ACTIVATION_RATIO - 0.85) < 1e-9,
+    )
 
     # 钉钉雷达标题须含品种 + 新文案
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
@@ -470,16 +483,17 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.64.2-live-radar-recover-guard" in readme
+        "v13.65.0-radar-85pct-tp1-lock" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
         and "8/14/20/26%" in readme
-        and "禁止历史 best" in readme,
+        and "85%" in readme
+        and "剩15%" in readme,
     )
     a.check(
         "README 雷达激活比例",
-        "70%" in readme and "75%" in readme and "80%" in readme,
+        "85%" in readme and "15%" in readme,
     )
     a.check("README UPDATE_SL 仅参考", "仅更新" in readme and "tv_sl_ref" in readme)
 
