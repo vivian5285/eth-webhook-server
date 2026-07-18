@@ -636,10 +636,21 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
 
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
                                   verify_note="", tp_audit=None, verified=True):
-    action_txt = _g("手动增仓", G_LIGHT) if "加仓" in action_type else _g("手动部分减仓", G_ACCENT)
-    is_manual_open = "人工开仓" in str(action_type or "")
+    raw = str(action_type or "")
+    if "加仓" in raw:
+        action_txt = _g("手动增仓", G_LIGHT)
+    elif "止盈" in raw or "对账" in raw:
+        action_txt = _g("限价止盈对账", G_ACCENT)
+    elif "减仓" in raw:
+        action_txt = _g("仓位减仓（待匹配TP）", G_ACCENT)
+    else:
+        action_txt = _g(raw or "仓位变动", G_ACCENT)
+    is_manual_open = "人工开仓" in raw
     if is_manual_open:
         action_txt = _g("人工首仓 · 系统接管", G_LIGHT)
+    title = "🔄 币安阵地异动重置"
+    if "止盈" in raw or "对账" in raw:
+        title = "🎯 币安止盈对账同步"
     data = {
         "触发机制": _g("🛡️ 智慧大脑态势感知同步", G_MAIN),
         "实盘动作": action_txt,
@@ -647,7 +658,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
         "最新均价": _g(f"**{new_entry_price:.2f}** USDT", G_MAIN),
         "后续动作": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123",
+            f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123 | 硬止损/雷达 closePosition 单槽",
             "⏳ 重挂已提交，REST 同步略延迟 | 哨兵持续对齐",
         ),
     }
@@ -660,7 +671,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
         data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🔄 币安阵地异动重置", data, G_ACCENT)
+    send_alert(title, data, G_ACCENT)
 
 
 def report_force_align(real_side, expected_side, verify_note="", verified=True):

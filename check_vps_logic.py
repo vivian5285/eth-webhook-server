@@ -395,6 +395,13 @@ def audit_module4_radar(a: Audit):
             _read(os.path.join(ROOT, "binance_client.py"))
         ),
     )
+    a.check(
+        "4.12 TP多档对账禁误报人工",
+        "_filter_credible_tp_fills" in sup
+        and "_detect_tp_fills_by_price_qty_reconcile" in sup
+        and "_reconcile_open_qty_vs_tp123" in sup
+        and "限价止盈待核实对账" in sup,
+    )
 
     from webhook_parser import (
         RADAR_STAGE_COST_BUFFER_PCT,
@@ -483,7 +490,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.65.0-radar-85pct-tp1-lock" in readme
+        "v13.66.0-tp-reconcile-quota-guard" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme

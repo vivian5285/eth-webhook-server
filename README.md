@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.65.0-radar-85pct-tp1-lock`**  
+**当前版本：`v13.66.0-tp-reconcile-quota-guard`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,14 +15,14 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.65.0-radar-85pct-tp1-lock
+# 期望 version 含 v13.66.0-tp-reconcile-quota-guard
 # 期望 tv_strategy: v6.9.108
 ```
 
 **Cursor / VPS 逻辑自查：**
 
 ```bash
-python check_vps_logic.py          # 静态对账（无需 API Key）→ 期望 109 通过
+python check_vps_logic.py          # 静态对账（无需 API Key）→ 期望 110 通过
 # 完整清单见 docs/VPS实盘检查清单.md
 ```
 
@@ -555,6 +555,7 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 
 | 版本 | 要点 |
 |------|------|
+| **v13.66.0** | **TP成交对账增强：多档TP1+TP2识别；禁TP2误判伪TP1/人工减仓；开仓头寸↔TP123切片对账；硬止损/雷达closePosition单槽与TP reduceOnly共存** |
 | **v13.65.0** | **雷达统一距TP1剩15%(85%)启动；TP1成交强制交棒；修交棒死锁(for_handoff)；WS mark脉冲；TP23锁利防回吐；硬止损/雷达单槽closePosition不抢份额** |
 | **v13.64.2** | **交棒/重启激活线只用现价（禁历史 best 误触保本）；硬止损撤后 3 次重挂；开仓 REST 滞后补探挂防线；接管终检裸仓** |
 | **v13.64.1** | **宽限内盘口无保护 STOP 仍允许补挂硬止损（禁裸仓空转）** |
@@ -596,4 +597,4 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.65.0-radar-85pct-tp1-lock*
+*GEMINI Quant · 双轨智慧雷达 · v13.66.0-tp-reconcile-quota-guard*
