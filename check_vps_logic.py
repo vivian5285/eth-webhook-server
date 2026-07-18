@@ -245,6 +245,14 @@ def audit_module3_hard_sl(a: Audit):
         "开仓后防线对齐" in sup and "recover_mode=False" in sup,
     )
     a.check(
+        "3.10b 防线 thrash 刹车",
+        "NUCLEAR_REALIGN_MIN_INTERVAL_SEC" in sup
+        and "_nuclear_backoff_remaining" in sup
+        and "_defense_anomaly_is_severe" in sup
+        and "idempotent_unified" in sup
+        and "即使 force 也禁止撤挂" in sup,
+    )
+    a.check(
         "3.11 账本消毒拒 TV 紧止损",
         "_sanitize_vps_hard_sl_ledger" in sup
         and "_is_exchange_stop_acceptable_as_vps_floor" in sup,
