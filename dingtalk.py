@@ -24,6 +24,7 @@ from webhook_parser import (
     format_tv_sizing_note,
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
+    get_radar_activation_ratio,
     VPS_RISK_PCT,
     VPS_REGIME_SCALE,
     VPS_MARGIN_LEVERAGE,
@@ -763,7 +764,8 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
                             last_tv_signal=None, radar_sl_ok=True,
                             pnl_label="", defense_plan="", shield_status="",
                             radar_progress=0.0, tv_aligned=True, qty_aligned=True,
-                            initial_qty=0.0, tp_consumed_levels=None):
+                            initial_qty=0.0, tp_consumed_levels=None,
+                            tv_regime=None, hard_sl_pct=None, radar_act_pct=None):
     expected = tp_expected or sum(1 for t in tv_tps if t > 0)
     if expected > 0 and tp_matched >= expected:
         action_txt = f"{VERIFY_TAG} | 头寸+TV对账 → 比例 TP123 已对齐 → 恢复哨兵"
@@ -787,26 +789,49 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         )
         action_txt += " · 雷达哨兵已点火"
     else:
+        act = f"{float(radar_act_pct) * 100:.0f}%" if radar_act_pct else "弱70%/强75~80%"
         radar_txt = _g(
-            "待命 (价触激活线后雷达5阶段保本·R弱70%/强75~80%)",
+            f"待命 (价触激活线 {act} 后雷达5阶段保本)",
             G_MUTED,
         )
 
     tv_ref = ""
+    tv_reg_from_sig = None
     if last_tv_signal:
         tv_ref = (
             f"{last_tv_signal.get('action', '?')} "
             f"R{last_tv_signal.get('regime', '?')} "
             f"@{last_tv_signal.get('ts', '')}"
         )
+        try:
+            tv_reg_from_sig = int(last_tv_signal.get("regime") or 0) or None
+        except (TypeError, ValueError):
+            tv_reg_from_sig = None
+    tv_reg = int(tv_regime or tv_reg_from_sig or 0) or None
+    open_reg = int(regime or 0) or None
     tv_align_txt = "一致" if tv_aligned else "⚠️ 与实盘方向有偏差(以实盘为准)"
     qty_align_txt = "一致" if qty_aligned else "⚠️ 账本数量有偏差(已同步实盘)"
+    regime_mismatch = bool(tv_reg and open_reg and tv_reg != open_reg)
 
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 核实头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
-        "📊 恢复档位": get_regime_name(regime),
+        "📊 开仓档位(硬止损/TP)": get_regime_name(open_reg or 3),
     }
+    if tv_reg:
+        data["📡 TV信号档位"] = get_regime_name(tv_reg)
+        if regime_mismatch:
+            data["⚠️ 档位对账"] = _g(
+                f"**不一致** TV=R{tv_reg} vs 锁档=R{open_reg} → 已以 TV 开仓档重算硬止损",
+                G_DEEP,
+            )
+        else:
+            data["✅ 档位对账"] = _g(f"TV R{tv_reg} = 开仓锁档 R{open_reg}", G_MAIN)
+    if hard_sl_pct is not None and sl_price:
+        data["🛡️ 硬止损比例"] = _g(
+            f"R{open_reg or '?'} **{float(hard_sl_pct) * 100:.2f}%** → `{float(sl_price):.2f}`",
+            G_ACCENT,
+        )
     if initial_qty and float(initial_qty) > float(qty) + 0.001:
         consumed_txt = ", ".join(f"TP{lv}" for lv in (tp_consumed_levels or [])) or "推断中"
         data["📦 开单原始"] = _g(f"**{initial_qty}** {_u()}", G_MUTED)
@@ -1249,11 +1274,17 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "📡 雷达进度": _g(f"**{radar_progress:.0%}** (5阶段·价触激活线启)", G_ACCENT),
+        "📡 雷达进度": _g(
+            f"**{radar_progress:.0%}** "
+            f"(5阶段·激活线{get_radar_activation_ratio(regime)*100:.0f}%)",
+            G_ACCENT,
+        ),
         "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
         "✅ 风控动作": _g(
-            "价触激活线(R弱70%/R强75~80%) → 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
+            f"价触激活线 R{int(regime)} "
+            f"{get_radar_activation_ratio(regime)*100:.0f}% "
+            f"→ 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(

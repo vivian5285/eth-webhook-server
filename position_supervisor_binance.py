@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.62.1-stop-detect-fix"
+BINANCE_VPS_VERSION = "v13.63.0-regime-tv-sync"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -455,15 +455,22 @@ class PositionSupervisorBinance:
                 verified=bool(verified),
             )
         else:
+            open_r = int(
+                getattr(self, "open_regime", None) or self._resolve_hard_sl_regime()
+            )
+            tv_r = self._resolve_tv_open_regime_for_position(side, entry_px) or (
+                int((self.last_tv_signal or {}).get("regime") or 0) or None
+            )
+            sl_px = float(self._vps_hard_sl_target(entry_px) or self.current_sl or 0)
             self._call_dingtalk(
                 dingtalk.report_recover_takeover,
                 side=side,
                 qty=real_amt,
                 entry=entry_px,
                 tv_tps=self.tv_tps,
-                regime=int(getattr(self, "open_regime", None) or self._resolve_hard_sl_regime()),
+                regime=open_r,
                 radar_active=radar_active,
-                sl_price=float(self._vps_hard_sl_target(entry_px) or self.current_sl or 0),
+                sl_price=sl_px,
                 verify_note=verify_note,
                 tp_matched=matched,
                 tp_expected=expected,
@@ -475,6 +482,9 @@ class PositionSupervisorBinance:
                 shield_status=health.get("shield_status", ""),
                 initial_qty=saved_initial,
                 tp_consumed_levels=getattr(self, "tp_levels_consumed", []) or [],
+                tv_regime=tv_r,
+                hard_sl_pct=get_vps_hard_sl_params(open_r).get("pct"),
+                radar_act_pct=get_radar_activation_ratio(open_r),
             )
 
         if expected > 0 and matched < expected:
@@ -957,45 +967,109 @@ class PositionSupervisorBinance:
             "vps_hard_sl": float(self._vps_hard_sl_target(entry, side, open_r) or 0),
         })
 
+    def _resolve_tv_open_regime_for_position(self, side=None, entry=None):
+        """
+        从 TV LONG/SHORT 开仓信源解析本仓应锁档位。
+        优先：同向 + 价格贴近入场；禁止用 recover 开仓日志 / 陈旧粘性覆盖 TV。
+        """
+        side = str(side or self.current_side or "").strip().upper()
+        entry = float(entry if entry is not None else (self.watched_entry or 0))
+        match_pct = max(float(OPEN_REGIME_ENTRY_MATCH_PCT), 0.012)
+
+        def _score_tv_entry(e):
+            if not isinstance(e, dict):
+                return 0, 0
+            action = str(e.get("action") or "").strip().upper()
+            e_side = action if action in ("LONG", "SHORT") else str(
+                e.get("side") or ""
+            ).strip().upper()
+            if e_side not in ("LONG", "SHORT"):
+                return 0, 0
+            if side and e_side != side:
+                return 0, 0
+            reg = int(e.get("regime") or 0)
+            if reg < 1 or reg > 4:
+                return 0, 0
+            score = 100
+            px = float(e.get("price") or e.get("entry") or 0)
+            if entry > 0 and px > 0:
+                drift = abs(px - entry) / entry
+                if drift <= match_pct:
+                    score += 80
+                elif drift <= match_pct * 2.5:
+                    score += 30
+                elif drift > 0.05:
+                    return 0, 0
+            et = normalize_entry_type(e.get("entry_type"))
+            if et == ENTRY_TYPE_OPEN:
+                score += 25
+            return score, reg
+
+        best_score, best_reg = 0, 0
+        # 内存最新信号
+        sc, rg = _score_tv_entry(self.last_tv_signal)
+        if sc > best_score:
+            best_score, best_reg = sc, rg
+        # TV 日志由新到旧
+        for e in reversed(self._iter_journal_entries("tv", symbol_only=True)):
+            sc, rg = _score_tv_entry(e)
+            if sc > best_score:
+                best_score, best_reg = sc, rg
+                if sc >= 180:  # 同向+贴近入场+OPEN：足够采信
+                    break
+        return int(best_reg or 0)
+
     def _lock_open_regime_from_sources(self, force=False):
         """
-        硬止损档位锁定开仓 R（本品种）：
-        - 持仓监控中已有 open_regime → 粘性锁定，禁止被 ETH 共享日志/其它品种改写成 R4
-        - 仅读取本 symbol 开仓日志；优先匹配当前入场价
-        - 禁止 R3↔R4 横跳导致 4226↔4337 反复撤挂
+        硬止损/TP 比例档位锁定开仓 R（本品种）：
+        1) TV LONG/SHORT 开仓档位（同向+入场价匹配）——最高优先级
+        2) 本品种 source=open 开仓日志（排除 recover/重启/接管）
+        3) 粘性 state / 当前 regime
+        禁止：recover 日志或错误粘性把 R1 改成 R4 → 8.33% 宽止损误挂
         """
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        side = str(getattr(self, "current_side", "") or "").upper()
         cur = int(getattr(self, "open_regime", None) or 0)
-        # 开仓已粘性锁定：哨兵/维护禁止再改档（否则 XAU R3↔ETH串档R4 → 4226↔4337 横跳）
+
+        tv_reg = self._resolve_tv_open_regime_for_position(side, entry)
+        if tv_reg > 0:
+            if cur and cur != tv_reg:
+                logger.warning(
+                    f"🔒 [{self.symbol}] 开仓档位以 TV 为准：粘性/账本 R{cur} → TV R{tv_reg} "
+                    f"(entry={entry:.2f})"
+                )
+            self.open_regime = tv_reg
+            self._open_regime_sticky = True
+            if not cur:
+                logger.info(
+                    f"🔒 [{self.symbol}] 开仓档位锁定 R{tv_reg} (tv_open_signal)"
+                )
+            return tv_reg
+
+        # 无可信 TV 时：粘性保护（避免哨兵横跳）；force 时仍可扫 open 日志
         if (
             not force
             and cur > 0
-            and (
-                getattr(self, "_open_regime_sticky", False)
-                or (
-                    getattr(self, "monitoring", False)
-                    and (
-                        float(getattr(self, "watched_qty", 0) or 0) > 0
-                        or str(getattr(self, "current_side", "") or "")
-                    )
-                )
-            )
+            and getattr(self, "_open_regime_sticky", False)
         ):
             return cur
 
-        entry = float(getattr(self, "watched_entry", 0) or 0)
-        side = str(getattr(self, "current_side", "") or "").upper()
         best = None
         best_src = ""
         best_score = -1
-        entries = self._iter_journal_entries("open", symbol_only=True)
-        for e in reversed(entries):
+        for e in reversed(self._iter_journal_entries("open", symbol_only=True)):
             src = str(e.get("source") or "").lower()
+            # recover/重启/接管行不可信（可能已写入错误 open_regime）
+            if (
+                src.startswith("recover")
+                or "重启" in src
+                or "接管" in src
+                or "巡检" in src
+            ):
+                continue
             or_field = e.get("open_regime")
             reg = or_field if or_field else e.get("regime")
             if not reg:
-                continue
-            # 无 open_regime 的 recover 行不可信
-            if not or_field and (src.startswith("recover") or "重启" in src):
                 continue
             score = 10 if or_field else 5
             e_side = str(e.get("side") or e.get("last_tv_side") or "").upper()
@@ -1007,7 +1081,7 @@ class PositionSupervisorBinance:
                 if drift <= OPEN_REGIME_ENTRY_MATCH_PCT:
                     score += 50
                 elif drift > 0.03:
-                    continue  # 入场差过大：别仓/别品种残留
+                    continue
             if score > best_score:
                 best_score = score
                 best = int(reg)
@@ -1210,17 +1284,26 @@ class PositionSupervisorBinance:
             if isinstance(s, dict)
         ]
 
-        for src in sources:
-            if src.get("regime"):
+        # regime：只采信 TV 信源，禁止被 open/recover 日志最后一项覆盖成错误档
+        for src in (
+            self.last_tv_signal,
+            self._load_last_tv_open_signal(),
+            self._load_last_journal_entry(None, kind="tv"),
+        ):
+            if isinstance(src, dict) and src.get("regime"):
                 self.regime = int(src["regime"])
+                break
+        for src in sources:
             if src.get("atr"):
                 self.current_atr = float(src["atr"])
             if float(self.tv_price or 0) <= 0 and float(src.get("price", 0) or 0) > 0:
                 self.tv_price = float(src["price"])
 
-        # 硬止损档位：本品种开仓日志强制匹配入场价（force 纠正错误 state）
+        # 硬止损档位：TV 开仓 R 优先（force 纠正错误粘性 R4）
         hard_regime = self._lock_open_regime_from_sources(force=True)
         notes.append(f"开仓档位锁定 R{hard_regime}")
+        # 钉钉/展示用 regime 与开仓锁档对齐
+        self.regime = int(hard_regime)
 
         tp_ok = sum(1 for t in (self.tv_tps or []) if t > 0)
         if not self._tp_prices_valid_for_side(side, entry):
@@ -9035,6 +9118,25 @@ class PositionSupervisorBinance:
                         qty_aligned=health.get("qty_match", True),
                         initial_qty=saved_initial,
                         tp_consumed_levels=getattr(self, "tp_levels_consumed", []) or [],
+                        tv_regime=(
+                            self._resolve_tv_open_regime_for_position(
+                                self.current_side, entry_px,
+                            )
+                            or int((self.last_tv_signal or {}).get("regime") or 0)
+                            or None
+                        ),
+                        hard_sl_pct=get_vps_hard_sl_params(
+                            int(
+                                getattr(self, "open_regime", None)
+                                or self._resolve_hard_sl_regime()
+                            )
+                        ).get("pct"),
+                        radar_act_pct=get_radar_activation_ratio(
+                            int(
+                                getattr(self, "open_regime", None)
+                                or self._resolve_hard_sl_regime()
+                            )
+                        ),
                     )
                     policy_actions = stack.get("notes") or []
                     logger.info(

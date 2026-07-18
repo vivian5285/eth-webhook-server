@@ -282,7 +282,8 @@ def audit_module3_hard_sl(a: Audit):
         "3.16 硬止损锁定 open_regime",
         "_resolve_hard_sl_regime" in sup
         and "_lock_open_regime_from_sources" in sup
-        and "禁止被后续 TV UPDATE" in sup,
+        and "_resolve_tv_open_regime_for_position" in sup
+        and "以 TV 为准" in sup,
     )
     a.check(
         "3.17 开仓日志写 open_regime",
@@ -419,6 +420,10 @@ def audit_module7_dingtalk(a: Audit):
     a.check(
         "UPDATE_SL 仅记录参考",
         "永不挂 TV 紧止损" in dt or "未改盘口硬止损" in dt,
+    )
+    a.check(
+        "钉钉档位对账字段",
+        "开仓档位(硬止损/TP)" in dt and "TV信号档位" in dt,
     )
 
 
