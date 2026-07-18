@@ -3,7 +3,8 @@
 """
 TV Webhook 时序：bar_index + seq
 - 排序：先 bar_index 升序，同 bar 内 seq 升序（严禁按到达时间）
-- 幂等：symbol_bar_index_seq（Redis 优先，否则本地文件 TTL）
+- 幂等：symbol_bar_index_seq_action（Redis 优先，否则本地文件 TTL）
+- 同 bar 1-2-1（开→平→再开）：CLOSE 后释放开仓幂等键，允许再次 OPEN
 - 乱序：前置 seq 缺失时暂存等待，超时报警后按已有顺序执行
 """
 from __future__ import annotations
@@ -24,9 +25,11 @@ SEQ_STORE_FILE = os.getenv("TV_SEQ_STORE_FILE", "logs/tv_seq_idempotency.json")
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
 
-def make_seq_key(symbol: str, bar_index: int, seq: int) -> str:
+def make_seq_key(symbol: str, bar_index: int, seq: int, action: str = "") -> str:
+    """幂等键含 action：同 bar 不同动作不互杀；1-2-1 再开靠 CLOSE 后 release。"""
     sym = str(symbol or "UNKNOWN").upper().replace(".P", "")
-    return f"{sym}_{int(bar_index)}_{int(seq)}"
+    act = str(action or "NA").strip().upper() or "NA"
+    return f"{sym}_{int(bar_index)}_{int(seq)}_{act}"
 
 
 def extract_seq_meta(payload: dict) -> Tuple[Optional[int], Optional[int]]:
@@ -124,6 +127,65 @@ class SeqIdempotencyStore:
             self._save_file(dict(self._mem))
             return False
 
+    def release_keys(self, keys: List[str]) -> int:
+        """释放幂等键（CLOSE 后允许同 bar 再开）。"""
+        freed = 0
+        now = time.time()
+        for key in keys or []:
+            key = str(key or "").strip()
+            if not key:
+                continue
+            if self._redis is not None:
+                try:
+                    self._redis.delete(f"tvseq:{key}")
+                except Exception as e:
+                    logger.warning(f"Redis 释放幂等失败 {key}: {e}")
+            with self._lock:
+                self._purge_mem(now)
+                file_map = self._load_file()
+                for k, exp in file_map.items():
+                    self._mem[k] = max(self._mem.get(k, 0), exp)
+                if key in self._mem:
+                    self._mem.pop(key, None)
+                    freed += 1
+                self._save_file(dict(self._mem))
+        return freed
+
+    def release_bar_open_keys(self, symbol: str, bar_index: int) -> int:
+        """
+        同 K 线 1-2-1：平仓后释放 LONG/SHORT/OPEN 幂等，允许 seq 再开。
+        不释放 CLOSE* 键。
+        """
+        sym = str(symbol or "UNKNOWN").upper().replace(".P", "")
+        prefix = f"{sym}_{int(bar_index)}_"
+        open_acts = ("LONG", "SHORT", "OPEN")
+        candidates: List[str] = []
+        now = time.time()
+        with self._lock:
+            self._purge_mem(now)
+            file_map = self._load_file()
+            for k, exp in file_map.items():
+                self._mem[k] = max(self._mem.get(k, 0), exp)
+            for k in list(self._mem.keys()):
+                if not str(k).startswith(prefix):
+                    continue
+                upper = str(k).upper()
+                if any(upper.endswith(f"_{a}") for a in open_acts):
+                    candidates.append(k)
+        # 兼容旧键无 action 后缀：{sym}_{bar}_{seq}
+        for seq_guess in range(1, 32):
+            legacy = f"{sym}_{int(bar_index)}_{seq_guess}"
+            candidates.append(legacy)
+        # 去重
+        uniq = list(dict.fromkeys(candidates))
+        n = self.release_keys(uniq)
+        if n:
+            logger.info(
+                f"📬 TV时序 1-2-1：释放 bar={bar_index} 开仓幂等 {n} 键 "
+                f"(允许同 bar 再开)"
+            )
+        return n
+
 
 _global_idempotency = None
 _idem_lock = threading.Lock()
@@ -142,6 +204,7 @@ class TVSeqBuffer:
     按品种缓冲：收到消息后按 (bar_index, seq) 排序弹出。
     若 seq>1 且前置缺失 → 暂存至 pending_wait 超时，再按已有顺序冲刷并报警。
     无 bar_index/seq 的旧信号：立即 FIFO 旁路（兼容）。
+    同 bar 1-2-1：CLOSE 后 call release_bar_for_reentry() 再收 OPEN。
     """
 
     def __init__(
@@ -154,20 +217,27 @@ class TVSeqBuffer:
         self.pending_wait = float(pending_wait_sec)
         self.on_gap_alert = on_gap_alert  # callable(str)
         self._lock = threading.RLock()
-        self._bars: Dict[int, Dict[int, dict]] = defaultdict(dict)  # bar -> {seq: payload}
+        # bar -> list of (seq, payload) 按到达追加；同 seq 不同波次可并存（1-2-1）
+        self._bars: Dict[int, List[Tuple[int, dict]]] = defaultdict(list)
         self._bar_first_ts: Dict[int, float] = {}
         self._legacy: List[dict] = []
         self._cv = threading.Condition(self._lock)
 
     def _depth_unlocked(self) -> int:
         n = len(self._legacy)
-        for m in self._bars.values():
-            n += len(m)
+        for items in self._bars.values():
+            n += len(items)
         return n
 
     def depth(self) -> int:
         with self._lock:
             return self._depth_unlocked()
+
+    def release_bar_for_reentry(self, bar_index: int) -> int:
+        """CLOSE 后调用：释放开仓幂等，清空本 bar 缓冲中已消费的开仓槽位占用。"""
+        store = get_idempotency_store()
+        n = store.release_bar_open_keys(self.symbol, int(bar_index))
+        return n
 
     def add(self, payload: dict) -> str:
         """
@@ -186,26 +256,32 @@ class TVSeqBuffer:
             or self.symbol
             or "UNKNOWN"
         )
-        key = make_seq_key(sym, bi, sq)
+        action = str(payload.get("action", "") or "").strip().upper()
+        key = make_seq_key(sym, bi, sq, action)
         store = get_idempotency_store()
         if store.is_duplicate_and_mark(key):
             logger.warning(
                 f"📬 [{self.symbol}] TV时序去重丢弃 key={key} "
-                f"action={payload.get('action')}"
+                f"action={action}"
             )
             return "duplicate"
 
         with self._cv:
-            if sq in self._bars[bi]:
-                logger.warning(
-                    f"📬 [{self.symbol}] 同 bar/seq 缓冲已有 → 丢弃 {key}"
-                )
-                return "duplicate"
-            self._bars[bi][sq] = dict(payload)
+            # 同 bar/seq/action 仍在缓冲未弹出 → 真重复
+            for existing_sq, existing_pl in self._bars[bi]:
+                if existing_sq != sq:
+                    continue
+                ex_act = str(existing_pl.get("action", "") or "").strip().upper()
+                if ex_act == action:
+                    logger.warning(
+                        f"📬 [{self.symbol}] 同 bar/seq/action 缓冲已有 → 丢弃 {key}"
+                    )
+                    return "duplicate"
+            self._bars[bi].append((sq, dict(payload)))
             self._bar_first_ts.setdefault(bi, time.time())
             logger.info(
                 f"📬 [{self.symbol}] 时序入缓冲 bar={bi} seq={sq} "
-                f"action={payload.get('action')} | 缓冲深度 {self._depth_unlocked()}"
+                f"action={action} | 缓冲深度 {self._depth_unlocked()}"
             )
             self._cv.notify_all()
         return "queued"
@@ -219,23 +295,22 @@ class TVSeqBuffer:
 
     def _flush_ready_locked(self, now: float) -> List[dict]:
         out: List[dict] = []
-        # 1) 无时序的旧信号优先按到达顺序吐出（兼容）
         if self._legacy:
             out.extend(self._legacy)
             self._legacy = []
 
-        # 2) 按 bar_index 升序
         for bar in sorted(self._bars.keys()):
-            bucket = self._bars[bar]
-            if not bucket:
+            items = self._bars[bar]
+            if not items:
                 continue
-            seqs = sorted(bucket.keys())
+            # 按 seq 升序；同 seq 保持到达顺序（先平后开波次）
+            items_sorted = sorted(items, key=lambda t: (t[0],))
+            seqs = sorted({sq for sq, _ in items_sorted})
             missing = self._missing_prefix(bar, seqs)
             age = now - float(self._bar_first_ts.get(bar, now))
             wait_done = age >= self.pending_wait
 
             if missing and not wait_done:
-                # 前置未齐且未超时 → 本 bar 及之后全部暂留（保证 bar 顺序）
                 break
 
             if missing and wait_done:
@@ -250,8 +325,8 @@ class TVSeqBuffer:
                     except Exception:
                         pass
 
-            for sq in seqs:
-                out.append(bucket[sq])
+            for sq, pl in items_sorted:
+                out.append(pl)
             self._bars.pop(bar, None)
             self._bar_first_ts.pop(bar, None)
 
@@ -267,7 +342,6 @@ class TVSeqBuffer:
                     return ready
                 remain = deadline - time.time()
                 if remain <= 0:
-                    # 超时再冲一次（可能 pending 到期）
                     return self._flush_ready_locked(time.time())
                 self._cv.wait(timeout=min(remain, 0.25))
 

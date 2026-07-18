@@ -134,7 +134,18 @@ def audit_module1_symbol(a: Audit):
         ordered[0].get("seq") == 1 and ordered[0].get("action") == "CLOSE_PROTECT"
         and ordered[1].get("seq") == 2 and ordered[2].get("bar_index") == 301,
     )
-    a.check("1.5e 幂等键格式", make_seq_key("ETHUSDT", 100, 1) == "ETHUSDT_100_1")
+    a.check(
+        "1.5e 幂等键含 action",
+        make_seq_key("ETHUSDT", 100, 1, "LONG") == "ETHUSDT_100_1_LONG"
+        and make_seq_key("ETHUSDT", 100, 1) == "ETHUSDT_100_1_NA",
+    )
+    a.check(
+        "1.5f 1-2-1 CLOSE后释放再开",
+        "release_bar_for_reentry" in _read(os.path.join(ROOT, "tv_seq.py"))
+        and "_release_tv_seq_after_close" in _read(
+            os.path.join(ROOT, "position_supervisor_binance.py")
+        ),
+    )
 
     # 钉钉单位不得硬编码黄金为 ETH
     from dingtalk import _resolve_unit, _format_tp_audit, bind_dingtalk_symbol, reset_dingtalk_symbol
@@ -427,6 +438,21 @@ def audit_module4_radar(a: Audit):
         and "头寸对账" in dt
         and "雷达激活线" in dt,
     )
+    a.check(
+        "4.16 TP成交记账禁漏挂补挂",
+        "_reconcile_tp_consumed_from_live_qty" in sup
+        and "_qty_reduction_looks_like_tp" in sup
+        and "_block_rehang_filled_tps_note" in sup
+        and "禁止把已成交档当漏挂" in sup
+        and "小额减仓疑似TP成交" in sup
+        and "soft_infer" in sup,
+    )
+    a.check(
+        "4.17 WS多档TP成交提示",
+        "_ws_tp_fill_levels" in sup
+        and "UD-WS TP" in sup
+        and "禁当漏挂补挂" in sup,
+    )
 
     from webhook_parser import (
         RADAR_STAGE_COST_BUFFER_PCT,
@@ -515,14 +541,15 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.67.0-exit-source-radar-ding" in readme
+        "v13.68.0-tp-fill-consume-guard" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
         and "8/14/20/26%" in readme
         and "85%" in readme
         and "剩15%" in readme
-        and "exit_source" in readme,
+        and "exit_source" in readme
+        and "tp_levels_consumed" in readme,
     )
     a.check(
         "README 雷达激活比例",

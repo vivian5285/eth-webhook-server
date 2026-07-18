@@ -36,6 +36,7 @@
 | 无 symbol（且 URL 无路径） | 默认 ETHUSDT（建议 TV 始终带 symbol） |
 | 恶意未知品种 | 拒绝 `unknown_symbol` |
 | 同 K 线重复 Webhook | 第二条去重忽略 |
+| 同 K 线 1-2-1（开→平→再开） | CLOSE 后释放开仓幂等 → 再开可入队执行 |
 
 ---
 
