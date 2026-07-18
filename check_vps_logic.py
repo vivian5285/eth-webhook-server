@@ -250,7 +250,9 @@ def audit_module3_hard_sl(a: Audit):
         and "_nuclear_backoff_remaining" in sup
         and "_defense_anomaly_is_severe" in sup
         and "idempotent_unified" in sup
-        and "即使 force 也禁止撤挂" in sup,
+        and "即使 force 也禁止撤挂" in sup
+        and "把唯一 VPS 止损当成" in sup
+        and "exclude_shield=False" in sup,
     )
     a.check(
         "3.11 账本消毒拒 TV 紧止损",

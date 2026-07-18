@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.62.0-defense-thrash-brake"
+BINANCE_VPS_VERSION = "v13.62.1-stop-detect-fix"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -4792,11 +4792,13 @@ class PositionSupervisorBinance:
         return False
 
     def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=1.0, qty_tol=0.005):
-        """头寸对应的 TP123 价位+数量均已正确挂好，且雷达止损（若需要）也在"""
+        """头寸对应的 TP123 价位+数量均已正确挂好，且雷达/VPS 止损（若需要）也在"""
         tp_pxs = self.tv_tps
         expected = self._expected_tp_count(tp_pxs)
         if expected == 0:
-            return dynamic_sl is None or self._has_stop_sl_near(dynamic_sl, tolerance)
+            return dynamic_sl is None or self._has_stop_sl_near(
+                dynamic_sl, tolerance, exclude_shield=False,
+            )
 
         orders = self._collect_tp_limit_orders()
         ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
@@ -4823,7 +4825,9 @@ class PositionSupervisorBinance:
             if not any(abs(o["price"] - p) <= tolerance for p in expected_prices):
                 return False
 
-        if dynamic_sl and not self._has_stop_sl_near(dynamic_sl, tolerance):
+        if dynamic_sl and not self._has_stop_sl_near(
+            dynamic_sl, tolerance, exclude_shield=False,
+        ):
             return False
         return True
 
@@ -5165,7 +5169,12 @@ class PositionSupervisorBinance:
             time.sleep(1.2)
             last_audit = self._audit_tp_levels(live_qty)
             stop_px = self._resolve_defense_stop_for_audit(dynamic_sl)
-            if self._defenses_fully_ok(live_qty, stop_px):
+            # TP 已齐即可收工；止损另用 exclude_shield=False 核对（勿把 VPS 当缺失）
+            if self._tp_audit_ok(last_audit) and (
+                not stop_px
+                or self._has_stop_sl_near(stop_px, exclude_shield=False)
+                or self._defenses_fully_ok(live_qty, stop_px)
+            ):
                 logger.info(f"☢️ 核武重挂成功: {self._format_audit_summary(last_audit)}")
                 self._nuclear_fail_streak = 0
                 self._mark_defense_align_ok()
@@ -5612,7 +5621,12 @@ class PositionSupervisorBinance:
                 last = self._audit_tp_levels(live_qty)
         return last
 
-    def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=True):
+    def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=False):
+        """
+        盘口是否已有贴近目标价的 STOP。
+        默认 exclude_shield=False：统一 closePosition 硬止损/雷达同槽，
+        若排除 shield 会把唯一 VPS 止损当成「缺失」→ 核武永远失败秒挂秒撤。
+        """
         target = round(float(sl_price), 2)
         shield_prices = self._shield_tier_prices() if exclude_shield else []
         for o in binance_client.get_open_orders(self.symbol):
