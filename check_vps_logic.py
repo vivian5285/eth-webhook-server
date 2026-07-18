@@ -139,12 +139,21 @@ def audit_module1_symbol(a: Audit):
         make_seq_key("ETHUSDT", 100, 1, "LONG") == "ETHUSDT_100_1_LONG"
         and make_seq_key("ETHUSDT", 100, 1) == "ETHUSDT_100_1_NA",
     )
+    sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    tvseq = _read(os.path.join(ROOT, "tv_seq.py"))
+    dt = _read(os.path.join(ROOT, "dingtalk.py"))
     a.check(
-        "1.5f 1-2-1 CLOSE后释放再开",
-        "release_bar_for_reentry" in _read(os.path.join(ROOT, "tv_seq.py"))
-        and "_release_tv_seq_after_close" in _read(
-            os.path.join(ROOT, "position_supervisor_binance.py")
-        ),
+        "1.5f 先平后开 CLOSE后释放再开",
+        "release_bar_for_reentry" in tvseq
+        and "_release_tv_seq_after_close" in sup
+        and "CLOSE(seq小)+OPEN(seq大)" in tvseq,
+    )
+    a.check(
+        "1.5g 无菌空仓闸（仓+单皆零）",
+        "_sterile_flat_gate" in sup
+        and "_verify_sterile_flat" in sup
+        and "report_close_then_open_chain" in dt
+        and "_annotate_close_open_chain" in sup,
     )
 
     # 钉钉单位不得硬编码黄金为 ETH
@@ -550,7 +559,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.69.0-tp-price-gone-lanes" in readme
+        "v13.70.0-close-then-open-sterile" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -559,7 +568,9 @@ def audit_readme_consistency(a: Audit):
         and "剩15%" in readme
         and "exit_source" in readme
         and "价到" in readme
-        and "reduceOnly" in readme,
+        and "reduceOnly" in readme
+        and "先平后开" in readme
+        and "无菌" in readme,
     )
     a.check(
         "README 雷达激活比例",

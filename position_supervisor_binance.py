@@ -71,7 +71,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.69.0-tp-price-gone-lanes"
+BINANCE_VPS_VERSION = "v13.70.0-close-then-open-sterile"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -233,6 +233,9 @@ class PositionSupervisorBinance:
         self._ws_tp1_fill_hint = False
         self._ws_tp_fill_levels = set()  # UD-WS 提示的 TP 档（1/2/3）
         self._tv_sl_missing_alerted = False
+        self._last_close_bar_index = None  # 同K线先平后开链
+        self._last_close_flat_ts = 0.0
+        self._close_open_chain_active = False
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -658,7 +661,6 @@ class PositionSupervisorBinance:
                 batch.extend(self._seq_buffer.pop_ready(timeout=0.5) or [])
             except Exception as e:
                 logger.error(f"时序缓冲 pop 异常: {e}", exc_info=True)
-            # 锁超时重入等旁路队列
             while True:
                 try:
                     batch.append(self._signal_queue.get_nowait())
@@ -666,6 +668,8 @@ class PositionSupervisorBinance:
                     break
             if not batch:
                 continue
+            # 同 bar 先平后开链：按 seq 已排序；打日志+钉钉标明链
+            self._annotate_close_open_chain(batch)
             for payload in batch:
                 try:
                     bi, sq = extract_seq_meta(payload or {})
@@ -682,6 +686,60 @@ class PositionSupervisorBinance:
                         self._signal_queue.task_done()
                     except ValueError:
                         pass
+
+    def _annotate_close_open_chain(self, batch):
+        """同K线 CLOSE(seq小)+OPEN(seq大) → 标记先平后开链（TV 永无同时先开后平）。"""
+        by_bar = {}
+        for p in batch or []:
+            bi, sq = extract_seq_meta(p or {})
+            if bi is None:
+                continue
+            act = str((p or {}).get("action", "")).strip().upper()
+            by_bar.setdefault(bi, []).append((sq, act, p))
+        for bi, items in by_bar.items():
+            items.sort(key=lambda x: (x[0] or 0))
+            acts = [a for _, a, _ in items]
+            has_close = any(a.startswith("CLOSE") for a in acts)
+            has_open = any(a in ("LONG", "SHORT") for a in acts)
+            if not (has_close and has_open):
+                continue
+            # 校验：第一个非旁路应为 CLOSE，最后一个开仓在 CLOSE 之后
+            first_close_sq = next(
+                (sq for sq, a, _ in items if a.startswith("CLOSE")), None
+            )
+            first_open_sq = next(
+                (sq for sq, a, _ in items if a in ("LONG", "SHORT")), None
+            )
+            order_ok = (
+                first_close_sq is not None
+                and first_open_sq is not None
+                and int(first_close_sq) < int(first_open_sq)
+            )
+            chain = " → ".join(f"seq{sq}:{a}" for sq, a, _ in items)
+            if order_ok:
+                logger.info(
+                    f"📬 [{self.symbol}] 同K线先平后开链 bar={bi} | {chain} | "
+                    f"按seq升序执行（平干净再开）"
+                )
+                self._close_open_chain_active = True
+                self._last_close_bar_index = int(bi)
+            else:
+                logger.error(
+                    f"⚠️ [{self.symbol}] 同K线信号序异常 bar={bi} | {chain} | "
+                    f"期望 CLOSE.seq < OPEN.seq；仍按seq升序执行并以交易所为准"
+                )
+                try:
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"TV时序异常·期望先平后开 [{self.symbol}]",
+                        detail=f"bar={bi} | {chain} | 期望平仓seq < 开仓seq",
+                        level="警告",
+                        suggestion="已按 seq 升序执行；核对 TV 警报模板",
+                    )
+                except Exception:
+                    pass
+                self._close_open_chain_active = True
+                self._last_close_bar_index = int(bi)
 
     def _signal_fingerprint(self, payload):
         action = str(payload.get("action", "")).strip().upper()
@@ -2117,14 +2175,84 @@ class PositionSupervisorBinance:
         pos = self._get_active_position()
         return pos is None
 
-    def _ensure_flat_before_open(self, reason_tag="开仓前"):
-        """开仓闸门：盘口必须归零，否则阶梯强平；仍失败则拒绝叠仓"""
-        if self._wait_verify(self._verify_flat, retries=4, delay=0.4):
+    def _verify_sterile_flat(self):
+        """无菌空仓：持仓=0 且挂单=0（防先平后开竞态残留 TP/STOP 成交）。"""
+        if not self._verify_flat():
+            return False
+        remaining = self._remaining_open_order_count()
+        if remaining < 0:
+            return False
+        if remaining > 0:
+            return False
+        try:
+            tp_left = self._collect_tp_limit_orders()
+        except Exception:
+            tp_left = []
+        return not tp_left
+
+    def _sterile_flat_gate(self, reason_tag="开仓前", force_close=True):
+        """
+        先平后开无菌闸：撤单 → 平仓 → 再撤单 → 扫孤儿 → 验 qty=0+orders=0。
+        TV 同K线只可能 CLOSE 或 CLOSE(seq小)+OPEN(seq大)；开仓前必须净场。
+        """
+        tag = reason_tag or "无菌清场"
+        prev_side = self.current_side
+        # 1) 先撤一切防御单，避免平仓过程中 TP 成交反向开仓
+        self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
+        time.sleep(0.35)
+        # 2) 有仓则阶梯强平（含平后撤单）
+        if not self._verify_flat():
+            if not force_close:
+                logger.error(f"❌ [{tag}] 盘口非空且未授权强平，拒绝开仓")
+                return False
+            logger.warning(f"⚠️ [{tag}] 检测到残留持仓，启动强制平仓")
+            if not self._close_all(f"{tag} · 强制清场", reset_state=True):
+                logger.error(f"❌ [{tag}] 强平未归零，拒绝开仓")
+                return False
+            if not self._wait_verify(self._verify_flat, retries=8, delay=0.45):
+                logger.error(f"❌ [{tag}] 空仓核查未通过，拒绝开仓")
+                return False
+        # 3) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价）
+        purge = self._purge_all_defense_orders_on_flat(f"{tag}·平后净挂单", max_rounds=8)
+        # 4) 扫孤儿反向（残留 TP 在空仓成交）
+        self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
+        time.sleep(0.35)
+        # 5) 终检：仓+单皆零
+        if self._wait_verify(self._verify_sterile_flat, retries=6, delay=0.4):
+            logger.info(
+                f"🧹 [{tag}] 无菌空仓通过 | qty=0 orders=0 | "
+                f"撤轮={purge.get('rounds')} TP撤={purge.get('tp_cancelled', 0)}"
+            )
+            self._last_close_flat_ts = time.time()
             return True
-        logger.warning(f"⚠️ {reason_tag}：检测到残留持仓，启动强制平仓")
-        if self._close_all(f"{reason_tag} · 强制清场", reset_state=True):
-            return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
+        remaining = self._remaining_open_order_count()
+        tp_left = []
+        try:
+            tp_left = self._collect_tp_limit_orders()
+        except Exception:
+            pass
+        pos = self._get_active_position()
+        if not pos:
+            pos_txt = "无"
+        else:
+            pos_txt = f"{pos.get('side')} {pos.get('size')}"
+        detail = f"持仓={pos_txt} | 挂单={remaining} | TP残留={len(tp_left)}"
+        logger.error(f"❌ [{tag}] 无菌空仓失败 → 拒绝开仓 | {detail}")
+        try:
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title=f"无菌空仓失败·拒绝开仓 [{self.symbol}]",
+                detail=f"{tag} | {detail} | 防残留限价成交导致反手/超档位",
+                level="紧急",
+                suggestion="币安 APP 手动全部撤单+平仓后，等下一根 TV 信号",
+            )
+        except Exception:
+            pass
         return False
+
+    def _ensure_flat_before_open(self, reason_tag="开仓前"):
+        """开仓闸门：无菌空仓（仓=0且挂单=0），否则拒绝叠仓"""
+        return self._sterile_flat_gate(reason_tag=reason_tag, force_close=True)
 
     def _snapshot_sizing_principal(self, reason=""):
         """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 13x 硬顶共用"""
@@ -7757,7 +7885,7 @@ class PositionSupervisorBinance:
 
     def _release_tv_seq_after_close(self, payload=None, reason=""):
         """
-        同 K 线 1-2-1：CLOSE 后释放 LONG/SHORT 幂等键，允许再开。
+        同 K 线先平后开：CLOSE(seq小) 后释放 LONG/SHORT 幂等，允许 OPEN(seq大)。
         """
         bi, _sq = extract_seq_meta(payload or {})
         if bi is None and isinstance(self.last_tv_signal, dict):
@@ -7765,27 +7893,29 @@ class PositionSupervisorBinance:
         if bi is None:
             return
         try:
+            self._last_close_bar_index = int(bi)
+            self._last_close_flat_ts = time.time()
             n = self._seq_buffer.release_bar_for_reentry(int(bi))
             if n:
                 logger.info(
-                    f"📬 [{self.symbol}] 1-2-1 先平后开：已释放 bar={bi} 开仓幂等 "
-                    f"({n}键) | {reason or 'CLOSE'}"
+                    f"📬 [{self.symbol}] 先平后开：已释放 bar={bi} 开仓幂等 "
+                    f"({n}键) | {reason or 'CLOSE'} | 随后 OPEN 按 seq 升序"
                 )
                 try:
                     self._call_dingtalk(
-                        dingtalk.report_system_alert,
-                        title=f"TV时序1-2-1·允许再开 [{self.symbol}]",
-                        detail=(
-                            f"bar_index={bi} CLOSE 后已释放开仓幂等 | "
-                            f"{reason or '先平后开'} | 同K线再次 OPEN 将按序执行"
-                        ),
-                        level="信息",
-                        suggestion="无需人工；确认随后 OPEN 入队成功即可",
+                        dingtalk.report_close_then_open_chain,
+                        phase="平仓完成·待开",
+                        side="",
+                        reason=reason or "CLOSE",
+                        bar_index=int(bi),
+                        chain_same_bar=True,
+                        verify_note=f"已释放开仓幂等 {n} 键；下一包 OPEN 将无菌净场后入场",
+                        ok=True,
                     )
                 except Exception:
                     pass
         except Exception as e:
-            logger.warning(f"1-2-1 释放幂等失败: {e}")
+            logger.warning(f"先平后开释放幂等失败: {e}")
 
     def _process_signal(self, payload):
         raw_action = str(payload.get("action", "")).strip().upper()
@@ -8113,27 +8243,63 @@ class PositionSupervisorBinance:
             ).start()
 
     def _full_reentry(self, action, close_reason):
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
-        if not self._close_all(close_reason, reset_state=True):
-            logger.error("❌ 先平后开中止：平仓未归零，拒绝叠仓开仓")
-            dingtalk.report_system_alert(
-                "先平后开中止 · 平仓未归零",
-                "6 轮强平后盘口仍有持仓，已拒绝新开仓，请人工核查币安盘口",
+        """
+        先平后开原子链：无菌净场（撤→平→撤→验）→ 干净开仓（TP123+宽硬止损+雷达待命）。
+        TV 同K线永远是 CLOSE.seq < OPEN.seq；禁止在挂单未净时开仓。
+        """
+        chain = bool(getattr(self, "_close_open_chain_active", False))
+        try:
+            self._call_dingtalk(
+                dingtalk.report_close_then_open_chain,
+                phase="开始",
+                side=action,
+                reason=close_reason,
+                bar_index=getattr(self, "_last_close_bar_index", None),
+                chain_same_bar=chain,
+                verify_note="即将无菌清场：撤尽 TP123/雷达/宽止损 → 平仓归零 → 再验挂单=0",
             )
+        except Exception:
+            pass
+        if not self._sterile_flat_gate(reason_tag=close_reason or "先平后开", force_close=True):
+            logger.error("❌ 先平后开中止：无菌空仓未通过，拒绝叠仓开仓")
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_close_then_open_chain,
+                    phase="中止",
+                    side=action,
+                    reason=close_reason,
+                    bar_index=getattr(self, "_last_close_bar_index", None),
+                    chain_same_bar=chain,
+                    verify_note="qty/挂单未净 → 已拒绝开仓，防反手盘或超档位头寸",
+                    ok=False,
+                )
+            except Exception:
+                pass
+            self._close_open_chain_active = False
             return
-        if not self._wait_verify(self._verify_flat, retries=8, delay=0.5):
-            logger.error("❌ 先平后开中止：空仓核查未通过")
-            dingtalk.report_system_alert(
-                "先平后开中止 · 空仓核查失败",
-                "平仓指令已发但 REST 仍显示持仓，已拒绝叠仓开仓",
-            )
-            return
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
-        if curr_px > 0:
-            self._open_position(action, curr_px)
+        if curr_px <= 0:
+            logger.error("❌ 先平后开中止：无有效市价")
+            self._close_open_chain_active = False
+            return
+        try:
+            self._call_dingtalk(
+                dingtalk.report_close_then_open_chain,
+                phase="开仓",
+                side=action,
+                reason=close_reason,
+                bar_index=getattr(self, "_last_close_bar_index", None),
+                chain_same_bar=chain,
+                verify_note=(
+                    f"无菌通过 @ {float(curr_px):.2f} → "
+                    f"挂新方向 TP123 + VPS宽硬止损 + 雷达待命"
+                ),
+                ok=True,
+            )
+        except Exception:
+            pass
+        self._open_position(action, curr_px)
+        self._close_open_chain_active = False
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
         """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉"""

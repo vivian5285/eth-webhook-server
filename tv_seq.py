@@ -4,7 +4,9 @@
 TV Webhook 时序：bar_index + seq
 - 排序：先 bar_index 升序，同 bar 内 seq 升序（严禁按到达时间）
 - 幂等：symbol_bar_index_seq_action（Redis 优先，否则本地文件 TTL）
-- 同 bar 1-2-1（开→平→再开）：CLOSE 后释放开仓幂等键，允许再次 OPEN
+- 同 K 线 TV 只可能：① 单独 CLOSE  ② CLOSE(seq小)+OPEN(seq大)=先平后开
+- 永远不会「先开后平」两条同时发；Pine 日志 1-2-1 是覆盖语义，VPS 收包为平小开大
+- CLOSE 后释放开仓幂等键，允许同 bar 再开（刷新仓位）
 - 乱序：前置 seq 缺失时暂存等待，超时报警后按已有顺序执行
 """
 from __future__ import annotations
@@ -26,7 +28,7 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
 
 def make_seq_key(symbol: str, bar_index: int, seq: int, action: str = "") -> str:
-    """幂等键含 action：同 bar 不同动作不互杀；1-2-1 再开靠 CLOSE 后 release。"""
+    """幂等键含 action：同 bar 不同动作不互杀；先平后开靠 CLOSE 后 release。"""
     sym = str(symbol or "UNKNOWN").upper().replace(".P", "")
     act = str(action or "NA").strip().upper() or "NA"
     return f"{sym}_{int(bar_index)}_{int(seq)}_{act}"
@@ -153,7 +155,7 @@ class SeqIdempotencyStore:
 
     def release_bar_open_keys(self, symbol: str, bar_index: int) -> int:
         """
-        同 K 线 1-2-1：平仓后释放 LONG/SHORT/OPEN 幂等，允许 seq 再开。
+        同 K 线先平后开：平仓后释放 LONG/SHORT/OPEN 幂等，允许更大 seq 再开。
         不释放 CLOSE* 键。
         """
         sym = str(symbol or "UNKNOWN").upper().replace(".P", "")
@@ -181,7 +183,7 @@ class SeqIdempotencyStore:
         n = self.release_keys(uniq)
         if n:
             logger.info(
-                f"📬 TV时序 1-2-1：释放 bar={bar_index} 开仓幂等 {n} 键 "
+                f"📬 TV时序先平后开：释放 bar={bar_index} 开仓幂等 {n} 键 "
                 f"(允许同 bar 再开)"
             )
         return n
@@ -204,7 +206,7 @@ class TVSeqBuffer:
     按品种缓冲：收到消息后按 (bar_index, seq) 排序弹出。
     若 seq>1 且前置缺失 → 暂存至 pending_wait 超时，再按已有顺序冲刷并报警。
     无 bar_index/seq 的旧信号：立即 FIFO 旁路（兼容）。
-    同 bar 1-2-1：CLOSE 后 call release_bar_for_reentry() 再收 OPEN。
+    同 bar 先平后开：CLOSE 后 call release_bar_for_reentry() 再收 OPEN。
     """
 
     def __init__(
@@ -217,7 +219,7 @@ class TVSeqBuffer:
         self.pending_wait = float(pending_wait_sec)
         self.on_gap_alert = on_gap_alert  # callable(str)
         self._lock = threading.RLock()
-        # bar -> list of (seq, payload) 按到达追加；同 seq 不同波次可并存（1-2-1）
+        # bar -> list of (seq, payload) 按到达追加；同 seq 不同波次可并存（刷新仓）
         self._bars: Dict[int, List[Tuple[int, dict]]] = defaultdict(list)
         self._bar_first_ts: Dict[int, float] = {}
         self._legacy: List[dict] = []

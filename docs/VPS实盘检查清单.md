@@ -24,7 +24,8 @@
 | 1.4 | 未知 symbol → 拒绝并记录 | ✅ | `app.py` 返回 400 + `allowed` 列表 |
 | 1.5 | 同 action+price 去重（45s） | ✅ | 无时序旧信号：`SIGNAL_DEDUP_SEC`；有 `bar_index`+`seq`：幂等键 |
 | 1.5b | TV 时序有序消费 | ✅ | `tv_seq.py`：先 `bar_index` 再 `seq`；乱序暂存 `TV_SEQ_PENDING_WAIT` |
-| 1.5d | 先平后开 | ✅ | CLOSE 后 `TV_SEQ_CLOSE_OPEN_HOLD` 等 OPEN；清除空仓同向去重；钉钉时序链 |
+| 1.5d | 先平后开 | ✅ | 同K线只可能单独 CLOSE 或 CLOSE(seq小)+OPEN(seq大)；按 seq 升序；钉钉时序链 |
+| 1.5g | 无菌空仓再开 | ✅ | `_sterile_flat_gate`：撤→平→撤→扫孤儿→验 qty=0+orders=0 |
 | 1.5c | 钉钉攒批防限流 | ✅ | `DINGTALK_BATCH_*` + 1/2/4s 重试 + `WECHAT_WEBHOOK` 备用 |
 
 ### 实盘场景
@@ -36,7 +37,7 @@
 | 无 symbol（且 URL 无路径） | 默认 ETHUSDT（建议 TV 始终带 symbol） |
 | 恶意未知品种 | 拒绝 `unknown_symbol` |
 | 同 K 线重复 Webhook | 第二条去重忽略 |
-| 同 K 线 1-2-1（开→平→再开） | CLOSE 后释放开仓幂等 → 再开可入队执行 |
+| 同 K 线先平后开（CLOSE→OPEN） | seq 升序执行；CLOSE 释放开仓幂等；开仓前无菌净场 |
 
 ---
 
