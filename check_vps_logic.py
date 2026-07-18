@@ -334,6 +334,23 @@ def audit_module3_hard_sl(a: Audit):
         and "多品种启动恢复清单" in sup
         and "重启异常兜底" in sup,
     )
+    a.check(
+        "3.25 开仓裸仓闸 expected=0 不假齐",
+        "开仓 TP123 补全失败" in sup
+        and "开仓终检裸仓补挂" in sup
+        and "不标 align_ok" in sup
+        and "expected <= 0" in sup
+        and "_ensure_tp123_prices_from_tv" in sup
+        and "盘口无保护 STOP" in sup,
+    )
+    from webhook_parser import enrich_entry_tp_prices
+    empty_tp = enrich_entry_tp_prices("LONG", 1800.0, 0, 1, {})
+    a.check(
+        "3.25b TV空ATR仍补全TP",
+        float(empty_tp.get("tv_tp1") or 0) > 1800
+        and float(empty_tp.get("tv_tp3") or 0) > float(empty_tp.get("tv_tp1") or 0),
+        str(empty_tp),
+    )
 
 
 def audit_module4_radar(a: Audit):

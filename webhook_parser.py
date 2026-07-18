@@ -932,8 +932,9 @@ def enrich_entry_tp_prices(action, price, atr, regime, payload=None):
     mults = TV_REGIME_TP_MULT[regime]
     sign = 1.0 if action == "LONG" else -1.0
     px = float(price or 0)
-    a = float(atr or 0)
-    if px <= 0 or a <= 0:
+    # TV 空 ATR 时禁止静默放弃补全（否则开仓 expected=0 → 裸奔）
+    a = float(atr or 0) or 30.0
+    if px <= 0:
         return payload
 
     filled = 0

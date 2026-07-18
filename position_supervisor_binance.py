@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.63.0-regime-tv-sync"
+BINANCE_VPS_VERSION = "v13.64.1-naked-defense-guard"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -4242,6 +4242,21 @@ class PositionSupervisorBinance:
         now = time.time()
         audit = audit or {}
         missing_shield = audit.get("status") == "missing"
+        # maintain 常不传 audit：宽限/冷却期内若盘口无保护 STOP → 视为 missing，禁止裸仓空转
+        if (
+            not missing_shield
+            and self.current_side
+            and float(self.watched_qty or 0) > 0
+            and (
+                now < float(getattr(self, "_sentinel_grace_until", 0) or 0)
+                or getattr(self, "_shield_fail_streak", 0) > 0
+            )
+        ):
+            try:
+                if not binance_client.find_protective_stop_prices(self.symbol):
+                    missing_shield = True
+            except Exception:
+                pass
         if now < getattr(self, "_sentinel_grace_until", 0):
             if missing_shield:
                 if now - getattr(self, "_last_shield_maintain_ts", 0) < 12:
@@ -4879,8 +4894,14 @@ class PositionSupervisorBinance:
         tp_pxs = self.tv_tps
         expected = self._expected_tp_count(tp_pxs)
         if expected == 0:
-            return dynamic_sl is None or self._has_stop_sl_near(
-                dynamic_sl, tolerance, exclude_shield=False,
+            # 价位缺失 ≠ 防线齐；仍须 VPS 硬止损在盘
+            stop_need = float(dynamic_sl or 0) or float(
+                self._vps_hard_sl_target() or getattr(self, "tv_sl", 0) or 0
+            )
+            if stop_need <= 0:
+                return False
+            return self._has_stop_sl_near(
+                stop_need, tolerance, exclude_shield=False,
             )
 
         orders = self._collect_tp_limit_orders()
@@ -5272,6 +5293,11 @@ class PositionSupervisorBinance:
     def _tp_audit_ok(self, audit):
         expected = audit.get("expected", 0)
         if expected <= 0:
+            # 有仓且 TP 未吃完时 expected=0 = 价位缺失，禁止假「已齐」跳过挂单
+            if self.current_side and float(self.watched_entry or 0) > 0:
+                consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+                if not all(lv in consumed for lv in (1, 2, 3)):
+                    return False
             return True
         tp_prices = sum(1 for t in (self.tv_tps or []) if t > 0)
         if (
@@ -5316,6 +5342,12 @@ class PositionSupervisorBinance:
                 "matched": 0, "expected": audit.get("expected", 0),
                 "pending_prices": [], "rebuilt": False, "audit": audit, "nuclear": False,
             }
+        entry = float(entry or self.watched_entry or 0)
+        # 对齐前强制补全 TP 价：禁止 expected=0 假齐跳过挂单
+        if entry > 0 and self.current_side and self._expected_tp_count() <= 0:
+            consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+            if not all(lv in consumed for lv in (1, 2, 3)):
+                self._ensure_tp123_prices_from_tv(entry)
         if reason:
             logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} ETH")
 
@@ -6893,6 +6925,14 @@ class PositionSupervisorBinance:
         px_in = self._safe_float(payload.get("price"), 0.0)
         if px_in > 0:
             self.tv_price = px_in
+        elif raw_action in ("LONG", "SHORT"):
+            # TV 空价：用盘口价占位，否则 enrich TP 无法补全 → 开仓裸奔
+            live_px = float(binance_client.get_current_price(self.symbol) or 0)
+            if live_px > 0:
+                self.tv_price = live_px
+                payload = dict(payload)
+                payload["price"] = live_px
+                payload["_price_source"] = payload.get("_price_source") or "local"
         elif not is_tp_sl_update:
             self.tv_price = 0.0
 
@@ -6906,19 +6946,27 @@ class PositionSupervisorBinance:
             self.tv_tps = new_tps
         elif raw_action in ("LONG", "SHORT"):
             self.tv_tps = new_tps
-            if self.tv_price > 0:
-                if not validate_tp_prices_for_side(raw_action, self.tv_price, self.tv_tps):
-                    enriched = enrich_entry_tp_prices(
-                        raw_action, self.tv_price, self.current_atr, self.regime, payload,
-                    )
-                    self.tv_tps = self._sanitize_tp_prices([
-                        self._safe_float(enriched.get("tv_tp1"), 0),
-                        self._safe_float(enriched.get("tv_tp2"), 0),
-                        self._safe_float(enriched.get("tv_tp3"), 0),
-                    ])
-                    if enriched.get("_tp_source"):
-                        payload = dict(payload)
-                        payload["_tp_source"] = enriched.get("_tp_source")
+            px_for_tp = float(self.tv_price or 0)
+            if px_for_tp <= 0:
+                px_for_tp = float(binance_client.get_current_price(self.symbol) or 0)
+            if px_for_tp > 0 and not validate_tp_prices_for_side(
+                raw_action, px_for_tp, self.tv_tps,
+            ):
+                enriched = enrich_entry_tp_prices(
+                    raw_action, px_for_tp, self.current_atr, self.regime, payload,
+                )
+                self.tv_tps = self._sanitize_tp_prices([
+                    self._safe_float(enriched.get("tv_tp1"), 0),
+                    self._safe_float(enriched.get("tv_tp2"), 0),
+                    self._safe_float(enriched.get("tv_tp3"), 0),
+                ])
+                if enriched.get("_tp_source"):
+                    payload = dict(payload)
+                    payload["_tp_source"] = enriched.get("_tp_source")
+                logger.info(
+                    f"📐 开仓信号 TP123 本地补全 @ {px_for_tp:.2f} → {self.tv_tps} "
+                    f"({payload.get('_tp_source', 'local')})"
+                )
         elif sum(1 for t in new_tps if t > 0) >= 2:
             # 其它信号若带齐 TP 才覆盖，避免 UPDATE_SL/CLOSE 把账本 TP 清零
             self.tv_tps = new_tps
@@ -7753,7 +7801,19 @@ class PositionSupervisorBinance:
             self._open_in_progress = False
 
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0, sizing_meta=None):
-        tp_pxs = self.tv_tps
+        entry_price = float(entry_price or 0)
+        # 开仓硬闸：TV 空/不全时必须用实盘 entry+ATR 合成 TP123，禁止 expected=0 裸奔
+        if not self._ensure_tp123_prices_from_tv(entry_price):
+            logger.error(
+                f"🚨 [{self.symbol}] 开仓 TP123 补全失败 entry={entry_price} "
+                f"tps={self.tv_tps} → 仍强制挂 VPS 硬止损"
+            )
+            dingtalk.report_system_alert(
+                f"开仓 TP123 补全失败 [{self.symbol}]",
+                f"{self.current_side} entry={entry_price:.2f} | tps={self.tv_tps} | "
+                f"将仅挂 VPS 宽硬止损，哨兵继续补 TP",
+            )
+        tp_pxs = list(self.tv_tps or [0.0, 0.0, 0.0])
         # 开仓后 current_sl 必须是 VPS 宽硬止损，绝不能写成成本价（否则会被当成雷达）
         self._refresh_vps_hard_sl(
             entry=entry_price, side=self.current_side,
@@ -7782,7 +7842,12 @@ class PositionSupervisorBinance:
 
         self._ensure_price_ws()
 
-        verified = self._wait_verify(lambda: self._verify_position(self.current_side))
+        verified = self._wait_verify(
+            lambda: self._verify_position(self.current_side), retries=8, delay=0.7,
+        )
+        if not verified:
+            time.sleep(1.0)
+            verified = self._verify_position(self.current_side)
         if verified:
             live_qty = verified["size"]
             if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
@@ -7805,19 +7870,21 @@ class PositionSupervisorBinance:
             # 开仓后只清残留挂单一次；禁止 recover 核武连环撤挂（易与挂 TP/止损竞态）
             binance_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.4)
+            # 再用核实 entry 补一次 TP（防 TV 空价时首轮用错价）
+            self._ensure_tp123_prices_from_tv(float(verified["entry_price"] or entry_price))
+            tp_pxs = list(self.tv_tps or tp_pxs)
             self._enforce_pre_tp1_radar_standby(
                 live_qty, verified["entry_price"], source="开仓保护",
             )
-            # 开仓宽限期：哨兵 90s 内对纯缺失只补挂不核武
-            self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_OPEN_SEC
             self._nuclear_fail_streak = 0
             # 先挂 TP123，再挂 closePosition 硬止损（不占 reduceOnly 额度）
+            # 宽限期在首轮挂单后再开，避免 grace 挡住 force=False 硬止损维护
             self._enforce_defense_alignment(
                 live_qty, verified["entry_price"],
                 dynamic_sl=None, reason="开仓后防线对齐", rounds=3,
                 recover_mode=False,
             )
-            # 开仓后硬闸：盘口若出现近市/TV紧止损 → 立刻改回 VPS 宽止损
+            # 开仓后硬闸：无论 TP 是否齐，强制 VPS 宽硬止损
             hung = binance_client.find_protective_stop_prices(self.symbol)
             vps_target = self._vps_hard_sl_target(verified["entry_price"])
             bad = [
@@ -7829,13 +7896,24 @@ class PositionSupervisorBinance:
                     and not self._is_valid_radar_sl(p)
                 )
             ]
-            if bad or not hung:
-                self._sync_exchange_stop(
-                    live_qty, radar_sl=None, reason="开仓后强制VPS宽硬止损", force=True,
-                )
+            self._sync_exchange_stop(
+                live_qty, radar_sl=None,
+                reason=(
+                    "开仓后强制VPS宽硬止损" if (bad or not hung)
+                    else "开仓后确认VPS宽硬止损"
+                ),
+                force=True,
+            )
             audit = self._wait_defense_settled(live_qty, retries=10, delay=0.9)
             matched, expected = audit["matched_full"], audit["expected"]
             curr_px = binance_client.get_current_price(self.symbol) or entry_price
+            if expected <= 0:
+                self._ensure_tp123_prices_from_tv(verified["entry_price"])
+                expected = self._expected_tp_count()
+                logger.warning(
+                    f"⚠️ 开仓后 expected TP=0 → 再合成 → expected={expected} tps={self.tv_tps}"
+                )
+                tp_pxs = list(self.tv_tps or tp_pxs)
             if expected > 0 and matched < expected:
                 logger.warning(
                     f"⚠️ 开仓首轮 TP 仅 {matched}/{expected} → 追加补挂/核武"
@@ -7849,15 +7927,32 @@ class PositionSupervisorBinance:
                     audit = self._nuclear_realign_tp(
                         live_qty, verified["entry_price"], dynamic_sl=None, rounds=2,
                     )
-                self._maintain_hard_shield(live_qty, curr_px, force=False)
+                self._maintain_hard_shield(live_qty, curr_px, force=True)
                 audit = self._wait_defense_settled(live_qty, retries=8, delay=0.8)
                 matched, expected = audit["matched_full"], audit["expected"]
-            # 无论是否齐，标记对齐冷却，抑制哨兵立刻连环核武
-            self._mark_defense_align_ok()
-            self._sentinel_grace_until = max(
-                float(getattr(self, "_sentinel_grace_until", 0) or 0),
-                time.time() + SENTINEL_GRACE_AFTER_OPEN_SEC,
-            )
+            hung_final = binance_client.find_protective_stop_prices(self.symbol)
+            if not hung_final:
+                logger.error(f"🚨 [{self.symbol}] 开仓终检：盘口无硬止损 → 再强制补挂")
+                self._sync_exchange_stop(
+                    live_qty, radar_sl=None, reason="开仓终检裸仓补挂", force=True,
+                )
+                hung_final = binance_client.find_protective_stop_prices(self.symbol)
+                if not hung_final:
+                    dingtalk.report_system_alert(
+                        f"开仓后裸仓无硬止损 [{self.symbol}]",
+                        f"{self.current_side} {live_qty} {self.unit_label} @ "
+                        f"{verified['entry_price']:.2f} | TP {matched}/{expected} | "
+                        f"目标VPS@{(vps_target or 0):.2f} | 请立即人工挂止损",
+                    )
+            # 首轮挂单完成后再开宽限；仅防线齐才标 align_ok
+            self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_OPEN_SEC
+            if expected > 0 and matched >= expected and hung_final:
+                self._mark_defense_align_ok()
+            else:
+                logger.warning(
+                    f"⚠️ 开仓防线未齐 TP {matched}/{expected} stop={hung_final} "
+                    f"→ 不标 align_ok，哨兵继续补"
+                )
             verify_note = (
                 f"{budget_note} | " if budget_note else ""
             ) + (
@@ -7890,6 +7985,9 @@ class PositionSupervisorBinance:
             self._record_open_log(
                 self.current_side, live_qty, verified["entry_price"], source="open",
             )
+            open_verified = (
+                expected > 0 and matched >= expected and bool(hung_final)
+            )
             self._call_dingtalk(
                 dingtalk.report_supervisor_open,
                 side=self.current_side,
@@ -7902,7 +8000,7 @@ class PositionSupervisorBinance:
                 tv_tps=self.tv_tps,
                 verify_note=verify_note,
                 tp_audit=audit,
-                verified=(expected == 0 or matched >= expected),
+                verified=open_verified,
                 principal_balance=self.sizing_principal or binance_client.get_principal_wallet_balance(),
                 margin_pct=float((sizing_meta or {}).get("effective_risk_pct", VPS_RISK_PCT) or VPS_RISK_PCT) / 100.0,
                 margin_usdt=float((sizing_meta or {}).get("order_amount", 0) or 0),
@@ -7923,8 +8021,15 @@ class PositionSupervisorBinance:
                     f"{self.current_side} {live_qty} {self.unit_label} | 仅 {matched}/{expected} 档 | "
                     f"{self._format_audit_summary(audit)} | {hint}",
                 )
+            if not hung_final:
+                self._open_tp_unconfirmed = True
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
+            dingtalk.report_system_alert(
+                f"开仓后持仓核查失败 [{self.symbol}]",
+                f"{self.current_side} 目标 qty={qty} entry≈{entry_price:.2f} | "
+                f"REST 未核实持仓，TP/硬止损可能未挂，请立即人工检查",
+            )
 
         self._ensure_sentinel_running()
 
@@ -8276,9 +8381,14 @@ class PositionSupervisorBinance:
             logger.debug(f"📡 [{self.symbol}] UD-WS 脉冲 {et}")
 
     def _tp1_distance(self):
-        if self.tv_tps[0] > 0 and self.watched_entry:
-            return abs(self.tv_tps[0] - self.watched_entry)
-        return self.current_atr * 1.5
+        entry = float(self.watched_entry or 0)
+        if self.tv_tps and float(self.tv_tps[0] or 0) > 0 and entry > 0:
+            return abs(float(self.tv_tps[0]) - entry)
+        atr = float(
+            getattr(self, "open_atr", None) or self.current_atr or 30.0
+        )
+        # 禁止 dist=0（激活线=成本）→ 开仓即误触雷达交棒
+        return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
         """开仓档位锁定的雷达启动比例（相对 entry→TP1）。"""
