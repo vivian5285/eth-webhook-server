@@ -63,7 +63,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.64.1-naked-defense-guard"
+BINANCE_VPS_VERSION = "v13.64.2-live-radar-recover-guard"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -1567,7 +1567,8 @@ class PositionSupervisorBinance:
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
         """
         全链防线：TP123 比例限价 + VPS 自主硬止损；
-        雷达按 5 阶段推进（仅 TP1 限价成交后激活；TP1 前仅 VPS 宽硬止损）。
+        雷达仅现价达档位激活线(R1/R2=70%·R3=75%·R4=80%→TP1)后交棒；激活线前仅 VPS 宽硬止损。
+        重启禁止用历史 best 误触保本（防无缘无故贴成本平仓）。
         """
         notes = []
         live_qty = float(self._resolve_live_qty(live_qty) or live_qty)
@@ -1698,6 +1699,22 @@ class PositionSupervisorBinance:
                     f"{self.current_side} {live_qty} ETH @ {entry:.2f} | "
                     f"仅 {audit.get('matched_full', 0)}/{exp} 档 | "
                     f"VPS@{float(self._vps_hard_sl_target() or 0):.2f} | 哨兵接力",
+                )
+
+        # 终检：盘口无保护 STOP → 强制再挂（接管/重启禁裸仓）
+        hung = binance_client.find_protective_stop_prices(self.symbol)
+        if live_qty > 0 and not hung:
+            logger.error(f"🚨 [{source}] 终检裸仓无硬止损 → 强制补挂")
+            shield_ok = self._maintain_hard_shield(
+                live_qty, curr_px, force=True, radar_sl=radar_sl,
+            )
+            hung = binance_client.find_protective_stop_prices(self.symbol)
+            if not hung:
+                dingtalk.report_system_alert(
+                    f"{source} · 裸仓无硬止损 [{self.symbol}]",
+                    f"{self.current_side} {live_qty} @ {entry:.2f} | "
+                    f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
+                    f"请立即人工挂 closePosition",
                 )
 
         self._post_recover_radar_pulse = True
@@ -3539,11 +3556,23 @@ class PositionSupervisorBinance:
             )
             time.sleep(0.5)
 
-        res = self._place_vps_hard_sl_order(
-            live_qty, target, use_stop_limit=False,
-        )
-        time.sleep(0.45)
-        ok = res is not None and self._has_stop_sl_near(target, exclude_shield=False)
+        # 撤净后必须挂上：失败重试，禁止「先撤后挂失败」裸仓
+        ok = False
+        res = None
+        for attempt in range(3):
+            res = self._place_vps_hard_sl_order(
+                live_qty, target, use_stop_limit=False,
+            )
+            time.sleep(0.45 if attempt == 0 else 0.7)
+            ok = res is not None and self._has_stop_sl_near(
+                target, exclude_shield=False,
+            )
+            if ok:
+                break
+            logger.warning(
+                f"🛡️ [{self.symbol}] 硬止损挂单未核实 @{target:.2f} "
+                f"重试 {attempt + 1}/3"
+            )
         leftovers = [
             p for p in self._count_protective_stops()
             if abs(p - target) > SHIELD_STOP_TOLERANCE
@@ -3553,6 +3582,14 @@ class PositionSupervisorBinance:
             extra = self._purge_all_protective_stops(keep_near=target)
             purged += extra
             logger.warning(f"🛡️ 二次清孤儿/TV STOP{leftovers} 撤 {extra} 笔")
+            if ok and not self._has_stop_sl_near(target, exclude_shield=False):
+                res = self._place_vps_hard_sl_order(
+                    live_qty, target, use_stop_limit=False,
+                )
+                time.sleep(0.45)
+                ok = res is not None and self._has_stop_sl_near(
+                    target, exclude_shield=False,
+                )
 
         if ok:
             self._last_applied_exchange_sl = target
@@ -3975,12 +4012,12 @@ class PositionSupervisorBinance:
                 f"📡 [{self.symbol}] 雷达交棒拒绝：开仓/防线重建中 | {reason or ''}"
             )
             return False
-        # 主判：现价朝 TP1 已达档位激活比例（不再要求限价成交+减仓三重）
-        if not self._price_reached_radar_activation(curr_px):
+        # 主判：现价朝 TP1 已达档位激活比例（禁止历史 best 单独触发交棒）
+        if not self._price_reached_radar_activation(curr_px, live_only=True):
             ratio = self._radar_activation_ratio()
             prog = self._tp1_direction_progress(curr_px)
             logger.info(
-                f"📡 [{self.symbol}] 雷达交棒拒绝：未达激活线 "
+                f"📡 [{self.symbol}] 雷达交棒拒绝：现价未达激活线 "
                 f"(朝TP1 {prog:.0%} < R{self._tp_split_regime()} {ratio:.0%}) | "
                 f"{reason or ''}"
             )
@@ -4474,7 +4511,7 @@ class PositionSupervisorBinance:
         elif favorable > 0.001:
             tp1_prog = self._tp1_direction_progress(curr_px)
             pnl_label = f"浮盈 {favorable:.1%}·朝TP1 {tp1_prog:.0%}(雷达待命)"
-            defense_plan = "持有 TP123 + VPS硬止损 (TP1成交后才激活雷达)"
+            defense_plan = "持有 TP123 + VPS硬止损 (现价达激活线后才激活雷达)"
         else:
             pnl_label = "保本附近"
             defense_plan = "持有 TP123 + VPS硬止损"
@@ -4684,7 +4721,7 @@ class PositionSupervisorBinance:
                     + (
                         "雷达已激活，专注移动保本"
                         if self._is_radar_active()
-                        else f"雷达进度 {progress:.0%}，TP1成交后推升止损"
+                        else f"雷达进度 {progress:.0%}，现价达激活线后推升止损"
                     )
                 ),
             )
@@ -8024,12 +8061,56 @@ class PositionSupervisorBinance:
             if not hung_final:
                 self._open_tp_unconfirmed = True
         else:
-            logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
+            logger.warning("开仓钉钉跳过：实盘持仓核查未通过 → 延迟再探并尽量挂防线")
             dingtalk.report_system_alert(
                 f"开仓后持仓核查失败 [{self.symbol}]",
                 f"{self.current_side} 目标 qty={qty} entry≈{entry_price:.2f} | "
-                f"REST 未核实持仓，TP/硬止损可能未挂，请立即人工检查",
+                f"REST 未核实持仓，正在延迟再探并挂 TP123+VPS硬止损",
             )
+            # 竞态：市价已成但 REST 滞后 → 再探一轮，能探到就挂齐防线，禁止裸奔
+            time.sleep(1.2)
+            late = self._get_active_position()
+            if late and float(late.get("size") or 0) > 0:
+                late_qty = float(late["size"])
+                late_entry = float(late.get("entry_price") or entry_price or 0)
+                self.current_side = late.get("side") or self.current_side
+                self.watched_qty = late_qty
+                self.watched_entry = late_entry
+                self.initial_qty = late_qty
+                self._open_settled_qty = late_qty
+                self.monitoring = True
+                self._save_state()
+                try:
+                    self._ensure_tp123_prices_from_tv(late_entry)
+                    self._refresh_vps_hard_sl(
+                        entry=late_entry, side=self.current_side,
+                        regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+                        atr=float(getattr(self, "open_atr", None) or self.current_atr or 30),
+                        tv_sl_ref=getattr(self, "tv_sl_ref", 0) or None,
+                        source="开仓滞后核实",
+                    )
+                    self._enforce_defense_alignment(
+                        late_qty, late_entry, dynamic_sl=None,
+                        reason="开仓滞后核实·补挂TP123", rounds=3, recover_mode=False,
+                    )
+                    self._sync_exchange_stop(
+                        late_qty, radar_sl=None,
+                        reason="开仓滞后核实·强制VPS硬止损", force=True,
+                    )
+                    hung_late = binance_client.find_protective_stop_prices(self.symbol)
+                    if not hung_late:
+                        dingtalk.report_system_alert(
+                            f"开仓滞后核实仍无硬止损 [{self.symbol}]",
+                            f"{self.current_side} {late_qty} @ {late_entry:.2f} | 请人工挂止损",
+                        )
+                    else:
+                        logger.warning(
+                            f"✅ [{self.symbol}] 开仓滞后核实成功 → "
+                            f"已补挂 TP123+VPS硬止损 stop={hung_late}"
+                        )
+                except Exception as e:
+                    logger.error(f"开仓滞后核实补挂失败: {e}")
+            self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_OPEN_SEC
 
         self._ensure_sentinel_running()
 
@@ -8069,12 +8150,12 @@ class PositionSupervisorBinance:
     def _enforce_pre_tp1_radar_standby(self, live_qty=None, curr_px=0.0, source=""):
         """
         激活线前：强制雷达待命，止损仅 VPS 宽硬止损（完整呼吸空间）。
-        价已达激活线 / 雷达已交棒：不干预。
+        现价已达激活线 / 雷达已交棒：不干预。历史 best 不算数。
         """
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         if self._radar_legitimately_armed(live_qty, curr_px):
             return False
-        if curr_px > 0 and self._price_reached_radar_activation(curr_px):
+        if curr_px > 0 and self._price_reached_radar_activation(curr_px, live_only=True):
             return False
 
         tv = float(getattr(self, "tv_sl", 0) or 0)
@@ -8145,13 +8226,13 @@ class PositionSupervisorBinance:
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
         """
         未达激活线却出现过早保本线 / 伪TP污染 → 恢复 VPS 宽硬止损。
-        已交棒或价已达激活线：不解除。
+        已交棒或现价已达激活线：不解除。历史 best 不算数。
         """
         live_qty = float(live_qty or self.watched_qty or 0)
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
         if self._radar_legitimately_armed(live_qty, curr_px):
             return False
-        if curr_px > 0 and self._price_reached_radar_activation(curr_px):
+        if curr_px > 0 and self._price_reached_radar_activation(curr_px, live_only=True):
             return False
 
         disarmed = False
@@ -8273,7 +8354,7 @@ class PositionSupervisorBinance:
         return None
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
-        """重启：仅当曾交棒成功且理想保本仍安全时恢复雷达；否则宽硬止损待命。"""
+        """重启：仅当曾交棒且现价仍达激活线且理想保本安全时恢复雷达；否则宽硬止损待命。"""
         if curr_px <= 0 or not entry:
             return
 
@@ -8285,19 +8366,26 @@ class PositionSupervisorBinance:
             self.best_price = min(self.best_price, curr_px)
 
         had_handoff = bool(getattr(self, "_radar_handoff_done", False))
+        live_at_act = self._price_reached_radar_activation(curr_px, live_only=True)
+        ratio = self._radar_activation_ratio()
+        prog = self._tp1_direction_progress(curr_px)
 
-        if not had_handoff:
+        if not had_handoff or not live_at_act:
             if self.current_sl == 0.0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
+                self.current_sl = float(self.tv_sl)
+            elif float(getattr(self, "tv_sl", 0) or 0) > 0:
+                # 未达激活线：强制账本回到 VPS 宽价，禁止残留保本线
                 self.current_sl = float(self.tv_sl)
             self._radar_stage_last = 0
             self._radar_armed_after_tp1 = False
             self._radar_handoff_done = False
             self._ws_tp1_fill_hint = False
-            ratio = self._radar_activation_ratio()
-            prog = self._tp1_direction_progress(curr_px)
+            why = "未曾交棒" if not had_handoff else (
+                f"现价未达激活线(朝TP1 {prog:.0%} < {ratio:.0%}，忽略历史best)"
+            )
             logger.info(
                 f"📡 [{self.symbol}] 重启雷达待命: 阶段0 | 保留 VPS硬止损 "
-                f"(朝TP1 {prog:.0%} / 激活线 {ratio:.0%})"
+                f"({why})"
             )
             return
 
@@ -8309,7 +8397,7 @@ class PositionSupervisorBinance:
             if float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             logger.info(
-                f"📡 [{self.symbol}] 重启：曾交棒但现价距理想保本不足 → "
+                f"📡 [{self.symbol}] 重启：曾交棒且现价达激活线，但理想保本距市不足 → "
                 f"退回宽硬止损，待哨兵再交棒"
             )
             return
@@ -8328,7 +8416,8 @@ class PositionSupervisorBinance:
         self._radar_stage_last = max(stage, 1)
         logger.info(
             f"📡 [{self.symbol}] 重启雷达恢复: 阶段{stage} {self._radar_stage_label(stage)} | "
-            f"best={self.best_price:.2f} | SL={self.current_sl:.2f}"
+            f"best={self.best_price:.2f} | SL={self.current_sl:.2f} | "
+            f"朝TP1 {prog:.0%}/{ratio:.0%}"
         )
 
     def _ensure_price_ws(self):
@@ -8408,19 +8497,32 @@ class PositionSupervisorBinance:
             return entry - tp1_dist * ratio
         return 0.0
 
-    def _price_reached_radar_activation(self, curr_px):
-        """主判：现价（或 best）已达档位激活线。"""
+    def _price_reached_radar_activation(self, curr_px, live_only=False):
+        """
+        主判：是否达档位激活线。
+        live_only=True（交棒/重启/待命闸）：只用现价，禁止历史 best 误触保本。
+        live_only=False：现价或 best（仅用于进度展示等非挂单路径）。
+        """
         curr_px = float(curr_px or 0)
         if curr_px <= 0 or not self.watched_entry:
             return False
         act = self._radar_activation_price()
         if act <= 0:
             return False
-        best = float(self.best_price or 0)
         if self.current_side == "LONG":
-            return curr_px >= act or (best > 0 and best >= act)
+            if curr_px >= act:
+                return True
+            if live_only:
+                return False
+            best = float(self.best_price or 0)
+            return best > 0 and best >= act
         if self.current_side == "SHORT":
-            return curr_px <= act or (best > 0 and best <= act)
+            if curr_px <= act:
+                return True
+            if live_only:
+                return False
+            best = float(self.best_price or 0)
+            return best > 0 and best <= act
         return False
 
     def _tp1_direction_progress(self, curr_px):
@@ -8460,14 +8562,15 @@ class PositionSupervisorBinance:
         return max(0.0, min(1.0, self._tp1_direction_progress(curr_px) / ratio))
 
     def _should_radar_trail(self, curr_px):
-        """价触激活线或已交棒 → 追踪；否则只保留 VPS 宽硬止损。"""
+        """现价触激活线或已交棒 → 追踪；否则只保留 VPS 宽硬止损。"""
         if getattr(self, "_open_in_progress", False):
             return False
         if self._radar_legitimately_armed(self.watched_qty, curr_px):
             return True
         if self._is_radar_active():
             return True
-        return self._price_reached_radar_activation(curr_px)
+        # 交棒门槛：必须现价达激活线，禁止历史 best 单独触发
+        return self._price_reached_radar_activation(curr_px, live_only=True)
 
     def _compute_radar_sl(self):
         if not self.watched_entry or self.best_price <= 0:
@@ -8748,12 +8851,12 @@ class PositionSupervisorBinance:
 
                             self._process_directional_defenses(real_amt, curr_px)
                             if (
-                                self._price_reached_radar_activation(curr_px)
+                                self._price_reached_radar_activation(curr_px, live_only=True)
                                 and not self._is_radar_active()
                                 and self._scan_ticks % 5 == 0
                             ):
                                 logger.info(
-                                    f"📡 雷达待交棒: 已达激活线 "
+                                    f"📡 雷达待交棒: 现价已达激活线 "
                                     f"(朝TP1 {self._tp1_direction_progress(curr_px):.0%} "
                                     f"/ {self._radar_activation_ratio():.0%}) | "
                                     f"现价 {curr_px:.2f} | 轮询 {SENTINEL_POLL_RADAR}s"
@@ -9003,7 +9106,7 @@ class PositionSupervisorBinance:
                 dingtalk.report_system_alert(
                     f"重启仓位探测冲突 [{self.symbol}]",
                     "REST 报空仓但盘口仍有挂单 → 禁止清挂单/禁止报空仓待命；"
-                    "已启动哨兵接力核对 TP123 + VPS硬止损（雷达仅TP1后）",
+                    "已启动哨兵接力核对 TP123 + VPS硬止损（雷达仅现价达激活线后）",
                     suggestion="请在币安核对持仓；勿手动乱撤，等待哨兵对齐",
                 )
                 self.monitoring = True
@@ -9437,7 +9540,7 @@ def bootstrap_supervisors():
             dingtalk.report_system_alert(
                 "多品种重启核查汇总",
                 " | ".join(summaries) if summaries else "无品种",
-                suggestion="有仓品种应挂齐 TP123+VPS硬止损；雷达仅TP1后；重启禁止无故平仓",
+                suggestion="有仓品种应挂齐 TP123+VPS硬止损；雷达仅现价达激活线后；重启禁止无故平仓",
             )
         except Exception as e:
             logger.warning(f"多品种重启汇总钉钉跳过: {e}")

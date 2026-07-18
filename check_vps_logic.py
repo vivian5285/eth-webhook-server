@@ -372,7 +372,22 @@ def audit_module4_radar(a: Audit):
     a.check("4.1 价触激活线主判", "_price_reached_radar_activation" in sup)
     a.check("交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
     a.check("交棒后才武装", "_radar_handoff_done" in sup)
-    a.check("废除三重门槛文案", "废除三重" in sup or "不再要求限价成交+减仓三重" in sup)
+    a.check("废除三重门槛文案", "废除三重" in sup or "不再要求限价成交" in sup)
+    a.check(
+        "4.8 交棒/重启只用现价激活线",
+        "live_only=True" in sup
+        and "禁止历史 best" in sup
+        and "现价未达激活线" in sup
+        and "忽略历史best" in sup,
+    )
+    a.check(
+        "4.9 硬止损撤后重试挂单",
+        "硬止损挂单未核实" in sup and "重试" in sup,
+    )
+    a.check(
+        "4.10 开仓滞后核实补挂",
+        "开仓滞后核实" in sup and "开仓滞后核实·强制VPS硬止损" in sup,
+    )
 
     from webhook_parser import (
         RADAR_STAGE_COST_BUFFER_PCT,
@@ -455,11 +470,12 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.64.1-naked-defense-guard" in readme
+        "v13.64.2-live-radar-recover-guard" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
-        and "8/14/20/26%" in readme,
+        and "8/14/20/26%" in readme
+        and "禁止历史 best" in readme,
     )
     a.check(
         "README 雷达激活比例",
