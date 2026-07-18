@@ -453,6 +453,19 @@ def audit_readme_consistency(a: Audit):
         a.check("README 硬止损描述", "VPS 自主" in readme or "开仓价百分比" in readme)
     a.check("README 检查清单链接", "check_vps_logic" in readme or "VPS实盘检查清单" in readme)
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
+    a.check(
+        "README 当前版本对齐代码",
+        "v13.64.1-naked-defense-guard" in readme
+        and "开仓裸仓闸" in readme
+        and "closePosition" in readme
+        and "2.78%" in readme
+        and "8/14/20/26%" in readme,
+    )
+    a.check(
+        "README 雷达激活比例",
+        "70%" in readme and "75%" in readme and "80%" in readme,
+    )
+    a.check("README UPDATE_SL 仅参考", "仅更新" in readme and "tv_sl_ref" in readme)
 
 
 def main():
