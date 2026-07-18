@@ -24,6 +24,7 @@
 | 1.4 | 未知 symbol → 拒绝并记录 | ✅ | `app.py` 返回 400 + `allowed` 列表 |
 | 1.5 | 同 action+price 去重（45s） | ✅ | 无时序旧信号：`SIGNAL_DEDUP_SEC`；有 `bar_index`+`seq`：幂等键 |
 | 1.5b | TV 时序有序消费 | ✅ | `tv_seq.py`：先 `bar_index` 再 `seq`；乱序暂存 `TV_SEQ_PENDING_WAIT` |
+| 1.5d | 先平后开 | ✅ | CLOSE 后 `TV_SEQ_CLOSE_OPEN_HOLD` 等 OPEN；清除空仓同向去重；钉钉时序链 |
 | 1.5c | 钉钉攒批防限流 | ✅ | `DINGTALK_BATCH_*` + 1/2/4s 重试 + `WECHAT_WEBHOOK` 备用 |
 
 ### 实盘场景
@@ -151,13 +152,16 @@ UPDATE_SL → 仅更新 TV 参考，不用 TV tv_sl 挂单
 
 | 场景 | 函数 | 状态 |
 |------|------|------|
-| 开单成功 | `report_supervisor_open` | ✅ |
+| 开单成功 | `report_supervisor_open` | ✅ 含硬止损价/雷达激活线/头寸对账 |
 | 硬止损/VPS盾 | `report_adverse_shield_armed` | ✅ |
-| 雷达启动 | `report_radar_activated` | ✅ |
+| 雷达启动 | `report_radar_activated` | ✅ 含启动闸门；失败哨兵补发 |
 | 雷达推升 | `report_intervention` | ✅ |
 | TP 成交 | `report_tp_fill` | ✅ |
+| 全平收网 | `report_supervisor_close` | ✅ **平仓归因** radar_be/tp3/vps_hard_sl |
 | 敞口超标拒绝 | `report_system_alert` | ✅ |
 | TV 紧止损忽略 | 日志 `tv_sl_ref` 对比 | ✅ 不单独钉钉 |
+
+> **归因铁律**：是否雷达平仓看 `_radar_handoff_done`，**不以** `_radar_activation_notified`（钉钉是否发出）为准。
 
 ---
 
@@ -199,7 +203,7 @@ python check_vps_logic.py
 curl -s http://127.0.0.1:5003/health | python -m json.tool
 
 # 日志关键词
-grep -E '雷达交棒|激活线|解除过早雷达|敞口硬顶|tv_sl_ref' logs/binance_brain.log | tail -30
+grep -E '雷达交棒|激活线|补发雷达|平仓归因|exit_source|闸门=|敞口硬顶|tv_sl_ref' logs/binance_brain.log | tail -30
 ```
 
 ### 优先级

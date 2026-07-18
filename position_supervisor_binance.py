@@ -42,6 +42,14 @@ from webhook_parser import (
     CLOSE_TYPE_TP3,
     CLOSE_TYPE_BREAKEVEN,
     CLOSE_TYPE_VPS_SHIELD,
+    CLOSE_TYPE_PROTECT,
+    EXIT_SOURCE_RADAR_BE,
+    EXIT_SOURCE_VPS_HARD_SL,
+    EXIT_SOURCE_TP3,
+    EXIT_SOURCE_TV_CLOSE,
+    EXIT_SOURCE_TV_PROTECT,
+    EXIT_SOURCE_MANUAL,
+    EXIT_SOURCE_LABELS,
     RADAR_STAGE_COST_BUFFER_PCT,
     RADAR_STAGE_ATR_MULT,
     RADAR_STAGE_LABELS,
@@ -63,7 +71,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.66.0-tp-reconcile-quota-guard"
+BINANCE_VPS_VERSION = "v13.67.0-exit-source-radar-ding"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -201,6 +209,8 @@ class PositionSupervisorBinance:
         self._shield_handoff_notified = False
         self.shield_sized_qty = 0.0
         self._radar_activation_notified = False
+        self._radar_notify_pending = False  # 交棒成功但钉钉未发出 → 哨兵补发
+        self._radar_trigger_gate = ""  # TP1成交 / 距TP1剩15%
         self._radar_armed_after_tp1 = False
         self._radar_handoff_done = False  # 仅保本 STOP 核实后才 True
         self._open_settled_qty = 0.0
@@ -1397,6 +1407,8 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self.shield_tiers_consumed = []
         self._radar_activation_notified = False
+        self._radar_notify_pending = False
+        self._radar_trigger_gate = ""
         self._shield_handoff_notified = False
         self.shield_active = False
         self.shield_sized_qty = 0.0
@@ -1975,6 +1987,18 @@ class PositionSupervisorBinance:
                     "radar_handoff_done": bool(
                         getattr(self, "_radar_handoff_done", False)
                     ),
+                    "radar_activation_notified": bool(
+                        getattr(self, "_radar_activation_notified", False)
+                    ),
+                    "radar_notify_pending": bool(
+                        getattr(self, "_radar_notify_pending", False)
+                    ),
+                    "radar_trigger_gate": str(
+                        getattr(self, "_radar_trigger_gate", "") or ""
+                    ),
+                    "shield_handoff_notified": bool(
+                        getattr(self, "_shield_handoff_notified", False)
+                    ),
                     "open_settled_qty": float(
                         getattr(self, "_open_settled_qty", 0) or 0
                     ),
@@ -2513,6 +2537,11 @@ class PositionSupervisorBinance:
         src_note = format_tv_field_sources(meta.get("field_sources") or {})
         if src_note and "TV透传" not in src_note:
             base_note += f" | {src_note}"
+        if meta.get("exit_source"):
+            label = meta.get("exit_source_label") or EXIT_SOURCE_LABELS.get(
+                meta.get("exit_source"), meta.get("exit_source")
+            )
+            base_note += f" | 归因 {label}"
         if flat:
             verify_note = base_note
         else:
@@ -2544,6 +2573,8 @@ class PositionSupervisorBinance:
             entry_px=meta.get("entry_px"),
             closed_qty=meta.get("closed_qty"),
             live_exit_px=meta.get("live_exit_px"),
+            exit_source=meta.get("exit_source"),
+            exit_source_label=meta.get("exit_source_label"),
         )
 
     def _sweep_dust_and_finalize(self, reason):
@@ -4121,12 +4152,17 @@ class PositionSupervisorBinance:
         self._radar_handoff_done = True
         self._radar_stage_last = max(int(getattr(self, "_radar_stage_last", 0) or 0), 1)
         self._post_open_radar_block_until = 0.0  # 交棒成功即解除开仓冷却
-        self._save_state()
-
         gate = (
-            "TP1成交" if self._tp1_fill_allows_radar(real_amt, curr_px)
+            "TP1成交强制交棒" if self._tp1_fill_allows_radar(real_amt, curr_px)
             else f"距TP1剩{(1 - self._radar_activation_ratio()) * 100:.0f}%"
         )
+        self._radar_trigger_gate = gate
+        # 交棒成功即排队钉钉；即使首次推送失败也由哨兵补发
+        self._radar_notify_pending = not bool(
+            getattr(self, "_radar_activation_notified", False)
+        )
+        self._save_state()
+
         logger.info(
             f"📡 [{self.symbol}] 雷达交棒成功：保本 @ {safe_sl:.2f} | "
             f"闸门={gate} | best={self.best_price:.2f} | "
@@ -4141,7 +4177,7 @@ class PositionSupervisorBinance:
             )
         if not getattr(self, "_radar_activation_notified", False):
             self._report_radar_first_activation(
-                real_amt, curr_px, safe_sl, sl_placed,
+                real_amt, curr_px, safe_sl, sl_placed, trigger_gate=gate,
             )
         stage = self._radar_stage(curr_px)
         self._log_radar_update(
@@ -4669,7 +4705,13 @@ class PositionSupervisorBinance:
                     self._report_radar_first_activation(
                         real_amt, curr_px, self._clamp_radar_to_tv_floor(self.current_sl),
                         self._has_stop_sl_near(self.current_sl),
+                        trigger_gate=self._describe_radar_trigger_gate(real_amt, curr_px),
                     )
+                elif getattr(self, "_radar_notify_pending", False) or (
+                    getattr(self, "_radar_handoff_done", False)
+                    and not getattr(self, "_radar_activation_notified", False)
+                ):
+                    self._flush_pending_radar_notify(real_amt, curr_px)
                 actions.append(f"雷达激活·进度{health.get('radar_progress', 0):.0%}")
 
             self._radar_guardian_audit(real_amt, curr_px)
@@ -5272,59 +5314,122 @@ class PositionSupervisorBinance:
         time.sleep(0.4)
         return bool(sl_placed or self._has_stop_sl_near(new_sl, exclude_shield=False))
 
-    def _report_radar_first_activation(self, real_amt, curr_px, new_sl, sl_placed):
-        """雷达首次激活：核实实盘后推送（价格推进或 TP 成交触发）"""
+    def _report_radar_first_activation(self, real_amt, curr_px, new_sl, sl_placed,
+                                       trigger_gate=""):
+        """
+        雷达首次激活钉钉：交棒核实后必须播报。
+        失败则 _radar_notify_pending=True，哨兵补发（修「启了雷达无钉钉」）。
+        """
         if getattr(self, "_radar_activation_notified", False):
-            return
+            self._radar_notify_pending = False
+            return True
+
+        gate = trigger_gate or self._describe_radar_trigger_gate(real_amt, curr_px)
+        self._radar_trigger_gate = gate
+
+        # 交棒已成功：禁止因次要校验跳过钉钉；仅记录警告
         if not self._radar_legitimately_armed(real_amt, curr_px):
+            if not getattr(self, "_radar_handoff_done", False):
+                logger.warning(
+                    f"📡 雷达激活钉钉暂缓：尚未交棒 "
+                    f"(entry={self.watched_entry:.2f} sl={new_sl:.2f})"
+                )
+                self._radar_notify_pending = True
+                self._save_state()
+                return False
             logger.warning(
-                f"📡 雷达激活钉钉跳过：未达价格推进阈值 "
-                f"(entry={self.watched_entry:.2f} sl={new_sl:.2f})"
+                f"📡 雷达激活钉钉：handoff_done 但 armed 标志异常，仍强制播报"
             )
-            return
+
         if self.current_side == "LONG" and float(new_sl or 0) <= float(self.watched_entry or 0):
             logger.warning(
-                f"📡 雷达激活钉钉跳过：LONG 止损 {new_sl:.2f} 未高于 entry"
+                f"📡 雷达激活钉钉警告：LONG 止损 {new_sl:.2f} 未高于 entry，仍播报"
             )
-            return
         if self.current_side == "SHORT" and float(new_sl or 0) >= float(self.watched_entry or 0):
             logger.warning(
-                f"📡 雷达激活钉钉跳过：SHORT 止损 {new_sl:.2f} 未低于 entry"
+                f"📡 雷达激活钉钉警告：SHORT 止损 {new_sl:.2f} 未低于 entry，仍播报"
             )
-            return
-        verified = self._wait_verify(
-            lambda: self._has_stop_sl_near(new_sl),
-            retries=10,
-            delay=0.45,
-        )
+
+        verified = bool(sl_placed)
+        try:
+            verified = verified or self._wait_verify(
+                lambda: self._has_stop_sl_near(new_sl, exclude_shield=False),
+                retries=6,
+                delay=0.35,
+            )
+        except Exception as e:
+            logger.warning(f"📡 雷达激活止损复核异常: {e}")
+
         progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 1.0
         stage = self._radar_stage(curr_px) if curr_px > 0 else 0
         tv_floor = round(float(getattr(self, "tv_sl", 0) or 0), 2)
+        act_px = round(float(self._radar_activation_price() or 0), 2)
         verify_note = (
-            f"雷达阶段{stage} {self._radar_stage_label(stage)} | 进度 {progress:.0%} | "
-            f"合并止损 @ {new_sl:.2f} | "
-            f"VPS硬止损底线={tv_floor or 'fallback'} | "
+            f"闸门={gate} | 雷达阶段{stage} {self._radar_stage_label(stage)} | "
+            f"进度 {progress:.0%} | 合并止损 @ {new_sl:.2f} | "
+            f"激活线@{act_px or '—'} | VPS硬止损底线={tv_floor or 'fallback'} | "
             f"持仓 {real_amt} {self._unit()} @ {self.watched_entry:.2f}"
         )
-        if not verified and not sl_placed:
-            logger.warning(f"雷达首次激活钉钉跳过：止损 @ {new_sl:.2f} 未核实")
-            return
         if not verified:
             verify_note += f" | {dingtalk.VERIFY_DELAY_MARK}"
-        self._call_dingtalk(
-            dingtalk.report_radar_activated,
-            side=self.current_side,
-            qty=real_amt,
-            entry=self.watched_entry,
-            new_sl=new_sl,
-            radar_progress=progress,
-            regime=self.regime,
-            shield_cleared=True,
-            verify_note=verify_note,
-            verified=verified,
+
+        try:
+            self._call_dingtalk(
+                dingtalk.report_radar_activated,
+                side=self.current_side,
+                qty=real_amt,
+                entry=self.watched_entry,
+                new_sl=new_sl,
+                radar_progress=progress,
+                regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+                shield_cleared=True,
+                verify_note=verify_note,
+                verified=verified,
+                trigger_gate=gate,
+                activation_price=act_px,
+            )
+            self._radar_activation_notified = True
+            self._radar_notify_pending = False
+            self._save_state()
+            logger.info(
+                f"📡 [{self.symbol}] 雷达激活钉钉已发 | 闸门={gate} | SL={new_sl:.2f}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"📡 雷达激活钉钉失败，排队补发: {e}", exc_info=True)
+            self._radar_notify_pending = True
+            self._save_state()
+            return False
+
+    def _flush_pending_radar_notify(self, real_amt, curr_px):
+        """哨兵补发：交棒成功但首次钉钉未发出。"""
+        if getattr(self, "_radar_activation_notified", False):
+            self._radar_notify_pending = False
+            return False
+        if not (
+            getattr(self, "_radar_notify_pending", False)
+            or getattr(self, "_radar_handoff_done", False)
+        ):
+            return False
+        real_amt = float(self._resolve_live_qty(real_amt) or 0)
+        if real_amt <= 0:
+            return False
+        sl = float(
+            getattr(self, "current_sl", 0)
+            or self._radar_sl_to_pass()
+            or 0
         )
-        self._radar_activation_notified = True
-        self._save_state()
+        if sl <= 0:
+            return False
+        logger.warning(
+            f"📡 [{self.symbol}] 补发雷达激活钉钉 | SL={sl:.2f} | "
+            f"闸门={self._describe_radar_trigger_gate(real_amt, curr_px)}"
+        )
+        return self._report_radar_first_activation(
+            real_amt, curr_px, sl,
+            sl_placed=self._has_stop_sl_near(sl, exclude_shield=False),
+            trigger_gate=self._describe_radar_trigger_gate(real_amt, curr_px),
+        )
 
     def _nuclear_realign_tp(self, live_qty, entry, dynamic_sl=None, rounds=3):
         """
@@ -6823,22 +6928,39 @@ class PositionSupervisorBinance:
             )
             if new_qty <= 0.0005 or self._is_dust_qty(new_qty):
                 near_sl = self._likely_exchange_stop_exit(curr_px)
-                reason = (
-                    "触碰硬止损平仓（VPS宽止损）"
-                    if near_sl else
-                    "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）"
+                if self._radar_was_armed():
+                    flat_meta = self._infer_flat_close_meta(
+                        curr_px, hint_reason="雷达保本/追踪止损全平",
+                    )
+                else:
+                    reason = (
+                        "触碰硬止损平仓（VPS宽止损）"
+                        if near_sl else
+                        "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）"
+                    )
+                    flat_meta = self._build_close_meta(
+                        "CLOSE_STOPLOSS" if near_sl else "CLOSE",
+                        self.current_side,
+                        self._estimate_pnl_pct(curr_px),
+                        reason,
+                    )
+                    if near_sl:
+                        flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
+                        flat_meta["exit_source"] = EXIT_SOURCE_VPS_HARD_SL
+                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS[
+                            EXIT_SOURCE_VPS_HARD_SL
+                        ]
+                    else:
+                        flat_meta["exit_source"] = EXIT_SOURCE_MANUAL
+                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS[
+                            EXIT_SOURCE_MANUAL
+                        ]
+                self._disarm_shield(
+                    "雷达/硬止损全平" if self._radar_was_armed() or near_sl else "异动全平",
+                    notify=False,
                 )
-                flat_meta = self._build_close_meta(
-                    "CLOSE_STOPLOSS" if near_sl else "CLOSE",
-                    self.current_side,
-                    self._estimate_pnl_pct(curr_px),
-                    reason,
-                )
-                if near_sl:
-                    flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
-                self._disarm_shield("硬止损全平" if near_sl else "异动全平", notify=False)
                 self._handle_manual_flat_detected(
-                    flat_meta["tv_reason"],
+                    flat_meta.get("tv_reason") or flat_meta.get("exit_source_label"),
                     close_meta=flat_meta,
                     curr_px=curr_px,
                 )
@@ -7135,68 +7257,140 @@ class PositionSupervisorBinance:
             "closed_qty": self.watched_qty or self.initial_qty,
         }
 
-    def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
-        """哨兵/重启推断全平类型（无 fresh TV 信号时）"""
-        if self._likely_exchange_stop_exit(curr_px) and not getattr(
-            self, "_radar_activation_notified", False
-        ):
-            est = self._estimate_pnl_pct(curr_px)
-            sl = float(
-                getattr(self, "_last_applied_exchange_sl", 0)
-                or getattr(self, "tv_sl", 0)
-                or 0
-            )
-            return self._build_close_meta(
-                "CLOSE_STOPLOSS",
-                self.current_side,
-                est,
-                f"交易所止损触发 @ {sl:.2f} (TP1前宽止损/非雷达保本钉钉) | {hint_reason}",
-            )
+    def _radar_was_armed(self):
+        """交棒 STOP 核实成功即武装——不以钉钉是否发出为准（修误判硬止损）。"""
+        return bool(
+            getattr(self, "_radar_handoff_done", False)
+            or getattr(self, "_radar_armed_after_tp1", False)
+            or self._is_radar_active()
+        )
 
+    def _describe_radar_trigger_gate(self, live_qty=None, curr_px=0.0):
+        saved = str(getattr(self, "_radar_trigger_gate", "") or "").strip()
+        if saved:
+            return saved
+        if self._tp1_fill_allows_radar(live_qty, curr_px):
+            return "TP1成交强制交棒"
+        ratio = self._radar_activation_ratio()
+        return (
+            f"距TP1剩{(1 - ratio) * 100:.0f}%（路程{ratio * 100:.0f}%）"
+        )
+
+    def _resolve_exit_source(self, curr_px=0.0, hint_reason=""):
+        """
+        全平归因（优先级）：
+        ① 近 180s TV 全平信号 → tv_*
+        ② TP123 全吃完 → tp3
+        ③ 雷达已交棒（handoff_done，不看钉钉）→ radar_be
+        ④ 贴 VPS 宽硬止损且未交棒 → vps_hard_sl
+        ⑤ 其余 → manual
+        """
+        hint = str(hint_reason or "").strip()
         last = self.last_tv_signal or {}
-        if (
-            last.get("action") in ("CLOSE_TP3", "CLOSE_PROTECT", "CLOSE_STOPLOSS")
-            and time.time() - float(last.get("ts", 0) or 0) < 180
-        ):
-            return self._build_close_meta(
-                last.get("action"),
-                last.get("side") or self.current_side,
-                last.get("pnl_pct"),
-                last.get("reason") or hint_reason,
-            )
+        last_ts = float(last.get("ts", 0) or 0)
+        last_act = str(last.get("action", "") or "").upper()
+        if last_act and time.time() - last_ts < 180:
+            if last_act == "CLOSE_TP3":
+                return EXIT_SOURCE_TP3, last.get("reason") or "TV CLOSE_TP3 · TP3完美收网"
+            if last_act == "CLOSE_PROTECT" or last_act.startswith("CLOSE_PROTECT"):
+                return (
+                    EXIT_SOURCE_TV_PROTECT,
+                    last.get("reason") or "TV CLOSE_PROTECT · 风控拦截",
+                )
+            if last_act == "CLOSE_STOPLOSS" or last_act.startswith("CLOSE_STOP"):
+                reason = str(last.get("reason") or "")
+                if (
+                    "雷达" in reason
+                    or "保本" in reason
+                    or "防回吐" in reason
+                    or self._radar_was_armed()
+                ):
+                    gate = self._describe_radar_trigger_gate(self.watched_qty, curr_px)
+                    return (
+                        EXIT_SOURCE_RADAR_BE,
+                        (reason or "TV CLOSE_STOPLOSS · 雷达/保本")
+                        + f" | 启动闸门={gate}",
+                    )
+                return (
+                    EXIT_SOURCE_TV_CLOSE,
+                    reason or "TV CLOSE_STOPLOSS",
+                )
+            if last_act == "CLOSE" or last_act.startswith("CLOSE"):
+                return EXIT_SOURCE_TV_CLOSE, last.get("reason") or last_act
 
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         if consumed >= {1, 2, 3}:
-            return self._build_close_meta(
-                "CLOSE_TP3", self.current_side,
-                self._estimate_pnl_pct(curr_px), "TP3完美收网",
-            )
-        if getattr(self, "_shield_handoff_notified", False) or getattr(
-            self, "_radar_activation_notified", False
-        ) or self._is_radar_active():
-            est = self._estimate_pnl_pct(curr_px)
+            return EXIT_SOURCE_TP3, "TP123三档全部成交 · 完美收网"
+
+        if self._radar_was_armed():
+            gate = self._describe_radar_trigger_gate(self.watched_qty, curr_px)
             sl = float(
                 getattr(self, "_last_applied_exchange_sl", 0)
                 or getattr(self, "current_sl", 0)
                 or 0
             )
-            return self._build_close_meta(
-                "CLOSE_STOPLOSS", self.current_side, est,
-                f"雷达保本止损触发 @ {sl:.2f} | {hint_reason}",
+            near = self._likely_exchange_stop_exit(curr_px)
+            note = (
+                f"雷达保本止损触发 @ {sl:.2f}" if sl > 0 else "雷达保本止损触发"
             )
+            note += f" | 启动闸门={gate}"
+            note += " | 现价贴保本线" if near else " | 现价未贴线(滑点/扫尾可能)"
+            if hint:
+                note += f" | {hint}"
+            return EXIT_SOURCE_RADAR_BE, note
+
+        if self._likely_exchange_stop_exit(curr_px):
+            sl = float(
+                getattr(self, "_last_applied_exchange_sl", 0)
+                or getattr(self, "tv_sl", 0)
+                or 0
+            )
+            return (
+                EXIT_SOURCE_VPS_HARD_SL,
+                f"VPS宽硬止损触发 @ {sl:.2f}（雷达未交棒）"
+                + (f" | {hint}" if hint else ""),
+            )
+
         if getattr(self, "shield_active", False):
-            est = self._estimate_pnl_pct(curr_px)
-            if self._likely_exchange_stop_exit(curr_px):
-                return self._build_close_meta(
-                    "CLOSE_STOPLOSS", self.current_side, est,
-                    "触碰硬止损平仓（VPS宽止损）",
-                )
-            return self._build_close_meta(
-                "CLOSE", self.current_side, est,
-                hint_reason
+            return (
+                EXIT_SOURCE_MANUAL,
+                hint
                 or "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）",
             )
-        return self._build_close_meta("CLOSE", self.current_side, None, hint_reason or "仓位归零")
+        return EXIT_SOURCE_MANUAL, hint or "仓位归零（来源未明）"
+
+    def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
+        """哨兵/重启推断全平类型 + exit_source（雷达 vs TP vs 硬止损一目了然）"""
+        exit_src, note = self._resolve_exit_source(curr_px, hint_reason)
+        est = self._estimate_pnl_pct(curr_px)
+        side = self.current_side
+
+        if exit_src == EXIT_SOURCE_TP3:
+            meta = self._build_close_meta("CLOSE_TP3", side, est, note)
+            meta["close_type"] = CLOSE_TYPE_TP3
+        elif exit_src == EXIT_SOURCE_RADAR_BE:
+            meta = self._build_close_meta("CLOSE_STOPLOSS", side, est, note)
+            meta["close_type"] = CLOSE_TYPE_BREAKEVEN
+        elif exit_src == EXIT_SOURCE_VPS_HARD_SL:
+            meta = self._build_close_meta("CLOSE_STOPLOSS", side, est, note)
+            meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
+        elif exit_src == EXIT_SOURCE_TV_PROTECT:
+            meta = self._build_close_meta("CLOSE_PROTECT", side, est, note)
+            meta["close_type"] = CLOSE_TYPE_PROTECT
+        elif exit_src == EXIT_SOURCE_TV_CLOSE:
+            last = self.last_tv_signal or {}
+            meta = self._build_close_meta(
+                last.get("action") or "CLOSE",
+                last.get("side") or side,
+                last.get("pnl_pct") if last.get("pnl_pct") is not None else est,
+                note,
+            )
+        else:
+            meta = self._build_close_meta("CLOSE", side, est, note)
+
+        meta["exit_source"] = exit_src
+        meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(exit_src, exit_src)
+        return meta
 
     def _enrich_close_meta_live(self, meta, curr_px=0.0):
         """核实前补全实盘字段（须在账本清零前调用）"""
@@ -7660,6 +7854,8 @@ class PositionSupervisorBinance:
         self.current_sl = merged_sl if merged_sl > 0 else new_vps_sl
         self._radar_stage_last = 0
         self._radar_activation_notified = False
+        self._radar_notify_pending = False
+        self._radar_trigger_gate = ""
         self._shield_handoff_notified = False
 
         if old_qty > 0 and old_entry > 0:
@@ -8164,6 +8360,8 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self._radar_stage_last = 0
         self._radar_activation_notified = False
+        self._radar_notify_pending = False
+        self._radar_trigger_gate = ""
         self._radar_armed_after_tp1 = False
         self._radar_handoff_done = False
         self._ws_tp1_fill_hint = False
@@ -8291,12 +8489,26 @@ class PositionSupervisorBinance:
             verify_note = (
                 f"{budget_note} | " if budget_note else ""
             ) + (
-                f"持仓 {live_qty} ETH @ {verified['entry_price']:.2f} | "
+                f"持仓 {live_qty} {self._unit()} @ {verified['entry_price']:.2f} | "
                 f"限价止盈 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
                 f"{self._tv_field_source_note(getattr(self, '_last_tv_field_sources', {}))}"
             )
+            hard_sl_px = float(
+                self._vps_hard_sl_target(verified["entry_price"]) or vps_sl or 0
+            )
+            act_px = float(self._radar_activation_price() or 0)
+            if hard_sl_px > 0:
+                verify_note += f" | VPS硬止损@{hard_sl_px:.2f}"
+            if act_px > 0:
+                ratio = self._radar_activation_ratio()
+                verify_note += (
+                    f" | 雷达待命激活线@{act_px:.2f}"
+                    f"(距TP1剩{(1 - ratio) * 100:.0f}%)"
+                )
+            if hung_final:
+                verify_note += f" | 盘口保护STOP@{[round(float(p), 2) for p in hung_final]}"
             if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
-                verify_note += f" | ⚠️ 超标目标 {target_qty} ETH"
+                verify_note += f" | ⚠️ 超标目标 {target_qty} {self._unit()}"
             if self._should_activate_shield(curr_px):
                 shield_ok = self._maintain_hard_shield(live_qty, curr_px, force=True)
                 stop_px = self._shield_stop_price(verified["entry_price"])
@@ -8344,6 +8556,9 @@ class PositionSupervisorBinance:
                 tv_field_sources=getattr(self, "_last_tv_field_sources", {}),
                 symbol=self.symbol,
                 unit_label=self.unit_label,
+                hard_sl_px=hard_sl_px,
+                radar_act_px=act_px,
+                radar_act_ratio=self._radar_activation_ratio(),
             )
             if expected > 0 and matched < expected:
                 self._open_tp_unconfirmed = True
@@ -8496,6 +8711,12 @@ class PositionSupervisorBinance:
         if getattr(self, "_radar_activation_notified", False):
             self._radar_activation_notified = False
             changed = True
+        if getattr(self, "_radar_notify_pending", False):
+            self._radar_notify_pending = False
+            changed = True
+        if getattr(self, "_radar_trigger_gate", ""):
+            self._radar_trigger_gate = ""
+            changed = True
         if getattr(self, "_shield_handoff_notified", False):
             self._shield_handoff_notified = False
             changed = True
@@ -8555,6 +8776,8 @@ class PositionSupervisorBinance:
             return False
 
         self._radar_activation_notified = False
+        self._radar_notify_pending = False
+        self._radar_trigger_gate = ""
         self._shield_handoff_notified = False
         self._radar_stage_last = 0
         self._radar_armed_after_tp1 = False
@@ -9204,6 +9427,8 @@ class PositionSupervisorBinance:
                                 continue
 
                             self._process_directional_defenses(real_amt, curr_px)
+                            # 交棒成功但钉钉未发 → 每轮补发（修实盘「雷达启了无播报」）
+                            self._flush_pending_radar_notify(real_amt, curr_px)
                             if (
                                 self._price_reached_radar_activation(curr_px, live_only=True)
                                 and not self._is_radar_active()
@@ -9414,6 +9639,24 @@ class PositionSupervisorBinance:
                     self._radar_handoff_done = bool(
                         s.get("radar_handoff_done", s.get("radar_armed_after_tp1", False))
                     )
+                    self._radar_activation_notified = bool(
+                        s.get("radar_activation_notified", False)
+                    )
+                    self._radar_notify_pending = bool(
+                        s.get("radar_notify_pending", False)
+                    )
+                    self._radar_trigger_gate = str(
+                        s.get("radar_trigger_gate", "") or ""
+                    )
+                    self._shield_handoff_notified = bool(
+                        s.get("shield_handoff_notified", False)
+                    )
+                    # 交棒已成功但钉钉未记 → 强制补发队列（修实盘「雷达启了无钉钉」）
+                    if (
+                        self._radar_handoff_done
+                        and not self._radar_activation_notified
+                    ):
+                        self._radar_notify_pending = True
                     self._open_settled_qty = float(
                         s.get("open_settled_qty", s.get("initial_qty", 0)) or 0
                     )

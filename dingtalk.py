@@ -39,6 +39,7 @@ from webhook_parser import (
     CLOSE_TYPE_HARD_SL,
     CLOSE_TYPE_VPS_SHIELD,
     CLOSE_TYPE_GENERIC,
+    EXIT_SOURCE_LABELS,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -541,7 +542,8 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
 def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
                            verify_note="", tp_audit=None, verified=True,
                            principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None,
-                           tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None):
+                           tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None,
+                           hard_sl_px=None, radar_act_px=None, radar_act_ratio=None):
     side_str = _g("🔶 开多 (LONG)", G_LIGHT) if side == "LONG" else _g("🟤 开空 (SHORT)", G_DEEP)
     slip_txt = (
         f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
@@ -550,6 +552,9 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     lev = leverage or DEFAULT_LEVERAGE
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or "").upper() or "ETHUSDT"
+    act_ratio = float(
+        radar_act_ratio if radar_act_ratio is not None else get_radar_activation_ratio(regime)
+    )
 
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
@@ -560,7 +565,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
             G_LIGHT,
         ),
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
-        "📦 唯一头寸": _g(f"**{qty}** {unit} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
+        "📦 开单头寸": _g(f"**{qty}** {unit} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
         "🕸️ 止盈布防比对": _g(
             _format_tp_audit(tp_audit, tv_tps, unit_label=unit, symbol=sym)
             if tp_audit else _format_tp_compare(tp_pxs, tv_tps, unit_label=unit, symbol=sym),
@@ -570,10 +575,28 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP123已挂 · 雷达等TP1三角对账(价到+限价成交+量匹配)",
+            f"🟢 {VERIFY_TAG} | TP123已挂 · VPS硬止损已挂 · 雷达待命"
+            f"(价触激活线{act_ratio * 100:.0}%/TP1成交交棒)",
             "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
         ),
     }
+    if hard_sl_px is not None and float(hard_sl_px or 0) > 0:
+        data["🛡️ VPS硬止损"] = _g(
+            f"**{float(hard_sl_px):.2f}** USDT (closePosition·激活线前唯一护体)",
+            G_DEEP,
+        )
+    if radar_act_px is not None and float(radar_act_px or 0) > 0:
+        data["📡 雷达激活线"] = _g(
+            f"**{float(radar_act_px):.2f}** USDT "
+            f"(距TP1剩{(1 - act_ratio) * 100:.0f}%·路程{act_ratio * 100:.0f}%)",
+            G_LIGHT,
+        )
+    data["🔍 头寸对账"] = _g(
+        f"实盘 `{qty}` {unit} @ `{entry_price:.2f}` | "
+        f"TP审计={'齐' if verified else '待补'} | "
+        f"硬止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'}",
+        G_MAIN if verified else G_ACCENT,
+    )
     if principal_balance and margin_pct is not None:
         if vps_sizing_meta:
             data["📐 仓位预算"] = _g(
@@ -694,7 +717,7 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
                             tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
                             tv_regime=None, tv_atr=None, tv_field_sources=None,
                             close_type="", tv_reason="", entry_px=None, closed_qty=None,
-                            live_exit_px=None):
+                            live_exit_px=None, exit_source="", exit_source_label=""):
     theme = _classify_close(
         reason, verify_note, swept_dust=swept_dust,
         close_type=close_type, close_action=close_action, tv_reason=tv_reason or reason,
@@ -706,6 +729,9 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
         delay_verify = f"⏳ 蚂蚁仓扫尾已提交，{VERIFY_DELAY_MARK} | 盘口对齐中"
 
     ct = close_type or classify_tv_close(close_action, tv_reason or reason, tv_pnl_pct)
+    src_label = exit_source_label or EXIT_SOURCE_LABELS.get(
+        exit_source, exit_source or ""
+    )
     data = {
         "🏷️ 收网类型": theme.get("tag") or _g(close_type_display_label(ct, reason), G_MAIN),
         "📋 策略原由": _g(f"**{tv_reason or reason}**", G_MAIN),
@@ -716,6 +742,21 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
             delay_verify,
         ),
     }
+    if src_label:
+        data["🧭 平仓归因"] = _g(f"**{src_label}**", G_ACCENT)
+        # 一眼区分：雷达保本 / TP3 / VPS硬止损
+        if exit_source == "radar_be":
+            data["📡 说明"] = _g(
+                "由雷达移动保本 STOP 触发（非 TP 限价吃完）", G_LIGHT,
+            )
+        elif exit_source == "tp3":
+            data["📡 说明"] = _g(
+                "由 TP123 限价止盈吃完收网（非雷达保本）", G_LIGHT,
+            )
+        elif exit_source == "vps_hard_sl":
+            data["📡 说明"] = _g(
+                "由 VPS 宽硬止损触发（雷达尚未交棒）", G_DEEP,
+            )
     if close_action:
         data["📡 TV动作"] = _g(close_action, G_MUTED)
     if tv_side:
@@ -1277,25 +1318,28 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
 
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
-                           symbol=None, unit_label=None):
+                           symbol=None, unit_label=None, trigger_gate="",
+                           activation_price=None):
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    gate = str(trigger_gate or "").strip() or (
+        f"距TP1剩{(1 - get_radar_activation_ratio(regime)) * 100:.0f}%"
+    )
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
-        "📊 恢复档位": get_regime_name(regime),
+        "📊 开仓档位": get_regime_name(regime),
+        "🚪 启动闸门": _g(f"**{gate}**", G_ACCENT),
         "📡 雷达进度": _g(
             f"**{radar_progress:.0%}** "
             f"(5阶段·激活线{get_radar_activation_ratio(regime)*100:.0f}%)",
             G_ACCENT,
         ),
-        "🗑️ 硬止损": _g("已撤销" if shield_cleared else "清理中", G_MAIN),
+        "🗑️ 硬止损": _g("已撤销/合并" if shield_cleared else "清理中", G_MAIN),
         "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
         "✅ 风控动作": _g(
-            f"价触激活线 R{int(regime)} "
-            f"{get_radar_activation_ratio(regime)*100:.0f}% "
-            f"→ 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
+            f"{gate} → 安全交棒 · TP2/TP3 逐级锁利 · 止损只向有利方向",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -1304,6 +1348,8 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
             f"⏳ 止损已提交，{VERIFY_DELAY_MARK} | 雷达已启动",
         ),
     }
+    if activation_price is not None and float(activation_price or 0) > 0:
+        data["🎯 激活线价"] = _g(f"`{float(activation_price):.2f}` USDT", G_MUTED)
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
     send_alert(f"📡 [{sym}] 雷达 · 移动保本已激活", data, G_DEEP)

@@ -356,6 +356,8 @@ def audit_module3_hard_sl(a: Audit):
 def audit_module4_radar(a: Audit):
     a.section("模块四 · 雷达价触激活线")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    dt = _read(os.path.join(ROOT, "dingtalk.py"))
+    wp = _read(os.path.join(ROOT, "webhook_parser.py"))
 
     for fn in (
         "_price_reached_radar_activation",
@@ -401,6 +403,29 @@ def audit_module4_radar(a: Audit):
         and "_detect_tp_fills_by_price_qty_reconcile" in sup
         and "_reconcile_open_qty_vs_tp123" in sup
         and "限价止盈待核实对账" in sup,
+    )
+    a.check(
+        "4.13 平仓归因 exit_source",
+        "_resolve_exit_source" in sup
+        and "_radar_was_armed" in sup
+        and "EXIT_SOURCE_RADAR_BE" in wp
+        and "exit_source" in dt
+        and "平仓归因" in dt,
+    )
+    a.check(
+        "4.14 雷达钉钉必达+哨兵补发",
+        "_flush_pending_radar_notify" in sup
+        and "_radar_notify_pending" in sup
+        and "radar_activation_notified" in sup
+        and "trigger_gate" in dt
+        and "补发雷达激活钉钉" in sup,
+    )
+    a.check(
+        "4.15 开单钉钉头寸对账字段",
+        "hard_sl_px" in dt
+        and "radar_act_px" in dt
+        and "头寸对账" in dt
+        and "雷达激活线" in dt,
     )
 
     from webhook_parser import (
@@ -490,13 +515,14 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.66.0-tp-reconcile-quota-guard" in readme
+        "v13.67.0-exit-source-radar-ding" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
         and "8/14/20/26%" in readme
         and "85%" in readme
-        and "剩15%" in readme,
+        and "剩15%" in readme
+        and "exit_source" in readme,
     )
     a.check(
         "README 雷达激活比例",

@@ -104,6 +104,25 @@ CLOSE_TYPE_LABELS = {
     CLOSE_TYPE_GENERIC: "常规清场",
 }
 
+# 实盘全平归因（钉钉/日志一眼区分：雷达保本 vs TP3 vs VPS硬止损）
+EXIT_SOURCE_RADAR_BE = "radar_be"
+EXIT_SOURCE_VPS_HARD_SL = "vps_hard_sl"
+EXIT_SOURCE_TP3 = "tp3"
+EXIT_SOURCE_TV_CLOSE = "tv_close"
+EXIT_SOURCE_TV_PROTECT = "tv_protect"
+EXIT_SOURCE_MANUAL = "manual"
+EXIT_SOURCE_UNKNOWN = "unknown"
+
+EXIT_SOURCE_LABELS = {
+    EXIT_SOURCE_RADAR_BE: "📡 雷达保本止损",
+    EXIT_SOURCE_VPS_HARD_SL: "🛡️ VPS宽硬止损",
+    EXIT_SOURCE_TP3: "🏆 TP3止盈收网",
+    EXIT_SOURCE_TV_CLOSE: "📺 TV信号全平",
+    EXIT_SOURCE_TV_PROTECT: "🛡️ TV风控拦截",
+    EXIT_SOURCE_MANUAL: "🖐 人工/异动清仓",
+    EXIT_SOURCE_UNKNOWN: "❓ 来源未明",
+}
+
 
 def classify_tv_close(action="", reason="", pnl_pct=None):
     """
