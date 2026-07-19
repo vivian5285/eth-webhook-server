@@ -71,7 +71,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.70.0-close-then-open-sterile"
+BINANCE_VPS_VERSION = "v13.71.0-open-only-no-instant-trim"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -118,6 +118,7 @@ SHIELD_FAIL_BACKOFF_MAX_SEC = 300
 SHIELD_QTY_TOLERANCE_PCT = 0.04
 SHIELD_MAX_TIER_ORDERS = 1
 RADAR_DINGTALK_COOLDOWN_SEC = 120
+DINGTALK_EVENT_DEDUP_SEC = 20  # 同一行为钉钉 20s 内不重复
 RADAR_STOP_MIN_GAP_USD = 2.5
 RADAR_STOP_MIN_GAP_PCT = 0.0012
 # 交棒额外安全：理想保本线相对现价至少再留 0.15% 利润缓冲，禁止夹成贴市毛刺止损
@@ -236,6 +237,7 @@ class PositionSupervisorBinance:
         self._last_close_bar_index = None  # 同K线先平后开链
         self._last_close_flat_ts = 0.0
         self._close_open_chain_active = False
+        self._dingtalk_recent = {}  # event_key -> ts，防同行为刷屏
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -601,10 +603,43 @@ class PositionSupervisorBinance:
         if not self.monitoring:
             self._resume_live_monitoring(pos, source="空闲巡检")
 
+    def _dingtalk_event_key(self, fn, kwargs):
+        name = getattr(fn, "__name__", str(fn))
+        side = str(kwargs.get("side") or kwargs.get("action") or "")[:12]
+        phase = str(kwargs.get("phase") or kwargs.get("decision") or "")[:24]
+        reason = str(kwargs.get("reason") or kwargs.get("title") or "")[:48]
+        return f"{name}|{side}|{phase}|{reason}"
+
     def _dingtalk(self, fn, **kwargs):
-        """钉钉播报：强制绑定本军师品种单位（XAU/ETH）。"""
+        """钉钉播报：强制绑定本军师品种单位（XAU/ETH）；同行为短窗去重。"""
         kwargs.setdefault("symbol", self.symbol)
         kwargs.setdefault("unit_label", self.unit_label)
+        # 关键事件（开仓/平仓/TP成交）不去重；过程类告警去重
+        name = getattr(fn, "__name__", "")
+        dedupe_names = {
+            "report_principal_snapshot",
+            "report_close_then_open_chain",
+            "report_system_alert",
+            "report_smart_same_dir_decision",
+            "report_radar_guardian_realigned",
+            "report_tv_signal_received",
+        }
+        if name in dedupe_names:
+            key = self._dingtalk_event_key(fn, kwargs)
+            now = time.time()
+            recent = getattr(self, "_dingtalk_recent", None)
+            if recent is None:
+                self._dingtalk_recent = {}
+                recent = self._dingtalk_recent
+            # 清理过期
+            dead = [k for k, ts in recent.items() if now - ts > DINGTALK_EVENT_DEDUP_SEC * 3]
+            for k in dead:
+                recent.pop(k, None)
+            last = float(recent.get(key) or 0)
+            if last > 0 and now - last < DINGTALK_EVENT_DEDUP_SEC:
+                logger.info(f"🔇 钉钉去重跳过 {name} ({DINGTALK_EVENT_DEDUP_SEC}s内同事件)")
+                return None
+            recent[key] = now
         tokens = []
         try:
             tokens = dingtalk.bind_dingtalk_symbol(
@@ -2251,36 +2286,44 @@ class PositionSupervisorBinance:
         return False
 
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
-        """开仓闸门：无菌空仓（仓=0且挂单=0），否则拒绝叠仓"""
-        return self._sterile_flat_gate(reason_tag=reason_tag, force_close=True)
+        """
+        空仓 OPEN 轻量闸：盘口已空 → 直接开（最多清残留挂单）。
+        无菌重闸仅用于先平后开（有仓需清场 / CLOSE+OPEN 链）。
+        """
+        tag = reason_tag or "开仓前"
+        if self._verify_flat():
+            rem = self._remaining_open_order_count()
+            if rem and rem > 0:
+                logger.info(f"🧹 [{tag}] 空仓但有 {rem} 张残留挂单 → 轻量清挂单")
+                self._purge_all_defense_orders_on_flat(
+                    f"{tag}·空仓清残留挂单", max_rounds=3,
+                )
+                time.sleep(0.3)
+            if self._verify_flat():
+                logger.info(f"✅ [{tag}] 盘口已空，按档位直接开仓（不做先平后开）")
+                return True
+        # 非空才走无菌强平
+        return self._sterile_flat_gate(reason_tag=tag, force_close=True)
 
-    def _snapshot_sizing_principal(self, reason=""):
+    def _snapshot_sizing_principal(self, reason="", notify=True):
         """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 13x 硬顶共用"""
         principal = binance_client.get_total_equity()
         if principal > 0:
             self.sizing_principal = principal
             self._save_state()
             logger.info(f"📸 本金快照 {principal:.2f} USDT ({reason})")
-            if reason and ("全平" in reason or "开仓前" in reason):
-                target_qty = None
-                eff_risk = None
-                if "开仓前" in reason and self.tv_price > 0:
-                    t, meta = self._calc_vps_open_qty(self.tv_price)
-                    target_qty = t
-                    eff_risk = float(meta.get("effective_risk_pct", VPS_RISK_PCT) or VPS_RISK_PCT) / 100.0
-                    vps_meta = meta
-                else:
-                    vps_meta = None
+            # 开仓前快照并入开仓钉钉，避免「快照+开仓」双条刷屏
+            if notify and reason and "全平" in reason:
                 try:
                     self._call_dingtalk(
                         dingtalk.report_principal_snapshot,
                         reason=reason,
                         principal=principal,
-                        regime=self.regime if "开仓前" in reason else None,
-                        margin_pct=eff_risk,
-                        target_qty=target_qty,
+                        regime=None,
+                        margin_pct=None,
+                        target_qty=None,
                         leverage=EXCHANGE_LEVERAGE,
-                        vps_sizing_meta=vps_meta,
+                        vps_sizing_meta=None,
                     )
                 except Exception as e:
                     logger.warning(f"本金快照钉钉跳过: {e}")
@@ -2545,6 +2588,19 @@ class PositionSupervisorBinance:
         if not force and (
             getattr(self, "_open_in_progress", False)
             or getattr(self, "_recover_in_progress", False)
+        ):
+            return None
+        # 刚开仓宽限内禁止档位裁减（防开完立刻秒平大半）
+        if not force and time.time() < float(
+            getattr(self, "_post_open_radar_block_until", 0) or 0
+        ):
+            logger.info(
+                f"📡 [档位限额] 开仓宽限内跳过裁减 "
+                f"(剩 {max(0, self._post_open_radar_block_until - time.time()):.0f}s)"
+            )
+            return None
+        if not force and time.time() < float(
+            getattr(self, "_sentinel_grace_until", 0) or 0
         ):
             return None
 
@@ -3986,16 +4042,110 @@ class PositionSupervisorBinance:
             f"| VPS硬止损 `{vps_sl:.2f}` 由 regime+atr 自主管理"
         )
 
+    def _tp_is_marketable(self, side, tp_px, curr_px, buffer_pct=0.0002):
+        """
+        穿价 TP：挂出即成交。LONG 卖限价 ≤ 市价；SHORT 买限价 ≥ 市价。
+        """
+        side = str(side or "").strip().upper()
+        tp = float(tp_px or 0)
+        px = float(curr_px or 0)
+        if tp <= 0 or px <= 0 or side not in ("LONG", "SHORT"):
+            return False
+        buf = max(px * float(buffer_pct), 0.05)
+        if side == "LONG":
+            return tp <= px + buf
+        return tp >= px - buf
+
+    def _sanitize_open_tps_vs_mark(self, entry, curr_px=None):
+        """
+        开仓挂 TP 前：穿市价的档禁止挂出（否则开完秒平大半剩蚂蚁仓）。
+        优先 entry+ATR 重算；仍穿价则把价格推离市价一侧，绝不挂出即成交的限价。
+        """
+        side = str(self.current_side or "").strip().upper()
+        entry = float(entry or self.watched_entry or 0)
+        curr_px = float(
+            curr_px
+            or binance_client.get_current_price(self.symbol)
+            or self.tv_price
+            or 0
+        )
+        atr = float(getattr(self, "open_atr", None) or self.current_atr or 30)
+        regime = int(getattr(self, "open_regime", None) or self.regime or 3)
+        if side not in ("LONG", "SHORT") or curr_px <= 0:
+            return list(self.tv_tps or [])
+
+        tps = list(self.tv_tps or [0.0, 0.0, 0.0])
+        while len(tps) < 3:
+            tps.append(0.0)
+
+        def _any_marketable(prices):
+            return any(
+                self._tp_is_marketable(side, p, curr_px)
+                for p in prices if float(p or 0) > 0
+            )
+
+        if _any_marketable(tps) and entry > 0:
+            enriched = enrich_entry_tp_prices(side, entry, atr, regime, {})
+            rebuilt = self._sanitize_tp_prices([
+                self._safe_float(enriched.get("tv_tp1"), 0),
+                self._safe_float(enriched.get("tv_tp2"), 0),
+                self._safe_float(enriched.get("tv_tp3"), 0),
+            ])
+            if validate_tp_prices_for_side(side, entry, rebuilt):
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 开仓 TP 穿市价 → ATR 重算 "
+                    f"{[round(float(x or 0), 2) for x in tps]} → {rebuilt} | "
+                    f"mark={curr_px:.2f}"
+                )
+                tps = list(rebuilt)
+
+        # 仍穿价：强制推离市价（LONG 抬高 / SHORT 压低），保持单调
+        min_gap = max(curr_px * 0.0015, atr * 0.15, 0.5)
+        fixed = []
+        for i, p in enumerate(tps[:3]):
+            px = float(p or 0)
+            if px <= 0:
+                fixed.append(0.0)
+                continue
+            if self._tp_is_marketable(side, px, curr_px):
+                if side == "LONG":
+                    px = round(curr_px + min_gap * (i + 1), 2)
+                else:
+                    px = round(curr_px - min_gap * (i + 1), 2)
+                logger.error(
+                    f"🚨 [{self.symbol}] 穿价 TP{i + 1} 推离市价 → @{px:.2f} "
+                    f"(mark={curr_px:.2f})，禁止挂出秒平"
+                )
+            fixed.append(px)
+        # 单调修正
+        if side == "LONG":
+            for i in range(1, 3):
+                if fixed[i] > 0 and fixed[i - 1] > 0 and fixed[i] <= fixed[i - 1]:
+                    fixed[i] = round(fixed[i - 1] + min_gap, 2)
+        else:
+            for i in range(1, 3):
+                if fixed[i] > 0 and fixed[i - 1] > 0 and fixed[i] >= fixed[i - 1]:
+                    fixed[i] = round(fixed[i - 1] - min_gap, 2)
+        self.tv_tps = self._sanitize_tp_prices(fixed)
+        self._save_state()
+        return list(self.tv_tps)
+
     def _place_tp_levels_only(self, live_qty, retries=2):
         """只挂未成交 TP 限价档，绝不触碰止损/雷达"""
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
             return 0
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         placed = 0
         for lv in self._expected_tp_levels(live_qty):
             q, px = float(lv["qty"] or 0), float(lv["price"] or 0)
             if q <= 0 or px <= 0:
+                continue
+            if self._tp_is_marketable(self.current_side, px, curr_px):
+                logger.warning(
+                    f"📈 跳过穿价 TP{lv['level']} @{px:.2f} ≤≥ mark {curr_px:.2f}"
+                )
                 continue
             ok = False
             for attempt in range(max(1, retries + 1)):
@@ -7901,19 +8051,11 @@ class PositionSupervisorBinance:
                     f"📬 [{self.symbol}] 先平后开：已释放 bar={bi} 开仓幂等 "
                     f"({n}键) | {reason or 'CLOSE'} | 随后 OPEN 按 seq 升序"
                 )
-                try:
-                    self._call_dingtalk(
-                        dingtalk.report_close_then_open_chain,
-                        phase="平仓完成·待开",
-                        side="",
-                        reason=reason or "CLOSE",
-                        bar_index=int(bi),
-                        chain_same_bar=True,
-                        verify_note=f"已释放开仓幂等 {n} 键；下一包 OPEN 将无菌净场后入场",
-                        ok=True,
-                    )
-                except Exception:
-                    pass
+                # 钉钉：平仓本体已有收网播报；此处仅日志，避免连环刷屏
+                logger.info(
+                    f"📬 [{self.symbol}] CLOSE 后已释放开仓幂等 {n} 键 | "
+                    f"bar={bi} | 待 OPEN 按档位开仓"
+                )
         except Exception as e:
             logger.warning(f"先平后开释放幂等失败: {e}")
 
@@ -8244,22 +8386,10 @@ class PositionSupervisorBinance:
 
     def _full_reentry(self, action, close_reason):
         """
-        先平后开原子链：无菌净场（撤→平→撤→验）→ 干净开仓（TP123+宽硬止损+雷达待命）。
-        TV 同K线永远是 CLOSE.seq < OPEN.seq；禁止在挂单未净时开仓。
+        先平后开原子链：仅在「有仓需换防 / 同K CLOSE+OPEN」时调用。
+        无菌净场 → 干净开仓；钉钉只报一条结果（成败）。
         """
         chain = bool(getattr(self, "_close_open_chain_active", False))
-        try:
-            self._call_dingtalk(
-                dingtalk.report_close_then_open_chain,
-                phase="开始",
-                side=action,
-                reason=close_reason,
-                bar_index=getattr(self, "_last_close_bar_index", None),
-                chain_same_bar=chain,
-                verify_note="即将无菌清场：撤尽 TP123/雷达/宽止损 → 平仓归零 → 再验挂单=0",
-            )
-        except Exception:
-            pass
         if not self._sterile_flat_gate(reason_tag=close_reason or "先平后开", force_close=True):
             logger.error("❌ 先平后开中止：无菌空仓未通过，拒绝叠仓开仓")
             try:
@@ -8270,7 +8400,7 @@ class PositionSupervisorBinance:
                     reason=close_reason,
                     bar_index=getattr(self, "_last_close_bar_index", None),
                     chain_same_bar=chain,
-                    verify_note="qty/挂单未净 → 已拒绝开仓，防反手盘或超档位头寸",
+                    verify_note="qty/挂单未净 → 已拒绝开仓",
                     ok=False,
                 )
             except Exception:
@@ -8285,14 +8415,14 @@ class PositionSupervisorBinance:
         try:
             self._call_dingtalk(
                 dingtalk.report_close_then_open_chain,
-                phase="开仓",
+                phase="执行",
                 side=action,
                 reason=close_reason,
                 bar_index=getattr(self, "_last_close_bar_index", None),
                 chain_same_bar=chain,
                 verify_note=(
-                    f"无菌通过 @ {float(curr_px):.2f} → "
-                    f"挂新方向 TP123 + VPS宽硬止损 + 雷达待命"
+                    f"无菌通过 @ {float(curr_px):.2f} → 开 {action} "
+                    f"(TP123+宽硬止损+雷达待命)"
                 ),
                 ok=True,
             )
@@ -8684,15 +8814,18 @@ class PositionSupervisorBinance:
                 logger.info(f"🧠 TV OPEN 短时重复 [{action}] → 忽略")
                 self._touch_entry_signal_signature(action)
                 return
+            # 空仓仅 OPEN：按档位直接开，不做先平后开/重闸秒平
+            self._touch_entry_signal_signature(action)  # 先占位，防并发重复入场
             if not self._ensure_flat_before_open("TV OPEN"):
-                dingtalk.report_system_alert("TV OPEN 中止", "盘口非空，拒绝叠仓")
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title="TV OPEN 中止",
+                    detail="盘口非空，拒绝叠仓",
+                )
                 return
-            binance_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.5)
             curr_px = curr_px or binance_client.get_current_price(self.symbol) or self.tv_price
             if curr_px > 0:
                 self._open_position(action, curr_px, payload=payload)
-            self._touch_entry_signal_signature(action)
             return
 
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
@@ -8749,19 +8882,18 @@ class PositionSupervisorBinance:
             self._touch_entry_signal_signature(action)
             return
 
-        logger.info(f"⚡ 收到建仓信号 [{action}]，空仓极速开仓")
+        logger.info(f"⚡ 收到建仓信号 [{action}]，空仓极速开仓（按档位直开）")
+        self._touch_entry_signal_signature(action)
         if not self._ensure_flat_before_open("空仓开仓"):
-            dingtalk.report_system_alert(
-                "开仓中止 · 盘口非空",
-                f"收到 TV {action} 但实盘仍有残留持仓，已拒绝叠仓开仓",
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title="开仓中止 · 盘口非空",
+                detail=f"收到 TV {action} 但实盘仍有残留持仓，已拒绝叠仓开仓",
             )
             return
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
         curr_px = curr_px or binance_client.get_current_price(self.symbol)
         if curr_px > 0:
             self._open_position(action, curr_px, payload=payload)
-        self._touch_entry_signal_signature(action)
 
     def _open_position(self, action, curr_px, payload=None):
         payload = payload or {}
@@ -8770,8 +8902,10 @@ class PositionSupervisorBinance:
             return
         self._open_in_progress = True
         try:
+            # 本金快照不单独钉钉（并入开仓播报），避免开一单刷两条
             self._snapshot_sizing_principal(
-                f"开仓前 {normalize_entry_type(payload.get('entry_type'))} R{self.regime}"
+                f"开仓前 {normalize_entry_type(payload.get('entry_type'))} R{self.regime}",
+                notify=False,
             )
             qty, balance, margin_usdt, margin_pct, sizing_meta = self._calc_target_open_qty(
                 curr_px, payload=payload,
@@ -8925,8 +9059,13 @@ class PositionSupervisorBinance:
             binance_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.4)
             # 再用核实 entry 补一次 TP（防 TV 空价时首轮用错价）
-            self._ensure_tp123_prices_from_tv(float(verified["entry_price"] or entry_price))
-            tp_pxs = list(self.tv_tps or tp_pxs)
+            entry_live = float(verified["entry_price"] or entry_price)
+            self._ensure_tp123_prices_from_tv(entry_live)
+            # 穿市价 TP 禁止挂出（主因：开完秒平成蚂蚁仓）
+            mark_px = float(
+                binance_client.get_current_price(self.symbol) or entry_live or 0
+            )
+            tp_pxs = self._sanitize_open_tps_vs_mark(entry_live, mark_px)
             self._enforce_pre_tp1_radar_standby(
                 live_qty, verified["entry_price"], source="开仓保护",
             )
@@ -10029,6 +10168,7 @@ class PositionSupervisorBinance:
             f"R{self._tp_split_regime()} 剩余档"
         )
 
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         for lv in self._expected_tp_levels(live_qty):
             q, px = lv["qty"], lv["price"]
             if q > 0 and px > 0:
@@ -10036,6 +10176,12 @@ class PositionSupervisorBinance:
                 if self._has_tp_limit_at_price(px, tolerance=1.0):
                     logger.info(f"  ✓ TP{lv['level']} @ {px:.2f} 已在盘口，跳过")
                     placed += 1
+                    continue
+                if self._tp_is_marketable(self.current_side, px, curr_px):
+                    logger.error(
+                        f"🚨 拒绝挂穿价 TP{lv['level']} {q}@{px:.2f} "
+                        f"(mark={curr_px:.2f}) → 防开完秒平"
+                    )
                     continue
                 res = binance_client.place_limit_order(
                     close_side, q, px, symbol=self.symbol, reduce_only=True,

@@ -25,7 +25,8 @@
 | 1.5 | 同 action+price 去重（45s） | ✅ | 无时序旧信号：`SIGNAL_DEDUP_SEC`；有 `bar_index`+`seq`：幂等键 |
 | 1.5b | TV 时序有序消费 | ✅ | `tv_seq.py`：先 `bar_index` 再 `seq`；乱序暂存 `TV_SEQ_PENDING_WAIT` |
 | 1.5d | 先平后开 | ✅ | 同K线只可能单独 CLOSE 或 CLOSE(seq小)+OPEN(seq大)；按 seq 升序；钉钉时序链 |
-| 1.5g | 无菌空仓再开 | ✅ | `_sterile_flat_gate`：撤→平→撤→扫孤儿→验 qty=0+orders=0 |
+| 1.5g | 无菌空仓再开 | ✅ | `_sterile_flat_gate`：仅先平后开/有仓清场时；空仓 OPEN 轻量直开 |
+| 1.5h | 禁开完秒平 | ✅ | 穿价 TP 不挂；开仓宽限禁 regime_cap；钉钉去重 |
 | 1.5c | 钉钉攒批防限流 | ✅ | `DINGTALK_BATCH_*` + 1/2/4s 重试 + `WECHAT_WEBHOOK` 备用 |
 
 ### 实盘场景
