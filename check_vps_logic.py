@@ -436,6 +436,15 @@ def audit_module4_radar(a: Audit):
         ),
     )
     a.check(
+        "4.11b WS最快盯价·接近激活线加速",
+        "RADAR_WS_APPROACH_RATIO" in sup
+        and "_radar_work_urgent" in sup
+        and "markPrice@1s" in _read(os.path.join(ROOT, "binance_client.py"))
+        and "_radar_in_progress" in sup
+        and "雷达进行中·新TV到达" in sup
+        and "禁止先 scope=radar 撤再挂" in sup,
+    )
+    a.check(
         "4.12 TP多档对账禁误报人工",
         "_filter_credible_tp_fills" in sup
         and "_detect_tp_fills_by_price_qty_reconcile" in sup
@@ -601,7 +610,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.73.0-radar-moderate-follow" in readme
+        "v13.74.0-ws-radar-first" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -613,7 +622,8 @@ def audit_readme_consistency(a: Audit):
         and "reduceOnly" in readme
         and "先平后开" in readme
         and "穿价" in readme
-        and "适度追随" in readme,
+        and "适度追随" in readme
+        and "mark@1s" in readme,
     )
     a.check(
         "README 雷达分档激活",

@@ -101,7 +101,8 @@
 | 4.6 | 雷达启动 → 成本 ±0.1% | ✅ | `RADAR_STAGE_COST_BUFFER_PCT` |
 | 4.7 | TP2/TP3 逐级收紧 ATR 追踪 | ✅ | `_radar_stage()` 5 阶段 |
 | 4.8 | 交棒死锁修复 for_handoff | ✅ | `_ensure_radar_sl(for_handoff=True)` |
-| 4.9 | WS mark@1s 脉冲哨兵 | ✅ | `_on_mark_price_tick` |
+| 4.9 | WS mark@1s 最快盯价 | ✅ | `_on_mark_price_tick` · 接近90%加速 · 达线紧急交棒 |
+| 4.9b | 雷达进行中新TV | ✅ | 一律先平后开；空仓OPEN直开+TP123+宽止损+雷达待命 |
 | 4.10 | 硬止损/雷达单槽不抢 TP | ✅ | closePosition 合并 |
 
 ### 启动伪代码（v13.65）

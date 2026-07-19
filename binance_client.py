@@ -202,7 +202,7 @@ class BinanceClient:
         return None
 
     def register_price_tick_callback(self, symbol, callback):
-        """雷达：markPrice@1s 触及激活线时秒级脉冲哨兵。"""
+        """雷达：markPrice@1s 最快盯价 → 接近/达激活线脉冲哨兵交棒。"""
         sym = str(symbol or "ETHUSDT").upper()
         if callable(callback):
             self._price_tick_cbs[sym] = callback

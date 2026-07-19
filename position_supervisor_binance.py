@@ -72,7 +72,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.73.0-radar-moderate-follow"
+BINANCE_VPS_VERSION = "v13.74.0-ws-radar-first"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -90,6 +90,8 @@ SENTINEL_GRACE_AFTER_OPEN_SEC = 90
 # 开仓后禁止雷达/近市保本：只允许 TP123 + VPS 宽硬止损
 POST_OPEN_RADAR_BLOCK_SEC = 180
 RADAR_TRAIL_MIN_INTERVAL_SEC = 25  # 雷达推升最短间隔，防撤挂死循环
+RADAR_WS_APPROACH_RATIO = 0.90  # 朝激活线走过 90% 即 WS 加速盯价（mark@1s）
+RADAR_WS_URGENT_SLEEP_SEC = 0.25  # 已达激活线/交棒：哨兵几乎立即执行
 # 核武撤挂 thrash 刹车：失败/全缺后最短间隔，避免秒挂秒撤
 NUCLEAR_REALIGN_MIN_INTERVAL_SEC = 45
 NUCLEAR_FAIL_BACKOFF_MAX_SEC = 180
@@ -243,6 +245,7 @@ class PositionSupervisorBinance:
         self._last_radar_trail_ts = 0.0
         self._last_radar_trail_stage = 0
         self._last_radar_trail_progress = 0.0
+        self._radar_work_urgent = False  # WS 达激活线 → 哨兵立刻跑雷达
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -5875,27 +5878,39 @@ class PositionSupervisorBinance:
         return result.get("ok", False)
 
     def _realign_radar_defenses(self, live_qty, entry, new_sl):
-        """雷达推升：TP 异常才核武；同价止损已在则跳过撤挂"""
+        """
+        雷达推升：同价已在则跳过；禁止先 scope=radar 撤再挂（易裸仓/死循环）。
+        一律走 closePosition 单槽合并总线（雷达∪VPS宽底），不抢 TP reduceOnly。
+        """
         new_sl = round(float(new_sl or 0), 2)
-        if new_sl > 0 and self._has_stop_sl_near(new_sl, exclude_shield=False):
+        if new_sl <= 0:
+            return False
+        if self._has_stop_sl_near(new_sl, exclude_shield=False):
+            self._last_applied_exchange_sl = new_sl
             logger.info(f"📡 雷达止损已在 @{new_sl:.2f}，跳过撤挂")
             return True
-        self._cancel_stop_orders(scope="radar")
-        time.sleep(0.35)
+        last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
+        if last > 0 and abs(last - new_sl) <= SHIELD_STOP_TOLERANCE:
+            if self._has_stop_sl_near(last, exclude_shield=False):
+                return True
+        # 仅当 TP 严重异常才纠偏；正常追随只同步单槽 STOP
         audit = self._audit_tp_levels(live_qty)
         if self._defense_needs_immediate_fix(audit):
             self._enforce_defense_alignment(
                 live_qty, entry, dynamic_sl=new_sl,
                 reason="雷达推升前 TP 纠偏", rounds=2,
             )
-        sl_placed = self._ensure_radar_sl(new_sl, live_qty)
-        if not sl_placed and not self._has_stop_sl_near(new_sl, exclude_shield=False):
-            # 禁止裸 place_stop：必须走合并总线（夹 VPS 宽底）
-            sl_placed = self._sync_exchange_stop(
-                live_qty, radar_sl=new_sl, reason="雷达推升兜底", force=True,
+        result = self._sync_exchange_stop(
+            live_qty, radar_sl=new_sl, reason=f"雷达追随 @{new_sl:.2f}", force=False,
+        )
+        if result.get("ok") or result.get("skipped"):
+            return True
+        # 冷却挡住但盘口仍无目标价 → 强制一次（仍走合并总线，不裸挂）
+        if not self._has_stop_sl_near(new_sl, exclude_shield=False):
+            return self._sync_exchange_stop(
+                live_qty, radar_sl=new_sl, reason="雷达追随兜底", force=True,
             ).get("ok", False)
-        time.sleep(0.4)
-        return bool(sl_placed or self._has_stop_sl_near(new_sl, exclude_shield=False))
+        return True
 
     def _report_radar_first_activation(self, real_amt, curr_px, new_sl, sl_placed,
                                        trigger_gate=""):
@@ -8804,8 +8819,18 @@ class PositionSupervisorBinance:
         except Exception:
             return False
 
+    def _radar_in_progress(self):
+        """雷达已交棒/已激活：新 TV OPEN 一律先平后开，禁止在保本线下刷新 TP。"""
+        return bool(
+            getattr(self, "_radar_handoff_done", False)
+            or self._is_radar_active()
+        )
+
     def _handle_smart_entry(self, action, payload=None):
-        """VPS sizing：OPEN 同向智能；反向/确需刷新才先平后开；加仓重挂 TP123"""
+        """
+        空仓仅 OPEN → 按档位直开 + TP123 + VPS宽硬止损 + 雷达待命。
+        有仓：反向 / 雷达进行中 / 需刷新 → 先平后开（无菌净场再开）。
+        """
         payload = payload or {}
         entry_type = normalize_entry_type(payload.get("entry_type"))
 
@@ -8827,8 +8852,22 @@ class PositionSupervisorBinance:
                     self._touch_entry_signal_signature(action)
                     return
 
+                # 雷达进行中：新 TV 一律先平后开（干净换防，雷达回待命）
+                if self._radar_in_progress():
+                    logger.info(
+                        f"📡 雷达进行中 · 新 TV {action} → 一律先平后开 "
+                        f"(剩仓 {pos.get('size')} {self._unit()})"
+                    )
+                    self._full_reentry(
+                        action,
+                        "雷达进行中·新TV到达·先平后开换防"
+                        "（净场后挂TP123+VPS宽硬止损+雷达待命）",
+                    )
+                    self._touch_entry_signal_signature(action)
+                    return
+
                 curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
-                # 刚开仓冷却：同向重复 OPEN 禁止市价清仓（这是“开单立刻被平”的主因）
+                # 刚开仓冷却（雷达尚未启动）：同向重复 OPEN 禁止市价清仓
                 if self._is_fresh_open_cooldown(pos):
                     logger.warning(
                         f"🛡️ 同向 OPEN 冷却 {OPEN_SAME_DIR_COOLDOWN_SEC:.0f}s 内 "
@@ -8877,8 +8916,8 @@ class PositionSupervisorBinance:
                 logger.info(f"🧠 TV OPEN 短时重复 [{action}] → 忽略")
                 self._touch_entry_signal_signature(action)
                 return
-            # 空仓仅 OPEN：按档位直接开，不做先平后开/重闸秒平
-            self._touch_entry_signal_signature(action)  # 先占位，防并发重复入场
+            # 空仓仅 OPEN：按档位直接开 + TP123 + VPS宽硬止损 + 雷达待命
+            self._touch_entry_signal_signature(action)
             if not self._ensure_flat_before_open("TV OPEN"):
                 self._call_dingtalk(
                     dingtalk.report_system_alert,
@@ -8899,6 +8938,18 @@ class PositionSupervisorBinance:
             if current_side != action:
                 logger.info(f"⚡ 反方向 [{action}] vs 实盘 [{current_side}] → 先平后开")
                 self._full_reentry(action, "反方向指令到达，触发【先平后开】原子对冲换防")
+                self._touch_entry_signal_signature(action)
+                return
+
+            if self._radar_in_progress():
+                logger.info(
+                    f"📡 雷达进行中 · 新 TV {action} → 一律先平后开"
+                )
+                self._full_reentry(
+                    action,
+                    "雷达进行中·新TV到达·先平后开换防"
+                    "（净场后挂TP123+VPS宽硬止损+雷达待命）",
+                )
                 self._touch_entry_signal_signature(action)
                 return
 
@@ -9741,9 +9792,8 @@ class PositionSupervisorBinance:
 
     def _on_mark_price_tick(self, symbol, price):
         """
-        WS 实时标记价：距 TP1 还剩 ≤15% 或已交棒 → 脉冲哨兵快轮询交棒/锁利。
-        不在 WS 线程直接挂单，只置位脉冲由哨兵串行执行。
-        轻量闸门：只用现价进度 + 账本标记，禁止每秒 REST 查挂单。
+        WS markPrice@1s（最快盯价）：朝档位激活线接近 / 已达线 / 已交棒 → 脉冲哨兵。
+        不在 WS 线程挂单（防竞态）；只置位，由哨兵串行交棒/追随。
         """
         if str(symbol or "").upper() != self.symbol.upper():
             return
@@ -9752,7 +9802,7 @@ class PositionSupervisorBinance:
         px = float(price or 0)
         if px <= 0:
             return
-        # 更新 best，供阶段锁利
+        # 更新 best，供阶段锁利（精密追随用）
         if self.current_side == "LONG":
             if px > float(self.best_price or 0):
                 self.best_price = px
@@ -9760,15 +9810,26 @@ class PositionSupervisorBinance:
             bp = float(self.best_price or 0)
             if bp <= 0 or px < bp:
                 self.best_price = px
+
         armed = self._radar_legitimately_armed(self.watched_qty, px)
-        near_tp1 = self._price_reached_radar_activation(px, live_only=True)
+        near_act = self._price_reached_radar_activation(px, live_only=True)
         tp1_hint = bool(
             getattr(self, "_ws_tp1_fill_hint", False)
             or self._tp_level_consumed(1)
         )
-        if armed or near_tp1 or tp1_hint:
+        # 接近激活线（走过档位比例的 90%）就加速盯，护本金必须快
+        ratio = float(self._radar_activation_ratio() or 0)
+        prog = float(self._tp1_direction_progress(px) or 0)
+        approaching = (
+            ratio > 0
+            and prog >= ratio * float(RADAR_WS_APPROACH_RATIO)
+            and not near_act
+        )
+        if armed or near_act or tp1_hint or approaching:
             self._ws_defense_pulse = True
             self._ws_fast_poll = True
+        if near_act or armed or tp1_hint:
+            self._radar_work_urgent = True
 
     def _on_user_data_ws_event(self, event_type, data):
         """WS 事件脉冲：本品种 LIMIT 成交 → 提示 TP 档并脉冲哨兵对账（禁止仅看漏挂）"""
@@ -10311,7 +10372,12 @@ class PositionSupervisorBinance:
                 except Exception as e:
                     logger.error(f"哨兵异常: {e}")
                 if self.monitoring:
-                    if getattr(self, "_ws_fast_poll", False):
+                    # WS 达激活线/交棒：几乎立即再跑；接近线：1.5s；否则 5~8s
+                    if getattr(self, "_radar_work_urgent", False):
+                        self._radar_work_urgent = False
+                        self._ws_fast_poll = False
+                        time.sleep(float(RADAR_WS_URGENT_SLEEP_SEC))
+                    elif getattr(self, "_ws_fast_poll", False):
                         self._ws_fast_poll = False
                         time.sleep(1.5)
                     else:
