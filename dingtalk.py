@@ -720,7 +720,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     }
     if is_manual_open:
         data["📡 雷达/止损"] = _g(
-            "阶段0仅 VPS硬止损 | 距TP1剩15%(路程85%)后雷达保本",
+            "阶段0仅 VPS硬止损 | 档位激活线后雷达适度追随保本",
             G_MUTED,
         )
     if tp_audit:
@@ -874,7 +874,11 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         )
         action_txt += " · 雷达哨兵已点火"
     else:
-        act = f"{float(radar_act_pct) * 100:.0f}%" if radar_act_pct else "85%(距TP1剩15%)"
+        act = (
+            f"{float(radar_act_pct) * 100:.0f}%"
+            if radar_act_pct
+            else f"{get_radar_activation_ratio(regime) * 100:.0f}%(档位)"
+        )
         radar_txt = _g(
             f"待命 (价触激活线 {act} 后雷达5阶段保本)",
             G_MUTED,
@@ -1326,7 +1330,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "✅ 风控动作": _g(
             "VPS按开仓价×档位%计算硬止损(Stop-Limit) · "
             "CLOSE_STOPLOSS=TV第一指令市价全平 · "
-            "距TP1剩15%后雷达5阶段防回吐(全档统一85%)",
+            "档位激活线后雷达适度追随(R1松→R4稍积极)",
             G_MAIN,
         ),
     }

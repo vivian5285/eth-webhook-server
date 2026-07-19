@@ -202,39 +202,66 @@ VPS_HARD_SL_M = VPS_HARD_SL_PCT
 VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 VPS_HARD_SL_LIMIT_OFFSET = 0.0  # 已改用百分比缓冲
 
-# 雷达启动：距 TP1 还剩 15%（即 entry→TP1 路程已走 85%）即交棒保本防回吐
-# 全档位统一；WS 实时价 + TP1 成交均可触发（废除「价格+订单+减仓」三重强制门槛）
-RADAR_TP1_REMAINING_PCT = 0.15  # 距 TP1 剩余 15%
-RADAR_ACTIVATION_RATIO = 1.0 - RADAR_TP1_REMAINING_PCT  # 0.85
+# 雷达适度追随（按开仓档位锁定；强趋势不是紧追，是稍积极的适度追随）
+# 启动=entry→TP1 路程比例；步进=TP段内每走多少再推升；呼吸=追踪止损距 best 的 ATR 倍数
 RADAR_ACTIVATION_RATIO_BY_REGIME = {
-    1: RADAR_ACTIVATION_RATIO,
-    2: RADAR_ACTIVATION_RATIO,
-    3: RADAR_ACTIVATION_RATIO,
-    4: RADAR_ACTIVATION_RATIO,
+    1: 0.85,  # 震荡：最晚启动，距TP1剩15%
+    2: 0.80,  # 弱势：剩20%
+    3: 0.75,  # 中势：剩25%
+    4: 0.70,  # 强趋势：稍积极，剩30%
 }
-# 兼容旧 import（展示/默认）
+RADAR_TRAIL_STEP_BY_REGIME = {
+    1: 0.35,  # 每走35%推一次
+    2: 0.30,
+    3: 0.25,
+    4: 0.20,  # 强趋势更勤，但仍给足呼吸
+}
+RADAR_BREATH_ATR_BY_REGIME = {
+    1: 1.0,   # 最松
+    2: 0.8,
+    3: 0.65,
+    4: 0.5,   # 适度紧，绝非 0.3 极限憋死
+}
+# 兼容旧常量名（展示默认取 R1；计算请用 get_radar_*）
+RADAR_ACTIVATION_RATIO = RADAR_ACTIVATION_RATIO_BY_REGIME[1]
+RADAR_TP1_REMAINING_PCT = 1.0 - RADAR_ACTIVATION_RATIO
 RADAR_STAGE1_TP1_RATIO = RADAR_ACTIVATION_RATIO
 RADAR_STAGE2_TP1_RATIO = RADAR_ACTIVATION_RATIO
-RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 激活：成本 ±0.1%
-RADAR_STAGE_ATR_MULT = {
-    2: 1.0,  # TP1→TP2 50%
-    3: 0.6,  # 达 TP2
-    4: 0.5,  # TP2→TP3 50%
-    5: 0.3,  # 达 TP3
-}
+RADAR_STAGE_COST_BUFFER_PCT = 0.001  # 激活交棒：成本 ±0.1%
+# 已废弃：旧「阶段越紧 ATR 越小」紧追表；保留空壳防误 import，实盘改用 BREATH
+RADAR_STAGE_ATR_MULT = {}
 RADAR_STAGE_LABELS = {
     0: "硬止损防守(激活线前)",
-    1: "距TP1剩15%·成本保本",
-    2: "TP1→TP2 50%追踪",
+    1: "激活·成本保本",
+    2: "TP1→TP2 步进追踪",
     3: "达TP2锁利",
-    4: "TP2→TP3 50%追踪",
-    5: "达TP3极限保护",
+    4: "TP2→TP3 步进追踪",
+    5: "达TP3适度保护",
 }
 
 
 def get_radar_activation_ratio(regime=None):
-    """雷达启动比例：相对 entry→TP1 路程（全档统一 85%，距TP1剩15%）。"""
-    return float(RADAR_ACTIVATION_RATIO)
+    """雷达启动比例：相对 entry→TP1 路程（按档位，开仓锁定）。"""
+    r = int(regime or 3)
+    if r not in RADAR_ACTIVATION_RATIO_BY_REGIME:
+        r = 3
+    return float(RADAR_ACTIVATION_RATIO_BY_REGIME[r])
+
+
+def get_radar_trail_step(regime=None):
+    """TP1→TP2 / TP2→TP3 段内推升步进比例（越大越少动，防撤挂死循环）。"""
+    r = int(regime or 3)
+    if r not in RADAR_TRAIL_STEP_BY_REGIME:
+        r = 3
+    return float(RADAR_TRAIL_STEP_BY_REGIME[r])
+
+
+def get_radar_breath_atr(regime=None):
+    """追踪止损呼吸空间（ATR 倍数）：宁松勿紧。"""
+    r = int(regime or 3)
+    if r not in RADAR_BREATH_ATR_BY_REGIME:
+        r = 3
+    return float(RADAR_BREATH_ATR_BY_REGIME[r])
 
 
 def get_vps_hard_sl_params(regime):

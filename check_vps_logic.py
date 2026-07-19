@@ -410,14 +410,16 @@ def audit_module4_radar(a: Audit):
     a.check("4.1 价触激活线主判", "_price_reached_radar_activation" in sup)
     a.check("交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
     a.check("交棒后才武装", "_radar_handoff_done" in sup)
-    a.check("废除三重门槛文案", "废除三重" in sup or "不再要求限价成交" in sup)
     a.check(
-        "4.8 交棒/重启现价85%或TP1成交",
+        "交棒门槛文案",
+        "档位激活线" in sup or "_radar_ready_to_handoff" in sup,
+    )
+    a.check(
+        "4.8 交棒/重启现价激活线或TP1成交",
         "live_only=True" in sup
         and "_radar_ready_to_handoff" in sup
         and "_tp1_fill_allows_radar" in sup
-        and "for_handoff=True" in sup
-        and "修交棒死锁" in sup,
+        and "for_handoff=True" in sup,
     )
     a.check(
         "4.9 硬止损撤后重试挂单",
@@ -494,18 +496,42 @@ def audit_module4_radar(a: Audit):
         get_radar_activation_ratio,
     )
     a.check("4.6 成本缓冲 0.1%", abs(RADAR_STAGE_COST_BUFFER_PCT - 0.001) < 1e-6)
-    expected_act = {1: 0.85, 2: 0.85, 3: 0.85, 4: 0.85}
+    from webhook_parser import (
+        get_radar_trail_step,
+        get_radar_breath_atr,
+        RADAR_TRAIL_STEP_BY_REGIME,
+        RADAR_BREATH_ATR_BY_REGIME,
+        RADAR_STAGE_ATR_MULT,
+    )
+    expected_act = {1: 0.85, 2: 0.80, 3: 0.75, 4: 0.70}
+    expected_step = {1: 0.35, 2: 0.30, 3: 0.25, 4: 0.20}
+    expected_breath = {1: 1.0, 2: 0.8, 3: 0.65, 4: 0.5}
     for r, pct in expected_act.items():
         a.check(
-            f"4.2 R{r} 激活线 {pct*100:.0f}%（距TP1剩15%）",
+            f"4.2 R{r} 激活线 {pct*100:.0f}%",
             abs(RADAR_ACTIVATION_RATIO_BY_REGIME.get(r) - pct) < 1e-9
             and abs(get_radar_activation_ratio(r) - pct) < 1e-9,
         )
-    from webhook_parser import RADAR_TP1_REMAINING_PCT, RADAR_ACTIVATION_RATIO
+        a.check(
+            f"4.2s R{r} 步进 {expected_step[r]*100:.0f}%",
+            abs(RADAR_TRAIL_STEP_BY_REGIME.get(r) - expected_step[r]) < 1e-9
+            and abs(get_radar_trail_step(r) - expected_step[r]) < 1e-9,
+        )
+        a.check(
+            f"4.2b R{r} 呼吸 {expected_breath[r]}ATR",
+            abs(RADAR_BREATH_ATR_BY_REGIME.get(r) - expected_breath[r]) < 1e-9
+            and abs(get_radar_breath_atr(r) - expected_breath[r]) < 1e-9,
+        )
     a.check(
-        "4.2b 距TP1剩余15%",
-        abs(RADAR_TP1_REMAINING_PCT - 0.15) < 1e-9
-        and abs(RADAR_ACTIVATION_RATIO - 0.85) < 1e-9,
+        "4.2c 旧阶段紧追ATR表已清空",
+        not RADAR_STAGE_ATR_MULT,
+    )
+    a.check(
+        "4.2d 生产雷达用适度追随",
+        "_radar_breath_atr" in sup
+        and "_radar_trail_step" in sup
+        and "RADAR_TRAIL_MIN_INTERVAL_SEC" in sup
+        and "适度追随" in sup,
     )
 
     # 钉钉雷达标题须含品种 + 新文案
@@ -575,23 +601,24 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.72.0-tp-fill-requires-mark" in readme
+        "v13.73.0-radar-moderate-follow" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
         and "8/14/20/26%" in readme
         and "85%" in readme
-        and "剩15%" in readme
+        and "70%" in readme
         and "exit_source" in readme
         and "价到" in readme
         and "reduceOnly" in readme
         and "先平后开" in readme
         and "穿价" in readme
-        and "现价" in readme,
+        and "适度追随" in readme,
     )
     a.check(
-        "README 雷达激活比例",
-        "85%" in readme and "15%" in readme,
+        "README 雷达分档激活",
+        "85%" in readme and "80%" in readme and "75%" in readme and "70%" in readme
+        and "1.0 ATR" in readme,
     )
     a.check("README UPDATE_SL 仅参考", "仅更新" in readme and "tv_sl_ref" in readme)
 

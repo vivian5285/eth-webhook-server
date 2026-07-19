@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/15x 适配）
+# DEPRECATED 遗留镜像：生产以 position_supervisor_binance.py 为准。
+# 雷达参数已对齐 webhook_parser「适度追随」表，禁止再启用旧 40~70%/紧追 trail。
 import logging
 import time
 import threading
@@ -12,6 +13,12 @@ from logging.handlers import RotatingFileHandler
 from binance_client import binance_client
 from position_manager import position_manager
 import dingtalk
+from webhook_parser import (
+    get_radar_activation_ratio,
+    get_radar_breath_atr,
+    RADAR_ACTIVATION_RATIO_BY_REGIME,
+    RADAR_BREATH_ATR_BY_REGIME,
+)
 
 if not os.path.exists('logs'):
     os.makedirs('logs')
@@ -23,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.6.3-principal-snapshot"
+BINANCE_VPS_VERSION = "v13.73.0-radar-moderate-follow-legacy-stub"
 SENTINEL_POLL_NORMAL = 6
 SENTINEL_POLL_ARMING = 3
 SENTINEL_POLL_RADAR = 2
@@ -55,11 +62,28 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
+        # 与 webhook_parser 适度追随表一致（删除旧 40/50/60/70 + 紧追 trail）
         self.regime_settings = {
-            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "activation": 0.40, "trail_offset": 0.40},
-            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "activation": 0.50, "trail_offset": 0.60},
-            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "activation": 0.60, "trail_offset": 0.90},
-            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "activation": 0.70, "trail_offset": 1.30},
+            1: {
+                "margin": 0.15, "ratios": [0.25, 0.35, 0.40],
+                "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[1],
+                "trail_offset": RADAR_BREATH_ATR_BY_REGIME[1],
+            },
+            2: {
+                "margin": 0.25, "ratios": [0.20, 0.35, 0.45],
+                "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[2],
+                "trail_offset": RADAR_BREATH_ATR_BY_REGIME[2],
+            },
+            3: {
+                "margin": 0.35, "ratios": [0.18, 0.32, 0.50],
+                "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[3],
+                "trail_offset": RADAR_BREATH_ATR_BY_REGIME[3],
+            },
+            4: {
+                "margin": 0.50, "ratios": [0.05, 0.20, 0.75],
+                "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[4],
+                "trail_offset": RADAR_BREATH_ATR_BY_REGIME[4],
+            },
         }
         self.leverage = 15
 
