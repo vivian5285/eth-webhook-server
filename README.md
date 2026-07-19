@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.76.0-always-close-then-open`**  
+**当前版本：`v13.76.1-dingtalk-dedupe-qty`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,7 +15,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.76.0-always-close-then-open
+# 期望 version 含 v13.76.1-dingtalk-dedupe-qty
 # 期望 tv_strategy: v6.9.108
 ```
 
@@ -484,7 +484,7 @@ git fetch origin && git reset --hard origin/main
 
 # 版本门控
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v13.76.0-always-close-then-open
+# 期望: v13.76.1-dingtalk-dedupe-qty
 grep 'DEPLOY_SCRIPT_VERSION' deploy_binance.sh
 
 source venv/bin/activate    # 如有 venv
@@ -493,7 +493,7 @@ bash deploy_binance.sh
 
 # 验收
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version 含 v13.76.0 · tv_strategy 含 v6.9.108
+# version 含 v13.76.1 · tv_strategy 含 v6.9.108
 tail -f logs/binance_brain.log
 ```
 
@@ -592,6 +592,14 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 ## 版本演进
 
 ### 近期详细更新记录（v13.67 → v13.76）
+
+#### v13.76.1 · `dingtalk-dedupe-qty`
+
+**主题：仓位微差对账不刷屏**
+
+- 开仓基线 vs 实盘微差（未达 TP）：**静默锚定实盘**；开仓宽限内只播「仓位核实」一条
+- 「异常减仓·非TP」：**同仓位 600s 只告警一次**，告警后立即锚定，杜绝哨兵/WS 连环刷
+- 钉钉：标题去重默认 120s；系统告警 600s；攒批同标题折叠；双线程去重加锁
 
 #### v13.76.0 · `always-close-then-open`
 
@@ -692,6 +700,7 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 
 | 版本 | 要点 |
 |------|------|
+| **v13.76.1** | **仓位微差不刷屏：静默锚定实盘；异常减仓600s一条；钉钉标题/告警长去重+攒批折叠** |
 | **v13.76.0** | **开仓铁律：凡带开仓一律先平后开刷新；单独平仓清零等待；废除同向仅刷TP/空仓轻量直开** |
 | **v13.75.0** | **同秒开+平强制先平后开（终态必须有仓）：短停聚合；动作优先于seq；纠正 OPEN.seq=1+CLOSE.seq=2 先开后秒平事故** |
 | **v13.74.0** | **WS mark@1s最快盯价：接近激活线90%加速、达线0.25s紧急交棒；雷达进行中新TV一律先平后开；追随禁先撤后挂，单槽合并总线防死循环** |
@@ -743,4 +752,4 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.76.0-always-close-then-open*
+*GEMINI Quant · 双轨智慧雷达 · v13.76.1-dingtalk-dedupe-qty*

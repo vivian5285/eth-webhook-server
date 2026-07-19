@@ -182,7 +182,10 @@ def audit_module1_symbol(a: Audit):
         "_live_mark_for_tp_detect" in sup
         and "每一档都必须价到" in sup
         and "拒认仅凭减仓记" in sup
+        and "_resync_tp_baseline" in sup
+        and "ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC" in sup
         and "DINGTALK_TITLE_DEDUP_SEC" in dt
+        and "DINGTALK_ALERT_DEDUP_SEC" in dt
         and "钉钉标题去重" in dt,
     )
 
@@ -594,8 +597,11 @@ def audit_module7_dingtalk(a: Audit):
     ):
         a.check(f"钉钉 {fn}", f"def {fn}" in dt)
     a.check(
-        "钉钉攒批+重试",
-        "DINGTALK_BATCH" in dt and "_post_with_retry" in dt and "WECHAT_WEBHOOK" in dt,
+        "钉钉攒批+重试+标题去重",
+        "DINGTALK_BATCH" in dt and "_post_with_retry" in dt and "WECHAT_WEBHOOK" in dt
+        and "DINGTALK_TITLE_DEDUP_SEC" in dt
+        and "DINGTALK_ALERT_DEDUP_SEC" in dt
+        and "report_position_qty_reconcile" in dt,
     )
     a.check(
         "钉钉不宣称挂 TV硬止损",
@@ -624,7 +630,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.76.0-always-close-then-open" in readme
+        "v13.76.1-dingtalk-dedupe-qty" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme

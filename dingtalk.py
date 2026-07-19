@@ -55,7 +55,9 @@ DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lo
     "1", "true", "yes", "on",
 )
 # 全交易所共用：同类标题短窗只发一条，避免对账/告警连环刷屏
-DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "30"))
+DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "120"))
+# 系统告警 / 异常减仓类更长去重
+DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
 _title_dedup_lock = threading.Lock()
 _title_dedup_ts = {}  # key -> last_send_ts
 
@@ -371,6 +373,17 @@ class _DingTalkBatcher:
     def _flush(self, batch):
         if not batch:
             return
+        # 同标题只保留最后一条，杜绝攒批里雷同告警连发
+        collapsed = []
+        seen = {}
+        for title, data, color, ts in batch:
+            key = str(title or "")[:96]
+            if key in seen:
+                collapsed[seen[key]] = (title, data, color, ts)
+            else:
+                seen[key] = len(collapsed)
+                collapsed.append((title, data, color, ts))
+        batch = collapsed
         if len(batch) == 1:
             title, data, color, _ = batch[0]
             md = _build_alert_markdown(title, data, color)
@@ -406,24 +419,39 @@ def dingtalk_batch_stats():
     return _batcher.stats()
 
 
+def _title_dedup_window(title):
+    t = str(title or "")
+    if "异常减仓" in t or "系统告警" in t:
+        return float(DINGTALK_ALERT_DEDUP_SEC)
+    return float(DINGTALK_TITLE_DEDUP_SEC)
+
+
 def send_alert(title, data_dict, header_color=G_TITLE):
     """对外统一入口：默认攒批；DINGTALK_BATCH_DISABLE=1 则即时发送。同类标题短窗去重。"""
     if not DINGTALK_WEBHOOK and not WECHAT_WEBHOOK:
         return
     sym = str(_ctx_symbol.get() or "").upper()
-    dedup_key = f"{sym}|{str(title or '')[:96]}"
+    # 标题里已含品种时，空 ctx 也归一，避免 |title 与 ETHUSDT|title 双键漏过去重
+    raw_title = str(title or "")
+    dedup_key = f"{sym}|{raw_title[:96]}"
+    if not sym:
+        for token in ("ETHUSDT", "XAUUSDT", "ETH", "XAU"):
+            if token in raw_title.upper():
+                dedup_key = f"{token}|{raw_title[:96]}"
+                break
     now = time.time()
+    window = _title_dedup_window(raw_title)
     with _title_dedup_lock:
         dead = [
             k for k, ts in _title_dedup_ts.items()
-            if now - float(ts) > DINGTALK_TITLE_DEDUP_SEC * 4
+            if now - float(ts) > max(window, DINGTALK_TITLE_DEDUP_SEC) * 4
         ]
         for k in dead:
             _title_dedup_ts.pop(k, None)
         last = float(_title_dedup_ts.get(dedup_key) or 0)
-        if last > 0 and now - last < DINGTALK_TITLE_DEDUP_SEC:
+        if last > 0 and now - last < window:
             logger.info(
-                f"🔇 钉钉标题去重({DINGTALK_TITLE_DEDUP_SEC:.0f}s): {str(title)[:72]}"
+                f"🔇 钉钉标题去重({window:.0f}s): {raw_title[:72]}"
             )
             return
         _title_dedup_ts[dedup_key] = now
@@ -432,7 +460,6 @@ def send_alert(title, data_dict, header_color=G_TITLE):
         _post_with_retry(str(title), md)
         return
     _batcher.enqueue(title, data_dict, header_color)
-
 
 def get_regime_name(regime_code):
     names = {
@@ -1020,6 +1047,26 @@ def report_system_alert(title, detail, level="紧急", suggestion=""):
     if suggestion:
         data["💡 建议操作"] = _g(suggestion, G_LIGHT)
     send_alert(f"⚠️ 系统告警：{title}", data, G_TITLE)
+
+
+def report_position_qty_reconcile(side="", baseline=0, live_qty=0, curr_px=0,
+                                  note="", symbol=None, unit_label=None):
+    """
+    开仓后 / 微漂对账：只播报一次仓位核实（非异常告警）。
+    由军师事件去重 + 标题去重双保险，禁止连环刷屏。
+    """
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    unit = _u(unit_label, symbol)
+    side_u = str(side or "").strip().upper()
+    b = float(baseline or 0)
+    live = float(live_qty or 0)
+    data = {
+        "🎛️ 方向": _g(side_u or "—", G_LIGHT if side_u == "LONG" else G_DEEP),
+        "📦 基线→实盘": _g(f"`{b:.4f}` → `{live:.4f}` {unit}", G_MAIN),
+        "💹 现价": _g(f"`{float(curr_px or 0):.2f}`", G_MUTED),
+        "📌 说明": _g(note or "仓位对账·已锚定实盘", G_ACCENT),
+    }
+    send_alert(f"📌 [{sym}] 仓位核实·已锚定实盘", data, G_ACCENT)
 
 
 def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,

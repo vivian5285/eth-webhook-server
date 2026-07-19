@@ -78,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.76.0-always-close-then-open"
+BINANCE_VPS_VERSION = "v13.76.1-dingtalk-dedupe-qty"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -129,6 +129,11 @@ SHIELD_QTY_TOLERANCE_PCT = 0.04
 SHIELD_MAX_TIER_ORDERS = 1
 RADAR_DINGTALK_COOLDOWN_SEC = 120
 DINGTALK_EVENT_DEDUP_SEC = 45  # 同一行为钉钉 45s 内不重复
+# 异常减仓·非TP：同仓位生命周期只告警一次（防哨兵/WS 连环刷屏）
+ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC = 600
+# 告警门槛：低于此视为微漂/对账噪声，静默锚定实盘，不发钉钉
+ABNORMAL_REDUCE_ALERT_PCT = 0.05  # 相对基线 5%
+ABNORMAL_REDUCE_ALERT_MIN_QTY = 0.05  # ETH/XAU 绝对下限
 RADAR_STOP_MIN_GAP_USD = 2.5
 RADAR_STOP_MIN_GAP_PCT = 0.0012
 # 交棒额外安全：理想保本线相对现价至少再留 0.15% 利润缓冲，禁止夹成贴市毛刺止损
@@ -210,6 +215,10 @@ class PositionSupervisorBinance:
         self._sentinel_grace_until = 0.0
         self._post_open_radar_block_until = 0.0
         self._last_regime_cap_ts = 0.0
+        self._abnormal_reduce_alert_ts = 0.0
+        self._abnormal_reduce_alert_sig = ""
+        self._dingtalk_recent = {}
+        self._dingtalk_recent_lock = threading.Lock()
         self.shield_active = False
         self.shield_tiers_consumed = []
         self.tp_levels_consumed = []
@@ -642,22 +651,38 @@ class PositionSupervisorBinance:
             "report_tp_fill",
             "report_manual_position_change",
             "report_radar_regime_cap_trim",
+            "report_position_qty_reconcile",
         }
         if name in dedupe_names:
             key = self._dingtalk_event_key(fn, kwargs)
+            # 异常减仓类：更长冷却，避免哨兵/WS 双线程刷屏
+            title = str(kwargs.get("title") or "")
+            cooldown = float(DINGTALK_EVENT_DEDUP_SEC)
+            if name == "report_system_alert" and "异常减仓" in title:
+                cooldown = float(ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC)
             now = time.time()
-            recent = getattr(self, "_dingtalk_recent", None)
-            if recent is None:
-                self._dingtalk_recent = {}
-                recent = self._dingtalk_recent
-            dead = [k for k, ts in recent.items() if now - ts > DINGTALK_EVENT_DEDUP_SEC * 3]
-            for k in dead:
-                recent.pop(k, None)
-            last = float(recent.get(key) or 0)
-            if last > 0 and now - last < DINGTALK_EVENT_DEDUP_SEC:
-                logger.info(f"🔇 钉钉去重跳过 {name} ({DINGTALK_EVENT_DEDUP_SEC}s内同事件)")
-                return None
-            recent[key] = now
+            lock = getattr(self, "_dingtalk_recent_lock", None)
+            if lock is None:
+                self._dingtalk_recent_lock = threading.Lock()
+                lock = self._dingtalk_recent_lock
+            with lock:
+                recent = getattr(self, "_dingtalk_recent", None)
+                if recent is None:
+                    self._dingtalk_recent = {}
+                    recent = self._dingtalk_recent
+                dead = [
+                    k for k, ts in recent.items()
+                    if now - float(ts) > max(cooldown, DINGTALK_EVENT_DEDUP_SEC) * 3
+                ]
+                for k in dead:
+                    recent.pop(k, None)
+                last = float(recent.get(key) or 0)
+                if last > 0 and now - last < cooldown:
+                    logger.info(
+                        f"🔇 钉钉去重跳过 {name} ({cooldown:.0f}s内同事件)"
+                    )
+                    return None
+                recent[key] = now
         tokens = []
         try:
             tokens = dingtalk.bind_dingtalk_symbol(
@@ -3171,6 +3196,39 @@ class PositionSupervisorBinance:
         # 有明显减仓但无一档价到 → 不是 TP 成交，禁止误触发 TP12 播报
         return False
 
+    def _resync_tp_baseline(self, live_qty, reason=""):
+        """把开仓基线锚定到实盘数量，避免同一微差反复触发「异常减仓」告警。"""
+        live_qty = float(live_qty or 0)
+        if live_qty <= 0:
+            return
+        old = float(self._tp_baseline_qty(live_qty) or 0)
+        self._open_settled_qty = live_qty
+        self.initial_qty = live_qty
+        self.watched_qty = live_qty
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        logger.info(
+            f"📌 [{self.symbol}] TP基线锚定 {old:.4f}→{live_qty:.4f} "
+            f"| {reason or '对账'}"
+        )
+
+    def _should_alert_abnormal_reduce(self, initial, live_qty):
+        """同仓位生命周期内异常减仓钉钉只允许一条（长冷却）。"""
+        now = time.time()
+        sig = f"{self.current_side}|{round(float(initial), 3)}|{round(float(live_qty), 3)}"
+        last_ts = float(getattr(self, "_abnormal_reduce_alert_ts", 0) or 0)
+        last_sig = str(getattr(self, "_abnormal_reduce_alert_sig", "") or "")
+        if last_ts > 0 and now - last_ts < ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC:
+            return False
+        # 同签名更严：同一组数字绝不重复
+        if last_sig == sig and last_ts > 0 and now - last_ts < ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC * 2:
+            return False
+        self._abnormal_reduce_alert_ts = now
+        self._abnormal_reduce_alert_sig = sig
+        return True
+
     def _reconcile_tp_consumed_from_live_qty(self, live_qty, curr_px=0.0, source="",
                                             notify=True):
         """
@@ -3213,31 +3271,67 @@ class PositionSupervisorBinance:
                     merged = sorted(set(inferred or []) | set(confirmed))
                     inferred = self._sequential_tp_prefix(merged)
             elif not inferred:
-                # 明显减仓但现价未达任何 TP → 异常减仓，不是 TP 成交
+                # 明显减仓但现价未达任何 TP → 非 TP；微漂静默锚定，重大才告警一次
                 reduced = round(initial - live_qty, 3)
                 noise = max(0.003, initial * TP_FILL_NOISE_VS_OPEN_PCT)
-                if reduced >= noise and notify:
-                    logger.error(
-                        f"🚨 [{self.symbol}] 异常减仓 {initial}→{live_qty} "
-                        f"(Δ{reduced}) 但现价 {curr_px:.2f} 未达 TP123 "
-                        f"{list(self.tv_tps or [])} → 拒绝记 TP 成交 | {source}"
+                alert_floor = max(
+                    float(ABNORMAL_REDUCE_ALERT_MIN_QTY),
+                    initial * float(ABNORMAL_REDUCE_ALERT_PCT),
+                )
+                in_open_grace = time.time() < float(
+                    getattr(self, "_post_open_radar_block_until", 0) or 0
+                )
+                if reduced >= noise:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 减仓未达TP {initial}→{live_qty} "
+                        f"(Δ{reduced}) mark={curr_px:.2f} | {source} | "
+                        f"{'开仓宽限静默锚定' if in_open_grace or reduced < alert_floor else '评估告警'}"
                     )
-                    try:
-                        self._call_dingtalk(
-                            dingtalk.report_system_alert,
-                            title=f"异常减仓·非TP成交 [{self.symbol}]",
-                            detail=(
-                                f"{self.current_side} {initial}→{live_qty} | "
-                                f"现价 {curr_px:.2f} best {float(self.best_price or 0):.2f} | "
-                                f"TP {list(self.tv_tps or [])} 均未触及 | "
-                                f"{source or '对账'} | 已拒绝误报TP成交"
-                            ),
-                            level="警告",
-                            suggestion="核对是否穿价秒平/人工减仓；仓位以交易所为准",
-                        )
-                    except Exception:
-                        pass
-
+                    if notify and (
+                        not in_open_grace
+                        and reduced >= alert_floor
+                        and self._should_alert_abnormal_reduce(initial, live_qty)
+                    ):
+                        try:
+                            self._call_dingtalk(
+                                dingtalk.report_system_alert,
+                                title=f"异常减仓·非TP成交 [{self.symbol}]",
+                                detail=(
+                                    f"{self.current_side} {initial}→{live_qty} | "
+                                    f"现价 {curr_px:.2f} best {float(self.best_price or 0):.2f} | "
+                                    f"TP {list(self.tv_tps or [])} 均未触及 | "
+                                    f"{source or '对账'} | 已拒绝误报TP；"
+                                    f"本仓位同类告警 {ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC:.0f}s 内不再重复"
+                                ),
+                                level="警告",
+                                suggestion="核对是否穿价秒平/人工减仓；仓位以交易所为准",
+                            )
+                        except Exception:
+                            pass
+                    elif notify and (
+                        in_open_grace or reduced < alert_floor
+                    ):
+                        # 开仓后一次仓位核实播报（微漂也对一次账），同类去重
+                        try:
+                            self._call_dingtalk(
+                                dingtalk.report_position_qty_reconcile,
+                                side=self.current_side or "",
+                                baseline=initial,
+                                live_qty=live_qty,
+                                curr_px=curr_px,
+                                note=(
+                                    "开仓宽限/微漂对账·已锚定实盘"
+                                    if in_open_grace
+                                    else "头寸微差对账·已锚定实盘（非TP）"
+                                ),
+                            )
+                        except Exception:
+                            pass
+                    # 无论是否告警：锚定实盘，杜绝连环刷屏
+                    self._resync_tp_baseline(
+                        live_qty,
+                        reason=f"非TP减仓对账|{source or '—'}",
+                    )
         # WS 提示：仅限价已消失且价到才并入
         ws_levels = set(getattr(self, "_ws_tp_fill_levels", set()) or set())
         if getattr(self, "_ws_tp1_fill_hint", False):
@@ -8542,6 +8636,8 @@ class PositionSupervisorBinance:
         self.watched_qty = 0.0
         self.initial_qty = 0.0
         self._open_settled_qty = 0.0
+        self._abnormal_reduce_alert_ts = 0.0
+        self._abnormal_reduce_alert_sig = ""
         self.base_qty = 0.0
         self.add_count = 0
         self.tp_levels_consumed = []
