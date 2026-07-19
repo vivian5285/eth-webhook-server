@@ -78,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.76.1-dingtalk-dedupe-qty"
+BINANCE_VPS_VERSION = "v13.77.0-open-defense-takeover-safe"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -1772,15 +1772,29 @@ class PositionSupervisorBinance:
 
         self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
 
+        # 接管/重启：禁止 force 档位裁减（会 cancel_all 后裸仓/误减仓）
         try:
-            cap = self._radar_enforce_regime_cap(live_qty, curr_px, force=True)
-            if cap:
-                live_qty = float(cap["new_qty"])
-                self.watched_qty = live_qty
-                if float(self.initial_qty or 0) <= live_qty + 0.001:
-                    self.initial_qty = live_qty
+            if not getattr(self, "_recover_in_progress", False) and not any(
+                k in str(source) for k in ("重启", "接管", "recover", "Recover")
+            ):
+                cap = self._radar_enforce_regime_cap(live_qty, curr_px, force=False)
+                if cap:
+                    live_qty = float(cap["new_qty"])
+                    self.watched_qty = live_qty
+                    if float(self.initial_qty or 0) <= live_qty + 0.001:
+                        self.initial_qty = live_qty
+            else:
+                logger.info(
+                    f"📡 [{source}] 跳过档位限额裁减（重启/接管禁误减仓·禁平仓）"
+                )
         except Exception as e:
             logger.warning(f"接管档位限额跳过: {e}")
+
+        # 与开仓一致：穿价 TP 先推离再挂，禁止跳过全档导致无 TP
+        try:
+            self._sanitize_open_tps_vs_mark(entry, curr_px)
+        except Exception as e:
+            logger.warning(f"接管 TP 消毒跳过: {e}")
 
         tp_repair = {"repaired": False}
         try:
@@ -4034,16 +4048,20 @@ class PositionSupervisorBinance:
         if curr_px > 0:
             gap = max(2.5, curr_px * 0.0015)
             if self.current_side == "LONG" and trigger_px >= curr_px - gap:
-                logger.error(
-                    f"🚨 拒绝挂硬止损：LONG 触发价 {trigger_px:.2f} 贴/高于市价 "
-                    f"{curr_px:.2f}（会立刻全平）"
+                safe = round(curr_px - gap * 1.25, 2)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] LONG 硬止损 @{trigger_px:.2f} 贴/穿市 "
+                    f"{curr_px:.2f} → 推低到安全 @{safe:.2f}（禁裸仓）"
                 )
-                return None
-            if self.current_side == "SHORT" and trigger_px <= curr_px + gap:
-                logger.error(
-                    f"🚨 拒绝挂硬止损：SHORT 触发价 {trigger_px:.2f} 贴/低于市价 "
-                    f"{curr_px:.2f}（会立刻全平）"
+                trigger_px = safe
+            elif self.current_side == "SHORT" and trigger_px <= curr_px + gap:
+                safe = round(curr_px + gap * 1.25, 2)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] SHORT 硬止损 @{trigger_px:.2f} 贴/穿市 "
+                    f"{curr_px:.2f} → 推高到安全 @{safe:.2f}（禁裸仓）"
                 )
+                trigger_px = safe
+            if trigger_px <= 0:
                 return None
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if use_stop_limit:
@@ -4126,20 +4144,15 @@ class PositionSupervisorBinance:
                     "reason": "cooldown_same_target",
                 }
 
-        purged = self._purge_all_protective_stops(keep_near=0)
-        if purged or tv_leftovers:
-            logger.warning(
-                f"🛡️ 统一硬止损：撤净保护STOP {purged} 笔 "
-                f"(原盘口{live_stops} → 目标 VPS @{target:.2f})"
-                + (f" | 清TV紧价{tv_leftovers}" if tv_leftovers else "")
-                + (f" | 孤儿{orphans}" if orphans else "")
-            )
-            time.sleep(0.5)
-
-        # 撤净后必须挂上：失败重试，禁止「先撤后挂失败」裸仓
+        purged = 0
+        # 铁律：先挂/核实新 STOP，再撤孤儿；禁止「先撤净后挂失败」裸仓
         ok = False
         res = None
+        had_old_stops = bool(live_stops)
         for attempt in range(3):
+            if self._has_stop_sl_near(target, exclude_shield=False):
+                ok = True
+                break
             res = self._place_vps_hard_sl_order(
                 live_qty, target, use_stop_limit=False,
             )
@@ -4153,16 +4166,64 @@ class PositionSupervisorBinance:
                 f"🛡️ [{self.symbol}] 硬止损挂单未核实 @{target:.2f} "
                 f"重试 {attempt + 1}/3"
             )
+
+        if ok:
+            purged = self._purge_all_protective_stops(keep_near=target)
+            if purged or tv_leftovers or orphans:
+                logger.warning(
+                    f"🛡️ 统一硬止损：新挂已核实 @{target:.2f}，清孤儿/TV {purged} 笔 "
+                    f"(原盘口{live_stops})"
+                    + (f" | 清TV紧价{tv_leftovers}" if tv_leftovers else "")
+                )
+                time.sleep(0.35)
+                if not self._has_stop_sl_near(target, exclude_shield=False):
+                    res = self._place_vps_hard_sl_order(
+                        live_qty, target, use_stop_limit=False,
+                    )
+                    time.sleep(0.45)
+                    ok = res is not None and self._has_stop_sl_near(
+                        target, exclude_shield=False,
+                    )
+        elif had_old_stops:
+            logger.error(
+                f"❌ [{self.symbol}] 硬止损新挂失败 @{target:.2f}，"
+                f"保留原盘口 STOP {live_stops}，禁止撤净裸仓 | {reason}"
+            )
+            self._record_shield_maintain(success=True)
+            return {
+                "ok": True, "skipped": False, "target": target, "purged": 0,
+                "reason": "place_failed_keep_old",
+            }
+        else:
+            logger.error(
+                f"❌ [{self.symbol}] 硬止损新挂失败且盘口无 STOP → 裸仓 | {reason}"
+            )
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"裸仓告警·硬止损未挂上 [{self.symbol}]",
+                    detail=(
+                        f"{self.current_side} qty={live_qty} 目标SL@{target:.2f} "
+                        f"| {reason or '同步'} | 请人工挂 closePosition"
+                    ),
+                    level="紧急",
+                    suggestion="币安 APP 手动挂 VPS 宽硬止损；勿反复重启核武撤单",
+                )
+            except Exception:
+                pass
+            self._record_shield_maintain(success=False)
+            return {"ok": False, "skipped": False, "target": target, "purged": 0}
+
         leftovers = [
-            p for p in self._count_protective_stops()
-            if abs(p - target) > SHIELD_STOP_TOLERANCE
+            p for p in (self._count_protective_stops() or [])
+            if abs(float(p) - target) > SHIELD_STOP_TOLERANCE
             or self._looks_like_tv_tight_stop(p)
         ]
-        if leftovers:
+        if leftovers and ok:
             extra = self._purge_all_protective_stops(keep_near=target)
             purged += extra
             logger.warning(f"🛡️ 二次清孤儿/TV STOP{leftovers} 撤 {extra} 笔")
-            if ok and not self._has_stop_sl_near(target, exclude_shield=False):
+            if not self._has_stop_sl_near(target, exclude_shield=False):
                 res = self._place_vps_hard_sl_order(
                     live_qty, target, use_stop_limit=False,
                 )
@@ -4185,7 +4246,7 @@ class PositionSupervisorBinance:
                 f"Stop-Market closePosition @ {target:.2f} "
                 f"| 开仓R{self._resolve_hard_sl_regime()} "
                 f"| 实时VPS={vps_floor or '—'} | TV参考仅日志="
-                f"{float(getattr(self, 'tv_sl_ref', 0) or 0) or '—'} | 撤 {purged} 笔"
+                f"{float(getattr(self, 'tv_sl_ref', 0) or 0) or '—'} | 撤孤儿 {purged} 笔"
             )
         else:
             self._record_shield_maintain(success=False)
@@ -4304,10 +4365,18 @@ class PositionSupervisorBinance:
             if q <= 0 or px <= 0:
                 continue
             if self._tp_is_marketable(self.current_side, px, curr_px):
+                self._sanitize_open_tps_vs_mark(self.watched_entry or 0, curr_px)
+                tps = list(self.tv_tps or [])
+                idx = int(lv["level"]) - 1
+                px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
+                if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
+                    logger.warning(
+                        f"📈 跳过穿价 TP{lv['level']} mark={curr_px:.2f}（推离后仍穿）"
+                    )
+                    continue
                 logger.warning(
-                    f"📈 跳过穿价 TP{lv['level']} @{px:.2f} ≤≥ mark {curr_px:.2f}"
+                    f"📈 穿价 TP{lv['level']} 已推离 → @{px:.2f} mark={curr_px:.2f}"
                 )
-                continue
             ok = False
             for attempt in range(max(1, retries + 1)):
                 res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True,
@@ -5742,6 +5811,29 @@ class PositionSupervisorBinance:
                 )
                 self._mark_tp_levels_consumed([level])
                 continue
+            # 仅现价已达该档（限价或在或已没）→ 视为触及，禁当漏挂重挂秒成
+            if self._price_reached_tp_zone(level, curr_px, px):
+                logger.warning(
+                    f"🧩 拒绝补挂 TP{level} @{px:.2f}：现价已达该档 "
+                    f"(mark={curr_px:.2f}) → 记账/等待，禁止当漏挂重挂"
+                )
+                if not self._has_tp_limit_at_price(px):
+                    self._mark_tp_levels_consumed([level])
+                continue
+            # 穿价：推离后再挂，禁止挂出即成交把仓位在 TP1 削光
+            if self._tp_is_marketable(self.current_side, px, curr_px):
+                self._sanitize_open_tps_vs_mark(self.watched_entry or 0, curr_px)
+                tps = list(self.tv_tps or [])
+                px = float(tps[level - 1]) if level - 1 < len(tps) else 0.0
+                q = float(lv["qty"] or 0)
+                if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
+                    logger.error(
+                        f"🚨 补挂跳过穿价 TP{level} mark={curr_px:.2f}（已推离仍穿）"
+                    )
+                    continue
+                logger.warning(
+                    f"⚠️ 补挂 TP{level} 穿价已推离 → @{px:.2f} qty={q}"
+                )
             # 限价消失但价未到：不盲目补挂到未触及价（防异常撤单后贴价成交）
             if not self._has_tp_limit_at_price(px) and not self._price_reached_tp_zone(
                 level, curr_px, px
@@ -5842,22 +5934,26 @@ class PositionSupervisorBinance:
         return total
 
     def _scorched_earth_cancel_for_recover(self):
-        """重启接管：撤净全部挂单（含重复 TP），随后由核武重挂 TP + 雷达 SL"""
+        """
+        重启接管：只撤 TP 限价（含重复档），保留 closePosition 硬止损。
+        禁止 cancel_all 撤净 STOP 后裸仓；随后核武只重挂 TP。
+        """
         for attempt in range(6):
-            binance_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.8)
             self._cancel_all_tp_limit_orders(max_rounds=4)
             time.sleep(0.6)
             remaining = self._collect_tp_limit_orders()
             if not remaining:
-                logger.info(f"☢️ 重启撤单完成，限价止盈已清零 (第 {attempt + 1} 轮)")
+                logger.info(
+                    f"☢️ 重启撤TP完成，限价止盈已清零 (第 {attempt + 1} 轮) | "
+                    f"硬止损保留不撤"
+                )
                 return True
             remain_txt = ", ".join(f"{o['qty']}@{o['price']}" for o in remaining[:4])
             logger.warning(
-                f"⚠️ 撤单后仍剩 {len(remaining)} 张限价止盈 ({remain_txt}) "
+                f"⚠️ 撤TP后仍剩 {len(remaining)} 张 ({remain_txt}) "
                 f"→ 重试 {attempt + 1}/6"
             )
-        logger.error("❌ 重启撤单未净：重复 TP 可能残留，非权限问题时请币安 APP 手动全撤后重启")
+        logger.error("❌ 重启撤TP未净：请币安 APP 手动撤限价止盈后重启（勿平仓）")
         return False
 
     def _remaining_open_order_count(self):
@@ -9154,8 +9250,8 @@ class PositionSupervisorBinance:
                 self._open_settled_qty = float(live_qty)
                 self._save_state()
 
-            # 开仓后只清残留挂单一次；禁止 recover 核武连环撤挂（易与挂 TP/止损竞态）
-            binance_client.cancel_all_open_orders(self.symbol)
+            # 开仓后只清 TP 残留；硬止损由后续统一同步挂上（禁先撤净 STOP 裸仓窗口）
+            self._cancel_all_tp_limit_orders(max_rounds=3)
             time.sleep(0.4)
             # 再用核实 entry 补一次 TP（防 TV 空价时首轮用错价）
             entry_live = float(verified["entry_price"] or entry_price)
@@ -9236,6 +9332,29 @@ class PositionSupervisorBinance:
                         f"{verified['entry_price']:.2f} | TP {matched}/{expected} | "
                         f"目标VPS@{(vps_target or 0):.2f} | 请立即人工挂止损",
                     )
+            # 终检：应有 TP 却 0 档 → 消毒后再挂一轮（只一次，钉钉去重）
+            if expected > 0 and matched <= 0:
+                logger.error(
+                    f"🚨 [{self.symbol}] 开仓终检：TP 0/{expected} → 消毒重挂"
+                )
+                self._sanitize_open_tps_vs_mark(verified["entry_price"], curr_px)
+                self._place_tp_levels_only(live_qty, retries=2)
+                time.sleep(0.6)
+                audit = self._audit_tp_levels(live_qty)
+                matched, expected = audit["matched_full"], audit["expected"]
+                try:
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"开仓终检·TP未挂上 [{self.symbol}]",
+                        detail=(
+                            f"{self.current_side} {live_qty} | TP现 {matched}/{expected} "
+                            f"| 价 {list(self.tv_tps or [])} | 已消毒重挂一轮"
+                        ),
+                        level="警告",
+                        suggestion="核对盘口 TP123；勿反复重启核武",
+                    )
+                except Exception:
+                    pass
             # 首轮挂单完成后再开宽限；仅防线齐才标 align_ok
             self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_OPEN_SEC
             self._reconcile_open_qty_vs_tp123(live_qty, source="开仓终检")
@@ -10404,10 +10523,25 @@ class PositionSupervisorBinance:
                     placed += 1
                     continue
                 if self._tp_is_marketable(self.current_side, px, curr_px):
-                    logger.error(
-                        f"🚨 拒绝挂穿价 TP{lv['level']} {q}@{px:.2f} "
-                        f"(mark={curr_px:.2f}) → 防开完秒平"
+                    self._sanitize_open_tps_vs_mark(entry or self.watched_entry or 0, curr_px)
+                    tps = list(self.tv_tps or [])
+                    idx = int(lv["level"]) - 1
+                    px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
+                    if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
+                        logger.error(
+                            f"🚨 拒绝挂穿价 TP{lv['level']} mark={curr_px:.2f} "
+                            f"→ 推离后仍穿，防开完秒平"
+                        )
+                        continue
+                    logger.warning(
+                        f"⚠️ 重建 TP{lv['level']} 穿价已推离 → @{px:.2f}"
                     )
+                # 现价已达该档且限价不在 → 已成交，禁当漏挂重挂
+                if self._price_reached_tp_zone(int(lv["level"]), curr_px, px) and not self._has_tp_limit_at_price(px):
+                    logger.warning(
+                        f"🧩 重建跳过 TP{lv['level']}：现价已达且限价不在=已成交"
+                    )
+                    self._mark_tp_levels_consumed([int(lv["level"])])
                     continue
                 res = binance_client.place_limit_order(
                     close_side, q, px, symbol=self.symbol, reduce_only=True,

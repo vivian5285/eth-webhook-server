@@ -630,7 +630,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.76.1-dingtalk-dedupe-qty" in readme
+        "v13.77.0-open-defense-takeover-safe" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -644,7 +644,8 @@ def audit_readme_consistency(a: Audit):
         and "穿价" in readme
         and "适度追随" in readme
         and "mark@1s" in readme
-        and "一律先平后开" in readme,
+        and "一律先平后开" in readme
+        and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
         "README 雷达分档激活",
