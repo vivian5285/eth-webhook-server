@@ -645,7 +645,9 @@ def audit_readme_consistency(a: Audit):
         and "适度追随" in readme
         and "mark@1s" in readme
         and "一律先平后开" in readme
-        and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+        and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "实盘事故与优化备忘" in readme
+        and "TP1 被反复补挂" in readme,
     )
     a.check(
         "README 雷达分档激活",
