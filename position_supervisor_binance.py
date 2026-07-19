@@ -78,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.75.0-force-close-then-open"
+BINANCE_VPS_VERSION = "v13.76.0-always-close-then-open"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -2315,24 +2315,8 @@ class PositionSupervisorBinance:
         return False
 
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
-        """
-        空仓 OPEN 轻量闸：盘口已空 → 直接开（最多清残留挂单）。
-        无菌重闸仅用于先平后开（有仓需清场 / CLOSE+OPEN 链）。
-        """
-        tag = reason_tag or "开仓前"
-        if self._verify_flat():
-            rem = self._remaining_open_order_count()
-            if rem and rem > 0:
-                logger.info(f"🧹 [{tag}] 空仓但有 {rem} 张残留挂单 → 轻量清挂单")
-                self._purge_all_defense_orders_on_flat(
-                    f"{tag}·空仓清残留挂单", max_rounds=3,
-                )
-                time.sleep(0.3)
-            if self._verify_flat():
-                logger.info(f"✅ [{tag}] 盘口已空，按档位直接开仓（不做先平后开）")
-                return True
-        # 非空才走无菌强平
-        return self._sterile_flat_gate(reason_tag=tag, force_close=True)
+        """开仓前一律无菌净场（有仓强平+撤单；空仓也清残留挂单）。"""
+        return self._sterile_flat_gate(reason_tag=reason_tag or "开仓前", force_close=True)
 
     def _snapshot_sizing_principal(self, reason="", notify=True):
         """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 13x 硬顶共用"""
@@ -8316,7 +8300,23 @@ class PositionSupervisorBinance:
                         close_meta=close_meta,
                     )
             elif raw_action == "CLOSE":
-                self._close_all(f"🧹 换防清场：{close_reason}{close_extra}", close_meta=close_meta)
+                # 单独平仓：清仓+撤净挂单+复位，干净等待下次 TV（无开仓则不开）
+                pos = self._get_active_position()
+                tv_reason = close_reason or "TV单独平仓清场"
+                if not pos or pos.get("size", 0) <= 0:
+                    logger.info(
+                        f"🧹 TV单独平仓但盘口已空 → 撤净挂单复位等待 | {tv_reason}{close_extra}"
+                    )
+                    self._handle_manual_flat_detected(
+                        tv_reason,
+                        close_meta=close_meta,
+                        curr_px=self.tv_price,
+                    )
+                else:
+                    self._close_all(
+                        f"🧹 TV单独平仓清场：{tv_reason}{close_extra}",
+                        close_meta=close_meta,
+                    )
             elif raw_action == "UPDATE_SL":
                 self._handle_tv_sl_update(payload)
             elif raw_action == "UPDATE_TP":
@@ -8481,18 +8481,19 @@ class PositionSupervisorBinance:
 
     def _full_reentry(self, action, close_reason):
         """
-        先平后开原子链：仅在「有仓需换防 / 同K CLOSE+OPEN」时调用。
-        无菌净场 → 干净开仓；钉钉只报一条结果（成败）。
+        铁律原子链：先平现有仓（无菌净场）→ 再按 TV 开仓刷新。
+        空仓时同样走净场（清残留挂单）再开；钉钉核实终态。
         """
         chain = bool(getattr(self, "_close_open_chain_active", False))
-        if not self._sterile_flat_gate(reason_tag=close_reason or "先平后开", force_close=True):
+        reason = close_reason or "TV开仓·一律先平后开"
+        if not self._sterile_flat_gate(reason_tag=reason, force_close=True):
             logger.error("❌ 先平后开中止：无菌空仓未通过，拒绝叠仓开仓")
             try:
                 self._call_dingtalk(
                     dingtalk.report_close_then_open_chain,
                     phase="中止",
                     side=action,
-                    reason=close_reason,
+                    reason=reason,
                     bar_index=getattr(self, "_last_close_bar_index", None),
                     chain_same_bar=chain,
                     verify_note="qty/挂单未净 → 已拒绝开仓",
@@ -8510,9 +8511,9 @@ class PositionSupervisorBinance:
         try:
             self._call_dingtalk(
                 dingtalk.report_close_then_open_chain,
-                phase="执行",
+                phase="执行·先平后开",
                 side=action,
-                reason=close_reason,
+                reason=reason,
                 bar_index=getattr(self, "_last_close_bar_index", None),
                 chain_same_bar=chain,
                 verify_note=(
@@ -8845,8 +8846,11 @@ class PositionSupervisorBinance:
 
     def _handle_smart_entry(self, action, payload=None):
         """
-        空仓仅 OPEN → 按档位直开 + TP123 + VPS宽硬止损 + 雷达待命。
-        有仓：反向 / 雷达进行中 / 需刷新 → 先平后开（无菌净场再开）。
+        铁律（清晰）：
+        - 带开仓的 TV（OPEN / LONG|SHORT 建仓）→ 一律先平现有仓再开（刷新仓位）
+        - 同时收到平仓+开仓 → 缓冲已先平后开；此处开仓仍走先平后开净场
+        - PYRAMID / PROFIT_ADD → 加仓（非新开）
+        - 单独平仓由 CLOSE* 分支清零等待（不进本函数）
         """
         payload = payload or {}
         entry_type = normalize_entry_type(payload.get("entry_type"))
@@ -8856,175 +8860,43 @@ class PositionSupervisorBinance:
             self._touch_entry_signal_signature(action)
             return
 
-        if entry_type == ENTRY_TYPE_OPEN:
-            pos = self._get_active_position()
-            if pos and pos.get("size", 0) > 0:
-                if pos["side"] != action:
-                    logger.info(
-                        f"⚡ 反方向 OPEN [{action}] vs 实盘 [{pos['side']}] → 先平后开"
-                    )
-                    self._full_reentry(
-                        action, "反方向 OPEN 到达，触发【先平后开】原子对冲换防",
-                    )
-                    self._touch_entry_signal_signature(action)
-                    return
-
-                # 雷达进行中：新 TV 一律先平后开（干净换防，雷达回待命）
-                if self._radar_in_progress():
-                    logger.info(
-                        f"📡 雷达进行中 · 新 TV {action} → 一律先平后开 "
-                        f"(剩仓 {pos.get('size')} {self._unit()})"
-                    )
-                    self._full_reentry(
-                        action,
-                        "雷达进行中·新TV到达·先平后开换防"
-                        "（净场后挂TP123+VPS宽硬止损+雷达待命）",
-                    )
-                    self._touch_entry_signal_signature(action)
-                    return
-
-                curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
-                # 刚开仓冷却（雷达尚未启动）：同向重复 OPEN 禁止市价清仓
-                if self._is_fresh_open_cooldown(pos):
-                    logger.warning(
-                        f"🛡️ 同向 OPEN 冷却 {OPEN_SAME_DIR_COOLDOWN_SEC:.0f}s 内 "
-                        f"→ 禁止先平后开，仅刷新 TP123 [{action}]"
-                    )
-                    mode, diff_pct, reason, open_atr, tv_atr = (
-                        self._same_direction_entry_mode(action, pos, curr_px)
-                    )
-                    self._same_direction_refresh_tp(
-                        action, pos, curr_px, diff_pct, open_atr, tv_atr,
-                    )
-                    self._touch_entry_signal_signature(action)
-                    return
-
-                mode, diff_pct, reason, open_atr, tv_atr = (
-                    self._same_direction_entry_mode(action, pos, curr_px)
-                )
-                if mode == "REFRESH_TP":
-                    self._same_direction_refresh_tp(
-                        action, pos, curr_px, diff_pct, open_atr, tv_atr,
-                    )
-                    self._touch_entry_signal_signature(action)
-                    return
-
-                close_msgs = {
-                    "atr_changed": (
-                        f"同向 TV ATR 变化 ({open_atr:.2f}→{tv_atr:.2f})，"
-                        f"触发【先平后开】刷新仓位"
-                    ),
-                    "regime_changed": "同向 TV 档位变化，触发【先平后开】重入",
-                    "spread_ok": (
-                        f"同向理论价差 {diff_pct:.3f}% 达标，触发【先平后开】重入"
-                    ),
-                }
-                self._report_smart_reentry(
-                    action, pos, diff_pct, reason, open_atr, tv_atr,
-                )
-                self._full_reentry(
-                    action,
-                    close_msgs.get(reason, "同方向刷新仓位，触发【先平后开】重入"),
-                )
-                self._touch_entry_signal_signature(action)
-                return
-            curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
-            if self._is_duplicate_flat_entry(action, curr_px):
-                logger.info(f"🧠 TV OPEN 短时重复 [{action}] → 忽略")
-                self._touch_entry_signal_signature(action)
-                return
-            # 空仓仅 OPEN：按档位直接开 + TP123 + VPS宽硬止损 + 雷达待命
-            self._touch_entry_signal_signature(action)
-            if not self._ensure_flat_before_open("TV OPEN"):
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title="TV OPEN 中止",
-                    detail="盘口非空，拒绝叠仓",
-                )
-                return
-            curr_px = curr_px or binance_client.get_current_price(self.symbol) or self.tv_price
-            if curr_px > 0:
-                self._open_position(action, curr_px, payload=payload)
-            return
-
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
+        # 空仓短时重复开仓信号：忽略（无仓可刷，耐心等下次有效 TV）
+        if self._verify_flat() and self._is_duplicate_flat_entry(action, curr_px):
+            logger.info(f"🧠 空仓短时重复开仓 TV [{action}] → 忽略，干净等待下次")
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_smart_same_dir_decision,
+                    side=action,
+                    decision="skip_duplicate_flat",
+                    live_entry=0.0,
+                    tv_price=self.tv_price,
+                    diff_pct=0.0,
+                    threshold_pct=SAME_DIR_MIN_SPREAD_PCT,
+                    open_regime=self.regime,
+                    tv_regime=self.regime,
+                    open_atr=self._last_entry_signal.get("atr", self.current_atr),
+                    tv_atr=self.current_atr,
+                    qty=0.0,
+                    verify_note="空仓重复开仓信号已忽略 | 状态干净等待",
+                )
+            except Exception:
+                pass
+            self._touch_entry_signal_signature(action)
+            return
+
         pos = self._get_active_position()
-
-        if pos and pos["size"] > 0:
-            current_side = pos["side"]
-            if current_side != action:
-                logger.info(f"⚡ 反方向 [{action}] vs 实盘 [{current_side}] → 先平后开")
-                self._full_reentry(action, "反方向指令到达，触发【先平后开】原子对冲换防")
-                self._touch_entry_signal_signature(action)
-                return
-
-            if self._radar_in_progress():
-                logger.info(
-                    f"📡 雷达进行中 · 新 TV {action} → 一律先平后开"
-                )
-                self._full_reentry(
-                    action,
-                    "雷达进行中·新TV到达·先平后开换防"
-                    "（净场后挂TP123+VPS宽硬止损+雷达待命）",
-                )
-                self._touch_entry_signal_signature(action)
-                return
-
-            mode, diff_pct, reason, open_atr, tv_atr = self._same_direction_entry_mode(action, pos, curr_px)
-            if mode == "REFRESH_TP":
-                self._same_direction_refresh_tp(action, pos, curr_px, diff_pct, open_atr, tv_atr)
-                self._touch_entry_signal_signature(action)
-                return
-
-            close_msgs = {
-                "atr_changed": f"同向 TV ATR 变化 ({open_atr:.2f}→{tv_atr:.2f})，触发【先平后开】刷新仓位",
-                "regime_changed": "同向 TV 档位变化，触发【先平后开】重入",
-                "spread_ok": f"同向理论价差 {diff_pct:.3f}% 达标，触发【先平后开】重入",
-            }
-            self._report_smart_reentry(action, pos, diff_pct, reason, open_atr, tv_atr)
-            self._full_reentry(action, close_msgs.get(reason, "同方向刷新仓位，触发【先平后开】重入"))
-            self._touch_entry_signal_signature(action)
-            return
-
-        if self._is_duplicate_flat_entry(action, curr_px):
-            ref_px = curr_px or self.tv_price or 1.0
-            diff_pct = self._entry_price_diff_pct(
-                self._last_entry_signal.get("tv_price", 0), self.tv_price, ref_px,
-            )
-            logger.info(f"🧠 空仓短时重复同向 TV [{action}] → 忽略开仓")
-            self._call_dingtalk(
-                dingtalk.report_smart_same_dir_decision,
-                side=action,
-                decision="skip_duplicate_flat",
-                live_entry=0.0,
-                tv_price=self.tv_price,
-                diff_pct=diff_pct,
-                threshold_pct=SAME_DIR_MIN_SPREAD_PCT,
-                open_regime=self.regime,
-                tv_regime=self.regime,
-                open_atr=self._last_entry_signal.get("atr", self.current_atr),
-                tv_atr=self.current_atr,
-                qty=0.0,
-                verify_note=(
-                    f"5分钟内重复 {action} | ATR {self.current_atr:.2f} 未变 | "
-                    f"TV {self.tv_price:.2f} 价差 {diff_pct:.3f}% | 档位 R{self.regime} | 未重复下单"
-                ),
-            )
-            self._touch_entry_signal_signature(action)
-            return
-
-        logger.info(f"⚡ 收到建仓信号 [{action}]，空仓极速开仓（按档位直开）")
+        live_sz = float((pos or {}).get("size", 0) or 0)
+        live_side = (pos or {}).get("side")
+        logger.info(
+            f"⚡ TV开仓 [{action}] entry={entry_type} → 铁律先平后开刷新 "
+            f"| 现仓 {live_side or 'FLAT'} {live_sz} {self._unit()}"
+        )
+        self._full_reentry(
+            action,
+            "TV开仓·一律先平后开刷新仓位（有仓先平；无仓净挂单再开）",
+        )
         self._touch_entry_signal_signature(action)
-        if not self._ensure_flat_before_open("空仓开仓"):
-            self._call_dingtalk(
-                dingtalk.report_system_alert,
-                title="开仓中止 · 盘口非空",
-                detail=f"收到 TV {action} 但实盘仍有残留持仓，已拒绝叠仓开仓",
-            )
-            return
-        curr_px = curr_px or binance_client.get_current_price(self.symbol)
-        if curr_px > 0:
-            self._open_position(action, curr_px, payload=payload)
 
     def _open_position(self, action, curr_px, payload=None):
         payload = payload or {}

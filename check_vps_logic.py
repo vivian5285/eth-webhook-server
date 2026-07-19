@@ -169,11 +169,12 @@ def audit_module1_symbol(a: Audit):
         and "_annotate_close_open_chain" in sup,
     )
     a.check(
-        "1.5h 空仓OPEN轻量直开+禁穿价TP秒平",
-        "盘口已空，按档位直接开仓" in sup
+        "1.5h 开仓铁律一律先平后开+禁穿价TP",
+        "TV开仓·一律先平后开刷新仓位" in sup
+        and "_full_reentry" in sup
         and "_tp_is_marketable" in sup
         and "_sanitize_open_tps_vs_mark" in sup
-        and "开仓宽限内跳过裁减" in sup
+        and "_sterile_flat_gate" in sup
         and "钉钉去重跳过" in sup,
     )
     a.check(
@@ -454,7 +455,7 @@ def audit_module4_radar(a: Audit):
         and "_radar_work_urgent" in sup
         and "markPrice@1s" in _read(os.path.join(ROOT, "binance_client.py"))
         and "_radar_in_progress" in sup
-        and "雷达进行中·新TV到达" in sup
+        and "TV开仓·一律先平后开刷新仓位" in sup
         and "禁止先 scope=radar 撤再挂" in sup,
     )
     a.check(
@@ -623,7 +624,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.75.0-force-close-then-open" in readme
+        "v13.76.0-always-close-then-open" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -637,7 +638,7 @@ def audit_readme_consistency(a: Audit):
         and "穿价" in readme
         and "适度追随" in readme
         and "mark@1s" in readme
-        and "强制先平后开" in readme,
+        and "一律先平后开" in readme,
     )
     a.check(
         "README 雷达分档激活",
