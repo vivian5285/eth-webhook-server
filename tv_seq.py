@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 TV Webhook 时序：bar_index + seq
-- 排序：先 bar_index 升序，同 bar 内 seq 升序（严禁按到达时间）
+- 排序：先 bar_index 升序；同 bar 内 **动作优先**（CLOSE → UPDATE → OPEN），再 seq
+- 铁律：同 bar / 同秒同时收到开仓+平仓时，**永远先平后开**，最终状态必须是开仓
+  （即使 TV 把 OPEN 标成 seq=1、CLOSE 标成 seq=2，也强制重排；禁止先开后秒平）
+- 同秒聚合：同 bar 首包到达后短暂 settle，攒齐同时发出的开/平再冲刷
 - 幂等：symbol_bar_index_seq_action（Redis 优先，否则本地文件 TTL）
-- 同 K 线 TV 只可能：① 单独 CLOSE  ② CLOSE(seq小)+OPEN(seq大)=先平后开
-- 永远不会「先开后平」两条同时发；Pine 日志 1-2-1 是覆盖语义，VPS 收包为平小开大
 - CLOSE 后释放开仓幂等键，允许同 bar 再开（刷新仓位）
 - 乱序：前置 seq 缺失时暂存等待，超时报警后按已有顺序执行
 """
@@ -23,8 +24,48 @@ logger = logging.getLogger(__name__)
 
 SEQ_IDEMPOTENCY_TTL_SEC = int(os.getenv("TV_SEQ_IDEMPOTENCY_TTL", "86400"))  # 24h
 SEQ_PENDING_WAIT_SEC = float(os.getenv("TV_SEQ_PENDING_WAIT", "3.0"))  # 2~5s 窗口
+# 同 bar 首包后短停，等待同秒并发的开/平警报聚齐（再强制先平后开）
+SAME_BAR_SETTLE_SEC = float(os.getenv("TV_SAME_BAR_SETTLE", "1.0"))
 SEQ_STORE_FILE = os.getenv("TV_SEQ_STORE_FILE", "logs/tv_seq_idempotency.json")
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+
+def action_exec_rank(action: Any) -> int:
+    """
+    同 bar 执行优先级：平仓永远最先，开仓永远最后。
+    0=CLOSE*  1=UPDATE*  2=LONG/SHORT开仓  3=其它
+    """
+    a = str(action or "").strip().upper()
+    if a.startswith("CLOSE"):
+        return 0
+    if a.startswith("UPDATE"):
+        return 1
+    if a in ("LONG", "SHORT"):
+        return 2
+    return 3
+
+
+def is_close_action(action: Any) -> bool:
+    return str(action or "").strip().upper().startswith("CLOSE")
+
+
+def is_open_action(action: Any) -> bool:
+    return str(action or "").strip().upper() in ("LONG", "SHORT")
+
+
+def sort_same_bar_items(items: List[Tuple[int, dict]]) -> List[Tuple[int, dict]]:
+    """同 bar：(动作优先级, seq, 到达序) — 保证开平并存时永远先平后开。"""
+    decorated = []
+    for i, (sq, pl) in enumerate(items or []):
+        act = (pl or {}).get("action", "")
+        decorated.append((action_exec_rank(act), int(sq or 0), i, sq, pl))
+    decorated.sort(key=lambda t: (t[0], t[1], t[2]))
+    return [(sq, pl) for _, _, _, sq, pl in decorated]
+
+
+def bar_has_close_and_open(items: List[Tuple[int, dict]]) -> bool:
+    acts = [str((pl or {}).get("action", "") or "").strip().upper() for _, pl in (items or [])]
+    return any(a.startswith("CLOSE") for a in acts) and any(a in ("LONG", "SHORT") for a in acts)
 
 
 def make_seq_key(symbol: str, bar_index: int, seq: int, action: str = "") -> str:
@@ -305,20 +346,24 @@ class TVSeqBuffer:
             items = self._bars[bar]
             if not items:
                 continue
-            # 按 seq 升序；同 seq 保持到达顺序（先平后开波次）
-            items_sorted = sorted(items, key=lambda t: (t[0],))
-            seqs = sorted({sq for sq, _ in items_sorted})
+            seqs = sorted({sq for sq, _ in items})
             missing = self._missing_prefix(bar, seqs)
             age = now - float(self._bar_first_ts.get(bar, now))
             wait_done = age >= self.pending_wait
+            # 同秒并发：首包后短停攒齐；已同时有开+平则可提前冲刷
+            coalesced = bar_has_close_and_open(items)
+            settle_done = age >= SAME_BAR_SETTLE_SEC or coalesced
 
             if missing and not wait_done:
+                break
+            if not settle_done:
+                # 尚未攒齐同秒警报 → 暂不冲刷本 bar（也不越过到更新 bar）
                 break
 
             if missing and wait_done:
                 msg = (
                     f"[{self.symbol}] bar_index={bar} 前置 seq 缺失 {missing} "
-                    f"已等待 {age:.1f}s → 按已有 seq 顺序冲刷"
+                    f"已等待 {age:.1f}s → 按先平后开规则冲刷"
                 )
                 logger.error(f"⚠️ {msg}")
                 if self.on_gap_alert:
@@ -326,6 +371,22 @@ class TVSeqBuffer:
                         self.on_gap_alert(msg)
                     except Exception:
                         pass
+
+            # 铁律：同 bar 开平并存 → CLOSE* 永远先于 LONG/SHORT（无视 TV seq 颠倒）
+            items_sorted = sort_same_bar_items(items)
+            if coalesced:
+                chain = " → ".join(
+                    f"seq{sq}:{str((pl or {}).get('action', '')).upper()}"
+                    for sq, pl in items_sorted
+                )
+                raw_by_seq = " | ".join(
+                    f"seq{sq}:{str((pl or {}).get('action', '')).upper()}"
+                    for sq, pl in sorted(items, key=lambda t: (t[0],))
+                )
+                logger.info(
+                    f"📬 [{self.symbol}] 同bar强制先平后开 bar={bar} | "
+                    f"TV原始(按seq) {raw_by_seq} → 执行序 {chain}"
+                )
 
             for sq, pl in items_sorted:
                 out.append(pl)
@@ -349,7 +410,10 @@ class TVSeqBuffer:
 
 
 def sort_webhooks_by_seq(messages: List[dict]) -> List[dict]:
-    """批处理工具：先 bar_index，再 seq；无时序的保持相对顺序垫后。"""
+    """
+    批处理工具：先 bar_index；同 bar 内动作优先（CLOSE→OPEN）再 seq。
+    无时序的保持相对顺序垫后。
+    """
     timed = []
     legacy = []
     for i, m in enumerate(messages or []):
@@ -357,6 +421,12 @@ def sort_webhooks_by_seq(messages: List[dict]) -> List[dict]:
         if bi is None:
             legacy.append((i, m))
         else:
-            timed.append((bi, sq, i, m))
-    timed.sort(key=lambda x: (x[0], x[1], x[2]))
-    return [m for _, _, _, m in timed] + [m for _, m in legacy]
+            rank = action_exec_rank((m or {}).get("action"))
+            timed.append((bi, rank, sq, i, m))
+    timed.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    return [m for _, _, _, _, m in timed] + [m for _, m in legacy]
+
+
+def reorder_batch_close_then_open(messages: List[dict]) -> List[dict]:
+    """消费侧二次保险：同 bar 开平并存时重排为永远先平后开。"""
+    return sort_webhooks_by_seq(list(messages or []))

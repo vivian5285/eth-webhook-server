@@ -56,7 +56,13 @@ from webhook_parser import (
     get_radar_trail_step,
     get_radar_breath_atr,
 )
-from tv_seq import TVSeqBuffer, extract_seq_meta
+from tv_seq import (
+    TVSeqBuffer,
+    extract_seq_meta,
+    is_close_action,
+    is_open_action,
+    reorder_batch_close_then_open,
+)
 
 if not os.path.exists('logs'):
     os.makedirs('logs')
@@ -72,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.74.0-ws-radar-first"
+BINANCE_VPS_VERSION = "v13.75.0-force-close-then-open"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -715,7 +721,8 @@ class PositionSupervisorBinance:
                     break
             if not batch:
                 continue
-            # 同 bar 先平后开链：按 seq 已排序；打日志+钉钉标明链
+            # 铁律：同 bar 开+平并存 → 永远先平后开（无视 TV seq 颠倒 / 到达先后）
+            batch = reorder_batch_close_then_open(batch)
             self._annotate_close_open_chain(batch)
             for payload in batch:
                 try:
@@ -735,7 +742,10 @@ class PositionSupervisorBinance:
                         pass
 
     def _annotate_close_open_chain(self, batch):
-        """同K线 CLOSE(seq小)+OPEN(seq大) → 标记先平后开链（TV 永无同时先开后平）。"""
+        """
+        同K线同时开+平 → 标记先平后开链。
+        最终状态必须开仓；TV 即便 OPEN.seq < CLOSE.seq 也已强制重排。
+        """
         by_bar = {}
         for p in batch or []:
             bi, sq = extract_seq_meta(p or {})
@@ -744,49 +754,55 @@ class PositionSupervisorBinance:
             act = str((p or {}).get("action", "")).strip().upper()
             by_bar.setdefault(bi, []).append((sq, act, p))
         for bi, items in by_bar.items():
-            items.sort(key=lambda x: (x[0] or 0))
             acts = [a for _, a, _ in items]
-            has_close = any(a.startswith("CLOSE") for a in acts)
-            has_open = any(a in ("LONG", "SHORT") for a in acts)
+            has_close = any(is_close_action(a) for a in acts)
+            has_open = any(is_open_action(a) for a in acts)
             if not (has_close and has_open):
                 continue
-            # 校验：第一个非旁路应为 CLOSE，最后一个开仓在 CLOSE 之后
-            first_close_sq = next(
-                (sq for sq, a, _ in items if a.startswith("CLOSE")), None
+            exec_chain = " → ".join(f"seq{sq}:{a}" for sq, a, _ in items)
+            tv_by_seq = " → ".join(
+                f"seq{sq}:{a}" for sq, a, _ in sorted(items, key=lambda x: (x[0] or 0))
             )
-            first_open_sq = next(
-                (sq for sq, a, _ in items if a in ("LONG", "SHORT")), None
+            tv_open_sq = next(
+                (sq for sq, a, _ in sorted(items, key=lambda x: (x[0] or 0))
+                 if is_open_action(a)),
+                None,
             )
-            order_ok = (
-                first_close_sq is not None
-                and first_open_sq is not None
-                and int(first_close_sq) < int(first_open_sq)
+            tv_close_sq = next(
+                (sq for sq, a, _ in sorted(items, key=lambda x: (x[0] or 0))
+                 if is_close_action(a)),
+                None,
             )
-            chain = " → ".join(f"seq{sq}:{a}" for sq, a, _ in items)
-            if order_ok:
-                logger.info(
-                    f"📬 [{self.symbol}] 同K线先平后开链 bar={bi} | {chain} | "
-                    f"按seq升序执行（平干净再开）"
+            tv_inverted = (
+                tv_open_sq is not None
+                and tv_close_sq is not None
+                and int(tv_open_sq) < int(tv_close_sq)
+            )
+            logger.info(
+                f"📬 [{self.symbol}] 同K线强制先平后开 bar={bi} | "
+                f"执行序 {exec_chain} | TV按seq {tv_by_seq} | "
+                f"{'已纠正seq颠倒' if tv_inverted else 'seq已合序'} → 平干净再开·终态开仓"
+            )
+            self._close_open_chain_active = True
+            self._last_close_bar_index = int(bi)
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_close_then_open_chain,
+                    phase="同秒开平·强制先平后开",
+                    side=next(
+                        (a for _, a, _ in items if is_open_action(a)), ""
+                    ),
+                    reason=(
+                        f"bar={bi} | 执行 {exec_chain}"
+                        + (f" | TV seq颠倒已纠正({tv_by_seq})" if tv_inverted else "")
+                    ),
+                    bar_index=bi,
+                    chain_same_bar=True,
+                    verify_note="同秒开+平：先无菌平仓，最后执行开仓（终态必须有仓）",
+                    ok=True,
                 )
-                self._close_open_chain_active = True
-                self._last_close_bar_index = int(bi)
-            else:
-                logger.error(
-                    f"⚠️ [{self.symbol}] 同K线信号序异常 bar={bi} | {chain} | "
-                    f"期望 CLOSE.seq < OPEN.seq；仍按seq升序执行并以交易所为准"
-                )
-                try:
-                    self._call_dingtalk(
-                        dingtalk.report_system_alert,
-                        title=f"TV时序异常·期望先平后开 [{self.symbol}]",
-                        detail=f"bar={bi} | {chain} | 期望平仓seq < 开仓seq",
-                        level="警告",
-                        suggestion="已按 seq 升序执行；核对 TV 警报模板",
-                    )
-                except Exception:
-                    pass
-                self._close_open_chain_active = True
-                self._last_close_bar_index = int(bi)
+            except Exception as e:
+                logger.warning(f"先平后开链钉钉失败: {e}")
 
     def _signal_fingerprint(self, payload):
         action = str(payload.get("action", "")).strip().upper()
@@ -2240,7 +2256,8 @@ class PositionSupervisorBinance:
     def _sterile_flat_gate(self, reason_tag="开仓前", force_close=True):
         """
         先平后开无菌闸：撤单 → 平仓 → 再撤单 → 扫孤儿 → 验 qty=0+orders=0。
-        TV 同K线只可能 CLOSE 或 CLOSE(seq小)+OPEN(seq大)；开仓前必须净场。
+        TV 同K线 / 同秒开+平：永远先平后开；开仓前必须净场。
+        即使 TV 把 OPEN 标成更小 seq，缓冲层已强制重排。
         """
         tag = reason_tag or "无菌清场"
         prev_side = self.current_side

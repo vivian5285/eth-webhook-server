@@ -1025,15 +1025,15 @@ def report_system_alert(title, detail, level="紧急", suggestion=""):
 def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
                                  chain_same_bar=False, verify_note="", ok=True):
     """
-    TV 同K线先平后开链（CLOSE.seq < OPEN.seq）钉钉对账。
-    永不出现「先开后平」同时发；VPS 按 seq 升序 + 无菌净场后再开。
+    TV 同K线 / 同秒开+平 → 强制先平后开钉钉对账。
+    终态必须开仓；即使 TV 把 OPEN 标成更小 seq，VPS 也重排后执行。
     """
     phase = str(phase or "").strip() or "进度"
     side_u = str(side or "").strip().upper()
     title = f"📬 先平后开链 · {phase}"
     data = {
         "🧭 时序规则": _g(
-            "同K线只可能：单独CLOSE 或 CLOSE(seq小)+OPEN(seq大)；按 (bar,seq) 升序",
+            "同秒开+平：短停聚合 → 永远先平后开（终态必须有仓）；无视 TV seq 颠倒",
             G_MUTED,
         ),
         "📋 阶段": _g(f"**{phase}**", G_MAIN if ok else G_DEEP),
@@ -1042,11 +1042,11 @@ def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
     if bar_index is not None:
         data["📊 bar_index"] = _g(str(int(bar_index)), G_MUTED)
     if chain_same_bar:
-        data["🔗 同K链"] = _g("是 · 平干净再开（防残留限价成交）", G_LIGHT)
+        data["🔗 同K链"] = _g("是 · 平干净再开（防先开后秒平）", G_LIGHT)
     if side_u:
         data["🎛️ 目标方向"] = _g(side_u, G_LIGHT if side_u == "LONG" else G_DEEP)
     data["✅ 结果"] = _g(
-        "继续" if ok else "已中止·拒绝开仓",
+        "继续·终态开仓" if ok else "已中止·拒绝开仓",
         G_MAIN if ok else G_DEEP,
     )
     if verify_note:

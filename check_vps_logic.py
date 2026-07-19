@@ -123,16 +123,26 @@ def audit_module1_symbol(a: Audit):
         "bar_index" in _read(os.path.join(ROOT, "webhook_parser.py"))
         and "TVSeqBuffer" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
-    from tv_seq import sort_webhooks_by_seq, make_seq_key
+    from tv_seq import sort_webhooks_by_seq, make_seq_key, reorder_batch_close_then_open
     ordered = sort_webhooks_by_seq([
         {"action": "OPEN", "bar_index": 200, "seq": 2},
         {"action": "CLOSE_PROTECT", "bar_index": 200, "seq": 1},
         {"action": "OPEN", "bar_index": 301, "seq": 1},
     ])
     a.check(
-        "1.5d 时序排序 bar→seq",
+        "1.5d 时序排序 bar→动作优先→seq",
         ordered[0].get("seq") == 1 and ordered[0].get("action") == "CLOSE_PROTECT"
         and ordered[1].get("seq") == 2 and ordered[2].get("bar_index") == 301,
+    )
+    # 实盘事故：OPEN seq=1 + CLOSE seq=2 同秒 → 必须先平后开（终态开仓）
+    inverted = reorder_batch_close_then_open([
+        {"action": "LONG", "entry_type": "OPEN", "bar_index": 27096, "seq": 1},
+        {"action": "CLOSE_PROTECT", "bar_index": 27096, "seq": 2},
+    ])
+    a.check(
+        "1.5d2 同秒开平强制先平后开(seq颠倒)",
+        inverted[0].get("action") == "CLOSE_PROTECT"
+        and inverted[1].get("action") == "LONG",
     )
     a.check(
         "1.5e 幂等键含 action",
@@ -143,10 +153,13 @@ def audit_module1_symbol(a: Audit):
     tvseq = _read(os.path.join(ROOT, "tv_seq.py"))
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     a.check(
-        "1.5f 先平后开 CLOSE后释放再开",
+        "1.5f 先平后开 CLOSE后释放再开+同秒聚合",
         "release_bar_for_reentry" in tvseq
         and "_release_tv_seq_after_close" in sup
-        and "CLOSE(seq小)+OPEN(seq大)" in tvseq,
+        and "SAME_BAR_SETTLE_SEC" in tvseq
+        and "reorder_batch_close_then_open" in sup
+        and "action_exec_rank" in tvseq
+        and "永远先平后开" in tvseq,
     )
     a.check(
         "1.5g 无菌空仓闸（仓+单皆零）",
@@ -610,7 +623,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.74.0-ws-radar-first" in readme
+        "v13.75.0-force-close-then-open" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -623,7 +636,8 @@ def audit_readme_consistency(a: Audit):
         and "先平后开" in readme
         and "穿价" in readme
         and "适度追随" in readme
-        and "mark@1s" in readme,
+        and "mark@1s" in readme
+        and "强制先平后开" in readme,
     )
     a.check(
         "README 雷达分档激活",
