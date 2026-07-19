@@ -17,9 +17,10 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v13.26-deploy-tp-radar-realign"
-# 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl 等后缀标签）
-MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+)\.)'
+DEPLOY_SCRIPT_VERSION="v13.76-deploy-pid-health-robust"
+# 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl / always-close-then-open 等后缀）
+# 注意：ERE 不用 (?:...)，否则部分 grep 会报 "? at start of expression"
+MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)'
 
 PORT=5003
 WORKERS=1
@@ -28,6 +29,8 @@ BIND_HOST="0.0.0.0"
 MAX_CLEANUP_ROUNDS=5
 HEALTH_WAIT_SEC=5
 HEALTH_RETRIES=6
+# 启动后轮询 PID/端口（daemon 写 pid 与 fork 有延迟，勿只 sleep 2 就判失败）
+STARTUP_WAIT_SEC=12
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
@@ -192,13 +195,14 @@ install_deps() {
         log_warn "dingtalk.py 可能不是最新版"
     fi
 
-    if grep -qE 'v13\.(4\.(6|7|8)|21|20|10)|Binance Client v13' "$DIR/binance_client.py" 2>/dev/null; then
-        log_ok "binance_client.py 版本已就绪"
+    if grep -qE 'BINANCE_CLIENT_VERSION|v13\.(4[0-9]|[5-9][0-9]?)\.|Binance Client v13' "$DIR/binance_client.py" 2>/dev/null; then
+        CLIENT_VER="$(grep 'BINANCE_CLIENT_VERSION' "$DIR/binance_client.py" 2>/dev/null | head -1 || true)"
+        log_ok "binance_client.py 版本已就绪 (${CLIENT_VER:-ok})"
     else
-        log_warn "binance_client.py 可能不是最新版（建议含 v13.4.x 标识）"
+        log_warn "binance_client.py 可能不是最新版（建议含 BINANCE_CLIENT_VERSION）"
     fi
 
-    if grep -q "\-\-daemon" "$DIR/deploy_binance.sh" 2>/dev/null; then
+    if grep -q -- '--daemon' "$DIR/deploy_binance.sh" 2>/dev/null; then
         log_ok "deploy_binance.sh ${DEPLOY_SCRIPT_VERSION}（daemon 模式）"
     else
         log_fail "deploy_binance.sh 仍是旧版（含 nohup）！请 git pull 最新代码"
@@ -206,20 +210,21 @@ install_deps() {
     fi
 
     python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
-        "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" 2>/dev/null \
+        "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" "$DIR/tv_seq.py" 2>/dev/null \
         && log_ok "核心 Python 文件语法检查通过" \
-        || { log_fail "Python 语法检查失败（请检查 dingtalk.py / supervisor）"; return 1; }
+        || { log_fail "Python 语法检查失败（请检查 dingtalk.py / supervisor / tv_seq）"; return 1; }
 }
 
 get_gunicorn_master_pid() {
     local pid=""
     if [ -f "$PID_FILE" ]; then
-        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+        pid="$(tr -d '[:space:]' < "$PID_FILE" 2>/dev/null || true)"
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "$pid"
             return 0
         fi
     fi
+    # 回退：按端口找监听进程（daemon 时 pid 文件偶发滞后）
     if command -v lsof >/dev/null 2>&1; then
         pid="$(lsof -t -iTCP:"${PORT}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -227,7 +232,28 @@ get_gunicorn_master_pid() {
             return 0
         fi
     fi
+    if command -v ss >/dev/null 2>&1; then
+        pid="$(ss -lptn "sport = :${PORT}" 2>/dev/null \
+            | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+            | head -1 || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+            return 0
+        fi
+    fi
+    # 回退：本目录 gunicorn 进程
+    pid="$(pgrep -f "gunicorn.*${PORT}.*app:app" 2>/dev/null | head -1 || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "$pid"
+        return 0
+    fi
     return 1
+}
+
+http_health_ok() {
+    local body
+    body="$(curl -sf --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "")"
+    echo "$body" | grep -q "binance_webhook"
 }
 
 start_service() {
@@ -240,7 +266,7 @@ start_service() {
     rm -f "$PID_FILE"
 
     # 使用 --daemon 正式脱离终端，避免 nohup & 被 shell 作业控制 SIGKILL
-    gunicorn \
+    if ! gunicorn \
         --workers "$WORKERS" \
         --threads "$THREADS" \
         --timeout 120 \
@@ -253,18 +279,42 @@ start_service() {
         --capture-output \
         --daemon \
         app:app
-
-    sleep 2
-    GUNICORN_PID="$(get_gunicorn_master_pid || true)"
-    if [ -z "$GUNICORN_PID" ]; then
-        log_fail "Gunicorn 启动失败，请检查日志"
-        tail -n 30 "$LOG_FILE" 2>/dev/null || true
-        tail -n 15 "$LOG_DIR/gunicorn_error.log" 2>/dev/null || true
+    then
+        log_fail "gunicorn 命令本身退出非零"
+        tail -n 40 "$LOG_FILE" 2>/dev/null || true
+        tail -n 20 "$LOG_DIR/gunicorn_error.log" 2>/dev/null || true
         return 1
     fi
-    log_ok "Gunicorn 已启动 PID=${GUNICORN_PID}"
-}
 
+    # 轮询最多 ~12s：PID 文件 / 端口 LISTEN / /health —— 任一成功即视为启动成功
+    # （旧逻辑 sleep 2 只查 PID，daemon 写 pid 滞后时会误报失败并 exit，尽管服务已起来）
+    local i=0
+    local max_i=24
+    local found_pid=""
+    while [ "$i" -lt "$max_i" ]; do
+        found_pid="$(get_gunicorn_master_pid || true)"
+        if [ -n "$found_pid" ]; then
+            log_ok "Gunicorn 已启动 PID=${found_pid}（轮询 $((i + 1))/${max_i}）"
+            return 0
+        fi
+        if port_in_use; then
+            found_pid="$(get_gunicorn_master_pid || true)"
+            log_ok "端口 ${PORT} 已监听${found_pid:+ · PID=${found_pid}}（轮询 $((i + 1))/${max_i}）"
+            return 0
+        fi
+        if http_health_ok; then
+            log_ok "GET /health 已通（轮询 $((i + 1))/${max_i}）→ 服务正常"
+            return 0
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    log_fail "Gunicorn 启动失败：${STARTUP_WAIT_SEC}s 内无 PID / 端口 /health"
+    tail -n 40 "$LOG_FILE" 2>/dev/null || true
+    tail -n 20 "$LOG_DIR/gunicorn_error.log" 2>/dev/null || true
+    return 1
+}
 wait_for_listen() {
     log_step "[4/6] 等待端口 ${PORT} 进入 LISTEN 状态..."
     local i=1
@@ -314,7 +364,7 @@ health_check() {
     fi
 
     sleep 2
-    if grep -qE 'v13\.(4\.[6-9]|(?:[5-9]|[1-9][0-9]+))' "$BRAIN_LOG" 2>/dev/null; then
+    if grep -qE 'v13\.(4\.[6-9]|([5-9]|[1-9][0-9]+))' "$BRAIN_LOG" 2>/dev/null; then
         log_ok "VPS 大脑 v13.4.6+ / v13.10+ 已成功加载"
     elif grep -q "币安 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
         log_warn "大脑已加载但版本可能过旧（日志中无 v13.4.6+）"
