@@ -54,6 +54,10 @@ DINGTALK_BATCH_FLUSH_SEC = float(os.getenv("DINGTALK_BATCH_FLUSH_SEC", "6"))
 DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lower() in (
     "1", "true", "yes", "on",
 )
+# 全交易所共用：同类标题短窗只发一条，避免对账/告警连环刷屏
+DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "30"))
+_title_dedup_lock = threading.Lock()
+_title_dedup_ts = {}  # key -> last_send_ts
 
 EXCHANGE_LABEL = "币安 Binance"
 LEVERAGE_LABEL = f"{int(EXCHANGE_LEVERAGE)}x"
@@ -403,9 +407,26 @@ def dingtalk_batch_stats():
 
 
 def send_alert(title, data_dict, header_color=G_TITLE):
-    """对外统一入口：默认攒批；DINGTALK_BATCH_DISABLE=1 则即时发送。"""
+    """对外统一入口：默认攒批；DINGTALK_BATCH_DISABLE=1 则即时发送。同类标题短窗去重。"""
     if not DINGTALK_WEBHOOK and not WECHAT_WEBHOOK:
         return
+    sym = str(_ctx_symbol.get() or "").upper()
+    dedup_key = f"{sym}|{str(title or '')[:96]}"
+    now = time.time()
+    with _title_dedup_lock:
+        dead = [
+            k for k, ts in _title_dedup_ts.items()
+            if now - float(ts) > DINGTALK_TITLE_DEDUP_SEC * 4
+        ]
+        for k in dead:
+            _title_dedup_ts.pop(k, None)
+        last = float(_title_dedup_ts.get(dedup_key) or 0)
+        if last > 0 and now - last < DINGTALK_TITLE_DEDUP_SEC:
+            logger.info(
+                f"🔇 钉钉标题去重({DINGTALK_TITLE_DEDUP_SEC:.0f}s): {str(title)[:72]}"
+            )
+            return
+        _title_dedup_ts[dedup_key] = now
     if DINGTALK_BATCH_DISABLE:
         md = _build_alert_markdown(title, data_dict, header_color)
         _post_with_retry(str(title), md)

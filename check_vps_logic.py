@@ -163,6 +163,14 @@ def audit_module1_symbol(a: Audit):
         and "开仓宽限内跳过裁减" in sup
         and "钉钉去重跳过" in sup,
     )
+    a.check(
+        "1.5i TP成交必须现价/best触及该档",
+        "_live_mark_for_tp_detect" in sup
+        and "每一档都必须价到" in sup
+        and "拒认仅凭减仓记" in sup
+        and "DINGTALK_TITLE_DEDUP_SEC" in dt
+        and "钉钉标题去重" in dt,
+    )
 
     # 钉钉单位不得硬编码黄金为 ETH
     from dingtalk import _resolve_unit, _format_tp_audit, bind_dingtalk_symbol, reset_dingtalk_symbol
@@ -567,7 +575,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.71.0-open-only-no-instant-trim" in readme
+        "v13.72.0-tp-fill-requires-mark" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -578,7 +586,8 @@ def audit_readme_consistency(a: Audit):
         and "价到" in readme
         and "reduceOnly" in readme
         and "先平后开" in readme
-        and "穿价" in readme,
+        and "穿价" in readme
+        and "现价" in readme,
     )
     a.check(
         "README 雷达激活比例",
