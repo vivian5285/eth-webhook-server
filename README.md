@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.88.0-tv-sl-raw`**  
+**当前版本：`v13.88.1-open-sl-failsafe`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,7 +15,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.88.0-tv-sl-raw
+# 期望 version 含 v13.88.1-open-sl-failsafe
 # 期望 leverage: "tv_webhook" · sizing: "TV_RISK_FORMULA"
 # 期望 tv_strategy: v6.9.108
 ```
@@ -1025,4 +1025,4 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.88.0-tv-sl-raw*
+*GEMINI Quant · 双轨智慧雷达 · v13.88.1-open-sl-failsafe*

@@ -517,7 +517,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.88.0-tv-sl-raw" in sup
+        "v13.88.1-open-sl-failsafe" in sup
+        or "v13.88.0-tv-sl-raw" in sup
         or "v13.87.1-drop-legacy-supervisor" in sup
         or "v13.87.0-radar-advance-only" in sup
         or "v13.86.0-tv-leverage-live" in sup
@@ -781,7 +782,8 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 当前版本对齐代码",
         (
-            "v13.88.0-tv-sl-raw" in readme
+            "v13.88.1-open-sl-failsafe" in readme
+            or "v13.88.0-tv-sl-raw" in readme
             or "v13.87.1-drop-legacy-supervisor" in readme
             or "v13.87.0-radar-advance-only" in readme
             or "v13.86.0-tv-leverage-live" in readme
@@ -808,8 +810,9 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.88.0-tv-sl-raw" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.88.1-open-sl-failsafe" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "开仓滞后核实·硬止损失败·撤开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py"))
         and "雷达解除·恢复呼吸空间" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))

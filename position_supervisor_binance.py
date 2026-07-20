@@ -78,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.88.0-tv-sl-raw"
+BINANCE_VPS_VERSION = "v13.88.1-open-sl-failsafe"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -10250,7 +10250,11 @@ class PositionSupervisorBinance:
                     if not hung_late:
                         dingtalk.report_system_alert(
                             f"开仓滞后核实仍无硬止损 [{self.symbol}]",
-                            f"{self.current_side} {late_qty} @ {late_entry:.2f} | 请人工挂止损",
+                            f"{self.current_side} {late_qty} @ {late_entry:.2f} | "
+                            f"将撤销开仓防裸奔（自查7.6）",
+                        )
+                        self._emergency_flatten_naked_open(
+                            "开仓滞后核实·硬止损失败·撤开仓防裸奔",
                         )
                     else:
                         logger.warning(
