@@ -338,7 +338,7 @@ def audit_module2_sizing(a: Audit):
     a.check(
         "2.4c 缺省仓位杠杆为0",
         "self.tv_sizing_leverage = 0.0" in sup
-        and "v13.86.0-tv-leverage-live" in sup,
+        and "v13.87.0-radar-advance-only" in sup,
     )
     legacy = _read(os.path.join(ROOT, "position_supervisor.py"))
     a.check(
@@ -505,7 +505,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.86.0-tv-leverage-live" in sup
+        "v13.87.0-radar-advance-only" in sup
+        or "v13.86.0-tv-leverage-live" in sup
         or "v13.85.1-tv-lev-dingtalk" in sup
         or "v13.85.0-no-hard-cap" in sup
         or "v13.84.0-tv-strategy-sync" in sup
@@ -666,8 +667,20 @@ def audit_module4_radar(a: Audit):
         "4.2c 旧阶段紧追ATR表已清空",
         not RADAR_STAGE_ATR_MULT,
     )
+    from webhook_parser import format_radar_activation_ratios_label
     a.check(
-        "4.2d 生产雷达用适度追随",
+        "4.2d 钉钉比例文案最新",
+        format_radar_activation_ratios_label() == "R1=50%/R2=60%/R3=70%/R4=80%",
+    )
+    a.check(
+        "4.2e 禁止旧85%文案与雷达解除标题",
+        "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "雷达解除·恢复呼吸空间" not in _read(
+            os.path.join(ROOT, "position_supervisor_binance.py")
+        ),
+    )
+    a.check(
+        "4.2f 生产雷达用适度追随",
         "_radar_breath_atr" in sup
         and "_radar_trail_step" in sup
         and "RADAR_TRAIL_MIN_INTERVAL_SEC" in sup
@@ -754,7 +767,8 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 当前版本对齐代码",
         (
-            "v13.86.0-tv-leverage-live" in readme
+            "v13.87.0-radar-advance-only" in readme
+            or "v13.86.0-tv-leverage-live" in readme
             or "v13.85.1-tv-lev-dingtalk" in readme
             or "v13.85.0-no-hard-cap" in readme
         )
@@ -778,9 +792,12 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.86.0-tv-leverage-live" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.87.0-radar-advance-only" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py")),
+        and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py"))
+        and "雷达解除·恢复呼吸空间" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "format_radar_activation_ratios_label" in _read(os.path.join(ROOT, "webhook_parser.py")),
     )
     a.check(
         "README 雷达分档激活",

@@ -233,6 +233,15 @@ def get_radar_activation_ratio(regime=None):
     return float(RADAR_ACTIVATION_RATIO_BY_REGIME[r])
 
 
+def format_radar_activation_ratios_label():
+    """钉钉/日志统一文案：禁止再写旧 R1=85%…R4=70%。"""
+    parts = [
+        f"R{r}={int(round(pct * 100))}%"
+        for r, pct in sorted(RADAR_ACTIVATION_RATIO_BY_REGIME.items())
+    ]
+    return "/".join(parts)  # R1=50%/R2=60%/R3=70%/R4=80%
+
+
 def get_radar_trail_step(regime=None):
     """TP1→TP2 / TP2→TP3 段内推升步进比例（越大越少动，防撤挂死循环）。"""
     r = int(regime or 3)

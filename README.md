@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.86.0-tv-leverage-live`**  
+**当前版本：`v13.87.0-radar-advance-only`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,7 +15,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.86.0-tv-leverage-live
+# 期望 version 含 v13.87.0-radar-advance-only
 # 期望 leverage: "tv_webhook" · sizing: "TV_RISK_FORMULA"
 # 期望 tv_strategy: v6.9.108
 ```
@@ -740,7 +740,16 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ## 版本演进
 
-### 近期详细更新记录（v13.67 → v13.86）
+### 近期详细更新记录（v13.67 → v13.87）
+
+#### v13.87.0 · `radar-advance-only`
+
+**主题：雷达交棒后只前进不回撤；钉钉/文案统一最新激活比例 R1=50%/R2=60%/R3=70%/R4=80%**
+
+- 废除「雷达解除·恢复呼吸空间」：清伪TP 与回撤止损解耦；已交棒绝不把 SL 拉回 `tv_sl`
+- 重启/接管：价格回撤激活线也不撤已交棒雷达
+- 空单追随只允许止损下移（锁利前进）
+- 文案禁止再写旧 `R1=85%…R4=70%`
 
 #### v13.86.0 · `tv-leverage-live`
 
@@ -935,6 +944,7 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 | 版本 | 要点 |
 |------|------|
+| **v13.87.0** | **雷达交棒后只前进不回撤；钉钉统一R1=50%/R2=60%/R3=70%/R4=80%** |
 | **v13.86.0** | **set_leverage=TV leverage；废除固定25x；遗留大脑同步清保证金%** |
 | **v13.85.0** | **删除单笔硬上限 maxNotional/50000；公式=min(理论,杠杆)×ratio** |
 | **v13.84.0** | **对齐终极策略：雷达50/60/70/80%；废除VPS%宽止损；禁TP1补挂死循环；硬止损失败撤开仓；钉钉去重加强** |
@@ -997,4 +1007,4 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.86.0-tv-leverage-live*
+*GEMINI Quant · 双轨智慧雷达 · v13.87.0-radar-advance-only*

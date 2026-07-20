@@ -8,7 +8,7 @@
 |---|------|----------|
 | 1 | **TV 只发信号**；仓位 sizing 由 VPS；**硬止损严格按 TV `tv_sl` 挂单** | `app.py` 网关不入队决策；`position_supervisor_*.py` |
 | 2 | TV `tv_sl` **即实盘硬止损挂单价**（多空）；禁止 VPS% 覆盖 | `_tv_hard_sl_target()` · `_sync_exchange_stop()` |
-| 3 | **雷达适度追随**按档激活（R1=85%…R4=70%）或 TP1 成交后启动 | `_radar_ready_to_handoff()` · `_process_radar_trailing` |
+| 3 | **雷达适度追随**按档激活（R1=50%/R2=60%/R3=70%/R4=80%）或 TP1 成交后启动；**交棒后只前进不回撤** | `_radar_ready_to_handoff()` · `_process_radar_trailing` |
 | 4 | **ETH / XAU** 独立状态，互不串单 | `symbol_config.py` · `SUPERVISORS` 按品种 |
 | 5 | 计算基于 **账户总权益**（marginBalance），非可用余额 | `get_total_equity()` · `_snapshot_sizing_principal()` |
 
