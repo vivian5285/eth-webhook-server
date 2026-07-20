@@ -589,7 +589,8 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
         if tv_price > 0 else "未知"
     )
-    lev = leverage or DEFAULT_LEVERAGE
+    lev = float(leverage or DEFAULT_LEVERAGE or 0)
+    lev_label = f"{int(round(lev))}x" if lev > 0 else LEVERAGE_LABEL
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or "").upper() or "ETHUSDT"
     act_ratio = float(
@@ -605,7 +606,15 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
             G_LIGHT,
         ),
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
-        "📦 开单头寸": _g(f"**{qty}** {unit} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", G_ACCENT),
+        "📦 开单头寸": _g(
+            f"**{qty}** {unit} ({EXCHANGE_LABEL} TV仓位杠杆 **{lev_label}**"
+            f"·API{LEVERAGE_LABEL})",
+            G_ACCENT,
+        ),
+        "📐 TV杠杆": _g(
+            f"**{lev_label}**（仓位公式用）| 交易所API设杠杆 {LEVERAGE_LABEL}（仅set_leverage）",
+            G_MUTED,
+        ),
         "🕸️ 止盈布防比对": _g(
             _format_tp_audit(tp_audit, tv_tps, unit_label=unit, symbol=sym)
             if tp_audit else _format_tp_compare(tp_pxs, tv_tps, unit_label=unit, symbol=sym),

@@ -486,7 +486,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.85.0-no-hard-cap" in sup
+        "v13.85.1-tv-lev-dingtalk" in sup
+        or "v13.85.0-no-hard-cap" in sup
         or "v13.84.0-tv-strategy-sync" in sup
         or "v13.82.0-tv-risk-sizing" in sup,
     )
@@ -732,7 +733,10 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.85.0-no-hard-cap" in readme
+        (
+            "v13.85.1-tv-lev-dingtalk" in readme
+            or "v13.85.0-no-hard-cap" in readme
+        )
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "TV_RISK_FORMULA" in _read(os.path.join(ROOT, "webhook_parser.py"))
@@ -753,8 +757,9 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.85.0-no-hard-cap" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+        and "v13.85.1-tv-lev-dingtalk" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "TV仓位杠杆" in _read(os.path.join(ROOT, "dingtalk.py")),
     )
     a.check(
         "README 雷达分档激活",

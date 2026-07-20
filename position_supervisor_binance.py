@@ -79,7 +79,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.85.0-no-hard-cap"
+BINANCE_VPS_VERSION = "v13.85.1-tv-lev-dingtalk"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -10168,7 +10168,11 @@ class PositionSupervisorBinance:
                     or 0
                 ) / 100.0,
                 margin_usdt=float((sizing_meta or {}).get("order_amount", 0) or 0),
-                leverage=EXCHANGE_LEVERAGE,
+                leverage=float(
+                    (sizing_meta or {}).get("leverage")
+                    or getattr(self, "tv_sizing_leverage", 0)
+                    or EXCHANGE_LEVERAGE
+                ),
                 vps_sizing_meta=sizing_meta,
                 tv_field_sources=getattr(self, "_last_tv_field_sources", {}),
                 symbol=self.symbol,
