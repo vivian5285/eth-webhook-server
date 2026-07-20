@@ -25,9 +25,6 @@ from webhook_parser import (
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
     get_radar_activation_ratio,
-    VPS_RISK_PCT,
-    VPS_REGIME_SCALE,
-    VPS_MARGIN_LEVERAGE,
     EXCHANGE_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -513,42 +510,37 @@ def _format_tp_audit(audit, tv_tps=None, unit_label=None, symbol=None):
 
 
 def _format_vps_sizing_basis(principal, meta=None, leverage=None):
-    """VPS OPEN 仓位预算公式 — 管理员一眼看懂"""
+    """TV 唯一仓位公式 — 管理员一眼看懂"""
     meta = meta or {}
-    eff = float(meta.get("effective_risk_pct", VPS_RISK_PCT) or VPS_RISK_PCT)
-    regime = int(meta.get("regime", 3) or 3)
-    scale = float(meta.get("regime_scale", VPS_REGIME_SCALE.get(regime, 0.95)) or 0.95)
-    margin = float(meta.get("margin", 0) or 0)
+    risk = float(meta.get("risk_pct") or meta.get("effective_risk_pct") or 0)
+    ratio = float(meta.get("qty_ratio") or 1.0)
     order_amount = float(meta.get("order_amount", 0) or meta.get("position_value", 0) or 0)
-    lev = int(round(float(
-        leverage or meta.get("leverage") or EXCHANGE_LEVERAGE
-    )))
-    lines = [
-        f"本金快照 **{float(principal):.2f}** USDT × **{VPS_RISK_PCT:.0f}%** "
-        f"× **{VPS_MARGIN_LEVERAGE}** × R{regime}系数 **{scale:.2f}** "
-        f"= 保证金 **{margin:.2f}** USDT" if margin > 0 else
-        f"本金快照 **{float(principal):.2f}** USDT × **{VPS_RISK_PCT:.0f}%** "
-        f"× **{VPS_MARGIN_LEVERAGE}** × R{regime}系数 **{scale:.2f}**",
-    ]
-    if order_amount > 0:
-        lines.append(
-            f"→ 保证金 **{margin:.2f}** × **{lev}x** 杠杆 = 头寸 **{order_amount:.2f}** USDT"
-            if margin > 0 else
-            f"→ 保证金 × **{lev}x** 杠杆 = 头寸 **{order_amount:.2f}** USDT"
-        )
+    lev = float(leverage or meta.get("leverage") or 0)
     stop_dist = float(meta.get("stop_dist", 0) or 0)
+    risk_amt = float(meta.get("risk_amount") or meta.get("margin") or 0)
+    lines = [
+        f"本金 **{float(principal):.2f}** U × risk_pct **{risk:.3f}%** "
+        f"= 风险金额 **{risk_amt:.2f}** U",
+    ]
     if stop_dist > 0:
-        lines.append(f"（TV tv_sl 距离 **{stop_dist:.2f}**，**仅日志参考，永不挂盘**）")
+        lines.append(
+            f"÷ 止损距离 **{stop_dist:.2f}** → 理论仓 · "
+            f"min(理论, 权益×{lev:.0f}x/价, 50000/价) × ratio **{ratio:.2f}**"
+        )
+    if order_amount > 0:
+        lines.append(f"→ 名义约 **{order_amount:.2f}** USDT（bind={meta.get('bind', '?')}）")
+    if stop_dist > 0:
+        lines.append(f"（TV tv_sl 距离 **{stop_dist:.2f}**，实盘按此挂硬止损）")
     return "\n".join(lines)
 
 
 def _format_sizing_basis(principal, margin_pct, leverage, margin_usdt=None):
-    """兼容旧调用 — 实为 VPS 有效风险%"""
+    """兼容旧调用 — 现按 TV risk_pct 展示"""
     if margin_usdt is None:
         margin_usdt = float(principal or 0) * float(margin_pct or 0)
     return (
-        f"本金快照 **{float(principal):.2f}** USDT × VPS有效风险 **{float(margin_pct or 0):.1%}** "
-        f"× **{leverage}x** 杠杆 = **{margin_usdt:.2f}** USDT 下单额"
+        f"本金快照 **{float(principal):.2f}** USDT × TV risk **{float(margin_pct or 0):.2%}** "
+        f"· lev **{leverage}** → 风险额 **{margin_usdt:.2f}** USDT"
     )
 
 
@@ -563,8 +555,8 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
         "📸 快照时机": _g(reason or "本金重置", G_MAIN),
         "💰 合约本金": _g(f"**{float(principal):.2f}** USDT（walletBalance，非可用保证金）", G_ACCENT),
         "📌 口径说明": _g(
-            "VPS 自主风控：本金 × VPS_RISK_PCT% × REGIME_SCALE × GLOBAL_SCALE × 杠杆 ÷ |price-tv_sl|；"
-            "完全忽略 TV risk_pct；禁止用 available / 剩余保证金",
+            "唯一公式：风险金额/止损距离 → min(理论, 权益×TV_leverage/价, 50000/价)×qty_ratio；"
+            "直接用 TV risk_pct/qty_ratio/leverage，禁止旧保证金%逻辑",
             G_MUTED,
         ),
     }
@@ -703,7 +695,7 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
         "✅ 判定": _g("**价到 + 限价消失 = 成交**（非头寸微漂）", G_MAIN),
         "⏳ 后续": _g(wait_txt, G_LIGHT),
         "🛡️ 三轨": _g(
-            "TP=reduceOnly | 雷达保本+VPS宽硬止损=closePosition单槽 · 互不抢份额",
+            "TP=reduceOnly | 雷达保本+TV硬止损=closePosition单槽 · 互不抢份额",
             G_MUTED,
         ),
         "📡 实盘核查": _verify_line(
@@ -815,7 +807,7 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
             )
         elif exit_source == "vps_hard_sl":
             data["📡 说明"] = _g(
-                "由 VPS 宽硬止损触发（雷达尚未交棒）", G_DEEP,
+                "由 TV 硬止损触发（雷达尚未交棒）", G_DEEP,
             )
     if close_action:
         data["📡 TV动作"] = _g(close_action, G_MUTED)
@@ -956,7 +948,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "📡 最新 TV 信号": _g(f"{tv_ref or '无日志记录'} ({tv_align_txt})", G_MUTED),
         "⚖️ 仓位核对": _g(qty_align_txt, G_MAIN if qty_aligned else G_ACCENT),
         "📈 盈亏态势": _g(pnl_label or "核查中", G_ACCENT if "浮亏" in (pnl_label or "") else G_MAIN),
-        "🛡️ VPS宽硬止损": _g(shield_status or "核查中", G_MAIN),
+        "🛡️ TV硬止损": _g(shield_status or "核查中", G_MAIN),
         "🕸️ TP123 比例审计": _g(
             _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tv_tps, tv_tps),
             G_ACCENT,
@@ -1189,12 +1181,12 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
             G_LIGHT,
         )
     if tv_sl and float(tv_sl) > 0:
-        data["📡 TV参考tv_sl"] = _g(f"`{float(tv_sl):.2f}` (仅参考)", G_MUTED)
+        data["🛡️ TV硬止损"] = _g(f"`{float(tv_sl):.2f}` (盘口挂单价)", G_MAIN)
     if vps_hard_sl_note:
         data["🛡️ 止损分工"] = _g(vps_hard_sl_note, G_LIGHT)
     if act == "CLOSE_STOPLOSS":
         data["⚡ TV第一指令"] = _g(
-            "收到 CLOSE_STOPLOSS → **立即市价全平**（优先于 VPS 宽止损挂单）",
+            "收到 CLOSE_STOPLOSS → **立即市价全平**（优先于 TV 硬止损挂单）",
             G_ACCENT,
         )
     if et == ENTRY_TYPE_OPEN and vps_sizing_meta:
@@ -1205,12 +1197,13 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     elif risk_pct and float(risk_pct) > 0:
         data["📐 比例参数"] = _g(
             format_tv_sizing_note(
-                risk_pct, EXCHANGE_LEVERAGE, qty_ratio, regime=regime,
+                risk_pct, leverage or EXCHANGE_LEVERAGE, qty_ratio, regime=regime,
             ),
             G_MUTED,
         )
-    data["⚙️ 实盘杠杆"] = _g(
-        f"VPS **{EXCHANGE_LEVERAGE}x**（忽略 TV payload leverage 字段）",
+    lev_show = float(leverage or 0)
+    data["⚙️ 仓位杠杆"] = _g(
+        f"TV sizing **{lev_show:.0f}x** · API set_leverage **{EXCHANGE_LEVERAGE}x**",
         G_MUTED,
     )
     if reason:
@@ -1222,23 +1215,22 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
 def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
                          radar_active=False, radar_sl=None, regime=3,
                          verify_note="", verified=True):
-    """UPDATE_SL：仅记录 TV 参考；盘口硬止损永远是 VPS 宽价，不挂 TV 紧价。"""
+    """UPDATE_SL：按 TV tv_sl 同步盘口硬止损（多空一致）。"""
     tv_sl = float(tv_sl or 0)
     exchange_stop = float(exchange_stop or 0)
+    hung = exchange_stop if exchange_stop > 0 else tv_sl
     action_txt = (
-        f"TV UPDATE_SL → 仅记录参考 `{tv_sl:.2f}` · "
-        f"盘口保持 VPS宽硬止损"
-        + (f" @ `{exchange_stop:.2f}`" if exchange_stop > 0 else "")
-        + "（永不挂 TV 紧止损）"
+        f"TV UPDATE_SL → 盘口硬止损改为 TV `{tv_sl:.2f}`"
+        + (f" · 已核实 @{hung:.2f}" if hung > 0 else "")
     )
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📊 开仓档位": get_regime_name(regime),
-        "📡 TV参考 tv_sl": _g(f"**{tv_sl:.2f}**（仅日志）", G_MUTED),
-        "🛡️ 盘口VPS硬止损": _g(
-            f"**{exchange_stop:.2f}** USDT" if exchange_stop > 0 else "由军师按开仓档位维护",
+        "🛡️ TV硬止损": _g(f"**{tv_sl:.2f}** USDT", G_MAIN),
+        "📌 盘口STOP": _g(
+            f"**{exchange_stop:.2f}** USDT" if exchange_stop > 0 else "同步中/待核实",
             G_MAIN,
         ),
         "📡 雷达状态": _g(
@@ -1249,13 +1241,13 @@ def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
         "✅ 风控动作": _g(action_txt, G_ACCENT),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | UPDATE_SL 仅更新参考，未改盘口硬止损",
+            f"{VERIFY_TAG} | UPDATE_SL 已按 TV tv_sl 改挂盘口硬止损",
             f"⏳ {VERIFY_DELAY_MARK}",
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("📡 TV参考止损 · 已记录（未改盘口）", data, G_TITLE)
+    send_alert("🛡️ TV硬止损 · UPDATE_SL 已同步盘口", data, G_TITLE)
 
 
 def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,

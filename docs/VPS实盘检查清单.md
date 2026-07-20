@@ -6,8 +6,8 @@
 
 | # | 原则 | 代码落点 |
 |---|------|----------|
-| 1 | **TV 只发信号**，开仓/硬止损/仓位计算均由 VPS 自主 | `app.py` 网关不入队决策；`position_supervisor_*.py` |
-| 2 | TV `tv_sl` **仅供日志参考**，绝不作为实盘硬止损挂单 | `_refresh_vps_hard_sl()` · `tv_sl_ref` 字段 |
+| 1 | **TV 只发信号**；仓位 sizing 由 VPS；**硬止损严格按 TV `tv_sl` 挂单** | `app.py` 网关不入队决策；`position_supervisor_*.py` |
+| 2 | TV `tv_sl` **即实盘硬止损挂单价**（多空）；禁止 VPS% 覆盖 | `_tv_hard_sl_target()` · `_sync_exchange_stop()` |
 | 3 | **雷达适度追随**按档激活（R1=85%…R4=70%）或 TP1 成交后启动 | `_radar_ready_to_handoff()` · `_process_radar_trailing` |
 | 4 | **ETH / XAU** 独立状态，互不串单 | `symbol_config.py` · `SUPERVISORS` 按品种 |
 | 5 | 计算基于 **账户总权益**（marginBalance），非可用余额 | `get_total_equity()` · `_snapshot_sizing_principal()` |
@@ -43,28 +43,43 @@
 
 ---
 
-## 模块二：开单计算（档位权重 + 杠杆）
+## 模块二：开单计算（TV 唯一公式）
 
 | # | 检查项 | 状态 | 说明 |
 |---|--------|------|------|
 | 2.1 | 总权益实时获取 | ✅ | `get_total_equity()` |
-| 2.2 | R1~R4 保证金系数 | ✅ | `VPS_MARGIN_PCT_BY_REGIME` |
-| 2.3 | 品种独立系数 | ✅ | 各 supervisor 独立 `sizing_principal` |
-| 2.4 | 杠杆 25x | ✅ | `EXCHANGE_LEVERAGE = 25` |
-| 2.5 | 名义 = 保证金 × 杠杆 | ✅ | `compute_vps_open_qty()` |
-| 2.6 | qty = 名义 ÷ 开仓价（步进取整） | ✅ | `symbol_config` qty_step |
-| 2.7 | Σ名义 ≤ 总权益 × 13 | ✅ | `check_total_notional_cap()` |
+| 2.2 | TV `risk_pct` / `qty_ratio` / `leverage` | ✅ | 直接用，不重算 |
+| 2.3 | 止损距离 = \|price − tv_sl\| | ✅ | `_normalize_stop_dist` |
+| 2.4 | API 杠杆 25x | ✅ | `EXCHANGE_LEVERAGE`（仅 set_leverage） |
+| 2.5 | 最终量 = min(理论, 杠杆限制, 硬上限)×qty_ratio | ✅ | `compute_tv_order_qty()` |
+| 2.6 | 精度 floor×1000/1000（最小 0.001） | ✅ | `_floor_qty_3dp` |
+| 2.7 | 单笔硬上限 50000U / price | ✅ | `HARD_NOTIONAL_CAP` |
+| 2.8 | Σ名义 ≤ 总权益 × 13 | ✅ | `check_total_notional_cap()` |
 
-### 档位保证金系数（占总权益 · 短周期 ETH45m / XAU50m）
+### 唯一公式
 
-| 档位 | 系数 | 1000U 示例名义 |
-|------|------|----------------|
-| R1 | 8% | 80×25 = **2000U**（2.0x） |
-| R2 | 14% | 140×25 = **3500U**（3.5x） |
-| R3 | 20% | 200×25 = **5000U**（5.0x） |
-| R4 | 26% | 260×25 = **6500U**（6.5x） |
+```
+止损距离 = |price - tv_sl|
+风险金额 = 账户权益 × (risk_pct / 100)
+理论仓位 = 风险金额 / 止损距离
+杠杆限制 = 账户权益 × leverage / price
+硬上限   = 50000 / price
+最终下单量 = min(理论, 杠杆限制, 硬上限) × qty_ratio
+精度     = floor(最终 × 1000) / 1000
+```
 
-双品种 R4+R4 = 13000U = 13×本金（踩线允许）。
+**禁止**旧「档位保证金% × 25x」路径；缺 `risk_pct`/`leverage` 时拒绝下单。
+
+### 参考表（本金 1000U · ETH≈1892 · qty_ratio=1.0）
+
+| 档位 | risk_pct | 止损距离 | 下单量 | 名义约 |
+|------|----------|----------|--------|--------|
+| R1 | 0.81% | 12.08 | 0.67 ETH | 1268U |
+| R2 | 1.35% | 14.09 | 0.96 ETH | 1817U |
+| R3 | 2.03% | 14.02 | 1.45 ETH | 2744U |
+| R4 | 2.70~3.38% | 15.94 | 1.69~2.12 ETH | 3200~4011U |
+
+本金线性：下单量(任意) = 下单量(1000U) × (本金/1000)。加仓同公式，`qty_ratio` 约 0.3~0.5。
 
 ---
 
@@ -72,13 +87,13 @@
 
 | # | 检查项 | 状态 | 说明 |
 |---|--------|------|------|
-| 3.1 | 硬止损 = 开仓价 × 档位% | ✅ | `compute_vps_hard_sl()` |
+| 3.1 | 硬止损 = TV `tv_sl` | ✅ | `_tv_hard_sl_target()` |
 | 3.2 | R1~R4 宽止损比例 | ✅ | `VPS_HARD_SL_PCT` |
 | 3.3~3.4 | 多/空方向公式 | ✅ | 开多减 / 开空加 |
 | 3.5 | 开仓成交后立即挂 **closePosition STOP**（不占 reduceOnly，避免撤掉 TP123） | ✅ | `_sync_exchange_stop()` · `use_stop_limit=False` |
 | 3.5b | TV 空 TP/价 → ATR 强制补全 TP123；`expected=0` 不假齐；终检无止损钉钉 | ✅ | v13.64 `_protect_and_monitor` |
 | 3.6 | 硬止损只收紧不放松 | ✅ | 雷达阶段前不动；雷达后只升不降 |
-| 3.7 | TV `tv_sl` 仅日志 | ✅ | 存入 `tv_sl_ref`，挂单用 `tv_sl`(VPS值) |
+| 3.7 | TV `tv_sl` 挂盘 | ✅ | `tv_sl`=`tv_sl_ref`=TV价，盘口 STOP 对齐 |
 
 | 档位 | 硬止损% | @1800 示例 |
 |------|---------|------------|
@@ -112,7 +127,7 @@
      或 TP1 已成交（账本消费 / WS 提示）
 理想保本线距现价足够安全 → for_handoff 挂保本 STOP 核实 → 交棒
 交棒成功 → _radar_handoff_done=True → 钉钉 [ETHUSDT]/[XAUUSDT]
-否则 → 保留 VPS 宽硬止损，雷达继续待命
+否则 → 保留 TV 硬止损，雷达继续待命
 WS mark 达激活线 / TP1成交 → 脉冲哨兵 1.5s 快轮询锁利
 随后 TP1→TP2→TP3 路程推进 → 阶段2~5 逐级锁利（只升不降）
 硬止损与雷达 = closePosition 单槽；TP123 = reduceOnly（不抢份额）
@@ -164,7 +179,7 @@ UPDATE_SL → 仅更新 TV 参考，不用 TV tv_sl 挂单
 | TP 成交 | `report_tp_fill` | ✅ |
 | 全平收网 | `report_supervisor_close` | ✅ **平仓归因** radar_be/tp3/vps_hard_sl |
 | 敞口超标拒绝 | `report_system_alert` | ✅ |
-| TV 紧止损忽略 | 日志 `tv_sl_ref` 对比 | ✅ 不单独钉钉 |
+| UPDATE_SL | 按 TV 改挂盘口硬止损 | ✅ 钉钉同步播报 |
 
 > **归因铁律**：是否雷达平仓看 `_radar_handoff_done`，**不以** `_radar_activation_notified`（钉钉是否发出）为准。
 
@@ -193,7 +208,7 @@ UPDATE_SL → 仅更新 TV 参考，不用 TV tv_sl 挂单
 
 ### 场景 4：TV 紧止损被忽略
 
-1. TV `tv_sl` 1910（紧）→ 记入 `tv_sl_ref`
+1. TV `tv_sl` 1910 → 写入账本并挂盘口硬止损
 2. VPS 挂 1700（宽）→ 实盘以 VPS 为准
 
 ---

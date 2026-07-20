@@ -218,95 +218,154 @@ def audit_module1_symbol(a: Audit):
 
 
 def audit_module2_sizing(a: Audit):
-    a.section("模块二 · 开单计算")
+    a.section("模块二 · 开单计算（TV 唯一公式）")
     from webhook_parser import (
-        VPS_MARGIN_PCT_BY_REGIME,
+        HARD_NOTIONAL_CAP,
         EXCHANGE_LEVERAGE,
         MAX_TOTAL_NOTIONAL_MULT,
+        compute_tv_order_qty,
         compute_vps_open_qty,
         check_total_notional_cap,
     )
 
-    expected_margin = {1: 0.08, 2: 0.14, 3: 0.20, 4: 0.26}
-    for r, pct in expected_margin.items():
-        a.check(f"2.2 R{r} 保证金 {pct*100:.0f}%", VPS_MARGIN_PCT_BY_REGIME.get(r) == pct)
+    a.check("2.1 硬上限 50000U", HARD_NOTIONAL_CAP == 50000.0)
+    a.check("2.4 API 杠杆 25x", EXCHANGE_LEVERAGE == 25)
+    a.check("2.7 13x 组合硬顶", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    a.check("2.4 杠杆 25x", EXCHANGE_LEVERAGE == 25)
-    a.check("2.7 13x 硬顶", MAX_TOTAL_NOTIONAL_MULT == 13.0)
-
-    qty, meta = compute_vps_open_qty(1000, 1800, 1700, regime=3, leverage=25)
-    exp_margin = 1000 * 0.20
-    exp_notional = exp_margin * 25
-    a.check(
-        "2.5~2.6 R3@1000U/1800",
-        abs(meta["margin"] - exp_margin) < 1 and abs(meta["position_value"] - exp_notional) < 1,
-        f"margin={meta.get('margin')} notional={meta.get('position_value')} qty={qty}",
+    # 表：本金 1000 / ETH 1892.43 · Regime1 risk 0.81% / SL距 12.08 → 0.67
+    qty1, meta1 = compute_tv_order_qty(
+        1000, risk_pct=0.81, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 12.08, regime=1,
     )
-    a.check("2.5c R3 ETH qty≈2.78", abs(qty - 2.777) < 0.01, f"qty={qty}")
-
-    qty4, meta4 = compute_vps_open_qty(1000, 1800, 1650, regime=4, leverage=25)
     a.check(
-        "2.5 R4 名义 6.5x",
-        abs(meta4["position_value"] - 6500) < 1,
-        f"notional={meta4.get('position_value')} qty={qty4}",
+        "2.5 R1@1000U → 0.67 ETH",
+        abs(qty1 - 0.67) < 0.005 and abs(meta1["stop_dist"] - 12.08) < 0.01,
+        f"qty={qty1} stop={meta1.get('stop_dist')} bind={meta1.get('bind')}",
     )
-    a.check("2.5d R4 ETH qty≈3.61", abs(qty4 - 3.611) < 0.01, f"qty={qty4}")
 
-    qty_xau, meta_xau = compute_vps_open_qty(1000, 2500, 2430, regime=1, leverage=25)
+    # Regime2: risk 1.35% / SL 14.09 → 0.96
+    qty2, meta2 = compute_tv_order_qty(
+        1000, risk_pct=1.35, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 14.09, regime=2,
+    )
     a.check(
-        "2.5e XAU R1@2500 qty≈0.80",
-        abs(meta_xau["position_value"] - 2000) < 1 and abs(qty_xau - 0.80) < 0.01,
-        f"notional={meta_xau.get('position_value')} qty={qty_xau}",
+        "2.5 R2@1000U → 0.96 ETH",
+        abs(qty2 - 0.96) < 0.01,
+        f"qty={qty2} theoretical={meta2.get('theoretical_qty')}",
+    )
+
+    # Regime3: risk 2.03% / SL 14.02 → 1.45
+    qty3, meta3 = compute_tv_order_qty(
+        1000, risk_pct=2.03, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
+    )
+    a.check(
+        "2.5 R3@1000U → 1.45 ETH",
+        abs(qty3 - 1.45) < 0.01,
+        f"qty={qty3} notional={meta3.get('order_amount')}",
+    )
+
+    # Regime4 下沿: risk 2.70% / SL 15.94 → 1.69
+    qty4lo, _ = compute_tv_order_qty(
+        1000, risk_pct=2.70, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
+    )
+    qty4hi, _ = compute_tv_order_qty(
+        1000, risk_pct=3.38, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
+    )
+    a.check("2.5 R4下沿 → 1.69", abs(qty4lo - 1.69) < 0.01, f"qty={qty4lo}")
+    a.check("2.5 R4上沿 → 2.12", abs(qty4hi - 2.12) < 0.01, f"qty={qty4hi}")
+
+    # 本金线性换算：5000U R3 → 7.25
+    qty5k, _ = compute_tv_order_qty(
+        5000, risk_pct=2.03, leverage=25, qty_ratio=1.0,
+        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
+    )
+    a.check("2.6 5000U R3 → 7.25", abs(qty5k - 7.25) < 0.02, f"qty={qty5k}")
+
+    # 加仓 ratio 0.5 → 首仓一半
+    qty_add, meta_add = compute_tv_order_qty(
+        1000, risk_pct=2.03, leverage=25, qty_ratio=0.5,
+        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
+    )
+    a.check(
+        "2.6b 加仓 ratio0.5 → ~0.72",
+        abs(qty_add - 0.72) < 0.02,
+        f"qty={qty_add} ratio={meta_add.get('qty_ratio')}",
+    )
+
+    # 缺 risk_pct → 0（禁止旧逻辑回退）
+    qty0, meta0 = compute_vps_open_qty(1000, 1892.43, 1880, regime=3, leverage=25)
+    a.check("2.8 无 risk_pct 拒绝下单", qty0 == 0 and meta0.get("error"), f"meta={meta0}")
+
+    # 硬上限绑定：极大 risk 时被 50000/price 卡住
+    qty_cap, meta_cap = compute_tv_order_qty(
+        1000, risk_pct=40.0, leverage=100, qty_ratio=1.0,
+        price=2000, tv_sl=1990, regime=4,
+    )
+    a.check(
+        "2.9 硬上限 50000/price",
+        meta_cap.get("bind") == "hard_cap" and abs(qty_cap - 25.0) < 0.01,
+        f"qty={qty_cap} bind={meta_cap.get('bind')}",
     )
 
     ok, cap_meta = check_total_notional_cap(1000, 6500, 6500, mult=13)
-    a.check("双品种 R4 踩线 13x", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
+    a.check("双品种 13x 踩线", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
     ok2, _ = check_total_notional_cap(1000, 7000, 6500, mult=13)
     a.check("超标拒绝", not ok2)
 
     bc = _read(os.path.join(ROOT, "binance_client.py"))
     a.check("2.1 get_total_equity", "def get_total_equity" in bc)
+    wp = _read(os.path.join(ROOT, "webhook_parser.py"))
+    a.check("禁止旧保证金%表参与计算", "sizing_mode\": \"TV_RISK_FORMULA\"" in wp or "TV_RISK_FORMULA" in wp)
+    a.check("旧 VPS_MARGIN 已清空", "VPS_MARGIN_PCT_BY_REGIME = {}" in wp)
 
 
 def audit_module3_hard_sl(a: Audit):
-    a.section("模块三 · VPS 硬止损")
+    a.section("模块三 · TV 硬止损（实盘挂单）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
 
+    # 旧 VPS% 表仍保留作 sizing/对照，但禁止作为实盘挂单价
     expected = {1: 0.0278, 2: 0.0389, 3: 0.0556, 4: 0.0833}
     for r, pct in expected.items():
-        a.check(f"3.2 R{r} 硬止损 {pct*100:.2f}%", abs(VPS_HARD_SL_PCT[r] - pct) < 0.0001)
+        a.check(f"3.2 旧VPS%表 R{r}={pct*100:.2f}%(仅对照)", abs(VPS_HARD_SL_PCT[r] - pct) < 0.0001)
 
-    # ETH@1800 绝对距离对照表（用户规格：50/70/100/150U）
     eth_abs = {1: 50.0, 2: 70.0, 3: 100.0, 4: 150.0}
     for r, dist in eth_abs.items():
         sl = compute_vps_hard_sl("SHORT", 1800, regime=r)
         a.check(
-            f"3.2b ETH@1800 R{r} ≈ +{dist:.0f}U",
+            f"3.2b 旧对照 ETH@1800 R{r} ≈ +{dist:.0f}U",
             abs(sl - (1800 + dist)) < 0.2,
             f"sl={sl}",
         )
 
-    # XAU 与 ETH 同比例：R3@4003.94 → 4226.56（非 R4 4337）
     xau_r3 = compute_vps_hard_sl("SHORT", 4003.94, regime=3)
     xau_r4 = compute_vps_hard_sl("SHORT", 4003.94, regime=4)
-    a.check("3.2c XAU R3@4003.94≈4226.56", abs(xau_r3 - 4226.56) < 0.05, f"sl={xau_r3}")
-    a.check("3.2d XAU R4@4003.94≈4337.47", abs(xau_r4 - 4337.47) < 0.05, f"sl={xau_r4}")
+    a.check("3.2c 旧对照 XAU R3", abs(xau_r3 - 4226.56) < 0.05, f"sl={xau_r3}")
+    a.check("3.2d 旧对照 XAU R4", abs(xau_r4 - 4337.47) < 0.05, f"sl={xau_r4}")
     a.check("3.2e ETH/XAU 共用同一 PCT 表", "ETH / XAU 同一套" in _read(os.path.join(ROOT, "webhook_parser.py")))
 
     sl_long = compute_vps_hard_sl("LONG", 1800, regime=3)
-    a.check("3.3 做多 R3@1800", abs(sl_long - 1800 * (1 - 0.0556)) < 1, f"sl={sl_long}")
+    a.check("3.3 旧对照做多 R3@1800", abs(sl_long - 1800 * (1 - 0.0556)) < 1, f"sl={sl_long}")
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-    a.check("3.7 tv_sl_ref 参考", "tv_sl_ref" in sup and "仅作参考" in sup)
+    a.check(
+        "3.7 实盘硬止损=TV tv_sl",
+        "_tv_hard_sl_target" in sup
+        and "禁止再用开仓价×档位%" in sup
+        and "TV硬止损" in sup
+        and "拒绝挂 TV 紧止损" not in sup,
+    )
     a.check("3.5 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
     a.check(
         "3.8 硬止损 closePosition 不抢 TP 额度",
         "use_stop_limit=False" in sup and "不占 reduceOnly" in sup,
     )
     a.check(
-        "3.9 全平勿误标 TV tv_sl",
-        "触碰硬止损平仓（TV tv_sl）" not in sup
-        and "触碰硬止损平仓（VPS宽止损）" in sup,
+        "3.9 全平归因 TV硬止损",
+        "触碰硬止损平仓（TV硬止损）" in sup
+        and "触碰硬止损平仓（VPS宽止损）" not in sup,
     )
     a.check(
         "3.10 开仓禁止 recover 核武连环撤",
@@ -318,14 +377,14 @@ def audit_module3_hard_sl(a: Audit):
         and "_nuclear_backoff_remaining" in sup
         and "_defense_anomaly_is_severe" in sup
         and "idempotent_unified" in sup
-        and "即使 force 也禁止撤挂" in sup
-        and "把唯一 VPS 止损当成" in sup
-        and "exclude_shield=False" in sup,
+        and "exclude_shield=False" in sup
+        and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
     )
     a.check(
-        "3.11 账本消毒拒 TV 紧止损",
+        "3.11 账本消毒对齐 TV",
         "_sanitize_vps_hard_sl_ledger" in sup
-        and "_is_exchange_stop_acceptable_as_vps_floor" in sup,
+        and "_is_exchange_stop_acceptable_as_vps_floor" in sup
+        and "不得用 VPS% 覆盖" in sup,
     )
     a.check(
         "3.12 重启禁止方向背离自动强平",
@@ -337,17 +396,19 @@ def audit_module3_hard_sl(a: Audit):
         and "get_radar_activation_ratio" in _read(os.path.join(ROOT, "webhook_parser.py")),
     )
     a.check(
-        "3.14 硬止损实时算 VPS 不读污染账本",
+        "3.14 TV硬止损允许挂盘（废除紧价拒绝）",
         "_looks_like_tv_tight_stop" in sup
-        and "拒绝挂 TV 紧止损" in sup
+        and "恒返回 False" in sup
+        and "拒绝挂 TV 紧止损" not in sup
         and "_is_valid_radar_sl" in sup,
     )
     a.check(
-        "3.15 SHORT 禁止 min 挂 TV 紧价",
-        "拒绝合并伪雷达/TV紧止损" in sup,
+        "3.15 合并底线=TV硬止损",
+        "仅挂 TV硬止损" in sup
+        and "拒绝合并伪雷达/TV紧止损" not in sup,
     )
     a.check(
-        "3.16 硬止损锁定 open_regime",
+        "3.16 硬止损锁定 open_regime(雷达/TP用)",
         "_resolve_hard_sl_regime" in sup
         and "_lock_open_regime_from_sources" in sup
         and "_resolve_tv_open_regime_for_position" in sup
@@ -359,9 +420,10 @@ def audit_module3_hard_sl(a: Audit):
         or "open_regime\": open_r" in sup,
     )
     a.check(
-        "3.18 重启先锁档再挂硬止损",
+        "3.18 重启先锁档再挂TV硬止损",
         "_lock_open_regime_from_sources" in sup
-        and "重启强制VPS宽硬止损" in sup,
+        and "重启强制TV硬止损" in sup
+        and "重启强制VPS宽硬止损" not in sup,
     )
     a.check(
         "3.19 雷达激活线：ensure闸门",
@@ -385,9 +447,9 @@ def audit_module3_hard_sl(a: Audit):
         and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
     )
     a.check(
-        "3.22 别档VPS宽价不作TV紧价",
+        "3.22 旧VPS%档位匹配已废弃",
         "_matches_any_vps_regime_stop" in sup
-        and "不是 TV 紧价" in sup,
+        and "旧 VPS% 档位匹配已废弃" in sup,
     )
     a.check(
         "3.23 重启锁按品种隔离",
@@ -418,6 +480,16 @@ def audit_module3_hard_sl(a: Audit):
         float(empty_tp.get("tv_tp1") or 0) > 1800
         and float(empty_tp.get("tv_tp3") or 0) > float(empty_tp.get("tv_tp1") or 0),
         str(empty_tp),
+    )
+    a.check(
+        "3.26 UPDATE_SL 必须同步盘口",
+        "UPDATE_SL·按TV硬止损重挂" in sup
+        and "UPDATE_SL 已按 TV 硬止损执行" in sup
+        and "UPDATE_SL 已忽略盘口动作" not in sup,
+    )
+    a.check(
+        "3.27 版本含 TV 仓位公式",
+        "v13.82.0-tv-risk-sizing" in sup,
     )
 
 
@@ -459,7 +531,7 @@ def audit_module4_radar(a: Audit):
     )
     a.check(
         "4.10 开仓滞后核实补挂",
-        "开仓滞后核实" in sup and "开仓滞后核实·强制VPS硬止损" in sup,
+        "开仓滞后核实" in sup and "开仓滞后核实·强制TV硬止损" in sup,
     )
     a.check(
         "4.11 WS mark 脉冲交棒",
@@ -619,14 +691,14 @@ def audit_module7_dingtalk(a: Audit):
         and "report_position_qty_reconcile" in dt,
     )
     a.check(
-        "钉钉不宣称挂 TV硬止损",
-        "send_alert(\"🛡️ TV硬止损" not in dt
-        and "TV硬止损 · UPDATE_SL" not in dt
-        and "VPS宽硬止损" in dt,
+        "钉钉宣称挂 TV硬止损",
+        "TV硬止损 · UPDATE_SL 已同步盘口" in dt
+        and "VPS宽硬止损" not in dt,
     )
     a.check(
-        "UPDATE_SL 仅记录参考",
-        "永不挂 TV 紧止损" in dt or "未改盘口硬止损" in dt,
+        "UPDATE_SL 同步盘口",
+        "已按 TV tv_sl 改挂盘口硬止损" in dt
+        and "永不挂 TV 紧止损" not in dt,
     )
     a.check(
         "钉钉档位对账字段",
@@ -637,19 +709,23 @@ def audit_module7_dingtalk(a: Audit):
 def audit_readme_consistency(a: Audit):
     a.section("README 一致性")
     readme = _read(os.path.join(ROOT, "README.md"))
-    if "exclusively 来自 TV `tv_sl`" in readme:
-        a.check("README 硬止损描述", False, "仍写 tv_sl 为唯一来源，应改为 VPS 自主")
-    else:
-        a.check("README 硬止损描述", "VPS 自主" in readme or "开仓价百分比" in readme)
+    a.check(
+        "README 硬止损描述",
+        "TV 硬止损" in readme
+        and "tv_sl" in readme
+        and ("VPS 自主硬止损（开仓价" not in readme),
+    )
     a.check("README 检查清单链接", "check_vps_logic" in readme or "VPS实盘检查清单" in readme)
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.80.0-open-tv-defense-bind" in readme
+        "v13.82.0-tv-risk-sizing" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
-        and "8/14/20/26%" in readme
+        and "TV_RISK_FORMULA" in _read(os.path.join(ROOT, "webhook_parser.py"))
+        and "risk_pct" in readme
+        and "HARD_NOTIONAL_CAP" in _read(os.path.join(ROOT, "webhook_parser.py"))
         and "85%" in readme
         and "70%" in readme
         and "exit_source" in readme
@@ -675,7 +751,7 @@ def audit_readme_consistency(a: Audit):
         "85%" in readme and "80%" in readme and "75%" in readme and "70%" in readme
         and "1.0 ATR" in readme,
     )
-    a.check("README UPDATE_SL 仅参考", "仅更新" in readme and "tv_sl_ref" in readme)
+    a.check("README UPDATE_SL 同步盘口", "UPDATE_SL" in readme and "按 TV" in readme)
 
 
 def main():

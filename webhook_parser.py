@@ -10,37 +10,25 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.9.108"
 
-# 交易所实盘杠杆（API set_leverage / 头寸计算 / 钉钉展示）
+# 交易所 API 杠杆（set_leverage）；仓位计算杠杆以 TV 下发的 leverage 为准
 EXCHANGE_LEVERAGE = 25
-# 兼容旧名：双品种文档改为按档位保证金%直接算，不再用「3%×5×scale」
+# 兼容旧导入名（已不再参与仓位计算）
 VPS_MARGIN_LEVERAGE = 1
-
-# VPS 自主风控（与 TV risk_pct / qty_ratio 完全脱钩）
-# 双品种文档：各品种独立按账户总本金 × 档位保证金系数
-# 短周期（ETH45m / XAU50m）：R1~R4 = 8%/14%/20%/26% → 名义 2.0/3.5/5.0/6.5x 本金
-VPS_MARGIN_PCT_BY_REGIME = {
-    1: 0.08,   # 8%  → 名义 2.0x 本金
-    2: 0.14,   # 14% → 名义 3.5x 本金
-    3: 0.20,   # 20% → 名义 5.0x 本金
-    4: 0.26,   # 26% → 名义 6.5x 本金
-}
-# 兼容旧计算路径 / 钉钉展示
-VPS_RISK_PCT = 26.0  # 展示用「最大档」；实际按 VPS_MARGIN_PCT_BY_REGIME
+VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
-VPS_REGIME_SCALE = {
-    1: VPS_MARGIN_PCT_BY_REGIME[1] / VPS_MARGIN_PCT_BY_REGIME[4],
-    2: VPS_MARGIN_PCT_BY_REGIME[2] / VPS_MARGIN_PCT_BY_REGIME[4],
-    3: VPS_MARGIN_PCT_BY_REGIME[3] / VPS_MARGIN_PCT_BY_REGIME[4],
-    4: 1.0,
-}
-MAX_RISK_PCT = 30.0  # 须 ≥ 最大档 26%，避免展示/元数据被误截断
-MIN_RISK_PCT = 1.0
+VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+VPS_MARGIN_PCT_BY_REGIME = {}  # 已废弃：禁止再用档位保证金%算仓
+
+# 单笔名义硬上限（USDT）→ 硬上限仓位 = HARD_NOTIONAL_CAP / price
+HARD_NOTIONAL_CAP = 50000.0
+MAX_RISK_PCT = 50.0
+MIN_RISK_PCT = 0.01
 MAX_POSITION_SIZE = 9999.0
 MIN_QTY_DEFAULT = 0.001
-# 双品种总名义敞口硬顶：Σ notional ≤ TOTAL_EQUITY × 13（双 R4 踩线）
+# 双品种总名义敞口硬顶：Σ notional ≤ TOTAL_EQUITY × 13
 MAX_TOTAL_NOTIONAL_MULT = 13.0
 
-# TV v6.9.93 动态加仓：TV qty_ratio 优先；缺失时按档位默认值
+# TV 动态加仓：qty_ratio 优先；缺失时按档位默认（仅作缺省，不另算仓）
 ADD_QTY_RATIO_BY_REGIME = {
     1: 0.0,   # R1 不加仓
     2: 0.3,
@@ -115,7 +103,7 @@ EXIT_SOURCE_UNKNOWN = "unknown"
 
 EXIT_SOURCE_LABELS = {
     EXIT_SOURCE_RADAR_BE: "📡 雷达保本止损",
-    EXIT_SOURCE_VPS_HARD_SL: "🛡️ VPS宽硬止损",
+    EXIT_SOURCE_VPS_HARD_SL: "🛡️ TV硬止损",
     EXIT_SOURCE_TP3: "🏆 TP3止盈收网",
     EXIT_SOURCE_TV_CLOSE: "📺 TV信号全平",
     EXIT_SOURCE_TV_PROTECT: "🛡️ TV风控拦截",
@@ -293,8 +281,8 @@ def compute_vps_hard_sl_distance(entry, regime, extra_relax=None, atr=None):
 
 def compute_vps_hard_sl(side, entry, atr=None, regime=None, extra_relax=None):
     """
-    VPS 自主硬止损价 = 开仓价 ± 开仓价×档位%。
-    TV tv_sl 仅作参考，不直接使用；atr 废弃兼容。
+    旧 VPS% 宽止损对照价 = 开仓价 ± 开仓价×档位%（仅 sizing/日志对照，不挂盘）。
+    实盘硬止损一律按 TV tv_sl；atr 废弃兼容。
     """
     entry = float(entry or 0)
     if entry <= 0:
@@ -349,7 +337,7 @@ def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_
 
 
 def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
-    """TV 紧止损 vs VPS 宽止损对比（实盘挂单价以 VPS 为准）"""
+    """TV 硬止损 vs 旧 VPS% 对照（实盘挂单价以 TV tv_sl 为准）"""
     entry = float(entry or 0)
     if entry <= 0:
         return ""
@@ -369,7 +357,7 @@ def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra
     pct = get_vps_hard_sl_params(regime)["pct_label"]
     return (
         f"TV紧止损 `{ref:.2f}` 距入场 {tv_dist:.2f}U · "
-        f"VPS宽止损 `{vps_sl:.2f}` 距入场 {vps_dist:.2f}U(开仓×{pct}) · "
+        f"旧VPS%对照 `{vps_sl:.2f}` 距入场 {vps_dist:.2f}U(开仓×{pct}) · 实盘挂TV "
         f"**实盘挂单价=VPS** · {wider} | CLOSE_STOPLOSS=TV第一指令立即全平"
     )
 
@@ -453,35 +441,8 @@ def normalize_entry_type(val, default=ENTRY_TYPE_OPEN):
     return default
 
 
-def get_vps_margin_pct(regime):
-    """档位保证金占账户总本金比例（双品种文档）。"""
-    regime = int(regime or 3)
-    return float(VPS_MARGIN_PCT_BY_REGIME.get(regime, VPS_MARGIN_PCT_BY_REGIME[3]))
-
-
-def compute_vps_effective_risk(regime, global_scale=None):
-    """有效「保证金占本金%」= 档位系数 × GLOBAL_SCALE（已非旧 3%×5×scale）。"""
-    regime = int(regime or 3)
-    margin_pct = get_vps_margin_pct(regime)
-    gs = float(global_scale if global_scale is not None else VPS_GLOBAL_SCALE)
-    raw = margin_pct * 100.0 * gs
-    capped = raw > MAX_RISK_PCT
-    final = min(max(raw, MIN_RISK_PCT), MAX_RISK_PCT)
-    regime_scale = float(VPS_REGIME_SCALE.get(regime, 1.0))
-    return final, {
-        "regime": regime,
-        "vps_risk_pct": round(margin_pct * 100.0, 4),
-        "margin_pct": margin_pct,
-        "regime_scale": regime_scale,
-        "global_scale": gs,
-        "effective_risk_pct": round(final, 4),
-        "raw_risk_pct": round(raw, 4),
-        "risk_capped": capped,
-        "sizing_mode": "MARGIN_PCT_BY_REGIME",
-    }
-
-
 def _normalize_stop_dist(price, tv_sl):
+    """止损距离 = |price - tv_sl|；非法时用价格 0.1% 兜底，避免除零。"""
     price = float(price or 0)
     tv_sl = float(tv_sl or 0)
     stop_dist = abs(price - tv_sl)
@@ -492,73 +453,118 @@ def _normalize_stop_dist(price, tv_sl):
     return stop_dist
 
 
-def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
-                         global_scale=None, qty_step=0.001, min_qty=None,
-                         face_value=None, max_position=None):
+def _floor_qty_3dp(qty, min_qty=None):
+    """精度：floor(qty × 1000) / 1000，最小 min_qty（默认 0.001）。"""
+    min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
+    qty = float(qty or 0)
+    if qty <= 0:
+        return 0.0
+    qty = math.floor(qty * 1000.0) / 1000.0
+    if qty < min_qty:
+        return 0.0
+    return qty
+
+
+def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
+                         qty_step=0.001, min_qty=None, face_value=None, regime=None,
+                         max_position=None):
     """
-    首次开仓 OPEN（双品种文档 · 短周期权重）：
-    保证金 = TOTAL_EQUITY × 档位保证金系数（R1=8%…R4=26%）
-    名义头寸 = 保证金 × EXCHANGE_LEVERAGE(25)
-    qty = 名义 / price（按交易所步进取整）
+    唯一仓位公式（TV 下发 risk_pct / qty_ratio / leverage，VPS 不重算）：
+
+      止损距离 = |price - tv_sl|
+      风险金额 = 账户权益 × (risk_pct / 100)
+      理论仓位 = 风险金额 / 止损距离
+      杠杆限制 = 账户权益 × leverage / price
+      硬上限   = HARD_NOTIONAL_CAP / price   （默认 50000U）
+      最终下单量 = min(理论仓位, 杠杆限制, 硬上限) × qty_ratio
+      精度     = floor(最终 × 1000) / 1000（最小 0.001）
     """
     principal = float(principal or 0)
     price = float(price or 0)
-    leverage = float(leverage if leverage is not None else EXCHANGE_LEVERAGE)
+    risk_pct = float(risk_pct or 0)
+    leverage = float(leverage or 0)
+    qty_ratio = float(qty_ratio if qty_ratio is not None else 1.0)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
+    stop_dist = _normalize_stop_dist(price, tv_sl)
 
-    effective_risk, risk_meta = compute_vps_effective_risk(regime, global_scale)
-    margin_pct = float(risk_meta.get("margin_pct") or get_vps_margin_pct(regime))
     meta = {
         "principal": principal,
         "price": price,
         "tv_sl": float(tv_sl or 0),
+        "stop_dist": round(stop_dist, 4),
+        "risk_pct": round(risk_pct, 4),
+        "effective_risk_pct": round(risk_pct, 4),
         "leverage": leverage,
-        "margin_leverage": VPS_MARGIN_LEVERAGE,
-        "sizing_mode": "VPS_OPEN_MARGIN_PCT",
-        **risk_meta,
+        "qty_ratio": qty_ratio,
+        "regime": int(regime or 3),
+        "hard_notional_cap": HARD_NOTIONAL_CAP,
+        "sizing_mode": "TV_RISK_FORMULA",
+        "max_add_times": get_regime_max_add_times(regime),
     }
-    if principal <= 0 or price <= 0 or leverage <= 0:
+    if principal <= 0 or price <= 0 or risk_pct <= 0 or leverage <= 0 or qty_ratio <= 0:
         meta["error"] = "invalid_inputs"
         return 0.0, meta
 
-    margin = principal * margin_pct
-    position_value = margin * leverage
-    meta["margin"] = round(margin, 2)
-    meta["margin_pct"] = margin_pct
-    meta["order_amount"] = round(position_value, 2)
-    meta["position_value"] = round(position_value, 2)
-    meta["numerator_usdt"] = round(position_value, 2)
-    meta["effective_risk_pct"] = round(margin_pct * 100.0, 4)
-    if tv_sl and price:
-        meta["stop_dist"] = round(_normalize_stop_dist(price, tv_sl), 2)
+    risk_amount = principal * (risk_pct / 100.0)
+    theoretical = risk_amount / stop_dist
+    lev_limit = principal * leverage / price
+    hard_cap = HARD_NOTIONAL_CAP / price
+    capped = min(theoretical, lev_limit, hard_cap, max_position)
+    raw_qty = capped * qty_ratio
+
+    meta["risk_amount"] = round(risk_amount, 4)
+    meta["theoretical_qty"] = round(theoretical, 6)
+    meta["leverage_limit_qty"] = round(lev_limit, 6)
+    meta["hard_cap_qty"] = round(hard_cap, 6)
+    meta["capped_qty"] = round(capped, 6)
+    meta["raw_qty"] = round(raw_qty, 6)
+    meta["order_amount"] = round(raw_qty * price, 2)
+    meta["position_value"] = meta["order_amount"]
+    meta["margin"] = round(risk_amount, 4)
+    meta["bind"] = (
+        "theoretical" if capped == theoretical else
+        "leverage" if capped == lev_limit else
+        "hard_cap" if capped == hard_cap else "max_position"
+    )
 
     if face_value and float(face_value) > 0:
         fv = float(face_value)
-        raw_qty = position_value / price / fv
-        max_qty = (principal * leverage) / (fv * price)
-        qty = max(1, int(raw_qty))
-        qty = min(qty, max(1, int(max_qty)), int(max_position))
-        meta["max_qty"] = int(max_qty)
-        meta["raw_qty"] = round(raw_qty, 4)
+        qty = max(1, int(math.floor(raw_qty / fv)))
+        qty = min(qty, int(max_position))
         meta["base_qty"] = float(qty)
-        meta["capped"] = qty >= int(max_qty)
+        meta["capped"] = meta["bind"] != "theoretical"
         return float(qty), meta
 
-    raw_qty = position_value / price
-    max_qty = min((principal * leverage) / price, max_position)
-    qty = math.floor(raw_qty / qty_step) * qty_step
-    qty = max(min_qty, qty)
-    qty = min(qty, math.floor(max_qty / qty_step) * qty_step)
-    # XAU 等也可能是 0.001 步进；保留最多 3 位
-    decimals = max(0, int(round(-math.log10(qty_step)))) if qty_step > 0 else 3
-    decimals = min(decimals, 6)
-    qty = round(qty, decimals)
-    meta["max_qty"] = round(max_qty, decimals)
-    meta["raw_qty"] = round(raw_qty, 4)
+    qty = _floor_qty_3dp(raw_qty, min_qty=min_qty)
+    # 若品种步进 > 0.001，再按步进向下取整
+    step = float(qty_step or 0.001)
+    if step > 0.001 + 1e-12 and qty > 0:
+        qty = math.floor(qty / step) * step
+        if qty < min_qty:
+            qty = 0.0
     meta["base_qty"] = qty
-    meta["capped"] = qty >= round(max_qty, decimals) - qty_step
+    meta["capped"] = meta["bind"] != "theoretical"
     return qty, meta
+
+
+def compute_vps_open_qty(principal, price, tv_sl, regime, leverage=None,
+                         risk_pct=None, qty_ratio=1.0, qty_step=0.001, min_qty=None,
+                         face_value=None, max_position=None, global_scale=None):
+    """OPEN/加仓统一入口 → TV 唯一公式（须传入 TV risk_pct / leverage）。"""
+    return compute_tv_order_qty(
+        principal=principal,
+        risk_pct=risk_pct,
+        leverage=leverage,
+        qty_ratio=qty_ratio if qty_ratio is not None else 1.0,
+        price=price,
+        tv_sl=tv_sl,
+        qty_step=qty_step,
+        min_qty=min_qty,
+        face_value=face_value,
+        regime=regime,
+        max_position=max_position,
+    )
 
 
 def check_total_notional_cap(equity, existing_notional, new_notional,
@@ -585,86 +591,98 @@ def check_total_notional_cap(equity, existing_notional, new_notional,
     }
 
 
-def compute_vps_add_qty(base_qty, qty_ratio=None, regime=None, qty_step=0.001, min_qty=None,
-                        face_value=None, max_position=None):
+def compute_vps_add_qty(base_qty=None, qty_ratio=None, regime=None, qty_step=0.001, min_qty=None,
+                        face_value=None, max_position=None, principal=None, price=None,
+                        tv_sl=None, risk_pct=None, leverage=None):
     """
-    加仓 PYRAMID/PROFIT_ADD：
-    add_qty = base_qty × TV qty_ratio（首仓 VPS 自主 sizing，加仓跟 TV 系数）
+    加仓：同一 TV 公式 × qty_ratio（不再用 base_qty×ratio 旧路径）。
+    若缺 TV 参数则返回 0，禁止回退旧保证金%逻辑。
     """
-    base_qty = float(base_qty or 0)
     ratio = resolve_tv_add_qty_ratio(regime, qty_ratio)
-    min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
-    max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
+    if risk_pct and leverage and price and principal:
+        qty, meta = compute_tv_order_qty(
+            principal=principal,
+            risk_pct=risk_pct,
+            leverage=leverage,
+            qty_ratio=ratio,
+            price=price,
+            tv_sl=tv_sl,
+            qty_step=qty_step,
+            min_qty=min_qty,
+            face_value=face_value,
+            regime=regime,
+            max_position=max_position,
+        )
+        meta["sizing_mode"] = "TV_ADD_FORMULA"
+        meta["ratio_source"] = "tv" if qty_ratio is not None else "regime_default"
+        meta["regime_add_ratio_default"] = get_regime_add_qty_ratio(regime)
+        return qty, meta
     meta = {
-        "base_qty": base_qty,
+        "error": "missing_tv_params",
         "qty_ratio": ratio,
         "regime": int(regime or 3),
-        "regime_add_ratio_default": get_regime_add_qty_ratio(regime),
-        "max_add_times": get_regime_max_add_times(regime),
-        "sizing_mode": "VPS_ADD",
-        "ratio_source": "tv" if qty_ratio is not None else "regime_default",
+        "sizing_mode": "TV_ADD_FORMULA",
+        "hint": "加仓须带 risk_pct/leverage/price/本金，禁止旧 base×ratio",
     }
-    if base_qty <= 0 or ratio <= 0:
-        meta["error"] = "invalid_base_or_ratio"
-        return 0.0, meta
+    return 0.0, meta
 
-    raw = base_qty * ratio
-    if face_value and float(face_value) > 0:
-        qty = max(1, int(raw))
-        qty = min(qty, int(max_position))
-        meta["raw_qty"] = round(raw, 4)
-        return float(qty), meta
 
-    qty = math.floor(raw / qty_step) * qty_step
-    qty = max(min_qty, qty)
-    qty = min(qty, math.floor(max_position / qty_step) * qty_step)
-    qty = round(qty, 3)
-    meta["raw_qty"] = round(raw, 4)
-    return qty, meta
+def get_vps_margin_pct(regime):
+    """已废弃：旧档位保证金%。"""
+    return 0.0
+
+
+def compute_vps_effective_risk(regime, global_scale=None):
+    """已废弃：返回 0，强制走 TV risk_pct。"""
+    regime = int(regime or 3)
+    return 0.0, {
+        "regime": regime,
+        "effective_risk_pct": 0.0,
+        "sizing_mode": "TV_RISK_FORMULA",
+        "deprecated": True,
+    }
 
 
 def apply_vps_regime_risk(risk_pct, regime):
-    """兼容旧调用：转为 VPS 自主 effective_risk"""
-    return compute_vps_effective_risk(regime)
-
-
-def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
-                         qty_step=0.001, min_qty=0.001, face_value=None, regime=None):
-    """兼容别名 → VPS OPEN（忽略 TV risk_pct / qty_ratio≠1 时仍走 OPEN 公式）"""
-    return compute_vps_open_qty(
-        principal, price, tv_sl, regime, leverage=leverage,
-        qty_step=qty_step, min_qty=min_qty, face_value=face_value,
-    )
+    """兼容：直接回传 TV risk_pct，不再按档位改写。"""
+    rp = float(risk_pct or 0)
+    return rp, {
+        "regime": int(regime or 3),
+        "effective_risk_pct": round(rp, 4),
+        "raw_risk_pct": round(rp, 4),
+        "sizing_mode": "TV_RISK_FORMULA",
+    }
 
 
 def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
     meta = meta or {}
-    mode = meta.get("sizing_mode", "VPS_OPEN")
-    if mode == "VPS_ADD":
+    mode = str(meta.get("sizing_mode") or "")
+    if "ADD" in mode:
         src = "TV" if meta.get("ratio_source") == "tv" else "档位默认"
         return (
-            f"首仓base={float(meta.get('base_qty', 0)):.3f} "
-            f"× TV比例={float(meta.get('qty_ratio', 0)):.2f}({src}) "
-            f"→ add={float(qty or meta.get('raw_qty', 0)):.3f} "
+            f"TV公式×比例={float(meta.get('qty_ratio', 0)):.2f}({src}) "
+            f"→ qty={float(qty or meta.get('base_qty') or meta.get('raw_qty', 0)):.3f} "
+            f"| risk={float(meta.get('risk_pct', 0)):.2f}% "
+            f"lev={float(meta.get('leverage', 0)):.0f}x "
             f"| R{int(meta.get('regime', 3))} 最多{int(meta.get('max_add_times', 2))}次"
         )
-    eff = float(meta.get("effective_risk_pct", VPS_RISK_PCT))
-    lev = int(round(float(meta.get("leverage", EXCHANGE_LEVERAGE))))
+    risk = float(meta.get("risk_pct") or meta.get("effective_risk_pct") or 0)
+    lev = float(meta.get("leverage") or 0)
+    ratio = float(meta.get("qty_ratio") or 1.0)
+    stop_dist = float(meta.get("stop_dist") or 0)
     parts = [
-        f"VPS风险={eff:.3f}%",
-        f"R{int(meta.get('regime', 3))}×{float(meta.get('regime_scale', 1)):.2f}",
-        f"保证金×{VPS_MARGIN_LEVERAGE}",
-        f"头寸×{lev}x",
+        f"TV风险={risk:.3f}%",
+        f"止损距={stop_dist:.2f}",
+        f"lev={lev:.0f}x",
+        f"ratio={ratio:.2f}",
+        f"bind={meta.get('bind', '?')}",
     ]
-    if meta.get("margin"):
-        parts.append(f"保证金={float(meta['margin']):.1f}U")
-    if meta.get("position_value") or meta.get("order_amount"):
-        pv = float(meta.get("position_value") or meta.get("order_amount") or 0)
-        parts.append(f"头寸={pv:.1f}U")
+    if meta.get("order_amount"):
+        parts.append(f"名义={float(meta['order_amount']):.0f}U")
     if qty is not None and float(qty) > 0:
         parts.append(f"qty={float(qty)}")
-    if meta.get("base_qty"):
-        parts.append(f"base={float(meta['base_qty'])}")
+    elif meta.get("base_qty"):
+        parts.append(f"qty={float(meta['base_qty'])}")
     return " · ".join(parts)
 
 
@@ -672,10 +690,9 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
                           regime=None, final_risk_pct=None, meta=None, entry_type="OPEN"):
     if meta:
         return format_vps_sizing_note(meta, qty=qty, entry_type=entry_type)
-    eff_meta, _ = compute_vps_effective_risk(regime or 3)
     parts = [
-        f"VPS风险={eff_meta:.3f}%",
-        f"保证金×{VPS_MARGIN_LEVERAGE}·头寸×{int(round(float(leverage or EXCHANGE_LEVERAGE)))}x",
+        f"TV风险={float(risk_pct or final_risk_pct or 0):.3f}%",
+        f"lev={int(round(float(leverage or 0)))}x",
     ]
     if qty_ratio is not None:
         parts.append(f"ratio={float(qty_ratio):.2f}")
