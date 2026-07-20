@@ -20,7 +20,8 @@ TradingView Alert
         ↓
 app.py (入口层 + Secret 校验)
         ↓
-position_supervisor.py (编排 + 监督层)
+# 编排 + 监督层（生产唯一）：position_supervisor_binance.py
+# （遗留 position_supervisor.py 已删除）
     ├── 记录最新 TV 信号
     ├── 先平后开（同/反向一致）
     ├── 主动检查并强制对齐最新 TV 方向

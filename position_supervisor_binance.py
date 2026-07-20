@@ -79,7 +79,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.87.0-radar-advance-only"
+BINANCE_VPS_VERSION = "v13.87.1-drop-legacy-supervisor"
 
 
 SENTINEL_POLL_NORMAL = 8
