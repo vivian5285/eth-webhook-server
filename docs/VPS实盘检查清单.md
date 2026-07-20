@@ -24,9 +24,9 @@
 | 1.4 | 未知 symbol → 拒绝并记录 | ✅ | `app.py` 返回 400 + `allowed` 列表 |
 | 1.5 | 同 action+price 去重（45s） | ✅ | 无时序旧信号：`SIGNAL_DEDUP_SEC`；有 `bar_index`+`seq`：幂等键 |
 | 1.5b | TV 时序有序消费 | ✅ | `tv_seq.py`：先 `bar_index` 再 `seq`；乱序暂存 `TV_SEQ_PENDING_WAIT` |
-| 1.5d | 先平后开 | ✅ | 同K线只可能单独 CLOSE 或 CLOSE(seq小)+OPEN(seq大)；按 seq 升序；钉钉时序链 |
-| 1.5g | 无菌空仓再开 | ✅ | `_sterile_flat_gate`：仅先平后开/有仓清场时；空仓 OPEN 轻量直开 |
-| 1.5h | 禁开完秒平 | ✅ | 穿价 TP 不挂；开仓宽限禁 regime_cap；钉钉去重 |
+| 1.5d | 先平后开 | ✅ | 同 bar settle + 动作优先 CLOSE→OPEN；同秒开平终态有仓 |
+| 1.5g | 无菌空仓再开 | ✅ | `_sterile_flat_gate`：凡 OPEN 一律先平后开净场再开 |
+| 1.5h | 禁开完秒平 | ✅ | 穿价 TP 推离；开仓宽限禁 regime_cap；钉钉去重 |
 | 1.5i | TP成交必须价到 | ✅ | 每档验 mark/best；拒认仅凭减仓；假TP记账可清除 |
 | 1.5c | 钉钉攒批防限流 | ✅ | `DINGTALK_BATCH_*` + 1/2/4s 重试 + `WECHAT_WEBHOOK` 备用 |
 
@@ -83,20 +83,20 @@
 
 ---
 
-## 模块三：硬止损（VPS 自主，忽略 TV 紧止损）
+## 模块三：硬止损（严格按 TV `tv_sl` 挂盘）
 
 | # | 检查项 | 状态 | 说明 |
 |---|--------|------|------|
 | 3.1 | 硬止损 = TV `tv_sl` | ✅ | `_tv_hard_sl_target()` |
-| 3.2 | R1~R4 宽止损比例 | ✅ | `VPS_HARD_SL_PCT` |
-| 3.3~3.4 | 多/空方向公式 | ✅ | 开多减 / 开空加 |
+| 3.2 | 旧 VPS% 仅对照不挂盘 | ✅ | `VPS_HARD_SL_PCT` 不用于挂单 |
+| 3.3~3.4 | 多/空方向公式 | ✅ | TV `tv_sl` 多空严格 |
 | 3.5 | 开仓成交后立即挂 **closePosition STOP**（不占 reduceOnly，避免撤掉 TP123） | ✅ | `_sync_exchange_stop()` · `use_stop_limit=False` |
 | 3.5b | TV 空 TP/价 → ATR 强制补全 TP123；`expected=0` 不假齐；终检无止损钉钉 | ✅ | v13.64 `_protect_and_monitor` |
-| 3.6 | 硬止损只收紧不放松 | ✅ | 雷达阶段前不动；雷达后只升不降 |
+| 3.6 | 硬止损与雷达单槽合并 | ✅ | 雷达激活后保本取代；止损只向有利方向 |
 | 3.7 | TV `tv_sl` 挂盘 | ✅ | `tv_sl`=`tv_sl_ref`=TV价，盘口 STOP 对齐 |
 
-| 档位 | 硬止损% | @1800 示例 |
-|------|---------|------------|
+| 档位 | 旧VPS%对照（不挂盘） | @1800 示例 |
+|------|---------------------|------------|
 | R1 | 2.78% | 1750 |
 | R2 | 3.89% | 1730 |
 | R3 | 5.56% | 1700 |
@@ -131,7 +131,7 @@
 WS mark 达激活线 / TP1成交 → 脉冲哨兵 1.5s 快轮询锁利
 随后 TP1→TP2→TP3 路程推进 → 阶段2~5 逐级锁利（只升不降）
 硬止损与雷达 = closePosition 单槽；TP123 = reduceOnly（不抢份额）
-UPDATE_SL → 仅更新 TV 参考，不用 TV tv_sl 挂单
+UPDATE_SL → 按 TV tv_sl 强制改挂盘口硬止损（雷达激活时可合并保本）
 ```
 
 ### 防误判场景

@@ -489,7 +489,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.82.0-tv-risk-sizing" in sup,
+        "v13.83.0-tv-defense-iron" in sup
+        or "v13.82.0-tv-risk-sizing" in sup,
     )
 
 
@@ -547,6 +548,13 @@ def audit_module4_radar(a: Audit):
         and "_radar_in_progress" in sup
         and "TV开仓·一律先平后开刷新仓位" in sup
         and "禁止先 scope=radar 撤再挂" in sup,
+    )
+    a.check(
+        "4.11c 废除同向仅刷TP·一律先平后开",
+        "always_close_then_open" in sup
+        and "OPEN_SAME_DIR_COOLDOWN_SEC = 0" in sup
+        and "废弃同向仅刷TP" in sup
+        and 'return "REFRESH_TP"' not in sup,
     )
     a.check(
         "4.12 TP多档对账禁误报人工",
@@ -701,6 +709,13 @@ def audit_module7_dingtalk(a: Audit):
         and "永不挂 TV 紧止损" not in dt,
     )
     a.check(
+        "钉钉开仓三轨文案",
+        "TV硬止损已挂(closePosition)" in dt
+        and "三轨不抢份额" in dt
+        and "雷达待命" in dt
+        and "VPS硬止损已挂" not in dt,
+    )
+    a.check(
         "钉钉档位对账字段",
         "开仓档位(硬止损/TP)" in dt and "TV信号档位" in dt,
     )
@@ -719,7 +734,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.82.0-tv-risk-sizing" in readme
+        "v13.83.0-tv-defense-iron" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -736,6 +751,7 @@ def audit_readme_consistency(a: Audit):
         and "适度追随" in readme
         and "mark@1s" in readme
         and "一律先平后开" in readme
+        and "三轨不抢份额" in readme
         and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "实盘事故与优化备忘" in readme
         and "TP1 被反复补挂" in readme
@@ -744,7 +760,8 @@ def audit_readme_consistency(a: Audit):
         and "_apply_takeover_price_progress" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "开仓价/现价对账" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "_snapshot_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+        and "_snapshot_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.83.0-tv-defense-iron" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
         "README 雷达分档激活",
