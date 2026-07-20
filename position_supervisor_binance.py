@@ -79,7 +79,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.83.0-tv-defense-iron"
+BINANCE_VPS_VERSION = "v13.84.0-tv-strategy-sync"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -3976,14 +3976,39 @@ class PositionSupervisorBinance:
         return out
 
     def _expected_tp_levels(self, live_qty):
+        """
+        应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂，
+        杜绝「TP1 成交后当漏挂 → 补挂 → 头寸在 TP1 吃光」低级 bug。
+        """
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         qty_map = self._split_remaining_tp_quantities(live_qty)
         qty_map = self._normalize_tp_qty_map(qty_map, live_qty)
         levels = []
+        curr_px = 0.0
+        open_busy = bool(getattr(self, "_open_in_progress", False))
+        if not open_busy:
+            try:
+                curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+            except Exception:
+                curr_px = 0.0
         for level in (1, 2, 3):
             if level in consumed:
                 continue
-            price = self.tv_tps[level - 1]
+            price = self.tv_tps[level - 1] if self.tv_tps and level - 1 < len(self.tv_tps) else 0
+            # 持仓期：现价已达该档 → 记账并跳过，禁止再出现在应挂列表
+            if (
+                not open_busy
+                and curr_px > 0
+                and float(price or 0) > 0
+                and self._price_reached_tp_zone(level, curr_px, price, live_only=True)
+            ):
+                self._mark_tp_levels_consumed([level])
+                consumed.add(level)
+                logger.warning(
+                    f"📌 [{self.symbol}] 现价已达 TP{level}@{float(price):.2f} "
+                    f"(mark={curr_px:.2f}) → 记账跳过，禁止补挂"
+                )
+                continue
             qty = qty_map.get(level, 0.0)
             levels.append({"level": level, "qty": qty, "price": price})
         return levels
@@ -6281,19 +6306,15 @@ class PositionSupervisorBinance:
                 )
                 self._mark_tp_levels_consumed([level])
                 continue
-            # 接管/重启：现价已过该档 → 记账跳过，禁止推离后重挂（防 TP1 死循环）
-            # 开仓进行中绝对禁止此分支（否则刚开仓会误跳过全部 TP）
+            # 持仓期铁律：现价已达该档 → 永远不补挂（防 TP1 死循环吃光仓）
+            # 仅开仓瞬间允许推离后挂；开仓结束后一律记账跳过
             if (
                 not getattr(self, "_open_in_progress", False)
-                and (
-                    getattr(self, "_takeover_price_skip", False)
-                    or getattr(self, "_recover_in_progress", False)
-                )
                 and self._price_reached_tp_zone(level, curr_px, px, live_only=True)
             ):
                 logger.warning(
-                    f"🧩 接管跳过补挂 TP{level} @{px:.2f}：现价已达 "
-                    f"(mark={curr_px:.2f}) → 只挂更远档，禁 TP1 反复成交"
+                    f"🧩 接管跳过补挂/拒绝补挂 TP{level} @{px:.2f}：现价已达 "
+                    f"(mark={curr_px:.2f}) → 记账跳过，只挂更远档，禁 TP1 反复成交"
                 )
                 self._mark_tp_levels_consumed([level])
                 continue
@@ -6301,9 +6322,13 @@ class PositionSupervisorBinance:
             if self._price_reached_tp_zone(level, curr_px, px):
                 if self._has_tp_limit_at_price(px):
                     continue
+                if not getattr(self, "_open_in_progress", False):
+                    # 双保险：非开仓不得推离补挂
+                    self._mark_tp_levels_consumed([level])
+                    continue
                 logger.warning(
                     f"🧩 TP{level} @{px:.2f} 现价已近但无减仓证据 "
-                    f"(mark={curr_px:.2f}) → 推离后补挂，禁止假吃"
+                    f"(mark={curr_px:.2f}) → 开仓推离后补挂，禁止假吃"
                 )
                 self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
                 tps = list(self.tv_tps or [])
@@ -10025,8 +10050,13 @@ class PositionSupervisorBinance:
                         f"开仓后裸仓无硬止损 [{self.symbol}]",
                         f"{self.current_side} {live_qty} {self.unit_label} @ "
                         f"{verified['entry_price']:.2f} | TP {matched}/{expected} | "
-                        f"目标TV硬止损@{(tv_target or 0):.2f} | 请立即人工挂止损",
+                        f"目标TV硬止损@{(tv_target or 0):.2f} | 将撤销开仓防裸奔",
                     )
+                    # 自查 7.6：硬止损失败 → 撤销开仓，不持仓裸奔
+                    self._emergency_flatten_naked_open(
+                        "硬止损失败·撤销开仓防裸奔",
+                    )
+                    return
             # 终检：应有 TP 却不齐 / 无硬止损 → 强制闭环挂齐（清假成交+推离+重挂）
             if (expected > 0 and matched < expected) or not hung_final:
                 logger.error(
@@ -10039,6 +10069,11 @@ class PositionSupervisorBinance:
                 matched = int(audit.get("matched_full") or 0)
                 expected = int(audit.get("expected") or self._expected_tp_count() or 0)
                 tp_pxs = list(self.tv_tps or tp_pxs)
+                if not hung_final:
+                    self._emergency_flatten_naked_open(
+                        "硬止损失败·强制闭环后仍无STOP·撤开仓",
+                    )
+                    return
                 try:
                     self._call_dingtalk(
                         dingtalk.report_system_alert,
@@ -10046,7 +10081,7 @@ class PositionSupervisorBinance:
                         detail=(
                             f"{self.current_side} {live_qty} | TP现 {matched}/{expected} "
                             f"| stop={hung_final} | 价 {list(self.tv_tps or [])} | "
-                            f"已清假成交+推离穿价+强制挂TP123+VPS"
+                            f"已清假成交+推离穿价+强制挂TP123+TV硬止损"
                         ),
                         level="警告",
                         suggestion="核对盘口 TP123 与 closePosition；勿反复重启核武",
@@ -11324,6 +11359,31 @@ class PositionSupervisorBinance:
             live_qty, None, force=False, radar_sl=dynamic_sl,
         )
         return placed
+
+    def _emergency_flatten_naked_open(self, reason="硬止损失败·撤销开仓防裸奔"):
+        """
+        开仓后硬止损挂不上 → 立即市价平掉，禁止裸仓持有。
+        （自查清单 7.6：硬止损挂单失败，开仓单自动撤销）
+        """
+        logger.error(f"🚨 [{self.symbol}] {reason} → 强制市价撤仓")
+        try:
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title=f"硬止损失败·已撤开仓 [{self.symbol}]",
+                detail=(
+                    f"{self.current_side} 硬止损未挂上 → 已市价平仓防裸奔 | {reason}"
+                ),
+                level="紧急",
+                suggestion="检查 TV tv_sl 是否有效；勿人工重开裸仓",
+            )
+        except Exception:
+            pass
+        ok = self._close_all(
+            reason=reason,
+            reset_state=True,
+            close_meta={"tv_reason": reason, "exit_source": "naked_sl_abort"},
+        )
+        return bool(ok)
 
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):

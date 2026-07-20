@@ -326,28 +326,13 @@ def audit_module3_hard_sl(a: Audit):
     a.section("模块三 · TV 硬止损（实盘挂单）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
 
-    # 旧 VPS% 表仍保留作 sizing/对照，但禁止作为实盘挂单价
-    expected = {1: 0.0278, 2: 0.0389, 3: 0.0556, 4: 0.0833}
-    for r, pct in expected.items():
-        a.check(f"3.2 旧VPS%表 R{r}={pct*100:.2f}%(仅对照)", abs(VPS_HARD_SL_PCT[r] - pct) < 0.0001)
-
-    eth_abs = {1: 50.0, 2: 70.0, 3: 100.0, 4: 150.0}
-    for r, dist in eth_abs.items():
-        sl = compute_vps_hard_sl("SHORT", 1800, regime=r)
-        a.check(
-            f"3.2b 旧对照 ETH@1800 R{r} ≈ +{dist:.0f}U",
-            abs(sl - (1800 + dist)) < 0.2,
-            f"sl={sl}",
-        )
-
-    xau_r3 = compute_vps_hard_sl("SHORT", 4003.94, regime=3)
-    xau_r4 = compute_vps_hard_sl("SHORT", 4003.94, regime=4)
-    a.check("3.2c 旧对照 XAU R3", abs(xau_r3 - 4226.56) < 0.05, f"sl={xau_r3}")
-    a.check("3.2d 旧对照 XAU R4", abs(xau_r4 - 4337.47) < 0.05, f"sl={xau_r4}")
-    a.check("3.2e ETH/XAU 共用同一 PCT 表", "ETH / XAU 同一套" in _read(os.path.join(ROOT, "webhook_parser.py")))
-
-    sl_long = compute_vps_hard_sl("LONG", 1800, regime=3)
-    a.check("3.3 旧对照做多 R3@1800", abs(sl_long - 1800 * (1 - 0.0556)) < 1, f"sl={sl_long}")
+    # VPS% 宽止损表必须清空；compute 恒 0
+    a.check("3.2 VPS%宽止损表已清空", VPS_HARD_SL_PCT == {} or not VPS_HARD_SL_PCT)
+    a.check(
+        "3.2b compute_vps_hard_sl 恒0(已废除)",
+        compute_vps_hard_sl("LONG", 1800, regime=3) == 0
+        and compute_vps_hard_sl("SHORT", 1800, regime=4) == 0,
+    )
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     a.check(
@@ -366,6 +351,10 @@ def audit_module3_hard_sl(a: Audit):
         "3.9 全平归因 TV硬止损",
         "触碰硬止损平仓（TV硬止损）" in sup
         and "触碰硬止损平仓（VPS宽止损）" not in sup,
+    )
+    a.check(
+        "3.10 硬止损失败撤开仓防裸奔",
+        "硬止损失败·撤销开仓防裸奔" in sup or "_emergency_flatten_naked_open" in sup,
     )
     a.check(
         "3.10 开仓禁止 recover 核武连环撤",
@@ -489,7 +478,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.83.0-tv-defense-iron" in sup
+        "v13.84.0-tv-strategy-sync" in sup
+        or "v13.83.0-tv-defense-iron" in sup
         or "v13.82.0-tv-risk-sizing" in sup,
     )
 
@@ -584,7 +574,7 @@ def audit_module4_radar(a: Audit):
         "hard_sl_px" in dt
         and "radar_act_px" in dt
         and "头寸对账" in dt
-        and "雷达激活线" in dt,
+        and ("雷达激活线" in dt or "雷达候命" in dt),
     )
     a.check(
         "4.16 TP成交记账禁漏挂补挂",
@@ -624,7 +614,7 @@ def audit_module4_radar(a: Audit):
         RADAR_BREATH_ATR_BY_REGIME,
         RADAR_STAGE_ATR_MULT,
     )
-    expected_act = {1: 0.85, 2: 0.80, 3: 0.75, 4: 0.70}
+    expected_act = {1: 0.50, 2: 0.60, 3: 0.70, 4: 0.80}
     expected_step = {1: 0.35, 2: 0.30, 3: 0.25, 4: 0.20}
     expected_breath = {1: 1.0, 2: 0.8, 3: 0.65, 4: 0.5}
     for r, pct in expected_act.items():
@@ -734,38 +724,32 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.83.0-tv-defense-iron" in readme
+        "v13.84.0-tv-strategy-sync" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
-        and "2.78%" in readme
         and "TV_RISK_FORMULA" in _read(os.path.join(ROOT, "webhook_parser.py"))
         and "risk_pct" in readme
         and "HARD_NOTIONAL_CAP" in _read(os.path.join(ROOT, "webhook_parser.py"))
-        and "85%" in readme
-        and "70%" in readme
+        and "50%" in readme
+        and "80%" in readme
         and "exit_source" in readme
         and "价到" in readme
         and "reduceOnly" in readme
         and "先平后开" in readme
         and "穿价" in readme
-        and "适度追随" in readme
         and "mark@1s" in readme
         and "一律先平后开" in readme
         and "三轨不抢份额" in readme
         and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "实盘事故与优化备忘" in readme
-        and "TP1 被反复补挂" in readme
-        and "假成交" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "_apply_takeover_price_progress" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "开仓价/现价对账" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "_snapshot_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.83.0-tv-defense-iron" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+        and "v13.84.0-tv-strategy-sync" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
         "README 雷达分档激活",
-        "85%" in readme and "80%" in readme and "75%" in readme and "70%" in readme
+        "50%" in readme and "60%" in readme and "70%" in readme and "80%" in readme
         and "1.0 ATR" in readme,
     )
     a.check("README UPDATE_SL 同步盘口", "UPDATE_SL" in readme and "按 TV" in readme)

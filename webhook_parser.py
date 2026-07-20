@@ -178,25 +178,21 @@ def format_regime_tp_ratios_label(regime):
     return "/".join(str(int(round(x * 100))) for x in get_regime_tp_ratios(regime))
 
 
-# VPS 自主硬止损：按开仓价百分比等比呼吸（ETH / XAU 同一套 1~4 档，无品种分支）
-# Regime → 开仓价百分比：R1 2.78% · R2 3.89% · R3 5.56% · R4 8.33%
-# 对应 ETH@1800 绝对距离约 50/70/100/150U；XAU 同比例随开仓价缩放
-# 硬止损：开仓价百分比（双品种统一；与 TV tv_sl / 周期无关）
-VPS_HARD_SL_PCT = {1: 0.0278, 2: 0.0389, 3: 0.0556, 4: 0.0833}
-VPS_HARD_SL_EXTRA_RELAX = 0.0  # 极端强趋势额外放宽 0~0.10（乘数）
-VPS_HARD_SL_LIMIT_PCT = 0.0015  # Stop-Limit 限价相对触发价缓冲 0.15%（落在 0.1%~0.2%）
-# 兼容旧常量名（不再用于计算）
+# ⚠ 已废除：VPS 档位%宽硬止损。实盘硬止损 = TV tv_sl 原值，禁止再用下表挂盘。
+VPS_HARD_SL_PCT = {}  # 空：禁止 entry×档位% 算硬止损
+VPS_HARD_SL_EXTRA_RELAX = 0.0
+VPS_HARD_SL_LIMIT_PCT = 0.0015  # 仅交易所拒单时的贴市安全距（非宽止损）
 VPS_HARD_SL_M = VPS_HARD_SL_PCT
 VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-VPS_HARD_SL_LIMIT_OFFSET = 0.0  # 已改用百分比缓冲
+VPS_HARD_SL_LIMIT_OFFSET = 0.0
 
-# 雷达适度追随（按开仓档位锁定；强趋势不是紧追，是稍积极的适度追随）
-# 启动=entry→TP1 路程比例；步进=TP段内每走多少再推升；呼吸=追踪止损距 best 的 ATR 倍数
+# 雷达激活（对齐 TV 最终策略 / VPS 自查清单）：现价走完 entry→TP1 的比例后启动
+# R1 极弱 50% · R2 弱势 60% · R3 中势 70% · R4 强势 80%
 RADAR_ACTIVATION_RATIO_BY_REGIME = {
-    1: 0.85,  # 震荡：最晚启动，距TP1剩15%
-    2: 0.80,  # 弱势：剩20%
-    3: 0.75,  # 中势：剩25%
-    4: 0.70,  # 强趋势：稍积极，剩30%
+    1: 0.50,  # 极弱：接近 TP1 的 50% → 保本监控
+    2: 0.60,  # 弱势：60% → 保本监控
+    3: 0.70,  # 中势：70% → 保本+移动止损
+    4: 0.80,  # 强势：80% → 保本+移动+追踪
 }
 RADAR_TRAIL_STEP_BY_REGIME = {
     1: 0.35,  # 每走35%推一次
@@ -253,56 +249,35 @@ def get_radar_breath_atr(regime=None):
 
 
 def get_vps_hard_sl_params(regime):
-    """返回档位硬止损参数：开仓价百分比"""
+    """已废除档位%宽止损：恒返回 0（实盘只认 TV tv_sl）。"""
     regime = int(regime or 3)
-    pct = float(VPS_HARD_SL_PCT.get(regime, 0.056))
     return {
         "regime": regime,
-        "pct": pct,
-        "pct_label": f"{pct * 100:.1f}%",
-        "sl_m": pct,  # 兼容旧字段
+        "pct": 0.0,
+        "pct_label": "TV_tv_sl",
+        "sl_m": 0.0,
         "breath_mult": 1.0,
-        "final_mult": pct,
+        "final_mult": 0.0,
+        "deprecated": True,
     }
 
 
 def compute_vps_hard_sl_distance(entry, regime, extra_relax=None, atr=None):
-    """硬止损距离 = 开仓价 × 档位百分比（atr 参数废弃，仅兼容旧调用）"""
-    entry = float(entry or 0)
-    if entry <= 0:
-        return 0.0
-    params = get_vps_hard_sl_params(regime)
-    relax = VPS_HARD_SL_EXTRA_RELAX if extra_relax is None else float(extra_relax or 0)
-    dist = entry * params["pct"]
-    if relax > 0:
-        dist *= (1.0 + relax)
-    return round(dist, 2)
+    """已废除：禁止用档位%算止损距离。返回 0。"""
+    return 0.0
 
 
 def compute_vps_hard_sl(side, entry, atr=None, regime=None, extra_relax=None):
     """
-    旧 VPS% 宽止损对照价 = 开仓价 ± 开仓价×档位%（仅 sizing/日志对照，不挂盘）。
-    实盘硬止损一律按 TV tv_sl；atr 废弃兼容。
+    已废除 VPS 宽硬止损。恒返回 0。
+    实盘硬止损必须用 TV webhook 的 tv_sl 原值挂单，禁止 entry×档位%。
     """
-    entry = float(entry or 0)
-    if entry <= 0:
-        return 0.0
-    if regime is None:
-        regime = 3
-    dist = compute_vps_hard_sl_distance(entry, regime, extra_relax)
-    if dist <= 0:
-        return 0.0
-    side = str(side or "").strip().upper()
-    if side == "LONG":
-        return round(entry - dist, 2)
-    if side == "SHORT":
-        return round(entry + dist, 2)
     return 0.0
 
 
 def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
     """
-    VPS 缓冲止损 Stop-Limit 限价（百分比缓冲防跳空）：
+    贴市安全限价偏移（交易所拒单时用，非宽止损加宽）。
     多头平仓(SELL)：限价 = 触发价 × (1 − 0.15%)
     空头平仓(BUY)：限价 = 触发价 × (1 + 0.15%)
     """
@@ -322,43 +297,24 @@ def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
 
 
 def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
-    """钉钉/日志：VPS 硬止损计算明细（开仓价百分比版）"""
-    params = get_vps_hard_sl_params(regime)
-    dist = compute_vps_hard_sl_distance(entry, regime, extra_relax)
-    vps_sl = compute_vps_hard_sl(side, entry, atr, regime, extra_relax)
-    limit_px = compute_vps_hard_sl_limit_price(side, vps_sl)
-    ref = f" | TV参考 `{float(tv_sl_ref):.2f}`" if tv_sl_ref and float(tv_sl_ref) > 0 else ""
-    return (
-        f"VPS硬止损 `{vps_sl:.2f}` | R{regime} "
-        f"开仓价×{params['pct_label']} | 呼吸 **{dist:.2f}U** "
-        f"({params['pct_label']})"
-        f" | Stop-Limit 触发@{vps_sl:.2f} 限价@{limit_px:.2f}{ref}"
-    )
+    """钉钉/日志：实盘硬止损 = TV tv_sl（已废除 VPS%）。"""
+    ref = float(tv_sl_ref or 0)
+    if ref > 0:
+        return f"TV硬止损 `{ref:.2f}` | R{int(regime or 3)} | closePosition 原值挂单"
+    return f"TV硬止损待绑定 | R{int(regime or 3)} | 须 webhook tv_sl"
 
 
 def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
-    """TV 硬止损 vs 旧 VPS% 对照（实盘挂单价以 TV tv_sl 为准）"""
-    entry = float(entry or 0)
-    if entry <= 0:
-        return ""
-    side = str(side or "").strip().upper()
-    vps_sl = compute_vps_hard_sl(side, entry, atr, regime, extra_relax)
+    """钉钉对照：只展示 TV tv_sl（VPS% 宽止损已删除）。"""
     ref = float(tv_sl_ref or 0)
-    vps_dist = abs(entry - vps_sl) if vps_sl > 0 else 0
+    entry = float(entry or 0)
     if ref <= 0:
         return format_vps_hard_sl_note(side, entry, atr, regime)
-    tv_dist = abs(entry - ref)
-    if vps_dist > tv_dist + 0.5:
-        wider = "VPS更宽(挂单)"
-    elif tv_dist > vps_dist + 0.5:
-        wider = "TV更紧(仅警报)"
-    else:
-        wider = "宽度接近"
-    pct = get_vps_hard_sl_params(regime)["pct_label"]
+    dist = abs(entry - ref) if entry > 0 else 0
     return (
-        f"TV紧止损 `{ref:.2f}` 距入场 {tv_dist:.2f}U · "
-        f"旧VPS%对照 `{vps_sl:.2f}` 距入场 {vps_dist:.2f}U(开仓×{pct}) · 实盘挂TV "
-        f"**实盘挂单价=VPS** · {wider} | CLOSE_STOPLOSS=TV第一指令立即全平"
+        f"TV硬止损 `{ref:.2f}` 距入场 {dist:.2f}U · "
+        f"**实盘挂单价=TV tv_sl（禁止VPS%宽止损）** | "
+        f"CLOSE_STOPLOSS=TV第一指令立即全平"
     )
 
 

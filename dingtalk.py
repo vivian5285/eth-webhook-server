@@ -52,7 +52,7 @@ DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lo
     "1", "true", "yes", "on",
 )
 # 全交易所共用：同类标题短窗只发一条，避免对账/告警连环刷屏
-DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "120"))
+DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
 # 系统告警 / 异常减仓类更长去重
 DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
 _title_dedup_lock = threading.Lock()
@@ -615,20 +615,20 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly) · TV硬止损已挂(closePosition) · "
-            f"雷达待命(距TP1剩{(1 - act_ratio) * 100:.0f}%交棒·独立保本) · 三轨不抢份额",
+            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly·各挂一次) · TV硬止损已挂(closePosition) · "
+            f"雷达候命(WS mark@1s·距TP1 {(act_ratio) * 100:.0f}%激活) · 三轨不抢份额",
             "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
         ),
     }
     if hard_sl_px is not None and float(hard_sl_px or 0) > 0:
         data["🛡️ TV硬止损"] = _g(
-            f"**{float(hard_sl_px):.2f}** USDT (closePosition·与雷达单槽合并)",
+            f"**{float(hard_sl_px):.2f}** USDT ✅已挂载 (closePosition·与雷达单槽)",
             G_DEEP,
         )
     if radar_act_px is not None and float(radar_act_px or 0) > 0:
-        data["📡 雷达激活线"] = _g(
-            f"**{float(radar_act_px):.2f}** USDT "
-            f"(距TP1剩{(1 - act_ratio) * 100:.0f}%·与TP123并行不冲突)",
+        data["📡 雷达候命"] = _g(
+            f"激活线 **{float(radar_act_px):.2f}** "
+            f"(走完TP1路程{(act_ratio) * 100:.0f}%·WS实时监控·不干预TP/硬止损)",
             G_LIGHT,
         )
     data["🔍 头寸对账"] = _g(
