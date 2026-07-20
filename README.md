@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.79.0-takeover-price-skip-tp`**  
+**当前版本：`v13.80.0-open-tv-defense-bind`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,7 +15,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.79.0-takeover-price-skip-tp
+# 期望 version 含 v13.80.0-open-tv-defense-bind
 # 期望 tv_strategy: v6.9.108
 ```
 
@@ -485,7 +485,7 @@ git fetch origin && git reset --hard origin/main
 
 # 版本门控
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v13.79.0-takeover-price-skip-tp
+# 期望: v13.80.0-open-tv-defense-bind
 grep 'DEPLOY_SCRIPT_VERSION' deploy_binance.sh
 
 source venv/bin/activate    # 如有 venv
@@ -494,7 +494,7 @@ bash deploy_binance.sh
 
 # 验收
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version 含 v13.79.0 · tv_strategy 含 v6.9.108
+# version 含 v13.80.0 · tv_strategy 含 v6.9.108
 tail -f logs/binance_brain.log
 ```
 
@@ -575,7 +575,7 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 | 现象 | 排查 |
 |------|------|
 | git pull 失败 | 见上文 `git reset --hard` |
-| 开仓后无 TP、无硬止损 | 升级 ≥ **v13.78**；查「假成交」「开仓强制挂防线」「place_failed_keep_old」；人工先挂 closePosition |
+| 开仓后无 TP、无硬止损 | 升级 ≥ **v13.80**；查「开仓前防线快照」「绑定开仓防线」「开仓强制挂防线」；人工先挂 closePosition |
 | 只有 TP23 无 TP1 | 查是否现价已达 TP1 且有减仓（真成交禁重挂）；无减仓则应推离补挂；`伪TP` / `trusted_initial` |
 | TP1成交雷达未启 | 升级 ≥ v13.65（修交棒死锁 for_handoff）；查「雷达交棒」「开仓冷却」 |
 | 微盈就全平、无雷达钉钉 | 升级 ≥ v13.67；查「交棒延迟」/「补发雷达激活钉钉」；平仓看「平仓归因」 |
@@ -595,7 +595,7 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
 ## 实盘事故与优化备忘（必读）
 
 > 以下均来自 **2026-07 币安 ETH/XAU 实盘** 踩坑记录。改逻辑、部署、排错前先读本节。  
-> 当前修复版本基准：**`v13.79.0-takeover-price-skip-tp`**（含 v13.75～v13.78 时序/开仓闭环铁律）。
+> 当前修复版本基准：**`v13.80.0-open-tv-defense-bind`**（含 v13.75～v13.79 时序/接管/假成交铁律）。
 
 ### 一、绝对铁律（违反必出事故）
 
@@ -669,7 +669,9 @@ grep -E '雷达交棒|交棒延迟|开仓终检|裸仓|TP123 补全|核武|expec
   2. **平+开同时到** → 同样先平后开 → 同样挂齐 TP123 + VPS 宽硬止损；  
   3. **单独平 TV** → 平完 + 撤净挂单 → 干净等待下次 TV。  
 - **份额关系**：TP123 = `reduceOnly` 限价；VPS 宽硬止损与雷达 = **同一** `closePosition` STOP 槽（互不抢 TP 额度）。雷达开仓后待命，达激活线或 TP1 真成交后交棒替换宽硬止损。  
-- **若再出现「有仓无 TP/无 STOP」**：查日志 `假成交` / `开仓强制挂防线` / `雷达守护·裸仓`；确认 `health.version` ≥ v13.78。
+- **根因（2026-07-20 再现）**：无菌净场/`_full_reentry` 未回传 TV payload；开仓后 `tv_tps` 被冲掉；接管 `_takeover_price_skip` 残留污染开仓补挂。  
+- **修复**：≥ **v13.80** `_snapshot_tv_open_defenses` → 净场后 `_bind_tv_open_defenses` → 开仓保护强制绑回；开仓路径强制 `_takeover_price_skip=False`。  
+- **若再出现「有仓无 TP/无 STOP」**：查日志 `开仓前防线快照` / `绑定开仓防线` / `开仓强制挂防线`；确认 `health.version` ≥ v13.80。
 
 ### 三、雷达（开仓后 · 多空对称）注意点
 
@@ -721,13 +723,23 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 | v13.77 | 开仓必挂防线；硬止损失败保留旧单；重启禁误平、禁 TP1 重挂死循环 |
 | v13.78 | 假成交闸+开仓强制闭环；TP全缺无视刹车；穿价多轮推离 |
 | v13.79 | 接管开仓价/现价对账：已过TP跳过只挂剩余；应启雷达；禁TP1死循环；禁莫名平仓 |
+| v13.80 | 开仓前快照TV TP123；净场后强制绑回；禁接管skip污染开仓 |
 | deploy v13.76+ | Gunicorn PID 滞后误报失败 |
 
 ---
 
 ## 版本演进
 
-### 近期详细更新记录（v13.67 → v13.79）
+### 近期详细更新记录（v13.67 → v13.80）
+
+#### v13.80.0 · `open-tv-defense-bind`
+
+**主题：TV 开仓强制绑定 TP123+VPS；净场不得冲掉本笔防线**
+
+- `_snapshot_tv_open_defenses` / `_bind_tv_open_defenses`：开仓前快照 → 无菌净场后绑回 → 成交后再绑
+- `_full_reentry(payload=)`：payload 贯通；禁止只开仓不挂防线
+- 开仓路径强制 `_takeover_price_skip=False`；补挂/重建开仓中禁止「现价已过跳过」
+- 接管标志整段 try/finally 复位，防残留污染下一笔 OPEN
 
 #### v13.79.0 · `takeover-price-skip-tp`
 
@@ -866,6 +878,7 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 | 版本 | 要点 |
 |------|------|
+| **v13.80.0** | **开仓前快照TV TP123；净场后强制绑回；禁接管skip污染开仓；杜绝只开仓不挂防线** |
 | **v13.79.0** | **接管开仓价+现价对账：已过TP跳过只挂剩余；应启雷达；禁TP1反复补挂死循环；禁莫名平仓** |
 | **v13.78.0** | **开仓防线失败闭环；假成交闸(减仓证据)；TP全缺无视刹车/宽限；穿价多轮推离；禁TP1假吃/穿价死循环** |
 | **v13.77.0** | **开仓必挂TP123+宽硬止损；硬止损失败保留旧单；重启只撤TP不撤STOP；禁TP1价到后当漏挂重挂；接管禁误减仓** |
@@ -921,4 +934,4 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.79.0-takeover-price-skip-tp*
+*GEMINI Quant · 双轨智慧雷达 · v13.80.0-open-tv-defense-bind*
