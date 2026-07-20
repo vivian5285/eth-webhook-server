@@ -79,7 +79,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.84.0-tv-strategy-sync"
+BINANCE_VPS_VERSION = "v13.85.0-no-hard-cap"
 
 
 SENTINEL_POLL_NORMAL = 8

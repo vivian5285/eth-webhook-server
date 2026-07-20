@@ -525,7 +525,7 @@ def _format_vps_sizing_basis(principal, meta=None, leverage=None):
     if stop_dist > 0:
         lines.append(
             f"÷ 止损距离 **{stop_dist:.2f}** → 理论仓 · "
-            f"min(理论, 权益×{lev:.0f}x/价, 50000/价) × ratio **{ratio:.2f}**"
+            f"min(理论, 权益×{lev:.0f}x/价) × ratio **{ratio:.2f}**（无硬上限）"
         )
     if order_amount > 0:
         lines.append(f"→ 名义约 **{order_amount:.2f}** USDT（bind={meta.get('bind', '?')}）")
@@ -555,8 +555,8 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
         "📸 快照时机": _g(reason or "本金重置", G_MAIN),
         "💰 合约本金": _g(f"**{float(principal):.2f}** USDT（walletBalance，非可用保证金）", G_ACCENT),
         "📌 口径说明": _g(
-            "唯一公式：风险金额/止损距离 → min(理论, 权益×TV_leverage/价, 50000/价)×qty_ratio；"
-            "直接用 TV risk_pct/qty_ratio/leverage，禁止旧保证金%逻辑",
+            "唯一公式：风险金额/止损距离 → min(理论, 权益×TV_leverage/价)×qty_ratio（无硬上限）；"
+            "直接用 TV risk_pct/qty_ratio/leverage，禁止旧保证金%/%硬上限逻辑",
             G_MUTED,
         ),
     }

@@ -19,13 +19,13 @@ VPS_GLOBAL_SCALE = 1.0
 VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 VPS_MARGIN_PCT_BY_REGIME = {}  # 已废弃：禁止再用档位保证金%算仓
 
-# 单笔名义硬上限（USDT）→ 硬上限仓位 = HARD_NOTIONAL_CAP / price
-HARD_NOTIONAL_CAP = 50000.0
+# ⚠ 已删除：单笔 maxNotionalUSDT / HARD_NOTIONAL_CAP 硬上限（仓位只受理论仓位+杠杆限制）
+HARD_NOTIONAL_CAP = 0.0  # 恒 0：禁止参与 min()；保留常量名防旧 import 崩
 MAX_RISK_PCT = 50.0
 MIN_RISK_PCT = 0.01
-MAX_POSITION_SIZE = 9999.0
+MAX_POSITION_SIZE = 9999.0  # 仅防溢出，不作为业务硬上限
 MIN_QTY_DEFAULT = 0.001
-# 双品种总名义敞口硬顶：Σ notional ≤ TOTAL_EQUITY × 13
+# 双品种总名义敞口顶：Σ notional ≤ TOTAL_EQUITY × 13（组合风控，非单笔硬上限）
 MAX_TOTAL_NOTIONAL_MULT = 13.0
 
 # TV 动态加仓：qty_ratio 优先；缺失时按档位默认（仅作缺省，不另算仓）
@@ -425,15 +425,16 @@ def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
                          qty_step=0.001, min_qty=None, face_value=None, regime=None,
                          max_position=None):
     """
-    唯一仓位公式（TV 下发 risk_pct / qty_ratio / leverage，VPS 不重算）：
+    唯一仓位公式（无单笔硬上限；TV 下发 risk_pct / qty_ratio / leverage）：
 
       止损距离 = |price - tv_sl|
       风险金额 = 账户权益 × (risk_pct / 100)
       理论仓位 = 风险金额 / 止损距离
       杠杆限制 = 账户权益 × leverage / price
-      硬上限   = HARD_NOTIONAL_CAP / price   （默认 50000U）
-      最终下单量 = min(理论仓位, 杠杆限制, 硬上限) × qty_ratio
+      最终下单量 = min(理论仓位, 杠杆限制) × qty_ratio
       精度     = floor(最终 × 1000) / 1000（最小 0.001）
+
+    已删除 maxNotionalUSDT / HARD_NOTIONAL_CAP / price 硬上限。
     """
     principal = float(principal or 0)
     price = float(price or 0)
@@ -441,6 +442,7 @@ def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
     leverage = float(leverage or 0)
     qty_ratio = float(qty_ratio if qty_ratio is not None else 1.0)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
+    # max_position 仅合约张数/溢出防呆，不参与业务硬上限
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
     stop_dist = _normalize_stop_dist(price, tv_sl)
 
@@ -454,8 +456,8 @@ def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
         "leverage": leverage,
         "qty_ratio": qty_ratio,
         "regime": int(regime or 3),
-        "hard_notional_cap": HARD_NOTIONAL_CAP,
-        "sizing_mode": "TV_RISK_FORMULA",
+        "hard_notional_cap": 0.0,
+        "sizing_mode": "TV_RISK_FORMULA_NO_HARD_CAP",
         "max_add_times": get_regime_max_add_times(regime),
     }
     if principal <= 0 or price <= 0 or risk_pct <= 0 or leverage <= 0 or qty_ratio <= 0:
@@ -465,24 +467,20 @@ def compute_tv_order_qty(principal, risk_pct, leverage, qty_ratio, price, tv_sl,
     risk_amount = principal * (risk_pct / 100.0)
     theoretical = risk_amount / stop_dist
     lev_limit = principal * leverage / price
-    hard_cap = HARD_NOTIONAL_CAP / price
-    capped = min(theoretical, lev_limit, hard_cap, max_position)
+    # 无硬上限：只取理论仓位与杠杆限制
+    capped = min(theoretical, lev_limit)
     raw_qty = capped * qty_ratio
 
     meta["risk_amount"] = round(risk_amount, 4)
     meta["theoretical_qty"] = round(theoretical, 6)
     meta["leverage_limit_qty"] = round(lev_limit, 6)
-    meta["hard_cap_qty"] = round(hard_cap, 6)
+    meta["hard_cap_qty"] = 0.0
     meta["capped_qty"] = round(capped, 6)
     meta["raw_qty"] = round(raw_qty, 6)
     meta["order_amount"] = round(raw_qty * price, 2)
     meta["position_value"] = meta["order_amount"]
     meta["margin"] = round(risk_amount, 4)
-    meta["bind"] = (
-        "theoretical" if capped == theoretical else
-        "leverage" if capped == lev_limit else
-        "hard_cap" if capped == hard_cap else "max_position"
-    )
+    meta["bind"] = "theoretical" if capped == theoretical else "leverage"
 
     if face_value and float(face_value) > 0:
         fv = float(face_value)

@@ -51,24 +51,23 @@
 | 2.2 | TV `risk_pct` / `qty_ratio` / `leverage` | ✅ | 直接用，不重算 |
 | 2.3 | 止损距离 = \|price − tv_sl\| | ✅ | `_normalize_stop_dist` |
 | 2.4 | API 杠杆 25x | ✅ | `EXCHANGE_LEVERAGE`（仅 set_leverage） |
-| 2.5 | 最终量 = min(理论, 杠杆限制, 硬上限)×qty_ratio | ✅ | `compute_tv_order_qty()` |
+| 2.5 | 最终量 = min(理论, 杠杆限制)×qty_ratio（**无硬上限**） | ✅ | `compute_tv_order_qty()` |
 | 2.6 | 精度 floor×1000/1000（最小 0.001） | ✅ | `_floor_qty_3dp` |
-| 2.7 | 单笔硬上限 50000U / price | ✅ | `HARD_NOTIONAL_CAP` |
-| 2.8 | Σ名义 ≤ 总权益 × 13 | ✅ | `check_total_notional_cap()` |
+| 2.7 | ~~单笔硬上限 50000U~~ **已删除** | ✅ | `HARD_NOTIONAL_CAP=0` |
+| 2.8 | Σ名义 ≤ 总权益 × 13（组合顶，非单笔硬上限） | ✅ | `check_total_notional_cap()` |
 
-### 唯一公式
+### 唯一公式（无硬上限）
 
 ```
 止损距离 = |price - tv_sl|
 风险金额 = 账户权益 × (risk_pct / 100)
 理论仓位 = 风险金额 / 止损距离
 杠杆限制 = 账户权益 × leverage / price
-硬上限   = 50000 / price
-最终下单量 = min(理论, 杠杆限制, 硬上限) × qty_ratio
+最终下单量 = min(理论, 杠杆限制) × qty_ratio
 精度     = floor(最终 × 1000) / 1000
 ```
 
-**禁止**旧「档位保证金% × 25x」路径；缺 `risk_pct`/`leverage` 时拒绝下单。
+**禁止**旧「档位保证金% × 25x」与「maxNotionalUSDT/50000硬上限」路径；缺 `risk_pct`/`leverage` 时拒绝下单。
 
 ### 参考表（本金 1000U · ETH≈1892 · qty_ratio=1.0）
 

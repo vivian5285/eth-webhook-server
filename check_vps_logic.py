@@ -218,7 +218,7 @@ def audit_module1_symbol(a: Audit):
 
 
 def audit_module2_sizing(a: Audit):
-    a.section("模块二 · 开单计算（TV 唯一公式）")
+    a.section("模块二 · 开单计算（TV 唯一公式·无硬上限）")
     from webhook_parser import (
         HARD_NOTIONAL_CAP,
         EXCHANGE_LEVERAGE,
@@ -228,9 +228,9 @@ def audit_module2_sizing(a: Audit):
         check_total_notional_cap,
     )
 
-    a.check("2.1 硬上限 50000U", HARD_NOTIONAL_CAP == 50000.0)
+    a.check("2.1 单笔硬上限已删除", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.4 API 杠杆 25x", EXCHANGE_LEVERAGE == 25)
-    a.check("2.7 13x 组合硬顶", MAX_TOTAL_NOTIONAL_MULT == 13.0)
+    a.check("2.7 13x 组合顶保留", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
     # 表：本金 1000 / ETH 1892.43 · Regime1 risk 0.81% / SL距 12.08 → 0.67
     qty1, meta1 = compute_tv_order_qty(
@@ -299,15 +299,22 @@ def audit_module2_sizing(a: Audit):
     qty0, meta0 = compute_vps_open_qty(1000, 1892.43, 1880, regime=3, leverage=25)
     a.check("2.8 无 risk_pct 拒绝下单", qty0 == 0 and meta0.get("error"), f"meta={meta0}")
 
-    # 硬上限绑定：极大 risk 时被 50000/price 卡住
-    qty_cap, meta_cap = compute_tv_order_qty(
+    # 无硬上限：极大 risk 不再被 50000/price 卡住，应绑理论或杠杆
+    qty_big, meta_big = compute_tv_order_qty(
         1000, risk_pct=40.0, leverage=100, qty_ratio=1.0,
         price=2000, tv_sl=1990, regime=4,
     )
     a.check(
-        "2.9 硬上限 50000/price",
-        meta_cap.get("bind") == "hard_cap" and abs(qty_cap - 25.0) < 0.01,
-        f"qty={qty_cap} bind={meta_cap.get('bind')}",
+        "2.9 无硬上限·大风险走理论/杠杆",
+        meta_big.get("bind") in ("theoretical", "leverage")
+        and meta_big.get("bind") != "hard_cap"
+        and float(meta_big.get("hard_cap_qty") or 0) == 0
+        and qty_big > 25.0,
+        f"qty={qty_big} bind={meta_big.get('bind')}",
+    )
+    a.check(
+        "2.9b sizing_mode 无硬上限",
+        "NO_HARD_CAP" in str(meta_big.get("sizing_mode") or ""),
     )
 
     ok, cap_meta = check_total_notional_cap(1000, 6500, 6500, mult=13)
@@ -318,8 +325,9 @@ def audit_module2_sizing(a: Audit):
     bc = _read(os.path.join(ROOT, "binance_client.py"))
     a.check("2.1 get_total_equity", "def get_total_equity" in bc)
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
-    a.check("禁止旧保证金%表参与计算", "sizing_mode\": \"TV_RISK_FORMULA\"" in wp or "TV_RISK_FORMULA" in wp)
+    a.check("禁止旧保证金%表参与计算", "TV_RISK_FORMULA" in wp)
     a.check("旧 VPS_MARGIN 已清空", "VPS_MARGIN_PCT_BY_REGIME = {}" in wp)
+    a.check("HARD_NOTIONAL_CAP 恒0", "HARD_NOTIONAL_CAP = 0.0" in wp)
 
 
 def audit_module3_hard_sl(a: Audit):
@@ -478,8 +486,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.84.0-tv-strategy-sync" in sup
-        or "v13.83.0-tv-defense-iron" in sup
+        "v13.85.0-no-hard-cap" in sup
+        or "v13.84.0-tv-strategy-sync" in sup
         or "v13.82.0-tv-risk-sizing" in sup,
     )
 
@@ -724,12 +732,13 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.84.0-tv-strategy-sync" in readme
+        "v13.85.0-no-hard-cap" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "TV_RISK_FORMULA" in _read(os.path.join(ROOT, "webhook_parser.py"))
         and "risk_pct" in readme
-        and "HARD_NOTIONAL_CAP" in _read(os.path.join(ROOT, "webhook_parser.py"))
+        and "HARD_NOTIONAL_CAP = 0.0" in _read(os.path.join(ROOT, "webhook_parser.py"))
+        and "无硬上限" in readme
         and "50%" in readme
         and "80%" in readme
         and "exit_source" in readme
@@ -744,7 +753,7 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.84.0-tv-strategy-sync" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.85.0-no-hard-cap" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
