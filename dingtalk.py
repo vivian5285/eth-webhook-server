@@ -1130,7 +1130,7 @@ def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, mar
         "📐 核算公式": _g(
             _format_sizing_basis(
                 principal_balance or 0, margin_pct, lev, margin_usdt,
-            ) if principal_balance else "本金快照 × 档位% × 杠杆（详见核实明细）",
+            ) if principal_balance else "本金快照 × TV risk_pct × leverage（详见核实明细）",
             G_LIGHT,
         ),
         "⚖️ 超标情况": _g(

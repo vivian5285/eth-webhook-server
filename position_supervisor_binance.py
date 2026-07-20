@@ -24,7 +24,6 @@ from webhook_parser import (
     HARD_NOTIONAL_CAP,
     compute_vps_hard_sl,
     compute_vps_hard_sl_distance,
-    compute_vps_hard_sl_limit_price,
     format_vps_hard_sl_note,
     format_tv_vps_sl_compare,
     get_vps_hard_sl_params,
@@ -79,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.87.1-drop-legacy-supervisor"
+BINANCE_VPS_VERSION = "v13.88.0-tv-sl-raw"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -4497,7 +4496,8 @@ class PositionSupervisorBinance:
     def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=False):
         """
         TV 硬止损：Stop-Market closePosition（不占 reduceOnly 额度）。
-        多空一律按 TV tv_sl 触发价挂单；禁止改回 VPS%。
+        触发价 = TV tv_sl **原值**，禁止任何 ±buffer / 推宽 / 推低。
+        若贴市导致交易所拒单 → 返回 None，由上层紧急平仓（禁止改价保活）。
         """
         live_qty = self._resolve_live_qty(live_qty)
         trigger_px = round(float(trigger_px or 0), 2)
@@ -4505,28 +4505,24 @@ class PositionSupervisorBinance:
             return None
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         if curr_px > 0:
-            gap = max(2.5, curr_px * 0.0015)
-            if self.current_side == "LONG" and trigger_px >= curr_px - gap:
-                safe = round(curr_px - gap * 1.25, 2)
-                logger.warning(
-                    f"⚠️ [{self.symbol}] LONG TV硬止损 @{trigger_px:.2f} 贴/穿市 "
-                    f"{curr_px:.2f} → 推低到安全 @{safe:.2f}（禁裸仓秒触）"
+            # 仅检测，不改价：穿价/贴市则失败，禁止 gap*1.25 推宽旧逻辑
+            if self.current_side == "LONG" and trigger_px >= curr_px:
+                logger.error(
+                    f"🚨 [{self.symbol}] LONG TV硬止损 @{trigger_px:.2f} 已穿/贴市 "
+                    f"{curr_px:.2f} → 禁止推宽，交紧急平仓"
                 )
-                trigger_px = safe
-            elif self.current_side == "SHORT" and trigger_px <= curr_px + gap:
-                safe = round(curr_px + gap * 1.25, 2)
-                logger.warning(
-                    f"⚠️ [{self.symbol}] SHORT TV硬止损 @{trigger_px:.2f} 贴/穿市 "
-                    f"{curr_px:.2f} → 推高到安全 @{safe:.2f}（禁裸仓秒触）"
+                return None
+            if self.current_side == "SHORT" and trigger_px <= curr_px:
+                logger.error(
+                    f"🚨 [{self.symbol}] SHORT TV硬止损 @{trigger_px:.2f} 已穿/贴市 "
+                    f"{curr_px:.2f} → 禁止推宽，交紧急平仓"
                 )
-                trigger_px = safe
-            if trigger_px <= 0:
                 return None
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         if use_stop_limit:
-            limit_px = compute_vps_hard_sl_limit_price(self.current_side, trigger_px)
+            # 限价=触发价原值，禁止 VPS_HARD_SL_LIMIT_PCT 偏移
             return binance_client.place_stop_limit_order(
-                close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=limit_px,
+                close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=trigger_px,
             )
         return binance_client.place_stop_market_order(
             close_side, trigger_px, symbol=self.symbol, quantity=None,
@@ -6138,20 +6134,19 @@ class PositionSupervisorBinance:
                 force=force,
             ).get("ok", False)
 
-        # 最终核对：盘口已有可接受的宽 STOP → 采纳；否则按 VPS 重挂
+        # 最终核对：盘口已有 STOP → 对齐 TV；禁止「拒紧止损改挂VPS宽」旧逻辑
         live_stops = binance_client.find_protective_stop_prices(self.symbol)
         if live_stops:
             adopted = self._adopt_exchange_hard_sl(source="维护核对·盘口已有")
             if adopted > 0:
                 logger.warning(
-                    f"🛡️ 账本缺tv_sl但盘口宽STOP可接受{live_stops} → 已归一VPS"
+                    f"🛡️ 账本缺tv_sl但盘口STOP可接受{live_stops} → 已对齐TV"
                 )
                 self._tv_sl_missing_alerted = False
                 return True
-            # 盘口是紧止损 → 强制刷成 VPS
-            self._ensure_hard_sl_ledger(real_amt, source="维护核对·拒紧止损")
+            self._ensure_hard_sl_ledger(real_amt, source="维护核对·补挂TV硬止损")
             return self._sync_exchange_stop(
-                real_amt, radar_sl=None, reason="拒TV紧止损·改挂VPS", force=True,
+                real_amt, radar_sl=None, reason="补挂TV硬止损原值", force=True,
             ).get("ok", False)
 
         if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
@@ -6164,7 +6159,7 @@ class PositionSupervisorBinance:
                 f"持仓 {real_amt} ETH · 账本与盘口均无硬止损 "
                 f"(entry={self.watched_entry or '空'} side={self.current_side or '空'} "
                 f"R{int(getattr(self, 'open_regime', None) or self.regime or 0)})",
-                suggestion="哨兵将重算开仓价×档位%并补挂；若盘口已有请忽略本条",
+                suggestion="哨兵将按 TV tv_sl 原值补挂；若盘口已有请忽略本条",
             )
             self._tv_sl_missing_alerted = True
         return False
@@ -7681,19 +7676,12 @@ class PositionSupervisorBinance:
             )
         return cancelled
 
-    def _merge_wider_vps_hard_sl(self, old_sl, new_sl):
-        """加仓合并：宽止损取更宽者（多头更低、空头更高）"""
-        old_sl = float(old_sl or 0)
+    def _merge_tv_hard_sl_on_add(self, old_sl, new_sl):
+        """加仓后硬止损：一律采用最新 TV tv_sl，禁止取更宽合并。"""
         new_sl = float(new_sl or 0)
-        if old_sl <= 0:
+        if new_sl > 0:
             return new_sl
-        if new_sl <= 0:
-            return old_sl
-        if self.current_side == "LONG":
-            return min(old_sl, new_sl)
-        if self.current_side == "SHORT":
-            return max(old_sl, new_sl)
-        return new_sl
+        return float(old_sl or 0)
 
     def _sweep_orphan_reverse_after_flat(self, prev_side=None, reason=""):
         """全平后复核：残留限价反向成交 → 反向蚂蚁仓扫尾"""
@@ -9351,7 +9339,7 @@ class PositionSupervisorBinance:
     def _realign_after_position_add(self, new_qty, new_entry, curr_px, entry_type,
                                     old_entry=None, old_qty=None, old_vps_sl=None):
         """
-        加仓成功后：加权均价(交易所) + 合并宽止损 + 重置雷达 + 替换 TP123。
+        加仓成功后：加权均价(交易所) + 最新 TV tv_sl + 重置雷达 + 替换 TP123。
         """
         old_entry = float(old_entry if old_entry is not None else self.watched_entry or 0)
         old_qty = float(old_qty if old_qty is not None else 0)
@@ -9366,14 +9354,15 @@ class PositionSupervisorBinance:
             source=f"{entry_type}加仓",
         )
         new_vps_sl = float(self.tv_sl or 0)
-        merged_sl = self._merge_wider_vps_hard_sl(old_vps_sl, new_vps_sl)
-        if merged_sl > 0 and abs(merged_sl - new_vps_sl) > 0.01:
+        merged_sl = self._merge_tv_hard_sl_on_add(old_vps_sl, new_vps_sl)
+        if merged_sl > 0:
             self.tv_sl = merged_sl
             self._last_applied_exchange_sl = 0.0
-            logger.info(
-                f"🛡️ 加仓合并宽止损: 旧{old_vps_sl:.2f} + 新{new_vps_sl:.2f} → {merged_sl:.2f} "
-                f"(取更宽)"
-            )
+            if abs(merged_sl - old_vps_sl) > 0.01:
+                logger.info(
+                    f"🛡️ 加仓硬止损改挂最新 TV tv_sl: 旧{old_vps_sl:.2f} → {merged_sl:.2f} "
+                    f"(禁止取更宽)"
+                )
         self.best_price = new_entry
         self.current_sl = merged_sl if merged_sl > 0 else new_vps_sl
         self._radar_stage_last = 0

@@ -338,7 +338,7 @@ def audit_module2_sizing(a: Audit):
     a.check(
         "2.4c 缺省仓位杠杆为0",
         "self.tv_sizing_leverage = 0.0" in sup
-        and "v13.87" in sup,
+        and "v13.88" in sup,
     )
     a.check(
         "2.4d 已删除遗留 position_supervisor.py",
@@ -365,6 +365,21 @@ def audit_module3_hard_sl(a: Audit):
         and "禁止再用开仓价×档位%" in sup
         and "TV硬止损" in sup
         and "拒绝挂 TV 紧止损" not in sup,
+    )
+    a.check(
+        "3.7b 禁止贴市推宽改 tv_sl",
+        "gap * 1.25" not in sup
+        and "推低到安全" not in sup
+        and "推高到安全" not in sup
+        and "_merge_wider_vps_hard_sl" not in sup
+        and "拒TV紧止损·改挂VPS" not in sup
+        and "禁止推宽" in sup,
+    )
+    from webhook_parser import VPS_HARD_SL_LIMIT_PCT, compute_vps_hard_sl_limit_price
+    a.check("3.7c LIMIT偏移已清零", float(VPS_HARD_SL_LIMIT_PCT or 0) == 0.0)
+    a.check(
+        "3.7d limit_price=触发原值",
+        abs(compute_vps_hard_sl_limit_price("LONG", 1874.39) - 1874.39) < 1e-9,
     )
     a.check("3.5 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
     a.check(
@@ -502,7 +517,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.87.1-drop-legacy-supervisor" in sup
+        "v13.88.0-tv-sl-raw" in sup
+        or "v13.87.1-drop-legacy-supervisor" in sup
         or "v13.87.0-radar-advance-only" in sup
         or "v13.86.0-tv-leverage-live" in sup
         or "v13.85.1-tv-lev-dingtalk" in sup
@@ -765,7 +781,8 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 当前版本对齐代码",
         (
-            "v13.87.1-drop-legacy-supervisor" in readme
+            "v13.88.0-tv-sl-raw" in readme
+            or "v13.87.1-drop-legacy-supervisor" in readme
             or "v13.87.0-radar-advance-only" in readme
             or "v13.86.0-tv-leverage-live" in readme
             or "v13.85.1-tv-lev-dingtalk" in readme
@@ -791,13 +808,14 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.87.1-drop-legacy-supervisor" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.88.0-tv-sl-raw" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py"))
         and "雷达解除·恢复呼吸空间" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "format_radar_activation_ratios_label" in _read(os.path.join(ROOT, "webhook_parser.py"))
-        and not os.path.exists(os.path.join(ROOT, "position_supervisor.py")),
+        and not os.path.exists(os.path.join(ROOT, "position_supervisor.py"))
+        and "gap * 1.25" not in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
         "README 雷达分档激活",

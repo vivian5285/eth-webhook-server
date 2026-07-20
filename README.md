@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.87.1-drop-legacy-supervisor`**  
+**当前版本：`v13.88.0-tv-sl-raw`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
@@ -15,7 +15,7 @@ TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.87.1-drop-legacy-supervisor
+# 期望 version 含 v13.88.0-tv-sl-raw
 # 期望 leverage: "tv_webhook" · sizing: "TV_RISK_FORMULA"
 # 期望 tv_strategy: v6.9.108
 ```
@@ -740,7 +740,16 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ## 版本演进
 
-### 近期详细更新记录（v13.67 → v13.87.1）
+### 近期详细更新记录（v13.67 → v13.88）
+
+#### v13.88.0 · `tv-sl-raw`
+
+**主题：硬止损 100% = TV `tv_sl` 原值；废除贴市推宽 / 加仓取更宽**
+
+- 删除 `gap*1.25` 推低/推高改价；穿价则失败→紧急平仓，禁止改宽
+- 加仓改挂最新 TV `tv_sl`，禁止 `_merge_wider`
+- `VPS_HARD_SL_LIMIT_PCT=0`；限价=触发价
+- 杠杆/仓位仍严格跟 TV `leverage`/`risk_pct`/`qty_ratio`（如 TV=5 → set_leverage=5）
 
 #### v13.87.1 · `drop-legacy-supervisor`
 
@@ -951,6 +960,7 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 | 版本 | 要点 |
 |------|------|
+| **v13.88.0** | **tv_sl 原值挂硬止损；禁贴市推宽/加仓取更宽；杠杆跟TV** |
 | **v13.87.1** | **删除遗留 position_supervisor.py；唯一生产大脑 binance** |
 | **v13.87.0** | **雷达交棒后只前进不回撤；钉钉统一R1=50%/R2=60%/R3=70%/R4=80%** |
 | **v13.86.0** | **set_leverage=TV leverage；废除固定25x；遗留大脑同步清保证金%** |
@@ -1015,4 +1025,4 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.87.1-drop-legacy-supervisor*
+*GEMINI Quant · 双轨智慧雷达 · v13.88.0-tv-sl-raw*

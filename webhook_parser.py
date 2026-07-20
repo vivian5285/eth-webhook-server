@@ -182,7 +182,7 @@ def format_regime_tp_ratios_label(regime):
 # ⚠ 已废除：VPS 档位%宽硬止损。实盘硬止损 = TV tv_sl 原值，禁止再用下表挂盘。
 VPS_HARD_SL_PCT = {}  # 空：禁止 entry×档位% 算硬止损
 VPS_HARD_SL_EXTRA_RELAX = 0.0
-VPS_HARD_SL_LIMIT_PCT = 0.0015  # 仅交易所拒单时的贴市安全距（非宽止损）
+VPS_HARD_SL_LIMIT_PCT = 0.0  # 废除贴市推价偏移；硬止损=tv_sl 原值
 VPS_HARD_SL_M = VPS_HARD_SL_PCT
 VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 VPS_HARD_SL_LIMIT_OFFSET = 0.0
@@ -286,24 +286,9 @@ def compute_vps_hard_sl(side, entry, atr=None, regime=None, extra_relax=None):
 
 
 def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
-    """
-    贴市安全限价偏移（交易所拒单时用，非宽止损加宽）。
-    多头平仓(SELL)：限价 = 触发价 × (1 − 0.15%)
-    空头平仓(BUY)：限价 = 触发价 × (1 + 0.15%)
-    """
+    """兼容旧名：限价 = TV 触发价原值（禁止任何偏移加宽）。"""
     trigger_px = float(trigger_px or 0)
-    if trigger_px <= 0:
-        return 0.0
-    if offset is None:
-        offset = trigger_px * VPS_HARD_SL_LIMIT_PCT
-    else:
-        offset = float(offset or 0)
-    side = str(side or "").strip().upper()
-    if side == "LONG":
-        return round(trigger_px - offset, 2)
-    if side == "SHORT":
-        return round(trigger_px + offset, 2)
-    return round(trigger_px, 2)
+    return round(trigger_px, 2) if trigger_px > 0 else 0.0
 
 
 def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
