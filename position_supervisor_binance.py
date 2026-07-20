@@ -78,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.78.0-open-defense-failclosed"
+BINANCE_VPS_VERSION = "v13.79.0-takeover-price-skip-tp"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -203,6 +203,7 @@ class PositionSupervisorBinance:
         self._recover_in_progress = False
         self._recover_tp_unconfirmed = False
         self._post_recover_radar_pulse = False
+        self._takeover_price_skip = False
         self._open_in_progress = False
         self._open_tp_unconfirmed = False
         self._last_signal_fp = None
@@ -334,25 +335,50 @@ class PositionSupervisorBinance:
         return self._live_position_qty() <= DUST_QTY_ETH
 
     def _reconcile_stale_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
-        """有 tp_levels_consumed 标记但无减仓证据 → 清空，避免只挂 TP23 漏 TP1"""
+        """
+        有 tp_levels_consumed 但无减仓证据 → 仅清「现价也未达」的假记账。
+        现价已过该档（接管场景）→ 保留，禁止清掉后重挂 TP1。
+        """
         initial_qty = float(initial_qty or 0)
         live_qty = float(live_qty or 0)
+        curr_px = float(
+            curr_px or binance_client.get_current_price(self.symbol) or 0
+        )
         consumed = list(getattr(self, "tp_levels_consumed", []) or [])
         if not consumed:
             return False
         inferred = self._infer_tp_consumed_sequential(initial_qty, live_qty, curr_px)
+        price_past = [
+            lv for lv in consumed
+            if self._price_reached_tp_zone(lv, curr_px, live_only=True)
+        ]
+        if price_past:
+            keep = self._sequential_tp_prefix(sorted(set(inferred or []) | set(price_past)))
+            if keep != consumed:
+                logger.warning(
+                    f"⚠️ 接管保留现价已过档 TP{keep} "
+                    f"(原 {consumed} | 开单 {initial_qty} 现仓 {live_qty} mark={curr_px:.2f})"
+                )
+                self.tp_levels_consumed = keep
+                self._save_state()
+                return True
+            return False
         if initial_qty <= live_qty + 0.001 and not inferred:
             logger.warning(
                 f"⚠️ 清除陈旧 tp_levels_consumed={consumed} "
-                f"(开单 {initial_qty}≈现仓 {live_qty}，无减仓证据)"
+                f"(开单 {initial_qty}≈现仓 {live_qty}，无减仓且现价未过)"
             )
             self.tp_levels_consumed = []
             self._save_state()
             return True
         if 1 in consumed and self.tv_tps and self.tv_tps[0] > 0:
-            if 1 not in inferred and not self._has_tp_limit_at_price(self.tv_tps[0]):
+            if (
+                1 not in inferred
+                and not self._has_tp_limit_at_price(self.tv_tps[0])
+                and not self._price_reached_tp_zone(1, curr_px, live_only=True)
+            ):
                 logger.warning(
-                    f"⚠️ TP1 已标记成交但无减仓/无 TP1 挂单 → 重置 {consumed}"
+                    f"⚠️ TP1 已标记成交但无减仓/无挂单/现价未过 → 重置 {consumed}"
                 )
                 self.tp_levels_consumed = []
                 self._save_state()
@@ -1734,9 +1760,19 @@ class PositionSupervisorBinance:
         live_qty = float(self._resolve_live_qty(live_qty) or live_qty)
         entry = float(entry or self.watched_entry or 0)
         curr_px = float(curr_px or binance_client.get_current_price(self.symbol) or 0)
+        self._takeover_price_skip = True  # 接管：现价已过档禁止重挂
 
         if manual_fresh:
             self._reset_fresh_takeover_state()
+
+        # 先补全 TP 价，再开仓价/现价两头对账（先于任何「清记账」老逻辑）
+        if not self._ensure_tp123_prices_from_tv(entry):
+            notes.append("TP123补全失败")
+        progress = self._apply_takeover_price_progress(
+            entry, curr_px, live_qty, source=source,
+        )
+        notes.extend(progress.get("notes") or [])
+        price_plan = progress
 
         self._disarm_premature_radar(live_qty, curr_px, source=source)
         self._reconcile_stale_tp_consumed(
@@ -1746,9 +1782,12 @@ class PositionSupervisorBinance:
         if float(self.initial_qty or 0) != trusted_initial:
             self.initial_qty = trusted_initial
         self._sanitize_tp_consumed(trusted_initial, live_qty, curr_px)
+        # 接管禁止无脑清记账；仅清「现价未过且无减仓」的假成交
         self._clear_spurious_tp_consumed_if_full_size(live_qty, source=source)
-        if not self._ensure_tp123_prices_from_tv(entry):
-            notes.append("TP123补全失败")
+        # 再次应用现价进度（防止中间步骤清掉已过档）
+        price_plan = self._apply_takeover_price_progress(
+            entry, curr_px, live_qty, source=f"{source}·复核",
+        )
         if float(getattr(self, "tv_sl", 0) or 0) <= 0:
             self._hydrate_tv_defense_context({
                 "side": self.current_side, "entry_price": entry, "size": live_qty,
@@ -1771,7 +1810,13 @@ class PositionSupervisorBinance:
                     tv_sl_ref=getattr(self, "tv_sl_ref", 0),
                 ))
 
-        self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
+        # 未达激活线/未过TP1 才强制待命；已过则勿清记账、勿解雷达
+        if not price_plan.get("should_radar"):
+            self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
+        else:
+            logger.info(
+                f"📡 [{source}] 现价已达雷达门槛 → 跳过激活线前待命清账"
+            )
 
         # 接管/重启：禁止 force 档位裁减（会 cancel_all 后裸仓/误减仓）
         try:
@@ -1821,18 +1866,32 @@ class PositionSupervisorBinance:
 
         stop_check = self._resolve_defense_stop_for_audit(radar_sl)
         if not self._radar_legitimately_armed(live_qty, curr_px):
-            radar_sl = None
-            self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
-            stop_check = self._shield_stop_price()
+            if price_plan.get("should_radar"):
+                # 应启雷达：尝试交棒，禁止再清 TP 过价记账
+                try:
+                    self._process_radar_trailing(live_qty, curr_px)
+                    radar_sl = self._radar_sl_to_pass()
+                    stop_check = self._resolve_defense_stop_for_audit(radar_sl)
+                except Exception as e:
+                    logger.warning(f"[{source}] 应启雷达追随失败: {e}")
+            else:
+                radar_sl = None
+                self._enforce_pre_tp1_radar_standby(live_qty, curr_px, source=source)
+                stop_check = self._shield_stop_price()
         shield_ok = self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=radar_sl)
         audit = self._wait_defense_settled(live_qty, stop_check)
 
         if not self._tp_audit_ok(audit) or (
             stop_check and not self._has_stop_sl_near(stop_check, tolerance=2.5)
         ):
+            # 核武前再钉一次现价已过档，禁止核武把 TP1 挂回
+            self._apply_takeover_price_progress(
+                entry, curr_px, live_qty, source=f"{source}·核武前",
+            )
             logger.warning(
                 f"⚠️ [{source}] TP/止损未齐 ({audit.get('matched_full', 0)}/"
-                f"{audit.get('expected', 0)}) → 核武重挂 TP123+tv_sl"
+                f"{audit.get('expected', 0)}) → 核武重挂剩余档 "
+                f"(已过 {getattr(self, 'tp_levels_consumed', [])})"
             )
             audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=radar_sl, rounds=3)
             shield_ok = self._maintain_hard_shield(
@@ -1845,23 +1904,30 @@ class PositionSupervisorBinance:
             {"side": self.current_side, "size": live_qty, "entry_price": entry},
             curr_px, audit,
         )
+        if price_plan.get("should_radar"):
+            health["should_radar"] = True
 
-        if self._radar_legitimately_armed(live_qty, curr_px) and (
+        if (
+            self._radar_legitimately_armed(live_qty, curr_px)
+            or price_plan.get("should_radar")
+        ) and (
             health.get("should_radar") or health.get("radar_active")
+            or price_plan.get("should_radar")
         ):
             self._process_radar_trailing(live_qty, curr_px)
             sl = self._radar_sl_to_pass()
             if sl and not self._has_stop_sl_near(sl):
                 self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=sl)
         else:
-            progress = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
+            act_prog = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
             tp1_prog = self._tp1_direction_progress(curr_px) if curr_px > 0 else 0.0
             logger.info(
-                f"📡 [{source}] 雷达待命 激活进度{progress:.0%} "
+                f"📡 [{source}] 雷达待命 激活进度{act_prog:.0%} "
                 f"朝TP1{tp1_prog:.0%} | "
                 f"VPS@{float(self._vps_hard_sl_target() or 0):.2f}"
                 f"(R{self._resolve_hard_sl_regime()}) | "
-                f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)}"
+                f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
+                f"已过档 {getattr(self, 'tp_levels_consumed', [])}"
             )
 
         if self._tp_audit_ok(audit):
@@ -1876,38 +1942,45 @@ class PositionSupervisorBinance:
                     f"VPS@{float(self._vps_hard_sl_target() or 0):.2f} | 哨兵接力",
                 )
 
-        # 终检：盘口无保护 STOP → 强制再挂（接管/重启禁裸仓）
+        # 终检：盘口无保护 STOP / 剩余 TP 未齐 → 强制闭环（接管模式：禁重挂已过价档）
         hung = binance_client.find_protective_stop_prices(self.symbol)
-        if live_qty > 0 and (
-            not hung
-            or (
-                int(audit.get("expected") or 0) > 0
-                and int(audit.get("matched_full") or 0) < int(audit.get("expected") or 0)
-            )
-        ):
-            logger.error(
-                f"🚨 [{source}] 终检防线未齐 TP "
-                f"{audit.get('matched_full', 0)}/{audit.get('expected', 0)} "
-                f"stop={hung} → 强制闭环"
-            )
-            audit, hung = self._force_hang_open_defenses(live_qty, entry, rounds=2)
-            shield_ok = bool(hung)
-            if not hung:
-                dingtalk.report_system_alert(
-                    f"{source} · 裸仓无硬止损 [{self.symbol}]",
-                    f"{self.current_side} {live_qty} @ {entry:.2f} | "
-                    f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
-                    f"请立即人工挂 closePosition",
+        try:
+            if live_qty > 0 and (
+                not hung
+                or (
+                    int(audit.get("expected") or 0) > 0
+                    and int(audit.get("matched_full") or 0) < int(audit.get("expected") or 0)
                 )
+            ):
+                logger.error(
+                    f"🚨 [{source}] 终检防线未齐 TP "
+                    f"{audit.get('matched_full', 0)}/{audit.get('expected', 0)} "
+                    f"stop={hung} 已过={getattr(self, 'tp_levels_consumed', [])} → 强制闭环"
+                )
+                audit, hung = self._force_hang_open_defenses(
+                    live_qty, entry, rounds=2, takeover_mode=True,
+                )
+                shield_ok = bool(hung)
+                if not hung:
+                    dingtalk.report_system_alert(
+                        f"{source} · 裸仓无硬止损 [{self.symbol}]",
+                        f"{self.current_side} {live_qty} @ {entry:.2f} | "
+                        f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
+                        f"已过档 {getattr(self, 'tp_levels_consumed', [])} | "
+                        f"请立即人工挂 closePosition",
+                    )
 
-        self._post_recover_radar_pulse = True
-        return {
-            "audit": audit,
-            "result": result,
-            "health": health,
-            "shield_ok": shield_ok,
-            "notes": notes,
-        }
+            self._post_recover_radar_pulse = True
+            return {
+                "audit": audit,
+                "result": result,
+                "health": health,
+                "shield_ok": shield_ok,
+                "notes": notes,
+                "price_plan": price_plan,
+            }
+        finally:
+            self._takeover_price_skip = False
 
     def _smart_recover_defenses(self, real_amt, entry, dynamic_sl=None):
         """重启智能补挂：审计齐全则跳过，缺档增量补，避免重复挂单"""
@@ -3108,9 +3181,12 @@ class PositionSupervisorBinance:
         return self._sequential_tp_prefix(consumed)
 
     def _sanitize_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
-        """纠正 tp_levels_consumed：全标已成交但仍有仓 / 非顺序前缀 → 按减仓重算"""
+        """纠正 tp_levels_consumed：合并减仓推断 + 现价已过档；禁止清掉已过价档"""
         live_qty = float(live_qty or 0)
         initial_qty = float(initial_qty or 0)
+        curr_px = float(
+            curr_px or binance_client.get_current_price(self.symbol) or 0
+        )
         if live_qty <= DUST_QTY_ETH:
             self.tp_levels_consumed = []
             self._save_state()
@@ -3118,10 +3194,27 @@ class PositionSupervisorBinance:
 
         saved = self._sequential_tp_prefix(getattr(self, "tp_levels_consumed", []) or [])
         inferred = self._infer_tp_consumed_sequential(initial_qty, live_qty, curr_px)
+        price_past = []
+        for lv in (1, 2, 3):
+            if self._price_reached_tp_zone(lv, curr_px, live_only=True):
+                price_past.append(lv)
+            else:
+                break
+        price_past = self._sequential_tp_prefix(price_past)
 
-        if initial_qty <= live_qty + 0.001 and saved and not inferred:
+        if price_past:
+            merged = self._sequential_tp_prefix(
+                sorted(set(saved or []) | set(inferred or []) | set(price_past))
+            )
+            if merged != saved:
+                logger.info(
+                    f"🎯 已成交档含现价已过: TP{saved or '无'} → TP{merged} "
+                    f"(开单 {initial_qty} → 现仓 {live_qty} mark={curr_px:.2f})"
+                )
+            saved = merged
+        elif initial_qty <= live_qty + 0.001 and saved and not inferred:
             logger.warning(
-                f"⚠️ 无减仓但 tp_levels_consumed={saved} → 清空（避免漏挂 TP1）"
+                f"⚠️ 无减仓且现价未过但 tp_levels_consumed={saved} → 清空（避免漏挂）"
             )
             saved = []
         elif initial_qty <= live_qty + 0.001 and saved and inferred and saved != inferred:
@@ -3130,20 +3223,20 @@ class PositionSupervisorBinance:
             )
             saved = inferred
 
-        if len(saved) >= 3 and live_qty > DUST_QTY_ETH:
+        if len(saved) >= 3 and live_qty > DUST_QTY_ETH and not price_past:
             logger.warning(
                 f"⚠️ tp_levels_consumed={saved} 但仍有 {live_qty} ETH → "
                 f"按开单 {initial_qty} 重算为 TP{inferred or '无'}"
             )
             saved = inferred
-        elif inferred and (not saved or len(inferred) < len(saved)):
+        elif inferred and (not saved or len(inferred) < len(saved)) and not price_past:
             if saved != inferred:
                 logger.info(
                     f"🎯 已成交档修正: TP{saved or '无'} → TP{inferred} "
                     f"(开单 {initial_qty} → 现仓 {live_qty})"
                 )
             saved = inferred
-        elif saved and inferred and saved != inferred:
+        elif saved and inferred and saved != inferred and not price_past:
             logger.info(
                 f"🎯 已成交档以减仓为准: TP{saved} → TP{inferred}"
             )
@@ -3545,12 +3638,34 @@ class PositionSupervisorBinance:
         return True
 
     def _clear_spurious_tp_consumed_if_full_size(self, live_qty, source=""):
-        """开仓后仓位≈基线却已记账 TP → 清掉假成交，恢复应挂档"""
+        """
+        开仓后仓位≈基线却已记账 TP → 清掉假成交。
+        例外：现价已过该档（接管）→ 保留，禁止清后重挂 TP1。
+        """
         live_qty = float(live_qty or 0)
         consumed = list(getattr(self, "tp_levels_consumed", []) or [])
         if not consumed or live_qty <= 0:
             return False
         if any(self._qty_evidence_tp_consumed(lv, live_qty) for lv in consumed):
+            return False
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        price_keep = [
+            lv for lv in consumed
+            if self._price_reached_tp_zone(lv, curr_px, live_only=True)
+        ]
+        if price_keep:
+            keep = self._sequential_tp_prefix(price_keep)
+            if keep != consumed:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 保留现价已过档 TP{keep}，"
+                    f"清除其余假记账 {consumed} | {source}"
+                )
+                self.tp_levels_consumed = keep
+                self._save_state()
+                return True
+            logger.info(
+                f"📌 [{self.symbol}] 现价已过 TP{keep} → 不清除记账 | {source}"
+            )
             return False
         logger.error(
             f"🚨 [{self.symbol}] 清除假 TP 成交记账 {consumed} | live={live_qty} | {source}"
@@ -3558,6 +3673,98 @@ class PositionSupervisorBinance:
         self.tp_levels_consumed = []
         self._save_state()
         return True
+
+    def _apply_takeover_price_progress(self, entry, curr_px, live_qty, source="接管"):
+        """
+        重启/接管铁律（开仓价 + 实时价两头对账）：
+        - 现价已达/越过 TPn → 记账跳过，禁止再挂该档（防 TP1 反复补挂秒成）
+        - 只挂尚未达价的剩余档（TP1过→只挂23；TP2过→只挂3）
+        - 达雷达激活比例或 TP1 已过 → 应启雷达动态追随
+        不要求减仓证据（接管时限价可能已成交或从未挂上）。
+        """
+        entry = float(entry or self.watched_entry or 0)
+        curr_px = float(
+            curr_px
+            or binance_client.get_current_price(self.symbol)
+            or 0
+        )
+        live_qty = float(live_qty or 0)
+        notes = []
+        if entry <= 0 or curr_px <= 0 or not self.current_side:
+            return {
+                "consumed": list(getattr(self, "tp_levels_consumed", []) or []),
+                "hang_levels": [1, 2, 3],
+                "should_radar": False,
+                "notes": ["缺开仓价或现价"],
+            }
+
+        self._ensure_tp123_prices_from_tv(entry)
+        past = []
+        for lv in (1, 2, 3):
+            if not self.tv_tps or lv - 1 >= len(self.tv_tps):
+                break
+            px = float(self.tv_tps[lv - 1] or 0)
+            if px <= 0:
+                break
+            if self._price_reached_tp_zone(lv, curr_px, px, live_only=True):
+                past.append(lv)
+            else:
+                break
+        past = self._sequential_tp_prefix(past)
+        prev = list(getattr(self, "tp_levels_consumed", []) or [])
+        merged = self._sequential_tp_prefix(sorted(set(prev) | set(past)))
+        if merged != prev:
+            self.tp_levels_consumed = merged
+            self._save_state()
+
+        hang = []
+        for lv in (1, 2, 3):
+            if lv in set(merged):
+                continue
+            if self.tv_tps and lv - 1 < len(self.tv_tps) and float(self.tv_tps[lv - 1] or 0) > 0:
+                hang.append(lv)
+
+        act_ratio = float(self._radar_activation_ratio() or 0)
+        prog = float(self._tp1_direction_progress(curr_px) or 0)
+        should_radar = bool(
+            self._price_reached_radar_activation(curr_px, live_only=True)
+            or (1 in merged)
+            or (act_ratio > 0 and prog >= act_ratio)
+        )
+        if past:
+            rem = hang if hang else ["无(全过)"]
+            notes.append(
+                f"现价已过TP{past}→跳过不挂 | 应挂{rem} | "
+                f"entry={entry:.2f} mark={curr_px:.2f}"
+            )
+            logger.warning(
+                f"🧭 [{source}] [{self.symbol}] 开仓价/现价对账: "
+                f"已过 TP{past} → 禁止补挂这些档 | 只挂 {hang or '无'} | "
+                f"雷达={'应激活' if should_radar else '待命'} "
+                f"(朝TP1 {prog:.0%}/{act_ratio:.0%})"
+            )
+        else:
+            notes.append(
+                f"现价未过TP1 | 应挂{hang or [1, 2, 3]} | "
+                f"entry={entry:.2f} mark={curr_px:.2f} | "
+                f"雷达={'应激活' if should_radar else '待命'}"
+            )
+            logger.info(
+                f"🧭 [{source}] [{self.symbol}] 开仓价/现价对账: "
+                f"未过TP1 → 可挂 {hang or [1, 2, 3]} | "
+                f"雷达={'应激活' if should_radar else '待命'} "
+                f"(朝TP1 {prog:.0%}/{act_ratio:.0%})"
+            )
+        return {
+            "consumed": merged,
+            "hang_levels": hang,
+            "should_radar": should_radar,
+            "notes": notes,
+            "progress": prog,
+            "act_ratio": act_ratio,
+            "entry": entry,
+            "mark": curr_px,
+        }
 
     def _force_tps_unmarketable(self, curr_px=None, entry=None):
         """穿价 TP 多轮加大间隙推离，直到可挂；禁止整档跳过导致 0 TP"""
@@ -3612,27 +3819,48 @@ class PositionSupervisorBinance:
         self._save_state()
         return list(self.tv_tps)
 
-    def _force_hang_open_defenses(self, live_qty, entry, rounds=3):
+    def _force_hang_open_defenses(self, live_qty, entry, rounds=3, takeover_mode=False):
         """
-        开仓铁律闭环：清假成交 → 推离穿价 → 挂 TP123 → 强制 VPS 宽硬止损。
-        任一轮未齐则重试；忽略核武刹车。
+        开仓/接管铁律闭环：挂齐「应挂」剩余 TP + VPS 宽硬止损。
+        takeover_mode：先按现价跳过已过档，禁止清记账后重挂 TP1。
         """
         live_qty = float(live_qty or 0)
         entry = float(entry or self.watched_entry or 0)
         last_audit = self._audit_tp_levels(live_qty)
         hung = binance_client.find_protective_stop_prices(self.symbol)
         for r in range(max(1, int(rounds))):
-            self._clear_spurious_tp_consumed_if_full_size(
-                live_qty, source=f"开仓强制挂防线#{r + 1}",
-            )
-            self._nuclear_fail_streak = 0
             mark = float(binance_client.get_current_price(self.symbol) or entry or 0)
+            if takeover_mode:
+                self._apply_takeover_price_progress(
+                    entry, mark, live_qty, source=f"接管强制挂#{r + 1}",
+                )
+            else:
+                self._clear_spurious_tp_consumed_if_full_size(
+                    live_qty, source=f"开仓强制挂防线#{r + 1}",
+                )
+            self._nuclear_fail_streak = 0
             self._ensure_tp123_prices_from_tv(entry)
-            self._force_tps_unmarketable(mark, entry)
+            # 只对尚未达价的剩余档推离穿价
+            remaining = [
+                lv for lv in self._expected_tp_levels(live_qty)
+                if float(lv.get("price") or 0) > 0
+            ]
+            if remaining:
+                self._force_tps_unmarketable(mark, entry)
             placed = self._place_tp_levels_only(live_qty, retries=3)
+            radar_sl = None
+            if takeover_mode and self._radar_ready_to_handoff(mark, live_qty):
+                try:
+                    self._process_radar_trailing(live_qty, mark)
+                    radar_sl = self._radar_sl_to_pass()
+                except Exception as e:
+                    logger.warning(f"接管强制挂·雷达追随跳过: {e}")
             self._sync_exchange_stop(
-                live_qty, radar_sl=None,
-                reason=f"开仓强制挂防线#{r + 1}·VPS宽硬止损",
+                live_qty, radar_sl=radar_sl,
+                reason=(
+                    f"接管强制挂#{r + 1}·保护止损" if takeover_mode
+                    else f"开仓强制挂防线#{r + 1}·VPS宽硬止损"
+                ),
                 force=True,
             )
             time.sleep(0.7)
@@ -3641,13 +3869,19 @@ class PositionSupervisorBinance:
             matched = int(last_audit.get("matched_full") or 0)
             expected = int(last_audit.get("expected") or 0)
             logger.warning(
-                f"🛡️ [{self.symbol}] 开仓强制挂防线 #{r + 1}/{rounds} "
-                f"placed={placed} TP {matched}/{expected} stop={hung}"
+                f"🛡️ [{self.symbol}] "
+                f"{'接管' if takeover_mode else '开仓'}强制挂防线 "
+                f"#{r + 1}/{rounds} placed={placed} TP {matched}/{expected} "
+                f"stop={hung} consumed={getattr(self, 'tp_levels_consumed', [])}"
             )
             if expected > 0 and matched >= expected and hung:
                 self._mark_defense_align_ok()
                 return last_audit, hung
-            if expected <= 0:
+            if expected <= 0 and hung and takeover_mode:
+                # 全档现价已过：只保硬止损/雷达即可
+                self._mark_defense_align_ok()
+                return last_audit, hung
+            if expected <= 0 and not takeover_mode:
                 self._ensure_tp123_prices_from_tv(entry)
                 self._clear_spurious_tp_consumed_if_full_size(
                     live_qty, source="开仓强制·expected=0",
@@ -6022,7 +6256,18 @@ class PositionSupervisorBinance:
                 )
                 self._mark_tp_levels_consumed([level])
                 continue
-            # 现价已达该档但无减仓证据：推离后仍要挂，禁止假成交跳过
+            # 接管/重启：现价已过该档 → 记账跳过，禁止推离后重挂（防 TP1 死循环）
+            if (
+                getattr(self, "_takeover_price_skip", False)
+                or getattr(self, "_recover_in_progress", False)
+            ) and self._price_reached_tp_zone(level, curr_px, px, live_only=True):
+                logger.warning(
+                    f"🧩 接管跳过补挂 TP{level} @{px:.2f}：现价已达 "
+                    f"(mark={curr_px:.2f}) → 只挂更远档，禁 TP1 反复成交"
+                )
+                self._mark_tp_levels_consumed([level])
+                continue
+            # 开仓路径：现价已达但无减仓证据 → 推离后仍要挂
             if self._price_reached_tp_zone(level, curr_px, px):
                 if self._has_tp_limit_at_price(px):
                     continue
@@ -7027,11 +7272,11 @@ class PositionSupervisorBinance:
                 return True
         return False
 
-    def _price_reached_tp_zone(self, level, curr_px=0.0, tp_px=None):
-        """现价或 best 是否已触及/越过指定 TP 档。"""
+    def _price_reached_tp_zone(self, level, curr_px=0.0, tp_px=None, live_only=False):
+        """现价（或 best）是否已触及/越过指定 TP 档。live_only=True 仅用实时价。"""
         level = int(level or 0)
         if level == 1:
-            return self._price_reached_tp1_zone(curr_px, tp_px)
+            return self._price_reached_tp1_zone(curr_px, tp_px, live_only=live_only)
         idx = level - 1
         tp_px = float(
             tp_px
@@ -7045,7 +7290,10 @@ class PositionSupervisorBinance:
             float(getattr(self, "qty_step", 0.001) or 0.001),
             tp_px * TP1_PRICE_ZONE_PCT,
         )
-        for px in (float(curr_px or 0), float(self.best_price or 0)):
+        prices = [float(curr_px or 0)]
+        if not live_only:
+            prices.append(float(self.best_price or 0))
+        for px in prices:
             if px <= 0:
                 continue
             if self.current_side == "LONG" and px >= tp_px - px_tol:
@@ -7459,34 +7707,60 @@ class PositionSupervisorBinance:
 
     def _repair_partial_tp_on_recover(self, live_qty, entry, initial_qty, curr_px=0.0):
         """
-        重启修复：开单头寸 + 部分止盈 → 撤多余已成交档，现仓=TP2+TP3 重分。
+        重启修复：开仓价+现价对账 → 已过档跳过；只重分/补挂剩余档。
+        禁止无减仓证据就清空「现价已过」记账后重挂 TP1。
         """
         live_qty = self._resolve_live_qty(live_qty)
         initial_qty = float(initial_qty or live_qty or 0)
+        curr_px = float(
+            curr_px or binance_client.get_current_price(self.symbol) or 0
+        )
         actions = []
 
+        plan = self._apply_takeover_price_progress(
+            entry, curr_px, live_qty, source="重启部分止盈修复",
+        )
+        actions.extend(plan.get("notes") or [])
         self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
         consumed = getattr(self, "tp_levels_consumed", []) or []
         if consumed and initial_qty <= live_qty + 0.001:
             inferred = self._infer_tp_consumed_sequential(initial_qty, live_qty, curr_px)
-            if not inferred:
+            price_past = [
+                lv for lv in consumed
+                if self._price_reached_tp_zone(lv, curr_px, live_only=True)
+            ]
+            if not inferred and not price_past:
                 logger.warning(
-                    f"跳过部分止盈修复：无减仓证据，清除 TP{consumed}"
+                    f"跳过部分止盈修复：无减仓且现价未过，清除 TP{consumed}"
                 )
                 self.tp_levels_consumed = []
                 self._save_state()
                 return {"repaired": False, "actions": actions, "result": None, "consumed": []}
+            if price_past and not inferred:
+                keep = self._sequential_tp_prefix(price_past)
+                self.tp_levels_consumed = keep
+                self._save_state()
+                consumed = keep
+                actions.append(f"现价已过保留 TP{keep}（无减仓也不重挂）")
 
         stale_levels = self._detect_stale_consumed_tp_levels(
             initial_qty, live_qty, curr_px,
         )
         if stale_levels:
+            # 合并现价已过，避免 detect 丢掉
+            past = [
+                lv for lv in (1, 2, 3)
+                if self._price_reached_tp_zone(lv, curr_px, live_only=True)
+            ]
+            merged = self._sequential_tp_prefix(
+                sorted(set(stale_levels) | set(past))
+            )
             prev = set(getattr(self, "tp_levels_consumed", []) or [])
-            if stale_levels != sorted(prev):
-                self.tp_levels_consumed = stale_levels
+            if merged != sorted(prev):
+                self.tp_levels_consumed = merged
                 self._save_state()
             actions.append(
-                f"已成交档 TP{stale_levels} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
+                f"已成交/已过价档 TP{merged} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
             )
 
         consumed = getattr(self, "tp_levels_consumed", []) or []
@@ -7500,18 +7774,30 @@ class PositionSupervisorBinance:
                 consumed = inferred
                 actions.append(f"推断已成交 TP{inferred}")
         if not consumed:
+            # 仍可能仅需补挂全档；交由后续 enforce
             return {"repaired": False, "actions": actions, "result": None, "consumed": []}
 
-        # 有现仓且仍有未成交档 → 必须 repair（含仅余 TP3 全仓 0.405 的情况）
+        # 有现仓且仍有未成交档 → 必须 repair（含仅余 TP3 全仓）
         if live_qty > DUST_QTY_ETH and self._expected_tp_count() == 0:
             self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
+            self._apply_takeover_price_progress(
+                entry, curr_px, live_qty, source="重启·无待挂档",
+            )
             consumed = getattr(self, "tp_levels_consumed", []) or []
             if self._expected_tp_count() == 0 and live_qty > DUST_QTY_ETH:
-                logger.warning(
-                    f"⚠️ 仍有 {live_qty} ETH 但无待挂 TP 档 → 强制挂最后一档 TP3"
-                )
-                self.tp_levels_consumed = [1, 2]
-                self._save_state()
+                # 现价未过任何档却 expected=0 → 异常；若已过1+2则只挂3
+                if self._price_reached_tp_zone(2, curr_px, live_only=True):
+                    logger.warning(
+                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP2 → 只挂 TP3"
+                    )
+                    self.tp_levels_consumed = [1, 2]
+                    self._save_state()
+                elif self._price_reached_tp_zone(1, curr_px, live_only=True):
+                    logger.warning(
+                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 只挂 TP23"
+                    )
+                    self.tp_levels_consumed = [1]
+                    self._save_state()
 
         n_stale = self._cancel_tp_orders_at_levels(consumed)
         if n_stale:
@@ -7519,19 +7805,20 @@ class PositionSupervisorBinance:
 
         n_mismatch = self._cancel_mismatched_remaining_tps(live_qty)
         if n_mismatch:
-            actions.append(f"撤偏差 TP2/TP3 {n_mismatch} 笔")
+            actions.append(f"撤偏差剩余档 {n_mismatch} 笔")
 
         time.sleep(0.4)
 
         sl_to_pass = self._radar_sl_to_pass()
         if sl_to_pass is None and curr_px and curr_px > 0:
-            top_level = max(consumed)
-            px = self.tv_tps[top_level - 1] if top_level <= len(self.tv_tps) else 0
-            if px > 0:
-                sl_to_pass = self._advance_radar_on_tp_fill(
-                    [{"level": top_level, "price": px, "qty": 0}],
-                    curr_px, live_qty,
-                )
+            top_level = max(consumed) if consumed else 0
+            if top_level:
+                px = self.tv_tps[top_level - 1] if top_level <= len(self.tv_tps) else 0
+                if px > 0:
+                    sl_to_pass = self._advance_radar_on_tp_fill(
+                        [{"level": top_level, "price": px, "qty": 0}],
+                        curr_px, live_qty,
+                    )
 
         result = self._realign_remaining_tps_after_fill(
             live_qty, dynamic_sl=sl_to_pass, reason="重启部分止盈修复",
@@ -7541,7 +7828,8 @@ class PositionSupervisorBinance:
         rem_sum = round(sum(lv["qty"] for lv in rem_levels), 3)
         actions.append(
             f"剩余 TP 重分 {rem_sum}/{live_qty} ETH | "
-            f"对齐 {audit.get('matched_full', 0)}/{audit.get('expected', 0)} 档"
+            f"对齐 {audit.get('matched_full', 0)}/{audit.get('expected', 0)} 档 | "
+            f"应挂 {[lv['level'] for lv in rem_levels]}"
         )
         return {
             "repaired": True,
@@ -7669,7 +7957,7 @@ class PositionSupervisorBinance:
             return {"kind": "shield_fill", "tp_fills": [], "shield_fills": shield_fills}
         return {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
 
-    def _price_reached_tp1_zone(self, curr_px=0.0, tp1_px=None):
+    def _price_reached_tp1_zone(self, curr_px=0.0, tp1_px=None, live_only=False):
         """现价或 best 是否已触及/越过 TP1（主判断；容差按品种相对价）。"""
         tp1_px = float(
             tp1_px
@@ -7680,10 +7968,10 @@ class PositionSupervisorBinance:
         if tp1_px <= 0 or entry <= 0:
             return False
         px_tol = max(float(getattr(self, "qty_step", 0.001) or 0.001), tp1_px * TP1_PRICE_ZONE_PCT)
-        for px in (
-            float(curr_px or 0),
-            float(self.best_price or 0),
-        ):
+        prices = [float(curr_px or 0)]
+        if not live_only:
+            prices.append(float(self.best_price or 0))
+        for px in prices:
             if px <= 0:
                 continue
             if self.current_side == "LONG" and px >= tp1_px - px_tol:
@@ -9832,14 +10120,18 @@ class PositionSupervisorBinance:
 
         consumed = list(getattr(self, "tp_levels_consumed", []) or [])
         if consumed:
-            # 伪 TP 标记（账本有但未核实成交）→ 清除
-            fake = [lv for lv in consumed if not self._tp_filled_verified(lv, live_qty, curr_px)]
+            # 伪 TP：未核实成交 且 现价也未过 → 才清除（接管现价已过必须保留）
+            fake = [
+                lv for lv in consumed
+                if not self._tp_filled_verified(lv, live_qty, curr_px)
+                and not self._price_reached_tp_zone(lv, curr_px, live_only=True)
+            ]
             if fake:
                 self.tp_levels_consumed = [lv for lv in consumed if lv not in fake]
                 changed = True
                 logger.warning(
                     f"📡 [{source or '雷达'}] 清除伪 TP{fake} 标记 "
-                    f"(TP 未实盘成交)"
+                    f"(TP 未实盘成交且现价未过)"
                 )
 
         if entry > 0 and self.current_sl:
@@ -9914,7 +10206,11 @@ class PositionSupervisorBinance:
         tv = float(getattr(self, "tv_sl", 0) or 0)
         entry = float(self.watched_entry or 0)
 
-        fake = [lv for lv in stale if not self._tp_filled_verified(lv, live_qty, curr_px)]
+        fake = [
+            lv for lv in stale
+            if not self._tp_filled_verified(lv, live_qty, curr_px)
+            and not self._price_reached_tp_zone(lv, curr_px, live_only=True)
+        ]
         if fake:
             self.tp_levels_consumed = [lv for lv in stale if lv not in fake]
             disarmed = True
@@ -10094,39 +10390,45 @@ class PositionSupervisorBinance:
         return None
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
-        """重启：仅当曾交棒且现价仍达激活线且理想保本安全时恢复雷达；否则宽硬止损待命。"""
+        """
+        重启/接管雷达：
+        - 现价达激活线 或 TP1 已过价 → 尝试交棒/恢复追随（不要求曾交棒）
+        - 否则宽硬止损待命
+        - 禁止无缘无故平仓；禁止用陈旧 best 误触
+        """
         if curr_px <= 0 or not entry:
             return
 
         if self.best_price == 0.0:
             self.best_price = entry
         if self.current_side == "LONG":
-            self.best_price = max(self.best_price, curr_px)
+            self.best_price = max(float(self.best_price or 0), float(curr_px))
         else:
-            self.best_price = min(self.best_price, curr_px)
+            bp = float(self.best_price or 0)
+            self.best_price = min(bp, float(curr_px)) if bp > 0 else float(curr_px)
 
-        had_handoff = bool(getattr(self, "_radar_handoff_done", False))
         live_at_act = self._radar_ready_to_handoff(curr_px, self.watched_qty)
+        # 接管：现价已过 TP1 也视为可启雷达
+        if not live_at_act and self._price_reached_tp_zone(1, curr_px, live_only=True):
+            live_at_act = True
+            if 1 not in (getattr(self, "tp_levels_consumed", []) or []):
+                self._mark_tp_levels_consumed([1])
         ratio = self._radar_activation_ratio()
         prog = self._tp1_direction_progress(curr_px)
 
-        if not had_handoff or not live_at_act:
+        if not live_at_act:
             if self.current_sl == 0.0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             elif float(getattr(self, "tv_sl", 0) or 0) > 0:
-                # 未达激活线：强制账本回到 VPS 宽价，禁止残留保本线
                 self.current_sl = float(self.tv_sl)
             self._radar_stage_last = 0
             self._radar_armed_after_tp1 = False
             self._radar_handoff_done = False
             self._ws_tp1_fill_hint = False
-            why = "未曾交棒" if not had_handoff else (
-                f"现价未达R{self._radar_regime_locked()}激活线"
-                f"{ratio:.0%}且TP1未成交(朝TP1 {prog:.0%})"
-            )
             logger.info(
                 f"📡 [{self.symbol}] 重启雷达待命: 阶段0 | 保留 VPS硬止损 "
-                f"({why})"
+                f"(现价未达R{self._radar_regime_locked()}激活线"
+                f"{ratio:.0%}且TP1未过价(朝TP1 {prog:.0%}))"
             )
             return
 
@@ -10138,8 +10440,8 @@ class PositionSupervisorBinance:
             if float(getattr(self, "tv_sl", 0) or 0) > 0:
                 self.current_sl = float(self.tv_sl)
             logger.info(
-                f"📡 [{self.symbol}] 重启：曾交棒且现价达激活线，但理想保本距市不足 → "
-                f"退回宽硬止损，待哨兵再交棒"
+                f"📡 [{self.symbol}] 重启：现价达雷达门槛，但理想保本距市不足 → "
+                f"暂留宽硬止损，哨兵再交棒"
             )
             return
 
@@ -10156,9 +10458,11 @@ class PositionSupervisorBinance:
             self.current_sl = min(float(self.current_sl or entry), new_sl)
         self._radar_stage_last = max(stage, 1)
         logger.info(
-            f"📡 [{self.symbol}] 重启雷达恢复: 阶段{stage} {self._radar_stage_label(stage)} | "
+            f"📡 [{self.symbol}] 重启/接管雷达激活: 阶段{stage} "
+            f"{self._radar_stage_label(stage)} | "
             f"best={self.best_price:.2f} | SL={self.current_sl:.2f} | "
-            f"朝TP1 {prog:.0%}/{ratio:.0%}"
+            f"朝TP1 {prog:.0%}/{ratio:.0%} | 已过档 "
+            f"{getattr(self, 'tp_levels_consumed', [])}"
         )
 
     def _ensure_price_ws(self):
@@ -10798,6 +11102,19 @@ class PositionSupervisorBinance:
                     logger.info(f"  ✓ TP{lv['level']} @ {px:.2f} 已在盘口，跳过")
                     placed += 1
                     continue
+                # 接管/重启：现价已过 → 跳过不挂（禁 TP1 死循环）
+                if (
+                    getattr(self, "_takeover_price_skip", False)
+                    or getattr(self, "_recover_in_progress", False)
+                ) and self._price_reached_tp_zone(
+                    int(lv["level"]), curr_px, px, live_only=True,
+                ):
+                    logger.warning(
+                        f"🧩 重建跳过 TP{lv['level']}：接管现价已达 "
+                        f"(mark={curr_px:.2f}) → 只挂更远档"
+                    )
+                    self._mark_tp_levels_consumed([int(lv["level"])])
+                    continue
                 if self._tp_is_marketable(self.current_side, px, curr_px):
                     self._force_tps_unmarketable(curr_px, entry or self.watched_entry or 0)
                     tps = list(self.tv_tps or [])
@@ -10823,7 +11140,7 @@ class PositionSupervisorBinance:
                     logger.warning(
                         f"⚠️ 重建 TP{lv['level']} 穿价已推离 → @{px:.2f}"
                     )
-                # 现价已达该档：有减仓证据才记账；否则推离后仍挂（禁假吃 TP1）
+                # 现价已达该档：有减仓证据才记账；开仓路径推离后仍挂
                 if self._may_mark_tp_filled_missing_limit(
                     int(lv["level"]), live_qty, curr_px, tp_px=px,
                 ):
@@ -10835,6 +11152,8 @@ class PositionSupervisorBinance:
                 if (
                     self._price_reached_tp_zone(int(lv["level"]), curr_px, px)
                     and not self._has_tp_limit_at_price(px)
+                    and not getattr(self, "_takeover_price_skip", False)
+                    and not getattr(self, "_recover_in_progress", False)
                 ):
                     logger.warning(
                         f"🧩 重建 TP{lv['level']} 现价已近但无减仓 → 推离后挂"
