@@ -229,12 +229,13 @@ def audit_module2_sizing(a: Audit):
     )
 
     a.check("2.1 单笔硬上限已删除", float(HARD_NOTIONAL_CAP or 0) == 0.0)
-    a.check("2.4 API 杠杆 25x", EXCHANGE_LEVERAGE == 25)
+    a.check("2.4 固定杠杆已废除", float(EXCHANGE_LEVERAGE or 0) == 0.0)
     a.check("2.7 13x 组合顶保留", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
     # 表：本金 1000 / ETH 1892.43 · Regime1 risk 0.81% / SL距 12.08 → 0.67
+    # 用 TV leverage=5（与策略一致）；理论仓绑定时与 25x 同量
     qty1, meta1 = compute_tv_order_qty(
-        1000, risk_pct=0.81, leverage=25, qty_ratio=1.0,
+        1000, risk_pct=0.81, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 12.08, regime=1,
     )
     a.check(
@@ -245,7 +246,7 @@ def audit_module2_sizing(a: Audit):
 
     # Regime2: risk 1.35% / SL 14.09 → 0.96
     qty2, meta2 = compute_tv_order_qty(
-        1000, risk_pct=1.35, leverage=25, qty_ratio=1.0,
+        1000, risk_pct=1.35, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 14.09, regime=2,
     )
     a.check(
@@ -256,7 +257,7 @@ def audit_module2_sizing(a: Audit):
 
     # Regime3: risk 2.03% / SL 14.02 → 1.45
     qty3, meta3 = compute_tv_order_qty(
-        1000, risk_pct=2.03, leverage=25, qty_ratio=1.0,
+        1000, risk_pct=2.03, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
     )
     a.check(
@@ -267,11 +268,11 @@ def audit_module2_sizing(a: Audit):
 
     # Regime4 下沿: risk 2.70% / SL 15.94 → 1.69
     qty4lo, _ = compute_tv_order_qty(
-        1000, risk_pct=2.70, leverage=25, qty_ratio=1.0,
+        1000, risk_pct=2.70, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
     )
     qty4hi, _ = compute_tv_order_qty(
-        1000, risk_pct=3.38, leverage=25, qty_ratio=1.0,
+        1000, risk_pct=3.38, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
     )
     a.check("2.5 R4下沿 → 1.69", abs(qty4lo - 1.69) < 0.01, f"qty={qty4lo}")
@@ -279,14 +280,14 @@ def audit_module2_sizing(a: Audit):
 
     # 本金线性换算：5000U R3 → 7.25
     qty5k, _ = compute_tv_order_qty(
-        5000, risk_pct=2.03, leverage=25, qty_ratio=1.0,
+        5000, risk_pct=2.03, leverage=5, qty_ratio=1.0,
         price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
     )
     a.check("2.6 5000U R3 → 7.25", abs(qty5k - 7.25) < 0.02, f"qty={qty5k}")
 
     # 加仓 ratio 0.5 → 首仓一半
     qty_add, meta_add = compute_tv_order_qty(
-        1000, risk_pct=2.03, leverage=25, qty_ratio=0.5,
+        1000, risk_pct=2.03, leverage=5, qty_ratio=0.5,
         price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
     )
     a.check(
@@ -296,7 +297,7 @@ def audit_module2_sizing(a: Audit):
     )
 
     # 缺 risk_pct → 0（禁止旧逻辑回退）
-    qty0, meta0 = compute_vps_open_qty(1000, 1892.43, 1880, regime=3, leverage=25)
+    qty0, meta0 = compute_vps_open_qty(1000, 1892.43, 1880, regime=3, leverage=5)
     a.check("2.8 无 risk_pct 拒绝下单", qty0 == 0 and meta0.get("error"), f"meta={meta0}")
 
     # 无硬上限：极大 risk 不再被 50000/price 卡住，应绑理论或杠杆
@@ -328,6 +329,24 @@ def audit_module2_sizing(a: Audit):
     a.check("禁止旧保证金%表参与计算", "TV_RISK_FORMULA" in wp)
     a.check("旧 VPS_MARGIN 已清空", "VPS_MARGIN_PCT_BY_REGIME = {}" in wp)
     a.check("HARD_NOTIONAL_CAP 恒0", "HARD_NOTIONAL_CAP = 0.0" in wp)
+    sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    a.check(
+        "2.4b set_leverage 禁止固定25x",
+        "set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)" not in sup
+        and "set_leverage={lev}x(TV)" in sup,
+    )
+    a.check(
+        "2.4c 缺省仓位杠杆为0",
+        "self.tv_sizing_leverage = 0.0" in sup
+        and "v13.86.0-tv-leverage-live" in sup,
+    )
+    legacy = _read(os.path.join(ROOT, "position_supervisor.py"))
+    a.check(
+        "遗留大脑废除保证金%×杠杆",
+        'margin_usdt * self.leverage' not in legacy
+        and '"margin": 0.0' in legacy
+        and "compute_tv_order_qty" in legacy,
+    )
 
 
 def audit_module3_hard_sl(a: Audit):
@@ -486,7 +505,8 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.27 版本含 TV 仓位公式",
-        "v13.85.1-tv-lev-dingtalk" in sup
+        "v13.86.0-tv-leverage-live" in sup
+        or "v13.85.1-tv-lev-dingtalk" in sup
         or "v13.85.0-no-hard-cap" in sup
         or "v13.84.0-tv-strategy-sync" in sup
         or "v13.82.0-tv-risk-sizing" in sup,
@@ -734,7 +754,8 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 当前版本对齐代码",
         (
-            "v13.85.1-tv-lev-dingtalk" in readme
+            "v13.86.0-tv-leverage-live" in readme
+            or "v13.85.1-tv-lev-dingtalk" in readme
             or "v13.85.0-no-hard-cap" in readme
         )
         and "开仓裸仓闸" in readme
@@ -757,9 +778,9 @@ def audit_readme_consistency(a: Audit):
         and "实盘事故与优化备忘" in readme
         and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.85.1-tv-lev-dingtalk" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+        and "v13.86.0-tv-leverage-live" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "TV仓位杠杆" in _read(os.path.join(ROOT, "dingtalk.py")),
+        and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py")),
     )
     a.check(
         "README 雷达分档激活",

@@ -7,7 +7,6 @@ import threading
 from binance.client import Client
 import os
 from dotenv import load_dotenv
-from webhook_parser import EXCHANGE_LEVERAGE
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -172,14 +171,22 @@ class BinanceClient:
         return f"{p:.2f}" if tick <= 0.01 else str(p)
 
     def set_leverage(self, symbol="ETHUSDT", leverage=None):
-        leverage = int(leverage or EXCHANGE_LEVERAGE)
-        """设置指定交易对的杠杆倍数"""
+        """设置杠杆：必须显式传入 TV leverage，禁止回退固定 25x。"""
         try:
-            result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
-            logger.info(f"[设置杠杆成功] {symbol} → {leverage}x")
+            lev = int(float(leverage or 0))
+        except (TypeError, ValueError):
+            lev = 0
+        if lev <= 0:
+            logger.error(
+                f"[设置杠杆拒绝] {symbol}: 缺少 TV leverage（禁止固定 EXCHANGE_LEVERAGE 回退）"
+            )
+            return None
+        try:
+            result = self.client.futures_change_leverage(symbol=symbol, leverage=lev)
+            logger.info(f"[设置杠杆成功] {symbol} → {lev}x (TV)")
             return result
         except Exception as e:
-            logger.error(f"[设置杠杆失败] {symbol} → {leverage}x: {e}")
+            logger.error(f"[设置杠杆失败] {symbol} → {lev}x: {e}")
             return None
 
     def _set_ws_price(self, symbol, price):

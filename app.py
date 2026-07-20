@@ -13,7 +13,6 @@ from webhook_parser import (
     normalize_tv_payload,
     format_webhook_log,
     TV_STRATEGY_VERSION,
-    EXCHANGE_LEVERAGE,
 )
 from symbol_config import active_binance_symbols
 
@@ -95,7 +94,8 @@ def health():
         "status": "ok",
         "version": BINANCE_VPS_VERSION,
         "tv_strategy": TV_STRATEGY_VERSION,
-        "leverage": EXCHANGE_LEVERAGE,
+        "leverage": "tv_webhook",
+        "sizing": "TV_RISK_FORMULA",
         "symbols": list(SUPERVISORS.keys()) or active_binance_symbols(),
         "monitoring": {
             s: bool(getattr(sup, "monitoring", False))

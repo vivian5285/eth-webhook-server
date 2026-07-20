@@ -25,7 +25,6 @@ from webhook_parser import (
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
     get_radar_activation_ratio,
-    EXCHANGE_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
     ENTRY_TYPE_PYRAMID,
@@ -59,8 +58,8 @@ _title_dedup_lock = threading.Lock()
 _title_dedup_ts = {}  # key -> last_send_ts
 
 EXCHANGE_LABEL = "币安 Binance"
-LEVERAGE_LABEL = f"{int(EXCHANGE_LEVERAGE)}x"
-DEFAULT_LEVERAGE = EXCHANGE_LEVERAGE
+LEVERAGE_LABEL = "TVx"  # 实盘杠杆以 TV 为准，禁止写死 25x
+DEFAULT_LEVERAGE = 0
 UNIT_LABEL = "ETH"  # 仅缺省；实盘必须传 unit_label / symbol
 
 _ctx_unit = contextvars.ContextVar("dingtalk_unit", default=None)
@@ -607,12 +606,11 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         ),
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
         "📦 开单头寸": _g(
-            f"**{qty}** {unit} ({EXCHANGE_LABEL} TV仓位杠杆 **{lev_label}**"
-            f"·API{LEVERAGE_LABEL})",
+            f"**{qty}** {unit} ({EXCHANGE_LABEL} **{lev_label}** · TV仓位公式)",
             G_ACCENT,
         ),
-        "📐 TV杠杆": _g(
-            f"**{lev_label}**（仓位公式用）| 交易所API设杠杆 {LEVERAGE_LABEL}（仅set_leverage）",
+        "📐 杠杆": _g(
+            f"**{lev_label}**（仓位公式与 set_leverage 同源，禁止固定 25x）",
             G_MUTED,
         ),
         "🕸️ 止盈布防比对": _g(
@@ -1206,13 +1204,13 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     elif risk_pct and float(risk_pct) > 0:
         data["📐 比例参数"] = _g(
             format_tv_sizing_note(
-                risk_pct, leverage or EXCHANGE_LEVERAGE, qty_ratio, regime=regime,
+                risk_pct, leverage or 0, qty_ratio, regime=regime,
             ),
             G_MUTED,
         )
     lev_show = float(leverage or 0)
     data["⚙️ 仓位杠杆"] = _g(
-        f"TV sizing **{lev_show:.0f}x** · API set_leverage **{EXCHANGE_LEVERAGE}x**",
+        f"**{lev_show:.0f}x**（仓位公式 + set_leverage 同源，禁止固定 25x）",
         G_MUTED,
     )
     if reason:

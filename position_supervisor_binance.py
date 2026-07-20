@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（币安 ETH 数量/25x 适配）
+# position_supervisor_binance.py — 与深币 VPS 逻辑对齐（仓位/杠杆一律跟 TV）
 import logging
 import time
 import threading
@@ -34,7 +34,6 @@ from webhook_parser import (
     resolve_tv_add_qty_ratio,
     get_regime_tp_ratios,
     format_regime_tp_ratios_label,
-    EXCHANGE_LEVERAGE,
     validate_tp_prices_for_side,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -79,7 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.85.1-tv-lev-dingtalk"
+BINANCE_VPS_VERSION = "v13.86.0-tv-leverage-live"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -174,8 +173,8 @@ class PositionSupervisorBinance:
             3: {"margin": 0.0, "ratios": get_regime_tp_ratios(3)},
             4: {"margin": 0.0, "ratios": get_regime_tp_ratios(4)},
         }
-        self.leverage = EXCHANGE_LEVERAGE
-        self.tv_sizing_leverage = EXCHANGE_LEVERAGE
+        self.leverage = 0  # 与 TV sizing/API 同源；缺省 0=拒绝下单
+        self.tv_sizing_leverage = 0.0
 
         self.regime = 3
         self.current_atr = 30.0
@@ -2266,9 +2265,11 @@ class PositionSupervisorBinance:
                     "tv_risk_pct": float(getattr(self, "tv_risk_pct", 0) or 0),
                     "tv_qty_ratio": float(getattr(self, "tv_qty_ratio", 1.0) or 1.0),
                     "tv_entry_type": getattr(self, "tv_entry_type", ENTRY_TYPE_OPEN),
-                    "leverage": EXCHANGE_LEVERAGE,
+                    "leverage": float(
+                        getattr(self, "tv_sizing_leverage", 0) or 0
+                    ),
                     "tv_sizing_leverage": float(
-                        getattr(self, "tv_sizing_leverage", EXCHANGE_LEVERAGE) or EXCHANGE_LEVERAGE
+                        getattr(self, "tv_sizing_leverage", 0) or 0
                     ),
                     "base_qty": float(getattr(self, "base_qty", 0) or 0),
                     "add_count": int(getattr(self, "add_count", 0) or 0),
@@ -2468,7 +2469,7 @@ class PositionSupervisorBinance:
                         regime=None,
                         margin_pct=None,
                         target_qty=None,
-                        leverage=EXCHANGE_LEVERAGE,
+                        leverage=float(getattr(self, "tv_sizing_leverage", 0) or 0),
                         vps_sizing_meta=None,
                     )
                 except Exception as e:
@@ -2545,17 +2546,17 @@ class PositionSupervisorBinance:
         else:
             qr = self._safe_float(payload.get("qty_ratio"), 1.0)
             self.tv_qty_ratio = float(qr if qr and qr > 0 else 1.0)
-        # 交易所 API 杠杆仍用固定值；sizing 用 TV leverage
-        self.leverage = EXCHANGE_LEVERAGE
+        # 仓位公式 + 交易所 set_leverage 一律用 TV leverage（禁止固定 25x）
+        self.leverage = float(getattr(self, "tv_sizing_leverage", 0) or 0)
         self._save_state()
         max_add = self._max_add_times_for_regime()
         logger.info(
             f"📐 TV参数: type={self.tv_entry_type} "
             f"| risk_pct={float(getattr(self, 'tv_risk_pct', 0) or 0):.3f}% "
             f"| qty_ratio={self.tv_qty_ratio:.2f} "
-            f"| sizing_lev={float(getattr(self, 'tv_sizing_leverage', 0) or 0):.0f}x "
-            f"| R{self.regime} 最多加仓{max_add}次 "
-            f"| API={EXCHANGE_LEVERAGE}x"
+            f"| leverage={float(getattr(self, 'tv_sizing_leverage', 0) or 0):.0f}x "
+            f"(仓位+API同源) "
+            f"| R{self.regime} 最多加仓{max_add}次"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
@@ -9499,7 +9500,15 @@ class PositionSupervisorBinance:
             )
             return
 
-        binance_client.set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)
+        lev = int(round(float(getattr(self, "tv_sizing_leverage", 0) or 0)))
+        if lev <= 0:
+            logger.error(f"{entry_type} 跳过：TV leverage 无效，禁止 set_leverage 回退固定倍数")
+            dingtalk.report_system_alert(
+                f"{entry_type} 杠杆无效",
+                "缺少 TV leverage，已拒绝加仓（禁止固定 25x）",
+            )
+            return
+        binance_client.set_leverage(self.symbol, leverage=lev)
         logger.info(
             f"➕ [{entry_type}] {action} 追加 {add_qty} ETH | "
             f"{self._tv_sizing_note(add_qty, meta, entry_type=entry_type)}"
@@ -9800,10 +9809,25 @@ class PositionSupervisorBinance:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
                 return
 
-            binance_client.set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)
+            lev = int(round(float(
+                (sizing_meta or {}).get("leverage")
+                or getattr(self, "tv_sizing_leverage", 0)
+                or 0
+            )))
+            if lev <= 0:
+                logger.error("开仓跳过：TV leverage 无效，禁止 set_leverage 回退固定 25x")
+                dingtalk.report_system_alert(
+                    f"开仓中止 · TV杠杆缺失 [{self.symbol}]",
+                    "webhook 未带有效 leverage，已拒绝下单（仓位与 API 杠杆同源，禁止固定 25x）",
+                )
+                return
+            binance_client.set_leverage(self.symbol, leverage=lev)
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
-            logger.info(f"📐 仓位预算 [{self.symbol}]: {budget_txt} (名义 ~{notional:.0f}U)")
+            logger.info(
+                f"📐 仓位预算 [{self.symbol}]: {budget_txt} "
+                f"| set_leverage={lev}x(TV) | 名义 ~{notional:.0f}U"
+            )
 
             cap_ok, _cap_meta = self._assert_notional_cap_or_reject(
                 qty, curr_px, sizing_meta=sizing_meta,
@@ -10171,7 +10195,7 @@ class PositionSupervisorBinance:
                 leverage=float(
                     (sizing_meta or {}).get("leverage")
                     or getattr(self, "tv_sizing_leverage", 0)
-                    or EXCHANGE_LEVERAGE
+                    or 0
                 ),
                 vps_sizing_meta=sizing_meta,
                 tv_field_sources=getattr(self, "_last_tv_field_sources", {}),
@@ -11556,10 +11580,9 @@ class PositionSupervisorBinance:
                     self.tv_qty_ratio = float(s.get("tv_qty_ratio", 1.0) or 1.0)
                     self.tv_entry_type = s.get("tv_entry_type", ENTRY_TYPE_OPEN)
                     self.tv_sizing_leverage = float(
-                        s.get("tv_sizing_leverage", s.get("leverage", EXCHANGE_LEVERAGE))
-                        or EXCHANGE_LEVERAGE
+                        s.get("tv_sizing_leverage", s.get("leverage", 0)) or 0
                     )
-                    self.leverage = EXCHANGE_LEVERAGE
+                    self.leverage = float(getattr(self, "tv_sizing_leverage", 0) or 0)
                     self.base_qty = float(s.get("base_qty", 0) or 0)
                     self.add_count = int(s.get("add_count", 0) or 0)
                     if self.sizing_principal <= 0:

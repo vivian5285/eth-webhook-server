@@ -1,21 +1,22 @@
 # GEMINI 双轨交易工厂 · 统一实盘逻辑
 
-**当前版本：`v13.85.1-tv-lev-dingtalk`**  
+**当前版本：`v13.86.0-tv-leverage-live`**  
 **TV 策略 schema：`v6.9.108`**（`webhook_parser.TV_STRATEGY_VERSION`）
 
 TradingView Webhook → 交易所永续自动化引擎。**币安 ETH+XAU** 与 **深币** 两套 VPS 共用同一套「军师大脑」逻辑（`position_supervisor_*.py` 镜像实现），仅 **计量单位 / 交易所 API / 钉钉主题** 不同。
 
 | 工厂 | GitHub | VPS 目录 | 端口 | 品种 | 杠杆 | 钉钉 |
 |------|--------|----------|------|------|------|------|
-| **币安** | `vivian5285/eth-webhook-server` | `~/binance-engine` | **5003** | ETH + XAU | **25x** | 黄金 |
-| **深币** | `vivian5285/deepcoin-hft-server-main` | `~/deepcoin-hft-server` | **5004** | ETH + XAU 张 | **25x** | 紫金 |
+| **币安** | `vivian5285/eth-webhook-server` | `~/binance-engine` | **5003** | ETH + XAU | **TV leverage** | 黄金 |
+| **深币** | `vivian5285/deepcoin-hft-server-main` | `~/deepcoin-hft-server` | **5004** | ETH + XAU 张 | **TV leverage** | 紫金 |
 
 **健康检查：**
 
 ```bash
 curl -s http://127.0.0.1:5003/health   # 币安
 curl -s http://127.0.0.1:5004/health   # 深币
-# 期望 version 含 v13.85.1-tv-lev-dingtalk
+# 期望 version 含 v13.86.0-tv-leverage-live
+# 期望 leverage: "tv_webhook" · sizing: "TV_RISK_FORMULA"
 # 期望 tv_strategy: v6.9.108
 ```
 
@@ -739,7 +740,17 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ## 版本演进
 
-### 近期详细更新记录（v13.67 → v13.85）
+### 近期详细更新记录（v13.67 → v13.86）
+
+#### v13.86.0 · `tv-leverage-live`
+
+**主题：实盘 set_leverage 与仓位公式同源 = TV leverage；彻底清除固定 25x / 档位保证金%**
+
+- `EXCHANGE_LEVERAGE = 0`：禁止任何固定杠杆回退
+- 开仓/加仓 `set_leverage(TV.leverage)`；缺 leverage → 拒绝下单
+- 仓位仍唯一公式：`risk_pct` / `|price-tv_sl|` / `leverage` / `qty_ratio`
+- 遗留 `position_supervisor.py` 同步废除 `margin%×杠杆`
+- `/health`：`leverage: "tv_webhook"` · `sizing: "TV_RISK_FORMULA"`
 
 #### v13.85.0 · `no-hard-cap`
 
@@ -924,6 +935,7 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 | 版本 | 要点 |
 |------|------|
+| **v13.86.0** | **set_leverage=TV leverage；废除固定25x；遗留大脑同步清保证金%** |
 | **v13.85.0** | **删除单笔硬上限 maxNotional/50000；公式=min(理论,杠杆)×ratio** |
 | **v13.84.0** | **对齐终极策略：雷达50/60/70/80%；废除VPS%宽止损；禁TP1补挂死循环；硬止损失败撤开仓；钉钉去重加强** |
 | **v13.83.0** | **铁律链：先平后开→挂齐TP123+TV硬止损→雷达候命→钉钉核实；废除同向仅刷TP；三轨不抢份额；钉钉统一TV硬止损** |
@@ -985,4 +997,4 @@ grep -E '钉钉去重|钉钉标题去重|仓位核实' logs/binance_brain.log | 
 
 ---
 
-*GEMINI Quant · 双轨智慧雷达 · v13.85.1-tv-lev-dingtalk*
+*GEMINI Quant · 双轨智慧雷达 · v13.86.0-tv-leverage-live*

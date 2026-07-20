@@ -50,7 +50,7 @@
 | 2.1 | 总权益实时获取 | ✅ | `get_total_equity()` |
 | 2.2 | TV `risk_pct` / `qty_ratio` / `leverage` | ✅ | 直接用，不重算 |
 | 2.3 | 止损距离 = \|price − tv_sl\| | ✅ | `_normalize_stop_dist` |
-| 2.4 | API 杠杆 25x | ✅ | `EXCHANGE_LEVERAGE`（仅 set_leverage） |
+| 2.4 | **set_leverage = TV leverage**（废除固定 25x） | ✅ | `EXCHANGE_LEVERAGE=0`，禁止回退 |
 | 2.5 | 最终量 = min(理论, 杠杆限制)×qty_ratio（**无硬上限**） | ✅ | `compute_tv_order_qty()` |
 | 2.6 | 精度 floor×1000/1000（最小 0.001） | ✅ | `_floor_qty_3dp` |
 | 2.7 | ~~单笔硬上限 50000U~~ **已删除** | ✅ | `HARD_NOTIONAL_CAP=0` |

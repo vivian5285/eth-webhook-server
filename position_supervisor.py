@@ -18,6 +18,8 @@ from webhook_parser import (
     get_radar_breath_atr,
     RADAR_ACTIVATION_RATIO_BY_REGIME,
     RADAR_BREATH_ATR_BY_REGIME,
+    compute_tv_order_qty,
+    get_regime_tp_ratios,
 )
 
 if not os.path.exists('logs'):
@@ -62,30 +64,34 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 与 webhook_parser 适度追随表一致（删除旧 40/50/60/70 + 紧追 trail）
+        # 已废除档位保证金%；margin 恒 0，开仓只走 TV risk_pct 公式
         self.regime_settings = {
             1: {
-                "margin": 0.15, "ratios": [0.25, 0.35, 0.40],
+                "margin": 0.0, "ratios": get_regime_tp_ratios(1),
                 "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[1],
                 "trail_offset": RADAR_BREATH_ATR_BY_REGIME[1],
             },
             2: {
-                "margin": 0.25, "ratios": [0.20, 0.35, 0.45],
+                "margin": 0.0, "ratios": get_regime_tp_ratios(2),
                 "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[2],
                 "trail_offset": RADAR_BREATH_ATR_BY_REGIME[2],
             },
             3: {
-                "margin": 0.35, "ratios": [0.18, 0.32, 0.50],
+                "margin": 0.0, "ratios": get_regime_tp_ratios(3),
                 "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[3],
                 "trail_offset": RADAR_BREATH_ATR_BY_REGIME[3],
             },
             4: {
-                "margin": 0.50, "ratios": [0.05, 0.20, 0.75],
+                "margin": 0.0, "ratios": get_regime_tp_ratios(4),
                 "activation": RADAR_ACTIVATION_RATIO_BY_REGIME[4],
                 "trail_offset": RADAR_BREATH_ATR_BY_REGIME[4],
             },
         }
-        self.leverage = 15
+        self.leverage = 0
+        self.tv_sizing_leverage = 0.0
+        self.tv_risk_pct = 0.0
+        self.tv_qty_ratio = 1.0
+        self.tv_sl = 0.0
 
         self.regime = 3
         self.current_atr = 30.0
@@ -463,18 +469,29 @@ class PositionSupervisorBinance:
         return wallet
 
     def _regime_cap_target_qty(self, curr_px, regime=None):
-        """按 TV 档位：本金快照 × margin% × 杠杆 → 仓位上限 ETH"""
+        """TV 唯一公式仓位上限（禁止旧 margin%×杠杆）。"""
         regime = int(regime if regime is not None else self.regime)
         if regime not in self.regime_settings:
             regime = 3
         wallet = binance_client.get_principal_wallet_balance()
         balance = self._resolve_cap_sizing_base(wallet)
-        margin_pct = self.regime_settings[regime]["margin"]
-        margin_usdt = balance * margin_pct
-        if curr_px <= 0:
-            return 0.0, balance, margin_usdt, margin_pct, regime
-        qty = round((margin_usdt * self.leverage) / curr_px, 3)
-        return qty, balance, margin_usdt, margin_pct, regime
+        risk_pct = float(getattr(self, "tv_risk_pct", 0) or 0)
+        lev = float(getattr(self, "tv_sizing_leverage", 0) or getattr(self, "leverage", 0) or 0)
+        ratio = float(getattr(self, "tv_qty_ratio", 1.0) or 1.0)
+        sl = float(getattr(self, "tv_sl", 0) or 0)
+        if risk_pct <= 0 or lev <= 0 or float(curr_px or 0) <= 0:
+            return 0.0, balance, 0.0, risk_pct / 100.0 if risk_pct else 0.0, regime
+        qty, meta = compute_tv_order_qty(
+            principal=balance,
+            risk_pct=risk_pct,
+            leverage=lev,
+            qty_ratio=ratio,
+            price=float(curr_px),
+            tv_sl=sl,
+            regime=regime,
+        )
+        order_amount = float(meta.get("order_amount", 0) or 0)
+        return float(qty or 0), balance, order_amount, risk_pct / 100.0, regime
 
     def _validate_cap_trim_plan(self, live_qty, target_qty, trim_qty):
         """裁减前安全校验：防止 target 被错误算成灰尘导致几乎全平"""
@@ -2420,12 +2437,16 @@ class PositionSupervisorBinance:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
                 return
 
-            binance_client.set_leverage(self.symbol, leverage=self.leverage)
+            lev = int(round(float(getattr(self, "tv_sizing_leverage", 0) or self.leverage or 0)))
+            if lev <= 0:
+                logger.error("开仓跳过：TV leverage 无效（遗留大脑已禁用固定杠杆/保证金%）")
+                return
+
+            binance_client.set_leverage(self.symbol, leverage=lev)
             notional = qty * curr_px
             logger.info(
-                f"📐 仓位预算 R{self.regime}: 本金 {balance:.2f}U × {margin_pct:.0%} "
-                f"= 保证金 {margin_usdt:.2f}U × {self.leverage}x → 目标 {qty} ETH "
-                f"(名义 ~{notional:.0f}U)"
+                f"📐 仓位预算 R{self.regime}: TV risk {margin_pct:.2%} · lev {lev}x "
+                f"→ 目标 {qty} ETH (本金 {balance:.2f}U · 名义 ~{notional:.0f}U)"
             )
 
             if not self._wait_verify(self._verify_flat, retries=4, delay=0.35):

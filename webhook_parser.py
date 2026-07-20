@@ -10,10 +10,11 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.9.108"
 
-# 交易所 API 杠杆（set_leverage）；仓位计算杠杆以 TV 下发的 leverage 为准
-EXCHANGE_LEVERAGE = 25
+# 已废除固定 25x：set_leverage 与仓位公式一律用 TV webhook 的 leverage。
+# 常量保留为 0，禁止任何 `or EXCHANGE_LEVERAGE` 回退到老杠杆。
+EXCHANGE_LEVERAGE = 0
 # 兼容旧导入名（已不再参与仓位计算）
-VPS_MARGIN_LEVERAGE = 1
+VPS_MARGIN_LEVERAGE = 0
 VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
 VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
