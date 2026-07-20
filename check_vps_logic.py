@@ -175,7 +175,14 @@ def audit_module1_symbol(a: Audit):
         and "_tp_is_marketable" in sup
         and "_sanitize_open_tps_vs_mark" in sup
         and "_sterile_flat_gate" in sup
-        and "钉钉去重跳过" in sup,
+        and "钉钉去重跳过" in sup
+        and "_force_hang_open_defenses" in sup
+        and "_may_mark_tp_filled_missing_limit" in sup
+        and "_clear_spurious_tp_consumed_if_full_size" in sup
+        and "_force_tps_unmarketable" in sup
+        and "开仓强制挂防线" in sup
+        and "拒认 TP" in sup
+        and "假成交" in sup,
     )
     a.check(
         "1.5i TP成交必须现价/best触及该档",
@@ -630,7 +637,7 @@ def audit_readme_consistency(a: Audit):
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
         "README 当前版本对齐代码",
-        "v13.77.0-open-defense-takeover-safe" in readme
+        "v13.78.0-open-defense-failclosed" in readme
         and "开仓裸仓闸" in readme
         and "closePosition" in readme
         and "2.78%" in readme
@@ -647,7 +654,9 @@ def audit_readme_consistency(a: Audit):
         and "一律先平后开" in readme
         and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
         and "实盘事故与优化备忘" in readme
-        and "TP1 被反复补挂" in readme,
+        and "TP1 被反复补挂" in readme
+        and "假成交" in readme
+        and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     a.check(
         "README 雷达分档激活",
