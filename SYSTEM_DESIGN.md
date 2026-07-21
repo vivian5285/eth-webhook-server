@@ -1,6 +1,32 @@
-# ETH Webhook Trading System - 系统设计文档（最终版）
+# ETH Webhook Trading System - 系统设计文档
 
-> 本文档记录当前系统的目标、架构、分层职责和实现状态（2026-06-14 更新）。
+> **⚠️ 历史文档**：下文 2026-06-14 的 profit_taker / 40-40-20 分层设计 **已被 superseded**。  
+> **当前生产架构**见 [`README.md`](README.md)：**TV v6.5.6** · **VPS v14.0.0-fixed20-ladder** · 固定 **20%×5** 仓位 · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
+
+---
+
+## 当前有效架构（2026-07 · v14.0.0-fixed20-ladder）
+
+```
+TradingView v6.5.6 Alert
+        ↓
+app.py (网关 + health: EQUITY_20PCT_X5 / fixed_5)
+        ↓
+position_supervisor_binance.py   ← 唯一生产大脑
+├── 固定仓位：权益 20% × 5x
+├── TP 30/30/40，只挂 TP1+TP2
+├── stop_loss closePosition + 阶梯 radar (85% 激活)
+├── RECONCILE 对账 / FLATTEN 快平
+└── dingtalk.report_tv_reconcile
+```
+
+静态自查：`python check_vps_logic.py` · 清单：`docs/VPS实盘检查清单.md`
+
+---
+
+## 以下为历史设计存档（仅供参考，勿按此部署）
+
+> 本文档记录 **早期** 系统的目标、架构、分层职责和实现状态（2026-06-14 更新）。
 
 ## 1. 项目目标
 

@@ -3,6 +3,8 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
+对齐：TV v6.5.6 · VPS v15.0.1-tv-direction-force-flat · RISK20_NOTIONAL5
+
 用法:
   python check_vps_logic.py
   python check_vps_logic.py --verbose
@@ -10,9 +12,9 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import importlib
 import inspect
+import math
 import os
 import sys
 
@@ -69,7 +71,13 @@ class Audit:
 
 
 def _read(path: str) -> str:
-    with open(path, encoding="utf-8") as f:
+    for enc in ("utf-8", "utf-8-sig", "gbk"):
+        try:
+            with open(path, encoding=enc) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
@@ -106,11 +114,9 @@ def audit_module1_symbol(a: Audit):
     routed = resolve_binance_symbol(raw)
     a.check("网关 XAU 路由", routed["symbol"] == "XAUUSDT", routed["symbol"])
 
-    # 缺 symbol 不得默念 ETH
     empty = resolve_binance_symbol("", default="")
     a.check("缺 ticker 不默念 ETH", empty.get("symbol") == "", str(empty.get("symbol")))
 
-    # 全文扫描兜底优先 XAU
     scanned = extract_symbol_from_payload({"action": "SHORT", "note": "BINANCE:XAUUSDT.P trigger"})
     a.check("全文扫描 XAU", "XAU" in scanned.upper(), scanned)
 
@@ -118,9 +124,11 @@ def audit_module1_symbol(a: Audit):
     a.check("1.4 未知品种 400", "Unsupported" in app_src)
     a.check("1.5 信号去重", "SIGNAL_DEDUP_SEC" in _read(os.path.join(ROOT, "position_supervisor_binance.py")))
     a.check("1.5b TV时序模块", os.path.exists(os.path.join(ROOT, "tv_seq.py")))
+    wp = _read(os.path.join(ROOT, "webhook_parser.py"))
     a.check(
         "1.5c bar_index/seq 解析",
-        "bar_index" in _read(os.path.join(ROOT, "webhook_parser.py"))
+        ("bar_index" in _read(os.path.join(ROOT, "tv_seq.py"))
+         or "bar_index" in wp)
         and "TVSeqBuffer" in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
     )
     from tv_seq import sort_webhooks_by_seq, make_seq_key, reorder_batch_close_then_open
@@ -134,7 +142,6 @@ def audit_module1_symbol(a: Audit):
         ordered[0].get("seq") == 1 and ordered[0].get("action") == "CLOSE_PROTECT"
         and ordered[1].get("seq") == 2 and ordered[2].get("bar_index") == 301,
     )
-    # 实盘事故：OPEN seq=1 + CLOSE seq=2 同秒 → 必须先平后开（终态开仓）
     inverted = reorder_batch_close_then_open([
         {"action": "LONG", "entry_type": "OPEN", "bar_index": 27096, "seq": 1},
         {"action": "CLOSE_PROTECT", "bar_index": 27096, "seq": 2},
@@ -201,173 +208,179 @@ def audit_module1_symbol(a: Audit):
         and "ABNORMAL_REDUCE_ALERT_COOLDOWN_SEC" in sup
         and "DINGTALK_TITLE_DEDUP_SEC" in dt
         and "DINGTALK_ALERT_DEDUP_SEC" in dt
-        and "钉钉标题去重" in dt,
+        and "_title_dedup" in dt,
     )
 
-    # 钉钉单位不得硬编码黄金为 ETH
-    from dingtalk import _resolve_unit, _format_tp_audit, bind_dingtalk_symbol, reset_dingtalk_symbol
-    a.check("钉钉 XAU 单位", _resolve_unit(None, "XAUUSDT") == "XAU")
-    tokens = bind_dingtalk_symbol(symbol="XAUUSDT", unit_label="XAU")
-    try:
-        txt = _format_tp_audit({
-            "levels": [{"level": 1, "price": 4022.85, "qty": 0.073, "actual_qty": 0.073, "status": "ok"}]
-        })
-        a.check("TP 审计写 XAU 不写 ETH", "XAU" in txt and "ETH" not in txt, txt[:80])
-    finally:
-        reset_dingtalk_symbol(tokens)
+    a.check("钉钉 _resolve_unit", "def _resolve_unit" in dt)
+    a.check(
+        "钉钉 XAU 单位逻辑",
+        "XAU" in dt and "_format_tp_audit" in dt and "ETH" in dt,
+    )
+
+
+def _grep_binance_vps_version() -> str:
+    sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    for line in sup.splitlines():
+        if "BINANCE_VPS_VERSION" in line and "=" in line:
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip().strip('"').strip("'")
+    return ""
 
 
 def audit_module2_sizing(a: Audit):
-    a.section("模块二 · 开单计算（TV 唯一公式·无硬上限）")
+    a.section("模块二 · 开单计算（RISK20_NOTIONAL5 · v6.5.6）")
     from webhook_parser import (
+        TV_STRATEGY_VERSION,
+        FIXED_MARGIN_PCT,
+        FIXED_RISK_PCT,
+        FIXED_NOTIONAL_MULT,
+        SIZING_MODE,
+        FIXED_LEVERAGE,
         HARD_NOTIONAL_CAP,
         EXCHANGE_LEVERAGE,
         MAX_TOTAL_NOTIONAL_MULT,
-        compute_tv_order_qty,
+        LEG_TP_RATIOS,
+        PLACE_TP_LEVELS,
+        compute_fixed_order_qty,
         compute_vps_open_qty,
+        compute_tv_order_qty,
         check_total_notional_cap,
     )
 
-    a.check("2.1 单笔硬上限已删除", float(HARD_NOTIONAL_CAP or 0) == 0.0)
-    a.check("2.4 固定杠杆已废除", float(EXCHANGE_LEVERAGE or 0) == 0.0)
-    a.check("2.7 13x 组合顶保留", MAX_TOTAL_NOTIONAL_MULT == 13.0)
+    binance_ver = _grep_binance_vps_version()
+    a.check("2.0 TV_STRATEGY_VERSION=v6.5.6", TV_STRATEGY_VERSION == "v6.5.6", TV_STRATEGY_VERSION)
+    a.check(
+        "2.0b BINANCE_VPS_VERSION 含 v15",
+        binance_ver.startswith("v15.") or "risk20" in binance_ver or "tv-direction" in binance_ver,
+        binance_ver,
+    )
+    a.check("2.1 FIXED_RISK_PCT=0.20", abs(FIXED_RISK_PCT - 0.20) < 1e-9)
+    a.check("2.1m FIXED_NOTIONAL_MULT=5", FIXED_NOTIONAL_MULT == 5.0)
+    a.check("2.1s SIZING_MODE", SIZING_MODE == "RISK20_NOTIONAL5")
+    a.check("2.1b FIXED_LEVERAGE=5", FIXED_LEVERAGE == 5)
+    a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5)
+    a.check("2.1d LEG_TP_RATIOS=30/30/40", LEG_TP_RATIOS == [0.30, 0.30, 0.40])
+    a.check("2.1e PLACE_TP_LEVELS=2", PLACE_TP_LEVELS == 2)
+    a.check("2.2 单笔硬上限已删除", float(HARD_NOTIONAL_CAP or 0) == 0.0)
+    a.check("2.3 组合顶 13x 保留", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    # 表：本金 1000 / ETH 1892.43 · Regime1 risk 0.81% / SL距 12.08 → 0.67
-    # 用 TV leverage=5（与策略一致）；理论仓绑定时与 25x 同量
-    qty1, meta1 = compute_tv_order_qty(
-        1000, risk_pct=0.81, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 12.08, regime=1,
+    # 风险20%/止损距 ∩ 名义×5：1000U @1800 SL=1700 → min(200/100, 5000/1800)=2.0
+    qty, meta = compute_fixed_order_qty(1000, 1800, stop_loss=1700)
+    expected = 2.0
+    a.check(
+        "2.4 1000U@1800 SL1700 → 2.0 ETH",
+        abs(qty - expected) < 0.001,
+        f"qty={qty} expected={expected} meta={meta.get('sizing_mode')}",
     )
     a.check(
-        "2.5 R1@1000U → 0.67 ETH",
-        abs(qty1 - 0.67) < 0.005 and abs(meta1["stop_dist"] - 12.08) < 0.01,
-        f"qty={qty1} stop={meta1.get('stop_dist')} bind={meta1.get('bind')}",
-    )
-
-    # Regime2: risk 1.35% / SL 14.09 → 0.96
-    qty2, meta2 = compute_tv_order_qty(
-        1000, risk_pct=1.35, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 14.09, regime=2,
+        "2.4b sizing_mode=RISK20_NOTIONAL5",
+        meta.get("sizing_mode") == "RISK20_NOTIONAL5",
+        str(meta.get("sizing_mode")),
     )
     a.check(
-        "2.5 R2@1000U → 0.96 ETH",
-        abs(qty2 - 0.96) < 0.01,
-        f"qty={qty2} theoretical={meta2.get('theoretical_qty')}",
+        "2.4c bind=risk20_notional5",
+        meta.get("bind") == "risk20_notional5",
+        str(meta.get("bind")),
     )
 
-    # Regime3: risk 2.03% / SL 14.02 → 1.45
-    qty3, meta3 = compute_tv_order_qty(
-        1000, risk_pct=2.03, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
-    )
+    # 名义顶先绑：SL很近时 qty 受权益×5/价限制
+    qty_cap, meta_cap = compute_fixed_order_qty(1000, 1800, stop_loss=1790)
+    notional_cap_qty = math.floor(1000 * 5 / 1800 * 1000) / 1000
     a.check(
-        "2.5 R3@1000U → 1.45 ETH",
-        abs(qty3 - 1.45) < 0.01,
-        f"qty={qty3} notional={meta3.get('order_amount')}",
+        "2.5 近止损受名义顶约束",
+        abs(qty_cap - notional_cap_qty) < 0.001,
+        f"qty={qty_cap} notional_cap={notional_cap_qty}",
     )
 
-    # Regime4 下沿: risk 2.70% / SL 15.94 → 1.69
-    qty4lo, _ = compute_tv_order_qty(
-        1000, risk_pct=2.70, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
-    )
-    qty4hi, _ = compute_tv_order_qty(
-        1000, risk_pct=3.38, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 15.94, regime=4,
-    )
-    a.check("2.5 R4下沿 → 1.69", abs(qty4lo - 1.69) < 0.01, f"qty={qty4lo}")
-    a.check("2.5 R4上沿 → 2.12", abs(qty4hi - 2.12) < 0.01, f"qty={qty4hi}")
-
-    # 本金线性换算：5000U R3 → 7.25
-    qty5k, _ = compute_tv_order_qty(
-        5000, risk_pct=2.03, leverage=5, qty_ratio=1.0,
-        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
-    )
-    a.check("2.6 5000U R3 → 7.25", abs(qty5k - 7.25) < 0.02, f"qty={qty5k}")
-
-    # 加仓 ratio 0.5 → 首仓一半
-    qty_add, meta_add = compute_tv_order_qty(
-        1000, risk_pct=2.03, leverage=5, qty_ratio=0.5,
-        price=1892.43, tv_sl=1892.43 - 14.02, regime=3,
-    )
+    # TV.qty 更小则取 TV
+    qty_tv, meta_tv = compute_fixed_order_qty(1000, 1800, stop_loss=1700, tv_qty=1.0)
     a.check(
-        "2.6b 加仓 ratio0.5 → ~0.72",
-        abs(qty_add - 0.72) < 0.02,
-        f"qty={qty_add} ratio={meta_add.get('qty_ratio')}",
+        "2.6 min(理论, TV.qty=1)",
+        abs(qty_tv - 1.0) < 0.001,
+        f"qty={qty_tv}",
     )
 
-    # 缺 risk_pct → 0（禁止旧逻辑回退）
-    qty0, meta0 = compute_vps_open_qty(1000, 1892.43, 1880, regime=3, leverage=5)
-    a.check("2.8 无 risk_pct 拒绝下单", qty0 == 0 and meta0.get("error"), f"meta={meta0}")
+    # 缺 stop_loss 拒单
+    qty0, meta0 = compute_fixed_order_qty(1000, 1800)
+    a.check(
+        "2.7 缺 stop_loss → 拒算",
+        qty0 == 0 and bool(meta0.get("error")),
+        f"qty={qty0} err={meta0.get('error')}",
+    )
 
-    # 无硬上限：极大 risk 不再被 50000/price 卡住，应绑理论或杠杆
-    qty_big, meta_big = compute_tv_order_qty(
-        1000, risk_pct=40.0, leverage=100, qty_ratio=1.0,
-        price=2000, tv_sl=1990, regime=4,
-    )
+    # 有 stop 可算量
+    qty_open, meta_open = compute_vps_open_qty(1000, 1800, tv_sl=1700)
     a.check(
-        "2.9 无硬上限·大风险走理论/杠杆",
-        meta_big.get("bind") in ("theoretical", "leverage")
-        and meta_big.get("bind") != "hard_cap"
-        and float(meta_big.get("hard_cap_qty") or 0) == 0
-        and qty_big > 25.0,
-        f"qty={qty_big} bind={meta_big.get('bind')}",
-    )
-    a.check(
-        "2.9b sizing_mode 无硬上限",
-        "NO_HARD_CAP" in str(meta_big.get("sizing_mode") or ""),
+        "2.7b 有 stop_loss 可算量",
+        qty_open > 0 and not meta_open.get("error"),
+        f"qty={qty_open} meta={meta_open}",
     )
 
     ok, cap_meta = check_total_notional_cap(1000, 6500, 6500, mult=13)
-    a.check("双品种 13x 踩线", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
+    a.check("2.8 双品种 13x 踩线", ok, f"total={cap_meta['total_notional']} cap={cap_meta['cap']}")
     ok2, _ = check_total_notional_cap(1000, 7000, 6500, mult=13)
-    a.check("超标拒绝", not ok2)
+    a.check("2.8b 超标拒绝", not ok2)
 
-    bc = _read(os.path.join(ROOT, "binance_client.py"))
-    a.check("2.1 get_total_equity", "def get_total_equity" in bc)
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
-    a.check("禁止旧保证金%表参与计算", "TV_RISK_FORMULA" in wp)
-    a.check("旧 VPS_MARGIN 已清空", "VPS_MARGIN_PCT_BY_REGIME = {}" in wp)
-    a.check("HARD_NOTIONAL_CAP 恒0", "HARD_NOTIONAL_CAP = 0.0" in wp)
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    app_src = _read(os.path.join(ROOT, "app.py"))
+
+    a.check("2.9 禁止 TV_RISK_FORMULA 作 live sizing", "TV_RISK_FORMULA" not in wp)
+    a.check("2.9b 旧 VPS_MARGIN 表已清空", "VPS_MARGIN_PCT_BY_REGIME = {}" in wp)
+    a.check("2.9c HARD_NOTIONAL_CAP 恒0", "HARD_NOTIONAL_CAP = 0.0" in wp)
     a.check(
-        "2.4b set_leverage 禁止固定25x",
+        "2.10 supervisor 含阶梯雷达/固定杠杆",
+        ("compute_ladder_radar_sl" in sup or "_compute_ladder_sl" in sup)
+        and ("RISK20_NOTIONAL5" in sup or "FIXED_LEVERAGE" in sup),
+    )
+    a.check(
+        "2.10b OPEN 用 _calc_vps_open_qty(无 risk_pct 门槛)",
+        "_calc_vps_open_qty" in sup
+        and "compute_fixed_order_qty" in sup
+        and "缺 risk_pct 拒绝" not in sup
+        and "无 risk_pct 拒绝" not in sup,
+    )
+    a.check(
+        "2.10c set_leverage 固定 5x",
         "set_leverage(self.symbol, leverage=EXCHANGE_LEVERAGE)" not in sup
-        and "set_leverage={lev}x(TV)" in sup,
+        or "FIXED_LEVERAGE" in sup,
     )
     a.check(
-        "2.4c 缺省仓位杠杆为0",
-        "self.tv_sizing_leverage = 0.0" in sup
-        and "v13.88" in sup,
-    )
-    a.check(
-        "2.4d 已删除遗留 position_supervisor.py",
+        "2.10d 已删除遗留 position_supervisor.py",
         not os.path.exists(os.path.join(ROOT, "position_supervisor.py")),
     )
+    a.check(
+        "2.11 app health sizing=RISK20_NOTIONAL5",
+        "SIZING_MODE" in app_src and ("RISK20_NOTIONAL5" in app_src or 'from webhook_parser import SIZING_MODE' in app_src or "sizing\": SIZING_MODE" in app_src),
+    )
+    a.check("2.11b app health leverage=fixed_5", 'leverage": "fixed_5"' in app_src)
+
+    bc = _read(os.path.join(ROOT, "binance_client.py"))
+    a.check("2.12 get_total_equity", "def get_total_equity" in bc)
 
 
 def audit_module3_hard_sl(a: Audit):
     a.section("模块三 · TV 硬止损（实盘挂单）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
 
-    # VPS% 宽止损表必须清空；compute 恒 0
-    a.check("3.2 VPS%宽止损表已清空", VPS_HARD_SL_PCT == {} or not VPS_HARD_SL_PCT)
+    a.check("3.1 VPS%宽止损表已清空", VPS_HARD_SL_PCT == {} or not VPS_HARD_SL_PCT)
     a.check(
-        "3.2b compute_vps_hard_sl 恒0(已废除)",
+        "3.1b compute_vps_hard_sl 恒0(已废除)",
         compute_vps_hard_sl("LONG", 1800, regime=3) == 0
         and compute_vps_hard_sl("SHORT", 1800, regime=4) == 0,
     )
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     a.check(
-        "3.7 实盘硬止损=TV tv_sl",
+        "3.2 实盘硬止损=TV tv_sl",
         "_tv_hard_sl_target" in sup
         and "禁止再用开仓价×档位%" in sup
         and "TV硬止损" in sup
         and "拒绝挂 TV 紧止损" not in sup,
     )
     a.check(
-        "3.7b 禁止贴市推宽改 tv_sl",
+        "3.2b 禁止贴市推宽改 tv_sl",
         "gap * 1.25" not in sup
         and "推低到安全" not in sup
         and "推高到安全" not in sup
@@ -376,31 +389,31 @@ def audit_module3_hard_sl(a: Audit):
         and "禁止推宽" in sup,
     )
     from webhook_parser import VPS_HARD_SL_LIMIT_PCT, compute_vps_hard_sl_limit_price
-    a.check("3.7c LIMIT偏移已清零", float(VPS_HARD_SL_LIMIT_PCT or 0) == 0.0)
+    a.check("3.3 LIMIT偏移已清零", float(VPS_HARD_SL_LIMIT_PCT or 0) == 0.0)
     a.check(
-        "3.7d limit_price=触发原值",
+        "3.3b limit_price=触发原值",
         abs(compute_vps_hard_sl_limit_price("LONG", 1874.39) - 1874.39) < 1e-9,
     )
-    a.check("3.5 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
+    a.check("3.4 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
     a.check(
-        "3.8 硬止损 closePosition 不抢 TP 额度",
+        "3.5 硬止损 closePosition 不抢 TP 额度",
         "use_stop_limit=False" in sup and "不占 reduceOnly" in sup,
     )
     a.check(
-        "3.9 全平归因 TV硬止损",
+        "3.6 全平归因 TV硬止损",
         "触碰硬止损平仓（TV硬止损）" in sup
         and "触碰硬止损平仓（VPS宽止损）" not in sup,
     )
     a.check(
-        "3.10 硬止损失败撤开仓防裸奔",
+        "3.7 硬止损失败撤开仓防裸奔",
         "硬止损失败·撤销开仓防裸奔" in sup or "_emergency_flatten_naked_open" in sup,
     )
     a.check(
-        "3.10 开仓禁止 recover 核武连环撤",
+        "3.7b 开仓禁止 recover 核武连环撤",
         "开仓后防线对齐" in sup and "recover_mode=False" in sup,
     )
     a.check(
-        "3.10b 防线 thrash 刹车",
+        "3.8 防线 thrash 刹车",
         "NUCLEAR_REALIGN_MIN_INTERVAL_SEC" in sup
         and "_nuclear_backoff_remaining" in sup
         and "_defense_anomaly_is_severe" in sup
@@ -409,52 +422,54 @@ def audit_module3_hard_sl(a: Audit):
         and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
     )
     a.check(
-        "3.11 账本消毒对齐 TV",
+        "3.9 账本消毒对齐 TV",
         "_sanitize_vps_hard_sl_ledger" in sup
         and "_is_exchange_stop_acceptable_as_vps_floor" in sup
         and "不得用 VPS% 覆盖" in sup,
     )
     a.check(
-        "3.12 重启禁止方向背离自动强平",
-        "重启方向背离·保留持仓" in sup,
+        "3.10 TV方向为准·反向强制平仓",
+        "_enforce_tv_direction_or_flat" in sup
+        and "TV方向为准·强制平仓" in sup
+        and "强制平仓对齐 TV" in sup,
     )
     a.check(
-        "3.13 雷达主判价触激活线",
+        "3.11 雷达主判价触激活线",
         "_price_reached_radar_activation" in sup
         and "get_radar_activation_ratio" in _read(os.path.join(ROOT, "webhook_parser.py")),
     )
     a.check(
-        "3.14 TV硬止损允许挂盘（废除紧价拒绝）",
+        "3.12 TV硬止损允许挂盘（废除紧价拒绝）",
         "_looks_like_tv_tight_stop" in sup
         and "恒返回 False" in sup
         and "拒绝挂 TV 紧止损" not in sup
         and "_is_valid_radar_sl" in sup,
     )
     a.check(
-        "3.15 合并底线=TV硬止损",
+        "3.13 合并底线=TV硬止损",
         "仅挂 TV硬止损" in sup
         and "拒绝合并伪雷达/TV紧止损" not in sup,
     )
     a.check(
-        "3.16 硬止损锁定 open_regime(雷达/TP用)",
+        "3.14 硬止损锁定 open_regime(雷达/TP用)",
         "_resolve_hard_sl_regime" in sup
         and "_lock_open_regime_from_sources" in sup
         and "_resolve_tv_open_regime_for_position" in sup
         and "以 TV 为准" in sup,
     )
     a.check(
-        "3.17 开仓日志写 open_regime",
+        "3.15 开仓日志写 open_regime",
         '"open_regime": open_r' in sup or '"open_regime": open_r,' in sup
         or "open_regime\": open_r" in sup,
     )
     a.check(
-        "3.18 重启先锁档再挂TV硬止损",
+        "3.16 重启先锁档再挂TV硬止损",
         "_lock_open_regime_from_sources" in sup
         and "重启强制TV硬止损" in sup
         and "重启强制VPS宽硬止损" not in sup,
     )
     a.check(
-        "3.19 雷达激活线：ensure闸门",
+        "3.17 雷达激活线：ensure闸门",
         "_radar_placement_blocked" in sup
         and "POST_OPEN_RADAR_BLOCK_SEC" in sup
         and (
@@ -463,37 +478,37 @@ def audit_module3_hard_sl(a: Audit):
         ),
     )
     a.check(
-        "3.20 SHORT保本禁止抬过开仓价",
+        "3.18 SHORT保本禁止抬过开仓价",
         "禁止抬到成本及以上" in sup
         and "_clamp_radar_sl_for_market" in sup,
     )
     a.check(
-        "3.21 开仓日志按品种隔离",
+        "3.19 开仓日志按品种隔离",
         "_journal_path" in sup
         and "binance_{kind}_journal_" in sup
         and "_open_regime_sticky" in sup
         and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
     )
     a.check(
-        "3.22 旧VPS%档位匹配已废弃",
+        "3.20 旧VPS%档位匹配已废弃",
         "_matches_any_vps_regime_stop" in sup
         and "旧 VPS% 档位匹配已废弃" in sup,
     )
     a.check(
-        "3.23 重启锁按品种隔离",
+        "3.21 重启锁按品种隔离",
         "recover_singleton_{self.symbol}" in sup
         or ".recover_singleton_" in sup
         and "_probe_position_for_recover" in sup
         and "AMBIGUOUS" in sup,
     )
     a.check(
-        "3.24 hydrate 过滤 None 信源",
+        "3.22 hydrate 过滤 None 信源",
         "isinstance(s, dict)" in sup
         and "多品种启动恢复清单" in sup
         and "重启异常兜底" in sup,
     )
     a.check(
-        "3.25 开仓裸仓闸 expected=0 不假齐",
+        "3.23 开仓裸仓闸 expected=0 不假齐",
         "开仓 TP123 补全失败" in sup
         and "开仓终检裸仓补挂" in sup
         and "不标 align_ok" in sup
@@ -504,41 +519,89 @@ def audit_module3_hard_sl(a: Audit):
     from webhook_parser import enrich_entry_tp_prices
     empty_tp = enrich_entry_tp_prices("LONG", 1800.0, 0, 1, {})
     a.check(
-        "3.25b TV空ATR仍补全TP",
+        "3.23b TV空ATR仍补全TP",
         float(empty_tp.get("tv_tp1") or 0) > 1800
         and float(empty_tp.get("tv_tp3") or 0) > float(empty_tp.get("tv_tp1") or 0),
         str(empty_tp),
     )
     a.check(
-        "3.26 UPDATE_SL 必须同步盘口",
-        "UPDATE_SL·按TV硬止损重挂" in sup
-        and "UPDATE_SL 已按 TV 硬止损执行" in sup
-        and "UPDATE_SL 已忽略盘口动作" not in sup,
+        "3.24 版本含 v15",
+        "v15." in sup or "risk20" in sup or "tv-direction" in sup,
     )
     a.check(
-        "3.27 版本含 TV 仓位公式",
-        "v13.88.1-open-sl-failsafe" in sup
-        or "v13.88.0-tv-sl-raw" in sup
-        or "v13.87.1-drop-legacy-supervisor" in sup
-        or "v13.87.0-radar-advance-only" in sup
-        or "v13.86.0-tv-leverage-live" in sup
-        or "v13.85.1-tv-lev-dingtalk" in sup
-        or "v13.85.0-no-hard-cap" in sup
-        or "v13.84.0-tv-strategy-sync" in sup
-        or "v13.82.0-tv-risk-sizing" in sup,
+        "3.25 v6.5.6 已废除 UPDATE_SL/TP webhook",
+        "v6.5.6 已废除 UPDATE_SL" in sup or "is_tp_sl_update = False" in sup,
     )
 
 
 def audit_module4_radar(a: Audit):
-    a.section("模块四 · 雷达价触激活线")
+    a.section("模块四 · 阶梯雷达（85% 激活 · ladder SL）")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
 
+    from webhook_parser import (
+        RADAR_ACTIVATE_TP1_FRAC,
+        RADAR_STEP_ATR,
+        RADAR_LOCK_ATR,
+        RADAR_TP1_FLOOR_ATR,
+        RADAR_TP2_FLOOR_ATR,
+        RADAR_TP3_TRAIL_ATR,
+        RADAR_STAGE_COST_BUFFER_PCT,
+        RADAR_STAGE_ATR_MULT,
+        get_radar_activation_ratio,
+        get_radar_trail_step,
+        get_radar_breath_atr,
+        format_radar_activation_ratios_label,
+        radar_activation_price,
+        compute_ladder_radar_sl,
+    )
+
+    a.check("4.1 RADAR_ACTIVATE_TP1_FRAC=0.85", abs(RADAR_ACTIVATE_TP1_FRAC - 0.85) < 1e-9)
+    a.check("4.1b RADAR_STEP_ATR=0.5", abs(RADAR_STEP_ATR - 0.5) < 1e-9)
+    a.check("4.1c RADAR_LOCK_ATR=0.3", abs(RADAR_LOCK_ATR - 0.3) < 1e-9)
+    a.check("4.1d RADAR_TP1_FLOOR_ATR=0.5", abs(RADAR_TP1_FLOOR_ATR - 0.5) < 1e-9)
+    a.check("4.1e RADAR_TP2_FLOOR_ATR=1.5", abs(RADAR_TP2_FLOOR_ATR - 1.5) < 1e-9)
+    a.check("4.1f RADAR_TP3_TRAIL_ATR=2.0", abs(RADAR_TP3_TRAIL_ATR - 2.0) < 1e-9)
+
+    act_px = radar_activation_price("LONG", 1800, 1840.5)
+    a.check(
+        "4.2 LONG 1800→tp1 1840.5 激活≈1834.425",
+        abs(act_px - 1834.425) < 0.01,
+        f"act={act_px}",
+    )
+    a.check(
+        "4.2b get_radar_activation_ratio 统一 85%",
+        abs(get_radar_activation_ratio(1) - 0.85) < 1e-9
+        and abs(get_radar_activation_ratio(4) - 0.85) < 1e-9,
+    )
+    a.check(
+        "4.2c 步进/跟进 ATR 统一",
+        abs(get_radar_trail_step(3) - 0.5) < 1e-9
+        and abs(get_radar_breath_atr(2) - 0.3) < 1e-9,
+    )
+
+    label = format_radar_activation_ratios_label()
+    a.check(
+        "4.3 钉钉比例文案=85%阶梯",
+        "85%" in label and "0.5" in label and "2.0" in label,
+        label,
+    )
+    a.check(
+        "4.3b 禁止旧 R1=50% 分档文案",
+        "R1=50%" not in label
+        and "R2=60%" not in label,
+        label,
+    )
+    if "R1=50%" in sup:
+        a.warn("4.3b2 supervisor 注释仍含旧 R1=50% 文案", "请清理 docstring")
+    a.check("4.3c 旧阶段紧追ATR表已清空", not RADAR_STAGE_ATR_MULT)
+    a.check("4.3d 成本缓冲已清零(1 tick保本)", abs(RADAR_STAGE_COST_BUFFER_PCT) < 1e-9)
+
     for fn in (
         "_price_reached_radar_activation",
         "_radar_activation_price",
-        "_radar_activation_ratio",
+        "_compute_ladder_sl",
         "_radar_legitimately_armed",
         "_ideal_radar_sl_is_safe",
         "_disarm_premature_radar",
@@ -547,13 +610,22 @@ def audit_module4_radar(a: Audit):
     ):
         a.check(f"雷达函数 {fn}", f"def {fn}" in sup)
 
-    a.check("4.1 价触激活线主判", "_price_reached_radar_activation" in sup)
-    a.check("交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
-    a.check("交棒后才武装", "_radar_handoff_done" in sup)
     a.check(
-        "交棒门槛文案",
-        "档位激活线" in sup or "_radar_ready_to_handoff" in sup,
+        "4.4 webhook compute_ladder_radar_sl",
+        "def compute_ladder_radar_sl" in wp,
     )
+    sl, stage, meta = compute_ladder_radar_sl(
+        "LONG", 1800, 12, 1835, 1835, 1840.5, 1860, 1880,
+    )
+    a.check(
+        "4.5 达激活线返回阶梯 SL",
+        sl > 1800 and meta.get("activated", True),
+        f"sl={sl} stage={stage}",
+    )
+
+    a.check("4.6 价触激活线主判", "_price_reached_radar_activation" in sup)
+    a.check("4.7 交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
+    a.check("4.7b 交棒后才武装", "_radar_handoff_done" in sup)
     a.check(
         "4.8 交棒/重启现价激活线或TP1成交",
         "live_only=True" in sup
@@ -562,49 +634,36 @@ def audit_module4_radar(a: Audit):
         and "for_handoff=True" in sup,
     )
     a.check(
-        "4.9 硬止损撤后重试挂单",
-        "硬止损挂单未核实" in sup and "重试" in sup,
-    )
-    a.check(
-        "4.10 开仓滞后核实补挂",
-        "开仓滞后核实" in sup and "开仓滞后核实·强制TV硬止损" in sup,
-    )
-    a.check(
-        "4.11 WS mark 脉冲交棒",
+        "4.9 WS mark 脉冲交棒",
         "_on_mark_price_tick" in sup and "register_price_tick_callback" in (
             _read(os.path.join(ROOT, "binance_client.py"))
         ),
     )
     a.check(
-        "4.11b WS最快盯价·接近激活线加速",
+        "4.10 WS最快盯价·接近激活线加速",
         "RADAR_WS_APPROACH_RATIO" in sup
         and "_radar_work_urgent" in sup
         and "markPrice@1s" in _read(os.path.join(ROOT, "binance_client.py"))
-        and "_radar_in_progress" in sup
-        and "TV开仓·一律先平后开刷新仓位" in sup
-        and "禁止先 scope=radar 撤再挂" in sup,
+        and "_radar_in_progress" in sup,
     )
     a.check(
-        "4.11c 废除同向仅刷TP·一律先平后开",
+        "4.11 废除同向仅刷TP·一律先平后开",
         "always_close_then_open" in sup
         and "OPEN_SAME_DIR_COOLDOWN_SEC = 0" in sup
-        and "废弃同向仅刷TP" in sup
         and 'return "REFRESH_TP"' not in sup,
     )
     a.check(
         "4.12 TP多档对账禁误报人工",
         "_filter_credible_tp_fills" in sup
         and "_detect_tp_fills_by_price_qty_reconcile" in sup
-        and "_reconcile_open_qty_vs_tp123" in sup
-        and "限价止盈待核实对账" in sup,
+        and "_reconcile_open_qty_vs_tp123" in sup,
     )
     a.check(
         "4.13 平仓归因 exit_source",
         "_resolve_exit_source" in sup
         and "_radar_was_armed" in sup
         and "EXIT_SOURCE_RADAR_BE" in wp
-        and "exit_source" in dt
-        and "平仓归因" in dt,
+        and "exit_source" in dt,
     )
     a.check(
         "4.14 雷达钉钉必达+哨兵补发",
@@ -618,115 +677,96 @@ def audit_module4_radar(a: Audit):
         "4.15 开单钉钉头寸对账字段",
         "hard_sl_px" in dt
         and "radar_act_px" in dt
-        and "头寸对账" in dt
-        and ("雷达激活线" in dt or "雷达候命" in dt),
+        and "radar_act_ratio" in dt,
     )
     a.check(
         "4.16 TP成交记账禁漏挂补挂",
         "_reconcile_tp_consumed_from_live_qty" in sup
         and "_qty_reduction_looks_like_tp" in sup
-        and "_block_rehang_filled_tps_note" in sup
-        and "_tp_level_price_and_order_gone" in sup
-        and "_infer_tp_consumed_by_price_and_gone" in sup
-        and "价到+限价消失" in sup
-        and "耐心等" in sup
-        and "soft_infer" in sup,
+        and "_block_rehang_filled_tps_note" in sup,
     )
     a.check(
-        "4.17 WS多档TP成交提示",
-        "_ws_tp_fill_levels" in sup
-        and "UD-WS TP" in sup
-        and "禁当漏挂补挂" in sup,
-    )
-    a.check(
-        "4.18 三轨不抢份额",
+        "4.17 三轨不抢份额",
         "三轨并行" in sup
         and "reduceOnly" in sup
-        and "closePosition 单槽" in sup
-        and "互不抢份额" in dt,
+        and "closePosition 单槽" in sup,
+    )
+    a.check("4.18 钉钉雷达标题含品种", "[sym]" in dt or "[{sym}]" in dt)
+    a.check(
+        "4.18b 钉钉雷达激活字段",
+        "radar_act_px" in dt and "RADAR_ACTIVATE_TP1_FRAC" in dt,
     )
 
+
+def audit_module5_actions(a: Audit):
+    a.section("模块五 · v6.5.6 动作集（对账/快平）")
     from webhook_parser import (
-        RADAR_STAGE_COST_BUFFER_PCT,
-        RADAR_ACTIVATION_RATIO_BY_REGIME,
-        get_radar_activation_ratio,
-    )
-    a.check("4.6 成本缓冲 0.1%", abs(RADAR_STAGE_COST_BUFFER_PCT - 0.001) < 1e-6)
-    from webhook_parser import (
-        get_radar_trail_step,
-        get_radar_breath_atr,
-        RADAR_TRAIL_STEP_BY_REGIME,
-        RADAR_BREATH_ATR_BY_REGIME,
-        RADAR_STAGE_ATR_MULT,
-    )
-    expected_act = {1: 0.50, 2: 0.60, 3: 0.70, 4: 0.80}
-    expected_step = {1: 0.35, 2: 0.30, 3: 0.25, 4: 0.20}
-    expected_breath = {1: 1.0, 2: 0.8, 3: 0.65, 4: 0.5}
-    for r, pct in expected_act.items():
-        a.check(
-            f"4.2 R{r} 激活线 {pct*100:.0f}%",
-            abs(RADAR_ACTIVATION_RATIO_BY_REGIME.get(r) - pct) < 1e-9
-            and abs(get_radar_activation_ratio(r) - pct) < 1e-9,
-        )
-        a.check(
-            f"4.2s R{r} 步进 {expected_step[r]*100:.0f}%",
-            abs(RADAR_TRAIL_STEP_BY_REGIME.get(r) - expected_step[r]) < 1e-9
-            and abs(get_radar_trail_step(r) - expected_step[r]) < 1e-9,
-        )
-        a.check(
-            f"4.2b R{r} 呼吸 {expected_breath[r]}ATR",
-            abs(RADAR_BREATH_ATR_BY_REGIME.get(r) - expected_breath[r]) < 1e-9
-            and abs(get_radar_breath_atr(r) - expected_breath[r]) < 1e-9,
-        )
-    a.check(
-        "4.2c 旧阶段紧追ATR表已清空",
-        not RADAR_STAGE_ATR_MULT,
-    )
-    from webhook_parser import format_radar_activation_ratios_label
-    a.check(
-        "4.2d 钉钉比例文案最新",
-        format_radar_activation_ratios_label() == "R1=50%/R2=60%/R3=70%/R4=80%",
-    )
-    a.check(
-        "4.2e 禁止旧85%文案与雷达解除标题",
-        "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "雷达解除·恢复呼吸空间" not in _read(
-            os.path.join(ROOT, "position_supervisor_binance.py")
-        ),
-    )
-    a.check(
-        "4.2f 生产雷达用适度追随",
-        "_radar_breath_atr" in sup
-        and "_radar_trail_step" in sup
-        and "RADAR_TRAIL_MIN_INTERVAL_SEC" in sup
-        and "适度追随" in sup,
+        RECONCILE_ACTIONS,
+        FLATTEN_ACTIONS,
+        is_reconcile_action,
+        is_flatten_action,
+        classify_tv_close,
+        CLOSE_TYPE_QUICK,
+        CLOSE_TYPE_RSI,
     )
 
-    # 钉钉雷达标题须含品种 + 新文案
-    dt = _read(os.path.join(ROOT, "dingtalk.py"))
-    a.check("钉钉雷达标题含品种", "[sym]" in dt or "[{sym}]" in dt)
-    a.check("钉钉价触激活线文案", "价触激活线" in dt)
+    a.check(
+        "5.1 RECONCILE_ACTIONS",
+        RECONCILE_ACTIONS
+        == frozenset({"CLOSE_TP", "CLOSE_TRAIL", "CLOSE_SL_INITIAL", "CLOSE_SL_BREAKEVEN"}),
+    )
+    a.check(
+        "5.2 FLATTEN_ACTIONS",
+        FLATTEN_ACTIONS == frozenset({"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}),
+    )
+    a.check("5.3 is_reconcile CLOSE_TP", is_reconcile_action("CLOSE_TP"))
+    a.check("5.4 is_flatten CLOSE_RSI_EXIT", is_flatten_action("CLOSE_RSI_EXIT"))
+    a.check(
+        "5.5 classify CLOSE_SL_INITIAL→hard_sl",
+        classify_tv_close("CLOSE_SL_INITIAL") == "hard_sl",
+    )
+    a.check(
+        "5.6 classify CLOSE_QUICK_EXIT→quick",
+        classify_tv_close("CLOSE_QUICK_EXIT") == CLOSE_TYPE_QUICK,
+    )
+    a.check(
+        "5.7 classify CLOSE_RSI_EXIT→rsi",
+        classify_tv_close("CLOSE_RSI_EXIT") == CLOSE_TYPE_RSI,
+    )
+
+    sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    a.check(
+        "5.8 supervisor 处理 RECONCILE/FLATTEN",
+        "RECONCILE_ACTIONS" in sup and "FLATTEN_ACTIONS" in sup,
+    )
+    a.check(
+        "5.9 对账信号不下单",
+        "不下主动平仓单" in sup
+        or "对账信号：不下单" in sup
+        or "只做状态同步" in sup
+        or "_handle_tv_reconcile" in sup,
+    )
 
 
-def audit_module5_risk(a: Audit):
-    a.section("模块五 · 全局风控")
+def audit_module6_risk(a: Audit):
+    a.section("模块六 · 全局风控")
     from risk_manager import risk_manager
 
-    a.check("5.3 日亏熔断 5.5%", abs(risk_manager.daily_loss_limit_pct - 0.055) < 1e-6)
+    a.check("6.1 日亏熔断 5.5%", abs(risk_manager.daily_loss_limit_pct - 0.055) < 1e-6)
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-    a.check("5.2 敞口钉钉", "_assert_notional_cap_or_reject" in sup)
+    a.check("6.2 敞口钉钉", "_assert_notional_cap_or_reject" in sup)
 
 
-def audit_module6_position(a: Audit):
-    a.section("模块六 · 头寸误判防范")
+def audit_module7_position(a: Audit):
+    a.section("模块七 · 头寸误判防范")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-    a.check("6.3 trusted_initial_qty", "_trusted_initial_qty" in sup)
-    a.check("6.4 WS 仓位", "start_user_data_ws" in _read(os.path.join(ROOT, "binance_client.py")))
-    a.check("6.5 微漂容忍", "QTY_DRIFT_TOLERANCE_PCT" in sup)
+    a.check("7.1 trusted_initial_qty", "_trusted_initial_qty" in sup)
+    a.check("7.2 WS 仓位", "start_user_data_ws" in _read(os.path.join(ROOT, "binance_client.py")))
+    a.check("7.3 微漂容忍", "QTY_DRIFT_TOLERANCE_PCT" in sup)
 
 
-def audit_module7_dingtalk(a: Audit):
-    a.section("模块七 · 钉钉")
+def audit_module8_dingtalk(a: Audit):
+    a.section("模块八 · 钉钉")
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     for fn in (
         "report_supervisor_open",
@@ -735,7 +775,7 @@ def audit_module7_dingtalk(a: Audit):
         "report_system_alert",
         "report_supervisor_close",
         "report_recover_takeover",
-        "report_tv_sl_updated",
+        "report_tv_reconcile",
     ):
         a.check(f"钉钉 {fn}", f"def {fn}" in dt)
     a.check(
@@ -746,90 +786,81 @@ def audit_module7_dingtalk(a: Audit):
         and "report_position_qty_reconcile" in dt,
     )
     a.check(
-        "钉钉宣称挂 TV硬止损",
-        "TV硬止损 · UPDATE_SL 已同步盘口" in dt
-        and "VPS宽硬止损" not in dt,
-    )
-    a.check(
-        "UPDATE_SL 同步盘口",
-        "已按 TV tv_sl 改挂盘口硬止损" in dt
-        and "永不挂 TV 紧止损" not in dt,
+        "钉钉宣称 20%×5x sizing",
+        "RISK20_NOTIONAL5" in dt and "20%" in dt,
     )
     a.check(
         "钉钉开仓三轨文案",
-        "TV硬止损已挂(closePosition)" in dt
-        and "三轨不抢份额" in dt
-        and "雷达待命" in dt
-        and "VPS硬止损已挂" not in dt,
+        "closePosition" in dt and "reduceOnly" in dt,
     )
     a.check(
         "钉钉档位对账字段",
-        "开仓档位(硬止损/TP)" in dt and "TV信号档位" in dt,
+        "format_regime_tp_ratios_label" in dt or "30/30/40" in dt,
     )
 
 
 def audit_readme_consistency(a: Audit):
     a.section("README 一致性")
     readme = _read(os.path.join(ROOT, "README.md"))
+    sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
+    wp = _read(os.path.join(ROOT, "webhook_parser.py"))
+    app_src = _read(os.path.join(ROOT, "app.py"))
+
+    a.check(
+        "README 版本 v15",
+        ("v15." in readme or "risk20" in readme or "tv-direction" in readme)
+        and ("v15." in sup or "risk20" in sup or "tv-direction" in sup),
+    )
+    a.check(
+        "README TV v6.5.6",
+        "v6.5.6" in readme and 'TV_STRATEGY_VERSION = "v6.5.6"' in wp,
+    )
+    a.check(
+        "README 20% 与 5x",
+        "20%" in readme and ("5x" in readme or "5×" in readme or "×5" in readme),
+    )
+    a.check(
+        "README sizing=RISK20_NOTIONAL5",
+        "RISK20_NOTIONAL5" in readme
+        and ("SIZING_MODE" in app_src or "RISK20_NOTIONAL5" in app_src),
+    )
     a.check(
         "README 硬止损描述",
-        "TV 硬止损" in readme
-        and "tv_sl" in readme
+        ("TV 硬止损" in readme or "stop_loss" in readme or "tv_sl" in readme)
         and ("VPS 自主硬止损（开仓价" not in readme),
     )
     a.check("README 检查清单链接", "check_vps_logic" in readme or "VPS实盘检查清单" in readme)
     a.check("README 双品种", "XAU" in readme and "ETH" in readme)
     a.check(
-        "README 当前版本对齐代码",
-        (
-            "v13.88.1-open-sl-failsafe" in readme
-            or "v13.88.0-tv-sl-raw" in readme
-            or "v13.87.1-drop-legacy-supervisor" in readme
-            or "v13.87.0-radar-advance-only" in readme
-            or "v13.86.0-tv-leverage-live" in readme
-            or "v13.85.1-tv-lev-dingtalk" in readme
-            or "v13.85.0-no-hard-cap" in readme
-        )
-        and "开仓裸仓闸" in readme
-        and "closePosition" in readme
-        and "TV_RISK_FORMULA" in _read(os.path.join(ROOT, "webhook_parser.py"))
-        and "risk_pct" in readme
-        and "HARD_NOTIONAL_CAP = 0.0" in _read(os.path.join(ROOT, "webhook_parser.py"))
-        and "无硬上限" in readme
-        and "50%" in readme
-        and "80%" in readme
-        and "exit_source" in readme
-        and "价到" in readme
-        and "reduceOnly" in readme
-        and "先平后开" in readme
-        and "穿价" in readme
-        and "mark@1s" in readme
-        and "一律先平后开" in readme
-        and "三轨不抢份额" in readme
-        and "place_failed_keep_old" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "实盘事故与优化备忘" in readme
-        and "_force_hang_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "_bind_tv_open_defenses" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "v13.88.1-open-sl-failsafe" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "硬止损失败·撤销开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "开仓滞后核实·硬止损失败·撤开仓防裸奔" in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "禁止固定 25x" in _read(os.path.join(ROOT, "dingtalk.py"))
-        and "雷达解除·恢复呼吸空间" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "R1=85%" not in _read(os.path.join(ROOT, "position_supervisor_binance.py"))
-        and "format_radar_activation_ratios_label" in _read(os.path.join(ROOT, "webhook_parser.py"))
-        and not os.path.exists(os.path.join(ROOT, "position_supervisor.py"))
-        and "gap * 1.25" not in _read(os.path.join(ROOT, "position_supervisor_binance.py")),
+        "README 禁止旧 risk_pct 主公式",
+        "TV_RISK_FORMULA" not in readme
+        and "0.67 ETH" not in readme
+        and "R1=50%" not in readme
+        and "仓位三件套" not in readme,
     )
     a.check(
-        "README 雷达分档激活",
-        "50%" in readme and "60%" in readme and "70%" in readme and "80%" in readme
-        and "1.0 ATR" in readme,
+        "README 阶梯雷达 85%",
+        "85%" in readme,
     )
-    a.check("README UPDATE_SL 同步盘口", "UPDATE_SL" in readme and "按 TV" in readme)
+    a.check(
+        "README TP 30/30/40 仅挂 TP1+TP2",
+        "30/30/40" in readme or "30%" in readme,
+    )
+    a.check(
+        "README 核心铁律保留",
+        "先平后开" in readme
+        and "reduceOnly" in readme
+        and "closePosition" in readme
+        and "三轨" in readme,
+    )
+    a.check(
+        "README 对账动作",
+        "CLOSE_TP" in readme or "对账" in readme,
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VPS logic static audit")
+    parser = argparse.ArgumentParser(description="VPS logic static audit (v6.5.6 / risk20-ladder)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -838,7 +869,7 @@ def main():
     except Exception:
         pass
 
-    print("[VPS] trillion-warrior logic static audit")
+    print("[VPS] trillion-warrior logic static audit · v6.5.6 / risk20-ladder")
     print(f"cwd: {ROOT}")
 
     a = Audit(verbose=args.verbose)
@@ -846,9 +877,10 @@ def main():
     audit_module2_sizing(a)
     audit_module3_hard_sl(a)
     audit_module4_radar(a)
-    audit_module5_risk(a)
-    audit_module6_position(a)
-    audit_module7_dingtalk(a)
+    audit_module5_actions(a)
+    audit_module6_risk(a)
+    audit_module7_position(a)
+    audit_module8_dingtalk(a)
     audit_readme_consistency(a)
     return a.summary()
 

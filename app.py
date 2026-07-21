@@ -38,8 +38,13 @@ def webhook(ticker=None):
 
     if not data:
         return jsonify({"status": "error", "message": "Empty payload"}), 400
-    if str(data.get("secret", "")).strip() != os.getenv("WEBHOOK_SECRET", "528586"):
-        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+    # token / secret 必须等于 WEBHOOK_SECRET（默认 528586）
+    token = str(
+        data.get("token") or data.get("secret") or ""
+    ).strip()
+    expected = str(os.getenv("WEBHOOK_SECRET", "528586")).strip()
+    if token != expected:
+        return jsonify({"status": "error", "message": "Invalid token"}), 403
     if not data.get("_parse_ok"):
         return jsonify({"status": "error", "message": "Missing or invalid action"}), 400
 
@@ -89,16 +94,24 @@ def webhook(ticker=None):
 
 @app.route('/health', methods=['GET'])
 def health():
+    from webhook_parser import SIZING_MODE
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
         "version": BINANCE_VPS_VERSION,
         "tv_strategy": TV_STRATEGY_VERSION,
-        "leverage": "tv_webhook",
-        "sizing": "TV_RISK_FORMULA",
+        "sizing": SIZING_MODE,  # RISK20_NOTIONAL5
+        "leverage": "fixed_5",
+        "risk_pct": 0.20,
+        "notional_mult": 5,
+        "radar": "tp1_journey_85_ladder",
         "symbols": list(SUPERVISORS.keys()) or active_binance_symbols(),
         "monitoring": {
             s: bool(getattr(sup, "monitoring", False))
+            for s, sup in SUPERVISORS.items()
+        },
+        "trading_paused": {
+            s: bool(getattr(sup, "trading_paused", False))
             for s, sup in SUPERVISORS.items()
         },
     }), 200

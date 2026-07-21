@@ -17,10 +17,9 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v13.76-deploy-pid-health-robust"
-# 接受 v13.4.6+、v13.5~9、v13.10+（含 -tv-pure-sl / always-close-then-open 等后缀）
-# 注意：ERE 不用 (?:...)，否则部分 grep 会报 "? at start of expression"
-MIN_SUPERVISOR_VERSION_RE='v13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)'
+DEPLOY_SCRIPT_VERSION="v15.0.1-tv-direction-force-flat"
+# 接受 v13.4.6+ 以及 v14/v15+（含 risk20-ladder / tv-direction 等后缀）
+MIN_SUPERVISOR_VERSION_RE='v(13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)|1[4-9]\.|[2-9][0-9]+\.)'
 
 PORT=5003
 WORKERS=1

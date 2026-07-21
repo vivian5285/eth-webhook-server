@@ -19,9 +19,20 @@ from webhook_parser import (
     compute_vps_open_qty,
     compute_vps_add_qty,
     compute_tv_order_qty,
+    compute_fixed_order_qty,
     check_total_notional_cap,
     MAX_TOTAL_NOTIONAL_MULT,
     HARD_NOTIONAL_CAP,
+    FIXED_LEVERAGE,
+    FIXED_MARGIN_PCT,
+    FIXED_RISK_PCT,
+    FIXED_NOTIONAL_MULT,
+    SIZING_MODE,
+    LEG_TP_RATIOS,
+    PLACE_TP_LEVELS,
+    ATR_UPDATE_SEC,
+    ORDER_TIMEOUT_SEC,
+    SIGNAL_DEDUP_SEC as WP_SIGNAL_DEDUP_SEC,
     compute_vps_hard_sl,
     compute_vps_hard_sl_distance,
     format_vps_hard_sl_note,
@@ -32,10 +43,15 @@ from webhook_parser import (
     get_regime_max_add_times,
     resolve_tv_add_qty_ratio,
     get_regime_tp_ratios,
+    get_leg_tp_ratios,
     format_regime_tp_ratios_label,
     format_radar_activation_ratios_label,
     validate_tp_prices_for_side,
     normalize_entry_type,
+    is_reconcile_action,
+    is_flatten_action,
+    RECONCILE_ACTIONS,
+    FLATTEN_ACTIONS,
     ENTRY_TYPE_OPEN,
     ENTRY_TYPE_PYRAMID,
     ENTRY_TYPE_PROFIT_ADD,
@@ -43,18 +59,34 @@ from webhook_parser import (
     CLOSE_TYPE_BREAKEVEN,
     CLOSE_TYPE_VPS_SHIELD,
     CLOSE_TYPE_PROTECT,
+    CLOSE_TYPE_HARD_SL,
+    CLOSE_TYPE_QUICK,
+    CLOSE_TYPE_RSI,
+    CLOSE_TYPE_RECONCILE,
     EXIT_SOURCE_RADAR_BE,
     EXIT_SOURCE_VPS_HARD_SL,
+    EXIT_SOURCE_SL_INITIAL,
+    EXIT_SOURCE_SL_BREAKEVEN,
     EXIT_SOURCE_TP3,
     EXIT_SOURCE_TV_CLOSE,
     EXIT_SOURCE_TV_PROTECT,
     EXIT_SOURCE_MANUAL,
+    EXIT_SOURCE_QUICK,
+    EXIT_SOURCE_RSI,
     EXIT_SOURCE_LABELS,
     RADAR_STAGE_COST_BUFFER_PCT,
     RADAR_STAGE_LABELS,
+    RADAR_ACTIVATE_TP1_FRAC,
+    RADAR_STEP_ATR,
+    RADAR_LOCK_ATR,
+    RADAR_TP1_FLOOR_ATR,
+    RADAR_TP2_FLOOR_ATR,
+    RADAR_TP3_TRAIL_ATR,
     get_radar_activation_ratio,
     get_radar_trail_step,
     get_radar_breath_atr,
+    radar_activation_price,
+    compute_ladder_radar_sl,
 )
 from tv_seq import (
     TVSeqBuffer,
@@ -70,7 +102,8 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOG_DIR = os.path.join(_BASE_DIR, 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
 _BRAIN_LOG = os.path.join(_LOG_DIR, 'binance_brain.log')
-handler = RotatingFileHandler(_BRAIN_LOG, maxBytes=5 * 1024 * 1024, backupCount=3)
+# 日志保留约 30 天：5MB×约 40 卷 ≈ 200MB 上限（按日量估算）
+handler = RotatingFileHandler(_BRAIN_LOG, maxBytes=5 * 1024 * 1024, backupCount=40)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] Brain: %(message)s',
@@ -78,7 +111,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v13.88.1-open-sl-failsafe"
+BINANCE_VPS_VERSION = "v15.0.1-tv-direction-force-flat"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -89,7 +122,7 @@ IDLE_TAKEOVER_COOLDOWN_SEC = 30
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
-SIGNAL_DEDUP_SEC = 45  # 无 bar_index/seq 的旧信号指纹去重；有时序时用幂等键
+SIGNAL_DEDUP_SEC = int(WP_SIGNAL_DEDUP_SEC or 60)  # 60s：同 action+symbol+price 去重
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 SENTINEL_GRACE_AFTER_OPEN_SEC = 90
@@ -166,15 +199,16 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # TP123 分仓比例（margin 字段已废弃，仅保留 ratios）
+        # 固定分腿 30/30/40；仅挂 TP1+TP2，leg3 交雷达
+        _leg = list(LEG_TP_RATIOS)
         self.regime_settings = {
-            1: {"margin": 0.0, "ratios": get_regime_tp_ratios(1)},
-            2: {"margin": 0.0, "ratios": get_regime_tp_ratios(2)},
-            3: {"margin": 0.0, "ratios": get_regime_tp_ratios(3)},
-            4: {"margin": 0.0, "ratios": get_regime_tp_ratios(4)},
+            1: {"margin": 0.0, "ratios": list(_leg)},
+            2: {"margin": 0.0, "ratios": list(_leg)},
+            3: {"margin": 0.0, "ratios": list(_leg)},
+            4: {"margin": 0.0, "ratios": list(_leg)},
         }
-        self.leverage = 0  # 与 TV sizing/API 同源；缺省 0=拒绝下单
-        self.tv_sizing_leverage = 0.0
+        self.leverage = float(FIXED_LEVERAGE)  # 固定 5x
+        self.tv_sizing_leverage = float(FIXED_LEVERAGE)
 
         self.regime = 3
         self.current_atr = 30.0
@@ -263,6 +297,13 @@ class PositionSupervisorBinance:
         self._last_radar_trail_stage = 0
         self._last_radar_trail_progress = 0.0
         self._radar_work_urgent = False  # WS 达激活线 → 哨兵立刻跑雷达
+        self.tv_suggested_qty = 0.0  # TV webhook qty 上限
+        self.radar_step_count = 0
+        self.radar_activated = False
+        self._atr_last_update_ts = 0.0
+        self._tp_order_placed_ts = {}  # level(1/2) → unix ts，挂单超时移交雷达
+        self.trading_paused = False  # 重启方向不一致等 → 暂停新开仓
+        self.trading_pause_reason = ""
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -281,7 +322,7 @@ class PositionSupervisorBinance:
                 logger.warning(f"旧状态迁移失败: {e}")
         logger.info(
             f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] {self.symbol} 军师已加载："
-            f"双品种·价触激活线启雷达·5阶段锁利 · {self.leverage}x · {self.unit_label}"
+            f"sizing={SIZING_MODE} · 阶梯雷达 · leverage={FIXED_LEVERAGE}x · {self.unit_label}"
         )
         self._start_signal_worker()
         self._start_idle_flat_patrol()
@@ -857,43 +898,13 @@ class PositionSupervisorBinance:
                 logger.warning(f"先平后开链钉钉失败: {e}")
 
     def _signal_fingerprint(self, payload):
+        """去重键：action + symbol + price（需求：60s 内同键忽略）。"""
         action = str(payload.get("action", "")).strip().upper()
-        if action.startswith("CLOSE"):
-            return (
-                action,
-                str(payload.get("reason", ""))[:48],
-                round(self._safe_float(payload.get("price"), 0), 2),
-                round(self._safe_float(payload.get("pnl_pct"), 0), 2),
-            )
-        if action == "UPDATE_SL":
-            return (
-                action,
-                str(payload.get("side", "")).upper(),
-                round(self._safe_float(payload.get("tv_sl"), 0), 2),
-            )
-        if action == "UPDATE_TP":
-            return (
-                action,
-                str(payload.get("side", "")).upper(),
-                round(self._safe_float(payload.get("tv_tp1"), 0), 2),
-                round(self._safe_float(payload.get("tv_tp2"), 0), 2),
-                round(self._safe_float(payload.get("tv_tp3"), 0), 2),
-            )
-        if action in ("LONG", "SHORT"):
-            return (
-                action,
-                normalize_entry_type(payload.get("entry_type")),
-                round(self._safe_float(payload.get("tv_sl"), 0), 2),
-                round(self._safe_float(payload.get("risk_pct"), 0), 3),
-                round(self._safe_float(payload.get("qty_ratio"), 1.0), 3),
-                round(self._safe_float(payload.get("price"), 0), 2),
-            )
-        return (
-            action,
-            self._safe_int(payload.get("regime"), 3),
-            round(self._safe_float(payload.get("price"), 0), 2),
-            round(self._safe_float(payload.get("atr"), 0), 2),
-        )
+        sym = str(
+            payload.get("symbol") or payload.get("ticker") or self.symbol or ""
+        ).strip().upper()
+        px = round(self._safe_float(payload.get("price"), 0), 2)
+        return (action, sym, px)
 
     def enqueue_signal(self, payload):
         payload = dict(payload or {})
@@ -1410,26 +1421,28 @@ class PositionSupervisorBinance:
         return None
 
     def _enforce_tv_direction_or_flat(self, pos, source="sentinel"):
-        """实盘与 TV 明确反向 → 核武全平；同向或信源不明 → 交给接管"""
+        """TV 方向为准：实盘与 TV 明确反向 → 强制市价全平 + 钉钉。"""
         if not pos or float(pos.get("size", 0) or 0) <= 0:
             return False
         live_side = self._live_position_side(pos)
         if self._live_aligns_with_credible_tv(live_side):
             logger.info(
-                f"✅ [{source}] 实盘 {live_side} 与可信 TV 信源同向 → 跳过强平，进入接管"
+                f"✅ [{source}] 实盘 {live_side} 与可信 TV 信源同向 → 跳过强平"
             )
             return False
         tv_opposite = self._strict_tv_opposite_side(live_side)
         if not tv_opposite or not live_side:
             return False
         reason = (
-            f"人工反向手单 vs TV：实盘({live_side}) ≠ 最新TV({tv_opposite}) [{source}]"
+            f"TV方向为准·强制平仓：实盘({live_side}) ≠ 最新TV({tv_opposite}) [{source}]"
         )
-        logger.error(f"🚨 {reason} → 核武全平强制对齐 TV")
+        logger.error(f"🚨 {reason}")
         verify_note = (
             f"触发源: {source} | 最新TV {tv_opposite} | 实盘反向 {live_side} | "
-            "已核武全平，账本归零待命"
+            "已强制全平对齐 TV，账本归零待命"
         )
+        self.trading_paused = False
+        self.trading_pause_reason = ""
         self._close_all(
             reason,
             force_align=(live_side, tv_opposite),
@@ -1756,7 +1769,8 @@ class PositionSupervisorBinance:
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
         """
         全链防线：TP123 比例限价 + TV 硬止损；
-        雷达仅档位激活线(R1=50%/R2=60%/R3=70%/R4=80%)或TP1真实成交后交棒；
+        雷达仅 TP1路程85% 激活后交棒（连续阶梯追踪）；
+        TP1 真实成交也可加速交棒；
         激活线前仅 TV 硬止损；交棒后止损只前进不回撤。
         硬止损与雷达共用 closePosition 单槽（不抢 TP reduceOnly）。
         重启禁止用历史 best 误触保本（防无缘无故贴成本平仓）。
@@ -2274,6 +2288,13 @@ class PositionSupervisorBinance:
                     ),
                     "base_qty": float(getattr(self, "base_qty", 0) or 0),
                     "add_count": int(getattr(self, "add_count", 0) or 0),
+                    "tv_suggested_qty": float(getattr(self, "tv_suggested_qty", 0) or 0),
+                    "radar_step_count": int(getattr(self, "radar_step_count", 0) or 0),
+                    "radar_activated": bool(getattr(self, "radar_activated", False)),
+                    "atr_last_update_ts": float(getattr(self, "_atr_last_update_ts", 0) or 0),
+                    "tp_order_placed_ts": dict(getattr(self, "_tp_order_placed_ts", {}) or {}),
+                    "trading_paused": bool(getattr(self, "trading_paused", False)),
+                    "trading_pause_reason": str(getattr(self, "trading_pause_reason", "") or ""),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -2531,37 +2552,29 @@ class PositionSupervisorBinance:
         return get_regime_max_add_times(int(regime if regime is not None else self.regime or 3))
 
     def _apply_tv_sizing_params(self, payload):
-        """解析 TV risk_pct / qty_ratio / leverage；VPS 不重算，直接用于唯一公式。"""
-        self.tv_entry_type = normalize_entry_type(payload.get("entry_type"))
-        rp = self._safe_float(payload.get("risk_pct"), None)
-        if rp is not None and rp > 0:
-            self.tv_risk_pct = float(rp)
-        lev = self._safe_float(payload.get("leverage"), None)
-        if lev is not None and lev > 0:
-            self.tv_sizing_leverage = float(lev)
-        if self.tv_entry_type in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
-            self.tv_qty_ratio = resolve_tv_add_qty_ratio(
-                self.regime,
-                self._safe_float(payload.get("qty_ratio"), None),
-            )
-        else:
-            qr = self._safe_float(payload.get("qty_ratio"), 1.0)
-            self.tv_qty_ratio = float(qr if qr and qr > 0 else 1.0)
-        # 仓位公式 + 交易所 set_leverage 一律用 TV leverage（禁止固定 25x）
-        self.leverage = float(getattr(self, "tv_sizing_leverage", 0) or 0)
+        """v15：风险20%/止损距 + 名义×5，取 min(理论, TV.qty)；分腿 qty1/2/3。"""
+        self.tv_entry_type = ENTRY_TYPE_OPEN
+        self.tv_risk_pct = 0.0
+        self.tv_qty_ratio = 1.0
+        self.tv_sizing_leverage = float(FIXED_LEVERAGE)
+        self.leverage = float(FIXED_LEVERAGE)
+        tv_qty = self._safe_float((payload or {}).get("qty"), 0)
+        if tv_qty > 0:
+            self.tv_suggested_qty = tv_qty
+        ratios = get_leg_tp_ratios(payload)
+        for k in self.regime_settings:
+            self.regime_settings[k]["ratios"] = list(ratios)
+        self._leg_ratios = list(ratios)
         self._save_state()
-        max_add = self._max_add_times_for_regime()
         logger.info(
-            f"📐 TV参数: type={self.tv_entry_type} "
-            f"| risk_pct={float(getattr(self, 'tv_risk_pct', 0) or 0):.3f}% "
-            f"| qty_ratio={self.tv_qty_ratio:.2f} "
-            f"| leverage={float(getattr(self, 'tv_sizing_leverage', 0) or 0):.0f}x "
-            f"(仓位+API同源) "
-            f"| R{self.regime} 最多加仓{max_add}次"
+            f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
+            f"| TV.qty={self.tv_suggested_qty or '-'} "
+            f"| 分腿={[round(x * 100) for x in ratios]}% "
+            f"| 仅挂TP1+TP2 | sizing={SIZING_MODE}"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
-        """加仓：同一 TV 公式 × qty_ratio（禁止旧 base×ratio）。"""
+        """加仓已废除：恒 0。"""
         principal = self._resolve_cap_sizing_base()
         px = float(self.tv_price or 0) or float(
             binance_client.get_current_price(self.symbol) or 0
@@ -2591,38 +2604,43 @@ class PositionSupervisorBinance:
         return float(qty or 0), meta
 
     def _calc_vps_open_qty(self, curr_px, regime=None):
-        """OPEN：TV risk_pct / leverage / qty_ratio 唯一公式。"""
+        """OPEN：风险资金/止损距 ∩ 名义上限 ∩ TV.qty。"""
         principal = self._resolve_cap_sizing_base()
         px = float(curr_px or self.tv_price or 0)
-        sl = float(getattr(self, "tv_sl", 0) or 0)
-        risk_pct = float(getattr(self, "tv_risk_pct", 0) or 0)
-        lev = float(getattr(self, "tv_sizing_leverage", 0) or 0)
-        ratio = float(getattr(self, "tv_qty_ratio", 1.0) or 1.0)
-        if risk_pct <= 0 or lev <= 0:
+        sl = float(getattr(self, "tv_sl", 0) or getattr(self, "tv_sl_ref", 0) or 0)
+        tv_qty = float(getattr(self, "tv_suggested_qty", 0) or 0)
+        if principal <= 0 or px <= 0:
             logger.error(
-                f"🚫 开仓 sizing 拒绝：缺少 TV 参数 "
-                f"risk_pct={risk_pct} leverage={lev}（禁止回退旧保证金%逻辑）"
+                f"🚫 开仓 sizing 拒绝：权益={principal} price={px}"
             )
             return 0.0, {
-                "error": "missing_tv_risk_or_leverage",
+                "error": "missing_equity_or_price",
                 "principal": principal,
-                "risk_pct": risk_pct,
-                "leverage": lev,
-                "sizing_mode": "TV_RISK_FORMULA",
+                "leverage": FIXED_LEVERAGE,
+                "sizing_mode": SIZING_MODE,
             }
-        qty, meta = compute_tv_order_qty(
+        if sl <= 0:
+            logger.error(
+                f"🚫 开仓 sizing 拒绝：缺 stop_loss | 权益={principal} price={px}"
+            )
+            return 0.0, {
+                "error": "missing_or_invalid_stop_loss",
+                "principal": principal,
+                "price": px,
+                "sizing_mode": SIZING_MODE,
+            }
+        qty, meta = compute_fixed_order_qty(
             principal=principal,
-            risk_pct=risk_pct,
-            leverage=lev,
-            qty_ratio=ratio,
             price=px,
-            tv_sl=sl,
-            regime=int(regime if regime is not None else self.regime),
+            stop_loss=sl,
+            tv_qty=tv_qty if tv_qty > 0 else None,
             qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
             min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
         )
         meta["principal"] = principal
         meta["symbol"] = self.symbol
+        self.leverage = float(FIXED_LEVERAGE)
+        self.tv_sizing_leverage = float(FIXED_LEVERAGE)
         return float(qty or 0), meta
 
     def _other_symbols_notional(self, exclude_symbol=None):
@@ -3168,13 +3186,20 @@ class PositionSupervisorBinance:
         return int(self.regime)
 
     def _tp_slices_for_initial(self, initial_qty):
-        ratios = self.regime_settings[self._tp_split_regime()]["ratios"]
+        """仅返回可挂限价的 TP1+TP2；tp3 价格保留在 tv_tps 供雷达里程碑，不挂单。"""
+        ratios = list(
+            getattr(self, "_leg_ratios", None)
+            or self.regime_settings[self._tp_split_regime()]["ratios"]
+            or LEG_TP_RATIOS
+        )
         o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
-        return [
+        slices = [
             {"level": 1, "price": self.tv_tps[0], "qty": o1},
             {"level": 2, "price": self.tv_tps[1], "qty": o2},
-            {"level": 3, "price": self.tv_tps[2], "qty": o3},
         ]
+        # leg3 不挂 TP 限价；数量由雷达/硬止损接管
+        _ = o3
+        return slices[:PLACE_TP_LEVELS]
 
     @staticmethod
     def _sequential_tp_prefix(levels):
@@ -4189,6 +4214,7 @@ class PositionSupervisorBinance:
             )
             if res:
                 actions += 1
+                self._mark_tp_order_placed(lv['level'])
                 logger.info(f"🔧 重启补挂 TP{lv['level']} @{price:.2f} qty={target_q} ETH")
             time.sleep(0.35)
 
@@ -5199,7 +5225,8 @@ class PositionSupervisorBinance:
     def _radar_ready_to_handoff(self, curr_px, live_qty=None):
         """
         交棒门槛（按开仓档位）：
-        ① 现价达 entry→TP1 的档位激活线（R1=50%/R2=60%/R3=70%/R4=80%）
+        ① 现价达 entry→TP1 路程 85% 激活线
+        ② 或 TP1 限价真实成交
         ② 或 TP1 已真实成交（价到+限价消失，防回吐）
         """
         curr_px = float(curr_px or 0)
@@ -6375,6 +6402,7 @@ class PositionSupervisorBinance:
             logger.info(f"  + 补挂 TP{level} @ {px:.2f} qty={q} ETH")
             if binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True):
                 placed += 1
+                self._mark_tp_order_placed(level)
             else:
                 logger.error(f"  ❌ 补挂 TP{level} @ {px:.2f} 失败")
             time.sleep(0.4)
@@ -8837,12 +8865,12 @@ class PositionSupervisorBinance:
         if exit_src == EXIT_SOURCE_TP3:
             meta = self._build_close_meta("CLOSE_TP3", side, est, note)
             meta["close_type"] = CLOSE_TYPE_TP3
-        elif exit_src == EXIT_SOURCE_RADAR_BE:
-            meta = self._build_close_meta("CLOSE_STOPLOSS", side, est, note)
+        elif exit_src in (EXIT_SOURCE_RADAR_BE, EXIT_SOURCE_SL_BREAKEVEN):
+            meta = self._build_close_meta("CLOSE_SL_BREAKEVEN", side, est, note)
             meta["close_type"] = CLOSE_TYPE_BREAKEVEN
-        elif exit_src == EXIT_SOURCE_VPS_HARD_SL:
-            meta = self._build_close_meta("CLOSE_STOPLOSS", side, est, note)
-            meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
+        elif exit_src in (EXIT_SOURCE_VPS_HARD_SL, EXIT_SOURCE_SL_INITIAL):
+            meta = self._build_close_meta("CLOSE_SL_INITIAL", side, est, note)
+            meta["close_type"] = CLOSE_TYPE_HARD_SL if exit_src == EXIT_SOURCE_SL_INITIAL else CLOSE_TYPE_VPS_SHIELD
         elif exit_src == EXIT_SOURCE_TV_PROTECT:
             meta = self._build_close_meta("CLOSE_PROTECT", side, est, note)
             meta["close_type"] = CLOSE_TYPE_PROTECT
@@ -8931,43 +8959,64 @@ class PositionSupervisorBinance:
 
     def _process_signal(self, payload):
         raw_action = str(payload.get("action", "")).strip().upper()
-        is_tp_sl_update = raw_action in ("UPDATE_TP", "UPDATE_SL")
+        is_tp_sl_update = False  # v6.5.6 已废除 UPDATE_SL/TP
 
-        # UPDATE_* 可能不带 regime/atr：禁止用默认值覆盖开仓快照
-        if not is_tp_sl_update or payload.get("regime") is not None:
-            self.regime = self._safe_int(payload.get("regime"), self.regime or 3)
-            if self.regime not in self.regime_settings:
-                self.regime = 3
+        # 暂停交易闸：有仓时拦截新开；空仓允许新开并自动解除暂停
+        if (
+            raw_action in ("LONG", "SHORT")
+            and bool(getattr(self, "trading_paused", False))
+        ):
+            live = self._get_active_position()
+            live_qty = float((live or {}).get("size") or 0)
+            if live_qty > float(getattr(self, "min_qty", 0.001) or 0.001):
+                reason = getattr(self, "trading_pause_reason", "") or "trading_paused"
+                logger.error(
+                    f"🚫 [{self.symbol}] 交易已暂停，拒绝开仓 {raw_action} | {reason}"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"开仓拒绝·交易暂停 [{self.symbol}]",
+                        f"信号 {raw_action} 被拦截 | {reason} | 实盘仍有仓 {live_qty}",
+                        suggestion="处理方向背离/平仓后再发开仓信号",
+                    )
+                except Exception:
+                    pass
+                return
+            logger.warning(
+                f"✅ [{self.symbol}] 空仓状态下解除交易暂停，允许 {raw_action}"
+            )
+            self.trading_paused = False
+            self.trading_pause_reason = ""
+            self._save_state()
 
         atr_in = self._safe_float(payload.get("atr"), 0.0)
         if atr_in > 0:
             self.current_atr = atr_in
-        elif not is_tp_sl_update:
-            self.current_atr = self._safe_float(payload.get("atr"), 30.0)
+        elif raw_action in ("LONG", "SHORT"):
+            fetched = 0.0
+            try:
+                fetched = float(binance_client.fetch_atr_14(self.symbol) or 0)
+            except Exception:
+                fetched = 0.0
+            self.current_atr = fetched or float(self.current_atr or 30.0)
 
         px_in = self._safe_float(payload.get("price"), 0.0)
         if px_in > 0:
             self.tv_price = px_in
         elif raw_action in ("LONG", "SHORT"):
-            # TV 空价：用盘口价占位，否则 enrich TP 无法补全 → 开仓裸奔
             live_px = float(binance_client.get_current_price(self.symbol) or 0)
             if live_px > 0:
                 self.tv_price = live_px
                 payload = dict(payload)
                 payload["price"] = live_px
                 payload["_price_source"] = payload.get("_price_source") or "local"
-        elif not is_tp_sl_update:
-            self.tv_price = 0.0
 
         new_tps = self._sanitize_tp_prices([
-            self._safe_float(payload.get("tv_tp1"), 0),
-            self._safe_float(payload.get("tv_tp2"), 0),
-            self._safe_float(payload.get("tv_tp3"), 0),
+            self._safe_float(payload.get("tv_tp1") or payload.get("tp1"), 0),
+            self._safe_float(payload.get("tv_tp2") or payload.get("tp2"), 0),
+            self._safe_float(payload.get("tv_tp3") or payload.get("tp3"), 0),
         ])
-        if raw_action == "UPDATE_TP":
-            self._prev_tv_tps_before_update = list(self.tv_tps or [0.0, 0.0, 0.0])
-            self.tv_tps = new_tps
-        elif raw_action in ("LONG", "SHORT"):
+        if raw_action in ("LONG", "SHORT"):
             self.tv_tps = new_tps
             px_for_tp = float(self.tv_price or 0)
             if px_for_tp <= 0:
@@ -8987,34 +9036,35 @@ class PositionSupervisorBinance:
                     payload = dict(payload)
                     payload["_tp_source"] = enriched.get("_tp_source")
                 logger.info(
-                    f"📐 开仓信号 TP123 本地补全 @ {px_for_tp:.2f} → {self.tv_tps} "
+                    f"📐 开仓信号 TP 本地补全 @ {px_for_tp:.2f} → {self.tv_tps} "
                     f"({payload.get('_tp_source', 'local')})"
                 )
         elif sum(1 for t in new_tps if t > 0) >= 2:
-            # 其它信号若带齐 TP 才覆盖，避免 UPDATE_SL/CLOSE 把账本 TP 清零
             self.tv_tps = new_tps
 
         self._last_tv_field_sources = {
-            "regime": payload.get("_regime_source", "tv"),
             "atr": payload.get("_atr_source", "tv"),
             "tp": payload.get("_tp_source", "tv"),
             "price": payload.get("_price_source", "tv"),
         }
-        close_reason = str(payload.get("reason") or "策略指标反转/波动率安全退出").strip()
+        close_reason = str(payload.get("reason") or "").strip()
         close_side = str(payload.get("side") or "").strip().upper()
         pnl_pct = payload.get("pnl_pct")
         close_meta = self._build_close_meta(raw_action, close_side, pnl_pct, close_reason)
         close_extra = self._format_close_extra(
             close_side, pnl_pct, self.tv_price, self.regime, self.current_atr,
         )
+        leg = str(payload.get("leg") or "").strip()
 
         if not raw_action:
             logger.warning("TV 信号缺少 action，已忽略")
             return
-        if raw_action in (
-            "LONG", "SHORT", "CLOSE", "CLOSE_PROTECT", "CLOSE_TP3",
-            "CLOSE_STOPLOSS", "UPDATE_SL", "UPDATE_TP",
-        ) or raw_action.startswith("CLOSE"):
+        if (
+            raw_action in ("LONG", "SHORT")
+            or raw_action in RECONCILE_ACTIONS
+            or raw_action in FLATTEN_ACTIONS
+            or raw_action.startswith("CLOSE")
+        ):
             self._record_tv_signal(payload, raw_action)
 
         if not self._lock.acquire(timeout=120.0):
@@ -9023,96 +9073,42 @@ class PositionSupervisorBinance:
             return
 
         try:
-            is_close = (
-                raw_action in ("CLOSE", "CLOSE_PROTECT", "CLOSE_TP3", "CLOSE_STOPLOSS")
-                or raw_action.startswith("CLOSE")
-            )
-            if is_close:
+            # ── 对账类：不下单，只核对/记账 ──
+            if is_reconcile_action(raw_action) or (
+                raw_action.startswith("CLOSE")
+                and raw_action not in FLATTEN_ACTIONS
+                and raw_action not in ("CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT")
+                and raw_action in RECONCILE_ACTIONS
+            ):
+                self._handle_tv_reconcile(payload, raw_action, leg, close_reason, close_meta)
+                return
+
+            # ── 主动全平 ──
+            if is_flatten_action(raw_action):
                 self.monitoring = False
-                # 同 bar 1-2-1：先释放开仓幂等，再执行平仓，保证随后 OPEN 可入队
                 self._release_tv_seq_after_close(payload, reason=raw_action)
-            if raw_action == "CLOSE_PROTECT" or raw_action.startswith("CLOSE_PROTECT"):
                 pos = self._get_active_position()
-                tv_reason = close_reason or "保护性全平"
-                if not pos or pos.get("size", 0) <= 0:
-                    logger.info(f"🛡️ 保护性全平到达但盘口已空仓 → 撤单复位 | {tv_reason}{close_extra}")
-                    self._handle_manual_flat_detected(
-                        tv_reason,
-                        close_meta=close_meta,
-                        curr_px=self.tv_price,
-                    )
-                else:
-                    self._close_all(
-                        f"🛡️ 风控拦截：{tv_reason}{close_extra}",
-                        close_meta=close_meta,
-                    )
-            elif raw_action == "CLOSE_TP3":
-                pos = self._get_active_position()
-                tv_reason = close_reason or "TP3完美收网"
-                if not pos or pos.get("size", 0) <= 0:
-                    self._handle_manual_flat_detected(
-                        tv_reason,
-                        close_meta=close_meta,
-                        curr_px=self.tv_price,
-                    )
-                else:
-                    self._close_all(
-                        f"🏆 TP3止盈：{tv_reason}{close_extra}",
-                        close_meta=close_meta,
-                    )
-            elif raw_action == "CLOSE_STOPLOSS":
-                pos = self._get_active_position()
-                tv_reason = close_reason or "被动止损/保本"
-                sl_compare = ""
-                if self.watched_entry and self.current_side:
-                    sl_compare = format_tv_vps_sl_compare(
-                        self.current_side, self.watched_entry,
-                        self.current_atr, self.regime,
-                        tv_sl_ref=payload.get("tv_sl") or getattr(self, "tv_sl_ref", 0),
-                    )
-                logger.warning(
-                    f"🛑 [TV第一指令] CLOSE_STOPLOSS 立即全平 | {tv_reason}"
-                    + (f" | {sl_compare}" if sl_compare else "")
+                tv_reason = close_reason or raw_action
+                tag = (
+                    "多周期反转快平"
+                    if raw_action == "CLOSE_QUICK_EXIT"
+                    else "RSI反转快平"
                 )
                 if not pos or pos.get("size", 0) <= 0:
-                    self._handle_manual_flat_detected(
-                        tv_reason,
-                        close_meta=close_meta,
-                        curr_px=self.tv_price,
-                    )
-                else:
-                    tag = (
-                        "防回吐保本"
-                        if close_meta.get("close_type") == CLOSE_TYPE_BREAKEVEN
-                        else "TV紧止损"
-                    )
-                    self._close_all(
-                        f"🛑 {tag}·TV第一指令全平：{tv_reason}{close_extra}",
-                        close_meta=close_meta,
-                    )
-            elif raw_action == "CLOSE":
-                # 单独平仓：清仓+撤净挂单+复位，干净等待下次 TV（无开仓则不开）
-                pos = self._get_active_position()
-                tv_reason = close_reason or "TV单独平仓清场"
-                if not pos or pos.get("size", 0) <= 0:
                     logger.info(
-                        f"🧹 TV单独平仓但盘口已空 → 撤净挂单复位等待 | {tv_reason}{close_extra}"
+                        f"🧹 {tag}但盘口已空 → 撤净挂单复位 | {tv_reason}{close_extra}"
                     )
                     self._handle_manual_flat_detected(
-                        tv_reason,
-                        close_meta=close_meta,
-                        curr_px=self.tv_price,
+                        tv_reason, close_meta=close_meta, curr_px=self.tv_price,
                     )
                 else:
                     self._close_all(
-                        f"🧹 TV单独平仓清场：{tv_reason}{close_extra}",
+                        f"🧹 {tag}：{tv_reason}{close_extra}",
                         close_meta=close_meta,
                     )
-            elif raw_action == "UPDATE_SL":
-                self._handle_tv_sl_update(payload)
-            elif raw_action == "UPDATE_TP":
-                self._handle_tv_tp_update(payload)
-            elif raw_action in ["LONG", "SHORT"]:
+                return
+
+            if raw_action in ("LONG", "SHORT"):
                 self._apply_tv_sl_from_payload(payload, source=f"{raw_action}开仓")
                 self._apply_tv_sizing_params(payload)
                 self.last_tv_side = raw_action
@@ -9122,6 +9118,204 @@ class PositionSupervisorBinance:
                 logger.warning(f"未识别的 TV action: {raw_action}")
         finally:
             self._lock.release()
+
+    def _handle_tv_reconcile(self, payload, raw_action, leg, close_reason, close_meta):
+        """
+        平仓确认：只做状态同步与止损调整，不主动市价平仓。
+        CLOSE_TP leg1 → 保本；leg2 → entry±1.5ATR；
+        CLOSE_TRAIL leg3 / CLOSE_SL_* → 确认清零并重置。
+        """
+        pos = self._get_active_position()
+        live_qty = float((pos or {}).get("size") or 0)
+        px = self._safe_float(payload.get("price"), self.tv_price or 0)
+        qty = self._safe_float(payload.get("qty"), 0)
+        reason = close_reason or str((payload or {}).get("reason") or "")
+        try:
+            leg_i = int(float(leg)) if leg not in (None, "") else 0
+        except (TypeError, ValueError):
+            leg_i = 0
+
+        note = (
+            f"📋 TV对账 {raw_action} leg={leg or '-'} "
+            f"| TV qty={qty} price={px} | 实盘仓={live_qty:.4f} "
+            f"| {reason or '无reason'} | 不下主动平仓单"
+        )
+        logger.info(f"[{self.symbol}] {note}")
+
+        # 全部清零类：确认空仓 → 撤单重置
+        if raw_action in ("CLOSE_SL_INITIAL", "CLOSE_SL_BREAKEVEN") or (
+            raw_action == "CLOSE_TRAIL" and leg_i == 3
+        ):
+            if live_qty <= float(getattr(self, "min_qty", 0.001) or 0.001):
+                try:
+                    binance_client.cancel_all_open_orders(self.symbol)
+                except Exception as e:
+                    logger.warning(f"对账清场撤单失败: {e}")
+                self._reset_after_flat(source=f"TV对账·{raw_action}")
+            else:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] {raw_action} 对账称清零但实盘仍有 {live_qty} "
+                    f"→ 仅告警，不主动下单"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"对账仓位不一致 [{self.symbol}]",
+                        f"{raw_action} leg={leg} 期望空仓，实盘 {live_qty} {self.unit_label}",
+                        suggestion="以交易所为准；必要时人工平仓",
+                    )
+                except Exception:
+                    pass
+            self._notify_tv_reconcile(raw_action, leg, reason, qty, px, live_qty)
+            return
+
+        # CLOSE_TP / CLOSE_TRAIL leg1|2：状态 + 止损调整
+        if raw_action in ("CLOSE_TP", "CLOSE_TRAIL") and leg_i in (1, 2):
+            consumed = list(getattr(self, "tp_levels_consumed", []) or [])
+            if leg_i not in consumed:
+                consumed.append(leg_i)
+                self.tp_levels_consumed = sorted(set(consumed))
+
+            # 限价单未成交 → 取消挂单，移交雷达（禁止重复挂单）
+            try:
+                self._cancel_tp_level_if_still_open(leg_i, handoff_radar=True)
+            except Exception as e:
+                logger.warning(f"对账取消 TP{leg_i} 挂单失败: {e}")
+
+            entry = float(self.watched_entry or (pos or {}).get("entry_price") or 0)
+            atr = float(getattr(self, "open_atr", None) or self.current_atr or 0)
+            new_sl = None
+            if entry > 0 and self.current_side:
+                tick = 0.01
+                if leg_i == 1:
+                    # 保本：entry ± 1 tick
+                    new_sl = (
+                        round(entry + tick, 2) if self.current_side == "LONG"
+                        else round(entry - tick, 2)
+                    )
+                else:
+                    # leg2：entry ± 1.5×ATR（取更有利者）
+                    floor = (
+                        entry + 1.5 * atr if self.current_side == "LONG"
+                        else entry - 1.5 * atr
+                    )
+                    cur = float(self.current_sl or 0)
+                    if self.current_side == "LONG":
+                        new_sl = round(max(floor, cur, entry + tick), 2)
+                    else:
+                        candidates = [x for x in (floor, cur, entry - tick) if x > 0]
+                        new_sl = round(min(candidates), 2) if candidates else round(floor, 2)
+
+            if new_sl and live_qty > 0:
+                old = float(self.current_sl or 0)
+                improve = (
+                    (self.current_side == "LONG" and (old <= 0 or new_sl > old))
+                    or (self.current_side == "SHORT" and (old <= 0 or new_sl < old))
+                )
+                if improve:
+                    self.current_sl = new_sl
+                    self.radar_activated = True
+                    try:
+                        self._sync_exchange_stop(
+                            live_qty, radar_sl=new_sl,
+                            reason=f"TV对账·{raw_action}·leg{leg_i}止损调整",
+                            force=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"对账改止损失败: {e}")
+                    logger.info(
+                        f"📋 [{self.symbol}] 对账止损调整 leg{leg_i}: "
+                        f"{old:.2f} → {new_sl:.2f}"
+                    )
+
+            self._save_state()
+            logger.info(f"📋 [{self.symbol}] 对账标记 TP{leg_i} 已消耗")
+
+        self._notify_tv_reconcile(raw_action, leg, reason, qty, px, live_qty)
+
+    def _notify_tv_reconcile(self, raw_action, leg, reason, qty, px, live_qty):
+        try:
+            dingtalk.report_tv_reconcile(
+                symbol=self.symbol,
+                action=raw_action,
+                leg=leg,
+                reason=reason,
+                tv_qty=qty,
+                tv_price=px,
+                live_qty=live_qty,
+                unit_label=self.unit_label,
+            )
+        except Exception as e:
+            logger.warning(f"对账钉钉失败: {e}")
+
+    def _cancel_tp_level_if_still_open(self, level, handoff_radar=True):
+        """若 TP 限价仍挂着 → 取消并禁止重挂；可选移交雷达。"""
+        level = int(level or 0)
+        if level not in (1, 2):
+            return False
+        canceled = False
+        try:
+            orders = binance_client.get_open_orders(self.symbol) or []
+        except Exception:
+            orders = []
+        tps = list(self.tv_tps or [0, 0, 0])
+        target_px = float(tps[level - 1] or 0) if level <= len(tps) else 0
+        for o in orders:
+            try:
+                otype = str(o.get("type") or o.get("origType") or "").upper()
+                if "LIMIT" not in otype and otype not in ("LIMIT", "LIMIT_MAKER"):
+                    continue
+                if str(o.get("reduceOnly") or o.get("reduce_only") or "").lower() not in (
+                    "true", "1", True
+                ) and not o.get("reduceOnly"):
+                    # 仍尝试按价格匹配
+                    pass
+                opx = float(o.get("price") or o.get("stopPrice") or 0)
+                if target_px > 0 and abs(opx - target_px) <= max(0.5, target_px * 0.001):
+                    binance_client.cancel_order(self.symbol, order=o)
+                    canceled = True
+                    logger.info(
+                        f"📋 [{self.symbol}] 取消未成交 TP{level} @{opx} → 移交雷达"
+                    )
+            except Exception as e:
+                logger.debug(f"取消 TP{level} 单跳过: {e}")
+        placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
+        placed.pop(str(level), None)
+        placed.pop(level, None)
+        self._tp_order_placed_ts = placed
+        if canceled and handoff_radar:
+            self.radar_activated = True
+            try:
+                dingtalk.report_system_alert(
+                    f"TP未成交转雷达 [{self.symbol}]",
+                    f"TP{level} 限价未成交已取消，禁止重复挂单，移交雷达管理",
+                )
+            except Exception:
+                pass
+        return canceled
+
+    def _reset_after_flat(self, source=""):
+        """持仓清零后重置雷达/挂单状态。"""
+        try:
+            self._purge_all_defense_orders_on_flat(source or "flat_reset")
+        except Exception as e:
+            logger.debug(f"flat_reset 撤单跳过: {e}")
+        self.monitoring = False
+        self.watched_qty = 0.0
+        self.initial_qty = 0.0
+        self._open_settled_qty = 0.0
+        self.base_qty = 0.0
+        self.add_count = 0
+        self.tp_levels_consumed = []
+        self.shield_active = False
+        self.current_side = None
+        self.current_sl = 0.0
+        self.radar_activated = False
+        self.radar_step_count = 0
+        self._radar_handoff_done = False
+        self._radar_armed_after_tp1 = False
+        self._tp_order_placed_ts = {}
+        self._save_state()
+        logger.info(f"🧹 [{self.symbol}] 状态已重置 | {source}")
 
     def _entry_price_diff_pct(self, price_a, price_b, ref_px):
         ref = ref_px or max(abs(price_a), abs(price_b), 1.0)
@@ -9491,18 +9685,12 @@ class PositionSupervisorBinance:
             )
             return
 
-        lev = int(round(float(getattr(self, "tv_sizing_leverage", 0) or 0)))
-        if lev <= 0:
-            logger.error(f"{entry_type} 跳过：TV leverage 无效，禁止 set_leverage 回退固定倍数")
-            dingtalk.report_system_alert(
-                f"{entry_type} 杠杆无效",
-                "缺少 TV leverage，已拒绝加仓（禁止固定 25x）",
-            )
-            return
+        lev = int(FIXED_LEVERAGE)
         binance_client.set_leverage(self.symbol, leverage=lev)
         logger.info(
             f"➕ [{entry_type}] {action} 追加 {add_qty} ETH | "
-            f"{self._tv_sizing_note(add_qty, meta, entry_type=entry_type)}"
+            f"{self._tv_sizing_note(add_qty, meta, entry_type=entry_type)} "
+            f"| set_leverage={lev}x(固定)"
         )
         order = binance_client.place_market_order(action, add_qty, symbol=self.symbol)
         if not order:
@@ -9800,24 +9988,24 @@ class PositionSupervisorBinance:
                 logger.error(f"开仓跳过：目标数量无效 balance={balance:.2f} px={curr_px}")
                 return
 
-            lev = int(round(float(
-                (sizing_meta or {}).get("leverage")
-                or getattr(self, "tv_sizing_leverage", 0)
-                or 0
-            )))
-            if lev <= 0:
-                logger.error("开仓跳过：TV leverage 无效，禁止 set_leverage 回退固定 25x")
-                dingtalk.report_system_alert(
-                    f"开仓中止 · TV杠杆缺失 [{self.symbol}]",
-                    "webhook 未带有效 leverage，已拒绝下单（仓位与 API 杠杆同源，禁止固定 25x）",
+            # 成功进入开仓路径 → 解除暂停（新信号已对齐）
+            if getattr(self, "trading_paused", False):
+                logger.info(
+                    f"✅ [{self.symbol}] 新开仓解除交易暂停 | "
+                    f"{getattr(self, 'trading_pause_reason', '')}"
                 )
-                return
+                self.trading_paused = False
+                self.trading_pause_reason = ""
+
+            lev = int(FIXED_LEVERAGE)
+            self.leverage = float(FIXED_LEVERAGE)
+            self.tv_sizing_leverage = float(FIXED_LEVERAGE)
             binance_client.set_leverage(self.symbol, leverage=lev)
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
             logger.info(
                 f"📐 仓位预算 [{self.symbol}]: {budget_txt} "
-                f"| set_leverage={lev}x(TV) | 名义 ~{notional:.0f}U"
+                f"| set_leverage={lev}x(固定) | 名义 ~{notional:.0f}U"
             )
 
             cap_ok, _cap_meta = self._assert_notional_cap_or_reject(
@@ -10575,32 +10763,8 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
-        """
-        适度追随止损：
-        阶段1=成本±0.1%；阶段2+= best ± ATR×档位呼吸（R1=1.0 … R4=0.5）。
-        已删除旧 RADAR_STAGE_ATR_MULT 紧追（0.3 极限）逻辑。
-        """
-        stage = int(stage or 0)
-        if stage <= 0:
-            return None
-        entry = float(self.watched_entry or 0)
-        atr = float(
-            getattr(self, "open_atr", None) or self.current_atr or 30.0
-        )
-        best = float(self.best_price or entry)
-        if stage == 1:
-            cushion = entry * RADAR_STAGE_COST_BUFFER_PCT
-            if self.current_side == "LONG":
-                return round(entry + cushion, 2)
-            if self.current_side == "SHORT":
-                return round(entry - cushion, 2)
-            return None
-        breath = self._radar_breath_atr()  # 唯一呼吸源，无旧阶段紧追表
-        if self.current_side == "LONG":
-            return round(best - atr * breath, 2)
-        if self.current_side == "SHORT":
-            return round(best + atr * breath, 2)
-        return None
+        """已废除旧阶段呼吸表 → 连续阶梯追踪。"""
+        return self._compute_ladder_sl(curr_px)
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
         """
@@ -10812,22 +10976,77 @@ class PositionSupervisorBinance:
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """开仓档位锁定的雷达启动比例（相对 entry→TP1）。"""
-        regime = int(getattr(self, "open_regime", 0) or self.regime or 3)
-        return get_radar_activation_ratio(regime)
+        """连续阶梯：entry→TP1 路程 85% 激活。"""
+        return float(RADAR_ACTIVATE_TP1_FRAC)
 
     def _radar_activation_price(self):
-        """价触此价 → 可交棒雷达保本。"""
+        """价触此价 → 首次激活保本。"""
         entry = float(self.watched_entry or 0)
-        if entry <= 0:
-            return 0.0
-        tp1_dist = self._tp1_distance()
-        ratio = self._radar_activation_ratio()
-        if self.current_side == "LONG":
-            return entry + tp1_dist * ratio
-        if self.current_side == "SHORT":
-            return entry - tp1_dist * ratio
-        return 0.0
+        tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
+        if tp1 <= 0:
+            tp1 = entry + self._tp1_distance() if self.current_side == "LONG" else entry - self._tp1_distance()
+        return radar_activation_price(self.current_side, entry, tp1)
+
+    def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
+        """兼容旧调用：一律走连续阶梯公式。"""
+        return self._compute_ladder_sl(curr_px)
+
+    def _compute_ladder_sl(self, curr_px=0.0):
+        """v15 阶梯追踪止损（从 entry 起算步进）。未激活返回 None。"""
+        entry = float(self.watched_entry or 0)
+        if entry <= 0 or not self.current_side:
+            return None
+        atr = float(getattr(self, "open_atr", None) or self.current_atr or 30.0)
+        best = float(self.best_price or entry)
+        px = float(curr_px or 0) or best
+        tps = list(self.tv_tps or [0, 0, 0])
+        while len(tps) < 3:
+            tps.append(0.0)
+        locked_steps = int(getattr(self, "radar_step_count", 0) or 0)
+        sl, label, meta = compute_ladder_radar_sl(
+            self.current_side, entry, atr, best, px,
+            tps[0], tps[1], tps[2], tick_size=0.01,
+            step_count=locked_steps if locked_steps > 0 else None,
+        )
+        self._ladder_meta_last = meta
+        self._ladder_label_last = label
+        if not meta.get("activated") or sl <= 0:
+            return None
+        # 阶梯只前进不回溯（ATR 更新不降低 step_count）
+        new_steps = int(meta.get("step_count") or meta.get("steps") or 0)
+        if new_steps > locked_steps:
+            self.radar_step_count = new_steps
+        self.radar_activated = True
+        stage = int(meta.get("stage") or 1)
+        if stage > int(getattr(self, "_radar_stage_last", 0) or 0):
+            self._radar_stage_last = stage
+        return float(sl)
+
+    def _compute_radar_sl(self):
+        if not self.watched_entry or self.best_price <= 0:
+            return None
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        raw = self._compute_ladder_sl(curr_px)
+        if raw is None:
+            return None
+        # 止损只向有利方向移动，永不回退
+        if self.current_sl and float(self.current_sl) > 0:
+            if self.current_side == "LONG" and raw < float(self.current_sl):
+                raw = float(self.current_sl)
+            elif self.current_side == "SHORT" and raw > float(self.current_sl):
+                raw = float(self.current_sl)
+        stage = int(getattr(self, "_radar_stage_last", 0) or 0)
+        label = getattr(self, "_ladder_label_last", "") or self._radar_stage_label(stage)
+        prev_stage = int(getattr(self, "_radar_stage_reported", 0) or 0)
+        if stage > prev_stage:
+            logger.info(
+                f"📡 雷达阶梯 {prev_stage}→{stage} {label} | "
+                f"SL→{raw:.2f} | best={self.best_price:.2f} | "
+                f"{format_radar_activation_ratios_label()}"
+            )
+            self._radar_stage_reported = stage
+            self._save_state()
+        return self._clamp_radar_to_tv_floor(raw)
 
     def _price_reached_radar_activation(self, curr_px, live_only=False):
         """
@@ -10903,35 +11122,6 @@ class PositionSupervisorBinance:
             return True
         return self._radar_ready_to_handoff(curr_px, self.watched_qty)
 
-    def _compute_radar_sl(self):
-        if not self.watched_entry or self.best_price <= 0:
-            return None
-        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
-        stage = self._effective_radar_stage(curr_px)
-        if stage < 1:
-            return None
-        raw = self._compute_radar_sl_for_stage(stage, curr_px)
-        if raw is None:
-            return None
-        # 止损只向有利方向移动，永不回退
-        if self.current_sl and float(self.current_sl) > 0:
-            if self.current_side == "LONG" and raw < float(self.current_sl):
-                raw = float(self.current_sl)
-            elif self.current_side == "SHORT" and raw > float(self.current_sl):
-                raw = float(self.current_sl)
-        prev_stage = int(getattr(self, "_radar_stage_last", 0) or 0)
-        if stage > prev_stage:
-            logger.info(
-                f"📡 雷达阶段 {prev_stage}→{stage} {self._radar_stage_label(stage)} | "
-                f"SL→{raw:.2f} | best={self.best_price:.2f}"
-            )
-            self._radar_stage_last = stage
-            self._save_state()
-        elif prev_stage < 1 and stage >= 1:
-            self._radar_stage_last = stage
-            self._save_state()
-        return self._clamp_radar_to_tv_floor(raw)
-
     def _sync_radar_sl_from_best(self, curr_px):
         if not self._should_radar_trail(curr_px):
             return self.current_sl
@@ -10990,6 +11180,79 @@ class PositionSupervisorBinance:
         if self._is_radar_active() or self._radar_legitimately_armed(self.watched_qty, curr_px):
             return SENTINEL_POLL_RADAR
         return SENTINEL_POLL_NORMAL
+
+    def _maybe_refresh_atr(self):
+        """ATR 每 5 分钟更新；已触发阶梯 step_count 不因 ATR 变大而回溯。"""
+        now = time.time()
+        last = float(getattr(self, "_atr_last_update_ts", 0) or 0)
+        if last > 0 and (now - last) < float(ATR_UPDATE_SEC or 300):
+            return False
+        try:
+            fetched = float(binance_client.fetch_atr_14(self.symbol) or 0)
+        except Exception as e:
+            logger.debug(f"ATR 拉取失败: {e}")
+            return False
+        if fetched <= 0:
+            return False
+        old = float(self.current_atr or 0)
+        self.current_atr = fetched
+        # open_atr 用于阶梯距离：只允许在未激活时同步；激活后保持开仓 ATR 防回溯
+        if not bool(getattr(self, "radar_activated", False)) and not bool(
+            getattr(self, "_radar_handoff_done", False)
+        ):
+            self.open_atr = fetched
+        self._atr_last_update_ts = now
+        if abs(fetched - old) > 1e-6:
+            logger.info(
+                f"📐 [{self.symbol}] ATR 刷新 {old:.2f} → {fetched:.2f} "
+                f"(step_count={getattr(self, 'radar_step_count', 0)} 不回溯)"
+            )
+            self._save_state()
+        return True
+
+    def _mark_tp_order_placed(self, level):
+        level = int(level or 0)
+        if level not in (1, 2):
+            return
+        placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
+        placed[str(level)] = time.time()
+        self._tp_order_placed_ts = placed
+
+    def _check_tp_order_timeouts(self, curr_px=0.0):
+        """TP1/TP2 挂单超过 5 分钟未成交 → 取消并移交雷达，禁止重挂。"""
+        placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
+        if not placed:
+            return
+        now = time.time()
+        timeout = float(ORDER_TIMEOUT_SEC or 300)
+        changed = False
+        for level_s, ts in list(placed.items()):
+            try:
+                level = int(level_s)
+                ts = float(ts or 0)
+            except (TypeError, ValueError):
+                continue
+            if level not in (1, 2) or ts <= 0:
+                continue
+            if now - ts < timeout:
+                continue
+            consumed = list(getattr(self, "tp_levels_consumed", []) or [])
+            if level in consumed:
+                placed.pop(str(level), None)
+                changed = True
+                continue
+            logger.warning(
+                f"⏰ [{self.symbol}] TP{level} 挂单超时 {timeout:.0f}s → 取消移交雷达"
+            )
+            self._cancel_tp_level_if_still_open(level, handoff_radar=True)
+            if level not in consumed:
+                consumed.append(level)
+                self.tp_levels_consumed = sorted(set(consumed))
+            placed.pop(str(level), None)
+            changed = True
+        if changed:
+            self._tp_order_placed_ts = placed
+            self._save_state()
 
     def _process_radar_trailing(self, real_amt, curr_px):
         """
@@ -11202,6 +11465,17 @@ class PositionSupervisorBinance:
                                 self.best_price = max(self.best_price, curr_px)
                             else:
                                 self.best_price = min(self.best_price, curr_px)
+
+                        # ATR 每 5 分钟刷新（阶梯 step_count 不回溯）
+                        try:
+                            self._maybe_refresh_atr()
+                        except Exception as e:
+                            logger.debug(f"ATR刷新跳过: {e}")
+                        # 挂单超时 5 分钟 → 取消移交雷达
+                        try:
+                            self._check_tp_order_timeouts(curr_px)
+                        except Exception as e:
+                            logger.debug(f"挂单超时检查跳过: {e}")
 
                         qty_changed = False
                         if abs(real_amt - self.watched_qty) > REGIME_CAP_TOLERANCE_ETH:
@@ -11618,6 +11892,18 @@ class PositionSupervisorBinance:
                     self.leverage = float(getattr(self, "tv_sizing_leverage", 0) or 0)
                     self.base_qty = float(s.get("base_qty", 0) or 0)
                     self.add_count = int(s.get("add_count", 0) or 0)
+                    self.tv_suggested_qty = float(s.get("tv_suggested_qty", 0) or 0)
+                    self.radar_step_count = int(s.get("radar_step_count", 0) or 0)
+                    self.radar_activated = bool(s.get("radar_activated", False))
+                    self._atr_last_update_ts = float(s.get("atr_last_update_ts", 0) or 0)
+                    raw_tp_ts = s.get("tp_order_placed_ts") or {}
+                    self._tp_order_placed_ts = {
+                        str(k): float(v) for k, v in dict(raw_tp_ts).items()
+                    }
+                    self.trading_paused = bool(s.get("trading_paused", False))
+                    self.trading_pause_reason = str(
+                        s.get("trading_pause_reason", "") or ""
+                    )
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
@@ -11695,19 +11981,33 @@ class PositionSupervisorBinance:
                             self.last_tv_side = side
                             reconcile["direction_mismatch"] = False
                     elif self._strict_tv_opposite_side(side):
-                        # 重启禁止自动平仓：只告警并接管补挂 TP123+TV硬止损
+                        # TV 方向为准：实盘反向 → 强制市价全平 + 钉钉，不以暂停留仓处理
                         opp = self._strict_tv_opposite_side(side)
                         logger.error(
                             f"🚨 [重启] 实盘 {side} vs TV {opp} 反向 → "
-                            f"保留持仓接管，禁止自动强平"
+                            f"强制平仓对齐 TV（不以暂停留仓）"
+                        )
+                        flattened = self._enforce_tv_direction_or_flat(
+                            pos, source="VPS重启·TV方向为准",
+                        )
+                        self.trading_paused = False
+                        self.trading_pause_reason = ""
+                        if flattened:
+                            recover_ok = True
+                            self._recover_in_progress = False
+                            return
+                        # 若未能判定强平（信源瞬时不明），仍告警并暂停防误开
+                        self.trading_paused = True
+                        self.trading_pause_reason = (
+                            f"重启方向背离未强平: 实盘{side} vs TV{opp}"
                         )
                         dingtalk.report_system_alert(
-                            f"重启方向背离·保留持仓 [{self.symbol}]",
+                            f"重启方向背离·待处理 [{self.symbol}]",
                             f"实盘 {side} {pos['size']} {self.unit_label} vs 最新TV {opp} | "
-                            f"重启不自动平仓，改为挂齐 TP123 + TV硬止损",
-                            suggestion="若确需反向，请 TV 发 OPEN 反向信号走先平后开",
+                            f"自动强平未执行，已暂停新开仓",
+                            suggestion="核对 TV 方向后发 OPEN，或人工平仓",
                         )
-                        self.last_tv_side = side
+                        self._save_state()
 
                     if reconcile.get("manual_open") or float(self.watched_qty or 0) <= 0:
                         logger.info(
