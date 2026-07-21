@@ -199,7 +199,7 @@ def audit_module1_symbol(a: Audit):
         and "defense_order_ids" in sup
         and "_set_defense_order_id" in sup
         and "TimedRotatingFileHandler" in sup
-        and "SENTINEL_POLL_NORMAL = 1.0" in sup
+        and "SENTINEL_POLL_NORMAL = 0.5" in sup
         and "restart_no_persistence_with_position" in sup,
     )
     a.check(

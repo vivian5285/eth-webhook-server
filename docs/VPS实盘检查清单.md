@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server-main` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.0.5-order-persist** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **v15.0.6-sentinel-05** · sizing **RISK20_NOTIONAL5**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -18,8 +18,10 @@
 | 8 | 实盘/重启与 TV 方向背离 → **先全平** 对齐最新 TV + 钉钉 | `_enforce_tv_direction_or_flat` |
 | 9 | token 必须 = `528586` | `app.py` webhook |
 | 10 | **ETH / XAU** 独立状态 | `symbol_config.py` · `SUPERVISORS` |
-| 11 | TV 消息缓存 **1.0s** → 同窗**先平后开**（平一次+最新开） | `collapse_batch_for_execution` |
+| 11 | TV 消息缓存 **1.0s** → 同窗**先平后开**（平一次+最新开；~~忽略开仓已废弃~~） | `collapse_batch_for_execution` |
 | 12 | TP/止损 **订单 ID 持久化** | `_defense_order_ids` |
+| 13 | 订单监控 / sentinel **0.5s** | `SENTINEL_POLL_*=0.5` |
+| 14 | 60s 去重 key = **action+symbol+price**（不改） | `SIGNAL_DEDUP_SEC` |
 
 ---
 

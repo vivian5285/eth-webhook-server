@@ -1,11 +1,11 @@
 # ETH Webhook Trading System - 系统设计文档
 
 > **当前生产架构**见 [`README.md`](README.md)：  
-> **TV v6.5.6** · **VPS v15.0.5-order-persist** · sizing **RISK20_NOTIONAL5** · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
+> **TV v6.5.6** · **VPS v15.0.6-sentinel-05** · sizing **RISK20_NOTIONAL5** · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v15.0.5-order-persist）
+## 当前有效架构（2026-07 · v15.0.6-sentinel-05）
 
 ```
 TradingView v6.5.6 Alert (token=528586)
@@ -19,7 +19,7 @@ position_supervisor_binance.py   ← 唯一生产大脑
 ├── TP 30/30/40，只挂 TP1+TP2（TP3 交雷达）
 ├── stop_loss closePosition + 阶梯 radar（TP1路程85%激活）
 ├── RECONCILE 对账+调止损 / FLATTEN 快平
-├── ATR 5min 刷新 · 挂单 5min 超时 · 60s 去重 · 哨兵≈1s
+├── ATR 5min 刷新 · 挂单 5min 超时 · 60s 去重(action+symbol+price) · 哨兵 0.5s
 ├── 开仓前强制清仓（无菌空仓闸）
 ├── 无持久化有仓 → trading_paused
 ├── 日志按日滚动保留 30 天
@@ -37,17 +37,16 @@ position_supervisor_binance.py   ← 唯一生产大脑
 | 规则 | 实现 |
 |------|------|
 | 缓存窗口 **固定 1.0s** | `SAME_BAR_SETTLE_SEC` / `LEGACY_SETTLE_SEC` = 1.0 |
-| 同窗有平仓 → **一律先平后开** | 平仓一次 + 最新开仓（不忽略开仓） |
-| 优先级 P0>P1 | 平仓（`CLOSE_QUICK_EXIT`/`CLOSE_RSI_EXIT`）> 开仓（`LONG`/`SHORT`） |
-| 平仓幂等 | `collapse_batch_for_execution` |
-| 开仓取最新 | 同窗口多条开仓只执行 `entry_msgs[-1]` |
-| 60s 去重 | `SIGNAL_DEDUP_SEC`：同 action+symbol+price（平/开成功后清指纹） |
-| 开仓前强制清仓 | `_sterile_flat_gate` / `_full_reentry` |
+| ~~有平仓则忽略开仓~~（**已废弃**） | — |
+| 同窗有平仓 → **一律先平后开** | 平仓一次 + 最新开仓；开仓内强制清仓兜底 |
+| 平仓幂等 | 多条平仓只执行一条 |
+| 开仓幂等 | 多条开仓只执行最新一条 |
+| 60s 去重 | **保持** `action+symbol+price`（不含 price 会误杀变价有效信号） |
 | 超时兜底 | settle 到期立即冲刷 |
 
-一句话：收到 TV 消息缓存 1.0 秒 → 先平一次 → 再开最新一条；开仓第一步强制清仓。
+一句话：缓存 1.0 秒 → 先平一次 → 再开最新一条；开仓第一步强制清仓。
 
-币安 / 深币共用同一套逻辑。
+币安 / 深币共用同一套逻辑（哨兵统一 **0.5s**）。
 
 ---
 
