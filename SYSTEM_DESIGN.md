@@ -1,22 +1,26 @@
 # ETH Webhook Trading System - 系统设计文档
 
-> **⚠️ 历史文档**：下文 2026-06-14 的 profit_taker / 40-40-20 分层设计 **已被 superseded**。  
-> **当前生产架构**见 [`README.md`](README.md)：**TV v6.5.6** · **VPS v14.0.0-fixed20-ladder** · 固定 **20%×5** 仓位 · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
+> **当前生产架构**见 [`README.md`](README.md)：  
+> **TV v6.5.6** · **VPS v15.0.4-tv-flat-ladder** · sizing **RISK20_NOTIONAL5** · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v14.0.0-fixed20-ladder）
+## 当前有效架构（2026-07 · v15.0.4-tv-flat-ladder）
 
 ```
-TradingView v6.5.6 Alert
+TradingView v6.5.6 Alert (token=528586)
         ↓
-app.py (网关 + health: EQUITY_20PCT_X5 / fixed_5)
+app.py (网关 + health: RISK20_NOTIONAL5 / fixed_5)
         ↓
 position_supervisor_binance.py   ← 唯一生产大脑
-├── 固定仓位：权益 20% × 5x
-├── TP 30/30/40，只挂 TP1+TP2
-├── stop_loss closePosition + 阶梯 radar (85% 激活)
-├── RECONCILE 对账 / FLATTEN 快平
+├── TV 消息缓存 1s + 先平后开折叠（tv_seq.py）
+├── 仓位：风险20%/止损距 ∩ 名义×5 ∩ TV.qty
+├── TP 30/30/40，只挂 TP1+TP2（TP3 交雷达）
+├── stop_loss closePosition + 阶梯 radar（TP1路程85%激活）
+├── RECONCILE 对账+调止损 / FLATTEN 快平
+├── ATR 5min 刷新 · 挂单 5min 超时 · 60s 去重
+├── 开仓前强制清仓（无菌空仓闸）
+├── 重启方向背离 → trading_paused
 └── dingtalk.report_tv_reconcile
 ```
 
@@ -24,69 +28,26 @@ position_supervisor_binance.py   ← 唯一生产大脑
 
 ---
 
+## TV 消息顺序处理（VPS 铁律）
+
+同一根 K 线 TV 可能连发多条（开仓 / `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT`），网络到达顺序不保证。
+
+| 规则 | 实现 |
+|------|------|
+| 缓存窗口 1~2s | `SAME_BAR_SETTLE_SEC` / `LEGACY_SETTLE_SEC`（默认 1.0） |
+| 优先级 P0>P1 | 平仓（`CLOSE_QUICK_EXIT`/`CLOSE_RSI_EXIT`）> 开仓（`LONG`/`SHORT`） |
+| 平仓幂等 | `collapse_batch_for_execution` 窗口内只执行一条平仓 |
+| 开仓取最新 | 同窗口多条开仓只执行 `entry_msgs[-1]` |
+| 60s 去重 | `SIGNAL_DEDUP_SEC`：同 action+symbol+price |
+| 开仓前强制清仓 | `_sterile_flat_gate` / `_full_reentry`（最终安全网） |
+| 超时兜底 | settle 到期立即冲刷，不无限等待 |
+
+一句话：收到 TV 消息不立即执行 → 缓存约 1 秒 → 先平一次 → 再开最新一条；开仓第一步强制清仓。
+
+币安 / 深币共用同一套逻辑。
+
+---
+
 ## 以下为历史设计存档（仅供参考，勿按此部署）
 
-> 本文档记录 **早期** 系统的目标、架构、分层职责和实现状态（2026-06-14 更新）。
-
-## 1. 项目目标
-
-构建一套**稳定、可维护、风控优先**的 ETH 永续合约自动化交易系统，适合个人 + 客户资管使用。
-
-**核心理念**：
-- 风控 > 进攻（每日回撤熔断 + 防回吐优先）
-- **VPS 完全接管 40/40/20 自主 scale-out**
-- 监督层主动对齐最新 TV 信号方向
-- 清晰分层架构 + 强状态一致性
-- 支持人工干预智能处理
-
-## 2. 整体架构（当前最终架构）
-
-```
-TradingView Alert
-        ↓
-app.py (入口层 + Secret 校验)
-        ↓
-# 编排 + 监督层（生产唯一）：position_supervisor_binance.py
-# （遗留 position_supervisor.py 已删除）
-    ├── 记录最新 TV 信号
-    ├── 先平后开（同/反向一致）
-    ├── 主动检查并强制对齐最新 TV 方向
-    ├── 增强版 force_reconcile（真实对比 + 修复）
-    └── 统一详细决策推送
-        ↓
-    ┌───────────────────────┐
-    │ profit_taker.py       │  ← 核心执行层（VPS完全接管）
-    │ - 40/40/20 自主减仓    │
-    │ - TP1 后移保本         │
-    │ - 显著加仓重算 TP      │
-    │ - TP 距离监控 (18-50USD)│
-    │ - 定期调用对齐检查     │
-    └───────────────────────┘
-        ↓
-order_executor.py（仅负责开仓 + 全平 + 初始 SL）
-        ↓
-binance_client.py（带简单重试）
-```
-
-## 3. 关键改进点（相比原始设计）
-
-- **从“混合 TP3 限价”演进为 “VPS 完全接管 40/40/20 市价 scale-out”**
-- **监督层从被动编排 → 主动对齐最新 TV 信号**
-- **profit_taker 成为价格监控 + 执行的核心**
-- **所有关键决策都有美观、参数完整的钉钉推送**
-- **增强了对账真实对比 + 自动修复能力**
-
-## 4. 当前实现状态
-
-| 模块 | 状态 | 备注 |
-|------|------|------|
-| VPS 完全接管 40/40/20 | ✅ 已完成 | profit_taker 完全负责 |
-| 监督层主动方向对齐 | ✅ 已完成 | check_and_align_with_latest_signal |
-| 增强版强制对账 | ✅ 已完成 | 真实对比 + 自动修复 |
-| 统一详细决策推送 | ✅ 已完成 | emoji + 参数完整格式 |
-| TP 距离监控 (18-50 USD) | ✅ 已完成 | 异常告警 |
-| Webhook Secret 校验 | ✅ 已完成 | app.py |
-| Binance API 简单重试 | ✅ 已完成 | binance_client |
-| 异常补偿机制 | 部分 | 建议继续加强 |
-
-**文档最后更新**：2026-06-14
+> 早期 profit_taker / 40-40-20 / EQUITY_20PCT_X5 等设计均已被 v15 需求 supersede。

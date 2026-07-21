@@ -94,6 +94,7 @@ from tv_seq import (
     is_close_action,
     is_open_action,
     reorder_batch_close_then_open,
+    collapse_batch_for_execution,
 )
 
 if not os.path.exists('logs'):
@@ -816,6 +817,16 @@ class PositionSupervisorBinance:
                 continue
             # 铁律：同 bar 开+平并存 → 永远先平后开（无视 TV seq 颠倒 / 到达先后）
             batch = reorder_batch_close_then_open(batch)
+            # 缓存折叠：平仓只执行一次 + 开仓只执行最新一条
+            before_n = len(batch)
+            batch = collapse_batch_for_execution(batch)
+            if len(batch) != before_n:
+                logger.info(
+                    f"📬 [{self.symbol}] 缓存折叠 {before_n}→{len(batch)} | "
+                    + " → ".join(
+                        str((p or {}).get("action", "")).upper() for p in batch
+                    )
+                )
             self._annotate_close_open_chain(batch)
             for payload in batch:
                 try:
@@ -938,9 +949,9 @@ class PositionSupervisorBinance:
             return
         self._last_signal_fp = fp
         self._last_signal_fp_ts = now
-        status = self._seq_buffer.add(payload)  # legacy 旁路立即可弹
+        status = self._seq_buffer.add(payload)  # legacy：1s 缓存窗口后再冲刷
         logger.info(
-            f"📬 TV信号入队(无时序): {action} → {status} | "
+            f"📬 TV信号入队(无时序·缓存窗口): {action} → {status} | "
             f"缓冲深度 {self._seq_buffer.depth()}"
         )
 

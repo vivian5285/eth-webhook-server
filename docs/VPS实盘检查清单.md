@@ -18,6 +18,7 @@
 | 8 | 实盘/重启与 TV 方向背离 → **先全平** 对齐最新 TV + 钉钉 | `_enforce_tv_direction_or_flat` |
 | 9 | token 必须 = `528586` | `app.py` webhook |
 | 10 | **ETH / XAU** 独立状态 | `symbol_config.py` · `SUPERVISORS` |
+| 11 | TV 消息缓存 1s → 先平一次 → 再开最新一条 | `tv_seq.collapse_batch_for_execution` · `LEGACY_SETTLE_SEC` |
 
 ---
 
