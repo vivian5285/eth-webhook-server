@@ -131,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.4.0-arch-align"
+BINANCE_VPS_VERSION = "v15.5.0-final-spec"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -331,6 +331,7 @@ class PositionSupervisorBinance:
         self._defense_order_ids = {"tp1": "", "tp2": "", "tp3": "", "stop": ""}
         self.trading_paused = False
         self.trading_pause_reason = ""
+        self._state_old_schema = False
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -2798,167 +2799,43 @@ class PositionSupervisorBinance:
         return live_qty > target + tol, target, margin_pct, reg
 
     def _trim_position_to_target(self, target_qty, action, reason_tag="叠仓Remediation"):
-        """叠仓Remediation：仅裁减 excess=实盘-目标，带安全校验与多轮核实"""
-        target_qty = float(target_qty or 0)
+        """已废除 CAP_ALIGN：禁止 reduceOnly 主动减仓；返回当前实盘数量。"""
         pos = self._get_active_position()
-        if not pos or target_qty <= 0:
-            return pos["size"] if pos else 0.0
-        live = float(pos["size"])
-        cap_tol = self._regime_cap_tolerance(target_qty)
-        if live <= target_qty + cap_tol:
-            return live
-        trim_qty = round(live - target_qty, 3)
-        plan_err = self._validate_cap_trim_plan(live, target_qty, trim_qty)
-        if plan_err:
-            logger.error(f"✂️ {reason_tag} 中止: {plan_err} | live={live} target={target_qty}")
-            dingtalk.report_system_alert(
-                "档位裁减已中止（安全保护）",
-                f"场景：{reason_tag}\n"
-                f"实盘：**{live}** ETH → 目标：**{target_qty}** ETH\n"
-                f"原因：{plan_err}",
-                suggestion="请核对本金快照与 TV 档位是否一致；勿手动干预，待下一 TV 信号或人工核查后重试",
-            )
-            return live
-        close_side = "SELL" if action == "LONG" else "BUY"
+        live = float(pos["size"]) if pos else 0.0
         logger.warning(
-            f"✂️ {reason_tag}: 裁减 {trim_qty} ETH "
-            f"(实盘 {live} → 目标 {target_qty})"
+            f"🚫 [{self.symbol}] CAP_ALIGN/_trim 已废除 | {reason_tag} | "
+            f"目标 {target_qty} 实盘 {live} → 不减仓"
         )
-        binance_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
-        self._cancel_all_tp_limit_orders(max_rounds=3)
-        time.sleep(0.3)
-        new_sz = live
-        for round_i in range(CAP_TRIM_MAX_ROUNDS):
-            pos = self._get_active_position()
-            if not pos or pos["size"] <= 0:
-                break
-            cur = float(pos["size"])
-            if cur <= target_qty + cap_tol:
-                new_sz = cur
-                break
-            slice_trim = round(cur - target_qty, 3)
-            if slice_trim <= 0:
-                new_sz = cur
-                break
-            binance_client.place_market_order(close_side, slice_trim, symbol=self.symbol, reduce_only=True)
-            time.sleep(1.0)
-            verified = self._wait_verify(
-                lambda: self._get_active_position(),
-                retries=6,
-                delay=0.5,
-            )
-            new_sz = float(verified["size"]) if verified else cur
-            if new_sz <= target_qty + cap_tol:
-                break
-        if new_sz < target_qty * 0.5 and live > target_qty * 1.5:
-            dingtalk.report_system_alert(
-                "档位裁减过度",
-                f"目标 {target_qty} ETH，裁减后仅 {new_sz} ETH（原 {live}），请人工核查",
-            )
-        elif new_sz > target_qty * OPEN_OVERSIZE_RATIO:
-            dingtalk.report_system_alert(
-                "叠仓裁减未达标",
-                f"目标 {target_qty} ETH，裁减后仍 {new_sz} ETH，请人工核查",
-            )
-        return new_sz
+        return live
 
     def _radar_enforce_regime_cap(self, live_qty, curr_px, force=False):
         """
-        雷达最高权限：实盘超过 TV 档位保证金上限 → reduceOnly 裁减 → 重挂 TP123。
-        雷达移动止损位不变，仅补挂缺失 STOP。
+        已废除 CAP_ALIGN：新架构禁止 VPS 自主减仓（非 TV / 非呼吸止损）。
+        旧加仓超限补丁不再需要；仅打日志，不 reduceOnly。
         """
-        if live_qty <= 0 or not self.current_side:
+        if live_qty <= 0:
             return None
-        if not force and (
-            getattr(self, "_open_in_progress", False)
-            or getattr(self, "_recover_in_progress", False)
-        ):
-            return None
-        # 刚开仓宽限内禁止档位裁减（防开完立刻秒平大半）
-        if not force and time.time() < float(
-            getattr(self, "_post_open_radar_block_until", 0) or 0
-        ):
-            logger.info(
-                f"📡 [档位限额] 开仓宽限内跳过裁减 "
-                f"(剩 {max(0, self._post_open_radar_block_until - time.time()):.0f}s)"
+        try:
+            oversize, target, margin_pct, regime = self._is_oversize_for_regime(
+                live_qty, curr_px, self.regime,
             )
-            return None
-        if not force and time.time() < float(
-            getattr(self, "_sentinel_grace_until", 0) or 0
-        ):
-            return None
-
-        oversize, target, margin_pct, regime = self._is_oversize_for_regime(
-            live_qty, curr_px, self.regime,
-        )
-        if not oversize:
-            return None
-
-        now = time.time()
-        severe = live_qty > target * 1.35
-        if (
-            not severe
-            and now - getattr(self, "_last_regime_cap_ts", 0) < REGIME_CAP_COOLDOWN_SEC
-        ):
-            logger.info(
-                f"📡 [雷达档位限额] 超标 {live_qty}>{target} ETH 但冷却中 "
-                f"(R{regime} {margin_pct:.0%})"
-            )
-            return None
-
-        _, balance, margin_usdt, margin_pct, regime = self._regime_cap_target_qty(curr_px, regime)
-        old_qty = live_qty
-        logger.warning(
-            f"📡 [雷达档位限额] R{regime} VPS上限 {target} ETH "
-            f"(本金 {balance:.0f}U×VPS风险{margin_pct:.1%}×{self.leverage}x) | "
-            f"实盘 {live_qty} ETH 超标 → 强制裁减"
-        )
-
-        new_qty = self._trim_position_to_target(
-            target, self.current_side, reason_tag=f"雷达R{regime}档位限额",
-        )
-        pos = self._get_active_position()
-        entry = pos["entry_price"] if pos else self.watched_entry
-        self.watched_qty = new_qty
-        self.initial_qty = new_qty
-        if pos:
-            self.watched_entry = entry
-        self._save_state()
-
-        sl = self._radar_sl_to_pass()
-        result = self._enforce_defense_alignment(
-            new_qty, entry, dynamic_sl=sl,
-            reason=f"雷达档位限额 R{regime} 裁减后 TP 对齐", rounds=3,
-        )
-        if sl and not self._has_stop_sl_near(sl):
-            self._ensure_radar_sl(sl, new_qty)
-
-        self._last_regime_cap_ts = now
-        verify_note = (
-            f"VPS {balance:.2f}U × R{regime} 风险{margin_pct:.1%} × {self.leverage}x "
-            f"= 下单额 {margin_usdt:.0f}U → 上限 {target} ETH | "
-            f"裁减 {old_qty} → {new_qty} ETH | "
-            f"TP {result['matched']}/{result['expected']} | "
-            f"{self._format_audit_summary(result['audit'])} | "
-            f"雷达SL={'已保留/已补' if sl else '待命'}"
-        )
-        self._call_dingtalk(
-            dingtalk.report_radar_regime_cap_trim,
-            side=self.current_side,
-            old_qty=old_qty,
-            new_qty=new_qty,
-            target_qty=target,
-            regime=regime,
-            margin_pct=margin_pct,
-            tp_audit=result["audit"],
-            verify_note=verify_note,
-            principal_balance=balance,
-            margin_usdt=margin_usdt,
-            leverage=self.leverage,
-            trim_qty=round(old_qty - new_qty, 3),
-        )
-        return {"new_qty": new_qty, "target": target, "result": result}
+            if oversize:
+                logger.warning(
+                    f"📡 [{self.symbol}] CAP_ALIGN已废除：检测到实盘 {live_qty} > 目标 {target} "
+                    f"(R{regime}) → 不减仓，仅告警"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"仓位偏离目标·不减仓 [{self.symbol}]",
+                        f"实盘 {live_qty} > 计算目标 {target} | CAP_ALIGN已删除 | "
+                        f"请人工核对（非自主平仓）",
+                        level="提示",
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"CAP_ALIGN检查跳过: {e}")
+        return None
 
     def _is_dust_qty(self, qty):
         """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
@@ -4722,8 +4599,8 @@ class PositionSupervisorBinance:
 
     def _sync_exchange_stop(self, live_qty, radar_sl=None, reason="", force=False):
         """
-        统一交易所保护止损为单槽：挂 TV 硬止损（或合法浮盈侧雷达）。
-        禁止改回 VPS%；无 TV 价 → 告警且失败。
+        呼吸止损唯一写入：按 currentStop 挂/改 STOP_MARKET（quantity=剩余仓位）。
+        失败重试 3 次 → HARD_SL_FAIL_ABORT：钉钉告警，保持现状，不自主平仓。
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
@@ -4734,22 +4611,22 @@ class PositionSupervisorBinance:
         target = self._effective_exchange_stop(radar_sl)
         if not target or target <= 0:
             logger.error(
-                f"🚨 [{self.symbol}] 同步硬止损失败：无 TV tv_sl | {reason}"
+                f"🚨 [{self.symbol}] 同步呼吸止损失败：无有效 currentStop | {reason}"
             )
             try:
                 self._call_dingtalk(
                     dingtalk.report_system_alert,
-                    title=f"TV硬止损缺失·无法挂单 [{self.symbol}]",
+                    title=f"呼吸止损缺失·无法挂单 [{self.symbol}]",
                     detail=(
                         f"{self.current_side} qty={live_qty} | {reason or '同步'} | "
-                        f"请核对 TV payload tv_sl"
+                        f"请核对 open_atr/initial_stop/current_sl"
                     ),
                     level="紧急",
-                    suggestion="等待带 tv_sl 的 TV 信号或人工挂止损",
+                    suggestion="等待行情引擎补 ATR 或人工挂止损；勿按 TV stop_loss 改挂",
                 )
             except Exception:
                 pass
-            return {"ok": False, "skipped": True, "reason": "no_tv_sl"}
+            return {"ok": False, "skipped": True, "reason": "no_stop"}
         target = round(float(target), 2)
 
         live_stops = self._count_protective_stops()
@@ -4802,15 +4679,15 @@ class PositionSupervisorBinance:
             if ok:
                 break
             logger.warning(
-                f"🛡️ [{self.symbol}] TV硬止损挂单未核实 @{target:.2f} "
-                f"重试 {attempt + 1}/3"
+                f"🛡️ [{self.symbol}] 呼吸止损挂单未核实 @{target:.2f} "
+                f"重试 {attempt + 1}/3 | {reason}"
             )
 
         if ok:
             purged = self._purge_all_protective_stops(keep_near=target)
             if purged or orphans:
                 logger.warning(
-                    f"🛡️ 统一TV硬止损：新挂已核实 @{target:.2f}，清孤儿 {purged} 笔 "
+                    f"🛡️ 统一呼吸止损：新挂已核实 @{target:.2f}，清孤儿 {purged} 笔 "
                     f"(原盘口{live_stops})"
                 )
                 time.sleep(0.35)
@@ -4823,34 +4700,49 @@ class PositionSupervisorBinance:
                         target, exclude_shield=False,
                     )
         elif had_old_stops:
+            # HARD_SL_FAIL_ABORT：保留原盘口止损，不撤净裸仓，不自主平仓
             logger.error(
-                f"❌ [{self.symbol}] TV硬止损新挂失败 @{target:.2f}，"
-                f"保留原盘口 STOP {live_stops}，禁止撤净裸仓 | {reason}"
-            )
-            self._record_shield_maintain(success=True)
-            return {
-                "ok": True, "skipped": False, "target": target, "purged": 0,
-                "reason": "place_failed_keep_old",
-            }
-        else:
-            logger.error(
-                f"❌ [{self.symbol}] TV硬止损新挂失败且盘口无 STOP → 裸仓 | {reason}"
+                f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 新挂失败 @{target:.2f}，"
+                f"保留原盘口 STOP {live_stops} | {reason}"
             )
             try:
                 self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"裸仓告警·TV硬止损未挂上 [{self.symbol}]",
-                    detail=(
-                        f"{self.current_side} qty={live_qty} 目标TV_SL@{target:.2f} "
-                        f"| {reason or '同步'} | 请人工挂 closePosition"
-                    ),
-                    level="紧急",
-                    suggestion="币安 APP 按 TV tv_sl 手动挂止损；勿反复重启核武撤单",
+                    dingtalk.report_hard_sl_fail_abort,
+                    side=self.current_side,
+                    qty=live_qty,
+                    target_sl=target,
+                    attempts=3,
+                    reason=reason or "呼吸止损改单",
+                    detail=f"原盘口 STOP={live_stops} 已保留，禁止撤净裸仓",
+                )
+            except Exception:
+                pass
+            self._record_shield_maintain(success=True)
+            return {
+                "ok": True, "skipped": False, "target": target, "purged": 0,
+                "reason": "HARD_SL_FAIL_ABORT_keep_old",
+            }
+        else:
+            logger.error(
+                f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 新挂失败且盘口无 STOP → 裸仓 | {reason}"
+            )
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_hard_sl_fail_abort,
+                    side=self.current_side,
+                    qty=live_qty,
+                    target_sl=target,
+                    attempts=3,
+                    reason=reason or "呼吸止损挂单",
+                    detail="盘口无 STOP → 裸仓风险；请人工按 currentStop 挂止损",
                 )
             except Exception:
                 pass
             self._record_shield_maintain(success=False)
-            return {"ok": False, "skipped": False, "target": target, "purged": 0}
+            return {
+                "ok": False, "skipped": False, "target": target, "purged": 0,
+                "reason": "HARD_SL_FAIL_ABORT_naked",
+            }
 
         leftovers = [
             p for p in (self._count_protective_stops() or [])
@@ -4879,11 +4771,27 @@ class PositionSupervisorBinance:
             self._save_state()
             self._record_shield_maintain(success=True)
             logger.info(
-                f"✅ [{self.symbol}] TV硬止损已挂 @{target:.2f} | {reason} | "
-                f"tv_sl={float(getattr(self, 'tv_sl', 0) or 0) or target:.2f} | "
+                f"✅ [{self.symbol}] 呼吸止损已挂 @{target:.2f} | {reason} | "
+                f"current_sl={float(getattr(self, 'current_sl', 0) or 0):.2f} | "
                 f"撤孤儿 {purged} 笔"
             )
         else:
+            # 二次清理后仍失败 → HARD_SL_FAIL_ABORT
+            logger.error(
+                f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 核实失败 @{target:.2f} | {reason}"
+            )
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_hard_sl_fail_abort,
+                    side=self.current_side,
+                    qty=live_qty,
+                    target_sl=target,
+                    attempts=3,
+                    reason=reason or "呼吸止损核实",
+                    detail="重试后仍未核实到目标止损，保持现状",
+                )
+            except Exception:
+                pass
             self._record_shield_maintain(success=False)
         return {"ok": ok, "skipped": False, "target": target, "purged": purged}
 
@@ -9875,19 +9783,18 @@ class PositionSupervisorBinance:
 
             real_qty = pos["size"]
             if real_qty > qty * OPEN_OVERSIZE_RATIO:
+                # CAP_ALIGN 已废除：禁止 reduceOnly 自主减仓，仅告警并以实盘为准继续挂防
                 logger.error(
-                    f"🚨 持仓超标: 目标 {qty} {self.unit_label}，实盘 {real_qty} "
-                    f"(>{qty * OPEN_OVERSIZE_RATIO:.3f})，启动裁减"
+                    f"🚨 持仓偏离目标: 目标 {qty} {self.unit_label}，实盘 {real_qty} "
+                    f"(>{qty * OPEN_OVERSIZE_RATIO:.3f}) → 不减仓(CAP_ALIGN已删除)"
                 )
                 dingtalk.report_system_alert(
-                    f"持仓超标 · 自动裁减 [{self.symbol}]",
+                    f"持仓偏离目标·不减仓 [{self.symbol}]",
                     f"目标 {qty} {self.unit_label} (保证金 {margin_usdt:.0f}U)，"
-                    f"实盘 {real_qty} @ {pos['entry_price']:.2f}，正在 reduceOnly 裁减",
+                    f"实盘 {real_qty} @ {pos['entry_price']:.2f} | "
+                    f"CAP_ALIGN已废除，以实盘为准挂TP+呼吸止损",
+                    level="紧急",
                 )
-                real_qty = self._trim_position_to_target(qty, action)
-                pos = self._get_active_position()
-                if pos:
-                    pos["size"] = real_qty
 
             self.current_side = action
             self.open_regime = int(snap.get("regime") or self.regime or 3)
@@ -9913,29 +9820,29 @@ class PositionSupervisorBinance:
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0, sizing_meta=None):
         """
         开仓后防线铁律（挂一次、挂齐）：
-        1) 核实持仓 → 绑回本笔 TV TP123
-        2) 挂 TP123（reduceOnly 限价）
-        3) 挂呼吸止损 closePosition（entry±1.5×ATR，与雷达合并单槽）
-        4) 呼吸止损开仓即追踪
+        1) 核实持仓 → 绑回本笔 TV TP1/TP2 价
+        2) 挂 TP1+TP2（reduceOnly 限价；不挂 TP3）
+        3) 挂呼吸止损 STOP_MARKET+quantity（entry±1.5×ATR）
+        4) 呼吸止损开仓即接管
         5) 实盘核实后钉钉一条
         """
         entry_price = float(entry_price or 0)
-        # 开仓路径：禁止接管「现价已过跳过TP」污染；强制绑回本笔 TV TP123
+        # 开仓路径：禁止接管「现价已过跳过TP」污染；强制绑回本笔 TV TP
         self._takeover_price_skip = False
         snap = getattr(self, "_pending_open_defense_snap", None)
         self._bind_tv_open_defenses(
             snap, entry=entry_price, side=self.current_side, source="开仓保护绑定",
         )
-        # 开仓硬闸：TV 空/不全时必须用实盘 entry+ATR 合成 TP123，禁止 expected=0 裸奔
+        # 开仓硬闸：TV 空/不全时必须用实盘 entry+ATR 合成 TP 价，禁止 expected=0 裸奔
         if not self._ensure_tp123_prices_from_tv(entry_price):
             logger.error(
-                f"🚨 [{self.symbol}] 开仓 TP123 补全失败 entry={entry_price} "
+                f"🚨 [{self.symbol}] 开仓 TP1/TP2 补全失败 entry={entry_price} "
                 f"tps={self.tv_tps} → 仍强制挂呼吸止损"
             )
             dingtalk.report_system_alert(
-                f"开仓 TP123 补全失败 [{self.symbol}]",
+                f"开仓 TP 补全失败 [{self.symbol}]",
                 f"{self.current_side} entry={entry_price:.2f} | tps={self.tv_tps} | "
-                f"将仅挂呼吸止损，哨兵继续补 TP",
+                f"将仅挂呼吸止损，哨兵继续补 TP1/TP2",
             )
         # 若补全后仍空，再从快照硬灌一次
         if sum(1 for t in (self.tv_tps or []) if float(t or 0) > 0) < 3 and snap:
@@ -9987,21 +9894,15 @@ class PositionSupervisorBinance:
             live_qty = verified["size"]
             self._clear_signal_fingerprint()
             if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
-                live_qty = self._trim_position_to_target(target_qty, self.current_side)
-                verified = self._get_active_position() or verified
-                if verified:
-                    verified = dict(verified)
-                    verified["size"] = live_qty
-                self.watched_qty = live_qty
-                self.initial_qty = live_qty
-                self._open_settled_qty = float(live_qty)
-                self._save_state()
-            else:
-                # 以实盘核实仓为开仓基线，禁止保留偏高 target 制造「TP1=5% 已吃」幻觉
-                self.watched_qty = live_qty
-                self.initial_qty = float(live_qty)
-                self._open_settled_qty = float(live_qty)
-                self._save_state()
+                logger.warning(
+                    f"🚫 [{self.symbol}] 开仓后实盘 {live_qty} > 目标 "
+                    f"{target_qty}×{OPEN_OVERSIZE_RATIO} → CAP_ALIGN已废除，不减仓"
+                )
+            # 以实盘核实仓为开仓基线（禁止 CAP_ALIGN 自主减仓）
+            self.watched_qty = live_qty
+            self.initial_qty = float(live_qty)
+            self._open_settled_qty = float(live_qty)
+            self._save_state()
 
             # 开仓后只清 TP 残留；硬止损由后续统一同步挂上（禁先撤净 STOP 裸仓窗口）
             self._cancel_all_tp_limit_orders(max_rounds=3)
@@ -11656,18 +11557,31 @@ class PositionSupervisorBinance:
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)
                     self.remaining_qty_pct = float(s.get("remaining_qty_pct", 1.0) or 1.0)
-                    # 迁移：旧账本仅有 tv_sl → 当作 initial/current
-                    if self.initial_stop <= 0 and float(getattr(self, "current_sl", 0) or 0) > 0:
+                    # 旧 schema 识别：有 activated/stepCount 等旧字段，但缺 initialAtr/breakevenPhase/initial_stop
+                    # → 禁止自动转换；后面有仓则暂停交易
+                    _has_legacy_radar_keys = any(
+                        k in s for k in (
+                            "activated", "stepCount", "radar_step_count", "radar_activated",
+                        )
+                    )
+                    _has_breath_schema = (
+                        "breakeven_phase" in s
+                        and ("open_atr" in s or "initialAtr" in s)
+                        and "initial_stop" in s
+                    )
+                    self._state_old_schema = bool(
+                        _has_legacy_radar_keys and not _has_breath_schema
+                    )
+                    if self._state_old_schema:
+                        logger.error(
+                            f"⛔ [{self.symbol}] 检测到旧雷达 schema "
+                            f"(缺 breakeven_phase/open_atr/initial_stop) → 禁止自动转换"
+                        )
+                    # 仅新 schema 允许：initial_stop 缺失时从 current_sl 回填（非旧字段转换）
+                    if (not self._state_old_schema
+                            and self.initial_stop <= 0
+                            and float(getattr(self, "current_sl", 0) or 0) > 0):
                         self.initial_stop = float(self.current_sl)
-                    if self.initial_stop <= 0 and float(getattr(self, "tv_sl", 0) or 0) > 0:
-                        # 若旧 TV 止损存在但无 ATR 呼吸态：用 ATR 重算 initial
-                        atr = float(getattr(self, "open_atr", 0) or 0)
-                        entry = float(getattr(self, "watched_entry", 0) or 0)
-                        side = str(getattr(self, "current_side", "") or "")
-                        recomputed = initial_stop_price(side, entry, atr) if atr > 0 else 0.0
-                        self.initial_stop = recomputed or float(self.tv_sl)
-                        if float(getattr(self, "current_sl", 0) or 0) <= 0:
-                            self.current_sl = self.initial_stop
                     if not self.radar_activated and float(getattr(self, "current_sl", 0) or 0) > 0:
                         self.radar_activated = True
                     self._atr_last_update_ts = float(s.get("atr_last_update_ts", 0) or 0)
@@ -11721,43 +11635,51 @@ class PositionSupervisorBinance:
                 self._last_idle_takeover_ts = 0.0
                 return
 
-            # 8.4：无持久化 / 呼吸态缺失 + 有持仓 → 告警并暂停新开仓
+            # 权威规格 §六：旧 schema / 呼吸态缺失 + 有持仓 → 告警暂停，禁止自动转换
             breath_incomplete = (
                 float(getattr(self, "initial_stop", 0) or 0) <= 0
                 or float(getattr(self, "open_atr", 0) or 0) <= 0
                 or float(getattr(self, "current_sl", 0) or 0) <= 0
             )
+            old_schema = bool(getattr(self, "_state_old_schema", False))
             if (
                 pos
                 and isinstance(pos, dict)
                 and float(pos.get("size") or 0) > 0
-                and (not had_state_file or breath_incomplete)
+                and (not had_state_file or breath_incomplete or old_schema)
             ):
                 self.trading_paused = True
-                self.trading_pause_reason = (
-                    "restart_no_persistence_with_position"
-                    if not had_state_file
-                    else "restart_breath_state_incomplete"
-                )
+                if old_schema:
+                    self.trading_pause_reason = "restart_old_schema_no_auto_migrate"
+                elif not had_state_file:
+                    self.trading_pause_reason = "restart_no_persistence_with_position"
+                else:
+                    self.trading_pause_reason = "restart_breath_state_incomplete"
                 self._save_state()
                 logger.error(
-                    f"⛔ [{self.symbol}] 持久化缺失/呼吸态不全但实盘有仓 → 暂停交易"
+                    f"⛔ [{self.symbol}] 持久化缺失/旧schema/呼吸态不全但实盘有仓 → 暂停交易 "
+                    f"(old_schema={old_schema} incomplete={breath_incomplete})"
                 )
                 try:
                     dingtalk.report_system_alert(
-                        f"重启无呼吸态·已暂停 [{self.symbol}]",
+                        f"重启无有效呼吸态·已暂停 [{self.symbol}]",
                         (
-                            f"had_state={had_state_file} initial_stop="
-                            f"{float(getattr(self, 'initial_stop', 0) or 0):.2f} "
+                            f"had_state={had_state_file} old_schema={old_schema} "
+                            f"initial_stop={float(getattr(self, 'initial_stop', 0) or 0):.2f} "
                             f"open_atr={float(getattr(self, 'open_atr', 0) or 0):.2f} | "
-                            f"实盘 {pos.get('side')} {pos.get('size')} → 暂停新开仓；"
-                            f"仍尝试用行情引擎补挂防线"
+                            f"实盘 {pos.get('side')} {pos.get('size')} → 暂停自动交易；"
+                            f"旧schema禁止自动转换；人工核对后解除 trading_paused"
                         ),
                         level="紧急",
-                        suggestion="核对状态文件后解除 trading_paused；止损仅认 VPS ATR",
+                        suggestion="确认状态文件含 initial_stop/open_atr/breakeven_phase 后恢复；FORCE_ALIGN仅用于方向不一致",
                     )
                 except Exception as e:
                     logger.warning(f"无持久化暂停钉钉失败: {e}")
+                # 旧 schema：禁止用 tv_sl/行情自动灌入伪装成新态
+                if old_schema:
+                    self.monitoring = True
+                    self._ensure_sentinel_running_quiet()
+                    return
                 # 尽量用行情引擎补 initialAtr，防裸奔（不解除 pause）
                 try:
                     atr, adx = self._refresh_market_metrics(force=True)
@@ -11789,7 +11711,7 @@ class PositionSupervisorBinance:
                     )
                     return
                 try:
-                    # 持仓存在：先锁定开仓档位，再消毒/挂 TV 硬止损
+                    # 持仓存在：锁定档位 → 按恢复的 currentStop 重挂呼吸止损
                     self.watched_entry = float(
                         pos.get("entry_price") or self.watched_entry or 0
                     )
@@ -11799,7 +11721,7 @@ class PositionSupervisorBinance:
                     self._sync_exchange_stop(
                         float(pos.get("size") or 0),
                         radar_sl=None,
-                        reason="重启强制TV硬止损",
+                        reason="重启强制呼吸止损",
                         force=True,
                     )
 

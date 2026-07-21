@@ -1069,42 +1069,24 @@ def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
     send_alert("📡 雷达守护 · 止盈已重新对齐", data, G_MAIN)
 
 
-def report_radar_regime_cap_trim(side, old_qty, new_qty, target_qty, regime, margin_pct,
-                                 tp_audit=None, verify_note="",
-                                 principal_balance=None, margin_usdt=None, leverage=None,
-                                 trim_qty=None):
-    lev = leverage or DEFAULT_LEVERAGE
-    excess = max(0.0, float(old_qty) - float(target_qty))
+def report_radar_regime_cap_trim(*args, **kwargs):
+    """已废除 CAP_ALIGN：不再推送档位裁减钉钉。"""
+    return
+
+
+def report_hard_sl_fail_abort(side, qty, target_sl, attempts=3, reason="", detail=""):
+    """HARD_SL_FAIL_ABORT：改单/挂止损失败重试耗尽，保持现状并告警。"""
     data = {
-        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📊 TV 档位上限": _g(
-            f"**R{regime}** 档 · 保证金比例 **{margin_pct:.0%}** · 允许持仓 **{target_qty}** {_u()}",
-            G_ACCENT,
-        ),
-        "📐 核算公式": _g(
-            _format_sizing_basis(
-                principal_balance or 0, margin_pct, lev, margin_usdt,
-            ) if principal_balance else "本金快照 × TV risk_pct × leverage（详见核实明细）",
-            G_LIGHT,
-        ),
-        "⚖️ 超标情况": _g(
-            f"实盘 **{old_qty}** {_u()} 超出目标 **{excess:.3f}** {_u()}"
-            + (f" · 本次裁减 **{trim_qty}** {_u()}" if trim_qty else ""),
-            G_ACCENT,
-        ),
-        "✂️ 裁减结果": _g(f"`{old_qty}` ➔ `{new_qty}` {_u()}", G_MAIN),
-        "🕸️ TP123 重挂": _g(
-            _format_tp_audit(tp_audit, None) if tp_audit else "已按新仓位重挂",
-            G_MAIN,
-        ),
-        "✅ 纠偏结果": _g(
-            "雷达最高权限：超标裁减至档位额度 → TP123 已对齐 · 移动止损逻辑不变",
-            G_MAIN,
-        ),
+        "⚠️ 机制": _g("HARD_SL_FAIL_ABORT", G_ACCENT),
+        "🎛️ 方向": _g(str(side or "—"), G_LIGHT),
+        "📦 数量": _g(f"**{qty}** {_u()}", G_MAIN),
+        "🛑 目标止损": _g(f"`{float(target_sl or 0):.2f}`", G_DEEP),
+        "🔁 重试": _g(f"{int(attempts)} 次仍失败 → 保持当前止损不变", G_MUTED),
+        "📌 场景": _g(reason or "呼吸止损改单/挂单", G_MUTED),
     }
-    if verify_note:
-        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("📡 雷达守护 · 档位限额强制对齐", data, G_TITLE)
+    if detail:
+        data["🔍 明细"] = _g(str(detail), G_MUTED)
+    send_alert("🚨 止损执行失败 · HARD_SL_FAIL_ABORT", data, G_TITLE)
 
 
 def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,

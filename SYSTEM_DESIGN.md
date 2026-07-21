@@ -1,11 +1,11 @@
 # ETH Webhook Trading System - 系统设计文档
 
-> **当前生产架构**见 [`README.md`](README.md)：  
-> **TV v6.5.6** · **VPS v15.0.7-tp123-hang** · sizing **RISK20_NOTIONAL5** · 阶梯雷达 · `position_supervisor_binance.py` 唯一大脑。
+> **唯一权威**：见 [`README.md`](README.md)  
+> **TV v6.5.6** · **VPS v15.5.0-final-spec** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v15.0.7-tp123-hang）
+## 当前有效架构（2026-07 · v15.5.0-final-spec）
 
 ```
 TradingView v6.5.6 Alert (token=528586)
@@ -14,20 +14,21 @@ app.py (网关 + health: RISK20_NOTIONAL5 / fixed_5)
         ↓
 position_supervisor_binance.py   ← 唯一生产大脑
 ├── TV 消息缓存固定 1.0s + 同窗先平后开折叠（tv_seq.py）
-├── 订单 ID 持久化（TP1/TP2/TP3/止损）
-├── 仓位：风险20%/止损距 ∩ 名义×5 ∩ TV.qty
-├── TP 30/30/40 硬编码，挂 TP1+TP2+TP3 限价（价格用 TV）
-├── 限价止盈 vs 雷达止损并行，先到先得
-├── stop_loss closePosition + 阶梯 radar（TP1路程85%激活）
-├── RECONCILE 对账+调止损 / FLATTEN 快平
-├── ATR 5min 刷新 · 挂单 5min 超时 · 60s 去重(action+symbol+price) · 哨兵 0.5s
-├── 开仓前强制清仓（无菌空仓闸）
-├── 无持久化有仓 → trading_paused
-├── 日志按日滚动保留 30 天
-└── dingtalk.report_tv_reconcile
+├── 订单 ID 持久化（TP1/TP2/止损；不挂 TP3）
+├── 仓位：风险20%/|价−initialStop| ∩ 名义×5 ∩ TV.qty（无状态）
+├── TP 30/30/40 比例；盘口只挂 TP1+TP2；余仓40%交阶段二
+├── 呼吸止损唯一写止损（entry±1.5×ATR → 0.75/0.4 阶梯 → ADX 1.2~2.5）
+├── Webhook 仅 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT（+PING）
+├── 行情引擎：30m×3→90m Wilder ATR/ADX(14)；webhook 不读 atr/adx
+├── CAP_ALIGN 已废除；保留 HARD_SL_FAIL_ABORT / FORCE_ALIGN
+├── 旧 schema（缺 initial_stop/open_atr/breakeven_phase）→ 暂停，不自动转换
+├── ATR 随 90m 闭合刷新 · 挂单 5min 超时 · 60s 去重 · 哨兵 0.5s
+└── 开仓永远先平后开（无菌空仓闸）
 ```
 
-静态自查：`python check_vps_logic.py` · 清单：`docs/VPS实盘检查清单.md`
+静态自查：`python check_vps_logic.py`
+
+币安 / 深币共用同一套逻辑（哨兵统一 **0.5s**）。
 
 ---
 
@@ -36,15 +37,15 @@ position_supervisor_binance.py   ← 唯一生产大脑
 | 规则 | 实现 |
 |------|------|
 | 缓存窗口 **固定 1.0s** | `SAME_BAR_SETTLE_SEC` / `LEGACY_SETTLE_SEC` = 1.0 |
-| ~~有平仓则忽略开仓~~（**已废弃**） | — |
 | 同窗有平仓 → **一律先平后开** | 平仓一次 + 最新开仓；开仓内强制清仓兜底 |
-| 60s 去重 | **保持** `action+symbol+price` |
-| TP 分腿 | **硬编码 30/30/40**，挂三档限价；不依赖 TV qty1/2/3 |
-
-币安 / 深币共用同一套逻辑（哨兵统一 **0.5s**）。
+| 60s 去重 | `action+symbol`（同窗折叠另计） |
+| TP 分腿 | **硬编码 30/30/40**，只挂 TP1+TP2 |
 
 ---
 
-## 以下为历史设计存档（仅供参考，勿按此部署）
+## 四条硬性原则
 
-> 早期「只挂 TP1+TP2、TP3 永不挂限价」已被 v15.0.7 需求 supersede。
+1. 开仓永远先平后开
+2. 单仓位，不加仓（pyramiding=1）
+3. 下单数量每次独立计算，无状态
+4. 止损单全局唯一写入方 = 呼吸止损引擎

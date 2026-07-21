@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.4.0-arch-align · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.5.0-final-spec · RISK20_NOTIONAL5
 
 用法:
   python check_vps_logic.py
@@ -288,8 +288,11 @@ def audit_module2_sizing(a: Audit):
     binance_ver = _grep_binance_vps_version()
     a.check("2.0 TV_STRATEGY_VERSION=v6.5.6", TV_STRATEGY_VERSION == "v6.5.6", TV_STRATEGY_VERSION)
     a.check(
-        "2.0b BINANCE_VPS_VERSION 含 arch-align/v15",
-        ("arch-align" in binance_ver) or ("v15." in binance_ver) or ("breath" in binance_ver),
+        "2.0b BINANCE_VPS_VERSION 含 final-spec/v15",
+        ("final-spec" in binance_ver)
+        or ("arch-align" in binance_ver)
+        or ("v15." in binance_ver)
+        or ("breath" in binance_ver),
         binance_ver,
     )
     risk_ok = abs(float(FIXED_RISK_PCT) - 0.20) < 1e-9 or abs(float(FIXED_MARGIN_PCT) - 0.20) < 1e-9
@@ -503,8 +506,8 @@ def audit_module3_hard_sl(a: Audit):
         and "SENTINEL_POLL_RADAR = 0.5" in sup,
     )
     a.check(
-        "3.20 版本 arch-align/breath",
-        "arch-align" in sup or "breath-stop" in sup or "breath_stop" in sup,
+        "3.20 版本 final-spec/breath",
+        "final-spec" in sup or "arch-align" in sup or "breath-stop" in sup or "breath_stop" in sup,
     )
     a.check(
         "3.24 版本含 v15",
@@ -567,6 +570,21 @@ def audit_module4_radar(a: Audit):
     a.check(
         "4.3e 先平后开文案",
         "检测到已有持仓" in dt,
+    )
+    a.check(
+        "4.3f CAP_ALIGN已废除",
+        "CAP_ALIGN已废除" in sup
+        or "CAP_ALIGN/_trim 已废除" in sup
+        or "禁止 reduceOnly 主动减仓" in sup,
+    )
+    a.check(
+        "4.3g HARD_SL_FAIL_ABORT",
+        "HARD_SL_FAIL_ABORT" in sup and "report_hard_sl_fail_abort" in dt,
+    )
+    a.check(
+        "4.3h 旧schema暂停不转换",
+        "restart_old_schema_no_auto_migrate" in sup
+        or "_state_old_schema" in sup,
     )
     a.check(
         "4.4 废弃待命回撤",

@@ -206,7 +206,7 @@ def get_regime_tp_ratios(regime=None):
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30/40(挂TP1+TP2+TP3)"
+    return "30/30/40(挂TP1+TP2·余仓交阶段二)"
 
 
 def get_leg_tp_ratios(payload=None):
@@ -532,13 +532,10 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
     )
 
 
-# ── 阶梯雷达核心计算 ───────────────────────────────────────────────────────
+# ── 旧阶梯雷达（已废除生效路径；仅兼容导入，禁止新代码调用）────────────────
 
 def radar_activation_price(side, entry, tp1):
-    """
-    激活价 = entry ± |tp1−entry| × 0.85
-    （需求文档「tp1×0.85」指路程系数，非 tp1 绝对值×0.85）
-    """
+    """已废除：旧 85% TP1 激活价。生产路径请用 breath_stop.initial_stop_price。"""
     side = str(side or "").upper()
     entry = float(entry or 0)
     tp1 = float(tp1 or 0)
@@ -553,11 +550,9 @@ def radar_activation_price(side, entry, tp1):
 def compute_ladder_radar_sl(side, entry, atr, best, curr_px, tp1, tp2, tp3,
                             tick_size=0.01, step_count=None):
     """
-    阶梯追踪止损（多单为例，空单镜像）— VPS 最终需求：
-      激活：price ≥ 激活线 → currentStop = entry ± 1 tick
-      阶梯：price ≥ entry ± (n)×0.5×ATR → stop = entry ± n×0.3×ATR
-      TP1/TP2 强制底线；TP3 后动态追踪 best∓2.0×ATR
-    未达激活线返回 0。返回 (sl_price, stage_label, meta)
+    【已废除】旧阶梯雷达 0.85/0.5/0.3/2.0。
+    生产唯一止损：breath_stop.calculate_breath_stop（0.75/0.4 + ADX 1.2~2.5）。
+    保留函数体仅供静态对比/历史测试；supervisor 不得调用本函数做实盘决策。
     """
     side = str(side or "").upper()
     entry = float(entry or 0)
