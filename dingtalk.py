@@ -622,7 +622,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly) · 呼吸止损已挂(closePosition·"
+            f"🟢 {VERIFY_TAG} | TP1+TP2已挂(reduceOnly·余仓呼吸追踪) · 呼吸止损已挂(closePosition·"
             f"entry±1.5×ATR开仓即追踪·ADX阶段二) · 单槽不抢份额",
             "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
         ),
@@ -1457,7 +1457,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🫁 阶段": _g("阶段二 · ADX 驱动连续追踪", G_ACCENT),
         "🔒 呼吸止损": _g(f"**{new_sl:.2f}** USDT (只向有利方向)", G_LIGHT),
         "✅ 风控动作": _g(
-            f"{gate} → 切入ADX追踪 · 与TP123并行 · closePosition单槽 · 止损只前进",
+            f"{gate} → 切入ADX追踪 · 与TP1/TP2并行 · 余仓追踪收网 · closePosition单槽 · 止损只前进",
             G_MAIN,
         ),
         "🛡️ 防线": _g(

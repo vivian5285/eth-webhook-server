@@ -832,20 +832,38 @@ class BinanceClient:
             logger.error(f"[市价平仓失败] {symbol}: {e}")
             return None
 
-    def fetch_atr_14(self, symbol="ETHUSDT", interval="15m", period=14):
-        """REST K 线计算 ATR(14)，失败时回退公开接口。"""
+    def fetch_klines(self, symbol="ETHUSDT", interval="30m", limit=220):
+        """期货 K 线原始行（供行情引擎合成 90m）。"""
+        return self.client.futures_klines(
+            symbol=symbol, interval=interval, limit=int(limit or 220),
+        )
+
+    def fetch_atr_14(self, symbol="ETHUSDT", interval="30m", period=14):
+        """
+        兼容旧调用 → 走行情引擎（30m 合成 90m + Wilder ATR）。
+        interval 参数忽略（固定 90m 合成）。
+        """
         try:
-            from webhook_parser import compute_atr_from_klines
-            klines = self.client.futures_klines(
-                symbol=symbol, interval=interval, limit=period + 20,
+            from market_engine import get_market_engine
+            eng = get_market_engine(
+                symbol,
+                fetch_klines=lambda s, iv, lim: self.fetch_klines(s, iv, lim),
             )
-            atr = compute_atr_from_klines(klines, period)
+            atr, _adx = eng.refresh(force=False)
             if atr > 0:
                 return atr
         except Exception as e:
-            logger.warning(f"[ATR] {symbol} REST 计算失败: {e}")
-        from webhook_parser import fetch_eth_atr_14_public
-        return fetch_eth_atr_14_public(period)
+            logger.warning(f"[ATR] {symbol} 行情引擎失败: {e}")
+        return 0.0
+
+    def fetch_atr_adx(self, symbol="ETHUSDT", force=False):
+        """返回 (atr, adx)，VPS 自主计算。"""
+        from market_engine import get_market_engine
+        eng = get_market_engine(
+            symbol,
+            fetch_klines=lambda s, iv, lim: self.fetch_klines(s, iv, lim),
+        )
+        return eng.refresh(force=bool(force))
 
 
 binance_client = BinanceClient()

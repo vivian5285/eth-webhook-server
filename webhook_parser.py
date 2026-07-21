@@ -34,9 +34,9 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：挂 TP1/TP2/TP3 限价（30/30/40 硬编码）；价格用 TV tp1/2/3；与雷达并行先到先得
-LEG_TP_RATIOS = [0.30, 0.30, 0.40]  # qty1 / qty2 / qty3
-PLACE_TP_LEVELS = 3  # 三档全部挂限价
+# 分腿：挂 TP1+TP2 限价（30/30），余仓 40% 由呼吸止损阶段二追踪收网（不挂 TP3）
+LEG_TP_RATIOS = [0.30, 0.30, 0.40]  # qty1 / qty2 / 余仓追踪
+PLACE_TP_LEVELS = 2  # 只挂 TP1+TP2
 
 # ── 阶梯雷达参数（VPS 最终需求）────────────────────────────────────────────
 # 激活：price 达 TP1 路程 85%（文档「tp1×0.85」= 路程系数，非绝对值×0.85）
@@ -145,11 +145,11 @@ EXIT_SOURCE_QUICK = "quick_exit"
 EXIT_SOURCE_RSI = "rsi_exit"
 
 EXIT_SOURCE_LABELS = {
-    EXIT_SOURCE_RADAR_BE: "呼吸止损/阶段追踪",
-    EXIT_SOURCE_VPS_HARD_SL: "呼吸止损 closePosition",
-    EXIT_SOURCE_SL_INITIAL: "止损平仓（初始）",
-    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（保本/移动）",
-    EXIT_SOURCE_TP3: "TP3动态追踪收网",
+    EXIT_SOURCE_RADAR_BE: "止损平仓(呼吸止损)",
+    EXIT_SOURCE_VPS_HARD_SL: "止损平仓(呼吸止损)",
+    EXIT_SOURCE_SL_INITIAL: "止损平仓（阶段一）",
+    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（阶段二/趋势追踪）",
+    EXIT_SOURCE_TP3: "TP余仓追踪收网",
     EXIT_SOURCE_TV_CLOSE: "TV主动全平",
     EXIT_SOURCE_TV_PROTECT: "TV风控快平",
     EXIT_SOURCE_MANUAL: "人工/异动清仓",
@@ -216,7 +216,7 @@ def get_regime_tp_ratios(regime=None):
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30/40(挂TP1+TP2+TP3)"
+    return "30/30(挂TP1+TP2·余仓呼吸追踪)"
 
 
 def get_leg_tp_ratios(payload=None):

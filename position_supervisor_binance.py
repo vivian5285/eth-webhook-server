@@ -98,6 +98,12 @@ from breath_stop import (
     STEP_TRIGGER_ATR,
     STEP_ADVANCE_ATR,
 )
+from market_engine import (
+    get_market_engine,
+    implied_atr_from_stop,
+    atr_divergence_pct,
+    ATR_COMPARE_ALERT_PCT,
+)
 from tv_seq import (
     TVSeqBuffer,
     extract_seq_meta,
@@ -125,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.1.0-breath-stop"
+BINANCE_VPS_VERSION = "v15.2.0-market-90m"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -213,7 +219,7 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 固定分腿 30/30/40；挂 TP1+TP2+TP3 限价（价格用 TV，与雷达并行先到先得）
+        # 固定分腿 30/30；挂 TP1+TP2 限价，余仓 40% 由呼吸止损阶段二追踪（不挂 TP3）
         _leg = list(LEG_TP_RATIOS)
         self.regime_settings = {
             1: {"margin": 0.0, "ratios": list(_leg)},
@@ -1524,14 +1530,14 @@ class PositionSupervisorBinance:
                 break
         for src in sources:
             if src.get("atr"):
-                self.current_atr = float(src["atr"])
-            if src.get("adx") is not None:
-                try:
-                    self.last_adx = float(src["adx"])
-                except (TypeError, ValueError):
-                    pass
+                # 日志 ATR 仅展示；权威值由行情引擎刷新
+                pass
             if float(self.tv_price or 0) <= 0 and float(src.get("price", 0) or 0) > 0:
                 self.tv_price = float(src["price"])
+        try:
+            self._refresh_market_metrics(force=False)
+        except Exception:
+            pass
 
         # 硬止损档位：TV 开仓 R 优先（force 纠正错误粘性 R4）
         hard_regime = self._lock_open_regime_from_sources(force=True)
@@ -4316,6 +4322,47 @@ class PositionSupervisorBinance:
         """开仓档位锁定（TP 比例用）。"""
         return int(getattr(self, "open_regime", None) or self.regime or 3)
 
+    def _market_engine(self):
+        return get_market_engine(
+            self.symbol,
+            fetch_klines=lambda s, iv, lim: binance_client.fetch_klines(s, iv, lim),
+        )
+
+    def _refresh_market_metrics(self, force=False):
+        """
+        VPS 行情引擎：30m 合成 90m → ATR(14)/ADX(14)。
+        返回 (atr, adx)。止损距离只用 open_atr(initialAtr)；ADX 可刷新。
+        """
+        atr, adx = self._market_engine().refresh(force=bool(force))
+        if atr > 0:
+            self.current_atr = float(atr)
+        if adx > 0:
+            self.last_adx = float(adx)
+        return float(self.current_atr or 0), float(self.last_adx or 0)
+
+    def _debug_compare_tv_implied_atr(self, entry, tv_sl_ref, vps_atr):
+        """纯调试：TV stop_loss 反推 ATR vs VPS ATR；不参与交易决策。"""
+        implied = implied_atr_from_stop(entry, tv_sl_ref, INITIAL_SL_ATR)
+        if implied <= 0 or float(vps_atr or 0) <= 0:
+            return
+        div = atr_divergence_pct(vps_atr, implied)
+        msg = (
+            f"🔍 [{self.symbol}] ATR核对(仅日志) VPS={float(vps_atr):.4f} "
+            f"TV隐含={implied:.4f} 差={div:.1%}"
+        )
+        if div >= ATR_COMPARE_ALERT_PCT:
+            logger.warning(msg + " → 超阈值，请人工核周期/参数")
+            try:
+                dingtalk.report_system_alert(
+                    f"ATR核对差异 [{self.symbol}]",
+                    msg + " | 止损仍只用 VPS ATR，请核对 TV 90m 与 VPS 合成是否一致",
+                    level="提示",
+                )
+            except Exception:
+                pass
+        else:
+            logger.info(msg)
+
     def _locked_initial_atr(self):
         """开仓 ATR 锁定：全程固定，禁止实时 ATR 重算止损距离。"""
         atr = float(getattr(self, "open_atr", 0) or 0)
@@ -4483,19 +4530,17 @@ class PositionSupervisorBinance:
         if side not in ("LONG", "SHORT"):
             side = self.current_side
         atr = float(
-            payload.get("atr")
-            or getattr(self, "open_atr", 0)
+            getattr(self, "open_atr", 0)
             or self.current_atr
             or 0
         )
+        # 若开仓尚未锁定 ATR，强制行情引擎刷新（禁止用 webhook atr）
+        if atr <= 0:
+            atr, _adx = self._refresh_market_metrics(force=True)
         tv_ref = payload.get("tv_sl") or payload.get("stop_loss")
         ref_px = round(self._safe_float(tv_ref, 0), 2) if tv_ref not in (None, "") else 0.0
-        adx = payload.get("adx")
-        if adx is not None and adx != "":
-            try:
-                self.last_adx = float(adx)
-            except (TypeError, ValueError):
-                pass
+        # ADX 只认行情引擎，忽略 webhook adx
+        self._refresh_market_metrics(force=False)
         ok = self._refresh_vps_hard_sl(
             entry=entry, side=side,
             regime=self._resolve_hard_sl_regime(), atr=atr,
@@ -8638,15 +8683,17 @@ class PositionSupervisorBinance:
                 or 0
             )
             near = self._likely_exchange_stop_exit(curr_px)
-            phase = "阶段二ADX" if getattr(self, "breakeven_phase", False) else "阶段一阶梯"
+            phase = "阶段二/趋势追踪" if getattr(self, "breakeven_phase", False) else "阶段一"
             note = (
-                f"呼吸止损触发 @ {sl:.2f}（{phase}）" if sl > 0 else "呼吸止损触发"
+                f"止损平仓({phase}) @ {sl:.2f}" if sl > 0 else f"止损平仓({phase})"
             )
             note += f" | 闸门={gate}"
             note += " | 现价贴止损线" if near else " | 现价未贴线(滑点/扫尾可能)"
             if hint:
                 note += f" | {hint}"
-            return EXIT_SOURCE_RADAR_BE, note
+            if getattr(self, "breakeven_phase", False):
+                return EXIT_SOURCE_SL_BREAKEVEN, note
+            return EXIT_SOURCE_SL_INITIAL, note
 
         if self._likely_exchange_stop_exit(curr_px):
             sl = float(
@@ -8655,11 +8702,13 @@ class PositionSupervisorBinance:
                 or getattr(self, "tv_sl", 0)
                 or 0
             )
-            return (
-                EXIT_SOURCE_VPS_HARD_SL,
-                f"呼吸止损触发 @ {sl:.2f}"
-                + (f" | {hint}" if hint else ""),
-            )
+            note = (
+                f"止损平仓({'阶段二/趋势追踪' if getattr(self, 'breakeven_phase', False) else '阶段一'}) "
+                f"@ {sl:.2f}"
+            ) + (f" | {hint}" if hint else "")
+            if getattr(self, "breakeven_phase", False):
+                return EXIT_SOURCE_SL_BREAKEVEN, note
+            return EXIT_SOURCE_SL_INITIAL, note
 
         if getattr(self, "shield_active", False):
             return (
@@ -9638,7 +9687,7 @@ class PositionSupervisorBinance:
         )
 
     def _snapshot_tv_open_defenses(self, payload=None, action=None):
-        """开仓前快照 TV TP123/参考止损，防无菌净场/复位冲掉后再裸仓开单。"""
+        """开仓前快照：TP 价格用 TV；ATR/ADX 强制 VPS 行情引擎（90m 合成）。"""
         payload = dict(payload or {})
         tps = self._sanitize_tp_prices([
             self._safe_float(payload.get("tv_tp1"), 0)
@@ -9648,12 +9697,13 @@ class PositionSupervisorBinance:
             self._safe_float(payload.get("tv_tp3"), 0)
             or (self.tv_tps[2] if self.tv_tps and len(self.tv_tps) > 2 else 0),
         ])
-        if sum(1 for t in tps if float(t or 0) > 0) < 3:
+        # TP3 不挂限价，但仍可保留 TV 价作日志；缺 TP1/TP2 时再回落日志
+        if sum(1 for t in tps[:2] if float(t or 0) > 0) < 2:
             last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
             last_tps = last.get("tv_tps") or []
             if isinstance(last_tps, (list, tuple)) and sum(
-                1 for t in last_tps if float(t or 0) > 0
-            ) >= 3:
+                1 for t in last_tps[:2] if float(t or 0) > 0
+            ) >= 2:
                 tps = self._sanitize_tp_prices(list(last_tps))
             else:
                 pl = last.get("payload") if isinstance(last.get("payload"), dict) else {}
@@ -9662,27 +9712,37 @@ class PositionSupervisorBinance:
                     self._safe_float(pl.get("tv_tp2") or last.get("tv_tp2"), 0),
                     self._safe_float(pl.get("tv_tp3") or last.get("tv_tp3"), 0),
                 ])
+
+        vps_atr, vps_adx = self._refresh_market_metrics(force=True)
+        if vps_atr <= 0:
+            vps_atr = float(getattr(self, "current_atr", 0) or 30)
+            logger.error(
+                f"🚨 [{self.symbol}] 行情引擎 ATR 无效，临时回退 {vps_atr:.2f}"
+            )
+
+        entry_px = float(
+            self._safe_float(payload.get("price"), 0)
+            or getattr(self, "tv_price", 0)
+            or 0
+        )
+        tv_sl_ref = self._safe_float(
+            payload.get("tv_sl") or payload.get("stop_loss")
+            or getattr(self, "tv_sl_ref", 0), 0,
+        )
+        self._debug_compare_tv_implied_atr(entry_px, tv_sl_ref, vps_atr)
+
         return {
             "action": str(action or payload.get("action") or self.current_side or "").upper(),
             "tv_tps": list(tps),
-            "tv_sl_ref": self._safe_float(
-                payload.get("tv_sl") or getattr(self, "tv_sl_ref", 0), 0,
-            ),
-            "atr": float(
-                self._safe_float(payload.get("atr"), 0)
-                or getattr(self, "current_atr", 0)
-                or 30
-            ),
+            "tv_sl_ref": tv_sl_ref,
+            "atr": float(vps_atr),  # 权威：VPS，忽略 webhook atr
+            "adx": float(vps_adx or getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
             "regime": int(
                 self._safe_int(payload.get("regime"), 0)
                 or getattr(self, "regime", 0)
                 or 3
             ),
-            "price": float(
-                self._safe_float(payload.get("price"), 0)
-                or getattr(self, "tv_price", 0)
-                or 0
-            ),
+            "price": entry_px,
             "payload": payload,
         }
 
@@ -9716,6 +9776,8 @@ class PositionSupervisorBinance:
         if float(snap.get("atr") or 0) > 0:
             self.current_atr = float(snap["atr"])
             self.open_atr = float(snap["atr"])
+        if float(snap.get("adx") or 0) > 0:
+            self.last_adx = float(snap["adx"])
         if int(snap.get("regime") or 0) in (1, 2, 3, 4):
             self.regime = int(snap["regime"])
             self.open_regime = int(snap["regime"])
@@ -10863,27 +10925,35 @@ class PositionSupervisorBinance:
         return SENTINEL_POLL_NORMAL
 
     def _maybe_refresh_atr(self):
-        """current_atr 可刷新；open_atr（initialAtr）开仓后锁定不变。"""
+        """
+        刷新 current_atr + last_adx（90m 合成）；open_atr(initialAtr) 锁定不变。
+        止损距离全程用 initialAtr；ADX 仅影响阶段二追踪倍数。
+        """
         now = time.time()
         last = float(getattr(self, "_atr_last_update_ts", 0) or 0)
-        if last > 0 and (now - last) < float(ATR_UPDATE_SEC or 300):
+        # 90m 周期：约每 3 分钟探测一次是否有新合成 bar
+        if last > 0 and (now - last) < 180.0:
             return False
         try:
-            fetched = float(binance_client.fetch_atr_14(self.symbol) or 0)
+            atr, adx = self._refresh_market_metrics(force=True)
         except Exception as e:
-            logger.debug(f"ATR 拉取失败: {e}")
+            logger.debug(f"行情引擎刷新失败: {e}")
             return False
-        if fetched <= 0:
+        if atr <= 0 and adx <= 0:
             return False
-        old = float(self.current_atr or 0)
-        self.current_atr = fetched
-        # 呼吸止损：open_atr 全程锁定，禁止用实时 ATR 重算
-        if float(getattr(self, "open_atr", 0) or 0) <= 0:
-            self.open_atr = fetched
+        old_a = float(self.current_atr or 0)
+        old_x = float(getattr(self, "last_adx", 0) or 0)
+        if atr > 0:
+            self.current_atr = atr
+        if adx > 0:
+            self.last_adx = adx
+        if float(getattr(self, "open_atr", 0) or 0) <= 0 and atr > 0:
+            self.open_atr = atr
         self._atr_last_update_ts = now
-        if abs(fetched - old) > 1e-6:
+        if abs(atr - old_a) > 1e-6 or abs(adx - old_x) > 1e-6:
             logger.info(
-                f"📐 [{self.symbol}] current_atr 刷新 {old:.2f} → {fetched:.2f} "
+                f"📐 [{self.symbol}] 行情刷新 ATR {old_a:.2f}→{float(self.current_atr):.2f} "
+                f"ADX {old_x:.1f}→{float(self.last_adx):.1f} "
                 f"(open_atr锁定={float(getattr(self, 'open_atr', 0) or 0):.2f})"
             )
             self._save_state()
@@ -11699,33 +11769,58 @@ class PositionSupervisorBinance:
                 self._last_idle_takeover_ts = 0.0
                 return
 
-            # 8.4：无持久化 + 有持仓 → 告警并暂停新开仓（仍接管防线防裸奔）
+            # 8.4：无持久化 / 呼吸态缺失 + 有持仓 → 告警并暂停新开仓
+            breath_incomplete = (
+                float(getattr(self, "initial_stop", 0) or 0) <= 0
+                or float(getattr(self, "open_atr", 0) or 0) <= 0
+                or float(getattr(self, "current_sl", 0) or 0) <= 0
+            )
             if (
-                not had_state_file
-                and pos
+                pos
                 and isinstance(pos, dict)
                 and float(pos.get("size") or 0) > 0
+                and (not had_state_file or breath_incomplete)
             ):
                 self.trading_paused = True
-                self.trading_pause_reason = "restart_no_persistence_with_position"
+                self.trading_pause_reason = (
+                    "restart_no_persistence_with_position"
+                    if not had_state_file
+                    else "restart_breath_state_incomplete"
+                )
                 self._save_state()
                 logger.error(
-                    f"⛔ [{self.symbol}] 无持久化状态但实盘有仓 → 暂停交易并接管防线"
+                    f"⛔ [{self.symbol}] 持久化缺失/呼吸态不全但实盘有仓 → 暂停交易"
                 )
                 try:
                     dingtalk.report_system_alert(
-                        f"重启无持久化·已暂停 [{self.symbol}]",
+                        f"重启无呼吸态·已暂停 [{self.symbol}]",
                         (
-                            f"状态文件缺失但实盘有 {pos.get('side')} "
-                            f"{pos.get('size')} {self.unit_label} @ "
-                            f"{float(pos.get('entry_price') or 0):.2f} → "
-                            f"已暂停新开仓；仍尝试挂防线"
+                            f"had_state={had_state_file} initial_stop="
+                            f"{float(getattr(self, 'initial_stop', 0) or 0):.2f} "
+                            f"open_atr={float(getattr(self, 'open_atr', 0) or 0):.2f} | "
+                            f"实盘 {pos.get('side')} {pos.get('size')} → 暂停新开仓；"
+                            f"仍尝试用行情引擎补挂防线"
                         ),
                         level="紧急",
-                        suggestion="核对状态文件/人工确认后解除 trading_paused",
+                        suggestion="核对状态文件后解除 trading_paused；止损仅认 VPS ATR",
                     )
                 except Exception as e:
                     logger.warning(f"无持久化暂停钉钉失败: {e}")
+                # 尽量用行情引擎补 initialAtr，防裸奔（不解除 pause）
+                try:
+                    atr, adx = self._refresh_market_metrics(force=True)
+                    if atr > 0 and float(getattr(self, "open_atr", 0) or 0) <= 0:
+                        self.open_atr = atr
+                    if adx > 0:
+                        self.last_adx = adx
+                    entry = float(pos.get("entry_price") or 0)
+                    side = str(pos.get("side") or "")
+                    if entry > 0 and atr > 0 and float(getattr(self, "initial_stop", 0) or 0) <= 0:
+                        self.initial_stop = initial_stop_price(side, entry, atr)
+                        self.current_sl = float(self.initial_stop)
+                        self.best_price = entry
+                except Exception as e:
+                    logger.warning(f"重启补算呼吸态失败: {e}")
 
             if pos:
                 self._recover_in_progress = True

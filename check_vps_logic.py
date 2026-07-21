@@ -301,7 +301,7 @@ def audit_module2_sizing(a: Audit):
     a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=5", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
     a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5, str(EXCHANGE_LEVERAGE))
     a.check("2.1d LEG_TP_RATIOS=30/30/40", LEG_TP_RATIOS == [0.30, 0.30, 0.40], str(LEG_TP_RATIOS))
-    a.check("2.1e PLACE_TP_LEVELS=3", PLACE_TP_LEVELS == 3, str(PLACE_TP_LEVELS))
+    a.check("2.1e PLACE_TP_LEVELS=2(仅TP1+TP2)", PLACE_TP_LEVELS == 2, str(PLACE_TP_LEVELS))
     a.check("2.1f SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
     a.check("2.1g SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
     a.check("2.1h ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
@@ -506,8 +506,8 @@ def audit_module3_hard_sl(a: Audit):
         and "SENTINEL_POLL_RADAR = 0.5" in sup,
     )
     a.check(
-        "3.20 版本 breath-stop",
-        "breath-stop" in sup or "breath_stop" in sup,
+        "3.20 版本 market-90m/breath",
+        "market-90m" in sup or "breath-stop" in sup or "breath_stop" in sup,
     )
     a.check(
         "3.24 版本含 v15",
@@ -525,6 +525,7 @@ def audit_module4_radar(a: Audit):
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
     bs = _read(os.path.join(ROOT, "breath_stop.py"))
+    me = _read(os.path.join(ROOT, "market_engine.py"))
 
     a.check("4.1 breath_stop.py 存在", "INITIAL_SL_ATR" in bs and "calculate_stop_long" in bs)
     a.check("4.1b STEP_TRIGGER=0.75", "STEP_TRIGGER_ATR = 0.75" in bs)
@@ -541,7 +542,15 @@ def audit_module4_radar(a: Audit):
     ):
         a.check(f"呼吸函数 {fn}", f"def {fn}" in sup)
 
-    a.check("4.2 webhook 解析 adx", 'src.get("adx")' in wp or 'get("adx")' in wp)
+    a.check("4.2 market_engine 90m合成", "merge_30m_to_90m" in me and "wilder_adx" in me)
+    a.check(
+        "4.2b VPS自算ATR/ADX入口",
+        "_refresh_market_metrics" in sup and "get_market_engine" in sup,
+    )
+    a.check(
+        "4.2c webhook不作为ATR权威",
+        "权威：VPS" in sup or "忽略 webhook atr" in sup or "行情引擎" in sup,
+    )
     a.check(
         "4.3 钉钉阶段二文案",
         "呼吸止损" in dt and "阶段二" in dt and "ADX" in dt,
@@ -759,10 +768,10 @@ def audit_readme_consistency(a: Audit):
         and "85%" not in readme,
     )
     a.check(
-        "README TP 30/30/40 挂 TP1+TP2+TP3",
-        ("30/30/40" in readme or "30%" in readme)
-        and ("TP3" in readme)
-        and ("永不挂" not in readme),
+        "README TP 30/30 挂 TP1+TP2",
+        ("TP1+TP2" in readme or "挂 TP1+TP2" in readme)
+        and ("不挂 TP3" in readme or "余仓" in readme)
+        and "挂 TP1+TP2+TP3" not in readme,
     )
     a.check(
         "README 核心铁律保留",

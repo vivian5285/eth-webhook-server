@@ -75,39 +75,23 @@ def webhook(ticker=None):
 
     logger.info(f"[Webhook] [{sym}] {format_webhook_log(data)}")
 
-    # 开仓必要字段：price + (atr 或 stop_loss)；仓位按 1.5×ATR 呼吸止损距
+    # 开仓必要字段：仅 price（ATR/ADX 由 VPS 行情引擎自算，webhook 不传）
     if raw_action in ("LONG", "SHORT"):
         px = data.get("price")
-        atr = data.get("atr")
-        sl = data.get("stop_loss") or data.get("tv_sl")
         try:
             px_ok = px is not None and float(px) > 0
         except (TypeError, ValueError):
             px_ok = False
-        try:
-            atr_ok = atr is not None and float(atr) > 0
-        except (TypeError, ValueError):
-            atr_ok = False
-        try:
-            sl_ok = sl is not None and float(sl) > 0
-        except (TypeError, ValueError):
-            sl_ok = False
-        if not px_ok or (not atr_ok and not sl_ok):
+        if not px_ok:
             return jsonify({
                 "status": "error",
-                "message": "LONG/SHORT require valid price and atr (or stop_loss)",
-                "got": {"price": px, "atr": atr, "stop_loss": sl},
+                "message": "LONG/SHORT require valid price (ATR/ADX computed on VPS)",
+                "got": {"price": px},
             }), 400
-        # 无 stop_loss 时用 ATR 合成 sizing 参考（挂盘仍用呼吸止损）
-        if atr_ok and not sl_ok:
-            try:
-                from breath_stop import initial_stop_price
-                side = "SHORT" if raw_action == "SHORT" else "LONG"
-                data["stop_loss"] = initial_stop_price(side, float(px), float(atr))
-                data["tv_sl"] = data["stop_loss"]
-                data["_sl_source"] = "breath_1.5atr"
-            except Exception:
-                pass
+        # stop_loss 仅作调试对比参考，不参与挂盘/仓位权威计算
+        sl = data.get("stop_loss") or data.get("tv_sl")
+        if sl is not None:
+            data["_tv_sl_ref"] = sl
 
     try:
         threading.Thread(

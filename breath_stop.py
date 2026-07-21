@@ -27,7 +27,7 @@ ADX_WEAK_BOUND = 15.0
 ADX_STRONG_BOUND = 35.0
 TRAIL_DIST_WEAK_ATR = 1.2
 TRAIL_DIST_STRONG_ATR = 2.5
-ADX_FALLBACK = 25.0  # webhook 缺 ADX 时用中间值
+ADX_FALLBACK = 25.0  # 行情引擎尚未产出 ADX 时用中间值（非 webhook）
 
 
 def trail_distance_by_adx(adx_val: float) -> float:
