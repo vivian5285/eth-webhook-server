@@ -34,9 +34,9 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：仅挂 TP1/TP2 限价；leg3(40%) 无 TP 挂单，交给雷达
+# 分腿：挂 TP1/TP2/TP3 限价（30/30/40 硬编码）；价格用 TV tp1/2/3；与雷达并行先到先得
 LEG_TP_RATIOS = [0.30, 0.30, 0.40]  # qty1 / qty2 / qty3
-PLACE_TP_LEVELS = 2  # 只挂前两档
+PLACE_TP_LEVELS = 3  # 三档全部挂限价
 
 # ── 阶梯雷达参数（VPS 最终需求）────────────────────────────────────────────
 # 激活：price 达 TP1 路程 85%（文档「tp1×0.85」= 路程系数，非绝对值×0.85）
@@ -216,19 +216,11 @@ def get_regime_tp_ratios(regime=None):
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30/40(仅挂TP1+TP2)"
+    return "30/30/40(挂TP1+TP2+TP3)"
 
 
 def get_leg_tp_ratios(payload=None):
-    """优先用 webhook qty1/2/3 归一化；否则 30/30/40。"""
-    payload = payload or {}
-    q1 = _to_float(payload.get("qty1"), None)
-    q2 = _to_float(payload.get("qty2"), None)
-    q3 = _to_float(payload.get("qty3"), None)
-    if q1 is not None and q2 is not None and q3 is not None:
-        total = q1 + q2 + q3
-        if total > 0:
-            return [q1 / total, q2 / total, q3 / total]
+    """固定 30/30/40，不依赖 TV qty1/2/3（数量由实开仓切分，价格用 TV tp）。"""
     return list(LEG_TP_RATIOS)
 
 

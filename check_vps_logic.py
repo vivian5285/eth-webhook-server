@@ -301,7 +301,7 @@ def audit_module2_sizing(a: Audit):
     a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=5", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
     a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5, str(EXCHANGE_LEVERAGE))
     a.check("2.1d LEG_TP_RATIOS=30/30/40", LEG_TP_RATIOS == [0.30, 0.30, 0.40], str(LEG_TP_RATIOS))
-    a.check("2.1e PLACE_TP_LEVELS=2", PLACE_TP_LEVELS == 2, str(PLACE_TP_LEVELS))
+    a.check("2.1e PLACE_TP_LEVELS=3", PLACE_TP_LEVELS == 3, str(PLACE_TP_LEVELS))
     a.check("2.1f SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
     a.check("2.1g SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
     a.check("2.1h ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
@@ -880,8 +880,10 @@ def audit_readme_consistency(a: Audit):
         "85%" in readme,
     )
     a.check(
-        "README TP 30/30/40 仅挂 TP1+TP2",
-        "30/30/40" in readme or "30%" in readme,
+        "README TP 30/30/40 挂 TP1+TP2+TP3",
+        ("30/30/40" in readme or "30%" in readme)
+        and ("TP3" in readme)
+        and ("永不挂" not in readme),
     )
     a.check(
         "README 核心铁律保留",

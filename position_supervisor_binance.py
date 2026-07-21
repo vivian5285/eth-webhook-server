@@ -115,7 +115,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.0.6-sentinel-05"
+BINANCE_VPS_VERSION = "v15.0.7-tp123-hang"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -203,7 +203,7 @@ class PositionSupervisorBinance:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 固定分腿 30/30/40；仅挂 TP1+TP2，leg3 交雷达
+        # 固定分腿 30/30/40；挂 TP1+TP2+TP3 限价（价格用 TV，与雷达并行先到先得）
         _leg = list(LEG_TP_RATIOS)
         self.regime_settings = {
             1: {"margin": 0.0, "ratios": list(_leg)},
@@ -307,7 +307,7 @@ class PositionSupervisorBinance:
         self._atr_last_update_ts = 0.0
         self._tp_order_placed_ts = {}  # level(1/2) → unix ts，挂单超时移交雷达
         # TP1/TP2/止损 交易所订单 ID（持久化，重启可按 ID 跟踪）
-        self._defense_order_ids = {"tp1": "", "tp2": "", "stop": ""}
+        self._defense_order_ids = {"tp1": "", "tp2": "", "tp3": "", "stop": ""}
         self.trading_paused = False  # 无持久化有仓 / 强平失败兜底；方向背离优先全平对齐 TV
         self.trading_pause_reason = ""
 
@@ -2586,7 +2586,7 @@ class PositionSupervisorBinance:
             f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
             f"| TV.qty={self.tv_suggested_qty or '-'} "
             f"| 分腿={[round(x * 100) for x in ratios]}% "
-            f"| 仅挂TP1+TP2 | sizing={SIZING_MODE}"
+            f"| 挂TP1+TP2+TP3(30/30/40) | sizing={SIZING_MODE}"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
@@ -3187,13 +3187,20 @@ class PositionSupervisorBinance:
                 prices.append(round(px, 2))
         return sorted(prices)
 
-    def _expected_tp_count(self, tp_pxs=None):
-        tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
-        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-        return sum(
-            1 for i, t in enumerate(tp_pxs)
-            if t > 0 and (i + 1) not in consumed
+    def _tp_slices_for_initial(self, initial_qty):
+        """返回可挂限价的 TP1+TP2+TP3；数量固定 30/30/40，价格用 TV tp。"""
+        ratios = list(
+            getattr(self, "_leg_ratios", None)
+            or LEG_TP_RATIOS
+            or self.regime_settings[self._tp_split_regime()]["ratios"]
         )
+        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
+        slices = [
+            {"level": 1, "price": self.tv_tps[0], "qty": o1},
+            {"level": 2, "price": self.tv_tps[1], "qty": o2},
+            {"level": 3, "price": self.tv_tps[2], "qty": o3},
+        ]
+        return [s for s in slices[:PLACE_TP_LEVELS] if float(s.get("price") or 0) > 0 and float(s.get("qty") or 0) > 0]
 
     def _tp_split_regime(self):
         """止盈比例以开仓档位为准（open_regime），避免 TV 档位变化导致比例算错"""
@@ -3201,21 +3208,14 @@ class PositionSupervisorBinance:
             return int(getattr(self, "open_regime", self.regime) or self.regime)
         return int(self.regime)
 
-    def _tp_slices_for_initial(self, initial_qty):
-        """仅返回可挂限价的 TP1+TP2；tp3 价格保留在 tv_tps 供雷达里程碑，不挂单。"""
-        ratios = list(
-            getattr(self, "_leg_ratios", None)
-            or self.regime_settings[self._tp_split_regime()]["ratios"]
-            or LEG_TP_RATIOS
+    def _expected_tp_count(self, tp_pxs=None):
+        tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        n = min(int(PLACE_TP_LEVELS or 3), len(tp_pxs or []))
+        return sum(
+            1 for i in range(n)
+            if float((tp_pxs or [0])[i] or 0) > 0 and (i + 1) not in consumed
         )
-        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
-        slices = [
-            {"level": 1, "price": self.tv_tps[0], "qty": o1},
-            {"level": 2, "price": self.tv_tps[1], "qty": o2},
-        ]
-        # leg3 不挂 TP 限价；数量由雷达/硬止损接管
-        _ = o3
-        return slices[:PLACE_TP_LEVELS]
 
     @staticmethod
     def _sequential_tp_prefix(levels):
@@ -7688,7 +7688,7 @@ class PositionSupervisorBinance:
         live_qty = float(live_qty if live_qty is not None else self.watched_qty or 0)
         cancelled = 0
         stale_levels = []
-        for level in (1, 2):
+        for level in (1, 2, 3):
             idx = level - 1
             if idx >= len(self.tv_tps) or float(self.tv_tps[idx] or 0) <= 0:
                 continue
@@ -9273,7 +9273,7 @@ class PositionSupervisorBinance:
     def _cancel_tp_level_if_still_open(self, level, handoff_radar=True):
         """若 TP 限价仍挂着 → 取消并禁止重挂；可选移交雷达。"""
         level = int(level or 0)
-        if level not in (1, 2):
+        if level not in (1, 2, 3):
             return False
         canceled = False
         # 优先按持久化 orderId 撤单
@@ -11260,9 +11260,9 @@ class PositionSupervisorBinance:
         return str(oid or "").strip()
 
     def _set_defense_order_id(self, key, res_or_id, save=True):
-        """key: tp1 | tp2 | stop"""
+        """key: tp1 | tp2 | tp3 | stop"""
         key = str(key or "").strip().lower()
-        if key not in ("tp1", "tp2", "stop"):
+        if key not in ("tp1", "tp2", "tp3", "stop"):
             return
         if isinstance(res_or_id, dict):
             oid = self._extract_exchange_order_id(res_or_id)
@@ -11271,6 +11271,7 @@ class PositionSupervisorBinance:
         ids = dict(getattr(self, "_defense_order_ids", None) or {})
         ids.setdefault("tp1", "")
         ids.setdefault("tp2", "")
+        ids.setdefault("tp3", "")
         ids.setdefault("stop", "")
         ids[key] = oid
         self._defense_order_ids = ids
@@ -11283,8 +11284,9 @@ class PositionSupervisorBinance:
         ids = dict(getattr(self, "_defense_order_ids", None) or {})
         ids.setdefault("tp1", "")
         ids.setdefault("tp2", "")
+        ids.setdefault("tp3", "")
         ids.setdefault("stop", "")
-        targets = keys or ("tp1", "tp2", "stop")
+        targets = keys or ("tp1", "tp2", "tp3", "stop")
         for k in targets:
             kk = str(k or "").strip().lower()
             if kk in ids:
@@ -11300,7 +11302,7 @@ class PositionSupervisorBinance:
 
     def _mark_tp_order_placed(self, level, order_res=None):
         level = int(level or 0)
-        if level not in (1, 2):
+        if level not in (1, 2, 3):
             return
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         placed[str(level)] = time.time()
@@ -11310,7 +11312,7 @@ class PositionSupervisorBinance:
         self._save_state()
 
     def _check_tp_order_timeouts(self, curr_px=0.0):
-        """TP1/TP2 挂单超过 5 分钟未成交 → 取消并移交雷达，禁止重挂。"""
+        """TP1/TP2/TP3 挂单超过 5 分钟未成交 → 取消并移交雷达，禁止重挂。"""
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         if not placed:
             return
@@ -11323,7 +11325,7 @@ class PositionSupervisorBinance:
                 ts = float(ts or 0)
             except (TypeError, ValueError):
                 continue
-            if level not in (1, 2) or ts <= 0:
+            if level not in (1, 2, 3) or ts <= 0:
                 continue
             if now - ts < timeout:
                 continue
@@ -11999,6 +12001,7 @@ class PositionSupervisorBinance:
                     self._defense_order_ids = {
                         "tp1": str((raw_oids or {}).get("tp1") or ""),
                         "tp2": str((raw_oids or {}).get("tp2") or ""),
+                        "tp3": str((raw_oids or {}).get("tp3") or ""),
                         "stop": str((raw_oids or {}).get("stop") or ""),
                     }
                     self.trading_paused = bool(s.get("trading_paused", False))
