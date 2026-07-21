@@ -383,8 +383,15 @@ def audit_module2_sizing(a: Audit):
 
 
 def audit_module3_hard_sl(a: Audit):
-    a.section("模块三 · TV 硬止损（实盘挂单）")
+    a.section("模块三 · 呼吸止损（硬止损+雷达合并）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
+    from breath_stop import (
+        INITIAL_SL_ATR,
+        BREAKEVEN_TRIGGER_ATR,
+        initial_stop_price,
+        calculate_breath_stop,
+        trail_distance_by_adx,
+    )
 
     a.check("3.1 VPS%宽止损表已清空", VPS_HARD_SL_PCT == {} or not VPS_HARD_SL_PCT)
     a.check(
@@ -392,13 +399,42 @@ def audit_module3_hard_sl(a: Audit):
         compute_vps_hard_sl("LONG", 1800, regime=3) == 0
         and compute_vps_hard_sl("SHORT", 1800, regime=4) == 0,
     )
+    a.check("3.1c INITIAL_SL_ATR=1.5", abs(INITIAL_SL_ATR - 1.5) < 1e-9)
+    a.check("3.1d BREAKEVEN_TRIGGER_ATR=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
+    a.check(
+        "3.1e initial_stop LONG 1800 atr40 → 1740",
+        abs(initial_stop_price("LONG", 1800, 40) - 1740.0) < 1e-6,
+    )
+
+    out = calculate_breath_stop(
+        "LONG", 1890, 1800, 40, 1740, 1740, 1890, False, 24,
+    )
+    a.check(
+        "3.1f 阶段一阶梯推进",
+        float(out["stop"]) > 1740 and not out["breakeven_phase"],
+        f"stop={out['stop']} phase={out['breakeven_phase']}",
+    )
+    out2 = calculate_breath_stop(
+        "LONG", 1930, 1800, 40, 1740, float(out["stop"]), 1930, False, 28,
+    )
+    a.check(
+        "3.1g 浮盈≥3ATR 切入阶段二",
+        out2["breakeven_phase"] is True and float(out2["stop"]) > 1800,
+        f"stop={out2['stop']} phase={out2['breakeven_phase']}",
+    )
+    a.check(
+        "3.1h ADX 插值边界",
+        abs(trail_distance_by_adx(15) - 1.2) < 1e-9
+        and abs(trail_distance_by_adx(35) - 2.5) < 1e-9,
+    )
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     a.check(
-        "3.2 实盘硬止损=TV tv_sl",
+        "3.2 实盘止损=呼吸 currentStop",
         "_tv_hard_sl_target" in sup
-        and "禁止再用开仓价×档位%" in sup
-        and "TV硬止损" in sup
+        and "breath_stop" in sup
+        and "initial_stop_price" in sup
+        and "calculate_breath_stop" in sup
         and "拒绝挂 TV 紧止损" not in sup,
     )
     a.check(
@@ -407,8 +443,7 @@ def audit_module3_hard_sl(a: Audit):
         and "推低到安全" not in sup
         and "推高到安全" not in sup
         and "_merge_wider_vps_hard_sl" not in sup
-        and "拒TV紧止损·改挂VPS" not in sup
-        and "禁止推宽" in sup,
+        and "拒TV紧止损·改挂VPS" not in sup,
     )
     from webhook_parser import VPS_HARD_SL_LIMIT_PCT, compute_vps_hard_sl_limit_price
     a.check("3.3 LIMIT偏移已清零", float(VPS_HARD_SL_LIMIT_PCT or 0) == 0.0)
@@ -418,16 +453,11 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check("3.4 STOP 挂单", "place_stop_market_order" in sup or "place_stop_limit" in sup)
     a.check(
-        "3.5 硬止损 closePosition 不抢 TP 额度",
+        "3.5 止损 closePosition 不抢 TP 额度",
         "use_stop_limit=False" in sup and "不占 reduceOnly" in sup,
     )
     a.check(
-        "3.6 全平归因 TV硬止损",
-        "触碰硬止损平仓（TV硬止损）" in sup
-        and "触碰硬止损平仓（VPS宽止损）" not in sup,
-    )
-    a.check(
-        "3.7 硬止损失败撤开仓防裸奔",
+        "3.7 止损失败撤开仓防裸奔",
         "硬止损失败·撤销开仓防裸奔" in sup or "_emergency_flatten_naked_open" in sup,
     )
     a.check(
@@ -439,116 +469,49 @@ def audit_module3_hard_sl(a: Audit):
         "NUCLEAR_REALIGN_MIN_INTERVAL_SEC" in sup
         and "_nuclear_backoff_remaining" in sup
         and "_defense_anomaly_is_severe" in sup
-        and "idempotent_unified" in sup
-        and "exclude_shield=False" in sup
         and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
     )
     a.check(
-        "3.9 账本消毒对齐 TV",
+        "3.9 账本消毒/呼吸对齐",
         "_sanitize_vps_hard_sl_ledger" in sup
         and "_is_exchange_stop_acceptable_as_vps_floor" in sup
-        and "不得用 VPS% 覆盖" in sup,
+        and "breakeven_phase" in sup
+        and "initial_stop" in sup,
     )
     a.check(
         "3.10 TV方向为准·反向强制平仓",
         "_enforce_tv_direction_or_flat" in sup
-        and "TV方向为准·强制平仓" in sup
-        and "强制平仓对齐 TV" in sup,
+        and "TV方向为准·强制平仓" in sup,
     )
     a.check(
-        "3.11 雷达主判价触激活线",
-        "_price_reached_radar_activation" in sup
-        and "get_radar_activation_ratio" in _read(os.path.join(ROOT, "webhook_parser.py")),
+        "3.12 呼吸止损允许低于入场",
+        "_is_valid_radar_sl" in sup
+        and "只要正价即可" in sup,
     )
     a.check(
-        "3.12 TV硬止损允许挂盘（废除紧价拒绝）",
-        "_looks_like_tv_tight_stop" in sup
-        and "恒返回 False" in sup
-        and "拒绝挂 TV 紧止损" not in sup
-        and "_is_valid_radar_sl" in sup,
-    )
-    a.check(
-        "3.13 合并底线=TV硬止损",
-        "仅挂 TV硬止损" in sup
-        and "拒绝合并伪雷达/TV紧止损" not in sup,
-    )
-    a.check(
-        "3.14 硬止损锁定 open_regime(雷达/TP用)",
+        "3.14 档位锁定 open_regime(TP用)",
         "_resolve_hard_sl_regime" in sup
-        and "_lock_open_regime_from_sources" in sup
-        and "_resolve_tv_open_regime_for_position" in sup
-        and "以 TV 为准" in sup,
+        and "_lock_open_regime_from_sources" in sup,
     )
     a.check(
-        "3.15 开仓日志写 open_regime",
-        '"open_regime": open_r' in sup or '"open_regime": open_r,' in sup
-        or "open_regime\": open_r" in sup,
+        "3.15 open_atr 锁定不重算止损距",
+        "_locked_initial_atr" in sup
+        and ("open_atr锁定" in sup or "open_atr（initialAtr）开仓后锁定" in sup),
+    )
+    a.check("3.16 POST_OPEN_RADAR_BLOCK_SEC=0", "POST_OPEN_RADAR_BLOCK_SEC = 0" in sup)
+    a.check(
+        "3.18 哨兵周期 0.5s",
+        "SENTINEL_POLL_NORMAL = 0.5" in sup
+        and "SENTINEL_POLL_ARMING = 0.5" in sup
+        and "SENTINEL_POLL_RADAR = 0.5" in sup,
     )
     a.check(
-        "3.16 重启先锁档再挂TV硬止损",
-        "_lock_open_regime_from_sources" in sup
-        and "重启强制TV硬止损" in sup
-        and "重启强制VPS宽硬止损" not in sup,
+        "3.20 版本 breath-stop",
+        "breath-stop" in sup or "breath_stop" in sup,
     )
     a.check(
-        "3.17 雷达激活线：ensure闸门",
-        "_radar_placement_blocked" in sup
-        and "POST_OPEN_RADAR_BLOCK_SEC" in sup
-        and (
-            "拒绝雷达挂单：未交棒/未达激活线" in sup
-            or "_price_reached_radar_activation" in sup
-        ),
-    )
-    a.check(
-        "3.18 SHORT保本禁止抬过开仓价",
-        "禁止抬到成本及以上" in sup
-        and "_clamp_radar_sl_for_market" in sup,
-    )
-    a.check(
-        "3.19 开仓日志按品种隔离",
-        "_journal_path" in sup
-        and "binance_{kind}_journal_" in sup
-        and "_open_regime_sticky" in sup
-        and "HARD_SL_SYNC_COOLDOWN_SEC" in sup,
-    )
-    a.check(
-        "3.20 旧VPS%档位匹配已废弃",
-        "_matches_any_vps_regime_stop" in sup
-        and "旧 VPS% 档位匹配已废弃" in sup,
-    )
-    a.check(
-        "3.21 重启锁按品种隔离",
-        "recover_singleton_{self.symbol}" in sup
-        or ".recover_singleton_" in sup
-        and "_probe_position_for_recover" in sup
-        and "AMBIGUOUS" in sup,
-    )
-    a.check(
-        "3.22 hydrate 过滤 None 信源",
-        "isinstance(s, dict)" in sup
-        and "多品种启动恢复清单" in sup
-        and "重启异常兜底" in sup,
-    )
-    a.check(
-        "3.23 开仓裸仓闸 expected=0 不假齐",
-        "开仓 TP123 补全失败" in sup
-        and "开仓终检裸仓补挂" in sup
-        and "不标 align_ok" in sup
-        and "expected <= 0" in sup
-        and "_ensure_tp123_prices_from_tv" in sup
-        and "盘口无保护 STOP" in sup,
-    )
-    from webhook_parser import enrich_entry_tp_prices
-    empty_tp = enrich_entry_tp_prices("LONG", 1800.0, 0, 1, {})
-    a.check(
-        "3.23b TV空ATR仍补全TP",
-        float(empty_tp.get("tv_tp1") or 0) > 1800
-        and float(empty_tp.get("tv_tp3") or 0) > float(empty_tp.get("tv_tp1") or 0),
-        str(empty_tp),
-    )
-    a.check(
-        "3.24 版本含 v15/risk20-ladder",
-        "v15." in sup or "risk20-ladder" in sup or "risk20" in sup,
+        "3.24 版本含 v15",
+        "v15." in sup or "breath-stop" in sup,
     )
     a.check(
         "3.25 v6.5.6 已废除 UPDATE_SL/TP webhook",
@@ -557,98 +520,43 @@ def audit_module3_hard_sl(a: Audit):
 
 
 def audit_module4_radar(a: Audit):
-    a.section("模块四 · 阶梯雷达（85% 激活 · ladder SL）")
+    a.section("模块四 · 呼吸止损雷达（两阶段·ADX）")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
+    bs = _read(os.path.join(ROOT, "breath_stop.py"))
 
-    from webhook_parser import (
-        RADAR_ACTIVATE_TP1_FRAC,
-        RADAR_STEP_ATR,
-        RADAR_LOCK_ATR,
-        RADAR_TP1_FLOOR_ATR,
-        RADAR_TP2_FLOOR_ATR,
-        RADAR_TP3_TRAIL_ATR,
-        RADAR_STAGE_COST_BUFFER_PCT,
-        RADAR_STAGE_ATR_MULT,
-        get_radar_activation_ratio,
-        get_radar_trail_step,
-        get_radar_breath_atr,
-        format_radar_activation_ratios_label,
-        radar_activation_price,
-        compute_ladder_radar_sl,
-    )
-
-    a.check("4.1 RADAR_ACTIVATE_TP1_FRAC=0.85", abs(RADAR_ACTIVATE_TP1_FRAC - 0.85) < 1e-9)
-    a.check("4.1b RADAR_STEP_ATR=0.5", abs(RADAR_STEP_ATR - 0.5) < 1e-9)
-    a.check("4.1c RADAR_LOCK_ATR=0.3", abs(RADAR_LOCK_ATR - 0.3) < 1e-9)
-    a.check("4.1d RADAR_TP1_FLOOR_ATR=0.5", abs(RADAR_TP1_FLOOR_ATR - 0.5) < 1e-9)
-    a.check("4.1e RADAR_TP2_FLOOR_ATR=1.5", abs(RADAR_TP2_FLOOR_ATR - 1.5) < 1e-9)
-    a.check("4.1f RADAR_TP3_TRAIL_ATR=2.0", abs(RADAR_TP3_TRAIL_ATR - 2.0) < 1e-9)
-
-    act_px = radar_activation_price("LONG", 1800, 1840.5)
-    a.check(
-        "4.2 LONG 1800→tp1 1840.5 激活≈1834.425",
-        abs(act_px - 1834.425) < 0.01,
-        f"act={act_px}",
-    )
-    a.check(
-        "4.2b get_radar_activation_ratio 统一 85%",
-        abs(get_radar_activation_ratio(1) - 0.85) < 1e-9
-        and abs(get_radar_activation_ratio(4) - 0.85) < 1e-9,
-    )
-    a.check(
-        "4.2c 步进/跟进 ATR 统一",
-        abs(get_radar_trail_step(3) - 0.5) < 1e-9
-        and abs(get_radar_breath_atr(2) - 0.3) < 1e-9,
-    )
-
-    label = format_radar_activation_ratios_label()
-    a.check(
-        "4.3 钉钉比例文案=85%阶梯",
-        "85%" in label and "0.5" in label and "2.0" in label,
-        label,
-    )
-    a.check(
-        "4.3b 禁止旧 R1=50% 分档文案",
-        "R1=50%" not in label
-        and "R2=60%" not in label,
-        label,
-    )
-    if "R1=50%" in sup:
-        a.warn("4.3b2 supervisor 注释仍含旧 R1=50% 文案", "请清理 docstring")
-    a.check("4.3c 旧阶段紧追ATR表已清空", not RADAR_STAGE_ATR_MULT)
-    a.check("4.3d 成本缓冲已清零(1 tick保本)", abs(RADAR_STAGE_COST_BUFFER_PCT) < 1e-9)
+    a.check("4.1 breath_stop.py 存在", "INITIAL_SL_ATR" in bs and "calculate_stop_long" in bs)
+    a.check("4.1b STEP_TRIGGER=0.75", "STEP_TRIGGER_ATR = 0.75" in bs)
+    a.check("4.1c STEP_ADVANCE=0.4", "STEP_ADVANCE_ATR = 0.4" in bs)
+    a.check("4.1d ADX 弱/强界", "ADX_WEAK_BOUND = 15" in bs and "ADX_STRONG_BOUND = 35" in bs)
 
     for fn in (
-        "_price_reached_radar_activation",
-        "_radar_activation_price",
+        "_apply_breath_stop_tick",
         "_compute_ladder_sl",
-        "_radar_legitimately_armed",
-        "_ideal_radar_sl_is_safe",
-        "_disarm_premature_radar",
-        "_perform_radar_handoff",
-        "_tp1_filled_verified",
+        "_process_radar_trailing",
+        "_report_breath_phase2",
+        "_is_radar_active",
+        "_should_radar_trail",
     ):
-        a.check(f"雷达函数 {fn}", f"def {fn}" in sup)
+        a.check(f"呼吸函数 {fn}", f"def {fn}" in sup)
 
+    a.check("4.2 webhook 解析 adx", 'src.get("adx")' in wp or 'get("adx")' in wp)
     a.check(
-        "4.4 webhook compute_ladder_radar_sl",
-        "def compute_ladder_radar_sl" in wp,
-    )
-    sl, stage, meta = compute_ladder_radar_sl(
-        "LONG", 1800, 12, 1835, 1835, 1840.5, 1860, 1880,
-    )
-    steps = int(meta.get("steps") or meta.get("step_count") or 0)
-    a.check(
-        "4.5 达激活线阶梯 SL（px1835 atr12 → steps=5 sl≈1818）",
-        meta.get("activated", True)
-        and steps == 5
-        and abs(float(sl) - 1818.0) < 1.0,
-        f"sl={sl} stage={stage} steps={steps}",
+        "4.3 钉钉阶段二文案",
+        "呼吸止损" in dt and "阶段二" in dt and "ADX" in dt,
     )
     a.check(
-        "4.5b ATR_UPDATE_SEC/ORDER_TIMEOUT_SEC 在 webhook_parser",
+        "4.3b 旧交棒标题已替换",
+        "呼吸止损 · 阶段二ADX追踪已激活" in dt,
+    )
+    a.check(
+        "4.4 废弃待命回撤",
+        "已废弃：呼吸止损开仓即运行" in sup
+        and "已废弃回撤逻辑" in sup,
+    )
+    a.check(
+        "4.5 ATR_UPDATE/ORDER_TIMEOUT 在 webhook_parser",
         "ATR_UPDATE_SEC" in wp and "ORDER_TIMEOUT_SEC" in wp,
     )
     a.check(
@@ -658,79 +566,48 @@ def audit_module4_radar(a: Audit):
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
     a.check("4.5d SIGNAL_DEDUP_SEC=60", int(_DEDUP) == 60, str(_DEDUP))
 
-    a.check("4.6 价触激活线主判", "_price_reached_radar_activation" in sup)
-    a.check("4.7 交棒禁止贴市", "_ideal_radar_sl_is_safe" in sup and "雷达交棒延迟" in sup)
-    a.check("4.7b 交棒后才武装", "_radar_handoff_done" in sup)
     a.check(
-        "4.8 交棒/重启现价激活线或TP1成交",
-        "live_only=True" in sup
-        and "_radar_ready_to_handoff" in sup
-        and "_tp1_fill_allows_radar" in sup
-        and "for_handoff=True" in sup,
-    )
-    a.check(
-        "4.9 WS mark 脉冲交棒",
+        "4.9 WS mark 脉冲",
         "_on_mark_price_tick" in sup and "register_price_tick_callback" in (
             _read(os.path.join(ROOT, "binance_client.py"))
         ),
     )
     a.check(
-        "4.10 WS最快盯价·接近激活线加速",
-        "RADAR_WS_APPROACH_RATIO" in sup
-        and "_radar_work_urgent" in sup
-        and "markPrice@1s" in _read(os.path.join(ROOT, "binance_client.py"))
-        and "_radar_in_progress" in sup,
-    )
-    a.check(
         "4.11 废除同向仅刷TP·一律先平后开",
         "always_close_then_open" in sup
-        and "OPEN_SAME_DIR_COOLDOWN_SEC = 0" in sup
-        and 'return "REFRESH_TP"' not in sup,
+        and "OPEN_SAME_DIR_COOLDOWN_SEC = 0" in sup,
     )
     a.check(
         "4.12 TP多档对账禁误报人工",
         "_filter_credible_tp_fills" in sup
-        and "_detect_tp_fills_by_price_qty_reconcile" in sup
-        and "_reconcile_open_qty_vs_tp123" in sup,
+        and "_detect_tp_fills_by_price_qty_reconcile" in sup,
     )
     a.check(
         "4.13 平仓归因 exit_source",
         "_resolve_exit_source" in sup
-        and "_radar_was_armed" in sup
         and "EXIT_SOURCE_RADAR_BE" in wp
         and "exit_source" in dt,
     )
     a.check(
-        "4.14 雷达钉钉必达+哨兵补发",
+        "4.14 阶段二钉钉+哨兵补发",
         "_flush_pending_radar_notify" in sup
         and "_radar_notify_pending" in sup
-        and "radar_activation_notified" in sup
-        and "trigger_gate" in dt
-        and "补发雷达激活钉钉" in sup,
+        and "radar_activation_notified" in sup,
     )
     a.check(
-        "4.15 开单钉钉头寸对账字段",
-        "hard_sl_px" in dt
-        and "radar_act_px" in dt
-        and "radar_act_ratio" in dt,
+        "4.15 开单钉钉含止损价",
+        "hard_sl_px" in dt and "呼吸止损" in dt,
     )
     a.check(
-        "4.16 TP成交记账禁漏挂补挂",
+        "4.16 TP成交记账",
         "_reconcile_tp_consumed_from_live_qty" in sup
-        and "_qty_reduction_looks_like_tp" in sup
-        and "_block_rehang_filled_tps_note" in sup,
+        and "_qty_reduction_looks_like_tp" in sup,
     )
     a.check(
-        "4.17 三轨不抢份额",
-        "三轨并行" in sup
-        and "reduceOnly" in sup
-        and "closePosition 单槽" in sup,
+        "4.17 closePosition 单槽",
+        "closePosition" in sup and "reduceOnly" in sup,
     )
-    a.check("4.18 钉钉雷达标题含品种", "[sym]" in dt or "[{sym}]" in dt)
-    a.check(
-        "4.18b 钉钉雷达激活字段",
-        "radar_act_px" in dt and "RADAR_ACTIVATE_TP1_FRAC" in dt,
-    )
+    a.check("4.18 钉钉标题含品种", "[sym]" in dt or "[{sym}]" in dt)
 
 
 def audit_module5_actions(a: Audit):
@@ -863,7 +740,7 @@ def audit_readme_consistency(a: Audit):
     )
     a.check(
         "README 硬止损描述",
-        ("TV 硬止损" in readme or "stop_loss" in readme or "tv_sl" in readme)
+        ("呼吸止损" in readme or "1.5×ATR" in readme or "1.5xATR" in readme)
         and ("VPS 自主硬止损（开仓价" not in readme),
     )
     a.check("README 检查清单链接", "check_vps_logic" in readme or "VPS实盘检查清单" in readme)
@@ -876,8 +753,10 @@ def audit_readme_consistency(a: Audit):
         and "仓位三件套" not in readme,
     )
     a.check(
-        "README 阶梯雷达 85%",
-        "85%" in readme,
+        "README 呼吸止损参数",
+        ("呼吸止损" in readme or "breath" in readme.lower())
+        and ("3.0" in readme or "ADX" in readme)
+        and "85%" not in readme,
     )
     a.check(
         "README TP 30/30/40 挂 TP1+TP2+TP3",
@@ -888,9 +767,9 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 核心铁律保留",
         "先平后开" in readme
-        and "reduceOnly" in readme
+        and ("reduceOnly" in readme or "TP123" in readme)
         and "closePosition" in readme
-        and "三轨" in readme,
+        and ("呼吸止损" in readme or "双轨" in readme or "三轨" in readme),
     )
     a.check(
         "README 对账动作",

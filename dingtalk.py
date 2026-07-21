@@ -177,16 +177,10 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
             "header": G_LIGHT,
         }
     if ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD):
-        title = (
-            "🛡️ TV硬止损 · 全平"
-            if ct == CLOSE_TYPE_VPS_SHIELD
-            else "🛑 硬止损 · 全平离场"
-        )
-        tag_txt = "TV硬止损" if ct == CLOSE_TYPE_VPS_SHIELD else "硬止损"
         return {
-            "title": title,
-            "tag": _g(f"**{tag_txt}**", G_DEEP),
-            "status": _g("止损触发全平，多空网格全撤，账本复位待命。", G_DEEP),
+            "title": "🫁 呼吸止损 · 全平离场",
+            "tag": _g("**呼吸止损**", G_DEEP),
+            "status": _g("呼吸止损触发全平，多空网格全撤，账本复位待命。", G_DEEP),
             "header": G_DEEP,
         }
     if is_dust_ctx:
@@ -628,26 +622,25 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
         "📡 哨兵状态": _verify_line(
             verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly·各挂一次) · TV硬止损已挂(closePosition) · "
-            f"雷达候命(WS mark@1s·距TP1 {(act_ratio) * 100:.0f}%激活) · 三轨不抢份额",
+            f"🟢 {VERIFY_TAG} | TP123已挂(reduceOnly) · 呼吸止损已挂(closePosition·"
+            f"entry±1.5×ATR开仓即追踪·ADX阶段二) · 单槽不抢份额",
             "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
         ),
     }
     if hard_sl_px is not None and float(hard_sl_px or 0) > 0:
-        data["🛡️ TV硬止损"] = _g(
-            f"**{float(hard_sl_px):.2f}** USDT ✅已挂载 (closePosition·与雷达单槽)",
+        data["🫁 呼吸止损"] = _g(
+            f"**{float(hard_sl_px):.2f}** USDT ✅已挂载 (closePosition·动态呼吸)",
             G_DEEP,
         )
     if radar_act_px is not None and float(radar_act_px or 0) > 0:
-        data["📡 雷达候命"] = _g(
-            f"激活线 **{float(radar_act_px):.2f}** "
-            f"(走完TP1路程{(act_ratio) * 100:.0f}%·WS实时监控·不干预TP/硬止损)",
+        data["📡 阶段二触发"] = _g(
+            f"浮盈≥3.0×ATR 切入 ADX 追踪 (参考激活参考价 **{float(radar_act_px):.2f}**)",
             G_LIGHT,
         )
     data["🔍 头寸对账"] = _g(
         f"实盘 `{qty}` {unit} @ `{entry_price:.2f}` | "
         f"TP审计={'齐' if verified else '待补'} | "
-        f"硬止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'} | "
+        f"呼吸止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'} | "
         f"成交判据=价到+限价消失(微漂忽略)",
         G_MAIN if verified else G_ACCENT,
     )
@@ -677,16 +670,16 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verif
         "🛡️ 战术动作": _g(action_msg, G_ACCENT),
         "📦 利润头寸": _g(f"`{qty}` {unit}", G_MAIN),
         "💰 原始成本": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
-        "🔒 最新硬防线": _g(f"**{new_sl:.2f}** USDT (物理保本单已挂)", G_LIGHT),
+        "🫁 呼吸止损": _g(f"**{new_sl:.2f}** USDT (只向有利方向)", G_LIGHT),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 移动保本机制已触发",
-            "⏳ 止损已提交，REST 同步略延迟 | 移动保本机制已触发",
+            f"{VERIFY_TAG} | 呼吸止损已上移锁利",
+            "⏳ 止损已提交，REST 同步略延迟 | 呼吸止损已上移",
         ),
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"📈 [{sym}] 捷报：追踪雷达锁死趋势利润", data, G_DEEP)
+    send_alert(f"📈 [{sym}] 捷报：呼吸止损锁死趋势利润", data, G_DEEP)
 
 
 def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
@@ -707,8 +700,8 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
         "🧭 方向/档位": _g(f"{side} | TV {regime} 档", G_MUTED),
         "✅ 判定": _g("**价到 + 限价消失 = 成交**（非头寸微漂）", G_MAIN),
         "⏳ 后续": _g(wait_txt, G_LIGHT),
-        "🛡️ 三轨": _g(
-            "TP=reduceOnly | 雷达保本+TV硬止损=closePosition单槽 · 互不抢份额",
+        "🛡️ 双轨": _g(
+            "TP=reduceOnly | 呼吸止损=closePosition单槽 · 互不抢份额",
             G_MUTED,
         ),
         "📡 实盘核查": _verify_line(
@@ -746,13 +739,13 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
         "最新均价": _g(f"**{new_entry_price:.2f}** USDT", G_MAIN),
         "后续动作": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123 | 硬止损/雷达 closePosition 单槽",
+            f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123 | 呼吸止损 closePosition 单槽",
             "⏳ 重挂已提交，REST 同步略延迟 | 哨兵持续对齐",
         ),
     }
     if is_manual_open:
-        data["📡 雷达/止损"] = _g(
-            "阶段0仅 TV硬止损 | 档位激活线后雷达适度追随保本",
+        data["🫁 呼吸止损"] = _g(
+            "开仓即挂 entry±1.5×ATR · 阶段一阶梯 · 浮盈≥3×ATR 切入ADX追踪",
             G_MUTED,
         )
     if tp_audit:
@@ -812,18 +805,18 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
     }
     if src_label:
         data["🧭 平仓归因"] = _g(f"**{src_label}**", G_ACCENT)
-        # 一眼区分：雷达保本 / TP3 / TV硬止损
+        # 一眼区分：呼吸止损 / TP3
         if exit_source == "radar_be":
             data["📡 说明"] = _g(
-                "由雷达移动保本 STOP 触发（非 TP 限价吃完）", G_LIGHT,
+                "由呼吸止损 closePosition 触发（阶段一阶梯/阶段二ADX）", G_LIGHT,
             )
         elif exit_source == "tp3":
             data["📡 说明"] = _g(
-                "由 TP123 限价止盈吃完收网（非雷达保本）", G_LIGHT,
+                "由 TP123 限价止盈吃完收网（非呼吸止损）", G_LIGHT,
             )
         elif exit_source == "vps_hard_sl":
             data["📡 说明"] = _g(
-                "由 TV 硬止损触发（雷达尚未交棒）", G_DEEP,
+                "由呼吸止损 closePosition 触发", G_DEEP,
             )
     if close_action:
         data["📡 TV动作"] = _g(close_action, G_MUTED)
@@ -923,20 +916,16 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
 
     if radar_active:
         sl_state = "止损已挂/已确认" if radar_sl_ok else "止损待哨兵补挂"
+        phase = "阶段二·ADX" if radar_progress >= 1.0 else "阶段一·阶梯"
         radar_txt = _g(
-            f"已激活 · 进度 {radar_progress:.0%} | 保本 `{sl_price:.2f}` | "
-            f"轮询 2s | {sl_state}",
+            f"呼吸止损已运行 · {phase} | 止损 `{sl_price:.2f}` | "
+            f"轮询 0.5s | {sl_state}",
             G_LIGHT,
         )
-        action_txt += " · 雷达哨兵已点火"
+        action_txt += " · 呼吸止损哨兵已点火"
     else:
-        act = (
-            f"{float(radar_act_pct) * 100:.0f}%"
-            if radar_act_pct
-            else f"{get_radar_activation_ratio(regime) * 100:.0f}%(档位)"
-        )
         radar_txt = _g(
-            f"待命 (价触激活线 {act} 后雷达阶梯雷达保本)",
+            "呼吸止损待对齐 (开仓即 entry±1.5×ATR · 哨兵补挂)",
             G_MUTED,
         )
 
@@ -961,20 +950,20 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 核实头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
-        "📊 开仓档位(硬止损/TP)": get_regime_name(open_reg or 3),
+        "📊 开仓档位(TP)": get_regime_name(open_reg or 3),
     }
     if tv_reg:
         data["📡 TV信号档位"] = get_regime_name(tv_reg)
         if regime_mismatch:
             data["⚠️ 档位对账"] = _g(
-                f"**不一致** TV=R{tv_reg} vs 锁档=R{open_reg} → 已以 TV 开仓档重算硬止损",
+                f"**不一致** TV=R{tv_reg} vs 锁档=R{open_reg} → 已以 TV 开仓档对齐 TP",
                 G_DEEP,
             )
         else:
             data["✅ 档位对账"] = _g(f"TV R{tv_reg} = 开仓锁档 R{open_reg}", G_MAIN)
     if hard_sl_pct is not None and sl_price:
-        data["🛡️ 硬止损比例"] = _g(
-            f"R{open_reg or '?'} **{float(hard_sl_pct) * 100:.2f}%** → `{float(sl_price):.2f}`",
+        data["🫁 呼吸止损"] = _g(
+            f"**{float(sl_price):.2f}** USDT (entry±1.5×ATR 起)",
             G_ACCENT,
         )
     if initial_qty and float(initial_qty) > float(qty) + 0.001:
@@ -985,12 +974,12 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "📡 最新 TV 信号": _g(f"{tv_ref or '无日志记录'} ({tv_align_txt})", G_MUTED),
         "⚖️ 仓位核对": _g(qty_align_txt, G_MAIN if qty_aligned else G_ACCENT),
         "📈 盈亏态势": _g(pnl_label or "核查中", G_ACCENT if "浮亏" in (pnl_label or "") else G_MAIN),
-        "🛡️ TV硬止损": _g(shield_status or "核查中", G_MAIN),
+        "🫁 呼吸止损": _g(shield_status or "核查中", G_MAIN),
         "🕸️ TP123 比例审计": _g(
             _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tv_tps, tv_tps),
             G_ACCENT,
         ),
-        "📡 雷达状态": radar_txt,
+        "🫁 止损状态": radar_txt,
         "🧭 防线路由": _g(defense_plan or "哨兵接力维护", G_LIGHT),
         "✅ 接管动作": _g(action_txt, action_color),
     })
@@ -1004,7 +993,7 @@ def report_recover_standby(verify_note="", version="", symbol=None):
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "📡 实盘核查": _g(f"{VERIFY_TAG} | 盘口无持仓", G_MAIN),
-        "✅ 系统状态": _g("空仓待命 · 挂单已清空 · 雷达/哨兵复位", G_LIGHT),
+        "✅ 系统状态": _g("空仓待命 · 挂单已清空 · 呼吸止损/哨兵复位", G_LIGHT),
         "🔮 版本": _g(version or "binance_webhook", G_MUTED),
     }
     if verify_note:
@@ -1252,39 +1241,33 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
 def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
                          radar_active=False, radar_sl=None, regime=3,
                          verify_note="", verified=True):
-    """UPDATE_SL：按 TV tv_sl 同步盘口硬止损（多空一致）。"""
+    """兼容旧入口：UPDATE_SL 不再改挂盘口，仅记录 TV 参考。"""
     tv_sl = float(tv_sl or 0)
     exchange_stop = float(exchange_stop or 0)
-    hung = exchange_stop if exchange_stop > 0 else tv_sl
-    action_txt = (
-        f"TV UPDATE_SL → 盘口硬止损改为 TV `{tv_sl:.2f}`"
-        + (f" · 已核实 @{hung:.2f}" if hung > 0 else "")
-    )
+    hung = exchange_stop if exchange_stop > 0 else float(radar_sl or 0)
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📊 开仓档位": get_regime_name(regime),
-        "🛡️ TV硬止损": _g(f"**{tv_sl:.2f}** USDT", G_MAIN),
-        "📌 盘口STOP": _g(
-            f"**{exchange_stop:.2f}** USDT" if exchange_stop > 0 else "同步中/待核实",
+        "📡 TV参考止损": _g(f"**{tv_sl:.2f}** USDT (不挂盘)", G_MUTED),
+        "🫁 呼吸止损": _g(
+            f"**{hung:.2f}** USDT" if hung > 0 else "哨兵维护中",
             G_MAIN,
         ),
-        "📡 雷达状态": _g(
-            f"已激活 @ `{float(radar_sl):.2f}`" if radar_active and radar_sl
-            else ("已激活" if radar_active else "待命监控中"),
-            G_MAIN,
+        "✅ 风控动作": _g(
+            "UPDATE_SL 已忽略TV改挂 · 盘口维持呼吸止损单槽",
+            G_ACCENT,
         ),
-        "✅ 风控动作": _g(action_txt, G_ACCENT),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | UPDATE_SL 已按 TV tv_sl 改挂盘口硬止损",
+            f"{VERIFY_TAG} | UPDATE_SL 仅记参考，呼吸止损未改用TV价",
             f"⏳ {VERIFY_DELAY_MARK}",
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ TV硬止损 · UPDATE_SL 已同步盘口", data, G_TITLE)
+    send_alert("🫁 呼吸止损 · UPDATE_SL 已忽略TV改挂", data, G_TITLE)
 
 
 def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
@@ -1316,7 +1299,7 @@ def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
             G_MUTED,
         ),
         "✅ 风控动作": _g(
-            "动能 UPDATE_TP → 仅替换限价 TP123 · 硬止损与雷达 STOP 未触碰",
+            "动能 UPDATE_TP → 仅替换限价 TP123 · 呼吸止损 STOP 未触碰",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -1376,9 +1359,9 @@ def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entr
         "📡 TV加仓比例": _g(f"**{float(qty_ratio):.2f}** × 首仓", G_LIGHT),
         "🔢 加仓次数": _g(f"**{add_count}/{max_add_times}**", G_LIGHT),
         "🕸️ TP123 重挂": _g(tp_audit or "已按新总头寸重算", G_MAIN),
-        "📡 雷达状态": _g(radar_note or "待命(TP1前)", G_LIGHT),
+        "📡 雷达状态": _g(radar_note or "呼吸止损运行中", G_LIGHT),
         "✅ 风控动作": _g(
-            "加仓成交 → TV TP123 按新头寸重挂 + tv_sl/雷达同步",
+            "加仓成交 → TV TP123 按新头寸重挂 + 呼吸止损同步",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
@@ -1394,44 +1377,45 @@ def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entr
 
 def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices, tier_pcts,
                                 verify_note="", vps_hard_sl_note=""):
+    """兼容旧入口 → 呼吸止损已武装。"""
     stop_px = tier_prices[0] if tier_prices else entry
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()} 全平", G_MAIN),
-        "🛡️ TV硬止损": _g(
-            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition",
+        "🫁 呼吸止损": _g(
+            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition · entry±1.5×ATR",
             G_ACCENT,
         ),
         "✅ 风控动作": _g(
-            "严格按 TV tv_sl 挂 closePosition 硬止损 · "
-            "TP123=reduceOnly 互不抢份额 · "
-            "激活线前雷达待命 · 达线后雷达保本合并同槽",
+            "呼吸止损已挂 closePosition · 开仓即追踪 · "
+            "TP123=reduceOnly 互不抢份额",
             G_MAIN,
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ TV硬止损 · 已武装", data, G_TITLE)
+    send_alert("🫁 呼吸止损 · 已武装", data, G_TITLE)
 
 
 def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, entry_px,
                             remaining_tiers=None, verify_note=""):
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "🛡️ 触发止损": _g(f"**TV硬止损** @ `{tier_price:.2f}` USDT", G_ACCENT),
+        "🫁 触发止损": _g(f"**呼吸止损** @ `{tier_price:.2f}` USDT", G_ACCENT),
         "✂️ 本次平仓": _g(f"`{filled_qty}` {_u()}", G_MAIN),
         "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
-        "✅ 风控动作": _g("TV硬止损成交 → TP123 已重算", G_MAIN),
+        "✅ 风控动作": _g("呼吸止损成交 → TP123 已重算", G_MAIN),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🛡️ TV硬止损 · 成交", data, G_TITLE)
+    send_alert("🫁 呼吸止损 · 成交", data, G_TITLE)
 
 
 def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
                            radar_progress=0.0, verify_note="", verified=True,
                            symbol=None, unit_label=None):
+    """旧「撤硬止损转雷达」已废除；保留兼容入口但不暗示交棒。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
@@ -1439,68 +1423,55 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 剩余头寸": _g(f"**{live_qty}** {unit}", G_MAIN),
-        "📈 价格方向": _g("**价触激活线** → 交棒雷达保本", G_LIGHT),
-        "🗑️ 撤销止损": _g(f"**{cancelled_count}** 笔 TV硬止损", G_ACCENT),
-        "📡 雷达状态": _g(
-            "已激活移动保本" if radar_progress >= 0.2
-            else f"进度 {radar_progress:.0%}，达激活线后挂雷达保本",
-            G_MAIN,
-        ),
+        "🫁 呼吸止损": _g("单槽合并运行中（硬止损+雷达已合一）", G_LIGHT),
+        "🗑️ 清理次数": _g(f"**{cancelled_count}** 笔旧 STOP", G_ACCENT),
         "✅ 风控动作": _g(
-            reason or "价触激活线 → 雷达接管 · 成本±0.1%保本 · 硬止损退居次级",
+            reason or "呼吸止损单槽维护 · 止损只前进不回撤",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 硬止损已净，可挂雷达保本",
-            f"⏳ 撤单已提交，{VERIFY_DELAY_MARK} | 哨兵继续清理",
+            f"{VERIFY_TAG} | 呼吸止损单槽已对齐",
+            f"⏳ 撤单已提交，{VERIFY_DELAY_MARK} | 哨兵继续维护",
         ),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🛡️ [{sym}] TV硬止损 · 已撤销（转雷达）", data, G_TITLE)
+    send_alert(f"🫁 [{sym}] 呼吸止损 · 单槽维护", data, G_TITLE)
 
 
-# radar_act_px + RADAR_ACTIVATE_TP1_FRAC (journey 85% ladder)
+# breath-stop phase2 (ADX trail) — replaces old ladder handoff notify
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
                            symbol=None, unit_label=None, trigger_gate="",
                            activation_price=None):
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    gate = str(trigger_gate or "").strip() or (
-        f"距TP1剩{(1 - get_radar_activation_ratio(regime)) * 100:.0f}%"
-    )
+    gate = str(trigger_gate or "").strip() or "浮盈≥3.0×ATR"
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
         "📊 开仓档位": get_regime_name(regime),
         "🚪 启动闸门": _g(f"**{gate}**", G_ACCENT),
-        "📡 雷达进度": _g(
-            f"**{radar_progress:.0%}** "
-            f"(阶梯雷达·激活线{get_radar_activation_ratio(regime)*100:.0f}%)",
-            G_ACCENT,
-        ),
-        "🗑️ 硬止损": _g("已撤销/合并" if shield_cleared else "清理中", G_MAIN),
-        "🔒 保本止损": _g(f"**{new_sl:.2f}** USDT (成本±0.1%·距市价安全)", G_LIGHT),
+        "🫁 阶段": _g("阶段二 · ADX 驱动连续追踪", G_ACCENT),
+        "🔒 呼吸止损": _g(f"**{new_sl:.2f}** USDT (只向有利方向)", G_LIGHT),
         "✅ 风控动作": _g(
-            f"{gate} → 安全交棒 · 与TP123并行(不撤剩余限价) · "
-            f"closePosition单槽合并TV硬止损 · 止损只向有利方向",
+            f"{gate} → 切入ADX追踪 · 与TP123并行 · closePosition单槽 · 止损只前进",
             G_MAIN,
         ),
-        "🛡️ 三轨": _g(
-            "雷达保本独立锁利 | TP23 继续 reduceOnly | 互不抢份额",
+        "🛡️ 防线": _g(
+            "呼吸止损锁利 | TP 继续 reduceOnly | 互不抢份额",
             G_MUTED,
         ),
         "📡 实盘核查": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | {sym} 雷达移动保本已启动",
-            f"⏳ 止损已提交，{VERIFY_DELAY_MARK} | 雷达已启动",
+            f"{VERIFY_TAG} | {sym} 呼吸止损阶段二已启动",
+            f"⏳ 止损已提交，{VERIFY_DELAY_MARK} | 阶段二已启动",
         ),
     }
     if activation_price is not None and float(activation_price or 0) > 0:
-        data["🎯 激活线价"] = _g(f"`{float(activation_price):.2f}` USDT", G_MUTED)
+        data["🎯 触发价"] = _g(f"`{float(activation_price):.2f}` USDT", G_MUTED)
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"📡 [{sym}] 雷达 · 移动保本已激活", data, G_DEEP)
+    send_alert(f"📡 [{sym}] 呼吸止损 · 阶段二ADX追踪已激活", data, G_DEEP)

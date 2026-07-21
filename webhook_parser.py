@@ -145,8 +145,8 @@ EXIT_SOURCE_QUICK = "quick_exit"
 EXIT_SOURCE_RSI = "rsi_exit"
 
 EXIT_SOURCE_LABELS = {
-    EXIT_SOURCE_RADAR_BE: "雷达保本/阶梯止损",
-    EXIT_SOURCE_VPS_HARD_SL: "硬止损 stop_loss",
+    EXIT_SOURCE_RADAR_BE: "呼吸止损/阶段追踪",
+    EXIT_SOURCE_VPS_HARD_SL: "呼吸止损 closePosition",
     EXIT_SOURCE_SL_INITIAL: "止损平仓（初始）",
     EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（保本/移动）",
     EXIT_SOURCE_TP3: "TP3动态追踪收网",
@@ -159,14 +159,14 @@ EXIT_SOURCE_LABELS = {
 }
 
 RADAR_STAGE_LABELS = {
-    0: "候命(未达TP1路程85%)",
-    1: "激活·保本(±1tick)",
-    2: "阶梯推进",
-    3: "TP1强制底线(0.5ATR)",
+    0: "呼吸止损·开仓即挂",
+    1: "阶段一·阶梯锁本",
+    2: "阶段二·ADX追踪",
+    3: "TP1底线(0.5ATR)",
     4: "阶梯推进",
-    5: "TP2强制底线(1.5ATR)",
+    5: "TP2底线(1.5ATR)",
     6: "阶梯推进",
-    7: "TP3动态追踪(2.0ATR)",
+    7: "ADX连续追踪",
 }
 
 
@@ -230,10 +230,9 @@ def get_radar_activation_ratio(regime=None):
 
 def format_radar_activation_ratios_label():
     return (
-        f"激活=TP1路程{int(RADAR_ACTIVATE_TP1_FRAC * 100)}%"
-        f"|间隔{RADAR_STEP_ATR}ATR"
-        f"|步进{RADAR_LOCK_ATR}ATR"
-        f"|TP3后{RADAR_TP3_TRAIL_ATR}ATR"
+        "呼吸止损=1.5ATR起"
+        "|阶梯0.75/0.4ATR"
+        "|保本3.0ATR→ADX1.2~2.5"
     )
 
 
@@ -271,10 +270,22 @@ def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
 
 
 def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
+    """呼吸止损说明（TV stop_loss 仅参考）。"""
+    try:
+        from breath_stop import INITIAL_SL_ATR, initial_stop_price
+        atr_f = float(atr or 0)
+        if atr_f > 0 and entry:
+            px = initial_stop_price(side, entry, atr_f)
+            return (
+                f"呼吸止损 `{px:.2f}` | entry±{INITIAL_SL_ATR}×ATR={atr_f:.2f} "
+                f"| closePosition 开仓即追踪"
+            )
+    except Exception:
+        pass
     ref = float(tv_sl_ref or 0)
     if ref > 0:
-        return f"硬止损 stop_loss `{ref:.2f}` | closePosition 原值"
-    return "硬止损待绑定 | 须 webhook stop_loss"
+        return f"呼吸止损待ATR绑定 | TV参考 `{ref:.2f}`(不挂盘)"
+    return "呼吸止损待绑定 | 须 webhook atr"
 
 
 def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
@@ -746,6 +757,7 @@ def normalize_tv_payload(data):
 
     price = _to_float(src.get("price") or src.get("close") or src.get("entry"))
     atr = _to_float(src.get("atr") or src.get("ATR"))
+    adx = _to_float(src.get("adx") or src.get("ADX") or src.get("adx_val"))
 
     tp1 = _to_float(src.get("tp1") or src.get("tv_tp1") or src.get("TP1"))
     tp2 = _to_float(src.get("tp2") or src.get("tv_tp2") or src.get("TP2"))
@@ -778,6 +790,8 @@ def normalize_tv_payload(data):
         out["price"] = price
     if atr is not None:
         out["atr"] = atr
+    if adx is not None:
+        out["adx"] = adx
     if tp1 is not None:
         out["tp1"] = tp1
         out["tv_tp1"] = tp1
