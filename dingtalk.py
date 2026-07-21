@@ -151,36 +151,33 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
     ct = close_type or classify_tv_close(close_action, tv_reason or r)
 
     if ct == CLOSE_TYPE_TP3:
+        # TP3 不挂限价：归入阶段二止损收网文案
         return {
-            "title": "🏆 TP3止盈 · 完美收网",
-            "tag": _g("**TP3止盈**", G_LIGHT),
-            "status": _g(
-                "三档网格全部吃尽，暴利安全落袋。"
-                + ("（含蚂蚁仓扫尾）" if is_dust_ctx else "")
-                + ("（重启对账补发）" if "重启对账" in note else ""),
-                G_LIGHT,
-            ),
+            "title": "止损平仓（阶段二/趋势追踪）",
+            "tag": _g("**止损平仓**", G_LIGHT),
+            "status": _g("阶段二收网离场。" + ("（含扫尾）" if is_dust_ctx else ""), G_LIGHT),
             "header": G_TITLE,
         }
     if ct == CLOSE_TYPE_PROTECT:
+        reason = (tv_reason or r or "反转保护").strip()
         return {
-            "title": "🛡️ 风控拦截 · 保护性全平",
-            "tag": _g("**风控拦截**", G_ACCENT),
-            "status": _g("策略风控触发，多空网格全撤，空仓待命。", G_ACCENT),
+            "title": f"反转保护平仓：{reason[:80]}",
+            "tag": _g("**反转保护**", G_ACCENT),
+            "status": _g("市价全平 + 撤单 + 状态重置。", G_ACCENT),
             "header": G_ACCENT,
         }
     if ct == CLOSE_TYPE_BREAKEVEN:
         return {
-            "title": "💚 防回吐保本 · 全平收网",
-            "tag": _g("**防回吐保本**", G_LIGHT),
-            "status": _g("追踪保本/微利护体触发，利润锁死离场。", G_MAIN),
+            "title": "止损平仓（阶段二/趋势追踪）",
+            "tag": _g("**止损平仓**", G_LIGHT),
+            "status": _g("阶段二追踪止损触及，全平离场。", G_MAIN),
             "header": G_LIGHT,
         }
     if ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD):
         return {
-            "title": "🫁 呼吸止损 · 全平离场",
-            "tag": _g("**呼吸止损**", G_DEEP),
-            "status": _g("呼吸止损触发全平，多空网格全撤，账本复位待命。", G_DEEP),
+            "title": "止损平仓（阶段一）",
+            "tag": _g("**止损平仓**", G_DEEP),
+            "status": _g("价格触及呼吸止损，市价全平。", G_DEEP),
             "header": G_DEEP,
         }
     if is_dust_ctx:
@@ -513,7 +510,7 @@ def _format_tp_audit(audit, tv_tps=None, unit_label=None, symbol=None):
 def _format_vps_sizing_basis(principal, meta=None, leverage=None):
     """VPS 最终仓位：风险20%/止损距 ∩ 名义×5 ∩ TV.qty"""
     meta = meta or {}
-    mode = str(meta.get("sizing_mode") or "RISK20_NOTIONAL5")
+    mode = str(meta.get("sizing_mode") or "MOM_EQUITY_1X")
     risk_capital = float(meta.get("risk_capital") or meta.get("margin") or 0)
     stop_dist = float(meta.get("stop_dist") or 0)
     notional = float(meta.get("notional") or meta.get("order_amount") or 0)
@@ -583,142 +580,80 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
                            principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None,
                            tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None,
                            hard_sl_px=None, radar_act_px=None, radar_act_ratio=None):
-    side_str = _g("🔶 开多 (LONG)", G_LIGHT) if side == "LONG" else _g("🟤 开空 (SHORT)", G_DEEP)
-    slip_txt = (
-        f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
-        if tv_price > 0 else "未知"
-    )
-    lev = float(leverage or DEFAULT_LEVERAGE or 0)
-    lev_label = f"{int(round(lev))}x" if lev > 0 else LEVERAGE_LABEL
+    """妈妈版开仓通知。"""
     unit = _resolve_unit(unit_label, symbol)
-    sym = str(symbol or "").upper() or "ETHUSDT"
-    act_ratio = float(
-        radar_act_ratio if radar_act_ratio is not None else get_radar_activation_ratio(regime)
-    )
-
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    direction = "LONG" if str(side).upper() == "LONG" else "SHORT"
+    init_sl = float(hard_sl_px or 0)
+    equity = float(principal_balance or (vps_sizing_meta or {}).get("principal") or 0)
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
-        "🎛️ 趋势方向": side_str,
-        "📊 市场强度": get_regime_name(regime),
-        "🕸️ TP123 比例": _g(
-            f"开仓 R{regime} → **{format_regime_tp_ratios_label(regime)}%** (对齐 TV qty_percent)",
-            G_LIGHT,
-        ),
-        "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
-        "📦 开单头寸": _g(
-            f"**{qty}** {unit} ({EXCHANGE_LABEL} **{lev_label}** · 风险20%/止损距·名义×5)",
-            G_ACCENT,
-        ),
-        "📐 杠杆": _g(
-            f"**{lev_label}**（仓位公式与 set_leverage 同源，禁止固定 25x）",
-            G_MUTED,
-        ),
-        "🕸️ 止盈布防比对": _g(
-            _format_tp_audit(tp_audit, tv_tps, unit_label=unit, symbol=sym)
-            if tp_audit else _format_tp_compare(tp_pxs, tv_tps, unit_label=unit, symbol=sym),
-            G_LIGHT,
-        ),
-        "📏 波动参考": _g(f"ATR = {atr:.4f}", G_MUTED),
-        "📡 TV字段": _g(format_tv_field_sources(tv_field_sources or {}), G_MUTED),
-        "📡 哨兵状态": _verify_line(
-            verify_note if not verified else "",
-            f"🟢 {VERIFY_TAG} | TP1+TP2已挂(reduceOnly·余仓呼吸追踪) · 呼吸止损已挂(closePosition·"
-            f"entry±1.5×ATR开仓即追踪·ADX阶段二) · 单槽不抢份额",
-            "⏳ 开仓已提交，REST 同步略延迟 | 哨兵待确认",
-        ),
+        "开仓": _g(f"**{direction}**", G_LIGHT if direction == "LONG" else G_DEEP),
+        "价格": _g(f"**{float(entry_price):.2f}**", G_MAIN),
+        "数量": _g(f"**{qty}** {unit}", G_ACCENT),
+        "初始止损": _g(f"**{init_sl:.2f}**" if init_sl > 0 else "待挂", G_DEEP),
+        "账户权益": _g(f"**{equity:.2f}** USDT" if equity > 0 else "—", G_MUTED),
+        "TP": _g("TP1+TP2 已挂（余仓阶段二）", G_LIGHT),
+        "呼吸止损": _g("阶段一 · 阶梯锁本", G_MAIN),
     }
-    if hard_sl_px is not None and float(hard_sl_px or 0) > 0:
-        data["🫁 呼吸止损"] = _g(
-            f"**{float(hard_sl_px):.2f}** USDT ✅已挂载 (closePosition·动态呼吸)",
-            G_DEEP,
-        )
-    if radar_act_px is not None and float(radar_act_px or 0) > 0:
-        data["📡 阶段二触发"] = _g(
-            f"浮盈≥3.0×ATR 切入 ADX 追踪 (参考激活参考价 **{float(radar_act_px):.2f}**)",
-            G_LIGHT,
-        )
-    data["🔍 头寸对账"] = _g(
-        f"实盘 `{qty}` {unit} @ `{entry_price:.2f}` | "
-        f"TP审计={'齐' if verified else '待补'} | "
-        f"呼吸止损={'已挂' if hard_sl_px and float(hard_sl_px) > 0 else '待挂'} | "
-        f"成交判据=价到+限价消失(微漂忽略)",
-        G_MAIN if verified else G_ACCENT,
-    )
-    if principal_balance and margin_pct is not None:
-        if vps_sizing_meta:
-            data["📐 仓位预算"] = _g(
-                _format_vps_sizing_basis(principal_balance, meta=vps_sizing_meta, leverage=lev),
-                G_LIGHT,
-            )
-            data["📐 VPS参数"] = _g(format_vps_sizing_note(vps_sizing_meta, qty=qty), G_MUTED)
-        else:
-            data["📐 仓位预算"] = _g(
-                _format_sizing_basis(principal_balance, margin_pct, lev, margin_usdt),
-                G_LIGHT,
-            )
     if verify_note:
-        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🔶 战神出击：币安 {sym} 阵地建立", data)
+        data["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    send_alert(f"📈 [{sym}] 开仓 {direction}", data, G_TITLE)
+
 
 
 def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verified=True,
-                        symbol=None, unit_label=None):
+                        symbol=None, unit_label=None, extreme=None, profit_pct=None):
+    """止损移动：止损上移/下移至 {new_stop}，当前最高/最低价 {extreme}，浮盈 {profit}%。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    msg = str(action_msg or "")[:180]
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
-        "🛡️ 战术动作": _g(action_msg, G_ACCENT),
-        "📦 利润头寸": _g(f"`{qty}` {unit}", G_MAIN),
-        "💰 原始成本": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
-        "🫁 呼吸止损": _g(f"**{new_sl:.2f}** USDT (只向有利方向)", G_LIGHT),
-        "📡 实盘核查": _verify_line(
-            verify_note if not verified else "",
-            f"{VERIFY_TAG} | 呼吸止损已上移锁利",
-            "⏳ 止损已提交，REST 同步略延迟 | 呼吸止损已上移",
-        ),
+        "止损移动": _g(msg or f"止损移至 {float(new_sl):.2f}", G_ACCENT),
+        "最新止损": _g(f"**{float(new_sl):.2f}**", G_LIGHT),
+        "成本": _g(f"`{float(entry_px):.2f}`", G_MUTED),
+        "头寸": _g(f"`{qty}` {unit}", G_MAIN),
     }
+    if extreme is not None and float(extreme or 0) > 0:
+        data["极值"] = _g(f"**{float(extreme):.2f}**", G_MAIN)
+    if profit_pct is not None:
+        data["浮盈"] = _g(f"**{float(profit_pct):+.2f}%**", G_LIGHT)
     if verify_note:
-        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"📈 [{sym}] 捷报：呼吸止损锁死趋势利润", data, G_DEEP)
+        data["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    send_alert(f"📈 [{sym}] 止损移动至 {float(new_sl):.2f}", data, G_DEEP)
+
 
 
 def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
-                   verify_note="", verified=True, symbol=None, unit_label=None):
+                   verify_note="", verified=True, symbol=None, unit_label=None,
+                   current_stop=None):
+    """TP1/TP2 成交通知（不挂 TP3，故无 TP3 成交播报）。"""
+    lv = int(tp_level or 0)
+    if lv >= 3:
+        return  # TP3 不挂限价，禁止旧文案
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    remain_levels = [lv for lv in (1, 2, 3) if lv > int(tp_level or 0)]
-    wait_txt = (
-        f"耐心等 TP{remain_levels} 限价成交（不再补挂已成交档）"
-        if remain_levels else "TP123 已吃完 · 收网/扫尾"
-    )
-    data = {
+    remain_pct = {1: "70%", 2: "40%"}.get(lv, "—")
+    stop = float(current_stop or 0)
+    title = f"🎯 [{sym}] TP{lv} 止盈成交，剩余仓位 {remain_pct}"
+    body = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
-        "🎯 成交档位": _g(f"**TP{tp_level}** @ **{tp_price:.2f}** USDT", G_LIGHT),
-        "📦 本次止盈": _g(f"`{filled_qty}` {unit}", G_ACCENT),
-        "📊 剩余头寸": _g(f"`{remain_qty}` {unit}", G_MAIN),
-        "💰 持仓均价": _g(f"`{entry_px:.2f}` USDT", G_MUTED),
-        "🧭 方向/档位": _g(f"{side} | TV {regime} 档", G_MUTED),
-        "✅ 判定": _g("**价到 + 限价消失 = 成交**（非头寸微漂）", G_MAIN),
-        "⏳ 后续": _g(wait_txt, G_LIGHT),
-        "🛡️ 双轨": _g(
-            "TP=reduceOnly | 呼吸止损=closePosition单槽 · 互不抢份额",
-            G_MUTED,
-        ),
-        "📡 实盘核查": _verify_line(
-            verify_note if not verified else "",
-            f"{VERIFY_TAG} | {sym} TP{tp_level} 限价止盈已成交",
-            "⏳ 止盈已成交，REST 同步略延迟 | 哨兵持续对齐",
-        ),
+        f"TP{lv}": _g(f"**@{float(tp_price):.2f}**", G_LIGHT),
+        "本次": _g(f"`{filled_qty}` {unit}", G_ACCENT),
+        "剩余": _g(f"`{remain_qty}` {unit}（{remain_pct}）", G_MAIN),
+        "当前止损": _g(f"**{stop:.2f}**" if stop > 0 else "—", G_DEEP),
     }
     if verify_note:
-        data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🎯 [{sym}] 捷报：TP{tp_level} 止盈成交", data, G_DEEP)
+        body["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    send_alert(title, body, G_DEEP)
+
 
 
 def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
                                   verify_note="", tp_audit=None, verified=True):
     raw = str(action_type or "")
-    if "加仓" in raw:
+    if "加仓" in raw or "增仓" in raw:
         action_txt = _g("手动增仓", G_LIGHT)
     elif "止盈" in raw or "对账" in raw:
         action_txt = _g("限价止盈对账", G_ACCENT)
@@ -728,7 +663,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
         action_txt = _g(raw or "仓位变动", G_ACCENT)
     is_manual_open = "人工开仓" in raw
     if is_manual_open:
-        action_txt = _g("人工首仓 · 系统接管", G_LIGHT)
+        action_txt = _g("人工开仓 · 系统接管", G_LIGHT)
     title = "🔄 币安阵地异动重置"
     if "止盈" in raw or "对账" in raw:
         title = "🎯 币安止盈对账同步"
@@ -985,7 +920,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     })
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🔄 币安 VPS · 重启闪电接管", data, immediate=True)
+    send_alert("🔄 重启恢复完成", data, immediate=True)
 
 
 def report_recover_standby(verify_note="", version="", symbol=None):
@@ -1064,7 +999,7 @@ def report_system_alert(title, detail, level="紧急", suggestion="", immediate=
     }
     if suggestion:
         data["💡 建议操作"] = _g(suggestion, G_LIGHT)
-    send_alert(f"⚠️ 系统告警：{title}", data, G_TITLE, immediate=immediate)
+    send_alert(f"⚠️ 异常告警：{title}", data, G_TITLE, immediate=immediate)
 
 
 def report_position_qty_reconcile(side="", baseline=0, live_qty=0, curr_px=0,
@@ -1095,10 +1030,10 @@ def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
     """
     phase = str(phase or "").strip() or "进度"
     side_u = str(side or "").strip().upper()
-    title = f"📬 先平后开链 · {phase}"
+    title = f"📬 先平后开 · {phase}"
     data = {
-        "🧭 时序规则": _g(
-            "铁律：带开仓一律先平后开刷新；同秒开+平亦先平后开；单独平仓则清零等待",
+        "🧭 说明": _g(
+            "先平后开：检测到已有持仓，已市价全平并撤单，准备执行新开仓",
             G_MUTED,
         ),
         "📋 阶段": _g(f"**{phase}**", G_MAIN if ok else G_DEEP),
@@ -1181,12 +1116,12 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     et = normalize_entry_type(entry_type)
     type_map = {
         ENTRY_TYPE_OPEN: "首次开仓 OPEN",
-        ENTRY_TYPE_PYRAMID: "金字塔加仓 PYRAMID",
-        ENTRY_TYPE_PROFIT_ADD: "浮盈加仓 PROFIT_ADD",
+        ENTRY_TYPE_PYRAMID: "已忽略 PYRAMID",
+        ENTRY_TYPE_PROFIT_ADD: "已忽略 PROFIT_ADD",
     }
     type_txt = type_map.get(et, et or "—")
     close_actions = {
-        "CLOSE_PROTECT": "保护性全平",
+        "CLOSE_PROTECT": "反转保护",
         "CLOSE_TP3": "TP3 收网",
         "CLOSE_STOPLOSS": "止损/保本平仓",
         "UPDATE_SL": "动态止损 UPDATE_SL",
@@ -1313,66 +1248,10 @@ def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
     send_alert("🚀 动能止盈 · UPDATE_TP 已同步", data, G_TITLE)
 
 
-def report_tv_position_add(side, entry_type, add_qty, old_qty, new_qty, old_entry, new_entry,
-                           tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
-                           verify_note="", verified=True, base_qty=0, vps_sizing_meta=None,
-                           add_count=0, max_add_times=2, regime=3, tp_audit="", radar_note="",
-                           open_regime=None, tp_ratio_label=""):
-    """PYRAMID / PROFIT_ADD 加仓核实 — 首仓×TV比例 + 新总头寸重挂 TP123/雷达"""
-    type_label = {
-        ENTRY_TYPE_PYRAMID: "金字塔加仓 PYRAMID",
-        ENTRY_TYPE_PROFIT_ADD: "浮盈加仓 PROFIT_ADD",
-    }.get(str(entry_type or "").upper(), str(entry_type or "ADD"))
-    lev = leverage or DEFAULT_LEVERAGE
-    data = {
-        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📡 加仓类型": _g(type_label, G_ACCENT),
-        "📊 档位": get_regime_name(regime),
-        "🕸️ TP123 比例": _g(
-            f"开仓 R{int(open_regime or regime)} → **{tp_ratio_label or format_regime_tp_ratios_label(open_regime or regime)}%**",
-            G_LIGHT,
-        ),
-        "➕ 追加数量": _g(f"**+{add_qty}** {_u()}", G_MAIN),
-        "📦 持仓变化": _g(
-            f"`{old_qty}` → **`{new_qty}`** {_u()}",
-            G_LIGHT,
-        ),
-        "💰 均价变化": _g(
-            f"`{old_entry:.2f}` → **`{new_entry:.2f}`** USDT",
-            G_MUTED,
-        ),
-        "📡 TV底线 tv_sl": _g(f"**{float(tv_sl or 0):.2f}** USDT", G_ACCENT),
-        "📐 加仓公式": _g(
-            format_vps_sizing_note(
-                vps_sizing_meta or {
-                    "base_qty": base_qty,
-                    "qty_ratio": qty_ratio,
-                    "regime": regime,
-                    "max_add_times": max_add_times,
-                    "sizing_mode": "VPS_ADD",
-                },
-                qty=add_qty,
-                entry_type=entry_type,
-            ),
-            G_MUTED,
-        ),
-        "📡 TV加仓比例": _g(f"**{float(qty_ratio):.2f}** × 首仓", G_LIGHT),
-        "🔢 加仓次数": _g(f"**{add_count}/{max_add_times}**", G_LIGHT),
-        "🕸️ TP123 重挂": _g(tp_audit or "已按新总头寸重算", G_MAIN),
-        "📡 雷达状态": _g(radar_note or "呼吸止损运行中", G_LIGHT),
-        "✅ 风控动作": _g(
-            "加仓成交 → TV TP123 按新头寸重挂 + 呼吸止损同步",
-            G_MAIN,
-        ),
-        "📡 实盘核查": _verify_line(
-            verify_note if not verified else "",
-            f"{VERIFY_TAG} | 加仓 + TP123 + 止损/雷达已同步",
-            f"⏳ 加仓已提交，{VERIFY_DELAY_MARK} | 哨兵继续核实",
-        ),
-    }
-    if verify_note:
-        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"➕ TV加仓 · {type_label}", data, G_TITLE)
+def report_tv_position_add(*args, **kwargs):
+    """妈妈版已废除追加仓位：不再推送旧文案。"""
+    return
+
 
 
 def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices, tier_pcts,
@@ -1444,34 +1323,25 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
                            symbol=None, unit_label=None, trigger_gate="",
-                           activation_price=None):
+                           activation_price=None, adx=None, trail_dist=None):
+    """阶段切换：浮盈达 3.0×ATR，进入 ADX 连续追踪。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    gate = str(trigger_gate or "").strip() or "浮盈≥3.0×ATR"
+    adx_v = float(adx or 0)
+    trail_v = float(trail_dist or 0)
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
-        "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
-        "📦 利润头寸": _g(f"**{qty}** {unit} @ `{entry:.2f}`", G_MAIN),
-        "📊 开仓档位": get_regime_name(regime),
-        "🚪 启动闸门": _g(f"**{gate}**", G_ACCENT),
-        "🫁 阶段": _g("阶段二 · ADX 驱动连续追踪", G_ACCENT),
-        "🔒 呼吸止损": _g(f"**{new_sl:.2f}** USDT (只向有利方向)", G_LIGHT),
-        "✅ 风控动作": _g(
-            f"{gate} → 切入ADX追踪 · 与TP1/TP2并行 · 余仓追踪收网 · closePosition单槽 · 止损只前进",
-            G_MAIN,
+        "阶段切换": _g(
+            f"止损已进入阶段二（趋势追踪），当前ADX={adx_v:.1f}，追踪距离={trail_v:.2f}×ATR"
+            if adx_v > 0 or trail_v > 0
+            else "止损已进入阶段二（趋势追踪）",
+            G_ACCENT,
         ),
-        "🛡️ 防线": _g(
-            "呼吸止损锁利 | TP 继续 reduceOnly | 互不抢份额",
-            G_MUTED,
-        ),
-        "📡 实盘核查": _verify_line(
-            verify_note if not verified else "",
-            f"{VERIFY_TAG} | {sym} 呼吸止损阶段二已启动",
-            f"⏳ 止损已提交，{VERIFY_DELAY_MARK} | 阶段二已启动",
-        ),
+        "当前ADX": _g(f"**{adx_v:.1f}**" if adx_v > 0 else "—", G_MAIN),
+        "追踪距离": _g(f"**{trail_v:.2f}×ATR**" if trail_v > 0 else "—", G_LIGHT),
+        "止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
+        "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),
     }
-    if activation_price is not None and float(activation_price or 0) > 0:
-        data["🎯 触发价"] = _g(f"`{float(activation_price):.2f}` USDT", G_MUTED)
     if verify_note:
-        data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"📡 [{sym}] 呼吸止损 · 阶段二ADX追踪已激活", data, G_DEEP)
+        data["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    send_alert(f"📡 [{sym}] 阶段切换：止损已进入阶段二", data, G_DEEP)

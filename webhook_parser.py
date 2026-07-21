@@ -10,14 +10,11 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.5.6"
 
-# ── 仓位公式（VPS 最终需求）：风险 20% + 名义上限 5× ─────────────────────────
-# 风险资金 = 权益 × 20%
-# 名义上限 = 权益 × 5
-# 理论数量 = min(风险资金/|价-止损|, 名义上限/开仓价, TV.qty)
+# ── RISK20：min(风险/止损距, 名义/价, TV.qty)，无状态纯函数 ───────────────
 FIXED_RISK_PCT = 0.20
 FIXED_NOTIONAL_MULT = 5.0
-FIXED_MARGIN_PCT = FIXED_RISK_PCT          # 兼容旧名
-FIXED_LEVERAGE = int(FIXED_NOTIONAL_MULT)  # set_leverage 固定 5
+FIXED_MARGIN_PCT = FIXED_RISK_PCT
+FIXED_LEVERAGE = 5
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
@@ -34,22 +31,21 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：挂 TP1+TP2 限价（30/30），余仓 40% 由呼吸止损阶段二追踪收网（不挂 TP3）
-LEG_TP_RATIOS = [0.30, 0.30, 0.40]  # qty1 / qty2 / 余仓追踪
-PLACE_TP_LEVELS = 2  # 只挂 TP1+TP2
+# 分腿：只挂 TP1+TP2（各30%）；余仓40%由呼吸止损阶段二收网
+LEG_TP_RATIOS = [0.30, 0.30, 0.40]
+PLACE_TP_LEVELS = 2
 
-# ── 阶梯雷达参数（VPS 最终需求）────────────────────────────────────────────
-# 激活：price 达 TP1 路程 85%（文档「tp1×0.85」= 路程系数，非绝对值×0.85）
+# ── 旧雷达常量（兼容导入；实盘走 breath_stop）──────────────────────────────
 RADAR_ACTIVATE_TP1_FRAC = 0.85
-RADAR_STEP_ATR = 0.5             # 阶梯推进间隔：entry ± (n)×0.5×ATR
-RADAR_LOCK_ATR = 0.3             # 每步推进幅度：entry ± (n)×0.3×ATR
-RADAR_TP1_FLOOR_ATR = 0.5        # 触及 TP1：止损底限 entry±0.5×ATR
-RADAR_TP2_FLOOR_ATR = 1.5        # 触及 TP2：止损底限 entry±1.5×ATR
-RADAR_TP3_TRAIL_ATR = 2.0        # 触及 TP3 后：best∓2.0×ATR 纯追踪
-RADAR_STAGE_COST_BUFFER_PCT = 0.0  # 保本用 1 tick
-ATR_UPDATE_SEC = 300            # ATR 每 5 分钟更新（已触发阶梯不回溯）
-ORDER_TIMEOUT_SEC = 300          # 挂单 5 分钟未成交 → 取消移交雷达
-SIGNAL_DEDUP_SEC = 60            # 60 秒内同 action+symbol+price 去重
+RADAR_STEP_ATR = 0.5
+RADAR_LOCK_ATR = 0.3
+RADAR_TP1_FLOOR_ATR = 0.5
+RADAR_TP2_FLOOR_ATR = 1.5
+RADAR_TP3_TRAIL_ATR = 2.0
+RADAR_STAGE_COST_BUFFER_PCT = 0.0
+ATR_UPDATE_SEC = 300
+ORDER_TIMEOUT_SEC = 300
+SIGNAL_DEDUP_SEC = 60
 ATR_FALLBACK_ETH = 12.0
 ATR_FALLBACK_DEFAULT = 30.0
 
@@ -83,16 +79,15 @@ ENTRY_TYPE_PYRAMID = "PYRAMID"
 ENTRY_TYPE_PROFIT_ADD = "PROFIT_ADD"
 VALID_ENTRY_TYPES = frozenset({ENTRY_TYPE_OPEN})
 
-# v6.5.6 动作集
-RECONCILE_ACTIONS = frozenset({
-    "CLOSE_TP", "CLOSE_TRAIL", "CLOSE_SL_INITIAL", "CLOSE_SL_BREAKEVEN",
-})
+# 最终架构：只认 4 个交易 action + PING 探活
+RECONCILE_ACTIONS = frozenset()  # 已废除，保留空集防旧 import
 FLATTEN_ACTIONS = frozenset({
     "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
 })
 VALID_ACTIONS = frozenset({
     "LONG", "SHORT", "PING",
-}) | RECONCILE_ACTIONS | FLATTEN_ACTIONS
+    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
+})
 
 ACTION_ALIASES = {
     "BUY": "LONG",
@@ -102,11 +97,6 @@ ACTION_ALIASES = {
     "CLOSE": "CLOSE_QUICK_EXIT",
     "QUICK_EXIT": "CLOSE_QUICK_EXIT",
     "RSI_EXIT": "CLOSE_RSI_EXIT",
-    "CLOSE_STOPLOSS": "CLOSE_SL_INITIAL",
-    "CLOSE_SL": "CLOSE_SL_INITIAL",
-    "STOPLOSS": "CLOSE_SL_INITIAL",
-    "CLOSE_BREAKEVEN": "CLOSE_SL_BREAKEVEN",
-    "CLOSE_TP3": "CLOSE_TRAIL",
     "CLOSE_PROTECT": "CLOSE_QUICK_EXIT",
 }
 
@@ -122,13 +112,13 @@ CLOSE_TYPE_RECONCILE = "reconcile"
 
 CLOSE_TYPE_LABELS = {
     CLOSE_TYPE_TP3: "TP3/追踪止盈",
-    CLOSE_TYPE_PROTECT: "风控拦截",
+    CLOSE_TYPE_PROTECT: "反转保护",
     CLOSE_TYPE_BREAKEVEN: "保本/移动止损",
     CLOSE_TYPE_HARD_SL: "硬止损",
     CLOSE_TYPE_VPS_SHIELD: "VPS硬止损",
     CLOSE_TYPE_GENERIC: "常规清场",
-    CLOSE_TYPE_QUICK: "多周期反转快平",
-    CLOSE_TYPE_RSI: "RSI反转快平",
+    CLOSE_TYPE_QUICK: "反转保护",
+    CLOSE_TYPE_RSI: "反转保护(RSI)",
     CLOSE_TYPE_RECONCILE: "TV对账(不下单)",
 }
 
@@ -151,7 +141,7 @@ EXIT_SOURCE_LABELS = {
     EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（阶段二/趋势追踪）",
     EXIT_SOURCE_TP3: "TP余仓追踪收网",
     EXIT_SOURCE_TV_CLOSE: "TV主动全平",
-    EXIT_SOURCE_TV_PROTECT: "TV风控快平",
+    EXIT_SOURCE_TV_PROTECT: "TV反转保护",
     EXIT_SOURCE_MANUAL: "人工/异动清仓",
     EXIT_SOURCE_UNKNOWN: "来源未明",
     EXIT_SOURCE_QUICK: "CLOSE_QUICK_EXIT",
@@ -216,7 +206,7 @@ def get_regime_tp_ratios(regime=None):
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30(挂TP1+TP2·余仓呼吸追踪)"
+    return "30/30/40(挂TP1+TP2+TP3)"
 
 
 def get_leg_tp_ratios(payload=None):
@@ -356,11 +346,11 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
                             margin_pct=None, leverage=None,
                             stop_loss=None, tv_qty=None, tv_sl=None, **_kw):
     """
-    VPS 最终仓位公式：
-      风险资金 = 权益 × 20%
-      名义上限 = 权益 × 5
-      理论数量 = min(风险资金/|开仓价-stop_loss|, 名义上限/开仓价, TV.qty)
-      qty = floor(理论数量)
+    无状态纯函数（不读历史仓位/加仓次数）：
+      risk_capital = equity * 0.20
+      notional_cap = equity * 5
+      qty = min(risk/|price-stop|, notional/price, TV.qty)
+    缺 stop 或 tv_qty → 拒绝。
     """
     principal = float(principal or 0)
     price = float(price or 0)
@@ -368,8 +358,8 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     notional_mult = float(leverage if leverage is not None else FIXED_NOTIONAL_MULT)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
-    sl = float(stop_loss if stop_loss is not None else (tv_sl if tv_sl is not None else 0) or 0)
-    tv_cap = float(tv_qty) if tv_qty is not None and float(tv_qty or 0) > 0 else None
+    stop = float(stop_loss if stop_loss is not None else (tv_sl or 0) or 0)
+    tv_ref = float(tv_qty) if tv_qty is not None and float(tv_qty or 0) > 0 else None
 
     meta = {
         "principal": principal,
@@ -381,46 +371,52 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
         "sizing_mode": SIZING_MODE,
         "hard_notional_cap": 0.0,
         "qty_ratio": 1.0,
-        "stop_loss": sl,
-        "tv_qty": tv_cap,
+        "stop_loss": stop,
+        "tv_qty": tv_ref,
+        "tv_qty_ref_only": False,
         "regime": 0,
+        "bind": "risk20_notional5",
+        "formula": "min(risk/stop_dist, notional/price, tv_qty)",
     }
     if principal <= 0 or price <= 0 or risk_pct <= 0 or notional_mult <= 0:
         meta["error"] = "invalid_inputs"
         return 0.0, meta
+    if stop <= 0:
+        meta["error"] = "missing_stop_loss"
+        return 0.0, meta
+    if tv_ref is None or tv_ref <= 0:
+        meta["error"] = "missing_tv_qty"
+        return 0.0, meta
+
+    stop_dist = abs(price - stop)
+    if stop_dist <= 0:
+        meta["error"] = "zero_stop_dist"
+        return 0.0, meta
 
     risk_capital = principal * risk_pct
     notional_cap = principal * notional_mult
-    stop_dist = abs(price - sl) if sl > 0 else 0.0
-    meta["risk_capital"] = round(risk_capital, 4)
-    meta["notional_cap"] = round(notional_cap, 2)
-    meta["stop_dist"] = round(stop_dist, 4)
-    meta["margin"] = round(risk_capital, 4)
-
-    if stop_dist <= 1e-12:
-        meta["error"] = "missing_or_invalid_stop_loss"
-        return 0.0, meta
-
     qty_by_risk = risk_capital / stop_dist
     qty_by_notional = notional_cap / price
-    raw_qty = min(qty_by_risk, qty_by_notional)
-    if tv_cap is not None:
-        raw_qty = min(raw_qty, tv_cap)
+    raw_qty = min(qty_by_risk, qty_by_notional, tv_ref)
 
+    meta["risk_capital"] = round(risk_capital, 4)
+    meta["notional_cap"] = round(notional_cap, 2)
+    meta["nominal_value"] = round(notional_cap, 2)
+    meta["stop_dist"] = round(stop_dist, 4)
     meta["qty_by_risk"] = round(qty_by_risk, 6)
     meta["qty_by_notional"] = round(qty_by_notional, 6)
+    meta["margin"] = round(risk_capital, 4)
     meta["notional"] = round(min(raw_qty * price, notional_cap), 2)
     meta["order_amount"] = meta["notional"]
     meta["position_value"] = meta["notional"]
     meta["raw_qty"] = round(raw_qty, 6)
-    meta["bind"] = "risk20_notional5"
 
     if face_value and float(face_value) > 0:
         fv = float(face_value)
         qty = max(1, int(math.floor(raw_qty / fv)))
-        qty = min(qty, int(max_position))
+        qty = min(qty, int(max_position), int(math.floor(tv_ref / fv)) if tv_ref else qty)
         meta["base_qty"] = float(qty)
-        meta["capped"] = tv_cap is not None and abs(float(qty) - float(tv_cap)) < 1e-9
+        meta["qty"] = float(qty)
         return float(qty), meta
 
     qty = _floor_qty_3dp(raw_qty, min_qty=min_qty)
@@ -429,9 +425,14 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
         qty = math.floor(qty / step) * step
         if qty < min_qty:
             qty = 0.0
-    meta["base_qty"] = qty
-    meta["capped"] = tv_cap is not None and qty <= tv_cap + 1e-12 and abs(qty - _floor_qty_3dp(tv_cap, min_qty)) < 1e-9
-    return qty, meta
+    if qty > max_position:
+        qty = float(max_position)
+    if tv_ref is not None and qty > tv_ref:
+        qty = _floor_qty_3dp(tv_ref, min_qty=min_qty)
+    meta["base_qty"] = float(qty)
+    meta["qty"] = float(qty)
+    return float(qty), meta
+
 
 
 def compute_tv_order_qty(principal, risk_pct=None, leverage=None, qty_ratio=None,

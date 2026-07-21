@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VPS 行情引擎：合成 90m K 线 → ATR(14) / ADX(14)
+VPS 行情引擎：30m×3 合成 90m → ATR(14) / ADX(14)
 
-币安无原生 90m，用 30m×3 合并（O=首开 H=最高 L=最低 C=末收 V=量和）。
-ATR/ADX 用 Wilder 平滑，与 TradingView 默认 RMA 对齐。
+币安无原生 90m；拉 30m K 线合并后算 Wilder ATR/ADX（与 TV RMA 对齐）。
 止损决策只认本模块数值；webhook 不传 ATR/ADX。
 """
 from __future__ import annotations
 
 import logging
 import threading
-import time
-from typing import List, Optional, Sequence, Tuple
+time_mod = __import__("time")
+from typing import List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-BASE_INTERVAL = "30m"
-BARS_PER_SYNTH = 3  # 3×30m = 90m
-TARGET_PERIOD_MIN = 90
+KLINE_INTERVAL = "30m"  # 拉取周期；合成后等效 90m
+SYNTH_INTERVAL = "90m"
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-# 合成 90m 至少需要 period*3 + 暖机；拉 30m 约 200 根 → ~66 根 90m
-FETCH_30M_LIMIT = 220
-REFRESH_MIN_SEC = 30.0  # 防抖
-ATR_COMPARE_ALERT_PCT = 0.20  # 与 TV 隐含 ATR 差超 20% 仅告警
+FETCH_LIMIT = 220
+REFRESH_MIN_SEC = 60.0
+ATR_COMPARE_ALERT_PCT = 0.20
 
 
 def _f(x, default=0.0) -> float:
@@ -35,36 +32,23 @@ def _f(x, default=0.0) -> float:
 
 
 def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
-    """
-    币安 kline 行: [openTime, o, h, l, c, vol, closeTime, ...]
-    按时间顺序每 3 根合成 1 根 90m；不足 3 根的尾部丢弃（未闭合）。
-    """
+    """每 3 根 30m 合并为 1 根 90m：[open_time, o, h, l, c, volume, ...]."""
     rows = list(klines_30m or [])
-    if len(rows) < BARS_PER_SYNTH:
+    if len(rows) < 3:
         return []
-    # 对齐到 90m 边界：openTime 为 UTC ms；90m=5400000ms
-    period_ms = TARGET_PERIOD_MIN * 60 * 1000
     out = []
-    i = 0
-    n = len(rows)
-    while i + BARS_PER_SYNTH <= n:
-        chunk = rows[i : i + BARS_PER_SYNTH]
-        try:
-            t0 = int(chunk[0][0])
-            # 若未对齐 90m 边界，滑动到下一根再试
-            if t0 % period_ms != 0:
-                i += 1
-                continue
-            o = _f(chunk[0][1])
-            h = max(_f(c[2]) for c in chunk)
-            l = min(_f(c[3]) for c in chunk)
-            c = _f(chunk[-1][4])
-            v = sum(_f(c[5]) for c in chunk)
-            close_t = int(chunk[-1][6]) if len(chunk[-1]) > 6 else t0 + period_ms - 1
-            out.append([t0, o, h, l, c, v, close_t])
-            i += BARS_PER_SYNTH
-        except (IndexError, TypeError, ValueError):
-            i += 1
+    # 对齐到完整三元组
+    n = len(rows) - (len(rows) % 3)
+    for i in range(0, n, 3):
+        a, b, c = rows[i], rows[i + 1], rows[i + 2]
+        out.append([
+            a[0],
+            a[1],
+            max(_f(a[2]), _f(b[2]), _f(c[2])),
+            min(_f(a[3]), _f(b[3]), _f(c[3])),
+            c[4],
+            _f(a[5]) + _f(b[5]) + _f(c[5]),
+        ])
     return out
 
 
@@ -79,7 +63,6 @@ def _true_ranges(bars: Sequence) -> List[float]:
 
 
 def wilder_atr(bars: Sequence, period: int = ATR_PERIOD) -> float:
-    """Wilder ATR；bars 为 OHLCV 行列表。"""
     if not bars or len(bars) < period + 1:
         return 0.0
     trs = _true_ranges(bars)
@@ -92,17 +75,11 @@ def wilder_atr(bars: Sequence, period: int = ATR_PERIOD) -> float:
 
 
 def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
-    """
-    Wilder ADX(period)。需要足够暖机：建议 >= period*3 根已合成 K 线。
-    smTR / sm+DM / sm-DM 首值为 period 根求和，其后 Wilder 递推。
-    """
     n = len(bars or [])
     if n < period * 2 + 2:
         return 0.0
 
-    plus_dm = []
-    minus_dm = []
-    trs = []
+    plus_dm, minus_dm, trs = [], [], []
     for i in range(1, n):
         h = _f(bars[i][2])
         l = _f(bars[i][3])
@@ -149,7 +126,6 @@ def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
 
 
 def implied_atr_from_stop(entry: float, stop_loss: float, mult: float = 1.5) -> float:
-    """由 TV stop_loss 反推隐含 ATR（仅调试）。"""
     entry = _f(entry)
     sl = _f(stop_loss)
     mult = _f(mult, 1.5) or 1.5
@@ -167,21 +143,16 @@ def atr_divergence_pct(vps_atr: float, tv_implied_atr: float) -> float:
 
 
 class MarketEngine:
-    """
-    每品种一份：缓存最新 ATR/ADX，K 线闭合后刷新。
-    线程安全。
-    """
-
     def __init__(self, symbol: str, fetch_klines=None):
         self.symbol = str(symbol or "").upper()
-        self._fetch_klines = fetch_klines  # callable(symbol, interval, limit) -> list
+        self._fetch_klines = fetch_klines
         self._lock = threading.RLock()
         self.atr = 0.0
         self.adx = 0.0
         self.last_bar_open_ms = 0
         self.last_refresh_ts = 0.0
         self.last_error = ""
-        self.bars_90m_count = 0
+        self.bars_count = 0
 
     def bind_fetcher(self, fetch_klines):
         self._fetch_klines = fetch_klines
@@ -192,15 +163,16 @@ class MarketEngine:
                 "symbol": self.symbol,
                 "atr": float(self.atr),
                 "adx": float(self.adx),
+                "interval": SYNTH_INTERVAL,
+                "source_interval": KLINE_INTERVAL,
                 "last_bar_open_ms": int(self.last_bar_open_ms),
-                "bars_90m": int(self.bars_90m_count),
+                "bars": int(self.bars_count),
                 "updated_at": float(self.last_refresh_ts),
                 "error": self.last_error,
             }
 
     def refresh(self, force: bool = False) -> Tuple[float, float]:
-        """拉取 30m → 合成 90m → 更新 atr/adx。返回 (atr, adx)。"""
-        now = time.time()
+        now = time_mod.time()
         with self._lock:
             if (
                 not force
@@ -215,16 +187,16 @@ class MarketEngine:
             return float(self.atr), float(self.adx)
 
         try:
-            raw = self._fetch_klines(self.symbol, BASE_INTERVAL, FETCH_30M_LIMIT)
+            raw = self._fetch_klines(self.symbol, KLINE_INTERVAL, FETCH_LIMIT)
         except Exception as e:
             self.last_error = str(e)
             logger.warning(f"[行情引擎] {self.symbol} 拉K失败: {e}")
             return float(self.atr), float(self.adx)
 
-        bars90 = merge_30m_to_90m(raw)
-        atr = wilder_atr(bars90, ATR_PERIOD)
-        adx = wilder_adx(bars90, ADX_PERIOD)
-        bar_open = int(bars90[-1][0]) if bars90 else 0
+        bars = merge_30m_to_90m(raw or [])
+        atr = wilder_atr(bars, ATR_PERIOD)
+        adx = wilder_adx(bars, ADX_PERIOD)
+        bar_open = int(bars[-1][0]) if bars else 0
 
         with self._lock:
             if atr > 0:
@@ -233,17 +205,16 @@ class MarketEngine:
                 self.adx = adx
             if bar_open > 0:
                 self.last_bar_open_ms = bar_open
-            self.bars_90m_count = len(bars90)
+            self.bars_count = len(bars)
             self.last_refresh_ts = now
             self.last_error = "" if atr > 0 else "atr_zero"
             logger.info(
-                f"[行情引擎] {self.symbol} 90m合成={len(bars90)}根 | "
+                f"[行情引擎] {self.symbol} 90m={len(bars)}根(←30m) | "
                 f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f}"
             )
             return float(self.atr), float(self.adx)
 
 
-# 全局注册表
 _ENGINES = {}
 _ENGINES_LOCK = threading.Lock()
 

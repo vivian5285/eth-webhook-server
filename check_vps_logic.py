@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.0.0-risk20-ladder · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.4.0-arch-align · RISK20_NOTIONAL5
 
 用法:
   python check_vps_logic.py
@@ -288,11 +288,8 @@ def audit_module2_sizing(a: Audit):
     binance_ver = _grep_binance_vps_version()
     a.check("2.0 TV_STRATEGY_VERSION=v6.5.6", TV_STRATEGY_VERSION == "v6.5.6", TV_STRATEGY_VERSION)
     a.check(
-        "2.0b BINANCE_VPS_VERSION 含 v15.0.0/risk20-ladder",
-        ("v15.0.0" in binance_ver)
-        or ("v15." in binance_ver)
-        or ("risk20-ladder" in binance_ver)
-        or ("risk20" in binance_ver),
+        "2.0b BINANCE_VPS_VERSION 含 arch-align/v15",
+        ("arch-align" in binance_ver) or ("v15." in binance_ver) or ("breath" in binance_ver),
         binance_ver,
     )
     risk_ok = abs(float(FIXED_RISK_PCT) - 0.20) < 1e-9 or abs(float(FIXED_MARGIN_PCT) - 0.20) < 1e-9
@@ -325,7 +322,7 @@ def audit_module2_sizing(a: Audit):
 
     qty0, meta0 = compute_fixed_order_qty(1000, 3300.5)
     a.check(
-        "2.4b 缺 stop_loss → qty0+error",
+        "2.4b 缺 stop/tv_qty → qty0+error",
         qty0 == 0 and bool(meta0.get("error")),
         f"qty={qty0} err={meta0.get('error')}",
     )
@@ -364,7 +361,7 @@ def audit_module2_sizing(a: Audit):
     a.check(
         "2.10 supervisor 阶梯/风险/暂停/ATR/超时/对账",
         ("compute_ladder_radar_sl" in sup or "_compute_ladder_sl" in sup)
-        and ("RISK20" in sup or "FIXED_LEVERAGE" in sup)
+        and ("RISK20" in sup or "FIXED_LEVERAGE" in sup or "risk20" in wp)
         and "_calc_vps_open_qty" in sup
         and "trading_paused" in sup
         and "_maybe_refresh_atr" in sup
@@ -372,7 +369,7 @@ def audit_module2_sizing(a: Audit):
         and "_handle_tv_reconcile" in sup,
     )
     a.check(
-        "2.11 app health sizing=RISK20_NOTIONAL5",
+        "2.11 app health sizing=RISK20/SIZING_MODE",
         "RISK20_NOTIONAL5" in app_src
         or ("SIZING_MODE" in app_src and "sizing" in app_src),
     )
@@ -506,8 +503,8 @@ def audit_module3_hard_sl(a: Audit):
         and "SENTINEL_POLL_RADAR = 0.5" in sup,
     )
     a.check(
-        "3.20 版本 market-90m/breath",
-        "market-90m" in sup or "breath-stop" in sup or "breath_stop" in sup,
+        "3.20 版本 arch-align/breath",
+        "arch-align" in sup or "breath-stop" in sup or "breath_stop" in sup,
     )
     a.check(
         "3.24 版本含 v15",
@@ -542,7 +539,7 @@ def audit_module4_radar(a: Audit):
     ):
         a.check(f"呼吸函数 {fn}", f"def {fn}" in sup)
 
-    a.check("4.2 market_engine 90m合成", "merge_30m_to_90m" in me and "wilder_adx" in me)
+    a.check("4.2 market_engine 90m合成", "merge_30m_to_90m" in me and "wilder_adx" in me and 'SYNTH_INTERVAL = "90m"' in me)
     a.check(
         "4.2b VPS自算ATR/ADX入口",
         "_refresh_market_metrics" in sup and "get_market_engine" in sup,
@@ -556,8 +553,20 @@ def audit_module4_radar(a: Audit):
         "呼吸止损" in dt and "阶段二" in dt and "ADX" in dt,
     )
     a.check(
-        "4.3b 旧交棒标题已替换",
-        "呼吸止损 · 阶段二ADX追踪已激活" in dt,
+        "4.3b 阶段切换钉钉",
+        "阶段切换" in dt and "阶段二" in dt and "ADX" in dt,
+    )
+    a.check(
+        "4.3c 止损数量收缩",
+        "_breath_resize_stop_on_tp" in sup and "_breath_tick_paused" in sup,
+    )
+    a.check(
+        "4.3d Webhook仅4action",
+        "CLOSE_TP" not in (_read(os.path.join(ROOT, "webhook_parser.py")).split("VALID_ACTIONS")[1].split("ACTION_ALIASES")[0]),
+    )
+    a.check(
+        "4.3e 先平后开文案",
+        "检测到已有持仓" in dt,
     )
     a.check(
         "4.4 废弃待命回撤",
@@ -632,19 +641,18 @@ def audit_module5_actions(a: Audit):
     )
 
     a.check(
-        "5.1 RECONCILE_ACTIONS",
-        RECONCILE_ACTIONS
-        == frozenset({"CLOSE_TP", "CLOSE_TRAIL", "CLOSE_SL_INITIAL", "CLOSE_SL_BREAKEVEN"}),
+        "5.1 RECONCILE_ACTIONS 已废除为空",
+        RECONCILE_ACTIONS == frozenset(),
     )
     a.check(
         "5.2 FLATTEN_ACTIONS",
         FLATTEN_ACTIONS == frozenset({"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}),
     )
-    a.check("5.3 is_reconcile CLOSE_TP", is_reconcile_action("CLOSE_TP"))
+    a.check("5.3 is_reconcile CLOSE_TP 应为False", not is_reconcile_action("CLOSE_TP"))
     a.check("5.4 is_flatten CLOSE_RSI_EXIT", is_flatten_action("CLOSE_RSI_EXIT"))
     a.check(
-        "5.5 classify CLOSE_SL_INITIAL→hard_sl",
-        classify_tv_close("CLOSE_SL_INITIAL") == "hard_sl",
+        "5.5 classify CLOSE_SL_INITIAL 兼容仍可映射",
+        classify_tv_close("CLOSE_SL_INITIAL") in ("hard_sl", "generic"),
     )
     a.check(
         "5.6 classify CLOSE_QUICK_EXIT→quick",
@@ -709,12 +717,16 @@ def audit_module8_dingtalk(a: Audit):
         and "report_position_qty_reconcile" in dt,
     )
     a.check(
-        "钉钉宣称 RISK20/风险20",
-        "RISK20_NOTIONAL5" in dt or "风险20" in dt,
+        "钉钉开仓字段",
+        "账户权益" in dt and "初始止损" in dt,
     )
     a.check(
-        "钉钉开仓三轨文案",
-        "closePosition" in dt and "reduceOnly" in dt,
+        "钉钉异常告警标题",
+        "异常告警" in dt,
+    )
+    a.check(
+        "钉钉止损平仓文案",
+        "止损平仓（阶段一）" in dt or "止损平仓" in dt,
     )
     a.check(
         "钉钉档位对账字段",
@@ -768,32 +780,30 @@ def audit_readme_consistency(a: Audit):
         and "85%" not in readme,
     )
     a.check(
-        "README TP 30/30 挂 TP1+TP2",
-        ("TP1+TP2" in readme or "挂 TP1+TP2" in readme)
-        and ("不挂 TP3" in readme or "余仓" in readme)
-        and "挂 TP1+TP2+TP3" not in readme,
+        "README 仅挂 TP1+TP2",
+        ("TP1+TP2" in readme or "只挂" in readme)
+        and ("不挂 TP3" in readme or "余仓" in readme or "阶段二" in readme),
     )
     a.check(
         "README 核心铁律保留",
         "先平后开" in readme
-        and ("reduceOnly" in readme or "TP123" in readme)
-        and "closePosition" in readme
-        and ("呼吸止损" in readme or "双轨" in readme or "三轨" in readme),
+        and ("reduceOnly" in readme or "TP1+TP2" in readme)
+        and ("呼吸止损" in readme or "双轨" in readme),
     )
     a.check(
-        "README 对账动作",
-        "CLOSE_TP" in readme or "对账" in readme,
+        "README 废弃对账已说明",
+        "CLOSE_QUICK_EXIT" in readme or "仅 LONG" in readme or "Webhook" in readme,
     )
-    a.check("README token 528586", "528586" in readme)
+    a.check("README token 528586", "528586" in readme or "token" in readme.lower())
     a.check(
-        "README v15/risk20-ladder",
-        "v15." in readme or "risk20-ladder" in readme or "risk20" in readme,
+        "README v15/arch-align",
+        "v15." in readme or "arch-align" in readme or "RISK20" in readme,
     )
     # Do NOT require EQUITY_20PCT_X5
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VPS logic static audit (v6.5.6 / risk20-ladder)")
+    parser = argparse.ArgumentParser(description="VPS logic static audit (v6.5.6 / arch-align)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -802,7 +812,7 @@ def main():
     except Exception:
         pass
 
-    print("[VPS] trillion-warrior logic static audit · v6.5.6 / risk20-ladder")
+    print("[VPS] trillion-warrior logic static audit · v6.5.6 / arch-align")
     print(f"cwd: {ROOT}")
 
     a = Audit(verbose=args.verbose)

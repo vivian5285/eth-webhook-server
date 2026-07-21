@@ -687,8 +687,9 @@ class BinanceClient:
             logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
             return None
 
-    def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT", close_position=True):
-        """Algo 通道 STOP_MARKET（closePosition 全平硬止损）"""
+    def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
+                                     close_position=True, quantity=None):
+        """Algo 通道 STOP_MARKET：优先 quantity+reduceOnly；否则 closePosition。"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
@@ -698,11 +699,19 @@ class BinanceClient:
                 "type": "STOP_MARKET",
                 "triggerPrice": self.format_price(stop_price, symbol),
             }
-            if close_position:
+            if quantity is not None:
+                qty = self.format_quantity(quantity, symbol)
+                if qty <= 0:
+                    logger.error(f"[Algo止损跳过] 数量无效 {quantity}")
+                    return None
+                params["quantity"] = qty
+                params["reduceOnly"] = "true"
+            elif close_position:
                 params["closePosition"] = "true"
             order = self._futures_signed_request("post", "algoOrder", params)
+            tag = f"qty={quantity}" if quantity is not None else "closePosition"
             logger.info(
-                f"[Algo止损成功] {side} closePosition Stop @ {stop_price} "
+                f"[Algo止损成功] {side} {tag} Stop @ {stop_price} "
                 f"algoId={order.get('algoId', '') if isinstance(order, dict) else '?'}"
             )
             if isinstance(order, dict):
@@ -733,12 +742,14 @@ class BinanceClient:
             logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price}")
             return order
         except Exception as e:
-            if quantity is None and self._is_algo_switch_error(e):
+            if self._is_algo_switch_error(e):
                 logger.info(
-                    f"[止损单] 普通通道不可用({e}) → 切换 Algo closePosition @ {stop_price}"
+                    f"[止损单] 普通通道不可用({e}) → 切换 Algo @ {stop_price}"
                 )
                 return self.place_algo_stop_market_order(
-                    side, stop_price, symbol=symbol, close_position=True,
+                    side, stop_price, symbol=symbol,
+                    close_position=(quantity is None),
+                    quantity=quantity,
                 )
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
@@ -833,7 +844,7 @@ class BinanceClient:
             return None
 
     def fetch_klines(self, symbol="ETHUSDT", interval="30m", limit=220):
-        """期货 K 线原始行（供行情引擎合成 90m）。"""
+        """期货 K 线原始行（行情引擎拉 30m 合成 90m）。"""
         return self.client.futures_klines(
             symbol=symbol, interval=interval, limit=int(limit or 220),
         )
