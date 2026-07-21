@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.5.2-tv-field-spec · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.5.3-rigor-checks · RISK20_NOTIONAL5
 
 用法:
   python check_vps_logic.py
@@ -291,6 +291,7 @@ def audit_module2_sizing(a: Audit):
         "2.0b BINANCE_VPS_VERSION 含 v15",
         ("qty-tv-sl-adj" in binance_ver)
         or ("tv-field-spec" in binance_ver)
+        or ("rigor-checks" in binance_ver)
         or ("final-spec" in binance_ver)
         or ("arch-align" in binance_ver)
         or ("v15." in binance_ver)
@@ -567,6 +568,29 @@ def audit_module4_radar(a: Audit):
         a.check(f"呼吸函数 {fn}", f"def {fn}" in sup)
 
     a.check("4.2 market_engine 90m合成", "merge_30m_to_90m" in me and "wilder_adx" in me and 'SYNTH_INTERVAL = "90m"' in me)
+    a.check(
+        "4.2b 90m UTC epoch 对齐",
+        "PERIOD_90M_MS" in me and "bucket_90m_open_ms" in me and "utc_epoch" in me.lower(),
+    )
+    a.check(
+        "4.2c ATR异常中位数兜底",
+        "check_atr_anomaly" in me and "ATR_ANOMALY_RATIO" in me and "atr_anomaly_reject" in sup,
+    )
+    a.check(
+        "4.2d bar_time 乱序兜底",
+        "bar_time" in wp and "_last_bar_time_ms" in sup and "_extract_bar_time_ms" in sup,
+    )
+    a.check("4.2e check_90m_align 脚本", os.path.exists(os.path.join(ROOT, "check_90m_align.py")))
+    from market_engine import merge_30m_to_90m, PERIOD_30M_MS, PERIOD_90M_MS, check_atr_anomaly
+    # 从不规则起点合成，首根仍须 epoch 对齐
+    start = PERIOD_90M_MS + PERIOD_30M_MS
+    fake = [[start + i * PERIOD_30M_MS, 1, 2, 0.5, 1.2, 1] for i in range(30)]
+    merged = merge_30m_to_90m(fake)
+    a.check("4.2f 合成非空且对齐", bool(merged) and all(int(b[0]) % PERIOD_90M_MS == 0 for b in merged), str([b[0] for b in merged[:3]]))
+    anom, meta = check_atr_anomaly(1.0, [10.0] * 20, lookback=20, ratio=0.3)
+    a.check("4.2g ATR过低判异常", anom is True and meta.get("reason") == "atr_below_median_ratio", str(meta))
+    anom0, meta0 = check_atr_anomaly(0.0, [10.0] * 20)
+    a.check("4.2h ATR=0 无条件异常", anom0 is True, str(meta0))
     a.check(
         "4.2b VPS自算ATR/ADX入口",
         "_refresh_market_metrics" in sup and "get_market_engine" in sup,

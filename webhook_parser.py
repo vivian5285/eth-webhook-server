@@ -824,6 +824,7 @@ def normalize_tv_payload(data):
     qty1 = _to_float(src.get("qty1"))
     qty2 = _to_float(src.get("qty2"))
     qty3 = _to_float(src.get("qty3"))
+    bar_time = src.get("bar_time") or src.get("bar_time_ms") or src.get("barTime") or src.get("time")
     leg = str(src.get("leg") or "").strip()
     bot_id = str(src.get("bot_id") or src.get("botId") or "").strip()
     reason = str(src.get("reason") or src.get("exit_reason") or src.get("comment") or "").strip()
@@ -866,6 +867,15 @@ def normalize_tv_payload(data):
         out["qty2"] = qty2
     if qty3 is not None:
         out["qty3"] = qty3
+    if bar_time is not None and bar_time != "":
+        try:
+            bt = int(float(bar_time))
+            if 0 < bt < 10_000_000_000:
+                bt *= 1000
+            if bt > 0:
+                out["bar_time"] = bt
+        except (TypeError, ValueError):
+            pass
     if leg:
         out["leg"] = leg
     if bot_id:

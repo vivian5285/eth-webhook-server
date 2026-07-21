@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · VPS 实盘
 
-**当前版本：`v15.5.2-tv-field-spec`**  
+**当前版本：`v15.5.3-rigor-checks`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（含 TV 止损距调整系数）**  
 **保护引擎：呼吸止损（`breath_stop` · 90m ATR/ADX）**  
@@ -17,7 +17,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.2-tv-field-spec
+# version: v15.5.3-rigor-checks
 # sizing: RISK20_NOTIONAL5 · leverage: fixed_5 · tv_strategy: v6.5.6
 # radar: breath_stop_90m
 
@@ -265,12 +265,26 @@ currentStop = max(currentStop, 候选)   # 只上移不倒退
 | 项 | 值 |
 |----|-----|
 | 数据源 | 交易所 **30m** 原始 K 线 |
-| 合成 | 每 3 根 → 1 根 **90m**（开=首开，收=末收，高=三高，低=三低，量=求和） |
+| 合成 | 每 3 根完整 30m → 1 根 **90m**，**UTC epoch 对齐**（`open_time % (90×60×1000)==0`） |
+| 锚点 | `bucket = t - (t % PERIOD_90M_MS)`；禁止从进程启动时刻随意起算 |
 | 指标 | 合成 K 闭合后重算 **ATR(14)**、**ADX(14)**（Wilder / 与 TV RMA 对齐） |
 | 刷新下限 | ≥60s |
+| ATR 兜底 | 开仓前：ATR≤0 无条件拒单；或 ATR < 近50根中位数×30% → 拒本笔+钉钉（非永久暂停） |
 | 权威性 | 止损距离只用开仓锁定的 `open_atr`；ADX 可刷新；webhook atr/adx 无效 |
 
-上线前应用人工核对 VPS 自算 ATR/ADX 与 TV 90m 图表是否一致。
+上线前必须跑：
+
+```bash
+python3 check_90m_align.py          # 单元对齐
+python3 check_90m_align.py --live   # 拉实盘30m，打印90m开盘时间供与TV逐根比对
+```
+
+ATR/ADX 与 TV 抽样误差建议 **<5%**；边界错位不得凑合上线。
+
+### 8.1 Webhook `bar_time`（中优先级 · 已落地）
+
+JSON 可增 `"bar_time": 1721520000000`（K 线时间戳，Pine `time`）。  
+VPS 记录每 symbol 最近处理的 `bar_time`；更早的消息记日志并**不执行交易**（先平后开/幂等仍为主兜底）。
 
 ---
 
@@ -351,7 +365,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.2-tv-field-spec
+# 期望: v15.5.3-rigor-checks
 
 bash deploy_binance.sh
 # 脚本末尾会自动: python3 check_deploy_events.py --live
@@ -362,6 +376,9 @@ curl -s http://127.0.0.1:5003/health | python3 -m json.tool
 python3 check_deploy_events.py --live          # 事件函数 + smoke + health
 python3 check_deploy_events.py --live --deep   # 再跑 check_vps_logic 全套
 python3 check_vps_logic.py -v                  # 仅静态逻辑
+# 上线前必须：90m 边界对齐（--live 拉实盘后与 TV 逐根比对开盘时间）
+python3 check_90m_align.py
+python3 check_90m_align.py --live
 ```
 
 ### `check_deploy_events.py` 覆盖

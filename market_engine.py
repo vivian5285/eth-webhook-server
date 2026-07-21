@@ -3,25 +3,39 @@
 """
 VPS 行情引擎：30m×3 合成 90m → ATR(14) / ADX(14)
 
-币安无原生 90m；拉 30m K 线合并后算 Wilder ATR/ADX（与 TV RMA 对齐）。
+币安无原生 90m；拉 30m K 线后按 **UTC epoch 90m 边界** 合并，
+再算 Wilder ATR/ADX（与 TV RMA 对齐）。
+
+合成锚点（与 TradingView 90 分钟图一致）：
+  PERIOD_90M_MS = 90 * 60 * 1000
+  bucket_open = open_time - (open_time % PERIOD_90M_MS)
+仅当某 bucket 凑齐 3 根完整 30m（bucket / +30m / +60m）才产出一根已闭合 90m。
+禁止「从进程启动时刻随意起算」的滑动三元组。
+
 止损决策只认本模块数值；webhook 不传 ATR/ADX。
 """
 from __future__ import annotations
 
 import logging
+import statistics
 import threading
 time_mod = __import__("time")
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
 KLINE_INTERVAL = "30m"  # 拉取周期；合成后等效 90m
 SYNTH_INTERVAL = "90m"
+PERIOD_30M_MS = 30 * 60 * 1000
+PERIOD_90M_MS = 90 * 60 * 1000  # UTC epoch 对齐锚
 ATR_PERIOD = 14
 ADX_PERIOD = 14
 FETCH_LIMIT = 220
 REFRESH_MIN_SEC = 60.0
 ATR_COMPARE_ALERT_PCT = 0.20
+# 开仓 ATR 合理性：低于近 N 根 ATR 中位数的该比例 → 拒绝开仓
+ATR_MEDIAN_LOOKBACK = 50
+ATR_ANOMALY_RATIO = 0.30
 
 
 def _f(x, default=0.0) -> float:
@@ -31,18 +45,54 @@ def _f(x, default=0.0) -> float:
         return float(default)
 
 
+def bucket_90m_open_ms(open_time_ms: int) -> int:
+    """将任意时间戳对齐到 UTC epoch 90m 桶开盘时间。"""
+    t = int(open_time_ms or 0)
+    if t <= 0:
+        return 0
+    return t - (t % PERIOD_90M_MS)
+
+
 def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
-    """每 3 根 30m 合并为 1 根 90m：[open_time, o, h, l, c, volume, ...]."""
-    rows = list(klines_30m or [])
+    """
+    按 UTC epoch 90m 边界合成：
+      仅输出 bucket 内恰好具备 3 根完整 30m
+      (t0, t0+30m, t0+60m) 的已闭合 90m K。
+    返回 [open_time, o, h, l, c, volume]。
+    """
+    rows = []
+    for r in (klines_30m or []):
+        try:
+            t = int(r[0])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if t <= 0:
+            continue
+        rows.append(r)
     if len(rows) < 3:
         return []
+
+    rows.sort(key=lambda r: int(r[0]))
+    by_t = {}
+    for r in rows:
+        by_t[int(r[0])] = r
+
+    # 从数据中出现过的 90m 桶起算（已按 epoch 对齐，非进程启动偏移）
+    buckets = sorted({bucket_90m_open_ms(int(r[0])) for r in rows})
     out = []
-    # 对齐到完整三元组
-    n = len(rows) - (len(rows) % 3)
-    for i in range(0, n, 3):
-        a, b, c = rows[i], rows[i + 1], rows[i + 2]
+    for bucket in buckets:
+        if bucket <= 0:
+            continue
+        expected = (
+            bucket,
+            bucket + PERIOD_30M_MS,
+            bucket + 2 * PERIOD_30M_MS,
+        )
+        if not all(t in by_t for t in expected):
+            continue
+        a, b, c = by_t[expected[0]], by_t[expected[1]], by_t[expected[2]]
         out.append([
-            a[0],
+            bucket,
             a[1],
             max(_f(a[2]), _f(b[2]), _f(c[2])),
             min(_f(a[3]), _f(b[3]), _f(c[3])),
@@ -50,6 +100,21 @@ def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
             _f(a[5]) + _f(b[5]) + _f(c[5]),
         ])
     return out
+
+
+def atr_series(bars: Sequence, period: int = ATR_PERIOD) -> List[float]:
+    """逐根闭合后的 Wilder ATR 序列（与最终 atr 同算法，便于中位数）。"""
+    if not bars or len(bars) < period + 1:
+        return []
+    trs = _true_ranges(bars)
+    if len(trs) < period:
+        return []
+    atr = sum(trs[:period]) / period
+    series = [float(atr)]
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+        series.append(float(atr))
+    return series
 
 
 def _true_ranges(bars: Sequence) -> List[float]:
@@ -63,15 +128,8 @@ def _true_ranges(bars: Sequence) -> List[float]:
 
 
 def wilder_atr(bars: Sequence, period: int = ATR_PERIOD) -> float:
-    if not bars or len(bars) < period + 1:
-        return 0.0
-    trs = _true_ranges(bars)
-    if len(trs) < period:
-        return 0.0
-    atr = sum(trs[:period]) / period
-    for tr in trs[period:]:
-        atr = (atr * (period - 1) + tr) / period
-    return float(atr)
+    series = atr_series(bars, period)
+    return float(series[-1]) if series else 0.0
 
 
 def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
@@ -142,6 +200,51 @@ def atr_divergence_pct(vps_atr: float, tv_implied_atr: float) -> float:
     return abs(v - t) / v
 
 
+def check_atr_anomaly(
+    atr: float,
+    atr_history: Sequence[float],
+    lookback: int = ATR_MEDIAN_LOOKBACK,
+    ratio: float = ATR_ANOMALY_RATIO,
+) -> Tuple[bool, dict]:
+    """
+    返回 (is_anomaly, meta)。
+    atr<=0 或空值 → 无条件异常（高优先级）。
+    atr < median(近 lookback 根) * ratio → 异常（拒绝本次开仓）。
+    """
+    atr = _f(atr)
+    meta = {
+        "atr": atr,
+        "lookback": int(lookback),
+        "ratio": float(ratio),
+        "median": 0.0,
+        "threshold": 0.0,
+        "reason": "",
+    }
+    if atr <= 0:
+        meta["reason"] = "atr_zero_or_missing"
+        return True, meta
+    hist = [float(x) for x in (atr_history or []) if float(x or 0) > 0]
+    if len(hist) < max(5, int(lookback * 0.2)):
+        # 历史不足时仅拦截 atr<=0；有少量样本仍用中位数
+        if len(hist) < 3:
+            meta["reason"] = "history_insufficient_skip"
+            return False, meta
+    window = hist[-int(lookback):] if lookback > 0 else hist
+    try:
+        med = float(statistics.median(window))
+    except statistics.StatisticsError:
+        meta["reason"] = "median_unavailable"
+        return False, meta
+    meta["median"] = round(med, 6)
+    thr = med * float(ratio)
+    meta["threshold"] = round(thr, 6)
+    if med > 0 and atr < thr:
+        meta["reason"] = "atr_below_median_ratio"
+        return True, meta
+    meta["reason"] = "ok"
+    return False, meta
+
+
 class MarketEngine:
     def __init__(self, symbol: str, fetch_klines=None):
         self.symbol = str(symbol or "").upper()
@@ -153,6 +256,8 @@ class MarketEngine:
         self.last_refresh_ts = 0.0
         self.last_error = ""
         self.bars_count = 0
+        self.atr_history: List[float] = []
+        self.last_bars_90m: List[list] = []
 
     def bind_fetcher(self, fetch_klines):
         self._fetch_klines = fetch_klines
@@ -165,11 +270,32 @@ class MarketEngine:
                 "adx": float(self.adx),
                 "interval": SYNTH_INTERVAL,
                 "source_interval": KLINE_INTERVAL,
+                "align": "utc_epoch_90m",
+                "period_90m_ms": PERIOD_90M_MS,
                 "last_bar_open_ms": int(self.last_bar_open_ms),
                 "bars": int(self.bars_count),
+                "atr_history_n": len(self.atr_history),
                 "updated_at": float(self.last_refresh_ts),
                 "error": self.last_error,
             }
+
+    def get_atr_median(self, lookback: int = ATR_MEDIAN_LOOKBACK) -> float:
+        with self._lock:
+            hist = [x for x in self.atr_history if x > 0]
+        if not hist:
+            return 0.0
+        window = hist[-int(lookback):] if lookback > 0 else hist
+        try:
+            return float(statistics.median(window))
+        except statistics.StatisticsError:
+            return 0.0
+
+    def check_open_atr(self, atr: Optional[float] = None) -> Tuple[bool, dict]:
+        """开仓前调用：True=异常应拒绝。"""
+        with self._lock:
+            cur = float(atr if atr is not None else self.atr)
+            hist = list(self.atr_history)
+        return check_atr_anomaly(cur, hist)
 
     def refresh(self, force: bool = False) -> Tuple[float, float]:
         now = time_mod.time()
@@ -194,7 +320,8 @@ class MarketEngine:
             return float(self.atr), float(self.adx)
 
         bars = merge_30m_to_90m(raw or [])
-        atr = wilder_atr(bars, ATR_PERIOD)
+        series = atr_series(bars, ATR_PERIOD)
+        atr = float(series[-1]) if series else 0.0
         adx = wilder_adx(bars, ADX_PERIOD)
         bar_open = int(bars[-1][0]) if bars else 0
 
@@ -206,11 +333,17 @@ class MarketEngine:
             if bar_open > 0:
                 self.last_bar_open_ms = bar_open
             self.bars_count = len(bars)
+            self.last_bars_90m = list(bars)
+            if series:
+                self.atr_history = [float(x) for x in series if float(x) > 0]
             self.last_refresh_ts = now
             self.last_error = "" if atr > 0 else "atr_zero"
             logger.info(
-                f"[行情引擎] {self.symbol} 90m={len(bars)}根(←30m) | "
-                f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f}"
+                f"[行情引擎] {self.symbol} 90m={len(bars)}根(UTC epoch对齐←30m) | "
+                f"last_open={bar_open} | "
+                f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f} | "
+                f"ATR中位(近{min(len(self.atr_history), ATR_MEDIAN_LOOKBACK)})="
+                f"{self.get_atr_median():.4f}"
             )
             return float(self.atr), float(self.adx)
 

@@ -103,6 +103,8 @@ from market_engine import (
     implied_atr_from_stop,
     atr_divergence_pct,
     ATR_COMPARE_ALERT_PCT,
+    ATR_ANOMALY_RATIO,
+    ATR_MEDIAN_LOOKBACK,
 )
 from tv_seq import (
     TVSeqBuffer,
@@ -131,7 +133,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.2-tv-field-spec"
+BINANCE_VPS_VERSION = "v15.5.3-rigor-checks"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -335,6 +337,7 @@ class PositionSupervisorBinance:
         self.trading_paused = False
         self.trading_pause_reason = ""
         self._state_old_schema = False
+        self._last_bar_time_ms = 0  # 最近处理过的 bar_time（乱序/过期兜底）
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -951,6 +954,24 @@ class PositionSupervisorBinance:
         payload = dict(payload or {})
         bi, sq = extract_seq_meta(payload)
         action = str(payload.get("action", "")).strip().upper() or "?"
+        # bar_time 乱序/过期兜底（中优先级）：早于已处理最新 bar_time → 只记日志不交易
+        bar_time = self._extract_bar_time_ms(payload)
+        if bar_time > 0 and int(getattr(self, "_last_bar_time_ms", 0) or 0) > 0:
+            if bar_time < int(self._last_bar_time_ms):
+                logger.warning(
+                    f"📬 [{self.symbol}] 过期/乱序 webhook 已忽略 | action={action} "
+                    f"bar_time={bar_time} < last={self._last_bar_time_ms}"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"过期webhook已忽略 [{self.symbol}]",
+                        f"action={action} bar_time={bar_time} < 已处理={self._last_bar_time_ms} | "
+                        f"不执行交易（先平后开/幂等仍兜底主路径）",
+                        level="提示",
+                    )
+                except Exception:
+                    pass
+                return
         # 60s 去重：所有路径统一（action+symbol+price）；平/开成功后清指纹
         fp = self._signal_fingerprint(payload)
         now = time.time()
@@ -970,19 +991,43 @@ class PositionSupervisorBinance:
             return
         self._last_signal_fp = fp
         self._last_signal_fp_ts = now
+        if bar_time > 0:
+            self._last_bar_time_ms = max(int(getattr(self, "_last_bar_time_ms", 0) or 0), bar_time)
         # 有 bar_index+seq：幂等键去重 + 有序缓冲
         if bi is not None and sq is not None:
             status = self._seq_buffer.add(payload)
             logger.info(
-                f"📬 TV时序入队: {action} bar={bi} seq={sq} → {status} | "
+                f"📬 TV时序入队: {action} bar={bi} seq={sq} "
+                f"bar_time={bar_time or '-'} → {status} | "
                 f"缓冲深度 {self._seq_buffer.depth()} 旁路 {self._signal_queue.qsize()}"
             )
             return
         status = self._seq_buffer.add(payload)  # legacy：1.0s 缓存窗口后再冲刷
         logger.info(
-            f"📬 TV信号入队(无时序·缓存窗口): {action} → {status} | "
+            f"📬 TV信号入队(无时序·缓存窗口): {action} "
+            f"bar_time={bar_time or '-'} → {status} | "
             f"缓冲深度 {self._seq_buffer.depth()}"
         )
+
+    @staticmethod
+    def _extract_bar_time_ms(payload) -> int:
+        """TV K线收盘/开盘时间戳（ms）。支持 bar_time / time / bar_time_ms。"""
+        if not isinstance(payload, dict):
+            return 0
+        for key in ("bar_time", "bar_time_ms", "time", "barTime"):
+            raw = payload.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                v = int(float(raw))
+            except (TypeError, ValueError):
+                continue
+            # 秒级时间戳 → ms
+            if 0 < v < 10_000_000_000:
+                v *= 1000
+            if v > 0:
+                return v
+        return 0
 
     def signal_queue_depth(self):
         return self._seq_buffer.depth() + self._signal_queue.qsize()
@@ -2348,6 +2393,7 @@ class PositionSupervisorBinance:
                     "defense_order_ids": dict(getattr(self, "_defense_order_ids", {}) or {}),
                     "trading_paused": bool(getattr(self, "trading_paused", False)),
                     "trading_pause_reason": str(getattr(self, "trading_pause_reason", "") or ""),
+                    "last_bar_time_ms": int(getattr(self, "_last_bar_time_ms", 0) or 0),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -2708,7 +2754,7 @@ class PositionSupervisorBinance:
                     f"atr={atr} initialStop={stop} price={px} | "
                     f"禁止在止损距为0时下单（除零保护）",
                     level="紧急",
-                    suggestion="检查行情引擎90m ATR；恢复后再发信号",
+                    suggestion="检查行情引擎90m ATR / 数据源；恢复后再发信号",
                 )
             except Exception:
                 pass
@@ -2717,6 +2763,44 @@ class PositionSupervisorBinance:
                 "principal": principal,
                 "stop_loss": stop,
                 "atr": atr,
+                "sizing_mode": SIZING_MODE,
+            }
+        # ATR 相对历史中位数过低 → 拒绝本次开仓（非永久暂停）
+        try:
+            eng = self._market_engine()
+            is_anom, anom_meta = eng.check_open_atr(atr)
+        except Exception as e:
+            logger.warning(f"ATR中位数检查跳过: {e}")
+            is_anom, anom_meta = False, {}
+        if is_anom:
+            reason = (anom_meta or {}).get("reason") or "atr_anomaly"
+            med = float((anom_meta or {}).get("median") or 0)
+            thr = float((anom_meta or {}).get("threshold") or 0)
+            logger.error(
+                f"🚫 [{self.symbol}] ATR异常兜底拒绝开仓 | atr={atr:.4f} "
+                f"median={med:.4f} thr={thr:.4f}({ATR_ANOMALY_RATIO:.0%}×中位) "
+                f"reason={reason}"
+            )
+            try:
+                level = "紧急" if reason == "atr_zero_or_missing" else "警告"
+                dingtalk.report_system_alert(
+                    f"ATR异常·已拒绝本次开仓 [{self.symbol}]",
+                    f"当前ATR={atr:.4f} · 历史中位数={med:.4f} "
+                    f"(近{ATR_MEDIAN_LOOKBACK}根) · 阈值={thr:.4f} "
+                    f"({ATR_ANOMALY_RATIO:.0%}) · reason={reason}\n"
+                    f"仅拒绝本笔信号，后续信号仍可正常判断",
+                    level=level,
+                    suggestion="核行情引擎90m对齐与数据源；勿在ATR失真下单",
+                )
+            except Exception:
+                pass
+            return 0.0, {
+                "error": "atr_anomaly_reject",
+                "principal": principal,
+                "atr": atr,
+                "atr_median": med,
+                "atr_threshold": thr,
+                "atr_anomaly_reason": reason,
                 "sizing_mode": SIZING_MODE,
             }
         if tv_qty <= 0:
@@ -11683,6 +11767,7 @@ class PositionSupervisorBinance:
                     self.trading_pause_reason = str(
                         s.get("trading_pause_reason", "") or ""
                     )
+                    self._last_bar_time_ms = int(s.get("last_bar_time_ms", 0) or 0)
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:

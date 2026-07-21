@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.5.2-tv-field-spec** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **v15.5.3-rigor-checks** · sizing **RISK20_NOTIONAL5**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -22,6 +22,19 @@
 | 12 | TP/止损 **订单 ID 持久化** | `_defense_order_ids` |
 | 13 | 哨兵 **0.5s** | `SENTINEL_POLL_*=0.5` |
 | 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT** | `_trim` no-op · `report_hard_sl_fail_abort` |
+| 15 | 90m **UTC epoch** 对齐；上线前 `check_90m_align.py --live` 与 TV 逐根对时 | `bucket_90m_open_ms` · `merge_30m_to_90m` |
+| 16 | ATR≤0 或 < 近50根中位数×30% → **拒本笔开仓** + 钉钉 | `check_atr_anomaly` · `_calc_vps_open_qty` |
+| 17 | 可选 `bar_time`：早于已处理 → 忽略不交易 | `enqueue_signal` · `webhook_parser` |
+
+---
+
+## 严谨性三项（上线前）
+
+| # | 项 | 阻塞? | 验证 |
+|---|----|-------|------|
+| 1 | 90m 边界与 TV 对齐 | **是** | `python check_90m_align.py --live` → TV 90m 开盘时间完全重合；ATR/ADX 抽样误差 <5% |
+| 2 | Webhook `bar_time` | 否 | JSON 带 `bar_time`；乱序旧消息只记日志 |
+| 3 | ATR 异常兜底 | **是** | atr=0 / 过低中位数 → 拒单钉钉，非永久暂停 |
 
 ---
 
@@ -70,5 +83,6 @@ TV.stop_loss **只**调 sl_adj，不挂盘。
 
 ```bash
 python check_vps_logic.py
+python check_90m_align.py --live
 curl -s http://127.0.0.1:5003/health | python -m json.tool
 ```
