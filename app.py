@@ -75,6 +75,25 @@ def webhook(ticker=None):
 
     logger.info(f"[Webhook] [{sym}] {format_webhook_log(data)}")
 
+    # 开仓必要字段：price + stop_loss
+    if raw_action in ("LONG", "SHORT"):
+        px = data.get("price")
+        sl = data.get("stop_loss") or data.get("tv_sl")
+        try:
+            px_ok = px is not None and float(px) > 0
+        except (TypeError, ValueError):
+            px_ok = False
+        try:
+            sl_ok = sl is not None and float(sl) > 0
+        except (TypeError, ValueError):
+            sl_ok = False
+        if not px_ok or not sl_ok:
+            return jsonify({
+                "status": "error",
+                "message": "LONG/SHORT require valid price and stop_loss",
+                "got": {"price": px, "stop_loss": sl},
+            }), 400
+
     try:
         threading.Thread(
             target=supervisor.handle_signal, args=(data,), daemon=True,
@@ -82,6 +101,11 @@ def webhook(ticker=None):
         ).start()
     except Exception as e:
         logger.error(f"启动线程失败 [{sym}]: {e}")
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to start processing: {e}",
+            "symbol": sym,
+        }), 500
 
     return jsonify({
         "status": "success",

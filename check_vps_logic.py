@@ -172,9 +172,9 @@ def audit_module1_symbol(a: Audit):
         str([m.get("action") for m in collapsed]),
     )
     a.check(
-        "1.5d4 缓存窗口 1~2s",
-        1.0 <= float(SAME_BAR_SETTLE_SEC) <= 2.0
-        and 1.0 <= float(LEGACY_SETTLE_SEC) <= 2.0,
+        "1.5d4 缓存窗口固定 1.0s",
+        abs(float(SAME_BAR_SETTLE_SEC) - 1.0) < 1e-9
+        and abs(float(LEGACY_SETTLE_SEC) - 1.0) < 1e-9,
         f"bar={SAME_BAR_SETTLE_SEC} legacy={LEGACY_SETTLE_SEC}",
     )
     a.check(
@@ -195,7 +195,12 @@ def audit_module1_symbol(a: Audit):
         and "collapse_batch_for_execution" in sup
         and "reorder_batch_close_then_open" in sup
         and "action_exec_rank" in tvseq
-        and "永远先平后开" in tvseq,
+        and "永远先平后开" in tvseq
+        and "defense_order_ids" in sup
+        and "_set_defense_order_id" in sup
+        and "TimedRotatingFileHandler" in sup
+        and "SENTINEL_POLL_NORMAL = 1.0" in sup
+        and "restart_no_persistence_with_position" in sup,
     )
     a.check(
         "1.5g 无菌空仓闸（仓+单皆零）",

@@ -267,6 +267,7 @@ class BinanceClient:
         def on_close(ws, code, msg):
             logger.warning(f"币安公开 WS 断开: {code} {msg}")
 
+        backoff = 1.0
         while self._pub_ws_running:
             with self._pub_ws_lock:
                 symbols = sorted(self._pub_ws_symbols) or ["ETHUSDT"]
@@ -286,7 +287,9 @@ class BinanceClient:
 
                 t = threading.Thread(target=_run, daemon=True)
                 t.start()
+                connected_ok = False
                 while t.is_alive() and self._pub_ws_running:
+                    connected_ok = True
                     if self._pub_ws_restart:
                         try:
                             ws.close()
@@ -295,10 +298,14 @@ class BinanceClient:
                         break
                     time.sleep(0.5)
                 t.join(timeout=5)
+                if connected_ok and self._pub_ws_running and not self._pub_ws_restart:
+                    backoff = 1.0  # 正常连过再断 → 重置退避
             except Exception as e:
                 logger.error(f"币安公开 WS 异常: {e}")
             if self._pub_ws_running:
-                time.sleep(3)
+                logger.warning(f"币安公开 WS 重连等待 {backoff:.0f}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 60.0)
 
     def _create_listen_key(self):
         try:
@@ -421,10 +428,12 @@ class BinanceClient:
         def on_close(ws, code, msg):
             logger.warning(f"币安私有 WS 断开: {code} {msg}")
 
+        backoff = 1.0
         while self._ud_ws_running:
             key = self._listen_key or self._create_listen_key()
             if not key:
-                time.sleep(5)
+                time.sleep(min(backoff, 5))
+                backoff = min(backoff * 2.0, 60.0)
                 continue
             self._listen_key = key
             url = f"{WS_PRIVATE_BASE}/{key}"
@@ -451,10 +460,13 @@ class BinanceClient:
 
                 threading.Thread(target=_ping, daemon=True).start()
                 ws.run_forever(ping_interval=180, ping_timeout=30)
+                backoff = 1.0  # 曾连上后断开 → 下次从 1s 起退避
             except Exception as e:
                 logger.error(f"币安私有 WS 异常: {e}")
             if self._ud_ws_running:
-                time.sleep(3)
+                logger.warning(f"币安私有 WS 重连等待 {backoff:.0f}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 60.0)
 
     def get_current_price(self, symbol="ETHUSDT", prefer_ws=True):
         """优先 WS 缓存；REST 仅作兜底且限频（有 WS 时 ≥30s 一次）"""

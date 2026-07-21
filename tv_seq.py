@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 TV Webhook 时序：bar_index + seq + 缓存窗口
-- 缓存窗口：同 symbol 首包后 1~2s settle，到期统一处理（不无限等待）
+- 缓存窗口：同 symbol 首包后 **固定 1.0s** settle，到期统一处理（不无限等待）
 - 排序：先 bar_index 升序；同 bar 内 **动作优先**（CLOSE → UPDATE → OPEN），再 seq
-- 铁律：同 bar / 同秒同时收到开仓+平仓时，**永远先平后开**，最终状态必须是开仓
-  （即使 TV 把 OPEN 标成 seq=1、CLOSE 标成 seq=2，也强制重排；禁止先开后秒平）
+- 铁律：同窗有平仓时 **一律先平后开**（平仓一次 + 最新开仓）；禁止先开后秒平
 - 折叠：平仓消息幂等只执行一次；开仓只执行窗口内最新一条
 - 幂等：symbol_bar_index_seq_action（Redis 优先，否则本地文件 TTL）
 - CLOSE 后释放开仓幂等键，允许同 bar 再开（刷新仓位）
@@ -25,10 +24,9 @@ logger = logging.getLogger(__name__)
 
 SEQ_IDEMPOTENCY_TTL_SEC = int(os.getenv("TV_SEQ_IDEMPOTENCY_TTL", "86400"))  # 24h
 SEQ_PENDING_WAIT_SEC = float(os.getenv("TV_SEQ_PENDING_WAIT", "3.0"))  # 2~5s 窗口
-# 同 bar / 无时序首包后短停，等待同秒并发的开/平警报聚齐（再强制先平后开）
-SAME_BAR_SETTLE_SEC = float(os.getenv("TV_SAME_BAR_SETTLE", "1.0"))
-# 无 bar_index/seq 的 legacy 消息：同样走 1s 缓存窗口（与同 bar settle 对齐）
-LEGACY_SETTLE_SEC = float(os.getenv("TV_LEGACY_SETTLE", str(SAME_BAR_SETTLE_SEC)))
+# 缓存窗口固定 1.0s（需求锁定；忽略环境变量漂移）
+SAME_BAR_SETTLE_SEC = 1.0
+LEGACY_SETTLE_SEC = 1.0
 SEQ_STORE_FILE = os.getenv("TV_SEQ_STORE_FILE", "logs/tv_seq_idempotency.json")
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 

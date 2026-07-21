@@ -8,7 +8,7 @@ import os
 import json
 import queue
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from binance_client import binance_client
 from position_manager import position_manager
 import dingtalk
@@ -103,8 +103,11 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _LOG_DIR = os.path.join(_BASE_DIR, 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
 _BRAIN_LOG = os.path.join(_LOG_DIR, 'binance_brain.log')
-# 日志保留约 30 天：5MB×约 40 卷 ≈ 200MB 上限（按日量估算）
-handler = RotatingFileHandler(_BRAIN_LOG, maxBytes=5 * 1024 * 1024, backupCount=40)
+# 按自然日滚动，保留 30 天
+handler = TimedRotatingFileHandler(
+    _BRAIN_LOG, when="midnight", interval=1, backupCount=30, encoding="utf-8",
+)
+handler.suffix = "%Y-%m-%d"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] Brain: %(message)s',
@@ -112,12 +115,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.0.4-tv-flat-ladder"
+BINANCE_VPS_VERSION = "v15.0.5-order-persist"
 
 
-SENTINEL_POLL_NORMAL = 8
-SENTINEL_POLL_ARMING = 5
-SENTINEL_POLL_RADAR = 5
+SENTINEL_POLL_NORMAL = 1.0
+SENTINEL_POLL_ARMING = 1.0
+SENTINEL_POLL_RADAR = 1.0
 IDLE_PATROL_INTERVAL_SEC = 12
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
 DUST_QTY_ETH = 0.004
@@ -303,7 +306,9 @@ class PositionSupervisorBinance:
         self.radar_activated = False
         self._atr_last_update_ts = 0.0
         self._tp_order_placed_ts = {}  # level(1/2) → unix ts，挂单超时移交雷达
-        self.trading_paused = False  # 仅强平失败兜底；方向背离优先全平对齐 TV
+        # TP1/TP2/止损 交易所订单 ID（持久化，重启可按 ID 跟踪）
+        self._defense_order_ids = {"tp1": "", "tp2": "", "stop": ""}
+        self.trading_paused = False  # 无持久化有仓 / 强平失败兜底；方向背离优先全平对齐 TV
         self.trading_pause_reason = ""
 
         self.state_file = os.path.join(
@@ -921,20 +926,8 @@ class PositionSupervisorBinance:
         payload = dict(payload or {})
         bi, sq = extract_seq_meta(payload)
         action = str(payload.get("action", "")).strip().upper() or "?"
-        # 有 bar_index+seq：幂等键去重 + 有序缓冲；不再用 45s 指纹（避免误杀同 bar 不同 seq）
-        if bi is not None and sq is not None:
-            if self._open_in_progress and action in ("LONG", "SHORT"):
-                logger.warning(f"📬 开仓进行中，忽略重复建仓信号 {action} bar={bi} seq={sq}")
-                return
-            status = self._seq_buffer.add(payload)
-            logger.info(
-                f"📬 TV时序入队: {action} bar={bi} seq={sq} → {status} | "
-                f"缓冲深度 {self._seq_buffer.depth()} 旁路 {self._signal_queue.qsize()}"
-            )
-            return
-
+        # 60s 去重：所有路径统一（action+symbol+price）；平/开成功后清指纹
         fp = self._signal_fingerprint(payload)
-        action = fp[0] or "?"
         now = time.time()
         if (
             fp == self._last_signal_fp
@@ -945,11 +938,22 @@ class PositionSupervisorBinance:
             )
             return
         if self._open_in_progress and action in ("LONG", "SHORT"):
-            logger.warning(f"📬 开仓进行中，忽略重复建仓信号 {action}")
+            logger.warning(
+                f"📬 开仓进行中，忽略重复建仓信号 {action}"
+                + (f" bar={bi} seq={sq}" if bi is not None else "")
+            )
             return
         self._last_signal_fp = fp
         self._last_signal_fp_ts = now
-        status = self._seq_buffer.add(payload)  # legacy：1s 缓存窗口后再冲刷
+        # 有 bar_index+seq：幂等键去重 + 有序缓冲
+        if bi is not None and sq is not None:
+            status = self._seq_buffer.add(payload)
+            logger.info(
+                f"📬 TV时序入队: {action} bar={bi} seq={sq} → {status} | "
+                f"缓冲深度 {self._seq_buffer.depth()} 旁路 {self._signal_queue.qsize()}"
+            )
+            return
+        status = self._seq_buffer.add(payload)  # legacy：1.0s 缓存窗口后再冲刷
         logger.info(
             f"📬 TV信号入队(无时序·缓存窗口): {action} → {status} | "
             f"缓冲深度 {self._seq_buffer.depth()}"
@@ -2304,6 +2308,7 @@ class PositionSupervisorBinance:
                     "radar_activated": bool(getattr(self, "radar_activated", False)),
                     "atr_last_update_ts": float(getattr(self, "_atr_last_update_ts", 0) or 0),
                     "tp_order_placed_ts": dict(getattr(self, "_tp_order_placed_ts", {}) or {}),
+                    "defense_order_ids": dict(getattr(self, "_defense_order_ids", {}) or {}),
                     "trading_paused": bool(getattr(self, "trading_paused", False)),
                     "trading_pause_reason": str(getattr(self, "trading_pause_reason", "") or ""),
                 }, f)
@@ -4215,6 +4220,7 @@ class PositionSupervisorBinance:
                     )
                     if res:
                         actions += 1
+                        self._mark_tp_order_placed(lv['level'], order_res=res)
                         logger.info(
                             f"🔧 重启纠偏 TP{lv['level']} @{price:.2f} → {target_q} ETH"
                         )
@@ -4225,7 +4231,7 @@ class PositionSupervisorBinance:
             )
             if res:
                 actions += 1
-                self._mark_tp_order_placed(lv['level'])
+                self._mark_tp_order_placed(lv['level'], order_res=res)
                 logger.info(f"🔧 重启补挂 TP{lv['level']} @{price:.2f} qty={target_q} ETH")
             time.sleep(0.35)
 
@@ -4719,6 +4725,8 @@ class PositionSupervisorBinance:
             self._shield_fail_streak = 0
             self._tv_sl_missing_alerted = False
             self.current_sl = target
+            if res is not None:
+                self._set_defense_order_id("stop", res, save=False)
             self._save_state()
             self._record_shield_maintain(success=True)
             logger.info(
@@ -4907,15 +4915,18 @@ class PositionSupervisorBinance:
                     f"📈 穿价 TP{lv['level']} 已推离 → @{px:.2f} mark={curr_px:.2f}"
                 )
             ok = False
+            last_res = None
             for attempt in range(max(1, retries + 1)):
                 res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True,
                 )
                 if res:
                     ok = True
+                    last_res = res
                     break
                 time.sleep(0.2)
             if ok:
                 placed += 1
+                self._mark_tp_order_placed(int(lv["level"]), order_res=last_res)
                 logger.info(f"📈 UPDATE_TP 挂 TP{lv['level']} {q} @ {px:.2f}")
             else:
                 logger.error(f"❌ UPDATE_TP 挂 TP{lv['level']} @ {px:.2f} 失败")
@@ -6411,9 +6422,10 @@ class PositionSupervisorBinance:
                     binance_client.cancel_order(self.symbol, order=o)
                     time.sleep(0.25)
             logger.info(f"  + 补挂 TP{level} @ {px:.2f} qty={q} ETH")
-            if binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True):
+            res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True)
+            if res:
                 placed += 1
-                self._mark_tp_order_placed(level)
+                self._mark_tp_order_placed(level, order_res=res)
             else:
                 logger.error(f"  ❌ 补挂 TP{level} @ {px:.2f} 失败")
             time.sleep(0.4)
@@ -9264,6 +9276,20 @@ class PositionSupervisorBinance:
         if level not in (1, 2):
             return False
         canceled = False
+        # 优先按持久化 orderId 撤单
+        stored_oid = str(
+            (getattr(self, "_defense_order_ids", {}) or {}).get(f"tp{level}") or ""
+        ).strip()
+        if stored_oid:
+            try:
+                if binance_client.cancel_order(self.symbol, order_id=stored_oid):
+                    canceled = True
+                    self._clear_defense_order_ids(f"tp{level}", save=False)
+                    logger.info(
+                        f"📋 [{self.symbol}] 按持久化ID取消 TP{level} orderId={stored_oid}"
+                    )
+            except Exception as e:
+                logger.debug(f"按ID取消 TP{level} 跳过: {e}")
         try:
             orders = binance_client.get_open_orders(self.symbol) or []
         except Exception:
@@ -9293,6 +9319,8 @@ class PositionSupervisorBinance:
         placed.pop(str(level), None)
         placed.pop(level, None)
         self._tp_order_placed_ts = placed
+        self._clear_defense_order_ids(f"tp{level}", save=False)
+        self._save_state()
         if canceled and handoff_radar:
             self.radar_activated = True
             try:
@@ -9325,6 +9353,8 @@ class PositionSupervisorBinance:
         self._radar_handoff_done = False
         self._radar_armed_after_tp1 = False
         self._tp_order_placed_ts = {}
+        self._clear_defense_order_ids(save=False)
+        self._clear_signal_fingerprint()
         self._save_state()
         logger.info(f"🧹 [{self.symbol}] 状态已重置 | {source}")
 
@@ -10162,6 +10192,7 @@ class PositionSupervisorBinance:
             verified = self._verify_position(self.current_side)
         if verified:
             live_qty = verified["size"]
+            self._clear_signal_fingerprint()
             if target_qty > 0 and live_qty > target_qty * OPEN_OVERSIZE_RATIO:
                 live_qty = self._trim_position_to_target(target_qty, self.current_side)
                 verified = self._get_active_position() or verified
@@ -11221,13 +11252,62 @@ class PositionSupervisorBinance:
             self._save_state()
         return True
 
-    def _mark_tp_order_placed(self, level):
+    def _extract_exchange_order_id(self, res):
+        """从下单响应提取 orderId / algoId。"""
+        if not isinstance(res, dict):
+            return ""
+        oid = res.get("algoId") or res.get("orderId") or res.get("clientOrderId")
+        return str(oid or "").strip()
+
+    def _set_defense_order_id(self, key, res_or_id, save=True):
+        """key: tp1 | tp2 | stop"""
+        key = str(key or "").strip().lower()
+        if key not in ("tp1", "tp2", "stop"):
+            return
+        if isinstance(res_or_id, dict):
+            oid = self._extract_exchange_order_id(res_or_id)
+        else:
+            oid = str(res_or_id or "").strip()
+        ids = dict(getattr(self, "_defense_order_ids", None) or {})
+        ids.setdefault("tp1", "")
+        ids.setdefault("tp2", "")
+        ids.setdefault("stop", "")
+        ids[key] = oid
+        self._defense_order_ids = ids
+        if save:
+            self._save_state()
+        if oid:
+            logger.info(f"📎 [{self.symbol}] 持久化订单ID {key}={oid}")
+
+    def _clear_defense_order_ids(self, *keys, save=True):
+        ids = dict(getattr(self, "_defense_order_ids", None) or {})
+        ids.setdefault("tp1", "")
+        ids.setdefault("tp2", "")
+        ids.setdefault("stop", "")
+        targets = keys or ("tp1", "tp2", "stop")
+        for k in targets:
+            kk = str(k or "").strip().lower()
+            if kk in ids:
+                ids[kk] = ""
+        self._defense_order_ids = ids
+        if save:
+            self._save_state()
+
+    def _clear_signal_fingerprint(self):
+        """平仓/开仓成功后清指纹，避免 60s 误杀同价再入场。"""
+        self._last_signal_fp = None
+        self._last_signal_fp_ts = 0.0
+
+    def _mark_tp_order_placed(self, level, order_res=None):
         level = int(level or 0)
         if level not in (1, 2):
             return
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         placed[str(level)] = time.time()
         self._tp_order_placed_ts = placed
+        if order_res is not None:
+            self._set_defense_order_id(f"tp{level}", order_res, save=False)
+        self._save_state()
 
     def _check_tp_order_timeouts(self, curr_px=0.0):
         """TP1/TP2 挂单超过 5 分钟未成交 → 取消并移交雷达，禁止重挂。"""
@@ -11695,6 +11775,7 @@ class PositionSupervisorBinance:
                 )
                 if res:
                     placed += 1
+                    self._mark_tp_order_placed(int(lv["level"]), order_res=res)
                 else:
                     logger.error(
                         f"❌ 挂 TP{lv['level']} 失败 {q} @ {px:.2f} {self.symbol}"
@@ -11779,6 +11860,8 @@ class PositionSupervisorBinance:
                 self.shield_active = False
                 self.shield_tiers_consumed = []
                 self.tp_levels_consumed = []
+                self._clear_defense_order_ids(save=False)
+                self._clear_signal_fingerprint()
                 self._snapshot_sizing_principal("全平后本金重置")
             else:
                 residual = self._get_active_position()
@@ -11833,7 +11916,8 @@ class PositionSupervisorBinance:
             return
         try:
             saved_monitoring = False
-            if os.path.exists(self.state_file):
+            had_state_file = os.path.exists(self.state_file)
+            if had_state_file:
                 with open(self.state_file, 'r') as f:
                     s = json.load(f)
                     saved_monitoring = bool(s.get("monitoring"))
@@ -11911,6 +11995,12 @@ class PositionSupervisorBinance:
                     self._tp_order_placed_ts = {
                         str(k): float(v) for k, v in dict(raw_tp_ts).items()
                     }
+                    raw_oids = s.get("defense_order_ids") or {}
+                    self._defense_order_ids = {
+                        "tp1": str((raw_oids or {}).get("tp1") or ""),
+                        "tp2": str((raw_oids or {}).get("tp2") or ""),
+                        "stop": str((raw_oids or {}).get("stop") or ""),
+                    }
                     self.trading_paused = bool(s.get("trading_paused", False))
                     self.trading_pause_reason = str(
                         s.get("trading_pause_reason", "") or ""
@@ -11949,6 +12039,34 @@ class PositionSupervisorBinance:
                 self._ensure_sentinel_running_quiet()
                 self._last_idle_takeover_ts = 0.0
                 return
+
+            # 8.4：无持久化 + 有持仓 → 告警并暂停新开仓（仍接管防线防裸奔）
+            if (
+                not had_state_file
+                and pos
+                and isinstance(pos, dict)
+                and float(pos.get("size") or 0) > 0
+            ):
+                self.trading_paused = True
+                self.trading_pause_reason = "restart_no_persistence_with_position"
+                self._save_state()
+                logger.error(
+                    f"⛔ [{self.symbol}] 无持久化状态但实盘有仓 → 暂停交易并接管防线"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"重启无持久化·已暂停 [{self.symbol}]",
+                        (
+                            f"状态文件缺失但实盘有 {pos.get('side')} "
+                            f"{pos.get('size')} {self.unit_label} @ "
+                            f"{float(pos.get('entry_price') or 0):.2f} → "
+                            f"已暂停新开仓；仍尝试挂防线"
+                        ),
+                        level="紧急",
+                        suggestion="核对状态文件/人工确认后解除 trading_paused",
+                    )
+                except Exception as e:
+                    logger.warning(f"无持久化暂停钉钉失败: {e}")
 
             if pos:
                 self._recover_in_progress = True
