@@ -111,7 +111,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.0.3-ladder-tv-flat-ding"
+BINANCE_VPS_VERSION = "v15.0.4-tv-flat-ladder"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -302,7 +302,7 @@ class PositionSupervisorBinance:
         self.radar_activated = False
         self._atr_last_update_ts = 0.0
         self._tp_order_placed_ts = {}  # level(1/2) → unix ts，挂单超时移交雷达
-        self.trading_paused = False  # 重启方向不一致等 → 暂停新开仓
+        self.trading_paused = False  # 仅强平失败兜底；方向背离优先全平对齐 TV
         self.trading_pause_reason = ""
 
         self.state_file = os.path.join(
@@ -11996,18 +11996,22 @@ class PositionSupervisorBinance:
                             recover_ok = True
                             self._recover_in_progress = False
                             return
-                        # 若未能判定强平（信源瞬时不明），仍告警并暂停防误开
-                        self.trading_paused = True
-                        self.trading_pause_reason = (
-                            f"重启方向背离未强平: 实盘{side} vs TV{opp}"
+                        # 兜底：信源瞬时抖动时仍强制市价全平，禁止以暂停留仓
+                        logger.error(
+                            f"🚨 [重启] enforce未触发 → 兜底市价全平 "
+                            f"实盘{side} vs TV{opp}"
                         )
-                        dingtalk.report_system_alert(
-                            f"重启方向背离·待处理 [{self.symbol}]",
-                            f"实盘 {side} {pos['size']} {self.unit_label} vs 最新TV {opp} | "
-                            f"自动强平未执行，已暂停新开仓",
-                            suggestion="核对 TV 方向后发 OPEN，或人工平仓",
+                        self._close_all(
+                            f"TV方向为准·重启兜底全平：实盘({side})≠TV({opp})",
+                            force_align=(side, opp),
+                            force_verify_note=(
+                                f"触发源: VPS重启兜底 | 实盘 {side} vs TV {opp} | "
+                                "已市价全平对齐 TV"
+                            ),
                         )
-                        self._save_state()
+                        recover_ok = True
+                        self._recover_in_progress = False
+                        return
 
                     if reconcile.get("manual_open") or float(self.watched_qty or 0) <= 0:
                         logger.info(
