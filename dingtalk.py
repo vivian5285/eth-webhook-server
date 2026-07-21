@@ -25,6 +25,8 @@ from webhook_parser import (
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
     get_radar_activation_ratio,
+    RADAR_ACTIVATE_TP1_FRAC,
+    SIZING_MODE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
     ENTRY_TYPE_PYRAMID,
@@ -422,12 +424,15 @@ def _title_dedup_window(title):
     return float(DINGTALK_TITLE_DEDUP_SEC)
 
 
-def send_alert(title, data_dict, header_color=G_TITLE):
-    """对外统一入口：默认攒批；DINGTALK_BATCH_DISABLE=1 则即时发送。同类标题短窗去重。"""
+def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
+    """Unified DingTalk entry. immediate=True: send now (skip 6s batch)."""
     if not DINGTALK_WEBHOOK and not WECHAT_WEBHOOK:
+        logger.warning(
+            "DINGTALK_WEBHOOK empty -> skip alert: %s",
+            str(title)[:72],
+        )
         return
     sym = str(_ctx_symbol.get() or "").upper()
-    # 标题里已含品种时，空 ctx 也归一，避免 |title 与 ETHUSDT|title 双键漏过去重
     raw_title = str(title or "")
     dedup_key = f"{sym}|{raw_title[:96]}"
     if not sym:
@@ -436,7 +441,7 @@ def send_alert(title, data_dict, header_color=G_TITLE):
                 dedup_key = f"{token}|{raw_title[:96]}"
                 break
     now = time.time()
-    window = _title_dedup_window(raw_title)
+    window = 15.0 if immediate else _title_dedup_window(raw_title)
     with _title_dedup_lock:
         dead = [
             k for k, ts in _title_dedup_ts.items()
@@ -447,16 +452,19 @@ def send_alert(title, data_dict, header_color=G_TITLE):
         last = float(_title_dedup_ts.get(dedup_key) or 0)
         if last > 0 and now - last < window:
             logger.info(
-                f"🔇 钉钉标题去重({window:.0f}s): {raw_title[:72]}"
+                "DingTalk title dedup(%.0fs): %s",
+                window,
+                raw_title[:72],
             )
             return
         _title_dedup_ts[dedup_key] = now
-    if DINGTALK_BATCH_DISABLE:
+    if immediate or DINGTALK_BATCH_DISABLE:
         md = _build_alert_markdown(title, data_dict, header_color)
-        _post_with_retry(str(title), md)
+        ok = _post_with_retry(str(title), md)
+        if not ok:
+            logger.error("DingTalk immediate send failed: %s", raw_title[:72])
         return
     _batcher.enqueue(title, data_dict, header_color)
-
 def get_regime_name(regime_code):
     names = {
         1: "🧊 [1档] 极弱震荡 (保守防守)",
@@ -509,29 +517,27 @@ def _format_tp_audit(audit, tv_tps=None, unit_label=None, symbol=None):
 
 
 def _format_vps_sizing_basis(principal, meta=None, leverage=None):
-    """TV 唯一仓位公式 — 管理员一眼看懂"""
+    """VPS 最终仓位：风险20%/止损距 ∩ 名义×5 ∩ TV.qty"""
     meta = meta or {}
-    risk = float(meta.get("risk_pct") or meta.get("effective_risk_pct") or 0)
-    ratio = float(meta.get("qty_ratio") or 1.0)
-    order_amount = float(meta.get("order_amount", 0) or meta.get("position_value", 0) or 0)
-    lev = float(leverage or meta.get("leverage") or 0)
-    stop_dist = float(meta.get("stop_dist", 0) or 0)
-    risk_amt = float(meta.get("risk_amount") or meta.get("margin") or 0)
+    mode = str(meta.get("sizing_mode") or "RISK20_NOTIONAL5")
+    risk_capital = float(meta.get("risk_capital") or meta.get("margin") or 0)
+    stop_dist = float(meta.get("stop_dist") or 0)
+    notional = float(meta.get("notional") or meta.get("order_amount") or 0)
+    notional_cap = float(meta.get("notional_cap") or 0)
+    tv_qty = meta.get("tv_qty")
     lines = [
-        f"本金 **{float(principal):.2f}** U × risk_pct **{risk:.3f}%** "
-        f"= 风险金额 **{risk_amt:.2f}** U",
+        f"权益 **{float(principal):.2f}** U · sizing=`{mode}`",
+        f"风险资金 **{risk_capital:.2f}** U（权益×20%）",
     ]
     if stop_dist > 0:
-        lines.append(
-            f"÷ 止损距离 **{stop_dist:.2f}** → 理论仓 · "
-            f"min(理论, 权益×{lev:.0f}x/价) × ratio **{ratio:.2f}**（无硬上限）"
-        )
-    if order_amount > 0:
-        lines.append(f"→ 名义约 **{order_amount:.2f}** USDT（bind={meta.get('bind', '?')}）")
-    if stop_dist > 0:
-        lines.append(f"（TV tv_sl 距离 **{stop_dist:.2f}**，实盘按此挂硬止损）")
+        lines.append(f"÷ 止损距 **{stop_dist:.2f}** → 风险仓上限")
+    if notional_cap > 0:
+        lines.append(f"名义上限 **{notional_cap:.2f}** U（权益×5）")
+    if notional > 0:
+        lines.append(f"→ 实际名义约 **{notional:.2f}** USDT（bind={meta.get('bind', '?')}）")
+    if tv_qty is not None:
+        lines.append(f"TV.qty 上限 **{float(tv_qty):.4f}**")
     return "\n".join(lines)
-
 
 def _format_sizing_basis(principal, margin_pct, leverage, margin_usdt=None):
     """兼容旧调用 — 现按 TV risk_pct 展示"""
@@ -606,7 +612,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         ),
         "💰 进场成本": _g(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", G_MAIN),
         "📦 开单头寸": _g(
-            f"**{qty}** {unit} ({EXCHANGE_LABEL} **{lev_label}** · TV仓位公式)",
+            f"**{qty}** {unit} ({EXCHANGE_LABEL} **{lev_label}** · 风险20%/止损距·名义×5)",
             G_ACCENT,
         ),
         "📐 杠杆": _g(
@@ -758,20 +764,23 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
 
 def report_force_align(real_side, expected_side, verify_note="", verified=True):
     data = {
-        "🚨 异常状况": _g("**实盘方向与 TV 战略指令发生严重背离！**", G_DEEP),
-        "🕵️ 现场方向": _g(real_side, G_ACCENT),
-        "🧠 策略指令": _g(expected_side, G_LIGHT),
-        "⚡ 仲裁结果": _verify_line(
+        "🚨 异常状况": _g("**实盘方向与最新 TV 不一致**", G_DEEP),
+        "🕵️ 实盘方向": _g(real_side, G_ACCENT),
+        "🧠 最新 TV": _g(expected_side, G_LIGHT),
+        "⚡ 处置": _verify_line(
             verify_note if not verified else "",
-            f"{VERIFY_TAG} | 已核武全平，账本归零",
-            "⏳ 强平已提交，REST 同步略延迟 | 账本复位中",
+            f"{VERIFY_TAG} | 已市价全平 · 账本归零 · 等待下一笔 TV 开仓",
+            "⏳ 强平已提交，REST 同步中 | 账本复位",
         ),
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🚨 严重警告：方向强行物理对齐", data, G_TITLE)
-
-
+    send_alert(
+        "🧭 TV 方向为准 · 已全平对齐",
+        data,
+        G_TITLE,
+        immediate=True,
+    )
 def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False,
                             tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
                             tv_regime=None, tv_atr=None, tv_field_sources=None,
@@ -870,6 +879,27 @@ def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels
     send_alert("🎯 重启 · 部分止盈修复", data, G_TITLE)
 
 
+def report_tv_reconcile(symbol=None, action="", leg="", reason="", tv_qty=0,
+                        tv_price=0, live_qty=0, unit_label=None):
+    """v6.5.6 reconcile: no orders, notify only."""
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or "").upper() or "?"
+    data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
+        "📋 对账动作": _g(f"**{action}** leg={leg or '-'}", G_MAIN),
+        "📌 TV数量/价": _g(
+            f"{float(tv_qty or 0)} {unit} @ {float(tv_price or 0):.2f}", G_LIGHT
+        ),
+        "📦 实盘仓位": _g(f"**{float(live_qty or 0):.4f}** {unit}", G_MAIN),
+        "📝 reason": _g(str(reason or "—")[:120], G_MUTED),
+        "✅ VPS动作": _g(
+            "**状态同步+止损调整** · 不主动市价平仓",
+            G_ACCENT,
+        ),
+    }
+    send_alert(f"📋 [{sym}] TV对账 · {action}", data, G_TITLE)
+
+
 def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
                             verify_note="", tp_matched=0, tp_expected=0, tp_audit=None,
                             last_tv_signal=None, radar_sl_ok=True,
@@ -906,7 +936,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
             else f"{get_radar_activation_ratio(regime) * 100:.0f}%(档位)"
         )
         radar_txt = _g(
-            f"待命 (价触激活线 {act} 后雷达5阶段保本)",
+            f"待命 (价触激活线 {act} 后雷达阶梯雷达保本)",
             G_MUTED,
         )
 
@@ -966,7 +996,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     })
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🔄 币安 VPS 重启 · 闪电接管报告", data)
+    send_alert("🔄 币安 VPS · 重启闪电接管", data, immediate=True)
 
 
 def report_recover_standby(verify_note="", version="", symbol=None):
@@ -979,7 +1009,7 @@ def report_recover_standby(verify_note="", version="", symbol=None):
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🔄 [{sym}] 币安 VPS 重启 · 空仓待命", data, G_ACCENT)
+    send_alert(f"🔄 [{sym}] 币安 VPS · 空仓待命", data, G_ACCENT, immediate=True)
 
 
 def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pct, threshold_pct,
@@ -1037,7 +1067,7 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
     send_alert(title, data, color)
 
 
-def report_system_alert(title, detail, level="紧急", suggestion=""):
+def report_system_alert(title, detail, level="紧急", suggestion="", immediate=False):
     data = {
         "⚠️ 告警级别": _g(f"【{level}】需管理员关注", G_DEEP),
         "📝 发生了什么": _g(f"**{title}**", G_MAIN),
@@ -1045,7 +1075,7 @@ def report_system_alert(title, detail, level="紧急", suggestion=""):
     }
     if suggestion:
         data["💡 建议操作"] = _g(suggestion, G_LIGHT)
-    send_alert(f"⚠️ 系统告警：{title}", data, G_TITLE)
+    send_alert(f"⚠️ 系统告警：{title}", data, G_TITLE, immediate=immediate)
 
 
 def report_position_qty_reconcile(side="", baseline=0, live_qty=0, curr_px=0,
@@ -1431,6 +1461,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     send_alert(f"🛡️ [{sym}] TV硬止损 · 已撤销（转雷达）", data, G_TITLE)
 
 
+# radar_act_px + RADAR_ACTIVATE_TP1_FRAC (journey 85% ladder)
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
                            symbol=None, unit_label=None, trigger_gate="",
@@ -1448,7 +1479,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🚪 启动闸门": _g(f"**{gate}**", G_ACCENT),
         "📡 雷达进度": _g(
             f"**{radar_progress:.0%}** "
-            f"(5阶段·激活线{get_radar_activation_ratio(regime)*100:.0f}%)",
+            f"(阶梯雷达·激活线{get_radar_activation_ratio(regime)*100:.0f}%)",
             G_ACCENT,
         ),
         "🗑️ 硬止损": _g("已撤销/合并" if shield_cleared else "清理中", G_MAIN),

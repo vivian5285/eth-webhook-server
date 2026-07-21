@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server-main` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.0.0-risk20-ladder** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **v15.0.3-ladder-tv-flat-ding** · sizing **RISK20_NOTIONAL5**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -15,7 +15,7 @@
 | 5 | 平仓确认只对账+调止损，**不主动市价平仓** | `_handle_tv_reconcile()` |
 | 6 | 反转保护 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |
 | 7 | 去重 60s · 挂单超时 5min · ATR 5min 刷新 | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` · `ATR_UPDATE_SEC` |
-| 8 | 重启方向背离 → 告警 + **暂停交易** | `trading_paused` |
+| 8 | 实盘/重启与 TV 方向背离 → **先全平** 对齐最新 TV + 钉钉 | `_enforce_tv_direction_or_flat` |
 | 9 | token 必须 = `528586` | `app.py` webhook |
 | 10 | **ETH / XAU** 独立状态 | `symbol_config.py` · `SUPERVISORS` |
 
@@ -56,7 +56,7 @@ qty      = floor(理论数量 × 1000) / 1000
 | 重复消息 | 60s 同 action+symbol+price 忽略 |
 | 开仓前 | 强制清仓 |
 | 改单失败 | 重试 3 次 → 告警保持现状 |
-| 重启方向不一致 | 告警 + 暂停交易 |
+| 实盘/重启与 TV 方向不一致 | 先全平对齐 TV + 钉钉 |
 | TP3 | 永不挂限价 |
 
 ---

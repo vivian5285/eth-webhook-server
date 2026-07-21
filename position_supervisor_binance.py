@@ -111,7 +111,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.0.1-tv-direction-force-flat"
+BINANCE_VPS_VERSION = "v15.0.3-ladder-tv-flat-ding"
 
 
 SENTINEL_POLL_NORMAL = 8
@@ -12380,6 +12380,7 @@ def bootstrap_supervisors():
                 "多品种重启核查汇总",
                 " | ".join(summaries) if summaries else "无品种",
                 suggestion="有仓品种应挂齐 TP123+TV硬止损；雷达仅现价达激活线后；重启禁止无故平仓",
+                immediate=True,
             )
         except Exception as e:
             logger.warning(f"多品种重启汇总钉钉跳过: {e}")
