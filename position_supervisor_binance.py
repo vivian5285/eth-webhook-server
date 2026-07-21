@@ -131,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.1-qty-tv-sl-adj"
+BINANCE_VPS_VERSION = "v15.5.2-tv-field-spec"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -318,6 +318,9 @@ class PositionSupervisorBinance:
         self._last_radar_trail_progress = 0.0
         self._radar_work_urgent = False  # WS 达激活线 → 哨兵立刻跑雷达
         self.tv_suggested_qty = 0.0  # TV webhook qty 上限
+        self.tv_qty1 = 0.0  # TV TP1 数量意图（按实开仓缩放后挂限价）
+        self.tv_qty2 = 0.0
+        self.tv_qty3 = 0.0  # 不挂限价，余仓交阶段二
         self.radar_step_count = 0
         self.radar_activated = False
         self.breakeven_phase = False  # 呼吸止损阶段二
@@ -2331,6 +2334,9 @@ class PositionSupervisorBinance:
                     "base_qty": float(getattr(self, "base_qty", 0) or 0),
                     "add_count": int(getattr(self, "add_count", 0) or 0),
                     "tv_suggested_qty": float(getattr(self, "tv_suggested_qty", 0) or 0),
+                    "tv_qty1": float(getattr(self, "tv_qty1", 0) or 0),
+                    "tv_qty2": float(getattr(self, "tv_qty2", 0) or 0),
+                    "tv_qty3": float(getattr(self, "tv_qty3", 0) or 0),
                     "radar_step_count": int(getattr(self, "radar_step_count", 0) or 0),
                     "radar_activated": bool(getattr(self, "radar_activated", False)),
                     "breakeven_phase": bool(getattr(self, "breakeven_phase", False)),
@@ -2608,6 +2614,10 @@ class PositionSupervisorBinance:
         tv_qty = self._safe_float((payload or {}).get("qty"), 0)
         if tv_qty > 0:
             self.tv_suggested_qty = tv_qty
+        # TV 分腿数量意图（qty3 不挂；qty1/qty2 按实开仓缩放后挂限价）
+        self.tv_qty1 = self._safe_float((payload or {}).get("qty1"), 0)
+        self.tv_qty2 = self._safe_float((payload or {}).get("qty2"), 0)
+        self.tv_qty3 = self._safe_float((payload or {}).get("qty3"), 0)
         # TV stop_loss 仅作 sizing 调整系数输入（不挂盘）
         tv_sl = self._safe_float(
             (payload or {}).get("stop_loss")
@@ -2625,9 +2635,9 @@ class PositionSupervisorBinance:
         logger.info(
             f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/VPS止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
             f"| TV.qty={self.tv_suggested_qty or '-'} "
+            f"| TV.qty1/2/3={self.tv_qty1 or '-'}/{self.tv_qty2 or '-'}/{self.tv_qty3 or '-'} "
             f"| TV.sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0) or '-'} "
-            f"| 分腿={[round(x * 100) for x in ratios]}% "
-            f"| 挂TP1+TP2(30/30/40余仓交阶段二) | sizing={SIZING_MODE}"
+            f"| 挂TP1+TP2(价格=tv tp；数量=qty1/qty2按实开缩放) | sizing={SIZING_MODE}"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
@@ -3150,19 +3160,53 @@ class PositionSupervisorBinance:
         return sorted(prices)
 
     def _tp_slices_for_initial(self, initial_qty):
-        """返回可挂限价的 TP1+TP2+TP3；数量固定 30/30/40，价格用 TV tp。"""
-        ratios = list(
-            getattr(self, "_leg_ratios", None)
-            or LEG_TP_RATIOS
-            or self.regime_settings[self._tp_split_regime()]["ratios"]
-        )
-        o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
+        """
+        返回可挂限价的 TP1+TP2（不挂 TP3）。
+        数量：优先 TV qty1/qty2，按 实开仓/TV总量 缩放；缺省回退 30/30。
+        价格：TV tp1/tp2。
+        """
+        initial_qty = float(initial_qty or 0)
+        q1 = float(getattr(self, "tv_qty1", 0) or 0)
+        q2 = float(getattr(self, "tv_qty2", 0) or 0)
+        q3 = float(getattr(self, "tv_qty3", 0) or 0)
+        tv_total = float(getattr(self, "tv_suggested_qty", 0) or 0)
+        denom = q1 + q2 + q3
+        if denom <= 0:
+            denom = tv_total
+
+        if q1 > 0 and initial_qty > 0 and denom > 0:
+            scale = initial_qty / denom
+            o1 = round(q1 * scale, 3)
+            o2 = round(q2 * scale, 3) if q2 > 0 else 0.0
+            if o1 + o2 > initial_qty + 1e-9:
+                o2 = max(0.0, round(initial_qty - o1, 3))
+            o3 = round(max(0.0, initial_qty - o1 - o2), 3)
+            logger.info(
+                f"📐 [{self.symbol}] TP切片按TV qty1/2 缩放 "
+                f"scale={scale:.4f} (实开{initial_qty}/TV基准{denom}) "
+                f"→ TP1={o1} TP2={o2} 余仓(不挂)={o3}"
+            )
+        else:
+            ratios = list(
+                getattr(self, "_leg_ratios", None)
+                or LEG_TP_RATIOS
+                or self.regime_settings[self._tp_split_regime()]["ratios"]
+            )
+            o1, o2, o3 = self._split_tp_quantities(initial_qty, ratios)
+            logger.info(
+                f"📐 [{self.symbol}] TP切片回退比例 {ratios} "
+                f"→ TP1={o1} TP2={o2} 余仓(不挂)={o3}"
+            )
+
         slices = [
             {"level": 1, "price": self.tv_tps[0], "qty": o1},
             {"level": 2, "price": self.tv_tps[1], "qty": o2},
             {"level": 3, "price": self.tv_tps[2], "qty": o3},
         ]
-        return [s for s in slices[:PLACE_TP_LEVELS] if float(s.get("price") or 0) > 0 and float(s.get("qty") or 0) > 0]
+        return [
+            s for s in slices[:PLACE_TP_LEVELS]
+            if float(s.get("price") or 0) > 0 and float(s.get("qty") or 0) > 0
+        ]
 
     def _tp_split_regime(self):
         """止盈比例以开仓档位为准（open_regime），避免 TV 档位变化导致比例算错"""
@@ -11587,6 +11631,9 @@ class PositionSupervisorBinance:
                     self.base_qty = float(s.get("base_qty", 0) or 0)
                     self.add_count = int(s.get("add_count", 0) or 0)
                     self.tv_suggested_qty = float(s.get("tv_suggested_qty", 0) or 0)
+                    self.tv_qty1 = float(s.get("tv_qty1", 0) or 0)
+                    self.tv_qty2 = float(s.get("tv_qty2", 0) or 0)
+                    self.tv_qty3 = float(s.get("tv_qty3", 0) or 0)
                     self.radar_step_count = int(s.get("radar_step_count", 0) or 0)
                     self.radar_activated = bool(s.get("radar_activated", False))
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))

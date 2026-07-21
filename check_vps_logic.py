@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.5.1-qty-tv-sl-adj · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.5.2-tv-field-spec · RISK20_NOTIONAL5
 
 用法:
   python check_vps_logic.py
@@ -290,6 +290,7 @@ def audit_module2_sizing(a: Audit):
     a.check(
         "2.0b BINANCE_VPS_VERSION 含 v15",
         ("qty-tv-sl-adj" in binance_ver)
+        or ("tv-field-spec" in binance_ver)
         or ("final-spec" in binance_ver)
         or ("arch-align" in binance_ver)
         or ("v15." in binance_ver)

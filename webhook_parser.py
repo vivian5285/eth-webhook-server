@@ -210,7 +210,10 @@ def format_regime_tp_ratios_label(regime=None):
 
 
 def get_leg_tp_ratios(payload=None):
-    """固定 30/30/40，不依赖 TV qty1/2/3（数量由实开仓切分，价格用 TV tp）。"""
+    """
+    默认 30/30/40（缺 qty1/qty2 时回退）。
+    有 TV qty1/qty2 时，supervisor._tp_slices_for_initial 按 qty 缩放挂单，不走本比例。
+    """
     return list(LEG_TP_RATIOS)
 
 

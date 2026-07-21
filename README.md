@@ -1,6 +1,6 @@
 # GEMINI 双轨交易工厂 · VPS 实盘
 
-**当前版本：`v15.5.1-qty-tv-sl-adj`**  
+**当前版本：`v15.5.2-tv-field-spec`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（含 TV 止损距调整系数）**  
 **保护引擎：呼吸止损（`breath_stop` · 90m ATR/ADX）**  
@@ -17,7 +17,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.1-qty-tv-sl-adj
+# version: v15.5.2-tv-field-spec
 # sizing: RISK20_NOTIONAL5 · leverage: fixed_5 · tv_strategy: v6.5.6
 # radar: breath_stop_90m
 
@@ -90,16 +90,45 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 **一律拒绝 / 忽略**（不执行）：  
 `CLOSE_TP` · `CLOSE_TRAIL` · `CLOSE_SL_*` · `CLOSE_TP3` · `UPDATE_SL` · `UPDATE_TP` · `leg` 字段驱动平仓等。
 
-| 字段 | 用途 |
-|------|------|
-| `action` / `price` / `qty` | 必填（开仓）；`qty` 为上限帽 |
-| `tp1` / `tp2` / `tp3` | TP 限价价格（只挂 TP1+TP2；tp3 仅日志参考） |
-| `stop_loss` / `tv_sl` | **仅日志参考**，不参与止损计算 |
-| `atr` / `adx` | **不读取、不采纳**；一律用 VPS 行情引擎 |
-| `symbol` / `ticker` | 路由 ETH / XAU |
-| `bar_index` / `seq` | 时序排序与幂等 |
-| `token` | 必须 = `528586`（可用环境变量覆盖） |
-| `reason` | 反转平仓原因文案 |
+### 2.1 开仓消息示例
+
+```json
+{
+  "action": "LONG",
+  "symbol": "ETHUSDT",
+  "price": 1900.0,
+  "qty": 12,
+  "qty1": 3,
+  "qty2": 3,
+  "qty3": 6,
+  "stop_loss": 1860.0,
+  "tp1": 1954.0,
+  "tp2": 2000.0,
+  "tp3": 2044.0,
+  "token": "528586"
+}
+```
+
+### 2.2 每个字段用在哪（是否参与实际止损价）
+
+| 字段 | VPS 怎么用 | 参与实际止损价？ |
+|------|------------|------------------|
+| `price` | 开仓参考价；与 `stop_loss` 做差得到「TV 隐含止损距离」，只用于仓位换算 | **否** |
+| `qty` | 三选一候选之一（先经 sl_adj 换算，见第四节） | **否**（只影响仓位大小） |
+| `qty1` / `qty2` | TP1/TP2 **限价止盈**挂单数量意图；按 `实开仓/TV总量` 缩放后挂出 | **否** |
+| `qty3` | **不使用**（TP3 不挂限价，余仓交阶段二） | 不适用 |
+| `stop_loss` | **只**反推 TV 隐含止损距离 → 修正仓位；**绝不**作为盘口止损价 | **否**（最易误解） |
+| `tp1` / `tp2` | TP1/TP2 限价止盈**价格** | **否** |
+| `tp3` | **不使用** | 不适用 |
+| `atr` / `adx` | **不读取**；一律用 VPS 行情引擎 | **否** |
+| `symbol` / `ticker` | 品种路由 ETH / XAU | — |
+| `bar_index` / `seq` | 时序排序与幂等 | — |
+| `token` | 必须 = `528586` | — |
+| `reason` | 反转平仓文案 | — |
+
+**一句话：** 消息里只有 `price` 与 `stop_loss` 会做一次减法算出「TV 隐含止损距离」，**唯一用途是修正仓位数量**；不会、也不能当作 VPS 挂在交易所上的止损单价格。
+
+`price` / `stop_loss` 仅开仓瞬间用一次；可落日志，**不参与后续任何 tick 级止损计算**。
 
 ---
 
@@ -107,43 +136,40 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 
 1. 查询交易所**实际持仓**（不只信本地缓存）  
 2. 若非空：市价全平 → 撤销所有挂单 → **等待成交回报或仓位归零确认** → 重置该 symbol 呼吸引擎全部状态 → 钉钉「先平后开」  
-3. 用 VPS ATR 算 `initialStop = entry ± 1.5×ATR`，再按第二节公式算 qty（无状态）  
-4. `set_leverage` 固定 **5x** → 市价开仓  
-5. 挂 **TP1** 限价（数量 ≈ 30%）· 挂 **TP2** 限价（数量 ≈ 30%）  
-6. **不挂 TP3**（余仓 40% 由阶段二追踪退出）  
-7. 呼吸止损初始化并立即挂 STOP（`quantity=全仓`，价格=`initialStop`）  
-8. 行情引擎持续提供 ATR/ADX；哨兵接管监控  
+3. **独立**拉 30m K → 合成 90m → 算 `initialAtr`（此后锁定）→ `initialStop = entry ± 1.5×initialAtr`（与 TV.stop_loss **零交集**）  
+4. 按第四节公式算最终下单数量（含 sl_adj）  
+5. `set_leverage` 固定 **5x** → 市价开仓  
+6. 挂 **TP1+TP2** 限价（价格=`tp1`/`tp2`，数量=`qty1`/`qty2` 按实开缩放）  
+7. **不挂 TP3**（`qty3` 对应余仓由阶段二追踪）  
+8. 呼吸止损初始化：挂 STOP（`quantity=全仓`，价格=`initialStop`）并立即接管  
 9. 钉钉：开仓详情（方向、价格、数量、initialStop）
+
+开仓成功后的**下一个 tick 起**：呼吸引擎逐 tick 更新止损价，**不再需要 TV 传任何新数据**，直到仓位归零（止损触发或反转保护全平）。
 
 ---
 
-## 四、仓位公式（RISK20_NOTIONAL5 · 无状态纯函数）
+## 四、仓位数量计算（开仓算一次，此后不变）
 
 ```
-风险资金 = 账户本金(合约权益) × 20%
-名义上限 = 账户本金(合约权益) × 5
+VPS实际止损距离 = |entryPrice − initialStop| = 1.5 × initialAtr
+TV隐含止损距离 = |price − stop_loss|
+调整系数 sl_adj = TV隐含止损距离 / VPS实际止损距离     # 缺 stop_loss → 1.0
+调整后的TV数量上限 = qty × sl_adj
 
-VPS实际止损距离 = |开仓价 − VPS自算的initialStop|     # initialStop = entry ± 1.5×ATR
-TV隐含止损距离 = |TV.price − TV.stop_loss|
-调整系数 sl_adj = TV隐含止损距离 / VPS实际止损距离     # 缺 TV.stop_loss → sl_adj=1.0
-调整后的TV数量上限 = TV.qty × sl_adj
+风险资金 = 账户本金 × 20%
+名义上限 = 账户本金 × 5
 
 理论数量 = min(
     风险资金 / VPS实际止损距离,
-    名义上限 / 开仓价,
+    名义上限 / entryPrice,
     调整后的TV数量上限,
 )
-最终数量 = 向下取整至交易所精度（ETH 约 0.001）
+最终下单数量 = 向下取整至交易所精度
 ```
 
-**为什么需要 sl_adj：** TV.qty 按 TV 内部止损距（常见约 1.0×ATR）算出；实盘呼吸止损初始距是 **1.5×ATR**。若直接 `min(..., TV.qty)`，按 VPS 止损触发时实际亏损会被放大约 50%。用两边止损距比值把 TV.qty 换算成「等效于 VPS 止损距下的建议仓位」后，只要止损在 VPS 的 `initialStop` 触发，实际亏损可控在风险资金预算内。
+**为什么需要 sl_adj：** TV.qty 按 TV 内部止损距（常见约 1.0×ATR）算出；实盘初始止损距是 **1.5×ATR**。若直接 `min(..., TV.qty)`，按 VPS 止损触发时实际亏损会被放大约 50%。换算后，只要止损在 VPS `initialStop` 触发，亏损可控在风险资金预算内。
 
-**原则不变：** `TV.stop_loss` **只**参与上述调整系数；真实挂单止损价永远是 VPS 自算的 `initialStop`。  
-调整系数**仅开仓时算一次**；ATR=0 / 止损距=0 时前置拒绝并告警，禁止除零。
-
-`set_leverage` 固定 **5x**。每次开仓独立计算，不读历史仓位。
-
-开仓日志会打印：`sl_adj`、三个候选 qty（risk / notional / tv′）、最终生效约束 `binding`。
+数量在开仓算完即固定，**不**随后续价格/ADX 重算。开仓日志打印：`sl_adj`、三候选、`binding`。
 
 ---
 
@@ -159,86 +185,78 @@ TV隐含止损距离 = |TV.price − TV.stop_loss|
 
 ---
 
-## 六、呼吸止损引擎（开仓即接管 · 唯一止损写入方）
+## 六、呼吸止损引擎（与 TV 完全无关 · 开仓即接管）
 
-实现：`breath_stop.py` · 接线：`_apply_breath_stop_tick` / `_sync_exchange_stop` / `_breath_resize_stop_on_tp`
+实现：`breath_stop.py`。盘口：`STOP_MARKET` + `reduceOnly` + 明确 `quantity`。
 
-### 6.1 必须持久化的状态
+### 6.1 VPS 自算初始止损（与 TV.stop_loss 平行、互不干扰）
 
-| 字段 | 含义 |
-|------|------|
-| `entryPrice` / `watched_entry` | 开仓均价 |
-| `open_atr` / `initialAtr` | 开仓时刻 VPS ATR，全程锁定 |
-| `initial_stop` | `entry ± 1.5×initialAtr`，阶梯公式基准 |
-| `current_sl` / `currentStop` | 当前止损，只朝盈利方向移动 |
-| `best_price` | 持仓期最高（多）/ 最低（空） |
-| `breakeven_phase` | 是否已进阶段二（一旦 True 不可回退） |
-| `remaining_qty_pct` | 剩余仓位比例（TP 成交后更新） |
-| `last_adx` | 最近 ADX（阶段二追踪宽度） |
+1. 交易所 30m K → 合成 90m  
+2. `initialAtr = ATR(14)`（开仓锁定，全程不变）  
+3. 多：`initialStop = entry − 1.5×initialAtr`；空：`entry + 1.5×initialAtr`  
+4. 以此价挂首笔止损，并作为后续阶梯基准  
 
-### 6.2 阶段一（保本前）— 多单示意，空单镜像
+### 6.2 必须持久化 / 每 tick 更新
+
+| 字段 | 开仓后 | 说明 |
+|------|--------|------|
+| `initialAtr` / `open_atr` | **固定** | 不因后续 ATR 刷新而重算止损距 |
+| `initialStop` / `initial_stop` | **固定** | 阶梯基准 |
+| `currentStop` / `current_sl` | **每 tick 可上移** | 只朝盈利方向 |
+| `highestPrice` / `lowestPrice` (`best_price`) | **每 tick** | 多只增 / 空只减 |
+| `breakevenPhase` | **只可 false→true** | 进入阶段二后不可回退 |
+| `remaining_qty_pct` | TP 成交后更新 | 止损单数量收缩 |
+
+### 6.3 每个 markPrice tick
+
+1. 更新 `highestPrice` / `lowestPrice`  
+2. `breakevenPhase == false` → 阶段一；否则 → 阶段二  
+3. 新止损更优（多更高 / 空更低）才改单；否则本 tick 空操作  
+4. 价格跌破/突破 `currentStop` → 市价全平剩余 → 重置状态 → 钉钉  
+
+### 6.4 阶段一（保本前 · 多单示意）
 
 ```
 step_count = max(0, floor((price − entry) / (0.75 × initialAtr)))
-step_stop  = initialStop + step_count × 0.4 × initialAtr   ← 基准是 initialStop，不是 entry
-candidate  = max(currentStop, step_stop)
+step_stop  = initialStop + step_count × 0.4 × initialAtr
+候选 = max(currentStop, step_stop)
 
-若 price ≥ entry + 1.35×ATR → candidate = max(candidate, entry + 0.5×ATR)   # TP1 强制底线
-若 price ≥ entry + 2.5×ATR  → candidate = max(candidate, entry + 1.5×ATR)   # TP2 强制底线
+若 price ≥ entry + 1.35×ATR → 候选 = max(候选, entry + 0.5×ATR)   # TP1 底线
+若 price ≥ entry + 2.5×ATR  → 候选 = max(候选, entry + 1.5×ATR)   # TP2 底线
 
-currentStop = candidate
+currentStop = 候选
 
 若 price ≥ entry + 3.0×ATR：
-    breakevenPhase = True
-    trail_dist = trail_distance(adx) × initialAtr
-    currentStop = max(currentStop, highestPrice − trail_dist)
+    breakevenPhase = true
+    currentStop = max(currentStop, highest − trail_distance(adx)×initialAtr)
 ```
 
-### 6.3 阶段二（保本后 · ADX 连续追踪）
+### 6.5 阶段二（ADX 连续追踪）
+
+ADX 来自行情引擎，**每根 90m K 闭合更新一次**（tick 间复用上次 ADX）；**只有止损价每个 tick 重算**。
 
 ```
-trail_dist = trail_distance(adx) × initialAtr
-candidate  = highestPrice − trail_dist
-currentStop = max(currentStop, candidate)   # 只上移不倒退
+trail_dist = trail_distance(adx) × initialAtr   # ADX≤15→1.2；≥35→2.5；中间线性插值
+候选 = highestPrice − trail_dist
+currentStop = max(currentStop, 候选)   # 只上移不倒退
 ```
 
-### 6.4 追踪距离插值
+### 6.6 HARD_SL_FAIL_ABORT
 
-```
-trail_distance(adx):
-  adx ≤ 15 → 1.2
-  adx ≥ 35 → 2.5
-  否则     → 1.2 + (adx−15)/20 × (2.5−1.2)
-```
-
-趋势越强（ADX 高）距离越宽，让利润奔跑；越弱越窄，加速锁利。
-
-### 6.5 止损触发
-
-价格跌破（多）/ 突破（空）`currentStop` → 市价全平剩余仓位 → 重置状态 → 钉钉（含阶段一/二）。
-
-盘口形态：`STOP_MARKET` + `reduceOnly` + **明确 quantity**（跟随剩余仓位），由引擎统一改挂。
-
-### 6.6 HARD_SL_FAIL_ABORT（保留）
-
-改单 / 挂单失败 → 重试 **3** 次 → 仍失败则钉钉 `report_hard_sl_fail_abort`，**保持当前止损不变**，不视为 VPS 自主平仓。
+改单失败重试 3 次 → 钉钉告警，保持现状，不自主平仓。
 
 ---
 
 ## 七、订单监控（TP1 / TP2）
 
-订单监控**只检测成交并通知引擎**，不直接操作止损单。
-
 | 事件 | 行为 |
 |------|------|
-| TP1 成交 | `remainingQtyPct≈70%`；通知引擎：撤旧止损 → 按 70% qty + 当前 `currentStop` 重挂；期间 `_breath_tick_paused` |
-| TP2 成交 | 同上 → ≈40% |
-| TP 限价超时 | 挂单 **>5 分钟**未成交 → 取消该档 → 头寸移交呼吸引擎，禁止重复挂单 |
-| 全部平仓 | 确认归零 → 取消挂单 → 重置呼吸态 → 停监控 → 钉钉 |
+| TP1 成交 | 剩余比例更新；引擎撤旧止损→按剩余 qty + 当前 `currentStop` 重挂；期间暂停 breath tick |
+| TP2 成交 | 同上 → 剩余进一步收缩 |
+| TP 限价 >5 分钟未成交 | 撤单，头寸移交呼吸引擎，禁止重复挂单 |
+| 全部平仓 | 归零 → 撤挂单 → 重置呼吸态 → 停监控 → 钉钉 |
 
-强制底线已由阶段一公式自动覆盖，**无** TP 成交后「止损=entry+1tick」等独立强制分支。
-
-比例常量：`LEG_TP_RATIOS = [0.30, 0.30, 0.40]`，`PLACE_TP_LEVELS = 2`。
+强制底线已由阶段一公式覆盖。缺 `qty1/qty2` 时回退 30/30 比例切分；`PLACE_TP_LEVELS=2`。
 
 ---
 
@@ -333,7 +351,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.1-qty-tv-sl-adj
+# 期望: v15.5.2-tv-field-spec
 
 bash deploy_binance.sh
 # 脚本末尾会自动: python3 check_deploy_events.py --live
