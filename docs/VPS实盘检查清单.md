@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server-main` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.0.3-ladder-tv-flat-ding** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **v15.0.4-tv-flat-ladder** · sizing **RISK20_NOTIONAL5**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
