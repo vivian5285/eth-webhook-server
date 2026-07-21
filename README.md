@@ -88,6 +88,7 @@ qty = min(risk_capital / |entry - initialStop|, notional_cap / entry, TV.qty)
 | `binance_client.py` | REST + WS |
 | `dingtalk.py` | 播报 |
 | `check_vps_logic.py` | 静态自查 |
+| `check_deploy_events.py` | **部署后**事件/函数全面自检 |
 
 ---
 
@@ -101,4 +102,9 @@ grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
 
 bash deploy_binance.sh
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
+
+# 部署后全面自检（钉钉事件函数 + 核心执行路径 + 呼吸/仓位 smoke + /health）
+python3 check_deploy_events.py --live
+# 更严：再跑静态全套
+python3 check_deploy_events.py --live --deep
 ```

@@ -420,4 +420,11 @@ install_deps || exit 1
 start_service || exit 1
 wait_for_listen || exit 1
 health_check
+# 部署后事件/函数全面自检（不依赖交易所密钥）
+log_step "▶ 运行部署事件自检 check_deploy_events.py ..."
+if python3 "$DIR/check_deploy_events.py" --live --port "${PORT}" 2>&1; then
+    log_ok "check_deploy_events.py 通过"
+else
+    log_fail "check_deploy_events.py 未通过（重要事件函数缺失或逻辑漂移）"
+fi
 print_summary
