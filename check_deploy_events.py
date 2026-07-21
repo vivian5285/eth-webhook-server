@@ -335,7 +335,7 @@ def audit_breath_and_sizing_smoke(a: Audit):
     td = trail_distance_by_adx(25)
     a.check("ADX25 追踪距在 1.2~2.5", 1.2 < td < 2.5, f"td={td:.3f}")
 
-    # 仓位：equity=1000, stop dist=60, tv_qty=10
+    # 仓位：无 TV.sl → adj=1；equity=1000, stop dist=60, tv_qty=10 → 名义约1.666
     qty, meta = compute_fixed_order_qty(
         principal=1000, price=3000, stop_loss=2940, tv_qty=10, qty_step=0.001,
     )
@@ -345,6 +345,16 @@ def audit_breath_and_sizing_smoke(a: Audit):
         "仓位受名义/风险约束",
         float(qty) <= 10 and float(qty) < 3.5,
         f"qty={qty}",
+    )
+    # 有 TV.sl：VPS距60 TV距40 → adj=2/3；tv=2 → 调整上限1.333 生效
+    qty2, meta2 = compute_fixed_order_qty(
+        principal=1000, price=3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
+    )
+    a.check(
+        "TV止损距调整系数",
+        abs(float(meta2.get("sl_adj") or 0) - 40.0 / 60.0) < 1e-6
+        and abs(float(qty2) - 1.333) < 0.002,
+        f"sl_adj={meta2.get('sl_adj')} qty={qty2} bind={meta2.get('binding')}",
     )
 
 

@@ -508,26 +508,34 @@ def _format_tp_audit(audit, tv_tps=None, unit_label=None, symbol=None):
 
 
 def _format_vps_sizing_basis(principal, meta=None, leverage=None):
-    """VPS 最终仓位：风险20%/止损距 ∩ 名义×5 ∩ TV.qty"""
+    """VPS 最终仓位：风险20%/VPS止损距 ∩ 名义×5 ∩ TV.qty×(TV距/VPS距)"""
     meta = meta or {}
     mode = str(meta.get("sizing_mode") or "MOM_EQUITY_1X")
     risk_capital = float(meta.get("risk_capital") or meta.get("margin") or 0)
-    stop_dist = float(meta.get("stop_dist") or 0)
+    stop_dist = float(meta.get("vps_stop_dist") or meta.get("stop_dist") or 0)
     notional = float(meta.get("notional") or meta.get("order_amount") or 0)
     notional_cap = float(meta.get("notional_cap") or 0)
     tv_qty = meta.get("tv_qty")
+    adj = float(meta.get("sl_adj") or 1.0)
+    adj_tv = meta.get("adjusted_tv_qty")
     lines = [
         f"权益 **{float(principal):.2f}** U · sizing=`{mode}`",
         f"风险资金 **{risk_capital:.2f}** U（权益×20%）",
     ]
     if stop_dist > 0:
-        lines.append(f"÷ 止损距 **{stop_dist:.2f}** → 风险仓上限")
+        lines.append(f"÷ VPS止损距 **{stop_dist:.2f}** → 风险仓上限")
     if notional_cap > 0:
         lines.append(f"名义上限 **{notional_cap:.2f}** U（权益×5）")
-    if notional > 0:
-        lines.append(f"→ 实际名义约 **{notional:.2f}** USDT（bind={meta.get('bind', '?')}）")
     if tv_qty is not None:
-        lines.append(f"TV.qty 上限 **{float(tv_qty):.4f}**")
+        lines.append(
+            f"TV.qty **{float(tv_qty):.4f}** × sl_adj **{adj:.4f}** "
+            f"→ 调整上限 **{float(adj_tv if adj_tv is not None else tv_qty):.4f}**"
+        )
+    if notional > 0:
+        lines.append(
+            f"→ 实际名义约 **{notional:.2f}** USDT"
+            f"（生效约束=`{meta.get('binding', meta.get('bind', '?'))}`）"
+        )
     return "\n".join(lines)
 
 def _format_sizing_basis(principal, margin_pct, leverage, margin_usdt=None):

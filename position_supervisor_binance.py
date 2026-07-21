@@ -131,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.0-final-spec"
+BINANCE_VPS_VERSION = "v15.5.1-qty-tv-sl-adj"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -2599,7 +2599,7 @@ class PositionSupervisorBinance:
         return get_regime_max_add_times(int(regime if regime is not None else self.regime or 3))
 
     def _apply_tv_sizing_params(self, payload):
-        """v15：风险20%/止损距 + 名义×5，取 min(理论, TV.qty)；分腿 qty1/2/3。"""
+        """v15.5.1：RISK20 + TV止损距调整系数；分腿仅 TP1+TP2。"""
         self.tv_entry_type = ENTRY_TYPE_OPEN
         self.tv_risk_pct = 0.0
         self.tv_qty_ratio = 1.0
@@ -2608,16 +2608,26 @@ class PositionSupervisorBinance:
         tv_qty = self._safe_float((payload or {}).get("qty"), 0)
         if tv_qty > 0:
             self.tv_suggested_qty = tv_qty
+        # TV stop_loss 仅作 sizing 调整系数输入（不挂盘）
+        tv_sl = self._safe_float(
+            (payload or {}).get("stop_loss")
+            or (payload or {}).get("tv_sl")
+            or (payload or {}).get("sl"),
+            0,
+        )
+        if tv_sl > 0:
+            self.tv_sl_ref = float(tv_sl)
         ratios = get_leg_tp_ratios(payload)
         for k in self.regime_settings:
             self.regime_settings[k]["ratios"] = list(ratios)
         self._leg_ratios = list(ratios)
         self._save_state()
         logger.info(
-            f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
+            f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/VPS止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
             f"| TV.qty={self.tv_suggested_qty or '-'} "
+            f"| TV.sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0) or '-'} "
             f"| 分腿={[round(x * 100) for x in ratios]}% "
-            f"| 挂TP1+TP2+TP3(30/30/40) | sizing={SIZING_MODE}"
+            f"| 挂TP1+TP2(30/30/40余仓交阶段二) | sizing={SIZING_MODE}"
         )
 
     def _calc_vps_add_qty(self, qty_ratio=None):
@@ -2652,12 +2662,14 @@ class PositionSupervisorBinance:
 
     def _calc_vps_open_qty(self, curr_px, regime=None):
         """
-        无状态独立计算：min(风险/|价-initialStop|, 名义/价, TV.qty)。
-        不读历史仓位/加仓次数；本笔 ATR→initialStop 仅作本函数输入。
+        无状态独立计算（仅开仓时一次）：
+          min(风险/VPS止损距, 名义/价, TV.qty×(TV隐含距/VPS距))
+        TV.stop_loss 只参与调整系数，不作为挂止损价。
         """
         principal = self._resolve_cap_sizing_base()
         px = float(curr_px or self.tv_price or 0)
         tv_qty = float(getattr(self, "tv_suggested_qty", 0) or 0)
+        tv_sl_ref = float(getattr(self, "tv_sl_ref", 0) or 0)
         try:
             atr, _adx = self._refresh_market_metrics(force=False)
         except Exception:
@@ -2677,8 +2689,19 @@ class PositionSupervisorBinance:
                 "leverage": FIXED_LEVERAGE,
                 "sizing_mode": SIZING_MODE,
             }
-        if stop <= 0 or atr <= 0:
-            logger.error(f"🚫 开仓 sizing 拒绝：缺止损/ATR stop={stop} atr={atr}")
+        if atr <= 0 or stop <= 0:
+            # ATR 异常 → 告警，禁止除零/裸奔下单
+            logger.error(f"🚫 开仓 sizing 拒绝：ATR异常 atr={atr} stop={stop}")
+            try:
+                dingtalk.report_system_alert(
+                    f"开仓拦截·ATR异常 [{self.symbol}]",
+                    f"atr={atr} initialStop={stop} price={px} | "
+                    f"禁止在止损距为0时下单（除零保护）",
+                    level="紧急",
+                    suggestion="检查行情引擎90m ATR；恢复后再发信号",
+                )
+            except Exception:
+                pass
             return 0.0, {
                 "error": "missing_stop_or_atr",
                 "principal": principal,
@@ -2698,6 +2721,8 @@ class PositionSupervisorBinance:
             price=px,
             stop_loss=stop,
             tv_qty=tv_qty,
+            tv_sl=tv_sl_ref if tv_sl_ref > 0 else None,
+            tv_price=float(getattr(self, "tv_price", 0) or px),
             qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
             min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
         )
@@ -2707,6 +2732,17 @@ class PositionSupervisorBinance:
         meta["atr"] = atr
         self.leverage = float(FIXED_LEVERAGE)
         self.tv_sizing_leverage = float(FIXED_LEVERAGE)
+        logger.info(
+            f"📐 [{self.symbol}] 开仓qty核算 | "
+            f"sl_adj={float(meta.get('sl_adj') or 1):.4f} "
+            f"(TV距={float(meta.get('tv_implied_dist') or 0):.2f}/"
+            f"VPS距={float(meta.get('vps_stop_dist') or 0):.2f}) | "
+            f"候选 risk={float(meta.get('qty_by_risk') or 0):.4f} "
+            f"notional={float(meta.get('qty_by_notional') or 0):.4f} "
+            f"tv′={float(meta.get('adjusted_tv_qty') or 0):.4f} | "
+            f"生效={meta.get('binding')} → qty={float(qty or 0):.4f} | "
+            f"TV.qty={tv_qty} TV.sl={tv_sl_ref or '—'} VPS.sl={stop:.2f}"
+        )
         return float(qty or 0), meta
 
     def _other_symbols_notional(self, exclude_symbol=None):

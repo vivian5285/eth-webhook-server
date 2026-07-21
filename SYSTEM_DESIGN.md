@@ -1,11 +1,11 @@
 # ETH Webhook Trading System - 系统设计文档
 
 > **唯一权威**：见 [`README.md`](README.md)  
-> **TV v6.5.6** · **VPS v15.5.0-final-spec** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
+> **TV v6.5.6** · **VPS v15.5.1-qty-tv-sl-adj** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v15.5.0-final-spec）
+## 当前有效架构（2026-07 · v15.5.1-qty-tv-sl-adj）
 
 ```
 TradingView v6.5.6 Alert (token=528586)
@@ -15,7 +15,7 @@ app.py (网关 + health: RISK20_NOTIONAL5 / fixed_5)
 position_supervisor_binance.py   ← 唯一生产大脑
 ├── TV 消息缓存固定 1.0s + 同窗先平后开折叠（tv_seq.py）
 ├── 订单 ID 持久化（TP1/TP2/止损；不挂 TP3）
-├── 仓位：风险20%/|价−initialStop| ∩ 名义×5 ∩ TV.qty（无状态）
+├── 仓位：风险20%/VPS止损距 ∩ 名义×5 ∩ TV.qty×(TV距/VPS距)
 ├── TP 30/30/40 比例；盘口只挂 TP1+TP2；余仓40%交阶段二
 ├── 呼吸止损唯一写止损（entry±1.5×ATR → 0.75/0.4 阶梯 → ADX 1.2~2.5）
 ├── Webhook 仅 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT（+PING）

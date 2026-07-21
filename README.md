@@ -1,8 +1,8 @@
 # GEMINI 双轨交易工厂 · VPS 实盘
 
-**当前版本：`v15.5.0-final-spec`**  
+**当前版本：`v15.5.1-qty-tv-sl-adj`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`**  
+**仓位模式：`RISK20_NOTIONAL5`（含 TV 止损距调整系数）**  
 **保护引擎：呼吸止损（`breath_stop` · 90m ATR/ADX）**  
 **生产唯一大脑：`position_supervisor_binance.py`**
 
@@ -17,7 +17,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.0-final-spec
+# version: v15.5.1-qty-tv-sl-adj
 # sizing: RISK20_NOTIONAL5 · leverage: fixed_5 · tv_strategy: v6.5.6
 # radar: breath_stop_90m
 
@@ -36,7 +36,7 @@ python3 check_deploy_events.py --live
    任意时刻一个 symbol 只允许一笔持仓。无多笔 trade 并存、无加权均价重算、无浮盈加仓。
 
 3. **下单数量每次独立计算，无状态**  
-   只依赖：账户权益、开仓价、`initialStop`（VPS ATR）、TV.qty。不读历史仓位、不加仓次数、不读上一笔结果。
+   只依赖：账户权益、开仓价、`initialStop`（VPS ATR）、TV.qty、以及 **仅用于调整系数** 的 TV.stop_loss。不读历史仓位、不加仓次数、不读上一笔结果。真实挂止损价仍只用 VPS `initialStop`。
 
 4. **止损单全局唯一写入方 = 呼吸止损引擎**  
    下单 / 改单 / 触发平仓只由呼吸引擎执行。订单监控、重启恢复等模块**不得**直接调用止损类交易所 API，只能通知引擎执行。  
@@ -122,16 +122,28 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 ```
 风险资金 = 账户本金(合约权益) × 20%
 名义上限 = 账户本金(合约权益) × 5
-initialStop = 开仓价 ± 1.5 × ATR(VPS 90m)     # 多减空加
-理论数量 = min(风险资金 / |开仓价 − initialStop|, 名义上限 / 开仓价)
-最终数量 = min(理论数量, TV.qty)
-向下取整至交易所精度（ETH 约 0.001）
+
+VPS实际止损距离 = |开仓价 − VPS自算的initialStop|     # initialStop = entry ± 1.5×ATR
+TV隐含止损距离 = |TV.price − TV.stop_loss|
+调整系数 sl_adj = TV隐含止损距离 / VPS实际止损距离     # 缺 TV.stop_loss → sl_adj=1.0
+调整后的TV数量上限 = TV.qty × sl_adj
+
+理论数量 = min(
+    风险资金 / VPS实际止损距离,
+    名义上限 / 开仓价,
+    调整后的TV数量上限,
+)
+最终数量 = 向下取整至交易所精度（ETH 约 0.001）
 ```
 
-**输入只有**：账户余额、开仓价、`initialStop`、TV.qty。  
-**禁止**：旧公式 `(equity×0.20×5)/price`、忽略止损距离、忽略 TV.qty、按历史仓位叠加。
+**为什么需要 sl_adj：** TV.qty 按 TV 内部止损距（常见约 1.0×ATR）算出；实盘呼吸止损初始距是 **1.5×ATR**。若直接 `min(..., TV.qty)`，按 VPS 止损触发时实际亏损会被放大约 50%。用两边止损距比值把 TV.qty 换算成「等效于 VPS 止损距下的建议仓位」后，只要止损在 VPS 的 `initialStop` 触发，实际亏损可控在风险资金预算内。
 
-额外：多品种合计名义仍受总敞口闸约束（实现见 `_assert_notional_cap_or_reject`）。
+**原则不变：** `TV.stop_loss` **只**参与上述调整系数；真实挂单止损价永远是 VPS 自算的 `initialStop`。  
+调整系数**仅开仓时算一次**；ATR=0 / 止损距=0 时前置拒绝并告警，禁止除零。
+
+`set_leverage` 固定 **5x**。每次开仓独立计算，不读历史仓位。
+
+开仓日志会打印：`sl_adj`、三个候选 qty（risk / notional / tv′）、最终生效约束 `binding`。
 
 ---
 
@@ -321,7 +333,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.0-final-spec
+# 期望: v15.5.1-qty-tv-sl-adj
 
 bash deploy_binance.sh
 # 脚本末尾会自动: python3 check_deploy_events.py --live

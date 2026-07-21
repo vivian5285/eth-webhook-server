@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.5.0-final-spec · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.5.1-qty-tv-sl-adj · RISK20_NOTIONAL5
 
 用法:
   python check_vps_logic.py
@@ -288,8 +288,9 @@ def audit_module2_sizing(a: Audit):
     binance_ver = _grep_binance_vps_version()
     a.check("2.0 TV_STRATEGY_VERSION=v6.5.6", TV_STRATEGY_VERSION == "v6.5.6", TV_STRATEGY_VERSION)
     a.check(
-        "2.0b BINANCE_VPS_VERSION 含 final-spec/v15",
-        ("final-spec" in binance_ver)
+        "2.0b BINANCE_VPS_VERSION 含 v15",
+        ("qty-tv-sl-adj" in binance_ver)
+        or ("final-spec" in binance_ver)
         or ("arch-align" in binance_ver)
         or ("v15." in binance_ver)
         or ("breath" in binance_ver),
@@ -309,7 +310,7 @@ def audit_module2_sizing(a: Audit):
     a.check("2.2 HARD_NOTIONAL_CAP=0", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.3 MAX_TOTAL_NOTIONAL_MULT=13", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    # min(200/100, 5000/3300.5, 12) floored 3dp = 1.514
+    # 无 TV.sl → adj=1.0：min(200/100, 5000/3300.5, 12) floored 3dp = 1.514
     qty, meta = compute_fixed_order_qty(1000, 3300.5, stop_loss=3200.5, tv_qty=12)
     expected = 1.514
     a.check(
@@ -319,8 +320,14 @@ def audit_module2_sizing(a: Audit):
     )
     a.check(
         "2.4 mode/bind RISK20",
-        meta.get("sizing_mode") == "RISK20_NOTIONAL5" and meta.get("bind") == "risk20_notional5",
+        meta.get("sizing_mode") == "RISK20_NOTIONAL5"
+        and "risk20_notional5" in str(meta.get("bind") or ""),
         f"mode={meta.get('sizing_mode')} bind={meta.get('bind')}",
+    )
+    a.check(
+        "2.4a 无TV.sl时 sl_adj=1",
+        abs(float(meta.get("sl_adj") or 0) - 1.0) < 1e-9,
+        f"sl_adj={meta.get('sl_adj')}",
     )
 
     qty0, meta0 = compute_fixed_order_qty(1000, 3300.5)
@@ -332,9 +339,25 @@ def audit_module2_sizing(a: Audit):
 
     qty_tv, meta_tv = compute_fixed_order_qty(1000, 1800, stop_loss=1000, tv_qty=0.5)
     a.check(
-        "2.5 TV.qty 上限 ≤0.5",
+        "2.5 TV.qty 上限 ≤0.5(adj=1)",
         qty_tv <= 0.5 + 1e-9 and qty_tv > 0,
         f"qty={qty_tv} meta={meta_tv.get('tv_qty')}",
+    )
+
+    # VPS距60、TV距40 → adj=2/3；tv_qty=2 → 调整上限≈1.333；名义≈1.666 → 生效=adjusted_tv
+    qty_adj, meta_adj = compute_fixed_order_qty(
+        1000, 3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
+    )
+    a.check(
+        "2.5b TV止损距调整系数≈0.6667",
+        abs(float(meta_adj.get("sl_adj") or 0) - (40.0 / 60.0)) < 1e-6,
+        f"sl_adj={meta_adj.get('sl_adj')} tv_dist={meta_adj.get('tv_implied_dist')} "
+        f"vps_dist={meta_adj.get('vps_stop_dist')}",
+    )
+    a.check(
+        "2.5c 调整后TV上限约束生效 → qty≈1.333",
+        abs(qty_adj - 1.333) < 0.002 and meta_adj.get("binding") == "adjusted_tv_qty",
+        f"qty={qty_adj} binding={meta_adj.get('binding')} adj_tv={meta_adj.get('adjusted_tv_qty')}",
     )
 
     qty_tv2, meta_tv2 = compute_tv_order_qty(1000, price=3300.5, stop_loss=3200.5, tv_qty=12)
