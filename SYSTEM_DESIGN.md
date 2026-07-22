@@ -8,7 +8,7 @@
 ## 当前有效架构（2026-07 · v15.5.3-rigor-checks）
 
 ```
-TradingView v6.5.6 Alert (token=528586)
+TradingView v6.5.6 Alert (secret=528586)
         ↓
 app.py (网关 + health: RISK20_NOTIONAL5 / fixed_5)
         ↓

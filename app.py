@@ -3,6 +3,7 @@
 import os, threading, logging
 from flask import Flask, request, jsonify
 from position_supervisor_binance import (
+    get_supervisor,
     get_supervisor_for_payload,
     SUPERVISORS,
     BINANCE_VPS_VERSION,
@@ -14,7 +15,7 @@ from webhook_parser import (
     format_webhook_log,
     TV_STRATEGY_VERSION,
 )
-from symbol_config import active_binance_symbols
+from symbol_config import active_binance_symbols, resolve_binance_symbol
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Binance: %(message)s')
 logger = logging.getLogger(__name__)
@@ -38,13 +39,13 @@ def webhook(ticker=None):
 
     if not data:
         return jsonify({"status": "error", "message": "Empty payload"}), 400
-    # token / secret 必须等于 WEBHOOK_SECRET（默认 528586）
-    token = str(
-        data.get("token") or data.get("secret") or ""
+    # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值须 = WEBHOOK_SECRET
+    auth = str(
+        data.get("secret") or data.get("token") or ""
     ).strip()
     expected = str(os.getenv("WEBHOOK_SECRET", "528586")).strip()
-    if token != expected:
-        return jsonify({"status": "error", "message": "Invalid token"}), 403
+    if auth != expected:
+        return jsonify({"status": "error", "message": "Invalid secret"}), 403
     if not data.get("_parse_ok"):
         return jsonify({"status": "error", "message": "Missing or invalid action"}), 400
 
@@ -75,7 +76,7 @@ def webhook(ticker=None):
 
     logger.info(f"[Webhook] [{sym}] {format_webhook_log(data)}")
 
-    # 开仓必要字段：仅 price（ATR/ADX 由 VPS 行情引擎自算，webhook 不传）
+    # 开仓必要字段：仅 price（ATR/ADX 由 VPS 行情引擎自算；webhook atr 仅调试比对）
     if raw_action in ("LONG", "SHORT"):
         px = data.get("price")
         try:
@@ -88,7 +89,7 @@ def webhook(ticker=None):
                 "message": "LONG/SHORT require valid price (ATR/ADX computed on VPS)",
                 "got": {"price": px},
             }), 400
-        # stop_loss 仅作调试对比参考，不参与挂盘/仓位权威计算
+        # stop_loss 仅作 sizing 调整系数 / 调试对比，不参与挂盘
         sl = data.get("stop_loss") or data.get("tv_sl")
         if sl is not None:
             data["_tv_sl_ref"] = sl
@@ -115,6 +116,47 @@ def webhook(ticker=None):
     }), 200
 
 
+@app.route('/admin/resume/<path:symbol>', methods=['POST'])
+def admin_resume(symbol):
+    """人工确认后解除交易暂停；同时清掉持仓期误累计的 ATR 降级污染。"""
+    meta = resolve_binance_symbol(symbol, default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({
+            "status": "error",
+            "message": f"Unknown symbol: {symbol}",
+            "allowed": active_binance_symbols(),
+        }), 400
+    sup = get_supervisor(sym)
+    prev = str(getattr(sup, "trading_pause_reason", "") or "")
+    was = bool(getattr(sup, "trading_paused", False))
+    sup.trading_paused = False
+    sup.trading_pause_reason = ""
+    # 持仓期误跑开仓sizing留下的污染（假 ATR 降级）一并清掉
+    try:
+        sup._atr_div_streak = 0
+        sup.atr_degraded = False
+        if str(getattr(sup, "atr_source", "") or "").startswith("tv_implied"):
+            sup.atr_source = "vps"
+        sup._pending_atr_degrade = None
+    except Exception as e:
+        logger.warning(f"[admin/resume] ATR污染清理跳过: {e}")
+    try:
+        sup._save_state()
+    except Exception as e:
+        logger.warning(f"[admin/resume] 状态持久化跳过: {e}")
+    logger.info(f"✅ [admin/resume] {sym} 解除暂停 | was={was} reason={prev or '—'}")
+    return jsonify({
+        "status": "success",
+        "symbol": sym,
+        "was_paused": was,
+        "previous_reason": prev,
+        "trading_paused": False,
+        "atr_div_streak": 0,
+        "atr_degraded": False,
+    }), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
     from webhook_parser import SIZING_MODE
@@ -135,6 +177,10 @@ def health():
         },
         "trading_paused": {
             s: bool(getattr(sup, "trading_paused", False))
+            for s, sup in SUPERVISORS.items()
+        },
+        "trading_pause_reason": {
+            s: str(getattr(sup, "trading_pause_reason", "") or "")
             for s, sup in SUPERVISORS.items()
         },
     }), 200

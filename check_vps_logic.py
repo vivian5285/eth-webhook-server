@@ -630,6 +630,12 @@ def audit_module4_radar(a: Audit):
         "HARD_SL_FAIL_ABORT" in sup and "report_hard_sl_fail_abort" in dt,
     )
     a.check(
+        "4.3g2 CLOSE_THEN_OPEN_FAIL_ABORT",
+        "CLOSE_THEN_OPEN_FAIL_ABORT" in sup
+        and "report_close_then_open_fail_abort" in dt
+        and "1.0,3.0,6.0" in sup.replace(" ", ""),
+    )
+    a.check(
         "4.3h 旧schema暂停不转换",
         "restart_old_schema_no_auto_migrate" in sup
         or "_state_old_schema" in sup,
@@ -860,7 +866,7 @@ def audit_readme_consistency(a: Audit):
         "README 废弃对账已说明",
         "CLOSE_QUICK_EXIT" in readme or "仅 LONG" in readme or "Webhook" in readme,
     )
-    a.check("README token 528586", "528586" in readme or "token" in readme.lower())
+    a.check("README secret/token 528586", "528586" in readme and ("secret" in readme.lower() or "token" in readme.lower()))
     a.check(
         "README v15/arch-align",
         "v15." in readme or "arch-align" in readme or "RISK20" in readme,

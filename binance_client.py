@@ -12,10 +12,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.45.0-dual-symbol-ws"
+BINANCE_CLIENT_VERSION = "v13.45.1-query-fail-safe"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
+
+# REST 持仓查询失败哨兵：禁止被上层当成「空仓」
+POSITION_QUERY_FAILED = {"_query_failed": True, "positionAmt": None, "entryPrice": None}
+
+
+def is_position_query_failed(pos):
+    """仅当显式 QUERY_FAILED 哨兵时为 True；禁止把 MagicMock/普通持仓误判。"""
+    return isinstance(pos, dict) and pos.get("_query_failed") is True
 
 
 class BinanceClient:
@@ -596,6 +604,10 @@ class BinanceClient:
             return 0.0
 
     def get_position(self, symbol="ETHUSDT", prefer_ws=True):
+        """
+        返回币安持仓 dict，或 None（确认无仓）。
+        REST 失败且无可用缓存时返回 POSITION_QUERY_FAILED，禁止上层当空仓清账本。
+        """
         if prefer_ws:
             cached = self._get_pos_cache(symbol, max_age=8.0)
             if cached is not None:
@@ -613,7 +625,16 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"[查询持仓失败] {symbol}: {e}")
             stale = self._get_pos_cache(symbol, max_age=60.0)
-            return stale
+            if stale is not None:
+                logger.warning(
+                    f"[查询持仓失败] {symbol}: 回退≤60s缓存，禁止当空仓"
+                )
+                return stale
+            logger.error(
+                f"[查询持仓失败] {symbol}: 无可用缓存 → 返回 QUERY_FAILED "
+                f"（上层必须保留账本/跳过空仓判定）"
+            )
+            return dict(POSITION_QUERY_FAILED)
 
     def get_recent_user_trades(self, symbol="ETHUSDT", limit=50):
         """最近用户成交（核对 TP 限价成交 vs 手工减仓）"""

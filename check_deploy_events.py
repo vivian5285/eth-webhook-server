@@ -117,6 +117,7 @@ DINGTALK_EVENT_FUNCS = [
     ("重启待命", "report_recover_standby"),
     ("FORCE_ALIGN", "report_force_align"),
     ("HARD_SL_FAIL_ABORT", "report_hard_sl_fail_abort"),
+    ("CLOSE_THEN_OPEN_FAIL_ABORT", "report_close_then_open_fail_abort"),
     ("异常告警", "report_system_alert"),
 ]
 

@@ -33,9 +33,15 @@ ADX_PERIOD = 14
 FETCH_LIMIT = 220
 REFRESH_MIN_SEC = 60.0
 ATR_COMPARE_ALERT_PCT = 0.20
-# 开仓 ATR 合理性：低于近 N 根 ATR 中位数的该比例 → 拒绝开仓
+# TV 策略硬止损常见约 1.0×ATR（与 VPS initialStop=1.5×ATR 不同）。
+# 用 stop_loss 反推「TV ATR」时必须除以该倍数；若误用 1.5，会系统性报出 ~33% 假偏差。
+TV_HARD_SL_ATR_MULT = 1.0
+# 开仓 ATR 合理性：低于近 N 根 ATR 中位数的该比例 → 异常（可触发应急降级）
 ATR_MEDIAN_LOOKBACK = 50
 ATR_ANOMALY_RATIO = 0.30
+# 应急降级：VPS vs TV隐含 连续超阈值的开仓信号次数
+ATR_DEGRADE_DIV_PCT = 0.20
+ATR_DEGRADE_STREAK_N = 3
 
 
 def _f(x, default=0.0) -> float:
@@ -183,10 +189,13 @@ def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
     return float(adx)
 
 
-def implied_atr_from_stop(entry: float, stop_loss: float, mult: float = 1.5) -> float:
+def implied_atr_from_stop(
+    entry: float, stop_loss: float, mult: float = TV_HARD_SL_ATR_MULT
+) -> float:
+    """由 |entry−stop| / mult 反推 ATR。默认 mult=TV 硬止损倍数(1.0)，非 VPS 1.5。"""
     entry = _f(entry)
     sl = _f(stop_loss)
-    mult = _f(mult, 1.5) or 1.5
+    mult = _f(mult, TV_HARD_SL_ATR_MULT) or TV_HARD_SL_ATR_MULT
     if entry <= 0 or sl <= 0 or mult <= 0:
         return 0.0
     return abs(entry - sl) / mult
@@ -198,6 +207,101 @@ def atr_divergence_pct(vps_atr: float, tv_implied_atr: float) -> float:
     if v <= 0 or t <= 0:
         return 0.0
     return abs(v - t) / v
+
+
+def resolve_tv_atr_for_compare(
+    vps_atr: float,
+    tv_atr: float = 0.0,
+    entry: float = 0.0,
+    stop_loss: float = 0.0,
+    tv_sl_mult: float = TV_HARD_SL_ATR_MULT,
+) -> Tuple[float, str]:
+    """
+    调试比对用 TV 侧 ATR：优先 webhook 显式 atr；否则按 TV 硬止损倍数反推。
+    返回 (tv_ref_atr, source_label)。无效时 atr=0。
+    """
+    direct = _f(tv_atr)
+    if direct > 0:
+        return direct, "TV.atr"
+    implied = implied_atr_from_stop(entry, stop_loss, tv_sl_mult)
+    if implied > 0:
+        return implied, f"stop÷{float(tv_sl_mult):.2g}"
+    return 0.0, ""
+
+
+def tv_implied_atr_for_degrade(
+    entry: float, stop_loss: float, mult: float = TV_HARD_SL_ATR_MULT
+) -> float:
+    """
+    应急降级用 TV 隐含 ATR：
+      |price − stop_loss| / atrMultiplierSL（当前 1.0）
+    """
+    return implied_atr_from_stop(entry, stop_loss, mult)
+
+
+def evaluate_atr_emergency_degrade(
+    vps_atr: float,
+    atr_history: Sequence[float],
+    entry: float,
+    stop_loss: float,
+    div_streak: int = 0,
+    klines_ok: bool = True,
+    lookback: int = ATR_MEDIAN_LOOKBACK,
+    anomaly_ratio: float = ATR_ANOMALY_RATIO,
+    div_pct: float = ATR_DEGRADE_DIV_PCT,
+    streak_n: int = ATR_DEGRADE_STREAK_N,
+) -> Tuple[bool, dict]:
+    """
+    判断是否触发 ATR 应急降级（临时用 TV 隐含 ATR，非静默容错）。
+    返回 (should_degrade, meta)。
+    """
+    vps = _f(vps_atr)
+    tv_imp = tv_implied_atr_for_degrade(entry, stop_loss)
+    meta = {
+        "vps_atr": round(vps, 6),
+        "tv_implied_atr": round(tv_imp, 6),
+        "div_pct": 0.0,
+        "div_streak": int(div_streak or 0),
+        "div_streak_next": int(div_streak or 0),
+        "reason": "",
+        "klines_ok": bool(klines_ok),
+        "tv_sl_mult": float(TV_HARD_SL_ATR_MULT),
+    }
+    if not klines_ok or vps <= 0:
+        if tv_imp <= 0:
+            meta["reason"] = "vps_atr_unavailable_and_no_tv_implied"
+            return False, meta
+        meta["reason"] = "vps_atr_unavailable"
+        return True, meta
+
+    is_anom, anom = check_atr_anomaly(vps, atr_history, lookback, anomaly_ratio)
+    meta["anomaly"] = anom
+    if is_anom and anom.get("reason") in ("atr_zero_or_missing", "atr_below_median_ratio"):
+        if tv_imp <= 0:
+            meta["reason"] = f"{anom.get('reason')}_no_tv_implied"
+            return False, meta
+        meta["reason"] = str(anom.get("reason") or "atr_anomaly")
+        return True, meta
+
+    # 连续偏差：仅当双边 ATR 都有效时累计
+    if tv_imp > 0 and vps > 0:
+        div = atr_divergence_pct(vps, tv_imp)
+        meta["div_pct"] = round(div, 6)
+        if div >= float(div_pct):
+            nxt = int(div_streak or 0) + 1
+            meta["div_streak_next"] = nxt
+            if nxt >= int(streak_n):
+                meta["reason"] = f"atr_div_streak_{nxt}"
+                return True, meta
+            meta["reason"] = f"atr_div_streak_pending_{nxt}"
+            return False, meta
+        meta["div_streak_next"] = 0
+        meta["reason"] = "ok"
+        return False, meta
+
+    meta["reason"] = "ok"
+    meta["div_streak_next"] = 0
+    return False, meta
 
 
 def check_atr_anomaly(

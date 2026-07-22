@@ -828,7 +828,7 @@ def normalize_tv_payload(data):
     leg = str(src.get("leg") or "").strip()
     bot_id = str(src.get("bot_id") or src.get("botId") or "").strip()
     reason = str(src.get("reason") or src.get("exit_reason") or src.get("comment") or "").strip()
-    secret = str(src.get("token") or src.get("secret") or src.get("key") or "").strip()
+    secret = str(src.get("secret") or src.get("token") or src.get("key") or "").strip()
 
     try:
         from symbol_config import extract_symbol_from_payload

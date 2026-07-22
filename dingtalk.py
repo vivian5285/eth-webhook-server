@@ -457,15 +457,24 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
         return
     _batcher.enqueue(title, data_dict, header_color)
 def get_regime_name(regime_code):
-    names = {
-        1: "🧊 [1档] 极弱震荡 (保守防守)",
-        2: "🚶 [2档] 弱势波段 (稳健推升)",
-        3: "🏃 [3档] 中势推升 (标准波段)",
-        4: "🚀 [4档] 强势单边 (趋势吃满)",
-    }
-    shade = [G_MUTED, G_LIGHT, G_MAIN, G_ACCENT]
-    idx = regime_code if 1 <= regime_code <= 4 else 0
-    return _g(names.get(regime_code, "未知状态"), shade[idx - 1] if idx else G_MUTED)
+    """
+    旧「评分档位/中势推升」文案已废除。
+    regime 若仍传入，仅作内部兼容编号展示；算仓一律 RISK20_NOTIONAL5。
+    """
+    try:
+        r = int(regime_code or 0)
+    except (TypeError, ValueError):
+        r = 0
+    if r <= 0:
+        return _g("算仓=本金20%风险资金×5x杠杆（RISK20）", G_MUTED)
+    return _g(
+        f"内部兼容编号 R{r}（不影响算仓；算仓=本金20%风险×5x·RISK20）",
+        G_MUTED,
+    )
+
+
+def _sizing_mode_label():
+    return _g("本金20%风险资金 × 5x杠杆 · RISK20_NOTIONAL5", G_MAIN)
 
 
 def _format_tp_compare(tp_pxs, tv_tps=None, unit_label=None, symbol=None):
@@ -565,7 +574,8 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
         ),
     }
     if regime and margin_pct is not None:
-        data["🔢 TV 档位"] = get_regime_name(int(regime))
+        data["📐 算仓模式"] = _sizing_mode_label()
+        data["🔢 内部编号"] = get_regime_name(int(regime))
         if meta:
             data["📐 预算公式"] = _g(
                 _format_vps_sizing_basis(principal, meta=meta, leverage=f"{lev}x"),
@@ -580,7 +590,7 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
         data["🎯 目标仓位"] = _g(f"**{target_qty}** {unit}", G_MAIN)
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("📸 本金快照 · 档位预算基数已锁定", data, G_TITLE)
+    send_alert("📸 本金快照 · RISK20 预算基数已锁定", data, G_TITLE)
 
 
 def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
@@ -670,8 +680,16 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
     else:
         action_txt = _g(raw or "仓位变动", G_ACCENT)
     is_manual_open = "人工开仓" in raw
-    if is_manual_open:
-        action_txt = _g("人工开仓 · 系统接管", G_LIGHT)
+    is_unverified = (
+        "未登记" in raw
+        or "来源待核实" in raw
+        or "待核实" in raw
+    )
+    if is_unverified:
+        action_txt = _g("未登记来源仓位 · 系统接管（来源待核实）", G_LIGHT)
+    elif is_manual_open:
+        # 兼容旧调用：不再对外宣称「确定人工开仓」
+        action_txt = _g("未登记来源仓位 · 系统接管（来源待核实）", G_LIGHT)
     title = "🔄 币安阵地异动重置"
     if "止盈" in raw or "对账" in raw:
         title = "🎯 币安止盈对账同步"
@@ -686,11 +704,17 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
             "⏳ 重挂已提交，REST 同步略延迟 | 哨兵持续对齐",
         ),
     }
-    if is_manual_open:
+    if is_unverified or is_manual_open:
+        data["⚠️ 归因说明"] = _g(
+            "未把该仓断言为「人工开仓」；可能是验证脚本/API直连/外部下单。"
+            "未关联历史TV档位或旧tv_sl。",
+            G_MUTED,
+        )
         data["🫁 呼吸止损"] = _g(
             "开仓即挂 entry±1.5×ATR · 阶段一阶梯 · 浮盈≥3×ATR 切入ADX追踪",
             G_MUTED,
         )
+        data["📐 算仓模式"] = _sizing_mode_label()
     if tp_audit:
         data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
     if verify_note:
@@ -721,7 +745,8 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
                             tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
                             tv_regime=None, tv_atr=None, tv_field_sources=None,
                             close_type="", tv_reason="", entry_px=None, closed_qty=None,
-                            live_exit_px=None, exit_source="", exit_source_label=""):
+                            live_exit_px=None, exit_source="", exit_source_label="",
+                            symbol=None, unit_label=None):
     theme = _classify_close(
         reason, verify_note, swept_dust=swept_dust,
         close_type=close_type, close_action=close_action, tv_reason=tv_reason or reason,
@@ -777,7 +802,8 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
         pnl = float(tv_pnl_pct)
         data["📈 盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
     if tv_regime is not None:
-        data["📊 TV档位"] = get_regime_name(int(tv_regime))
+        data["📐 算仓模式"] = _sizing_mode_label()
+        data["🔢 TV内部编号"] = get_regime_name(int(tv_regime))
     if tv_atr is not None and float(tv_atr or 0) > 0:
         data["📏 TV ATR"] = _g(f"`{float(tv_atr):.4f}`", G_MUTED)
     if tv_field_sources:
@@ -842,7 +868,8 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
                             pnl_label="", defense_plan="", shield_status="",
                             radar_progress=0.0, tv_aligned=True, qty_aligned=True,
                             initial_qty=0.0, tp_consumed_levels=None,
-                            tv_regime=None, hard_sl_pct=None, radar_act_pct=None):
+                            tv_regime=None, hard_sl_pct=None, radar_act_pct=None,
+                            symbol=None, unit_label=None):
     expected = tp_expected or sum(1 for t in tv_tps if t > 0)
     if expected > 0 and tp_matched >= expected:
         action_txt = f"{VERIFY_TAG} | 头寸+TV对账 → 比例 TP123 已对齐 → 恢复哨兵"
@@ -877,7 +904,6 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     if last_tv_signal:
         tv_ref = (
             f"{last_tv_signal.get('action', '?')} "
-            f"R{last_tv_signal.get('regime', '?')} "
             f"@{last_tv_signal.get('ts', '')}"
         )
         try:
@@ -893,17 +919,17 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 核实头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
-        "📊 开仓档位(TP)": get_regime_name(open_reg or 3),
+        "📐 算仓模式": _sizing_mode_label(),
     }
+    if open_reg:
+        data["🔢 内部兼容编号"] = get_regime_name(open_reg)
     if tv_reg:
-        data["📡 TV信号档位"] = get_regime_name(tv_reg)
+        data["📡 TV信号编号"] = get_regime_name(tv_reg)
         if regime_mismatch:
-            data["⚠️ 档位对账"] = _g(
-                f"**不一致** TV=R{tv_reg} vs 锁档=R{open_reg} → 已以 TV 开仓档对齐 TP",
-                G_DEEP,
+            data["⚠️ 编号对账"] = _g(
+                f"TV=R{tv_reg} vs 内部=R{open_reg}（均不影响 RISK20 算仓）",
+                G_MUTED,
             )
-        else:
-            data["✅ 档位对账"] = _g(f"TV R{tv_reg} = 开仓锁档 R{open_reg}", G_MAIN)
     if hard_sl_pct is not None and sl_price:
         data["🫁 呼吸止损"] = _g(
             f"**{float(sl_price):.2f}** USDT (entry±1.5×ATR 起)",
@@ -957,13 +983,13 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
         title = "🧠 智能筛选：短时重复同向 · 已忽略"
         status = _g(
             f"**5 分钟内** ATR 未变 ({atr_txt})，价差 **{diff_pct:.3f}%** < **{threshold_pct}%**，"
-            f"档位 **R{tv_regime}** → **未重复下单**。",
+            f"内部编号 **R{tv_regime}** → **未重复下单**。",
             G_ACCENT,
         )
     elif decision.startswith("reentry_"):
         reason_map = {
             "reentry_atr_changed": f"**① ATR 变化** ({atr_txt}) → **先平后开** 刷新仓位",
-            "reentry_regime_changed": f"**② 档位** R{open_regime}→R{tv_regime} → **先平后开** 刷新仓位",
+            "reentry_regime_changed": f"**② 内部编号** R{open_regime}→R{tv_regime} → **先平后开** 刷新仓位",
             "reentry_spread_ok": (
                 f"**③ 理论价差** **{diff_pct:.3f}%** ≥ **{threshold_pct}%** "
                 f"(ATR 未变 {atr_txt}) → **先平后开**"
@@ -975,7 +1001,7 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
         title = "🧠 智能筛选：同向持仓 · 仅刷新止盈"
         status = _g(
             f"**① ATR 未变** ({atr_txt}) + **③ 价差** **{diff_pct:.3f}%** < **{threshold_pct}%** "
-            f"(档位 R{open_regime}) → **未再开仓**，已核实持仓并按新 TV 价刷新 TP123。",
+            f"(内部编号 R{open_regime}) → **未再开仓**，已核实持仓并按新 TV 价刷新 TP123。",
             G_LIGHT,
         )
     data = {
@@ -988,7 +1014,8 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
             G_ACCENT if atr_changed else G_MUTED,
         ),
         "📏 理论价差": _g(f"{diff_pct:.3f}% / 阈值 {threshold_pct}%", G_ACCENT),
-        "🔢 档位": _g(f"开仓 R{open_regime} · TV R{tv_regime}", G_MUTED),
+        "🔢 内部编号": _g(f"开仓 R{open_regime} · TV R{tv_regime}（不影响算仓）", G_MUTED),
+        "📐 算仓模式": _sizing_mode_label(),
         "📦 持有": _g(f"**{qty}** {_u()}" if qty > 0 else "无持仓", G_ACCENT),
     }
     if tp_audit:
@@ -999,7 +1026,8 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
     send_alert(title, data, color)
 
 
-def report_system_alert(title, detail, level="紧急", suggestion="", immediate=False):
+def report_system_alert(title, detail, level="紧急", suggestion="", immediate=False,
+                        symbol=None, unit_label=None):
     data = {
         "⚠️ 告警级别": _g(f"【{level}】需管理员关注", G_DEEP),
         "📝 发生了什么": _g(f"**{title}**", G_MAIN),
@@ -1097,6 +1125,87 @@ def report_hard_sl_fail_abort(side, qty, target_sl, attempts=3, reason="", detai
     send_alert("🚨 止损执行失败 · HARD_SL_FAIL_ABORT", data, G_TITLE)
 
 
+def report_close_then_open_fail_abort(symbol="", attempts=3, reason="", detail=""):
+    """
+    CLOSE_THEN_OPEN_FAIL_ABORT：先平后开净场失败重试耗尽。
+    放弃本笔开仓 + 暂停该 symbol 自动开仓，需人工核对后 /admin/resume。
+    """
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    data = {
+        "⚠️ 机制": _g("CLOSE_THEN_OPEN_FAIL_ABORT", G_DEEP),
+        "🏷️ 品种": _g(sym, G_MAIN),
+        "🔁 重试": _g(
+            f"{int(attempts)} 次仍失败（间隔 1s/3s/6s）→ 本笔开仓已放弃",
+            G_MUTED,
+        ),
+        "📌 原因": _g(reason or "先平后开净场失败", G_ACCENT),
+        "🛑 状态": _g(
+            "已暂停该品种自动开仓 · **需要人工介入**",
+            G_DEEP,
+        ),
+        "💡 恢复": _g(
+            f"核对币安持仓/挂单清净后：`POST /admin/resume/{sym}`",
+            G_LIGHT,
+        ),
+    }
+    if detail:
+        data["📋 明细"] = _g(detail, G_MUTED)
+    send_alert(
+        f"🚨 清仓失败·需人工介入 [{sym}]",
+        data,
+        G_TITLE,
+        immediate=True,
+    )
+
+
+def report_atr_degrade_abort(
+    symbol="",
+    reason="",
+    vps_atr=0,
+    tv_implied_atr=0,
+    entry=0,
+    qty=0,
+    side="",
+    detail="",
+):
+    """
+    ATR 应急降级：本笔已用 TV 隐含 ATR 开仓；暂停后续自动开仓，需人工确认后 resume。
+    禁止静默切换——必须高优告警。
+    """
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    data = {
+        "⚠️ 机制": _g("ATR_DEGRADE_MANUAL_RESUME", G_DEEP),
+        "🏷️ 品种": _g(sym, G_MAIN),
+        "📌 触发原因": _g(reason or "—", G_ACCENT),
+        "📉 VPS原始ATR": _g(f"`{float(vps_atr or 0):.4f}`", G_MUTED),
+        "📐 TV隐含ATR": _g(
+            f"`{float(tv_implied_atr or 0):.4f}` (=|price−sl|/1.0)",
+            G_MAIN,
+        ),
+        "🚀 本笔执行": _g(
+            f"{str(side or '').upper() or '—'} qty={qty} @ {float(entry or 0):.2f} · "
+            f"**已用降级ATR** · 标签 `atr_source=tv_implied_degrade`",
+            G_LIGHT,
+        ),
+        "🛑 状态": _g(
+            "后续自动开仓已暂停 · **需要人工介入排查行情引擎**",
+            G_DEEP,
+        ),
+        "💡 恢复": _g(
+            f"复验 ATR/ADX 误差<5% 后：`POST /admin/resume/{sym}`",
+            G_LIGHT,
+        ),
+    }
+    if detail:
+        data["📋 明细"] = _g(str(detail), G_MUTED)
+    send_alert(
+        f"🚨 ATR应急降级·需人工介入 [{sym}]",
+        data,
+        G_TITLE,
+        immediate=True,
+    )
+
+
 def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
                               tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
                               reason="", vps_sizing_meta=None, vps_hard_sl_note="",
@@ -1123,7 +1232,7 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     data = {
         "📡 信号类型": _g(f"**{act}** · {type_txt}", G_ACCENT),
         "💹 TV价格": _g(f"`{float(price or 0):.2f}` USDT", G_MUTED),
-        "📊 档位": get_regime_name(regime),
+        "📐 算仓模式": _sizing_mode_label(),
         "📡 ATR": _g(f"`{float(atr or 0):.2f}`", G_MUTED),
     }
     if bar_index is not None or seq is not None:
@@ -1174,7 +1283,7 @@ def report_tv_sl_updated(side, live_qty, entry, tv_sl, exchange_stop=None,
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
-        "📊 开仓档位": get_regime_name(regime),
+        "📐 算仓模式": _sizing_mode_label(),
         "📡 TV参考止损": _g(f"**{tv_sl:.2f}** USDT (不挂盘)", G_MUTED),
         "🫁 呼吸止损": _g(
             f"**{hung:.2f}** USDT" if hung > 0 else "哨兵维护中",
@@ -1215,7 +1324,7 @@ def report_tv_tp_updated(side, live_qty, entry, old_tps=None, new_tps=None,
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()}", G_MAIN),
         "💰 开仓成本": _g(f"`{float(entry or 0):.2f}` USDT", G_MUTED),
-        "📊 档位": get_regime_name(regime),
+        "📐 算仓模式": _sizing_mode_label(),
         "📉 原 TP123": _g(_fmt(old_tps), G_MUTED),
         "🚀 新 TP123": _g(_fmt(new_tps), G_ACCENT),
         "📌 新挂档数": _g(f"**{int(placed or 0)}** 笔限价止盈", G_LIGHT),
