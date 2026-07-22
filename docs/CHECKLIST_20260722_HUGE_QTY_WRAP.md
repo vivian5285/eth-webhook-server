@@ -7,14 +7,13 @@
 ## 一、本次事件收尾确认
 
 ### 1. GitHub 推送 + VPS 部署 / health 版本
-- **结论**：本地在本清单完成时交付 `v15.5.17`；**须对照** `GET /health` 的 `version` 与 VPS 代码一致后勾选。
-- v15.5.16 曾部署但未稳定入 GitHub main（此前 HEAD 仍为 docs/`v15.5.15`）。本轮一并推送。
+- **已确认**：GitHub `main` @ `8e9bd67`；VPS `health.version=v15.5.17-incident-sticky`（2026-07-22 部署核验通过）。
 
 ### 2. ETH 暂停状态
-- 暂停原因：`INCIDENT_20260722_HUGE_QTY_PENDING_RESUME`
+- **已确认**：`trading_paused=true`，reason=`INCIDENT_20260722_HUGE_QTY_PENDING_RESUME`；空仓、`monitoring=false`。
 - **发现并已修**：原闸门仅把 `CLOSE_THEN_OPEN_FAIL*` / `restart_*` / `ATR_DEGRADE*` 视为人工粘性；`INCIDENT_*` / `PENDING_RESUME` 在空仓时会被下一笔 LONG/SHORT **自动解除**。
 - **修复**：`_process_signal` 与 `_open_position` 均将 `INCIDENT_*` 与含 `PENDING_RESUME` 视为 sticky，禁止自动恢复。
-- **恢复条件**：仅人工 `POST /admin/resume/ETHUSDT`，且需负责人明确确认。
+- **恢复条件**：仅人工 `POST /admin/resume/ETHUSDT`，且需负责人明确确认。本轮**未** resume。
 
 ### 3. `availableBalance×5×0.92` 裁剪位置与覆盖面
 - **位置**：`position_supervisor_binance.py` → `_calc_vps_open_qty`（保证金裁剪块，约 L3255–3284）
