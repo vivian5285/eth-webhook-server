@@ -131,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.18-checklist-clean"
+BINANCE_VPS_VERSION = "v15.5.19-sizing-iron"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -3254,8 +3254,9 @@ class PositionSupervisorBinance:
                 )
         except Exception:
             pass
-        # 保证金安全网：名义按权益×5 可能贴近全仓保证金 → 交易所 -2019
-        # 用 availableBalance×杠杆×0.92 再裁一次，保证「算出口」与「下得进」一致
+        # 保证金安全网（交易所 availableBalance）：名义按「本金×5」算出后，
+        # 再用 available×杠杆×0.92 裁一次，杜绝天文/满仓导致 -2019。
+        # 核心公式仍是 本金×20%风险 / 本金×5名义，本裁剪不改变该铁律。
         try:
             summary = binance_client.get_futures_account_summary() or {}
             avail = float(summary.get("available_balance") or 0)
@@ -4312,7 +4313,7 @@ class PositionSupervisorBinance:
         重启/接管铁律（开仓价 + 实时价两头对账）：
         - 现价已达/越过 TPn → 记账跳过，禁止再挂该档（防 TP1 反复补挂秒成）
         - 只挂尚未达价的剩余档（TP1过→只挂23；TP2过→只挂3）
-        - 达雷达激活比例或 TP1 已过 → 应启雷达动态追随
+        - 达阶段二激活条件或 TP1 已过 → 呼吸止损进入动态追随
         不要求减仓证据（接管时限价可能已成交或从未挂上）。
         """
         entry = float(entry or self.watched_entry or 0)
@@ -6873,7 +6874,7 @@ class PositionSupervisorBinance:
         return adopted > 0
 
     def _maintain_hard_shield(self, real_amt, curr_px=None, force=False, radar_sl=None):
-        """维护 TV 硬止损 closePosition；雷达激活时合并为雷达保本"""
+        """维护呼吸止损 closePosition；阶段二激活时合并为追踪止损单槽"""
         if real_amt <= 0 or not self.watched_entry:
             return False
         if getattr(self, "_stop_write_blocked", False):
@@ -8345,7 +8346,7 @@ class PositionSupervisorBinance:
 
     def _cancel_stale_tp_beyond_radar(self, radar_sl, live_qty=None, tolerance=1.5):
         """
-        雷达止损已越过 TP1/TP2 → 撤销无意义的限价止盈（防孤儿单干扰）。
+        呼吸止损已越过 TP1/TP2 → 撤销无意义的限价止盈（防孤儿单干扰）。
         多头：雷达价 ≥ TP 价；空头：雷达价 ≤ TP 价。
         """
         radar_sl = float(radar_sl or 0)
@@ -8600,7 +8601,7 @@ class PositionSupervisorBinance:
 
     def _realign_remaining_tps_after_fill(self, live_qty, dynamic_sl=None, reason=""):
         """
-        TP 成交后：只维护剩余 TP2/TP3，不重挂已成交 TP1；同步雷达止损。
+        TP 成交后：只维护剩余 TP2（不挂 TP3）；同步呼吸止损数量。
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:

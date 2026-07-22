@@ -1,14 +1,15 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.14-copy-tp-timeout`**  
+**当前版本：`v15.5.19-sizing-iron`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`（含 TV 止损距调整系数 `sl_adj`）**  
-**保护引擎：呼吸止损（`breath_stop` · 自建 markPrice WebSocket 驱动 · 90m ATR/ADX）**  
-**生产唯一大脑：`position_supervisor_binance.py`**
+**仓位模式：`RISK20_NOTIONAL5`（合约本金×20% 风险 + 本金×5 名义 · 永远）**  
+**保护引擎：呼吸止损（`breath_stop` · markPrice WebSocket · 90m ATR/ADX）**  
+**生产唯一大脑：`position_supervisor_binance.py`**  
+**通知渠道：钉钉（`dingtalk.py`；暂不迁 Telegram）**
 
-> 本文档为**唯一权威说明**。凡与旧文档（妈妈版阶梯雷达、TP3 挂限价、CAP_ALIGN、TV `stop_loss` 作盘口止损基准、同向跳过平仓等）冲突，一律以本文为准。  
+> 本文档为**唯一权威说明**。凡与旧文档（妈妈版阶梯雷达、TP3 挂限价、CAP_ALIGN、TV `stop_loss` 作盘口止损基准、同向跳过平仓、名义×0.85 折扣等）冲突，一律以本文为准。  
 > 旧逻辑清除对照表：[`docs/DELETED_LEGACY_LOGIC_v15.5.13.md`](docs/DELETED_LEGACY_LOGIC_v15.5.13.md)  
-> 生产门禁交付：[`docs/PROD_GATE_v15.5.13.md`](docs/PROD_GATE_v15.5.13.md)
+> 天文 qty 事故：[`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md)
 
 TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX) → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损全程接管** → 平仓钉钉诚实归因。
 
@@ -19,7 +20,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.13-prod-gate
+# version: v15.5.19-sizing-iron
 # sizing: RISK20_NOTIONAL5 · leverage: fixed_5 · tv_strategy: v6.5.6
 # radar: breath_stop_90m · trading_paused: false
 
@@ -29,7 +30,7 @@ python3 check_deploy_events.py --live
 
 ---
 
-## 零、四条不可动摇的硬性原则
+## 零、五条不可动摇的硬性原则
 
 1. **开仓永远先平后开**  
    不判断新旧仓位方向是否相同；收到 `LONG`/`SHORT` 一律：查实盘 → 有仓则市价全平 + 撤全部挂单 → **等待确认仓位归零** → 再算 qty 开新仓。  
@@ -38,14 +39,21 @@ python3 check_deploy_events.py --live
 2. **单仓位，不加仓**（pyramiding=1）  
    任意时刻一个 symbol 只允许一笔持仓。无多笔 trade 并存、无加权均价重算、无浮盈加仓。
 
-3. **下单数量每次独立计算，无状态**  
-   只依赖：账户权益、开仓价、`initialStop`（VPS ATR）、TV.qty、以及 **仅用于调整系数** 的 TV.stop_loss。不读历史仓位、不加仓次数、不读上一笔结果。真实挂止损价仍只用 VPS `initialStop`。
+3. **下单数量铁律（永远）**  
+   - 风险资金 = **合约账户本金 × 20%**  
+   - 名义上限 = **合约账户本金 × 5**  
+   - `qty = min(风险/|价−initialStop|, 名义/价, TV.qty′)`，向下取整  
+   - **绝不采信天文 TV.qty 为最终下单量**（Pine equity 膨胀时忽略该上限）  
+   - 交易所保证金再裁：`availableBalance × 5 × 0.92`（防 -2019；不改变「本金×20%/×5」铁律）  
+   无状态纯函数，不读历史仓位/加仓次数。真实挂止损价只用 VPS `initialStop`。
 
 4. **止损单全局唯一写入方 = 呼吸止损引擎**  
    下单 / 改单 / 触发平仓只由呼吸引擎执行。订单监控、重启恢复等模块**不得**直接调用止损类交易所 API，只能通知引擎执行。  
    保留兜底：`HARD_SL_FAIL_ABORT`、`CLOSE_THEN_OPEN_FAIL_ABORT`、`FORCE_ALIGN`。  
    **已删除：`CAP_ALIGN`（仓位上限主动减仓）**。
 
+5. **同窗先平后开**  
+   同 symbol 消息缓存 **固定 1.0s**；平仓优先于开仓；平干净确认后再开。
 ---
 
 ## 一、信号流与架构
@@ -156,26 +164,30 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 
 ## 四、仓位数量计算（开仓算一次，此后不变）
 
+**铁律（2026-07-22 天文 qty 事故后再次钉死）：永远按合约本金 ×20% 风险资金 + 本金 ×5 名义上限独立核算，不采信天文 TV.qty。**
+
 ```
 VPS实际止损距离 = |entryPrice − initialStop| = 1.5 × initialAtr
 TV隐含止损距离 = |price − stop_loss|
 调整系数 sl_adj = TV隐含止损距离 / VPS实际止损距离     # 缺 stop_loss → 1.0
 调整后的TV数量上限 = qty × sl_adj
+  # 若 TV.qty′ ≫ max(风险候选, 名义候选)×50 → 忽略该上限（Pine equity 膨胀）
 
-风险资金 = 账户本金 × 20%
-名义上限 = 账户本金 × 5
+风险资金 = 合约账户本金 × 20%
+名义上限 = 合约账户本金 × 5          # 不做 0.85 等折扣
 
 理论数量 = min(
     风险资金 / VPS实际止损距离,
     名义上限 / entryPrice,
-    调整后的TV数量上限,
+    调整后的TV数量上限（若未忽略）,
 )
 最终下单数量 = 向下取整至交易所精度
+# 下单前再裁：availableBalance × 5 × 0.92 / price（仅防交易所 -2019）
 ```
 
-**为什么需要 `sl_adj`：** TV.qty 按 TV 内部止损距（常见约 1.0×ATR）算出；实盘初始止损距是 **1.5×ATR**。若直接 `min(..., TV.qty)`，按 VPS 止损触发时实际亏损会被放大约 50%。换算后，只要止损在 VPS `initialStop` 触发，亏损可控在风险资金预算内。
+**为什么需要 `sl_adj`：** TV.qty 按 TV 内部止损距算出；实盘初始止损距是 **1.5×ATR**。换算后，止损在 VPS `initialStop` 触发时亏损可控在风险资金预算内。
 
-数量在开仓算完即固定，**不**随后续价格/ADX 重算。开仓日志打印：`sl_adj`、三候选、`binding`。
+数量在开仓算完即固定，**不**随后续价格/ADX 重算。开仓日志打印：`sl_adj`、三候选、`binding`、是否 `tv_qty_ignored_absurd` / `margin_cap`。
 
 ---
 
@@ -373,7 +385,8 @@ python3 check_90m_align.py --live   # 拉实盘30m，打印90m开盘时间供与
 |------|----------|------|
 | 开仓 | 方向、价格、数量、initialStop；**算仓模式=RISK20**（不展示旧档位/「中势推升」） | `report_supervisor_open` |
 | 先平后开 | 已有持仓已全平撤单，准备开新仓 | `report_close_then_open_chain` |
-| 阶段切换（一→二） | 切换价、ADX、追踪距离 | `report_radar_activated` |
+| 同窗开平同时到达 | 检测到平仓+开仓同秒到达，已按先平后开执行 | `report_close_then_open_chain`（phase「同秒开平·强制先平后开」） |
+| 阶段切换（一→二） | 切换价、ADX、追踪距离（文案用「阶段二」，禁用「雷达激活」标题） | `report_radar_activated` |
 | 止损移动 | 新止损、浮盈、所处阶段 | `report_intervention` |
 | TP1/TP2 成交 | 成交价、剩余比例、当前止损 | `report_tp_fill` |
 | 止损触发 | 须现价贴线；阶段一/二、盈亏 | `report_supervisor_close` |

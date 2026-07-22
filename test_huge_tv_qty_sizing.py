@@ -23,7 +23,7 @@ def _expect_notional(principal, price):
 
 class TestHugeTvQtySizing(unittest.TestCase):
     def test_huge_tv_qty_binds_notional_not_tv(self):
-        """TV.qty=860680123 → absurd ceiling ignored; binding=notional (×0.85 haircut)."""
+        """TV.qty=860680123 → absurd 忽略；binding=notional=本金×5/价。"""
         principal = 1719.0
         price = 1932.4
         vps_stop = price - 1.5 * 15.6005  # ≈1909.0
@@ -44,6 +44,8 @@ class TestHugeTvQtySizing(unittest.TestCase):
         expect = _expect_notional(principal, price)
         self.assertAlmostEqual(qty, expect, places=3)
         self.assertNotAlmostEqual(qty, 0.02, places=3)
+        # 铁律：名义 = 本金×5（haircut=1.0）
+        self.assertAlmostEqual(float(NOTIONAL_MARGIN_HAIRCUT), 1.0, places=6)
 
     def test_preview_and_order_use_same_payload_qty(self):
         """Stale 0.02 vs huge payload must differ; real path binds notional."""

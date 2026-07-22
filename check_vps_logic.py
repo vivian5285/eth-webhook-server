@@ -312,12 +312,11 @@ def audit_module2_sizing(a: Audit):
     a.check("2.2 HARD_NOTIONAL_CAP=0", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.3 MAX_TOTAL_NOTIONAL_MULT=13", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    # 无 TV.sl → adj=1.0：min(200/100, 1000*5*0.85/3300.5, 12) floored 3dp
-    # notional haircut 0.85 → 1.287（非旧无折扣 1.514）
+    # 无 TV.sl → adj=1.0：min(200/100, 1000*5/3300.5, 12) floored 3dp = 1.514
     qty, meta = compute_fixed_order_qty(1000, 3300.5, stop_loss=3200.5, tv_qty=12)
-    expected = 1.287
+    expected = 1.514
     a.check(
-        "2.4 1000U@3300.5 SL3200.5 tv=12 → 1.287(×0.85)",
+        "2.4 1000U@3300.5 SL3200.5 tv=12 → 1.514(本金×5)",
         abs(qty - expected) < 0.001,
         f"qty={qty} expected={expected} mode={meta.get('sizing_mode')} bind={meta.get('bind')}",
     )

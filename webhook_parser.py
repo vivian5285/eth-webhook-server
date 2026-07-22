@@ -19,7 +19,8 @@ EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
 ABSURD_TV_QTY_VS_CAPS = 50.0
-NOTIONAL_MARGIN_HAIRCUT = 0.85
+# 铁律：名义上限 = 合约本金 × 5（不做折扣）。保证金不足由 supervisor 用 available×5×0.92 再裁。
+NOTIONAL_MARGIN_HAIRCUT = 1.0
 VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
 VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
@@ -352,17 +353,12 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
                             stop_loss=None, tv_qty=None, tv_sl=None,
                             tv_price=None, **_kw):
     """
-    无状态纯函数（仅开仓时算一次；不读历史仓位）：
-      risk_capital = equity * 0.20
-      notional_cap = equity * 5
-      vps_stop_dist = |price − VPS.initialStop|
-      tv_implied_dist = |tv_price − TV.stop_loss|
-      adj = tv_implied_dist / vps_stop_dist   (缺 TV.stop_loss → adj=1.0)
-      adjusted_tv_qty = TV.qty × adj
-      qty = min(risk/vps_stop_dist, notional/price, adjusted_tv_qty)
-
-    stop_loss 参数 = VPS 自算 initialStop（真实挂止损价依据）。
-    tv_sl 仅用于调整系数，绝不作为盘口止损价。
+    无状态纯函数（仅开仓时算一次；不读历史仓位）——铁律永远：
+      risk_capital = 合约本金 × 0.20
+      notional_cap = 合约本金 × 5
+      qty = min(risk_capital/|price−initialStop|, notional_cap/price, TV.qty′)
+    天文 TV.qty（≫ 风险/名义候选）直接忽略，防止 Pine equity 膨胀把上限顶穿。
+    TV.stop_loss 只参与 sl_adj，绝不作为盘口止损价。
     """
     principal = float(principal or 0)
     price = float(price or 0)
