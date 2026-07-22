@@ -98,6 +98,7 @@ from breath_stop import (
     STEP_ADVANCE_ATR,
 )
 from atr_1h import get_atr_1h_engine
+from breath_profiles import LockedInitialAtr, cold_start_multiplier
 from market_engine import (
     get_market_engine,
     atr_divergence_pct,
@@ -136,7 +137,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.26-atr-reject"
+BINANCE_VPS_VERSION = "v15.5.27-breath-interp"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
@@ -272,7 +273,8 @@ class PositionSupervisorBinance:
         self._signal_worker_started = False
         self._sentinel_active = False
         self.open_regime = 3
-        self.open_atr = 30.0
+        self.open_atr = 30.0  # 展示默认；真开仓后由 LockedInitialAtr 锁定
+        self._locked_initial_atr = LockedInitialAtr(strict=False)
         self._last_entry_signal = None
         self._recover_in_progress = False
         self._recover_tp_unconfirmed = False
@@ -348,7 +350,9 @@ class PositionSupervisorBinance:
         self.breakeven_phase = False  # 呼吸止损阶段二
         self.initial_stop = 0.0       # entry±1.5×initialAtr，阶梯基准（理论，不含0.3缓冲）
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
-        self.breathing_coefficient = 1.0
+        self.breathing_coefficient = cold_start_multiplier(
+            getattr(self, "breath_profile", None)
+        )
         self.early_be_done = False
         self._breath_ratio_history = []
         self._tv_signal_atr = 0.0  # 本笔 webhook atr → initial_atr
@@ -725,8 +729,28 @@ class PositionSupervisorBinance:
                     return
                 curr_px = binance_client.get_current_price(self.symbol)
                 logger.warning("📭 [空闲巡检] 账本有仓且复核空仓 → 补发收网钉钉")
+                try:
+                    flat_meta = self._infer_flat_close_meta(
+                        curr_px=curr_px, hint_reason="",
+                    )
+                    src_lab = flat_meta.get("exit_source_label") or ""
+                    note = flat_meta.get("tv_reason") or ""
+                    if src_lab and src_lab not in str(note):
+                        flat_meta["tv_reason"] = (
+                            f"{src_lab} · {note}" if note else src_lab
+                        )
+                    elif not note:
+                        flat_meta["tv_reason"] = (
+                            src_lab or "仓位归零（空闲巡检·来源未明·请查交易所成交）"
+                        )
+                except Exception as e:
+                    logger.error(f"空闲巡检归因失败: {e}")
+                    flat_meta = {
+                        "tv_reason": "仓位归零（空闲巡检·归因异常·请查交易所成交）",
+                    }
                 self._handle_manual_flat_detected(
-                    "仓位归零 (人工强平 / 止盈吃单 / 止损触发)",
+                    flat_meta.get("tv_reason"),
+                    close_meta=flat_meta,
                     curr_px=curr_px,
                 )
             return
@@ -1312,7 +1336,7 @@ class PositionSupervisorBinance:
             _, open_sizing_meta = self._calc_vps_open_qty(self.tv_price)
             sizing_note = " | " + format_vps_sizing_note(open_sizing_meta, entry_type=ENTRY_TYPE_OPEN)
         logger.info(
-            f"📡 TV日志: {raw_action}{seq_tag} R{self.regime} @ {self.tv_price:.2f} "
+            f"📡 TV日志: {raw_action}{seq_tag} RISK20 @ {self.tv_price:.2f} "
             f"TP={self.tv_tps}"
             + sizing_note
             + (f" | pnl={payload.get('pnl_pct')}%" if payload.get("pnl_pct") is not None else "")
@@ -3649,7 +3673,7 @@ class PositionSupervisorBinance:
         if not self._is_dust_qty(real_amt) and not self._should_finalize_tp_victory(real_amt):
             return False
         if self.initial_qty > 0 or self.watched_qty > 0:
-            reason = "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
+            reason = "重启扫描：残量扫尾（疑似止盈余量/灰尘仓）"
         else:
             reason = "重启扫描：盘口蚂蚁仓自动扫平"
         logger.warning(
@@ -9613,6 +9637,16 @@ class PositionSupervisorBinance:
         if last_act and last_ts > 0 and time.time() - last_ts < 180:
             if last_act == "CLOSE_TP3":
                 return EXIT_SOURCE_TP3, last.get("reason") or "TV CLOSE_TP3 · TP3完美收网"
+            if last_act == "CLOSE_QUICK_EXIT":
+                return (
+                    EXIT_SOURCE_QUICK,
+                    last.get("reason") or "TV CLOSE_QUICK_EXIT · 反转保护",
+                )
+            if last_act == "CLOSE_RSI_EXIT":
+                return (
+                    EXIT_SOURCE_RSI,
+                    last.get("reason") or "TV CLOSE_RSI_EXIT · 反转保护(RSI)",
+                )
             if last_act == "CLOSE_PROTECT" or last_act.startswith("CLOSE_PROTECT"):
                 return (
                     EXIT_SOURCE_TV_PROTECT,
@@ -9695,9 +9729,23 @@ class PositionSupervisorBinance:
         elif exit_src in (EXIT_SOURCE_VPS_HARD_SL, EXIT_SOURCE_SL_INITIAL):
             meta = self._build_close_meta("CLOSE_SL_INITIAL", side, est, note)
             meta["close_type"] = CLOSE_TYPE_HARD_SL if exit_src == EXIT_SOURCE_SL_INITIAL else CLOSE_TYPE_VPS_SHIELD
-        elif exit_src == EXIT_SOURCE_TV_PROTECT:
-            meta = self._build_close_meta("CLOSE_PROTECT", side, est, note)
-            meta["close_type"] = CLOSE_TYPE_PROTECT
+        elif exit_src in (EXIT_SOURCE_TV_PROTECT, EXIT_SOURCE_QUICK, EXIT_SOURCE_RSI):
+            act = (
+                "CLOSE_QUICK_EXIT"
+                if exit_src == EXIT_SOURCE_QUICK
+                else (
+                    "CLOSE_RSI_EXIT"
+                    if exit_src == EXIT_SOURCE_RSI
+                    else "CLOSE_PROTECT"
+                )
+            )
+            meta = self._build_close_meta(act, side, est, note)
+            if exit_src == EXIT_SOURCE_RSI:
+                meta["close_type"] = CLOSE_TYPE_RSI
+            elif exit_src == EXIT_SOURCE_QUICK:
+                meta["close_type"] = CLOSE_TYPE_QUICK
+            else:
+                meta["close_type"] = CLOSE_TYPE_PROTECT
         elif exit_src == EXIT_SOURCE_TV_CLOSE:
             last = self.last_tv_signal or {}
             meta = self._build_close_meta(
@@ -9962,11 +10010,28 @@ class PositionSupervisorBinance:
                     else "反转保护(RSI)"
                 )
                 if not pos or pos.get("size", 0) <= 0:
+                    # 盘口已空：只复位账本，钉钉标明「非本次新平仓」，避免误读成刚平完却不知原因
+                    already_reason = (
+                        f"已空仓复位·{tag}信号到达时盘口无仓 | {tv_reason}{close_extra}"
+                    )
                     logger.info(
-                        f"🧹 {tag}但盘口已空 → 撤净挂单复位 | {tv_reason}{close_extra}"
+                        f"🧹 {tag}但盘口已空 → 撤净挂单复位 | {already_reason}"
+                    )
+                    flat_meta = dict(close_meta or {})
+                    flat_meta["already_flat"] = True
+                    flat_meta["tv_reason"] = already_reason
+                    flat_meta["exit_source"] = (
+                        EXIT_SOURCE_QUICK
+                        if raw_action == "CLOSE_QUICK_EXIT"
+                        else EXIT_SOURCE_RSI
+                    )
+                    flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
+                        flat_meta["exit_source"], tag
                     )
                     self._handle_manual_flat_detected(
-                        tv_reason, close_meta=close_meta, curr_px=self.tv_price,
+                        already_reason,
+                        close_meta=flat_meta,
+                        curr_px=self.tv_price,
                     )
                 else:
                     self._close_all(
@@ -10175,7 +10240,7 @@ class PositionSupervisorBinance:
         live_entry = pos["entry_price"]
         reason_txt = {
             "atr_changed": f"TV ATR `{tv_atr:.2f}` ≠ 持仓 ATR `{open_atr:.2f}` → 刷新仓位",
-            "regime_changed": f"档位 R{self.open_regime}→R{self.regime} → 刷新仓位",
+            "regime_changed": "参数刷新 → 刷新仓位",
             "spread_ok": f"理论价差 {diff_pct:.3f}% ≥ {SAME_DIR_MIN_SPREAD_PCT}% → 刷新仓位",
         }.get(reason, "同向刷新仓位")
         self._call_dingtalk(
@@ -10303,6 +10368,10 @@ class PositionSupervisorBinance:
         self.tv_sl_ref = 0.0
         self.initial_stop = 0.0
         self.open_atr = 0.0
+        try:
+            self._locked_initial_atr.clear_on_flat()
+        except Exception:
+            pass
         self.breakeven_phase = False
         self.radar_activated = False
         self.radar_step_count = 0
@@ -10517,6 +10586,20 @@ class PositionSupervisorBinance:
         if float(snap.get("atr") or 0) > 0:
             self.current_atr = float(snap["atr"])
             self.open_atr = float(snap["atr"])
+            try:
+                # 开仓绑定：写入并锁定 initial_atr（持仓期禁止再改）
+                if self._locked_initial_atr.locked:
+                    if abs(self._locked_initial_atr.value - float(snap["atr"])) > 1e-6:
+                        logger.warning(
+                            f"🛡️ [{self.symbol}] initial_atr 已锁定 "
+                            f"{self._locked_initial_atr.value:.4f}，忽略 snap atr={snap['atr']}"
+                        )
+                        self.open_atr = float(self._locked_initial_atr.value)
+                else:
+                    self._locked_initial_atr.set_on_open(float(snap["atr"]))
+                    self.open_atr = float(self._locked_initial_atr.value)
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] LockedInitialAtr 绑定跳过: {e}")
         if float(snap.get("adx") or 0) > 0:
             self.last_adx = float(snap["adx"])
         if int(snap.get("regime") or 0) in (1, 2, 3, 4):
@@ -10535,7 +10618,7 @@ class PositionSupervisorBinance:
         logger.info(
             f"🛡️ [{source}] 绑定开仓防线 TP={self.tv_tps} "
             f"tv_sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0):.2f} "
-            f"R{getattr(self, 'open_regime', self.regime)} "
+            f"RISK20 "
             f"ATR={float(getattr(self, 'open_atr', self.current_atr) or 0):.2f}"
         )
         return list(self.tv_tps)
@@ -10626,7 +10709,7 @@ class PositionSupervisorBinance:
             )
             # 本金快照不单独钉钉（并入开仓播报），避免开一单刷两条
             self._snapshot_sizing_principal(
-                f"开仓前 {normalize_entry_type(payload.get('entry_type'))} R{self.regime}",
+                f"开仓前 {normalize_entry_type(payload.get('entry_type'))} RISK20",
                 notify=False,
             )
             qty, balance, margin_usdt, margin_pct, sizing_meta = self._calc_target_open_qty(
@@ -10699,7 +10782,7 @@ class PositionSupervisorBinance:
             open_side = "BUY" if action == "LONG" else "SELL"
             logger.info(
                 f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} {self.unit_label} "
-                f"| {self.symbol} | 档位 {self.regime} | 待挂TP={self.tv_tps}"
+                f"| {self.symbol} | RISK20 | 待挂TP={self.tv_tps}"
             )
             order = binance_client.place_market_order(action, qty, symbol=self.symbol)
             if not order:
@@ -12108,18 +12191,32 @@ class PositionSupervisorBinance:
                                 try:
                                     flat_meta = self._infer_flat_close_meta(
                                         curr_px=last_px,
-                                        hint_reason="仓位归零 (止盈吃单 / 人工全平 / 止损触发)",
+                                        hint_reason="",
                                     )
+                                    # 禁止含糊「止盈/人工/止损」并列；归因结果写入 reason
+                                    src_lab = flat_meta.get("exit_source_label") or ""
+                                    note = flat_meta.get("tv_reason") or ""
+                                    if src_lab and src_lab not in note:
+                                        flat_meta["tv_reason"] = (
+                                            f"{src_lab} · {note}" if note else src_lab
+                                        )
+                                    elif not note:
+                                        flat_meta["tv_reason"] = (
+                                            src_lab or "仓位归零（来源未明·请查交易所成交）"
+                                        )
                                 except Exception as e:
                                     logger.error(
                                         f"⚠️ [哨兵] 空仓归因失败仍强制清账本: {e}"
                                     )
                                     flat_meta = {
-                                        "tv_reason": "仓位归零",
+                                        "tv_reason": "仓位归零（归因异常·请查交易所成交）",
                                         "close_type": "",
                                     }
                                 self._handle_manual_flat_detected(
-                                    flat_meta.get("tv_reason", "仓位归零"),
+                                    flat_meta.get(
+                                        "tv_reason",
+                                        "仓位归零（来源未明·请查交易所成交）",
+                                    ),
                                     close_meta=flat_meta,
                                     curr_px=last_px,
                                 )
@@ -12127,7 +12224,7 @@ class PositionSupervisorBinance:
 
                         if self.watched_qty > 0 and self._should_finalize_tp_victory(real_amt):
                             self._sweep_dust_and_finalize(
-                                "仓位归零 (止盈吃单 / 人工全平 / TV 强制平仓)"
+                                "TP余仓/蚂蚁仓扫尾（哨兵判定可收网）"
                             )
                             break
 

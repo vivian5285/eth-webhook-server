@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-呼吸止损引擎（开仓即工作 · TV initial_atr 基准 · 1h ATR 呼吸系数）
+呼吸止损引擎（开仓即工作 · TV initial_atr 基准 · 1h ATR 连续插值呼吸系数）
+
+边界（生产硬约束，勿再混淆）：
+  · trailDistanceMultiplier / breathing_coefficient —— 仅作用于阶段二追踪距离
+  · 阶段一阶梯步长 / 跟进 / TP 强制底线 —— 永远只用固定 ×initial_atr，与呼吸系数无关
+  · 早保本阈值 early_be_atr × initial_atr —— 亦不乘呼吸系数
 
 两阶段：
-  阶段一：早保本 + initial_stop 基准阶梯（步长/跟进 × breathing_coefficient）
-  阶段二：追踪距离 = initial_atr × breathing_coefficient × phase2_trail_mult
+  阶段一：早保本 + initial_stop 基准阶梯（步长/跟进 = 固定 ×initial_atr，不乘系数）
+  阶段二：追踪距离 = initial_atr × trailDistanceMultiplier(smoothedRatio)
 
-参数全部来自 breath_profiles（ETH/XAU）；模块级常量 = ETH 默认，保旧 import。
+呼吸系数 = 连续线性插值（见 breath_profiles.trail_distance_multiplier）；
+XAU 不再额外 ×0.8。
+
+历史备注：离散档中间版曾错误把 breathing_coefficient 乘进阶段一阶梯
+（step_trigger/advance × coeff）。v15.5.27 起按最终方案纠正为固定倍数。
 """
 from __future__ import annotations
 
@@ -15,8 +24,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from breath_profiles import (
     BREATH_ETH,
+    cold_start_multiplier,
     default_breath_profile,
-    map_coeff_from_tiers,
+    trail_distance_multiplier,
 )
 
 # ── ETH 默认常量（兼容旧 import / 测试）──────────────────────────────────────
@@ -65,22 +75,35 @@ def get_breathing_coefficient(
     profile: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, float, List[float]]:
     """
-    呼吸系数档位（对 ratio=current_1h/initial_atr 做最近3次平滑）。
-    profile 缺省 = ETH 档。
+    连续插值呼吸系数（trailDistanceMultiplier）：
+      1) 采样 ratio = current_1h / initial_atr
+      2) 近 3 次 ratio 算术平均 → smoothedRatio
+      3) trail_distance_multiplier(smoothedRatio)
+    冷启动（0 次有效采样 / cur<=0 且 hist 空）：ratio=1.0 → 公式中间值。
     返回 (coefficient, smooth_ratio, updated_history)
     """
     p = _profile(profile)
     init = float(initial_atr or 0)
     cur = float(current_atr_1h or 0)
     hist = list(ratio_history or [])
-    if init <= 0 or cur <= 0:
-        return 1.0, 0.0, hist
+
+    if init <= 0:
+        cold = cold_start_multiplier(p)
+        return float(cold), 1.0, hist
+
+    if cur <= 0:
+        if not hist:
+            cold = cold_start_multiplier(p)
+            return float(cold), 1.0, hist
+        smooth = sum(hist) / len(hist)
+        return float(trail_distance_multiplier(smooth, p)), float(smooth), hist
+
     ratio = cur / init
     hist.append(ratio)
     if len(hist) > 3:
         hist = hist[-3:]
     smooth = sum(hist) / len(hist)
-    coeff = map_coeff_from_tiers(smooth, p.get("coeff_tiers"))
+    coeff = trail_distance_multiplier(smooth, p)
     return float(coeff), float(smooth), hist
 
 
@@ -160,7 +183,7 @@ def calculate_stop_long(
     early_be_done = bool(early_be_done)
     coeff = float(breathing_coefficient or 1.0)
     if coeff <= 0:
-        coeff = 1.0
+        coeff = cold_start_multiplier(p)
 
     step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
     step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
@@ -170,7 +193,6 @@ def calculate_stop_long(
     tp1_f = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)
     tp2_a = float(p.get("tp2_atr") or TP2_ATR)
     tp2_f = float(p.get("tp2_floor_atr") or TP2_FLOOR_ATR)
-    trail_mult = float(p.get("phase2_trail_mult") or 1.0)
     tick = _tick_size(p)
 
     new_highest = max(highest_price, price) if price > 0 else highest_price
@@ -181,7 +203,8 @@ def calculate_stop_long(
     if entry_price <= 0 or initial_atr <= 0 or price <= 0:
         return new_stop, new_highest, new_phase, step_count, early_be_done
 
-    trail_dist = initial_atr * coeff * trail_mult
+    # 阶段二：trail = initial_atr × trailDistanceMultiplier（无额外 ×0.8）
+    trail_dist = initial_atr * coeff
 
     # 早保本：价达 entry+early_be×ATR → stop ≥ entry+1tick
     if early_be > 0 and price >= entry_price + early_be * initial_atr:
@@ -190,9 +213,10 @@ def calculate_stop_long(
         new_stop = max(float(new_stop or 0), be_stop)
 
     if not new_phase:
-        step_trigger = step_trig * initial_atr * coeff
+        # 阶梯：固定 ×initial_atr（文档总表；不乘呼吸系数）
+        step_trigger = step_trig * initial_atr
         step_count = max(0, int((price - entry_price) / step_trigger)) if step_trigger > 0 else 0
-        step_stop = initial_stop + step_count * step_adv * initial_atr * coeff
+        step_stop = initial_stop + step_count * step_adv * initial_atr
         candidate = max(float(new_stop or 0), float(current_stop or 0), step_stop)
 
         if price >= entry_price + tp1_a * initial_atr:
@@ -243,7 +267,7 @@ def calculate_stop_short(
     early_be_done = bool(early_be_done)
     coeff = float(breathing_coefficient or 1.0)
     if coeff <= 0:
-        coeff = 1.0
+        coeff = cold_start_multiplier(p)
 
     step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
     step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
@@ -253,7 +277,6 @@ def calculate_stop_short(
     tp1_f = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)
     tp2_a = float(p.get("tp2_atr") or TP2_ATR)
     tp2_f = float(p.get("tp2_floor_atr") or TP2_FLOOR_ATR)
-    trail_mult = float(p.get("phase2_trail_mult") or 1.0)
     tick = _tick_size(p)
 
     new_lowest = min(lowest_price, price) if (lowest_price > 0 and price > 0) else (
@@ -268,7 +291,7 @@ def calculate_stop_short(
     if entry_price <= 0 or initial_atr <= 0 or price <= 0:
         return new_stop, new_lowest, new_phase, step_count, early_be_done
 
-    trail_dist = initial_atr * coeff * trail_mult
+    trail_dist = initial_atr * coeff
 
     if early_be > 0 and price <= entry_price - early_be * initial_atr:
         early_be_done = True
@@ -279,9 +302,9 @@ def calculate_stop_short(
             new_stop = min(new_stop, be_stop)
 
     if not new_phase:
-        step_trigger = step_trig * initial_atr * coeff
+        step_trigger = step_trig * initial_atr
         step_count = max(0, int((entry_price - price) / step_trigger)) if step_trigger > 0 else 0
-        step_stop = initial_stop - step_count * step_adv * initial_atr * coeff
+        step_stop = initial_stop - step_count * step_adv * initial_atr
         if current_stop > 0 or new_stop > 0:
             candidate = min(x for x in (current_stop, new_stop, step_stop) if x > 0)
         else:
@@ -337,12 +360,11 @@ def calculate_breath_stop(
     px = float(price or 0)
     coeff = float(breathing_coefficient or 1.0)
     if coeff <= 0:
-        coeff = 1.0
-    trail_mult = float(p.get("phase2_trail_mult") or 1.0)
+        coeff = cold_start_multiplier(p)
     meta = {
-        "trail_atr": coeff * trail_mult,
+        "trail_atr": coeff,
         "breathing_coefficient": coeff,
-        "phase2_trail_mult": trail_mult,
+        "phase2_trail_mult": 1.0,
         "profile": p.get("name") or "ETH",
         "adx": float(adx_val or 0),
         "phase": "breakeven" if breakeven_phase else "ladder",
@@ -364,7 +386,7 @@ def calculate_breath_stop(
     meta["step_count"] = int(step_count)
     meta["phase"] = "breakeven" if phase else "ladder"
     meta["early_be_done"] = bool(early)
-    meta["trail_distance"] = round(atr * coeff * trail_mult, 4) if atr > 0 else 0.0
+    meta["trail_distance"] = round(atr * coeff, 4) if atr > 0 else 0.0
     return {
         "stop": stop,
         "best": best,

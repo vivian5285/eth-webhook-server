@@ -165,6 +165,23 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
         reason = re.sub(r"\s*\|\s*TV档位\s*R\d+", "", reason)
         reason = re.sub(r"\bR[1-4]\b", "", reason)
         reason = re.sub(r"\s{2,}", " ", reason).strip(" |")
+        # 盘口已空时的二次 CLOSE：勿伪装成「刚平完却不知原因」
+        if (
+            "已空仓" in reason
+            or "已空仓" in r
+            or "盘口已空" in reason
+            or "盘口已空" in r
+            or "已空仓复位" in reason
+        ):
+            return {
+                "title": f"已空仓复位：{reason[:80]}",
+                "tag": _g("**账本复位**", G_MUTED),
+                "status": _g(
+                    "盘口已无仓；本次仅撤挂单并清账本（非新成交平仓）。",
+                    G_MUTED,
+                ),
+                "header": G_MUTED,
+            }
         return {
             "title": f"反转保护平仓：{reason[:80]}",
             "tag": _g("**反转保护**", G_ACCENT),

@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""呼吸雷达单测：ETH/XAU profile · 早保本 · 缓冲 · 阶段二 ×trail_mult · 迟到平仓窗。"""
+"""呼吸雷达单测：连续插值 · initial_atr 锁 · 早保本 · 缓冲 · 迟到平仓窗。"""
 from __future__ import annotations
 
 import unittest
 
-from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
+from breath_profiles import (
+    BREATH_ETH,
+    BREATH_XAU,
+    LockedInitialAtr,
+    cold_start_multiplier,
+    get_breath_profile,
+    trail_distance_multiplier,
+)
 from breath_stop import (
     STOP_EXEC_BUFFER_USD,
     get_breathing_coefficient,
@@ -16,30 +23,33 @@ from breath_stop import (
 from tv_seq import OPEN_ALONE_MAX_WAIT_SEC
 
 
-class TestBreathingCoefficientETH(unittest.TestCase):
-    def test_tier_table(self):
-        cases = [
-            (0.5, 0.7),
-            (0.69, 0.7),
-            (0.85, 0.85),
-            (0.99, 0.85),
-            (1.0, 1.0),
-            (1.39, 1.0),
-            (1.4, 1.2),
-            (1.75, 1.2 + (1.75 - 1.4) / 0.6 * 0.2),
-            (1.99, 1.2 + (1.99 - 1.4) / 0.6 * 0.2),
-            (2.0, 1.5),
-            (2.5, 1.5),
-        ]
-        for ratio, expect in cases:
-            coeff, smooth, hist = get_breathing_coefficient(
-                ratio * 20.0, 20.0, [], profile=BREATH_ETH,
-            )
-            self.assertAlmostEqual(smooth, ratio, places=5)
-            self.assertAlmostEqual(coeff, expect, places=5, msg=f"ratio={ratio}")
-            self.assertEqual(len(hist), 1)
+class TestContinuousInterp(unittest.TestCase):
+    def test_eth_bounds_and_mid(self):
+        # floor / ceiling / mid(ratio=1.0→1.525)
+        self.assertAlmostEqual(trail_distance_multiplier(0.5, BREATH_ETH), 1.2, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(0.6, BREATH_ETH), 1.2, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_ETH), 2.5, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(3.0, BREATH_ETH), 2.5, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_ETH), 1.525, places=5)
+        # 原离散跳变点附近应连续（无 0.7/0.85/1.0 阶梯）
+        a = trail_distance_multiplier(0.699, BREATH_ETH)
+        b = trail_distance_multiplier(0.701, BREATH_ETH)
+        self.assertLess(abs(a - b), 0.02)
 
-    def test_three_sample_smooth(self):
+    def test_xau_bounds_and_mid(self):
+        self.assertAlmostEqual(trail_distance_multiplier(0.5, BREATH_XAU), 0.8, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_XAU), 1.8, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_XAU), 1.05, places=5)
+
+    def test_cold_start(self):
+        self.assertAlmostEqual(cold_start_multiplier(BREATH_ETH), 1.525, places=5)
+        self.assertAlmostEqual(cold_start_multiplier(BREATH_XAU), 1.05, places=5)
+        coeff, smooth, hist = get_breathing_coefficient(0, 20.0, [], profile=BREATH_ETH)
+        self.assertEqual(hist, [])
+        self.assertAlmostEqual(smooth, 1.0, places=5)
+        self.assertAlmostEqual(coeff, 1.525, places=5)
+
+    def test_smooth_then_formula(self):
         hist = []
         for r in (0.5, 1.0, 2.0):
             coeff, smooth, hist = get_breathing_coefficient(
@@ -47,30 +57,19 @@ class TestBreathingCoefficientETH(unittest.TestCase):
             )
         self.assertEqual(len(hist), 3)
         self.assertAlmostEqual(smooth, (0.5 + 1.0 + 2.0) / 3.0, places=5)
-        self.assertAlmostEqual(coeff, 1.0, places=5)
+        expect = trail_distance_multiplier(smooth, BREATH_ETH)
+        self.assertAlmostEqual(coeff, expect, places=5)
+
+    def test_single_sample_maps(self):
+        coeff, smooth, hist = get_breathing_coefficient(
+            0.8 * 20.0, 20.0, [], profile=BREATH_ETH,
+        )
+        self.assertAlmostEqual(smooth, 0.8, places=5)
+        self.assertAlmostEqual(coeff, trail_distance_multiplier(0.8, BREATH_ETH), places=5)
+        self.assertEqual(len(hist), 1)
 
 
-class TestBreathingCoefficientXAU(unittest.TestCase):
-    def test_xau_tier_table(self):
-        cases = [
-            (0.5, 0.5),
-            (0.69, 0.5),
-            (0.85, 0.7),
-            (0.99, 0.7),
-            (1.0, 0.9),
-            (1.39, 0.9),
-            (1.4, 1.0),
-            (1.7, 1.0 + (1.7 - 1.4) / 0.6 * 0.2),
-            (2.0, 1.3),
-            (2.5, 1.3),
-        ]
-        for ratio, expect in cases:
-            coeff, smooth, _ = get_breathing_coefficient(
-                ratio * 20.0, 20.0, [], profile=BREATH_XAU,
-            )
-            self.assertAlmostEqual(smooth, ratio, places=5)
-            self.assertAlmostEqual(coeff, expect, places=5, msg=f"xau ratio={ratio}")
-
+class TestProfiles(unittest.TestCase):
     def test_profiles_differ(self):
         eth = get_breath_profile("ETHUSDT")
         xau = get_breath_profile("XAUUSDT")
@@ -80,8 +79,35 @@ class TestBreathingCoefficientXAU(unittest.TestCase):
         self.assertEqual(xau["early_be_atr"], 0.3)
         self.assertEqual(eth["step_trigger_atr"], 0.75)
         self.assertEqual(xau["step_trigger_atr"], 0.4)
+        self.assertEqual(eth["min_mult"], 1.2)
+        self.assertEqual(eth["max_mult"], 2.5)
+        self.assertEqual(xau["min_mult"], 0.8)
+        self.assertEqual(xau["max_mult"], 1.8)
+        # 额外 ×0.8 层已删除
         self.assertEqual(eth["phase2_trail_mult"], 1.0)
-        self.assertEqual(xau["phase2_trail_mult"], 0.8)
+        self.assertEqual(xau["phase2_trail_mult"], 1.0)
+
+
+class TestLockedInitialAtr(unittest.TestCase):
+    def test_lock_blocks_rewrite(self):
+        lock = LockedInitialAtr(strict=True)
+        lock.set_on_open(23.22)
+        self.assertTrue(lock.locked)
+        self.assertAlmostEqual(lock.value, 23.22)
+        with self.assertRaises(RuntimeError):
+            lock.try_set(99.0)
+        self.assertAlmostEqual(lock.value, 23.22)
+        lock.clear_on_flat()
+        self.assertFalse(lock.locked)
+        self.assertEqual(lock.value, 0.0)
+        lock.try_set(14.0)
+        self.assertAlmostEqual(lock.value, 14.0)
+
+    def test_soft_mode_keeps_locked_value(self):
+        lock = LockedInitialAtr(strict=False)
+        lock.set_on_open(20.0)
+        out = lock.try_set(30.0)
+        self.assertAlmostEqual(out, 20.0)
 
 
 class TestOrderStopBuffer(unittest.TestCase):
@@ -105,10 +131,9 @@ class TestOrderStopBuffer(unittest.TestCase):
 
 class TestEarlyBreakeven(unittest.TestCase):
     def test_eth_early_be_at_0_5_atr(self):
-        # entry=1900 atr=20 → early at 1910；tick=0.01 → stop→1900.01
         out = calculate_breath_stop(
             "LONG", 1910.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.525,
             profile=BREATH_ETH,
             early_be_done=False,
         )
@@ -116,10 +141,9 @@ class TestEarlyBreakeven(unittest.TestCase):
         self.assertGreaterEqual(out["stop"], 1900.01)
 
     def test_xau_early_be_at_0_3_atr(self):
-        # entry=2650 atr=10 → early at 2653
         out = calculate_breath_stop(
             "LONG", 2653.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.05,
             profile=BREATH_XAU,
             early_be_done=False,
         )
@@ -129,7 +153,7 @@ class TestEarlyBreakeven(unittest.TestCase):
     def test_eth_not_early_before_0_5(self):
         out = calculate_breath_stop(
             "LONG", 1909.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.525,
             profile=BREATH_ETH,
             early_be_done=False,
         )
@@ -138,13 +162,14 @@ class TestEarlyBreakeven(unittest.TestCase):
 
 
 class TestBreathStopWithCoeff(unittest.TestCase):
-    def test_phase1_ladder_scales_with_coeff(self):
-        # 关掉早保本，隔离阶梯：price=1916 → 1 step → 1870+8=1878
+    def test_phase1_ladder_fixed_atr_no_coeff(self):
+        """边界：阶段一阶梯永不乘呼吸系数；coeff 仅影响阶段二 trail。"""
+        # 阶梯不乘呼吸系数：coeff 变化不应改变阶段一步数/止损
         p = dict(BREATH_ETH)
         p["early_be_atr"] = 0
         out = calculate_breath_stop(
             "LONG", 1916.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.525,
             profile=p,
         )
         self.assertEqual(out["meta"]["step_count"], 1)
@@ -152,25 +177,39 @@ class TestBreathStopWithCoeff(unittest.TestCase):
 
         out2 = calculate_breath_stop(
             "LONG", 1916.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=0.7,
+            breathing_coefficient=2.5,
             profile=p,
         )
-        self.assertGreaterEqual(out2["meta"]["step_count"], 1)
-        self.assertGreater(out2["stop"], 1870.0)
+        self.assertEqual(out2["meta"]["step_count"], 1)
+        self.assertEqual(out2["stop"], 1878.0)
+        # 同价同阶梯，阶段二才应随 coeff 变 trail
+        out3 = calculate_breath_stop(
+            "LONG", 1955.0, 1900.0, 20.0, 1870.0, 1920.0, 1960.0, True,
+            breathing_coefficient=1.2,
+            profile=p,
+        )
+        out4 = calculate_breath_stop(
+            "LONG", 1955.0, 1900.0, 20.0, 1870.0, 1920.0, 1960.0, True,
+            breathing_coefficient=2.5,
+            profile=p,
+        )
+        self.assertNotEqual(out3["stop"], out4["stop"])
+        self.assertAlmostEqual(out3["meta"]["trail_distance"], 24.0)
+        self.assertAlmostEqual(out4["meta"]["trail_distance"], 50.0)
 
     def test_xau_tighter_ladder(self):
-        # 关掉早保本；XAU step_trigger=0.4 → atr20 → trigger=8；+16 → 2 steps
         p = dict(BREATH_XAU)
         p["early_be_atr"] = 0
         out = calculate_breath_stop(
             "LONG", 1916.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.05,
             profile=p,
         )
         self.assertGreaterEqual(out["meta"]["step_count"], 2)
         self.assertGreater(out["stop"], 1878.0)
 
-    def test_phase2_trail_uses_coeff(self):
+    def test_phase2_trail_uses_coeff_only(self):
+        # trail = 20 * 1.5 = 30 → stop = 1960-30 = 1930；无 ×0.8
         out = calculate_breath_stop(
             "LONG", 1955.0, 1900.0, 20.0, 1870.0, 1920.0, 1960.0, True,
             breathing_coefficient=1.5,
@@ -180,21 +219,21 @@ class TestBreathStopWithCoeff(unittest.TestCase):
         self.assertEqual(out["stop"], 1930.0)
         self.assertAlmostEqual(out["meta"]["trail_distance"], 30.0)
 
-    def test_xau_phase2_trail_mult_0_8(self):
-        # coeff=1.5 → trail = 20*1.5*0.8 = 24 → stop = 1960-24 = 1936
+    def test_xau_phase2_no_extra_0_8(self):
+        # coeff=1.5 → trail = 20*1.5 = 30（不再 ×0.8）→ stop = 1960-30 = 1930
         out = calculate_breath_stop(
             "LONG", 1955.0, 1900.0, 20.0, 1870.0, 1920.0, 1960.0, True,
             breathing_coefficient=1.5,
             profile=BREATH_XAU,
         )
         self.assertTrue(out["breakeven_phase"])
-        self.assertAlmostEqual(out["meta"]["trail_distance"], 24.0)
-        self.assertEqual(out["stop"], 1936.0)
+        self.assertAlmostEqual(out["meta"]["trail_distance"], 30.0)
+        self.assertEqual(out["stop"], 1930.0)
 
     def test_phase_switch_at_3atr(self):
         out = calculate_breath_stop(
             "LONG", 1960.0, 1900.0, 20.0, 1870.0, 1880.0, 1900.0, False,
-            breathing_coefficient=1.0,
+            breathing_coefficient=1.525,
             profile=BREATH_ETH,
         )
         self.assertTrue(out["breakeven_phase"])

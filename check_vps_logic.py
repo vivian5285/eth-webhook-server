@@ -586,7 +586,7 @@ def audit_module4_radar(a: Audit):
             or "step_advance_atr" in bs
         ),
     )
-    a.check("4.1d 呼吸系数档位", "get_breathing_coefficient" in bs and "STOP_EXEC_BUFFER_USD" in bs)
+    a.check("4.1d 呼吸系数连续插值", "get_breathing_coefficient" in bs and "trail_distance_multiplier" in open(os.path.join(ROOT, "breath_profiles.py"), encoding="utf-8").read())
     a.check("4.1e atr_1h 引擎", "Atr1hEngine" in a1h and "REFRESH_MIN_SEC = 300" in a1h)
     from breath_stop import STEP_TRIGGER_ATR, STEP_ADVANCE_ATR
     a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.75) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.4) < 1e-9)
@@ -623,15 +623,20 @@ def audit_module4_radar(a: Audit):
         os.path.isfile(os.path.join(ROOT, "breath_profiles.py")),
     )
     try:
-        from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
+        from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile, trail_distance_multiplier
         a.check(
-            "4.2f ETH/XAU 缓冲与早保本差异",
+            "4.2f ETH/XAU 连续插值 min/max（无×0.8层）",
             abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
             and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
             and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
             and abs(float(BREATH_XAU["early_be_atr"]) - 0.3) < 1e-9
-            and abs(float(BREATH_XAU["phase2_trail_mult"]) - 0.8) < 1e-9
-            and abs(float(BREATH_ETH["phase2_trail_mult"]) - 1.0) < 1e-9,
+            and abs(float(BREATH_ETH["min_mult"]) - 1.2) < 1e-9
+            and abs(float(BREATH_ETH["max_mult"]) - 2.5) < 1e-9
+            and abs(float(BREATH_XAU["min_mult"]) - 0.8) < 1e-9
+            and abs(float(BREATH_XAU["max_mult"]) - 1.8) < 1e-9
+            and abs(float(BREATH_XAU["phase2_trail_mult"]) - 1.0) < 1e-9
+            and abs(trail_distance_multiplier(1.0, BREATH_ETH) - 1.525) < 1e-9
+            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 1.05) < 1e-9,
         )
         pe = get_breath_profile("ETHUSDT")
         px = get_breath_profile("XAUUSDT")
@@ -639,9 +644,19 @@ def audit_module4_radar(a: Audit):
             "4.2g get_breath_profile 路由",
             pe.get("name") == "ETH" and px.get("name") == "XAU",
         )
+        from breath_profiles import LockedInitialAtr
+        _lk = LockedInitialAtr(strict=True)
+        _lk.set_on_open(20.0)
+        _blocked = False
+        try:
+            _lk.try_set(30.0)
+        except RuntimeError:
+            _blocked = True
+        a.check("4.2g2 LockedInitialAtr 持仓期拒写", _blocked and abs(_lk.value - 20.0) < 1e-9)
     except Exception as e:
-        a.check("4.2f ETH/XAU 缓冲与早保本差异", False, str(e))
+        a.check("4.2f ETH/XAU 连续插值 min/max（无×0.8层）", False, str(e))
         a.check("4.2g get_breath_profile 路由", False, str(e))
+        a.check("4.2g2 LockedInitialAtr 持仓期拒写", False, str(e))
     a.check(
         "4.2h early_be_done 持久化",
         "early_be_done" in sup,

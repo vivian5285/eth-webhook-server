@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.24-xau-breath`**  
+**当前版本：`v15.5.27-breath-interp`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（单币名义≈本金×1；ETH+XAU 并存合计≈本金×2）**  
 **保护引擎：双雷达呼吸止损（`breath_profiles` · ETH/XAU 分档 · TV `atr`=initial_atr · 1h ATR 呼吸系数 · markPrice WS）**  
@@ -20,7 +20,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.24-xau-breath
+# version: v15.5.27-breath-interp
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
 # radar: breath_dual_eth_xau · trading_paused: false
 
@@ -223,8 +223,8 @@ TV隐含止损距离 = |price − stop_loss|
 | `phase_switch_atr` | 3.0 | 3.0 |
 | tp1/tp2 触发与底线 | 1.35→0.5 / 2.5→1.5 | 同 |
 | `initial_sl_atr` | 1.5 | 1.5 |
-| 呼吸档位 | 0.7 / 0.85 / 1.0 / 1.2~1.4 / 1.5 | **0.5 / 0.7 / 0.9 / 1.0~1.2 / 1.3** |
-| `phase2_trail_mult` | 1.0（trail=`atr×coeff`） | **0.8** |
+| 呼吸系数 | 连续插值 minMult~maxMult（ETH 1.2~2.5 / XAU 0.8~1.8） | 同公式，XAU 更紧 |
+| `phase2_trail_mult` | **已删除额外层**（恒 1.0） | **已删除**（收紧体现在 min/max） |
 | sizing | RISK20×5（≈1×本金名义） | 同；双开并存合计≈**2×本金** |
 | 缺 TV `atr` | **拒绝开仓 + 钉钉** | 同 |
 | 日亏熔断 | ≥本金×5.5% 拒开 | 同 |
@@ -234,7 +234,7 @@ TV隐含止损距离 = |price − stop_loss|
 1. **`initial_atr` = TV webhook `atr`**（开仓锁定，全程不变；**缺则拒开 + 钉钉，禁止 1h/90m 冒充**）  
 2. 多：`initialStop = entry − 1.5×initial_atr`；空：`entry + 1.5×initial_atr`  
 3. **盘口挂单** = `order_stop_price`：多再 −buffer / 空再 +buffer（ETH 0.3 / XAU 0.5）  
-4. 币安原生 **1h ATR** 每 5 分钟刷新，算呼吸系数（最近 3 次 ratio 平滑 · 按品种档位表）  
+4. 币安原生 **1h ATR** 每 5 分钟刷新，算呼吸系数（先对 ratio 近 3 次平滑，再连续插值）  
 5. **早保本**：价达 `entry ± early_be_atr×ATR` → `currentStop` 提到 `entry ± 1 tick`（与阶段二 `phase_switch=3.0` 独立）
 
 **禁止**：持仓期用默认 `ATR=30` 虚构止损；禁止把 ADX 当呼吸系数传参。
@@ -243,13 +243,13 @@ TV隐含止损距离 = |price − stop_loss|
 
 | 字段 | 开仓后 | 说明 |
 |------|--------|------|
-| `initialAtr` / `open_atr` | **固定** | = TV atr；不因 1h 刷新而改 |
+| `initialAtr` / `open_atr` | **固定** | = TV atr；`LockedInitialAtr` 持仓期拒写 |
 | `initialStop` / `initial_stop` | **固定** | 阶梯基准（理论价，不含 buffer） |
 | `currentStop` / `current_sl` | **每 tick 可上移** | 账本理论价；盘口 = ±buffer |
 | `highestPrice` / `lowestPrice` (`best_price`) | **每 tick** | 多只增 / 空只减 |
 | `breakevenPhase` | **只可 false→true** | 进入阶段二后不可回退 |
 | `early_be_done` | **只可 false→true** | 早保本已触发 |
-| `breathing_coefficient` | **可刷新** | 按 profile 档位；3 次平滑 |
+| `breathing_coefficient` | **可刷新** | = trailDistanceMultiplier(smoothedRatio)；冷启动 ETH1.525/XAU1.05 |
 | `remaining_qty_pct` | TP 成交后更新 | 止损单数量收缩 |
 | `tp_levels_radar_handoff` | TP 超时移交后持久化 | 禁止虚假 clear 后核武重挂 |
 
@@ -264,22 +264,24 @@ TV隐含止损距离 = |price − stop_loss|
 ### 6.4 阶段一（保本前 · 多单示意 · ETH 默认）
 
 ```
-step_trigger = step_trigger_atr × initial_atr × breathing_coefficient   # ETH 0.75 / XAU 0.4
-step_advance = step_advance_atr × initial_atr × breathing_coefficient   # ETH 0.4 / XAU 0.35
+step_trigger = step_trigger_atr × initial_atr   # ETH 0.75 / XAU 0.4（不乘呼吸系数）
+step_advance = step_advance_atr × initial_atr   # ETH 0.4 / XAU 0.35
 # TP1/TP2 强制底线：浮盈≥1.35/2.5×ATR → stop≥entry+0.5/1.5×ATR
 # 浮盈≥3.0×ATR → 切入阶段二
 ```
 
-### 6.5 阶段二（呼吸系数自适应追踪）
+### 6.5 阶段二（连续插值追踪距离）
 
 ```
-trail_distance = initial_atr × breathing_coefficient × phase2_trail_mult
-# ETH mult=1.0；XAU mult=0.8
+ratioFloor=0.6 / ratioCeiling=2.2（共用）
+smoothedRatio = mean(最近≤3次 current_1h_atr / initial_atr)
+trailDistanceMultiplier = 线性插值 minMult→maxMult
+# ETH min/max = 1.2/2.5；XAU = 0.8/1.8；冷启动 ratio=1.0 → ETH1.525 / XAU1.05
+trail_distance = initial_atr × trailDistanceMultiplier
 current_stop = max(current_stop, highest - trail_distance)  # 多
 ```
 
-ETH 档位：ratio<0.7→0.7；0.7~1.0→0.85；1.0~1.4→1.0；1.4~2.0→1.2~1.4 线性；≥2.0→1.5。  
-XAU 档位：ratio<0.7→0.5；0.7~1.0→0.7；1.0~1.4→0.9；1.4~2.0→1.0~1.2 线性；≥2.0→1.3。
+无离散档跳变；XAU 不再额外 ×0.8。
 
 ### 6.6 HARD_SL_FAIL_ABORT
 
@@ -441,7 +443,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.24-xau-breath
+# 期望: v15.5.27-breath-interp
 
 bash deploy_binance.sh
 # 或: systemctl restart binance-engine.service
