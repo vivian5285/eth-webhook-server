@@ -12,14 +12,15 @@ TV_STRATEGY_VERSION = "v6.5.6"
 
 # ── RISK20：min(风险/止损距, 名义/价, TV.qty)，无状态纯函数 ───────────────
 FIXED_RISK_PCT = 0.20
-FIXED_NOTIONAL_MULT = 5.0
+FIXED_NOTIONAL_MULT = 5.0  # 杠杆倍数：作用在「本金×20%」上，不是全本金
 FIXED_MARGIN_PCT = FIXED_RISK_PCT
 FIXED_LEVERAGE = 5
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
 ABSURD_TV_QTY_VS_CAPS = 50.0
-# 铁律：名义上限 = 合约本金 × 5（不做折扣）。保证金不足由 supervisor 用 available×5×0.92 再裁。
+# 铁律：名义上限 = 合约本金 × 20% × 5 = 本金 × 1（≈余额1倍）。
+# 保证金不足由 supervisor 用 available×20%×5×0.92 再裁。
 NOTIONAL_MARGIN_HAIRCUT = 1.0
 VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
@@ -354,8 +355,8 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
                             tv_price=None, **_kw):
     """
     无状态纯函数（仅开仓时算一次；不读历史仓位）——铁律永远：
-      risk_capital = 合约本金 × 0.20
-      notional_cap = 合约本金 × 5
+      risk_capital = 合约本金 × 0.20          # 风险资金（也作保证金预算）
+      notional_cap = risk_capital × 5        # = 本金 × 20% × 5 = 本金 × 1
       qty = min(risk_capital/|price−initialStop|, notional_cap/price, TV.qty′)
     天文 TV.qty（≫ 风险/名义候选）直接忽略，防止 Pine equity 膨胀把上限顶穿。
     TV.stop_loss 只参与 sl_adj，绝不作为盘口止损价。
@@ -390,9 +391,10 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
         "tv_qty": tv_ref,
         "tv_qty_ref_only": False,
         "regime": 0,
-        "bind": "risk20_notional5_tv_sl_adj",
+        "bind": "risk20_x5_equals_1x_equity_tv_sl_adj",
         "formula": (
-            "min(risk/vps_dist, notional/price, TV.qty×(tv_dist/vps_dist))"
+            "min(risk/vps_dist, (risk×5)/price, TV.qty×(tv_dist/vps_dist))"
+            " · notional=equity×20%×5(=1×equity)"
         ),
         "sl_adj": 1.0,
         "tv_sl_adj_skipped": False,
@@ -430,7 +432,8 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     adjusted_tv_qty = tv_ref * sl_adj
 
     risk_capital = principal * risk_pct
-    notional_cap = principal * notional_mult * NOTIONAL_MARGIN_HAIRCUT
+    # 名义 = (本金×20%) × 5倍杠杆 = 本金×1；绝不是本金×5
+    notional_cap = risk_capital * notional_mult * NOTIONAL_MARGIN_HAIRCUT
     qty_by_risk = risk_capital / vps_stop_dist
     qty_by_notional = notional_cap / price
     tv_qty_ignored_absurd = False
@@ -564,7 +567,7 @@ def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
     mult = float(meta.get("notional_mult") or meta.get("leverage") or FIXED_NOTIONAL_MULT)
     parts = [
         f"风险{risk_pct * 100:.0f}%/止损距",
-        f"名义≤{mult:.0f}x",
+        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.0f}(=本金×{risk_pct * mult:.0f})",
         f"sizing={SIZING_MODE}",
     ]
     if principal > 0:

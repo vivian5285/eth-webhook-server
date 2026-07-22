@@ -131,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.20-checklist-final"
+BINANCE_VPS_VERSION = "v15.5.21-notional-1x"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -2992,7 +2992,9 @@ class PositionSupervisorBinance:
         self._leg_ratios = list(ratios)
         self._save_state()
         logger.info(
-            f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/VPS止损距 · 名义≤{FIXED_NOTIONAL_MULT:.0f}x "
+            f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/VPS止损距 · "
+            f"名义=本金×{FIXED_RISK_PCT * 100:.0f}%×{FIXED_NOTIONAL_MULT:.0f}"
+            f"(=本金×{FIXED_RISK_PCT * FIXED_NOTIONAL_MULT:.0f}) "
             f"| TV.qty={self.tv_suggested_qty or '-'} "
             f"| TV.qty1/2/3={self.tv_qty1 or '-'}/{self.tv_qty2 or '-'}/{self.tv_qty3 or '-'} "
             f"| TV.sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0) or '-'} "
@@ -3251,16 +3253,17 @@ class PositionSupervisorBinance:
                 )
         except Exception:
             pass
-        # 保证金安全网（交易所 availableBalance）：名义按「本金×5」算出后，
-        # 再用 available×杠杆×0.92 裁一次，杜绝天文/满仓导致 -2019。
-        # 核心公式仍是 本金×20%风险 / 本金×5名义，本裁剪不改变该铁律。
+        # 保证金安全网：名义按「本金×20%×5(=本金×1)」算出后，
+        # 再用 available×20%×5×0.92 裁一次，杜绝 -2019。
         try:
             summary = binance_client.get_futures_account_summary() or {}
             avail = float(summary.get("available_balance") or 0)
             if avail <= 0:
                 avail = float(binance_client.get_available_balance() or 0)
             if avail > 0 and px > 0 and float(qty or 0) > 0:
-                margin_cap = (avail * float(FIXED_LEVERAGE) * 0.92) / px
+                margin_cap = (
+                    avail * float(FIXED_RISK_PCT) * float(FIXED_LEVERAGE) * 0.92
+                ) / px
                 step = float(getattr(self, "qty_step", 0.001) or 0.001)
                 min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
                 if margin_cap > 0 and float(qty) > margin_cap:
@@ -3270,7 +3273,7 @@ class PositionSupervisorBinance:
                     logger.warning(
                         f"🛡️ [{self.symbol}] 保证金裁剪 "
                         f"qty {float(qty):.4f} → {clipped:.4f} "
-                        f"(available={avail:.2f}U · {FIXED_LEVERAGE}x · 92%)"
+                        f"(available={avail:.2f}U · {FIXED_RISK_PCT*100:.0f}%×{FIXED_LEVERAGE:.0f}x · 92%)"
                     )
                     meta["qty_before_margin_cap"] = float(qty)
                     meta["margin_cap_qty"] = round(float(clipped), 6)

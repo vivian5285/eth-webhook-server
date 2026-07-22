@@ -1,14 +1,14 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.5.20-checklist-final** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **v15.5.21-notional-1x** · sizing **RISK20_NOTIONAL5**（名义=本金×1）  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
 
 | # | 原则 | 代码落点 |
 |---|------|----------|
-| 1 | **风险仓位**：风险=权益×20%；名义=权益×5；`min(风险/VPS止损距, 名义/价, TV.qty×(TV距/VPS距))` | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
+| 1 | **风险仓位**：风险=权益×20%；名义=权益×20%×5(=权益×1)；`min(风险/VPS止损距, 名义/价, TV.qty×(TV距/VPS距))` | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
 | 2 | **呼吸止损唯一写入**：initialStop=entry±1.5×ATR；不使用 TV `stop_loss` 作基准 | `breath_stop.py` · `_sync_exchange_stop()` |
 | 3 | **呼吸阶段一**：0.75 ATR 步进 / 0.4 ATR 跟进（基准=initialStop） | `calculate_breath_stop()` |
 | 4 | TP **30/30/40**；盘口只挂 **TP1+TP2**；余仓交阶段二 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=2` |

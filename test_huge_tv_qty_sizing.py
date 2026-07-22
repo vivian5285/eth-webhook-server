@@ -17,13 +17,14 @@ from webhook_parser import (
 
 
 def _expect_notional(principal, price):
-    raw = principal * FIXED_NOTIONAL_MULT * NOTIONAL_MARGIN_HAIRCUT / price
+    # 名义 = 本金 × 20% × 5 = 本金 × 1
+    raw = principal * 0.20 * FIXED_NOTIONAL_MULT * NOTIONAL_MARGIN_HAIRCUT / price
     return math.floor(raw * 1000) / 1000.0
 
 
 class TestHugeTvQtySizing(unittest.TestCase):
     def test_huge_tv_qty_binds_notional_not_tv(self):
-        """TV.qty=860680123 → absurd 忽略；binding=notional=本金×5/价。"""
+        """TV.qty=860680123 → absurd 忽略；binding=notional=本金×20%×5/价(=本金×1/价)。"""
         principal = 1719.0
         price = 1932.4
         vps_stop = price - 1.5 * 15.6005  # ≈1909.0
@@ -44,11 +45,12 @@ class TestHugeTvQtySizing(unittest.TestCase):
         expect = _expect_notional(principal, price)
         self.assertAlmostEqual(qty, expect, places=3)
         self.assertNotAlmostEqual(qty, 0.02, places=3)
-        # 铁律：名义 = 本金×5（haircut=1.0）
+        # 铁律：名义 = 本金×20%×5 = 本金×1
+        self.assertAlmostEqual(float(meta.get("notional_cap") or 0), principal * 1.0, places=2)
         self.assertAlmostEqual(float(NOTIONAL_MARGIN_HAIRCUT), 1.0, places=6)
 
     def test_preview_and_order_use_same_payload_qty(self):
-        """Stale 0.02 vs huge payload must differ; real path binds notional."""
+        """Stale 0.02 vs huge payload must differ; real path binds notional(=1×equity)."""
         principal = 1719.0
         price = 1932.4
         atr = 15.6005
@@ -79,16 +81,17 @@ class TestHugeTvQtySizing(unittest.TestCase):
         self.assertNotAlmostEqual(stale_qty, real_qty, places=3)
 
     def test_margin_cap_clips_notional_to_available(self):
-        """availableBalance×lev×0.92 must shrink qty below raw notional."""
+        """available×20%×5×0.92 must shrink qty below raw notional(=1×equity)."""
         px = 1932.4
-        raw_qty = 4.445
+        raw_qty = 0.889  # ~1719/1932
         avail = 1500.0
+        risk_pct = 0.20
         lev = 5.0
-        margin_cap = (avail * lev * 0.92) / px
+        margin_cap = (avail * risk_pct * lev * 0.92) / px
         self.assertLess(margin_cap, raw_qty)
         clipped = math.floor(margin_cap / 0.001) * 0.001
-        self.assertGreater(clipped, 1.0)
-        self.assertLess(clipped, 4.0)
+        self.assertGreater(clipped, 0.5)
+        self.assertLess(clipped, 0.9)
 
     def test_qty_zero_rejected(self):
         qty, meta = compute_fixed_order_qty(

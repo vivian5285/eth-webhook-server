@@ -1,8 +1,8 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.20-checklist-final`**  
+**当前版本：`v15.5.21-notional-1x`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`（合约本金×20% 风险 + 本金×5 名义 · 永远）**  
+**仓位模式：`RISK20_NOTIONAL5`（本金×20% 风险；名义=本金×20%×5=本金×1 · 永远）**  
 **保护引擎：呼吸止损（`breath_stop` · markPrice WebSocket · 90m ATR/ADX）**  
 **生产唯一大脑：`position_supervisor_binance.py`**  
 **通知渠道：钉钉（`dingtalk.py`；VPS 已配置，暂不迁 Telegram）**
@@ -20,8 +20,8 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.20-checklist-final
-# sizing: RISK20_NOTIONAL5 · leverage: fixed_5 · tv_strategy: v6.5.6
+# version: v15.5.21-notional-1x
+# sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
 # radar: breath_stop_90m · trading_paused: false
 
 python3 check_vps_logic.py
@@ -41,10 +41,10 @@ python3 check_deploy_events.py --live
 
 3. **下单数量铁律（永远）**  
    - 风险资金 = **合约账户本金 × 20%**  
-   - 名义上限 = **合约账户本金 × 5**  
+   - 名义上限 = **(本金 × 20%) × 5 倍杠杆 = 本金 × 1**（≈余额 1 倍，绝不是本金×5）  
    - `qty = min(风险/|价−initialStop|, 名义/价, TV.qty′)`，向下取整  
    - **绝不采信天文 TV.qty 为最终下单量**（Pine equity 膨胀时忽略该上限）  
-   - 交易所保证金再裁：`availableBalance × 5 × 0.92`（防 -2019；不改变「本金×20%/×5」铁律）  
+   - 交易所保证金再裁：`availableBalance × 20% × 5 × 0.92`（防 -2019）  
    无状态纯函数，不读历史仓位/加仓次数。真实挂止损价只用 VPS `initialStop`。
 
 4. **止损单全局唯一写入方 = 呼吸止损引擎**  
@@ -473,7 +473,7 @@ python3 test_stop_idempotent_and_tp_levels.py
 
 | 分类 | 已删除项 |
 |------|----------|
-| 仓位 | 旧 `(equity×0.20×5)/price`；加仓 / `opentrades` / pyramiding>1 |
+| 仓位 | 曾误把名义写成「全本金×5」；正确为「本金×20%×5=本金×1」；加仓 / `opentrades` / pyramiding>1 |
 | 止盈 | TP3 限价挂单主路径 |
 | 旧雷达 | `activated` 0.85×TP1；步进 0.5/0.3 ATR；TP3 后固定 2.0×ATR 追踪 |
 | 自主平仓 | 保护性全平、**CAP_ALIGN** 档位减仓 |
@@ -498,7 +498,7 @@ python3 test_stop_idempotent_and_tp_levels.py
 6. 查询失败：模拟 REST 失败时账本不被清零  
 7. 未登记仓位：接管文案「来源待核实」；平仓贴线才标止损  
 8. `python3 check_deploy_events.py --live --deep` 全绿 + 上表单测全绿  
-9. 天文 TV.qty：`test_huge_tv_qty_sizing.py` 绑定 notional（本金×5/价）
+9. 天文 TV.qty：`test_huge_tv_qty_sizing.py` 绑定 notional（本金×20%×5/价 = 本金×1/价）
 
 ---
 
@@ -512,7 +512,7 @@ python3 test_stop_idempotent_and_tp_levels.py
 | 4 | 不存在「先开仓再平仓」或「开平并行」的执行路径，只有「先平后开」一条路 | **已确认** |
 | 5 | 全局不存在任何「加仓」相关分支、下单函数、状态字段（生效路径） | **已确认** |
 | 6 | 全局不存在独立于 TV webhook 之外的 VPS 自主平仓判断（旧保护性全平已删；保留呼吸止损触发/FORCE_ALIGN） | **已确认** |
-| 7 | 下单数量计算函数是无状态纯函数，不读取历史仓位/加仓次数；永远 `本金×20%` 风险 + `本金×5` 名义 | **已确认** |
+| 7 | 下单数量计算函数是无状态纯函数，不读取历史仓位/加仓次数；永远 `本金×20%` 风险 + `本金×20%×5(=本金×1)` 名义 | **已确认** |
 | 8 | 止损单唯一写入方是呼吸止损引擎，其他模块只检测事件并通知引擎 | **已确认** |
 | 9 | TP1/TP2 成交后不再有单独的「强制移动止损」代码分支 | **已确认** |
 | 10 | TP3 限价单挂单代码已删除，TP3 完全由呼吸止损引擎阶段二接管 | **已确认** |
