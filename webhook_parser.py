@@ -939,7 +939,27 @@ def enrich_signal_fields(payload, action, fetch_atr=None, fallback_regime=3,
     is_entry = action in ("LONG", "SHORT")
     is_close = action.startswith("CLOSE")
 
-    if is_entry or is_close:
+    if is_entry:
+        # 开仓 initial_atr 只认 TV webhook.atr>0；禁止本地/1h/90m 回填冒充
+        has_key = ("atr" in out) or ("ATR" in out)
+        raw = _to_float(out.get("atr") if "atr" in out else out.get("ATR"))
+        if raw is not None and raw > 0:
+            out["atr"] = float(raw)
+            out["_atr_source"] = "tv"
+        else:
+            out["atr"] = float(raw or 0.0)  # 0 / 负 / 缺失→0，下游拒开
+            out["_atr_source"] = "tv_invalid" if has_key else "missing"
+            out["_atr_reject"] = True
+        out = enrich_entry_tp_prices(
+            action, out.get("price"), out.get("atr") if _has_positive_float(out.get("atr")) else None, None, out,
+        )
+        sl = _to_float(out.get("stop_loss")) or _to_float(out.get("tv_sl"))
+        if sl and sl > 0:
+            out["stop_loss"] = round(sl, 2)
+            out["tv_sl"] = round(sl, 2)
+        out["leverage"] = float(FIXED_LEVERAGE)
+    elif is_close:
+        # 平仓仅日志用 ATR，允许本地补全
         if not _has_positive_float(out.get("atr")):
             atr = 0.0
             if callable(fetch_atr):
@@ -948,16 +968,6 @@ def enrich_signal_fields(payload, action, fetch_atr=None, fallback_regime=3,
             out["_atr_source"] = "local"
         else:
             out["_atr_source"] = "tv"
-
-    if is_entry:
-        out = enrich_entry_tp_prices(
-            action, out.get("price"), out.get("atr"), None, out,
-        )
-        sl = _to_float(out.get("stop_loss")) or _to_float(out.get("tv_sl"))
-        if sl and sl > 0:
-            out["stop_loss"] = round(sl, 2)
-            out["tv_sl"] = round(sl, 2)
-        out["leverage"] = float(FIXED_LEVERAGE)
     return out
 
 

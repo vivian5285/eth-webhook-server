@@ -136,7 +136,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.25-dual-rate"
+BINANCE_VPS_VERSION = "v15.5.26-atr-reject"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
