@@ -707,7 +707,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
             G_MUTED,
         )
         data["🫁 呼吸止损"] = _g(
-            "开仓即挂 entry±1.5×ATR · 阶段一阶梯 · 浮盈≥3×ATR 切入ADX追踪",
+            "开仓即挂 entry±1.5×ATR · 阶段一阶梯 · 浮盈≥3×ATR 切入呼吸追踪",
             G_MUTED,
         )
         data["📐 算仓模式"] = _sizing_mode_label()
@@ -1400,26 +1400,27 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     send_alert(f"🫁 [{sym}] 呼吸止损 · 单槽维护", data, G_TITLE)
 
 
-# breath-stop phase2 (ADX trail) — replaces old ladder handoff notify
+# breath-stop phase2 (breathing coefficient trail)
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
                            symbol=None, unit_label=None, trigger_gate="",
-                           activation_price=None, adx=None, trail_dist=None):
-    """阶段切换：浮盈达 3.0×ATR，进入 ADX 连续追踪。"""
+                           activation_price=None, adx=None, trail_dist=None,
+                           breathing_coefficient=None):
+    """阶段切换：浮盈达 3.0×ATR，进入呼吸系数自适应追踪。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    adx_v = float(adx or 0)
+    coeff = float(breathing_coefficient or 0)
     trail_v = float(trail_dist or 0)
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "阶段切换": _g(
-            f"止损已进入阶段二（趋势追踪），当前ADX={adx_v:.1f}，追踪距离={trail_v:.2f}×ATR"
-            if adx_v > 0 or trail_v > 0
-            else "止损已进入阶段二（趋势追踪）",
+            f"止损已进入阶段二（呼吸追踪），呼吸系数={coeff:.2f}，追踪距离={trail_v:.2f}"
+            if coeff > 0 or trail_v > 0
+            else "止损已进入阶段二（呼吸追踪）",
             G_ACCENT,
         ),
-        "当前ADX": _g(f"**{adx_v:.1f}**" if adx_v > 0 else "—", G_MAIN),
-        "追踪距离": _g(f"**{trail_v:.2f}×ATR**" if trail_v > 0 else "—", G_LIGHT),
+        "呼吸系数": _g(f"**{coeff:.2f}**" if coeff > 0 else "—", G_MAIN),
+        "追踪距离": _g(f"**{trail_v:.2f}**" if trail_v > 0 else "—", G_LIGHT),
         "止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
         "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),
     }

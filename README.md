@@ -1,9 +1,9 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.21-notional-1x`**  
+**当前版本：`v15.5.23-breath-tv-atr`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（本金×20% 风险；名义=本金×20%×5=本金×1 · 永远）**  
-**保护引擎：呼吸止损（`breath_stop` · markPrice WebSocket · 90m ATR/ADX）**  
+**保护引擎：呼吸止损（`breath_stop` · TV `atr`=initial_atr · 币安原生 1h ATR 呼吸系数 · markPrice WS）**  
 **生产唯一大脑：`position_supervisor_binance.py`**  
 **通知渠道：钉钉（`dingtalk.py`；VPS 已配置，暂不迁 Telegram）**
 
@@ -11,7 +11,7 @@
 > 旧逻辑清除对照表：[`docs/DELETED_LEGACY_LOGIC_v15.5.13.md`](docs/DELETED_LEGACY_LOGIC_v15.5.13.md)  
 > 天文 qty 事故：[`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md)
 
-TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX) → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损全程接管** → 平仓钉钉诚实归因。
+TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_atr** + 1h ATR 呼吸系数 → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损开仓即工作** → 平仓钉钉诚实归因。
 
 | 工厂 | VPS 目录 | 端口 | 品种 | 仓位逻辑 | 钉钉主题 |
 |------|----------|------|------|----------|----------|
@@ -20,11 +20,12 @@ TradingView Alert → Webhook → VPS 接收/校验 → 行情引擎(90m ATR/ADX
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.21-notional-1x
+# version: v15.5.23-breath-tv-atr
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
-# radar: breath_stop_90m · trading_paused: false
+# radar: breath_tv_atr_1h · trading_paused: false
 
 python3 check_vps_logic.py
+python3 test_breath_radar_upgrade.py
 python3 check_deploy_events.py --live
 ```
 
@@ -66,10 +67,11 @@ TradingView v6.5.6 Alert (secret / token)
         │
         ▼
 position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例）
-   ├── tv_seq.py                   缓存 1.0s · 同窗折叠 · 先平后开
+   ├── tv_seq.py                   缓存 1.0s · 同窗折叠 · 先平后开 · 开仓单到延长等待
    ├── webhook_parser.py           动作白名单 · RISK20 仓位纯函数
-   ├── market_engine.py            30m×3→90m · Wilder ATR/ADX(14)
-   ├── breath_stop.py              两阶段呼吸止损状态机
+   ├── atr_1h.py                   币安原生 1h ATR(14) · 5 分钟刷新 · 呼吸系数
+   ├── breath_stop.py              两阶段呼吸止损（×breathing_coefficient）
+   ├── market_engine.py            90m 仅作缺 atr 降级/对比日志（非止损权威）
    ├── binance_client.py           REST + markPrice WS + 用户数据流
    └── dingtalk.py                 钉钉 / 企业微信双通道播报
 ```
@@ -203,65 +205,58 @@ TV隐含止损距离 = |price − stop_loss|
 
 ---
 
-## 六、呼吸止损引擎（与 TV 完全无关 · 开仓即接管）
+## 六、呼吸止损引擎（开仓即工作 · TV atr 基准 · 1h 呼吸系数）
 
-实现：`breath_stop.py`。盘口：`STOP_MARKET` + `reduceOnly` + 明确 `quantity`。  
+实现：`breath_stop.py` + `atr_1h.py`。盘口：`STOP_MARKET` + `reduceOnly` + 明确 `quantity`。  
 驱动：币安 **markPrice WebSocket** 逐 tick；REST 仅兜底。
 
-### 6.1 VPS 自算初始止损（与 TV.stop_loss 平行、互不干扰）
+### 6.1 初始止损（不用 TV.stop_loss 挂单）
 
-1. 交易所 30m K → 合成 90m  
-2. `initialAtr = ATR(14)`（开仓锁定，全程不变）  
-3. 多：`initialStop = entry − 1.5×initialAtr`；空：`entry + 1.5×initialAtr`  
-4. 以此价挂首笔止损，并作为后续阶梯基准  
+1. **`initial_atr` = TV webhook `atr`**（开仓锁定，全程不变；缺则降级 1h→90m 并钉钉）  
+2. 多：`initialStop = entry − 1.5×initial_atr`；空：`entry + 1.5×initial_atr`  
+3. **盘口挂单** = `order_stop_price`：多再 −0.3 USDT / 空再 +0.3（执行缓冲）  
+4. 币安原生 **1h ATR** 每 5 分钟刷新，算呼吸系数（最近 3 次 ratio 平滑）  
 
-**禁止**：持仓期用默认 `ATR=30` 虚构止损（曾导致重启窗口 1886↔1910 振荡；已修）。
+**禁止**：持仓期用默认 `ATR=30` 虚构止损；禁止把 ADX 当呼吸系数传参。
 
 ### 6.2 必须持久化 / 每 tick 更新
 
 | 字段 | 开仓后 | 说明 |
 |------|--------|------|
-| `initialAtr` / `open_atr` | **固定** | 不因后续 ATR 刷新而重算止损距 |
-| `initialStop` / `initial_stop` | **固定** | 阶梯基准 |
-| `currentStop` / `current_sl` | **每 tick 可上移** | 只朝盈利方向 |
+| `initialAtr` / `open_atr` | **固定** | = TV atr；不因 1h 刷新而改 |
+| `initialStop` / `initial_stop` | **固定** | 阶梯基准（理论价，不含 0.3） |
+| `currentStop` / `current_sl` | **每 tick 可上移** | 账本理论价；盘口 = ±0.3 |
 | `highestPrice` / `lowestPrice` (`best_price`) | **每 tick** | 多只增 / 空只减 |
 | `breakevenPhase` | **只可 false→true** | 进入阶段二后不可回退 |
+| `breathing_coefficient` | **可刷新** | 0.7~1.5；3 次平滑 |
 | `remaining_qty_pct` | TP 成交后更新 | 止损单数量收缩 |
 | `tp_levels_radar_handoff` | TP 超时移交后持久化 | 禁止虚假 clear 后核武重挂 |
 
 ### 6.3 每个 markPrice tick
 
-1. 更新 `highestPrice` / `lowestPrice`  
-2. `breakevenPhase == false` → 阶段一；否则 → 阶段二  
-3. 新止损更优（多更高 / 空更低）才改单；否则本 tick 空操作（幂等，防撤挂抖动）  
-4. 价格跌破/突破 `currentStop` → 市价全平剩余 → 重置状态 → 钉钉  
+1. 刷新呼吸系数（1h ATR / initial_atr）  
+2. 更新 `highestPrice` / `lowestPrice`  
+3. `breakevenPhase == false` → 阶段一；否则 → 阶段二  
+4. 新止损更优（多更高 / 空更低）才改单；否则本 tick 空操作（幂等，防撤挂抖动）  
+5. 价格跌破/突破 `currentStop` → 市价全平剩余 → 重置状态 → 钉钉  
 
 ### 6.4 阶段一（保本前 · 多单示意）
 
 ```
-step_count = max(0, floor((price − entry) / (0.75 × initialAtr)))
-step_stop  = initialStop + step_count × 0.4 × initialAtr
-候选 = max(currentStop, step_stop)
-
-若 price ≥ entry + 1.35×ATR → 候选 = max(候选, entry + 0.5×ATR)   # TP1 底线
-若 price ≥ entry + 2.5×ATR  → 候选 = max(候选, entry + 1.5×ATR)   # TP2 底线
-
-currentStop = 候选
-
-若 price ≥ entry + 3.0×ATR：
-    breakevenPhase = true
-    currentStop = max(currentStop, highest − trail_distance(adx)×initialAtr)
+step_trigger = 0.75 × initial_atr × breathing_coefficient
+step_advance = 0.4 × initial_atr × breathing_coefficient
+# TP1/TP2 强制底线：浮盈≥1.35/2.5×ATR → stop≥entry+0.5/1.5×ATR
+# 浮盈≥3.0×ATR → 切入阶段二
 ```
 
-### 6.5 阶段二（ADX 连续追踪）
-
-ADX 来自行情引擎，**每根 90m K 闭合更新一次**（tick 间复用上次 ADX）；**只有止损价每个 tick 重算**。
+### 6.5 阶段二（呼吸系数自适应追踪）
 
 ```
-trail_dist = trail_distance(adx) × initialAtr   # ADX≤15→1.2；≥35→2.5；中间线性插值
-候选 = highestPrice − trail_dist
-currentStop = max(currentStop, 候选)   # 只上移不倒退
+trail_distance = initial_atr × breathing_coefficient   # 约 0.7~1.5×ATR
+current_stop = max(current_stop, highest - trail_distance)  # 多
 ```
+
+档位：ratio<0.7→0.7；0.7~1.0→0.85；1.0~1.4→1.0；1.4~2.0→1.2~1.4 线性；≥2.0→1.5。
 
 ### 6.6 HARD_SL_FAIL_ABORT
 

@@ -426,7 +426,6 @@ def audit_module3_hard_sl(a: Audit):
         BREAKEVEN_TRIGGER_ATR,
         initial_stop_price,
         calculate_breath_stop,
-        trail_distance_by_adx,
     )
 
     a.check("3.1 VPS%宽止损表已清空", VPS_HARD_SL_PCT == {} or not VPS_HARD_SL_PCT)
@@ -443,7 +442,8 @@ def audit_module3_hard_sl(a: Audit):
     )
 
     out = calculate_breath_stop(
-        "LONG", 1890, 1800, 40, 1740, 1740, 1890, False, 24,
+        "LONG", 1890, 1800, 40, 1740, 1740, 1890, False,
+        breathing_coefficient=1.0,
     )
     a.check(
         "3.1f 阶段一阶梯推进",
@@ -451,17 +451,24 @@ def audit_module3_hard_sl(a: Audit):
         f"stop={out['stop']} phase={out['breakeven_phase']}",
     )
     out2 = calculate_breath_stop(
-        "LONG", 1930, 1800, 40, 1740, float(out["stop"]), 1930, False, 28,
+        "LONG", 1930, 1800, 40, 1740, float(out["stop"]), 1930, False,
+        breathing_coefficient=1.0,
     )
     a.check(
         "3.1g 浮盈≥3ATR 切入阶段二",
         out2["breakeven_phase"] is True and float(out2["stop"]) > 1800,
         f"stop={out2['stop']} phase={out2['breakeven_phase']}",
     )
+    from breath_stop import get_breathing_coefficient, order_stop_price
+    coeff, _, _ = get_breathing_coefficient(20.0, 20.0, [])
     a.check(
-        "3.1h ADX 插值边界",
-        abs(trail_distance_by_adx(15) - 1.2) < 1e-9
-        and abs(trail_distance_by_adx(35) - 2.5) < 1e-9,
+        "3.1h 呼吸系数正常档=1.0",
+        abs(coeff - 1.0) < 1e-9,
+    )
+    a.check(
+        "3.1i 挂单缓冲±0.3",
+        abs(order_stop_price("LONG", 1870.0) - 1869.7) < 1e-9
+        and abs(order_stop_price("SHORT", 1930.0) - 1930.3) < 1e-9,
     )
 
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
@@ -556,17 +563,19 @@ def audit_module3_hard_sl(a: Audit):
 
 
 def audit_module4_radar(a: Audit):
-    a.section("模块四 · 呼吸止损雷达（两阶段·ADX）")
+    a.section("模块四 · 呼吸止损雷达（TV atr + 1h 呼吸系数）")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
     bs = _read(os.path.join(ROOT, "breath_stop.py"))
     me = _read(os.path.join(ROOT, "market_engine.py"))
+    a1h = _read(os.path.join(ROOT, "atr_1h.py"))
 
     a.check("4.1 breath_stop.py 存在", "INITIAL_SL_ATR" in bs and "calculate_stop_long" in bs)
     a.check("4.1b STEP_TRIGGER=0.75", "STEP_TRIGGER_ATR = 0.75" in bs)
     a.check("4.1c STEP_ADVANCE=0.4", "STEP_ADVANCE_ATR = 0.4" in bs)
-    a.check("4.1d ADX 弱/强界", "ADX_WEAK_BOUND = 15" in bs and "ADX_STRONG_BOUND = 35" in bs)
+    a.check("4.1d 呼吸系数档位", "get_breathing_coefficient" in bs and "STOP_EXEC_BUFFER_USD" in bs)
+    a.check("4.1e atr_1h 引擎", "Atr1hEngine" in a1h and "REFRESH_MIN_SEC = 300" in a1h)
 
     for fn in (
         "_apply_breath_stop_tick",
@@ -575,49 +584,31 @@ def audit_module4_radar(a: Audit):
         "_report_breath_phase2",
         "_is_radar_active",
         "_should_radar_trail",
+        "_refresh_breathing_coefficient",
+        "_should_ignore_late_close",
     ):
         a.check(f"呼吸函数 {fn}", f"def {fn}" in sup)
 
-    a.check("4.2 market_engine 90m合成", "merge_30m_to_90m" in me and "wilder_adx" in me and 'SYNTH_INTERVAL = "90m"' in me)
+    a.check("4.2 market_engine 90m保留(降级)", "merge_30m_to_90m" in me and "wilder_atr" in me)
     a.check(
-        "4.2b 90m UTC epoch 对齐",
-        "PERIOD_90M_MS" in me and "bucket_90m_open_ms" in me and "utc_epoch" in me.lower(),
+        "4.2b TV atr 锁定 initial_atr",
+        "_tv_signal_atr" in sup and ("TV atr" in sup or "atr_source" in sup),
     )
     a.check(
-        "4.2c ATR异常中位数兜底",
-        "check_atr_anomaly" in me and "ATR_ANOMALY_RATIO" in me
-        and ("evaluate_atr_emergency_degrade" in me or "evaluate_atr_emergency_degrade" in sup),
+        "4.2c tick 用呼吸系数关键字传参",
+        "breathing_coefficient=coeff" in sup,
     )
     a.check(
-        "4.2d bar_time 乱序兜底",
-        "bar_time" in wp and "_last_bar_time_ms" in sup and "_extract_bar_time_ms" in sup,
-    )
-    a.check("4.2e check_90m_align 脚本", os.path.exists(os.path.join(ROOT, "check_90m_align.py")))
-    from market_engine import merge_30m_to_90m, PERIOD_30M_MS, PERIOD_90M_MS, check_atr_anomaly
-    # 从不规则起点合成，首根仍须 epoch 对齐
-    start = PERIOD_90M_MS + PERIOD_30M_MS
-    fake = [[start + i * PERIOD_30M_MS, 1, 2, 0.5, 1.2, 1] for i in range(30)]
-    merged = merge_30m_to_90m(fake)
-    a.check("4.2f 合成非空且对齐", bool(merged) and all(int(b[0]) % PERIOD_90M_MS == 0 for b in merged), str([b[0] for b in merged[:3]]))
-    anom, meta = check_atr_anomaly(1.0, [10.0] * 20, lookback=20, ratio=0.3)
-    a.check("4.2g ATR过低判异常", anom is True and meta.get("reason") == "atr_below_median_ratio", str(meta))
-    anom0, meta0 = check_atr_anomaly(0.0, [10.0] * 20)
-    a.check("4.2h ATR=0 无条件异常", anom0 is True, str(meta0))
-    a.check(
-        "4.2b VPS自算ATR/ADX入口",
-        "_refresh_market_metrics" in sup and "get_market_engine" in sup,
-    )
-    a.check(
-        "4.2c webhook不作为ATR权威",
-        "权威：VPS" in sup or "忽略 webhook atr" in sup or "行情引擎" in sup,
+        "4.2d 盘口执行缓冲 order_stop_price",
+        "order_stop_price" in sup and "STOP_EXEC_BUFFER_USD" in sup,
     )
     a.check(
         "4.3 钉钉阶段二文案",
-        "呼吸止损" in dt and "阶段二" in dt and "ADX" in dt,
+        "阶段二" in dt and ("呼吸追踪" in dt or "呼吸系数" in dt),
     )
     a.check(
         "4.3b 阶段切换钉钉",
-        "阶段切换" in dt and "阶段二" in dt and "ADX" in dt,
+        "阶段切换" in dt and "阶段二" in dt,
     )
     a.check(
         "4.3c 止损数量收缩",
@@ -856,7 +847,7 @@ def audit_readme_consistency(a: Audit):
     a.check(
         "README 呼吸止损参数",
         ("呼吸止损" in readme or "breath" in readme.lower())
-        and ("3.0" in readme or "ADX" in readme)
+        and ("3.0" in readme or "呼吸系数" in readme or "breathing" in readme.lower())
         and "85%" not in readme,
     )
     a.check(

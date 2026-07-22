@@ -39,13 +39,14 @@ VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 LEG_TP_RATIOS = [0.30, 0.30, 0.40]
 PLACE_TP_LEVELS = 2
 
-# ── 旧雷达常量（兼容导入；实盘走 breath_stop）──────────────────────────────
-RADAR_ACTIVATE_TP1_FRAC = 0.85
-RADAR_STEP_ATR = 0.5
-RADAR_LOCK_ATR = 0.3
+# ── 旧雷达常量已废除（实盘走 breath_stop；保留名防旧 import）────────────────
+# 旧值：activate=0.85 / step=0.5 / lock=0.3 / tp3_trail=2.0 — 禁止再用于决策
+RADAR_ACTIVATE_TP1_FRAC = 0.0  # deleted
+RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
+RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
 RADAR_TP1_FLOOR_ATR = 0.5
 RADAR_TP2_FLOOR_ATR = 1.5
-RADAR_TP3_TRAIL_ATR = 2.0
+RADAR_TP3_TRAIL_ATR = 0.0      # deleted（阶段二改呼吸系数）
 RADAR_STAGE_COST_BUFFER_PCT = 0.0
 ATR_UPDATE_SEC = 300
 ORDER_TIMEOUT_SEC = 300
@@ -60,16 +61,15 @@ TV_REGIME_TP_RATIOS = {1: list(LEG_TP_RATIOS), 2: list(LEG_TP_RATIOS),
                        3: list(LEG_TP_RATIOS), 4: list(LEG_TP_RATIOS)}
 TV_REGIME_TP_MULT = {1: (0.75, 1.4, 2.0), 2: (1.10, 2.0, 2.8),
                      3: (1.30, 2.6, 3.8), 4: (1.55, 3.0, 4.8)}
-RADAR_ACTIVATION_RATIO_BY_REGIME = {1: RADAR_ACTIVATE_TP1_FRAC, 2: RADAR_ACTIVATE_TP1_FRAC,
-                                   3: RADAR_ACTIVATE_TP1_FRAC, 4: RADAR_ACTIVATE_TP1_FRAC}
+RADAR_ACTIVATION_RATIO_BY_REGIME = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
 RADAR_TRAIL_STEP_BY_REGIME = {1: RADAR_STEP_ATR, 2: RADAR_STEP_ATR,
                              3: RADAR_STEP_ATR, 4: RADAR_STEP_ATR}
 RADAR_BREATH_ATR_BY_REGIME = {1: RADAR_LOCK_ATR, 2: RADAR_LOCK_ATR,
                              3: RADAR_LOCK_ATR, 4: RADAR_LOCK_ATR}
-RADAR_ACTIVATION_RATIO = RADAR_ACTIVATE_TP1_FRAC
-RADAR_TP1_REMAINING_PCT = 1.0 - RADAR_ACTIVATE_TP1_FRAC
-RADAR_STAGE1_TP1_RATIO = RADAR_ACTIVATE_TP1_FRAC
-RADAR_STAGE2_TP1_RATIO = RADAR_ACTIVATE_TP1_FRAC
+RADAR_ACTIVATION_RATIO = 0.0
+RADAR_TP1_REMAINING_PCT = 1.0
+RADAR_STAGE1_TP1_RATIO = 0.0
+RADAR_STAGE2_TP1_RATIO = 0.0
 RADAR_STAGE_ATR_MULT = {}
 VPS_HARD_SL_PCT = {}
 VPS_HARD_SL_EXTRA_RELAX = 0.0
@@ -222,22 +222,25 @@ def get_leg_tp_ratios(payload=None):
 
 
 def get_radar_activation_ratio(regime=None):
-    return float(RADAR_ACTIVATE_TP1_FRAC)
+    """已废除：开仓即呼吸，无激活比例。"""
+    return 0.0
 
 
 def format_radar_activation_ratios_label():
     return (
-        "呼吸止损=1.5ATR起"
-        "|阶梯0.75/0.4ATR"
-        "|保本3.0ATR→ADX1.2~2.5"
+        "呼吸止损=TV.atr×1.5+0.3缓冲"
+        "|阶梯0.75/0.4×呼吸系数"
+        "|保本3.0ATR→呼吸追踪"
     )
 
 
 def get_radar_trail_step(regime=None):
+    """兼容：breath 阶梯步长 0.75。"""
     return float(RADAR_STEP_ATR)
 
 
 def get_radar_breath_atr(regime=None):
+    """兼容：breath 跟进 0.4。"""
     return float(RADAR_LOCK_ATR)
 
 
@@ -605,16 +608,8 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
 # ── 旧阶梯雷达（已废除生效路径；仅兼容导入，禁止新代码调用）────────────────
 
 def radar_activation_price(side, entry, tp1):
-    """已废除：旧 85% TP1 激活价。生产路径请用 breath_stop.initial_stop_price。"""
-    side = str(side or "").upper()
-    entry = float(entry or 0)
-    tp1 = float(tp1 or 0)
-    if entry <= 0 or tp1 <= 0:
-        return 0.0
-    dist = abs(tp1 - entry)
-    if side == "SHORT":
-        return round(entry - dist * RADAR_ACTIVATE_TP1_FRAC, 2)
-    return round(entry + dist * RADAR_ACTIVATE_TP1_FRAC, 2)
+    """已废除：旧 85% TP1 激活价。开仓即呼吸，无激活门槛 → 返回 0。"""
+    return 0.0
 
 
 def compute_ladder_radar_sl(*_args, **_kwargs):
