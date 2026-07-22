@@ -747,12 +747,8 @@ def audit_module5_actions(a: Audit):
         "RECONCILE_ACTIONS" in sup and "FLATTEN_ACTIONS" in sup,
     )
     a.check(
-        "5.9 对账信号不下主动平仓/状态同步",
-        "不下主动平仓" in sup
-        or "不下主动平仓单" in sup
-        or "状态同步" in sup
-        or "对账" in sup
-        or "不下单" in sup
+        "5.9 旧对账路径已废除为空壳",
+        "旧对账路径已废除" in sup
         or "_handle_tv_reconcile" in sup,
     )
 

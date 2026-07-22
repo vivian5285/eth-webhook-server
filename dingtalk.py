@@ -1046,7 +1046,7 @@ def report_position_qty_reconcile(side="", baseline=0, live_qty=0, curr_px=0,
 def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
                                  chain_same_bar=False, verify_note="", ok=True):
     """
-    铁律钉钉：带开仓 → 先平后开；同秒开平同样先平后开；终态必须有仓。
+    铁律钉钉：带开仓 → 先平后开；同窗开平同样先平后开；终态必须有仓。
     单独平仓不走本函数（走平仓清场钉钉）。
     """
     phase = str(phase or "").strip() or "进度"
@@ -1063,7 +1063,10 @@ def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
     if bar_index is not None:
         data["📊 bar_index"] = _g(str(int(bar_index)), G_MUTED)
     if chain_same_bar:
-        data["🔗 同K链"] = _g("是 · 平干净再开（终态有仓）", G_LIGHT)
+        data["🔗 同窗缓存"] = _g(
+            "检测到平仓+开仓同时到达，已按先平后开顺序执行（1.0s 窗口）",
+            G_LIGHT,
+        )
     if side_u:
         data["🎛️ 目标方向"] = _g(side_u, G_LIGHT if side_u == "LONG" else G_DEEP)
     data["✅ 结果"] = _g(
@@ -1079,7 +1082,7 @@ def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 核实头寸": _g(f"**{qty}** {_u()}", G_MAIN),
-        "🕸️ TP123 比例审计": _g(
+        "🕸️ TP1+TP2 比例审计": _g(
             _format_tp_audit(tp_audit, None) if tp_audit else "已对齐",
             G_MAIN,
         ),
@@ -1346,7 +1349,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         ),
         "✅ 风控动作": _g(
             "呼吸止损已挂 closePosition · 开仓即追踪 · "
-            "TP123=reduceOnly 互不抢份额",
+            "TP1+TP2=reduceOnly 互不抢份额",
             G_MAIN,
         ),
     }
@@ -1362,7 +1365,7 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
         "🫁 触发止损": _g(f"**呼吸止损** @ `{tier_price:.2f}` USDT", G_ACCENT),
         "✂️ 本次平仓": _g(f"`{filled_qty}` {_u()}", G_MAIN),
         "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
-        "✅ 风控动作": _g("呼吸止损成交 → TP123 已重算", G_MAIN),
+        "✅ 风控动作": _g("呼吸止损成交 → 余仓交阶段二", G_MAIN),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
