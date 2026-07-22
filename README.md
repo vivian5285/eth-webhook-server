@@ -136,7 +136,7 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 | `stop_loss` | **只**反推 TV 隐含止损距离 → 修正仓位；**绝不**作为盘口止损价 | **否** |
 | `tp1` / `tp2` | TP1/TP2 限价止盈**价格** | **否** |
 | `tp3` | **不使用** | 不适用 |
-| `atr` / `adx` | **不读取作止损**；一律用 VPS 行情引擎。`atr` 仅可选用于调试比对 | **否** |
+| `atr` / `adx` | **`atr` = initial_atr（开仓锁定）**；`adx` 仅日志。波动调节用币安 1h ATR 呼吸系数 | atr→止损距；盘口另 ±0.3 |
 | `symbol` / `ticker` | 品种路由 ETH / XAU（支持 `ETHUSDT.P`） | — |
 | `bar_index` / `seq` | 时序排序与幂等 | — |
 | `secret` / `token` | 鉴权 | — |
