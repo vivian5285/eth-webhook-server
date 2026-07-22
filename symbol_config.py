@@ -9,20 +9,24 @@ BINANCE_SYMBOL_META = {
     "ETHUSDT": {
         "symbol": "ETHUSDT",
         "unit": "ETH",
+        "tag": "ETH",
         "qty_step": 0.001,
         "min_qty": 0.001,
         "dust_qty": 0.004,
         "price_precision": 2,
         "atr_fallback_symbol": "ETHUSDT",
+        "breath": "ETH",
     },
     "XAUUSDT": {
         "symbol": "XAUUSDT",
         "unit": "XAU",
+        "tag": "XAU",
         "qty_step": 0.001,
         "min_qty": 0.001,
         "dust_qty": 0.001,
         "price_precision": 2,
         "atr_fallback_symbol": "XAUUSDT",
+        "breath": "XAU",
     },
 }
 
@@ -32,6 +36,8 @@ DEEPCOIN_SYMBOL_META = {
         "symbol": "ETH-USDT-SWAP",
         "binance_mark": "ETHUSDT",
         "unit": "张",
+        "tag": "ETH",
+        "breath": "ETH",
         "face_value": 0.1,
         "qty_step": 1,
         "min_qty": 1,
@@ -43,6 +49,8 @@ DEEPCOIN_SYMBOL_META = {
         "symbol": "XAU-USDT-SWAP",
         "binance_mark": "XAUUSDT",
         "unit": "张",
+        "tag": "XAU",
+        "breath": "XAU",
         "face_value": 0.01,  # 启动后以 instruments 实盘覆盖
         "qty_step": 1,
         "min_qty": 1,
@@ -111,6 +119,11 @@ def resolve_binance_symbol(raw, default="ETHUSDT"):
             return {"symbol": "", "unit": "?", "qty_step": 0.001, "min_qty": 0.001}
         sym = default
     meta = dict(BINANCE_SYMBOL_META.get(sym, BINANCE_SYMBOL_META["ETHUSDT"]))
+    try:
+        from breath_profiles import get_breath_profile
+        meta["breath_profile"] = get_breath_profile(meta.get("symbol") or sym, "binance")
+    except Exception:
+        meta["breath_profile"] = None
     return meta
 
 
@@ -129,6 +142,11 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
         else:
             sym = default
     meta = dict(DEEPCOIN_SYMBOL_META.get(sym, DEEPCOIN_SYMBOL_META["ETH-USDT-SWAP"]))
+    try:
+        from breath_profiles import get_breath_profile
+        meta["breath_profile"] = get_breath_profile(meta.get("symbol") or sym, "deepcoin")
+    except Exception:
+        meta["breath_profile"] = None
     return meta
 
 

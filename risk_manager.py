@@ -81,17 +81,28 @@ class RiskManager:
             logger.debug(f"[RiskManager] 回撤扫描 - 权益: {current_equity:.2f}, 峰值: {self.peak_equity:.2f}, 回撤: {drawdown:.2%}, 风险系数: {self.risk_mult}")
     # =====================================================================
 
-    def is_daily_breaker_triggered(self) -> bool:
+    def is_daily_breaker_triggered(self, equity: float = 0.0) -> bool:
         self._reset_daily_if_needed()
+        eq = float(equity or 0)
+        if eq > 0:
+            # 日亏达到本金 × 5.5%（USDT）
+            if self.daily_pnl <= -abs(self.daily_loss_limit_pct) * eq:
+                logger.warning(
+                    f"[RiskManager] 触发每日熔断！当日亏损: {self.daily_pnl:.2f}U "
+                    f"(限额 {self.daily_loss_limit_pct*100:.1f}%×{eq:.0f}U)"
+                )
+                return True
+            return False
+        # 无权益时：旧逻辑用比例阈值（不推荐）
         if self.daily_pnl <= -abs(self.daily_loss_limit_pct):
             logger.warning(f"[RiskManager] 触发每日熔断！当日亏损: {self.daily_pnl:.2%}")
             return True
         return False
 
-    def is_trading_allowed(self) -> bool:
+    def is_trading_allowed(self, equity: float = 0.0) -> bool:
         self._reset_daily_if_needed()
 
-        if self.is_daily_breaker_triggered():
+        if self.is_daily_breaker_triggered(equity):
             return False
 
         if self.consecutive_losses >= self.max_consecutive_losses:
@@ -107,6 +118,9 @@ class RiskManager:
             return False
 
         return True
+
+    def is_trading_allowed_for_equity(self, equity: float) -> bool:
+        return self.is_trading_allowed(equity=float(equity or 0))
 
     def get_risk_multiplier(self) -> float:
         return self.risk_mult

@@ -223,9 +223,13 @@ def audit_dingtalk_events(a: Audit):
             a.check(f"钉钉·{label} 为 no-op", is_stub, "应早 return / 不推送")
 
     # 禁止旧文案残留在生效播报路径（标题串）
-    banned_titles = ("保护性全平", "TP3止盈成交", "加仓成交", "雷达激活 ·")
+    banned_titles = (
+        "保护性全平", "TP3止盈成交", "加仓成交", "雷达激活 ·", "雷达激活",
+        "极限逃顶", "极限逃底", "风控拦截", "降维打击", "复利保卫战",
+        "极速逃脱", "敏锐防守", "高优拦截", "动能衰竭", "变盘规避",
+        "大周期破位", "常规防守", "时间止损", "裸K反转",
+    )
     for phrase in banned_titles:
-        # 允许注释/历史；关键是 send_alert 标题里不再用这些
         in_send = False
         for line in src.splitlines():
             if "send_alert" in line and phrase in line:

@@ -135,7 +135,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.23-breath-tv-atr"
+BINANCE_VPS_VERSION = "v15.5.24-xau-breath"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
@@ -216,13 +216,23 @@ OPEN_REGIME_ENTRY_MATCH_PCT = 0.008  # 开仓日志匹配入场价容差 0.8%
 class PositionSupervisorBinance:
     def __init__(self, symbol="ETHUSDT"):
         from symbol_config import resolve_binance_symbol
+        from breath_profiles import get_breath_profile
         meta = resolve_binance_symbol(symbol)
         self.symbol = meta["symbol"]
         self.unit_label = meta.get("unit") or "ETH"
+        self.tag = str(meta.get("tag") or self.unit_label or "ETH").upper()
         self.qty_step = float(meta.get("qty_step") or 0.001)
         self.min_qty = float(meta.get("min_qty") or 0.001)
         self.dust_qty = float(meta.get("dust_qty") or DUST_QTY_ETH)
         self.atr_fallback_symbol = meta.get("atr_fallback_symbol") or self.symbol
+        self.breath_profile = meta.get("breath_profile") or get_breath_profile(
+            self.symbol, "binance",
+        )
+        self.price_precision = int(meta.get("price_precision") or 2)
+        # profile.tick_size 与价格精度对齐
+        if self.breath_profile and self.price_precision >= 0:
+            self.breath_profile = dict(self.breath_profile)
+            self.breath_profile["tick_size"] = 10 ** (-self.price_precision)
         self.monitoring = False
         self._lock = threading.Lock()
 
@@ -336,6 +346,7 @@ class PositionSupervisorBinance:
         self.initial_stop = 0.0       # entry±1.5×initialAtr，阶梯基准（理论，不含0.3缓冲）
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
         self.breathing_coefficient = 1.0
+        self.early_be_done = False
         self._breath_ratio_history = []
         self._tv_signal_atr = 0.0  # 本笔 webhook atr → initial_atr
         self._last_open_exec_ts = 0.0
@@ -345,6 +356,7 @@ class PositionSupervisorBinance:
         self._breath_tick_paused = False  # TP成交收缩止损数量时暂停价格tick
         self._atr_last_update_ts = 0.0
         self._tp_order_placed_ts = {}  # level(1/2/3) → unix ts
+        self._breath_coeff_meta = {}
         # TP1/TP2/TP3/止损 交易所订单 ID
         self._defense_order_ids = {"tp1": "", "tp2": "", "tp3": "", "stop": ""}
         self.trading_paused = False
@@ -372,8 +384,9 @@ class PositionSupervisorBinance:
             except Exception as e:
                 logger.warning(f"旧状态迁移失败: {e}")
         logger.info(
-            f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] {self.symbol} 军师已加载："
-            f"sizing={SIZING_MODE} · 呼吸止损 · 90m · leverage={FIXED_LEVERAGE}x · {self.unit_label}"
+            f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] [{self._tag()}] {self.symbol} 军师已加载："
+            f"sizing={SIZING_MODE} · breath={(self.breath_profile or {}).get('name') or '?'} "
+            f"· leverage={FIXED_LEVERAGE}x · {self.unit_label}"
         )
         self._start_signal_worker()
         self._start_idle_flat_patrol()
@@ -2611,6 +2624,10 @@ class PositionSupervisorBinance:
                     "breathing_coefficient": float(
                         getattr(self, "breathing_coefficient", 1.0) or 1.0
                     ),
+                    "early_be_done": bool(getattr(self, "early_be_done", False)),
+                    "breath_profile_name": str(
+                        (getattr(self, "breath_profile", None) or {}).get("name") or ""
+                    ),
                     "atr_1h_ratio_history": list(
                         getattr(self, "_breath_ratio_history", None) or []
                     ),
@@ -3022,13 +3039,15 @@ class PositionSupervisorBinance:
             f"| 挂TP1+TP2(价格=tv tp；数量=qty1/qty2按实开缩放) | sizing={SIZING_MODE}"
         )
 
+    def _tag(self):
+        """日志/钉钉品种短标签：[ETH] / [XAU]。"""
+        return str(getattr(self, "tag", None) or self.unit_label or self.symbol or "?").upper()
+
     def _resolve_open_atr_with_degrade(self, px, tv_sl_ref=None):
         """
-        开仓 ATR：优先 TV webhook.atr 作为 initial_atr（锁定后永不改）。
-        缺省降级：币安 1h ATR → market_engine 90m，并钉钉告警。
-        1h ATR 平时只喂呼吸系数，不覆盖已锁定 initial_atr。
+        开仓 ATR：必须用 TV webhook.atr 作为 initial_atr（缺则拒绝）。
+        1h ATR 只喂呼吸系数，不覆盖已锁定 initial_atr。
         """
-        px = float(px or getattr(self, "tv_price", 0) or 0)
         locked = float(getattr(self, "open_atr", 0) or 0)
         if float(getattr(self, "watched_qty", 0) or 0) > 0:
             atr = locked if locked > 0 else float(getattr(self, "current_atr", 0) or 0)
@@ -3059,81 +3078,87 @@ class PositionSupervisorBinance:
         if tv_atr > 0:
             self.atr_source = "tv"
             self.atr_degraded = False
+            self._pending_atr_degrade = None
             return float(tv_atr), meta
-
-        # 降级链：1h ATR → 90m market_engine
-        atr_1h = 0.0
-        try:
-            atr_1h = float(self._atr_1h_engine().refresh(force=True) or 0)
-        except Exception as e:
-            logger.warning(f"[{self.symbol}] 1h ATR 降级拉取失败: {e}")
-        if atr_1h > 0:
-            meta.update({
-                "reason": "fallback_atr_1h",
-                "source": "atr_1h",
-                "degrade": True,
-                "atr": atr_1h,
-                "vps_atr": atr_1h,
-            })
-            self.atr_source = "atr_1h_fallback"
-            self.atr_degraded = True
-            self._pending_atr_degrade = dict(meta)
-            try:
-                dingtalk.report_system_alert(
-                    f"缺TV atr·降级1h [{self.symbol}]",
-                    f"webhook 无 atr，本笔用币安1h ATR={atr_1h:.4f} 作 initial_atr",
-                    level="警告",
-                    suggestion="检查 TV get_entry_json 是否传 atr 字段",
-                )
-            except Exception:
-                pass
-            return float(atr_1h), meta
-
-        vps_atr, _adx = self._refresh_market_metrics(force=True)
-        vps_atr = float(vps_atr or getattr(self, "current_atr", 0) or 0)
-        if vps_atr > 0:
-            meta.update({
-                "reason": "fallback_90m",
-                "source": "vps_90m",
-                "degrade": True,
-                "atr": vps_atr,
-                "vps_atr": vps_atr,
-            })
-            self.atr_source = "vps_90m_fallback"
-            self.atr_degraded = True
-            self._pending_atr_degrade = dict(meta)
-            try:
-                dingtalk.report_system_alert(
-                    f"缺TV atr·降级90m [{self.symbol}]",
-                    f"webhook/1h 均无 atr，本笔用90m ATR={vps_atr:.4f} 作 initial_atr",
-                    level="紧急",
-                    suggestion="检查 TV atr 与币安1h K线",
-                )
-            except Exception:
-                pass
-            return float(vps_atr), meta
 
         meta["reason"] = "missing_tv_atr"
         meta["source"] = "reject"
+        self.atr_source = "reject"
+        self.atr_degraded = False
+        try:
+            dingtalk.report_system_alert(
+                f"[{self._tag()}] 开仓拒绝·缺TV atr",
+                f"{self.symbol} webhook 无 atr 或 atr≤0 → 拒绝开仓（禁止用1h/90m冒充 initial_atr）",
+                level="紧急",
+                suggestion="检查 TV get_entry_json 是否传 atr 字段",
+            )
+        except Exception:
+            pass
         return 0.0, meta
 
     def _atr_1h_engine(self):
         return get_atr_1h_engine(self.symbol, binance_client.fetch_klines)
 
     def _refresh_breathing_coefficient(self, force=False):
-        """用币安 1h ATR / initial_atr 更新呼吸系数（3 次平滑）。"""
+        """用币安 1h ATR / initial_atr 更新呼吸系数（3 次平滑 · 按品种档位表）。"""
         init = float(getattr(self, "open_atr", 0) or 0)
         if init <= 0:
             return float(getattr(self, "breathing_coefficient", 1.0) or 1.0)
         eng = self._atr_1h_engine()
         eng.ratio_history = list(getattr(self, "_breath_ratio_history", None) or [])
-        coeff, meta = eng.breathing_coefficient(init, force_refresh=force)
+        profile = getattr(self, "breath_profile", None)
+        coeff, meta = eng.breathing_coefficient(
+            init, force_refresh=force, profile=profile,
+        )
         self.breathing_coefficient = float(coeff or 1.0)
         self._breath_ratio_history = list(meta.get("ratio_history") or [])
         self._breath_coeff_meta = meta
-        self.current_atr = float(meta.get("atr_1h") or self.current_atr or 0)  # 仅展示/日志
+        # current_atr 仅展示实时 1h，不改 open_atr
+        if float(meta.get("atr_1h") or 0) > 0:
+            self.current_atr = float(meta["atr_1h"])
         self._atr_last_update_ts = time.time()
         return self.breathing_coefficient
+
+    def _stop_buffer_usd(self):
+        p = getattr(self, "breath_profile", None) or {}
+        try:
+            return abs(float(p.get("stop_exec_buffer") or STOP_EXEC_BUFFER_USD))
+        except (TypeError, ValueError):
+            return float(STOP_EXEC_BUFFER_USD)
+
+    def _circuit_breaker_blocks_open(self):
+        """日亏 ≥5.5% 本金 / 连续亏 / 次数 / 回撤 → 拒开仓。"""
+        try:
+            from risk_manager import risk_manager
+            equity = float(self._resolve_cap_sizing_base() or 0)
+            if hasattr(risk_manager, "is_trading_allowed_for_equity"):
+                ok = risk_manager.is_trading_allowed_for_equity(equity)
+            else:
+                # 兼容：用权益换算日亏阈值
+                risk_manager._reset_daily_if_needed()
+                if equity > 0 and float(risk_manager.daily_pnl or 0) <= -0.055 * equity:
+                    ok = False
+                else:
+                    ok = risk_manager.is_trading_allowed()
+            if not ok:
+                st = risk_manager.get_status() if hasattr(risk_manager, "get_status") else {}
+                logger.warning(
+                    f"🚫 [{self._tag()}] 熔断拒开仓 | daily_pnl={st.get('daily_pnl')} "
+                    f"consec={st.get('consecutive_losses')} trades={st.get('today_trade_count')}"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"[{self._tag()}] 开仓拒绝·熔断",
+                        f"{self.symbol} 触发日亏/连续亏/次数/回撤熔断 | {st}",
+                        level="紧急",
+                        suggestion="等待次日重置或人工确认后恢复",
+                    )
+                except Exception:
+                    pass
+                return True
+        except Exception as e:
+            logger.warning(f"[{self._tag()}] 熔断检查异常(放行): {e}")
+        return False
 
     def _should_ignore_late_close(self, payload=None):
         """
@@ -3221,7 +3246,9 @@ class PositionSupervisorBinance:
             or getattr(self, "current_side", None)
             or "LONG"
         ).upper()
-        stop = float(initial_stop_price(side, px, atr) or 0) if atr > 0 else 0.0
+        stop = float(initial_stop_price(
+            side, px, atr, profile=getattr(self, "breath_profile", None),
+        ) or 0) if atr > 0 else 0.0
         if principal <= 0 or px <= 0:
             logger.error(f"🚫 开仓 sizing 拒绝：权益={principal} price={px}")
             return 0.0, {
@@ -4981,7 +5008,9 @@ class PositionSupervisorBinance:
         atr = self._locked_initial_atr()
         if atr <= 0:
             return 0.0
-        return initial_stop_price(side, entry, atr)
+        return initial_stop_price(
+            side, entry, atr, profile=getattr(self, "breath_profile", None),
+        )
 
     def _vps_hard_sl_target(self, entry=None, side=None, regime=None):
         """兼容旧名 → 呼吸止损。"""
@@ -5032,7 +5061,10 @@ class PositionSupervisorBinance:
             # 仅当已锁定真实 open_atr（非空账本默认）时才允许 ATR 补算
             locked = float(getattr(self, "open_atr", 0) or 0)
             if locked > 0 and entry > 0 and side in ("LONG", "SHORT"):
-                target = round(float(initial_stop_price(side, entry, locked) or 0), 2)
+                target = round(float(initial_stop_price(
+                    side, entry, locked,
+                    profile=getattr(self, "breath_profile", None),
+                ) or 0), 2)
             if target <= 0:
                 logger.error(
                     f"🚨 [{self.symbol}] 呼吸止损账本消毒失败：无账本/盘口/锁定ATR "
@@ -5095,7 +5127,9 @@ class PositionSupervisorBinance:
                 )
                 return False
 
-        init = initial_stop_price(side, entry, locked)
+        init = initial_stop_price(
+            side, entry, locked, profile=getattr(self, "breath_profile", None),
+        )
         if init <= 0 or entry <= 0 or side not in ("LONG", "SHORT"):
             logger.error(
                 f"🚨 [{self.symbol}] 呼吸止损无法计算 | {source} "
@@ -5346,14 +5380,22 @@ class PositionSupervisorBinance:
                 self._purge_all_protective_stops()
             order = self._place_vps_hard_sl_order(
                 live_qty,
-                order_stop_price(self.current_side, stop) or stop,
+                order_stop_price(
+                    self.current_side, stop,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or stop,
             )
             if not order:
-                logger.error(f"🫁 [{self.symbol}] 止损数量收缩重挂失败 @{stop:.2f}")
+                logger.error(f"🫁 [{self._tag()}] 止损数量收缩重挂失败 @{stop:.2f}")
                 return False
             self.shield_sized_qty = live_qty
             self._last_applied_exchange_sl = round(
-                float(order_stop_price(self.current_side, stop) or stop), 2,
+                float(order_stop_price(
+                    self.current_side, stop,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or stop), 2,
             )
             self.shield_active = True
             self._set_defense_order_id("stop", order, save=False)
@@ -5404,7 +5446,11 @@ class PositionSupervisorBinance:
         # 账本理论止损；盘口挂单再 ±0.3 执行缓冲（多减空加）
         ledger_target = target
         exchange_target = round(
-            float(order_stop_price(self.current_side, ledger_target) or ledger_target),
+            float(order_stop_price(
+                self.current_side, ledger_target,
+                buffer_usd=self._stop_buffer_usd(),
+                profile=getattr(self, "breath_profile", None),
+            ) or ledger_target),
             2,
         )
         if exchange_target <= 0:
@@ -5422,7 +5468,9 @@ class PositionSupervisorBinance:
                         f"(账本@{ledger_target:.2f}) | 保留盘口 | {reason}"
                     )
                     # 盘口更紧：反推账本（去掉缓冲）保持一致
-                    self.current_sl = round(best_live + STOP_EXEC_BUFFER_USD, 2)
+                    self.current_sl = round(
+                        best_live + self._stop_buffer_usd(), 2,
+                    )
                     self.tv_sl = float(self.current_sl)
                     if float(getattr(self, "initial_stop", 0) or 0) <= 0:
                         self.initial_stop = float(self.current_sl)
@@ -5435,7 +5483,9 @@ class PositionSupervisorBinance:
                         f"🛡️ [{self.symbol}] 拒改宽止损：盘口@{best_live:.2f} < 拟挂@{exchange_target:.2f} "
                         f"(账本@{ledger_target:.2f}) | 保留盘口 | {reason}"
                     )
-                    self.current_sl = round(best_live - STOP_EXEC_BUFFER_USD, 2)
+                    self.current_sl = round(
+                        best_live - self._stop_buffer_usd(), 2,
+                    )
                     self.tv_sl = float(self.current_sl)
                     if float(getattr(self, "initial_stop", 0) or 0) <= 0:
                         self.initial_stop = float(self.current_sl)
@@ -5593,7 +5643,7 @@ class PositionSupervisorBinance:
             self._record_shield_maintain(success=True)
             logger.info(
                 f"✅ [{self.symbol}] 呼吸止损已挂 @{exchange_target:.2f}"
-                f"(账本{ledger_target:.2f}±{STOP_EXEC_BUFFER_USD}) | {reason} | "
+                f"(账本{ledger_target:.2f}±{self._stop_buffer_usd()}) | {reason} | "
                 f"current_sl={float(getattr(self, 'current_sl', 0) or 0):.2f} | "
                 f"撤孤儿 {purged} 笔"
             )
@@ -6546,6 +6596,7 @@ class PositionSupervisorBinance:
                 s.get("breathing_coefficient", getattr(self, "breathing_coefficient", 1.0))
                 or 1.0
             )
+            self.early_be_done = bool(s.get("early_be_done", False))
             self._breath_ratio_history = list(
                 s.get("atr_1h_ratio_history", getattr(self, "_breath_ratio_history", []))
                 or []
@@ -9771,7 +9822,7 @@ class PositionSupervisorBinance:
             self.trading_pause_reason = ""
             self._save_state()
 
-        # ATR 权威源 = VPS 行情引擎（90m）；webhook atr/adx 不写入决策路径
+        # 90m ATR 仅作展示/ADX；开仓 initial_atr 只认 TV atr（见 _resolve_open_atr）
         if raw_action in ("LONG", "SHORT"):
             try:
                 vps_atr, _adx = self._refresh_market_metrics(force=False)
@@ -10398,14 +10449,14 @@ class PositionSupervisorBinance:
         tv_atr = self._safe_float(payload.get("atr") or payload.get("ATR"), 0)
         self._tv_signal_atr = float(tv_atr or 0)
 
-        # 权威 initial_atr：TV atr → 1h → 90m（经 _resolve_open_atr_with_degrade）
+        # 权威 initial_atr：仅 TV atr；缺则拒绝（不经 1h/90m 冒充）
         init_atr, atr_meta = self._resolve_open_atr_with_degrade(
             entry_px, tv_sl_ref=tv_sl_ref,
         )
         init_atr = float(init_atr or 0)
         if init_atr <= 0:
             logger.error(
-                f"🚨 [{self.symbol}] 开仓快照无可用 ATR | meta={atr_meta}"
+                f"🚨 [{self._tag()}] 开仓快照缺 TV atr → 拒开 | meta={atr_meta}"
             )
 
         # 90m 仅作对比/ADX 日志，不覆盖 initial_atr
@@ -10421,7 +10472,7 @@ class PositionSupervisorBinance:
             "action": str(action or payload.get("action") or self.current_side or "").upper(),
             "tv_tps": list(tps),
             "tv_sl_ref": tv_sl_ref,
-            "atr": float(init_atr),  # 权威：TV atr（或缺省降级）
+            "atr": float(init_atr),  # 权威：仅 TV atr
             "atr_source": str(atr_meta.get("source") or "tv"),
             "adx": float(vps_adx or getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
             "regime": int(
@@ -10495,6 +10546,25 @@ class PositionSupervisorBinance:
         - 加仓/PYRAMID 已废除（normalize_entry_type 恒为 OPEN）
         """
         payload = payload or {}
+        if self._circuit_breaker_blocks_open():
+            return
+        # 必须有 TV atr
+        tv_atr = self._safe_float(
+            payload.get("atr") or payload.get("ATR")
+            or getattr(self, "_tv_signal_atr", 0), 0,
+        )
+        self._tv_signal_atr = float(tv_atr or 0)
+        if self._tv_signal_atr <= 0:
+            logger.error(f"🚫 [{self._tag()}] 开仓拒绝·缺 TV atr")
+            try:
+                dingtalk.report_system_alert(
+                    f"[{self._tag()}] 开仓拒绝·缺TV atr",
+                    f"{self.symbol} action={action} 无 atr → 拒开",
+                    level="紧急",
+                )
+            except Exception:
+                pass
+            return
         entry_type = normalize_entry_type(payload.get("entry_type"))
 
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
@@ -10681,9 +10751,11 @@ class PositionSupervisorBinance:
             self._open_regime_sticky = True
             self.initial_qty = real_qty
             self._last_open_exec_ts = time.time()
-            # 新仓重置呼吸系数采样
+            # 新仓重置呼吸系数采样 / 早保本
             self._breath_ratio_history = []
             self.breathing_coefficient = 1.0
+            self.early_be_done = False
+            self.breakeven_phase = False
             try:
                 self._atr_1h_engine().reset_ratio_history()
             except Exception:
@@ -11255,7 +11327,9 @@ class PositionSupervisorBinance:
         atr = self._locked_initial_atr()
         side = str(self.current_side or "").strip().upper()
         if float(getattr(self, "initial_stop", 0) or 0) <= 0 and atr > 0:
-            self.initial_stop = initial_stop_price(side, entry, atr)
+            self.initial_stop = initial_stop_price(
+                side, entry, atr, profile=getattr(self, "breath_profile", None),
+            )
         if float(getattr(self, "current_sl", 0) or 0) <= 0:
             self.current_sl = float(self.initial_stop or 0)
 
@@ -11420,7 +11494,7 @@ class PositionSupervisorBinance:
 
     def _apply_breath_stop_tick(self, curr_px=0.0):
         """
-        每个 tick 更新呼吸止损状态。
+        每个 tick 更新呼吸止损状态（按品种 breath_profile）。
         返回 dict(stop, best, breakeven_phase, meta) 或 None。
         """
         entry = float(self.watched_entry or 0)
@@ -11428,14 +11502,16 @@ class PositionSupervisorBinance:
         if entry <= 0 or side not in ("LONG", "SHORT"):
             return None
         atr = self._locked_initial_atr()
+        profile = getattr(self, "breath_profile", None)
         init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
-            init = initial_stop_price(side, entry, atr)
+            init = initial_stop_price(side, entry, atr, profile=profile)
             self.initial_stop = init
         cur = float(getattr(self, "current_sl", 0) or 0) or init
         best = float(getattr(self, "best_price", 0) or 0) or entry
         px = float(curr_px or 0) or best
         phase = bool(getattr(self, "breakeven_phase", False))
+        early = bool(getattr(self, "early_be_done", False))
         coeff = float(self._refresh_breathing_coefficient(force=False) or 1.0)
         if coeff <= 0:
             coeff = 1.0
@@ -11450,10 +11526,13 @@ class PositionSupervisorBinance:
             best,
             phase,
             breathing_coefficient=coeff,
+            profile=profile,
+            early_be_done=early,
         )
         new_stop = float(out["stop"] or 0)
         new_best = float(out["best"] or best)
         new_phase = bool(out["breakeven_phase"])
+        self.early_be_done = bool(out.get("early_be_done") or early)
         meta = out.get("meta") or {}
         meta["breathing_coefficient"] = coeff
         breath_meta = getattr(self, "_breath_coeff_meta", None) or {}
@@ -11464,7 +11543,6 @@ class PositionSupervisorBinance:
         if new_best > 0:
             self.best_price = new_best
         if new_stop > 0:
-            # 只向有利方向
             if side == "LONG":
                 self.current_sl = max(cur, new_stop) if cur > 0 else new_stop
             else:
@@ -11476,7 +11554,6 @@ class PositionSupervisorBinance:
         steps = int(meta.get("step_count") or 0)
         if steps > int(getattr(self, "radar_step_count", 0) or 0):
             self.radar_step_count = steps
-        # 阶段标签：1=阶梯 2=呼吸追踪
         self._radar_stage_last = 2 if new_phase else 1
         self._ladder_meta_last = meta
         self._ladder_label_last = (
@@ -11485,9 +11562,10 @@ class PositionSupervisorBinance:
         )
         if new_phase and not was_phase:
             logger.info(
-                f"🫁 [{self.symbol}] 呼吸止损切入阶段二(呼吸追踪) | "
+                f"🫁 [{self._tag()}] 呼吸止损切入阶段二 | "
                 f"SL={self.current_sl:.2f} best={self.best_price:.2f} "
-                f"coeff={coeff:.2f} trail={meta.get('trail_distance', 0):.2f}"
+                f"coeff={coeff:.2f} trail={meta.get('trail_distance', 0):.2f} "
+                f"profile={meta.get('profile')}"
             )
         return {
             "stop": float(self.current_sl or 0),
@@ -11495,6 +11573,7 @@ class PositionSupervisorBinance:
             "breakeven_phase": new_phase,
             "meta": meta,
             "phase_entered": bool(new_phase and not was_phase),
+            "early_be_done": bool(self.early_be_done),
         }
 
     def _compute_ladder_sl(self, curr_px=0.0):
@@ -11851,13 +11930,21 @@ class PositionSupervisorBinance:
         )
 
         if self._has_stop_sl_near(
-            order_stop_price(self.current_side, new_sl) or new_sl,
+            order_stop_price(
+                self.current_side, new_sl,
+                buffer_usd=self._stop_buffer_usd(),
+                profile=getattr(self, "breath_profile", None),
+            ) or new_sl,
             exclude_shield=False,
         ):
             self.current_sl = new_sl
             self.tv_sl = new_sl
             self._last_applied_exchange_sl = round(
-                float(order_stop_price(self.current_side, new_sl) or new_sl), 2,
+                float(order_stop_price(
+                    self.current_side, new_sl,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or new_sl), 2,
             )
             self._radar_stage_last = stage
             if phase_up and not getattr(self, "_radar_activation_notified", False):
@@ -11868,15 +11955,26 @@ class PositionSupervisorBinance:
 
         moved_enough = False
         exch_last = float(getattr(self, "_last_applied_exchange_sl", 0) or 0)
-        # last_sl 是盘口价（含缓冲）；与账本 new_sl 比时用缓冲后的拟挂价
-        exch_new = float(order_stop_price(self.current_side, new_sl) or new_sl)
+        exch_new = float(order_stop_price(
+            self.current_side, new_sl,
+            buffer_usd=self._stop_buffer_usd(),
+            profile=getattr(self, "breath_profile", None),
+        ) or new_sl)
         if self.current_side == "LONG":
             moved_enough = exch_new > max(exch_last, float(
-                order_stop_price(self.current_side, self.current_sl) or self.current_sl or 0
+                order_stop_price(
+                    self.current_side, self.current_sl,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or self.current_sl or 0
             )) + min_step
         else:
             ref = exch_last if exch_last > 0 else float(
-                order_stop_price(self.current_side, self.current_sl) or self.current_sl or 0
+                order_stop_price(
+                    self.current_side, self.current_sl,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or self.current_sl or 0
             )
             moved_enough = (ref <= 0) or (exch_new < ref - min_step)
 
@@ -12509,6 +12607,7 @@ class PositionSupervisorBinance:
                     self.breathing_coefficient = float(
                         s.get("breathing_coefficient", 1.0) or 1.0
                     )
+                    self.early_be_done = bool(s.get("early_be_done", False))
                     self._breath_ratio_history = list(
                         s.get("atr_1h_ratio_history", []) or []
                     )
@@ -12642,9 +12741,17 @@ class PositionSupervisorBinance:
                     self.monitoring = True
                     self._ensure_sentinel_running_quiet()
                     return
-                # 尽量用行情引擎补 initialAtr，防裸奔（不解除 pause）
+                # 尽量用 1h ATR 补 initialAtr（不作新开仓权威；仅孤儿仓恢复）
                 try:
-                    atr, adx = self._refresh_market_metrics(force=True)
+                    atr = 0.0
+                    adx = 0.0
+                    try:
+                        eng = self._atr_1h_engine()
+                        atr = float(eng.refresh(force=True) or 0)
+                    except Exception:
+                        atr = 0.0
+                    if atr <= 0:
+                        atr, adx = self._refresh_market_metrics(force=True)
                     if atr > 0 and float(getattr(self, "open_atr", 0) or 0) <= 0:
                         self.open_atr = atr
                     if adx > 0:
@@ -12652,7 +12759,9 @@ class PositionSupervisorBinance:
                     entry = float(pos.get("entry_price") or 0)
                     side = str(pos.get("side") or "")
                     if entry > 0 and atr > 0 and float(getattr(self, "initial_stop", 0) or 0) <= 0:
-                        self.initial_stop = initial_stop_price(side, entry, atr)
+                        self.initial_stop = initial_stop_price(
+                            side, entry, atr, profile=getattr(self, "breath_profile", None),
+                        )
                         self.current_sl = float(self.initial_stop)
                         self.best_price = entry
                 except Exception as e:

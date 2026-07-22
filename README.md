@@ -1,17 +1,17 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.23-breath-tv-atr`**  
+**当前版本：`v15.5.24-xau-breath`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`（本金×20% 风险；名义=本金×20%×5=本金×1 · 永远）**  
-**保护引擎：呼吸止损（`breath_stop` · TV `atr`=initial_atr · 币安原生 1h ATR 呼吸系数 · markPrice WS）**  
-**生产唯一大脑：`position_supervisor_binance.py`**  
+**仓位模式：`RISK20_NOTIONAL5`（单币名义≈本金×1；ETH+XAU 并存合计≈本金×2）**  
+**保护引擎：双雷达呼吸止损（`breath_profiles` · ETH/XAU 分档 · TV `atr`=initial_atr · 1h ATR 呼吸系数 · markPrice WS）**  
+**生产唯一大脑：`position_supervisor_binance.py`（每 symbol 一实例，状态/WS/ATR 互不串台）**  
 **通知渠道：钉钉（`dingtalk.py`；VPS 已配置，暂不迁 Telegram）**
 
 > 本文档为**唯一权威说明**。凡与旧文档（妈妈版阶梯雷达、TP3 挂限价、CAP_ALIGN、TV `stop_loss` 作盘口止损基准、同向跳过平仓、名义×0.85 折扣等）冲突，一律以本文为准。  
 > 旧逻辑清除对照表：[`docs/DELETED_LEGACY_LOGIC_v15.5.13.md`](docs/DELETED_LEGACY_LOGIC_v15.5.13.md)  
 > 天文 qty 事故：[`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md)
 
-TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_atr** + 1h ATR 呼吸系数 → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损开仓即工作** → 平仓钉钉诚实归因。
+TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_atr（缺则拒开）** + 1h ATR 呼吸系数 → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损开仓即工作** → 平仓钉钉诚实归因。
 
 | 工厂 | VPS 目录 | 端口 | 品种 | 仓位逻辑 | 钉钉主题 |
 |------|----------|------|------|----------|----------|
@@ -20,9 +20,9 @@ TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.23-breath-tv-atr
+# version: v15.5.24-xau-breath
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
-# radar: breath_tv_atr_1h · trading_paused: false
+# radar: breath_dual_eth_xau · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_breath_radar_upgrade.py
@@ -70,8 +70,10 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
    ├── tv_seq.py                   缓存 1.0s · 同窗折叠 · 先平后开 · 开仓单到延长等待
    ├── webhook_parser.py           动作白名单 · RISK20 仓位纯函数
    ├── atr_1h.py                   币安原生 1h ATR(14) · 5 分钟刷新 · 呼吸系数
-   ├── breath_stop.py              两阶段呼吸止损（×breathing_coefficient）
-   ├── market_engine.py            90m 仅作缺 atr 降级/对比日志（非止损权威）
+   ├── breath_profiles.py          ETH / XAU 呼吸参数档（缓冲/早保本/阶梯/档位）
+   ├── breath_stop.py              两阶段呼吸止损（吃 profile · ×breathing_coefficient）
+   ├── market_engine.py            90m 仅作对比/ADX 日志（非止损权威；缺 atr 拒开）
+   ├── symbol_config.py            ETH / XAU 路由 · 绑定 breath_profile
    ├── binance_client.py           REST + markPrice WS + 用户数据流
    └── dingtalk.py                 钉钉 / 企业微信双通道播报
 ```
@@ -205,17 +207,35 @@ TV隐含止损距离 = |price − stop_loss|
 
 ---
 
-## 六、呼吸止损引擎（开仓即工作 · TV atr 基准 · 1h 呼吸系数）
+## 六、呼吸止损引擎（开仓即工作 · 双雷达 profile · TV atr · 1h 系数）
 
-实现：`breath_stop.py` + `atr_1h.py`。盘口：`STOP_MARKET` + `reduceOnly` + 明确 `quantity`。  
-驱动：币安 **markPrice WebSocket** 逐 tick；REST 仅兜底。
+实现：`breath_profiles.py` + `breath_stop.py` + `atr_1h.py`。盘口：`STOP_MARKET` + `reduceOnly` + 明确 `quantity`。  
+驱动：币安 **markPrice WebSocket** 逐 tick（按 symbol 过滤）；REST 仅兜底。  
+**ETH / XAU 共用引擎，参数只从 `breath_profile` 读取（禁止业务里 `if XAU`）。**
+
+### 6.0 双品种参数档
+
+| 项 | ETH | XAU |
+|----|-----|-----|
+| `stop_exec_buffer` | 0.3 | **0.5** |
+| `early_be_atr`（早保本→entry±1tick） | **0.5** | **0.3** |
+| `step_trigger` / `step_advance` | 0.75 / 0.4 | **0.4 / 0.35** |
+| `phase_switch_atr` | 3.0 | 3.0 |
+| tp1/tp2 触发与底线 | 1.35→0.5 / 2.5→1.5 | 同 |
+| `initial_sl_atr` | 1.5 | 1.5 |
+| 呼吸档位 | 0.7 / 0.85 / 1.0 / 1.2~1.4 / 1.5 | **0.5 / 0.7 / 0.9 / 1.0~1.2 / 1.3** |
+| `phase2_trail_mult` | 1.0（trail=`atr×coeff`） | **0.8** |
+| sizing | RISK20×5（≈1×本金名义） | 同；双开并存合计≈**2×本金** |
+| 缺 TV `atr` | **拒绝开仓 + 钉钉** | 同 |
+| 日亏熔断 | ≥本金×5.5% 拒开 | 同 |
 
 ### 6.1 初始止损（不用 TV.stop_loss 挂单）
 
-1. **`initial_atr` = TV webhook `atr`**（开仓锁定，全程不变；缺则降级 1h→90m 并钉钉）  
+1. **`initial_atr` = TV webhook `atr`**（开仓锁定，全程不变；**缺则拒开 + 钉钉，禁止 1h/90m 冒充**）  
 2. 多：`initialStop = entry − 1.5×initial_atr`；空：`entry + 1.5×initial_atr`  
-3. **盘口挂单** = `order_stop_price`：多再 −0.3 USDT / 空再 +0.3（执行缓冲）  
-4. 币安原生 **1h ATR** 每 5 分钟刷新，算呼吸系数（最近 3 次 ratio 平滑）  
+3. **盘口挂单** = `order_stop_price`：多再 −buffer / 空再 +buffer（ETH 0.3 / XAU 0.5）  
+4. 币安原生 **1h ATR** 每 5 分钟刷新，算呼吸系数（最近 3 次 ratio 平滑 · 按品种档位表）  
+5. **早保本**：价达 `entry ± early_be_atr×ATR` → `currentStop` 提到 `entry ± 1 tick`（与阶段二 `phase_switch=3.0` 独立）
 
 **禁止**：持仓期用默认 `ATR=30` 虚构止损；禁止把 ADX 当呼吸系数传参。
 
@@ -224,27 +244,28 @@ TV隐含止损距离 = |price − stop_loss|
 | 字段 | 开仓后 | 说明 |
 |------|--------|------|
 | `initialAtr` / `open_atr` | **固定** | = TV atr；不因 1h 刷新而改 |
-| `initialStop` / `initial_stop` | **固定** | 阶梯基准（理论价，不含 0.3） |
-| `currentStop` / `current_sl` | **每 tick 可上移** | 账本理论价；盘口 = ±0.3 |
+| `initialStop` / `initial_stop` | **固定** | 阶梯基准（理论价，不含 buffer） |
+| `currentStop` / `current_sl` | **每 tick 可上移** | 账本理论价；盘口 = ±buffer |
 | `highestPrice` / `lowestPrice` (`best_price`) | **每 tick** | 多只增 / 空只减 |
 | `breakevenPhase` | **只可 false→true** | 进入阶段二后不可回退 |
-| `breathing_coefficient` | **可刷新** | 0.7~1.5；3 次平滑 |
+| `early_be_done` | **只可 false→true** | 早保本已触发 |
+| `breathing_coefficient` | **可刷新** | 按 profile 档位；3 次平滑 |
 | `remaining_qty_pct` | TP 成交后更新 | 止损单数量收缩 |
 | `tp_levels_radar_handoff` | TP 超时移交后持久化 | 禁止虚假 clear 后核武重挂 |
 
 ### 6.3 每个 markPrice tick
 
-1. 刷新呼吸系数（1h ATR / initial_atr）  
-2. 更新 `highestPrice` / `lowestPrice`  
+1. 刷新呼吸系数（1h ATR / initial_atr · 本 symbol profile）  
+2. 更新 `highestPrice` / `lowestPrice`；检查早保本  
 3. `breakevenPhase == false` → 阶段一；否则 → 阶段二  
 4. 新止损更优（多更高 / 空更低）才改单；否则本 tick 空操作（幂等，防撤挂抖动）  
 5. 价格跌破/突破 `currentStop` → 市价全平剩余 → 重置状态 → 钉钉  
 
-### 6.4 阶段一（保本前 · 多单示意）
+### 6.4 阶段一（保本前 · 多单示意 · ETH 默认）
 
 ```
-step_trigger = 0.75 × initial_atr × breathing_coefficient
-step_advance = 0.4 × initial_atr × breathing_coefficient
+step_trigger = step_trigger_atr × initial_atr × breathing_coefficient   # ETH 0.75 / XAU 0.4
+step_advance = step_advance_atr × initial_atr × breathing_coefficient   # ETH 0.4 / XAU 0.35
 # TP1/TP2 强制底线：浮盈≥1.35/2.5×ATR → stop≥entry+0.5/1.5×ATR
 # 浮盈≥3.0×ATR → 切入阶段二
 ```
@@ -252,11 +273,13 @@ step_advance = 0.4 × initial_atr × breathing_coefficient
 ### 6.5 阶段二（呼吸系数自适应追踪）
 
 ```
-trail_distance = initial_atr × breathing_coefficient   # 约 0.7~1.5×ATR
+trail_distance = initial_atr × breathing_coefficient × phase2_trail_mult
+# ETH mult=1.0；XAU mult=0.8
 current_stop = max(current_stop, highest - trail_distance)  # 多
 ```
 
-档位：ratio<0.7→0.7；0.7~1.0→0.85；1.0~1.4→1.0；1.4~2.0→1.2~1.4 线性；≥2.0→1.5。
+ETH 档位：ratio<0.7→0.7；0.7~1.0→0.85；1.0~1.4→1.0；1.4~2.0→1.2~1.4 线性；≥2.0→1.5。  
+XAU 档位：ratio<0.7→0.5；0.7~1.0→0.7；1.0~1.4→0.9；1.4~2.0→1.0~1.2 线性；≥2.0→1.3。
 
 ### 6.6 HARD_SL_FAIL_ABORT
 
@@ -270,17 +293,10 @@ current_stop = max(current_stop, highest - trail_distance)  # 多
 4. 该 symbol 置 `trading_paused=CLOSE_THEN_OPEN_FAIL_ABORT`（空仓也不自动解除）  
 5. 人工核对后：`POST /admin/resume/ETHUSDT` 恢复  
 
-### 6.8 ATR 应急降级（仅开仓瞬间 · 高调 · 需人工恢复）
+### 6.8 缺 ATR / 旧降级路径
 
-**定位：** 极端情况下临时用 TV 隐含 ATR，**不是**常态备选。  
-**持仓期禁止**因「缺 TV.qty / 假 ATR」反复降级刷屏（已 hold-skip）。
-
-触发（开仓信号，任一）：
-1. VPS 拉不到足够 K 线 / ATR 空或 ≤0  
-2. VPS ATR < 近50根中位数 × 30%  
-3. VPS vs TV隐含偏差 ≥20%，且**连续 3 次**开仓信号  
-
-降级时：钉钉 `ATR_DEGRADE_MANUAL_RESUME`；随后暂停该 symbol 自动开仓，复验后 `/admin/resume/{SYMBOL}`。
+**开仓必须带 TV `atr`>0，否则拒开 + 钉钉（不经 1h/90m 冒充 initial_atr）。**  
+`market_engine` 90m 仅保留对比/ADX 日志与孤儿仓恢复兜底，**不是**新开仓止损距离权威。
 
 ---
 
@@ -425,7 +441,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.20-checklist-final
+# 期望: v15.5.24-xau-breath
 
 bash deploy_binance.sh
 # 或: systemctl restart binance-engine.service

@@ -80,12 +80,12 @@ class Atr1hEngine:
                 logger.warning(f"[atr_1h] {self.symbol} refresh failed: {e}")
                 return float(self.atr or 0)
 
-    def breathing_coefficient(self, initial_atr: float, force_refresh: bool = False
-                              ) -> Tuple[float, dict]:
+    def breathing_coefficient(self, initial_atr: float, force_refresh: bool = False,
+                              profile=None) -> Tuple[float, dict]:
         from breath_stop import get_breathing_coefficient
         atr_1h = self.refresh(force=force_refresh)
         coeff, smooth, hist = get_breathing_coefficient(
-            atr_1h, initial_atr, self.ratio_history,
+            atr_1h, initial_atr, self.ratio_history, profile=profile,
         )
         self.ratio_history = hist
         meta = {
@@ -94,6 +94,7 @@ class Atr1hEngine:
             "smooth_ratio": float(smooth or 0),
             "breathing_coefficient": float(coeff or 1.0),
             "ratio_history": list(hist),
+            "profile": (profile or {}).get("name") if isinstance(profile, dict) else None,
         }
         return float(coeff or 1.0), meta
 

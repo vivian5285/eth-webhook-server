@@ -572,10 +572,24 @@ def audit_module4_radar(a: Audit):
     a1h = _read(os.path.join(ROOT, "atr_1h.py"))
 
     a.check("4.1 breath_stop.py 存在", "INITIAL_SL_ATR" in bs and "calculate_stop_long" in bs)
-    a.check("4.1b STEP_TRIGGER=0.75", "STEP_TRIGGER_ATR = 0.75" in bs)
-    a.check("4.1c STEP_ADVANCE=0.4", "STEP_ADVANCE_ATR = 0.4" in bs)
+    a.check(
+        "4.1b STEP_TRIGGER=0.75(ETH默认)",
+        "STEP_TRIGGER_ATR" in bs and (
+            "STEP_TRIGGER_ATR = 0.75" in bs
+            or 'step_trigger_atr' in bs
+        ),
+    )
+    a.check(
+        "4.1c STEP_ADVANCE=0.4(ETH默认)",
+        "STEP_ADVANCE_ATR" in bs and (
+            "STEP_ADVANCE_ATR = 0.4" in bs
+            or "step_advance_atr" in bs
+        ),
+    )
     a.check("4.1d 呼吸系数档位", "get_breathing_coefficient" in bs and "STOP_EXEC_BUFFER_USD" in bs)
     a.check("4.1e atr_1h 引擎", "Atr1hEngine" in a1h and "REFRESH_MIN_SEC = 300" in a1h)
+    from breath_stop import STEP_TRIGGER_ATR, STEP_ADVANCE_ATR
+    a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.75) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.4) < 1e-9)
 
     for fn in (
         "_apply_breath_stop_tick",
@@ -591,16 +605,46 @@ def audit_module4_radar(a: Audit):
 
     a.check("4.2 market_engine 90m保留(降级)", "merge_30m_to_90m" in me and "wilder_atr" in me)
     a.check(
-        "4.2b TV atr 锁定 initial_atr",
-        "_tv_signal_atr" in sup and ("TV atr" in sup or "atr_source" in sup),
+        "4.2b TV atr 锁定 initial_atr（缺则拒）",
+        "_tv_signal_atr" in sup
+        and ("missing_tv_atr" in sup or "拒绝开仓" in sup)
+        and "breath_profile" in sup,
     )
     a.check(
         "4.2c tick 用呼吸系数关键字传参",
-        "breathing_coefficient=coeff" in sup,
+        "breathing_coefficient=coeff" in sup or "breathing_coefficient=" in sup,
     )
     a.check(
         "4.2d 盘口执行缓冲 order_stop_price",
-        "order_stop_price" in sup and "STOP_EXEC_BUFFER_USD" in sup,
+        "order_stop_price" in sup and ("STOP_EXEC_BUFFER_USD" in sup or "stop_exec_buffer" in sup),
+    )
+    a.check(
+        "4.2e 双雷达 breath_profiles",
+        os.path.isfile(os.path.join(ROOT, "breath_profiles.py")),
+    )
+    try:
+        from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
+        a.check(
+            "4.2f ETH/XAU 缓冲与早保本差异",
+            abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
+            and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
+            and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
+            and abs(float(BREATH_XAU["early_be_atr"]) - 0.3) < 1e-9
+            and abs(float(BREATH_XAU["phase2_trail_mult"]) - 0.8) < 1e-9
+            and abs(float(BREATH_ETH["phase2_trail_mult"]) - 1.0) < 1e-9,
+        )
+        pe = get_breath_profile("ETHUSDT")
+        px = get_breath_profile("XAUUSDT")
+        a.check(
+            "4.2g get_breath_profile 路由",
+            pe.get("name") == "ETH" and px.get("name") == "XAU",
+        )
+    except Exception as e:
+        a.check("4.2f ETH/XAU 缓冲与早保本差异", False, str(e))
+        a.check("4.2g get_breath_profile 路由", False, str(e))
+    a.check(
+        "4.2h early_be_done 持久化",
+        "early_be_done" in sup,
     )
     a.check(
         "4.3 钉钉阶段二文案",

@@ -171,7 +171,7 @@ def health():
         "leverage": "fixed_5",
         "risk_pct": 0.20,
         "notional_mult": 5,
-        "radar": "breath_tv_atr_1h",
+        "radar": "breath_dual_eth_xau",
         "symbols": list(SUPERVISORS.keys()) or active_binance_symbols(),
         "monitoring": {
             s: bool(getattr(sup, "monitoring", False))
