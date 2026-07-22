@@ -312,11 +312,12 @@ def audit_module2_sizing(a: Audit):
     a.check("2.2 HARD_NOTIONAL_CAP=0", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.3 MAX_TOTAL_NOTIONAL_MULT=13", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    # 无 TV.sl → adj=1.0：min(200/100, 5000/3300.5, 12) floored 3dp = 1.514
+    # 无 TV.sl → adj=1.0：min(200/100, 1000*5*0.85/3300.5, 12) floored 3dp
+    # notional haircut 0.85 → 1.287（非旧无折扣 1.514）
     qty, meta = compute_fixed_order_qty(1000, 3300.5, stop_loss=3200.5, tv_qty=12)
-    expected = 1.514
+    expected = 1.287
     a.check(
-        "2.4 1000U@3300.5 SL3200.5 tv=12 → 1.514",
+        "2.4 1000U@3300.5 SL3200.5 tv=12 → 1.287(×0.85)",
         abs(qty - expected) < 0.001,
         f"qty={qty} expected={expected} mode={meta.get('sizing_mode')} bind={meta.get('bind')}",
     )
@@ -387,14 +388,19 @@ def audit_module2_sizing(a: Audit):
 
     a.check("2.9 禁止 TV_RISK_FORMULA", "TV_RISK_FORMULA" not in wp)
     a.check(
-        "2.10 supervisor 阶梯/风险/暂停/ATR/超时/对账",
-        ("compute_ladder_radar_sl" in sup or "_compute_ladder_sl" in sup)
+        "2.10 supervisor 呼吸止损/风险/暂停/ATR/超时",
+        ("from breath_stop import" in sup or "calculate_breath_stop" in sup)
+        and ("compute_ladder_radar_sl" not in sup)
         and ("RISK20" in sup or "FIXED_LEVERAGE" in sup or "risk20" in wp)
         and "_calc_vps_open_qty" in sup
         and "trading_paused" in sup
         and "_maybe_refresh_atr" in sup
-        and "_check_tp_order_timeouts" in sup
-        and "_handle_tv_reconcile" in sup,
+        and "_check_tp_order_timeouts" in sup,
+    )
+    a.check(
+        "2.10b 旧阶梯雷达函数已删体",
+        "compute_ladder_radar_sl deleted" in wp
+        or "use breath_stop.calculate_breath_stop" in wp,
     )
     a.check(
         "2.11 app health sizing=RISK20/SIZING_MODE",
@@ -574,7 +580,8 @@ def audit_module4_radar(a: Audit):
     )
     a.check(
         "4.2c ATR异常中位数兜底",
-        "check_atr_anomaly" in me and "ATR_ANOMALY_RATIO" in me and "atr_anomaly_reject" in sup,
+        "check_atr_anomaly" in me and "ATR_ANOMALY_RATIO" in me
+        and ("evaluate_atr_emergency_degrade" in me or "evaluate_atr_emergency_degrade" in sup),
     )
     a.check(
         "4.2d bar_time 乱序兜底",

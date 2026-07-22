@@ -29,8 +29,6 @@ from webhook_parser import (
     SIZING_MODE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
-    ENTRY_TYPE_PYRAMID,
-    ENTRY_TYPE_PROFIT_ADD,
     CLOSE_TYPE_TP3,
     CLOSE_TYPE_PROTECT,
     CLOSE_TYPE_QUICK,
@@ -1202,17 +1200,11 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     et = normalize_entry_type(entry_type)
     type_map = {
         ENTRY_TYPE_OPEN: "首次开仓 OPEN",
-        ENTRY_TYPE_PYRAMID: "已忽略 PYRAMID",
-        ENTRY_TYPE_PROFIT_ADD: "已忽略 PROFIT_ADD",
     }
     type_txt = type_map.get(et, et or "—")
     close_actions = {
-        "CLOSE_PROTECT": "反转保护",
-        "CLOSE_TP3": "TP3 收网",
-        "CLOSE_STOPLOSS": "止损/保本平仓",
-        "UPDATE_SL": "动态止损 UPDATE_SL",
-        "UPDATE_TP": "动能止盈升级 UPDATE_TP",
-        "CLOSE": "换防清场",
+        "CLOSE_QUICK_EXIT": "反转保护",
+        "CLOSE_RSI_EXIT": "反转保护(RSI)",
     }
     if act in close_actions:
         type_txt = close_actions[act]

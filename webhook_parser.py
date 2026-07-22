@@ -618,120 +618,15 @@ def radar_activation_price(side, entry, tp1):
     return round(entry + dist * RADAR_ACTIVATE_TP1_FRAC, 2)
 
 
-def compute_ladder_radar_sl(side, entry, atr, best, curr_px, tp1, tp2, tp3,
-                            tick_size=0.01, step_count=None):
+def compute_ladder_radar_sl(*_args, **_kwargs):
     """
-    【已废除】旧阶梯雷达 0.85/0.5/0.3/2.0。
-    生产唯一止损：breath_stop.calculate_breath_stop（0.75/0.4 + ADX 1.2~2.5）。
-    保留函数体仅供静态对比/历史测试；supervisor 不得调用本函数做实盘决策。
+    【已物理删除】旧阶梯雷达 0.85/0.5/0.3/2.0×ATR。
+    生产唯一止损：breath_stop.calculate_breath_stop。
+    保留函数名仅防旧 import 崩；调用即失败，禁止实盘决策。
     """
-    side = str(side or "").upper()
-    entry = float(entry or 0)
-    atr = float(atr or 0) or ATR_FALLBACK_DEFAULT
-    best = float(best or 0)
-    curr_px = float(curr_px or best or 0)
-    tp1, tp2, tp3 = float(tp1 or 0), float(tp2 or 0), float(tp3 or 0)
-    tick = max(float(tick_size or 0.01), 0.01)
-    is_long = side != "SHORT"
-
-    act = radar_activation_price(side, entry, tp1)
-    if act <= 0 or entry <= 0:
-        return 0.0, RADAR_STAGE_LABELS[0], {"activated": False, "step_count": 0}
-
-    reached = (curr_px >= act) if is_long else (curr_px <= act)
-    if not reached and best > 0:
-        reached = (best >= act) if is_long else (best <= act)
-    if not reached:
-        return 0.0, RADAR_STAGE_LABELS[0], {
-            "activated": False, "activation_px": act, "step_count": 0,
-        }
-
-    # 保本：开仓价 ± 1 tick
-    be_sl = round(entry + tick, 2) if is_long else round(entry - tick, 2)
-    ref = best if best > 0 else curr_px
-
-    # 阶梯：从 entry 起算，每 0.5×ATR 推进一档，止损跟进 n×0.3×ATR
-    if atr > 0:
-        if is_long:
-            progress = max(0.0, ref - entry)
-        else:
-            progress = max(0.0, entry - ref)
-        derived_steps = int(math.floor(progress / (RADAR_STEP_ATR * atr) + 1e-9))
-    else:
-        derived_steps = 0
-
-    # 允许外部传入已锁定的 step_count（ATR 更新不回溯）
-    if step_count is not None:
-        steps = max(int(step_count), derived_steps)
-    else:
-        steps = derived_steps
-
-    if steps <= 0:
-        ladder_sl = be_sl
-        stage = 1
-    else:
-        if is_long:
-            ladder_sl = entry + steps * RADAR_LOCK_ATR * atr
-        else:
-            ladder_sl = entry - steps * RADAR_LOCK_ATR * atr
-        stage = 2
-
-    floor_sl = be_sl
-
-    hit_tp1 = tp1 > 0 and ((ref >= tp1) if is_long else (ref <= tp1))
-    hit_tp2 = tp2 > 0 and ((ref >= tp2) if is_long else (ref <= tp2))
-    hit_tp3 = tp3 > 0 and ((ref >= tp3) if is_long else (ref <= tp3))
-
-    if hit_tp3:
-        if is_long:
-            trail = ref - RADAR_TP3_TRAIL_ATR * atr
-        else:
-            trail = ref + RADAR_TP3_TRAIL_ATR * atr
-        sl = trail
-        stage = 7
-        label = RADAR_STAGE_LABELS[7]
-    else:
-        if hit_tp1:
-            floor1 = (
-                entry + RADAR_TP1_FLOOR_ATR * atr if is_long
-                else entry - RADAR_TP1_FLOOR_ATR * atr
-            )
-            floor_sl = floor1
-            stage = 3
-        if hit_tp2:
-            floor2 = (
-                entry + RADAR_TP2_FLOOR_ATR * atr if is_long
-                else entry - RADAR_TP2_FLOOR_ATR * atr
-            )
-            floor_sl = floor2
-            stage = 5
-        elif hit_tp1 and not hit_tp2:
-            stage = 4 if steps > 0 else 3
-        elif not hit_tp1 and steps > 0:
-            stage = 2
-
-        if is_long:
-            sl = max(ladder_sl, floor_sl, be_sl)
-        else:
-            sl = min(ladder_sl, floor_sl, be_sl)
-        label = RADAR_STAGE_LABELS.get(stage, "阶梯跟进")
-
-    sl = round(float(sl), 2)
-    meta = {
-        "activated": True,
-        "activation_px": act,
-        "steps": steps,
-        "step_count": steps,
-        "ladder_sl": round(ladder_sl, 2),
-        "floor_sl": round(floor_sl, 2),
-        "be_sl": be_sl,
-        "hit_tp1": hit_tp1,
-        "hit_tp2": hit_tp2,
-        "hit_tp3": hit_tp3,
-        "stage": stage,
-        "atr": atr,
-    }
-    return sl, label, meta
+    raise RuntimeError(
+        "compute_ladder_radar_sl deleted; use breath_stop.calculate_breath_stop"
+    )
 
 
 def _unwrap_payload(obj):
@@ -908,9 +803,9 @@ def normalize_tv_payload(data):
 
     out["_normalized"] = True
     out["_schema"] = TV_STRATEGY_VERSION
-    out["_parse_ok"] = bool(action) and (
-        action in VALID_ACTIONS or action.startswith("CLOSE")
-    )
+    # 仅白名单：LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT/PING
+    # 禁止 CLOSE_TP/CLOSE_TRAIL/CLOSE_SL_* 等旧 action 借 startswith("CLOSE") 混入
+    out["_parse_ok"] = bool(action) and action in VALID_ACTIONS
     out["_is_reconcile"] = is_reconcile_action(action)
     out["_is_flatten"] = is_flatten_action(action)
     return out

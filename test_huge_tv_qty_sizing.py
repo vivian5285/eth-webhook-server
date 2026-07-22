@@ -164,9 +164,23 @@ class TestHugeTvQtySizing(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_webhook_request(b"not-json{{{")
 
-    def test_missing_action_not_ok(self):
-        out = normalize_tv_payload({"price": 1932.4, "qty": 0.1})
-        self.assertFalse(out.get("_parse_ok"))
+    def test_reject_legacy_close_actions(self):
+        for act in ("CLOSE_TP", "CLOSE_TRAIL", "CLOSE_SL_INITIAL", "UPDATE_SL"):
+            out = normalize_tv_payload({"action": act, "price": 1932.4, "qty": 0.1})
+            self.assertFalse(out.get("_parse_ok"), act)
+            self.assertNotIn(out.get("action"), ("LONG", "SHORT", "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT", "PING"))
+
+    def test_whitelist_actions_ok(self):
+        for act in ("LONG", "SHORT", "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT", "PING"):
+            out = normalize_tv_payload({
+                "action": act, "price": 1932.4, "qty": 0.1, "symbol": "ETHUSDT.P",
+            })
+            self.assertTrue(out.get("_parse_ok"), act)
+
+    def test_ladder_radar_sl_deleted(self):
+        from webhook_parser import compute_ladder_radar_sl
+        with self.assertRaises(RuntimeError):
+            compute_ladder_radar_sl("LONG", 1900, 15, 1910, 1910, 1920, 1930, 1940)
 
 
 if __name__ == "__main__":

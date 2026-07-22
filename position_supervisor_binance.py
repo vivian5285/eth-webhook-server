@@ -52,8 +52,6 @@ from webhook_parser import (
     RECONCILE_ACTIONS,
     FLATTEN_ACTIONS,
     ENTRY_TYPE_OPEN,
-    ENTRY_TYPE_PYRAMID,
-    ENTRY_TYPE_PROFIT_ADD,
     CLOSE_TYPE_TP3,
     CLOSE_TYPE_BREAKEVEN,
     CLOSE_TYPE_VPS_SHIELD,
@@ -80,12 +78,10 @@ from webhook_parser import (
     RADAR_LOCK_ATR,
     RADAR_TP1_FLOOR_ATR,
     RADAR_TP2_FLOOR_ATR,
-    RADAR_TP3_TRAIL_ATR,
     get_radar_activation_ratio,
     get_radar_trail_step,
     get_radar_breath_atr,
     radar_activation_price,
-    compute_ladder_radar_sl,
 )
 from breath_stop import (
     INITIAL_SL_ATR,
@@ -135,7 +131,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.17-incident-sticky"
+BINANCE_VPS_VERSION = "v15.5.18-checklist-clean"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -1287,8 +1283,6 @@ class PositionSupervisorBinance:
                 logger.warning(f"信号预览 sizing 参数绑定跳过: {e}")
             _, open_sizing_meta = self._calc_vps_open_qty(self.tv_price)
             sizing_note = " | " + format_vps_sizing_note(open_sizing_meta, entry_type=ENTRY_TYPE_OPEN)
-        elif et in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
-            sizing_note = f" | 加仓类型已废除({et})→忽略"
         logger.info(
             f"📡 TV日志: {raw_action}{seq_tag} R{self.regime} @ {self.tv_price:.2f} "
             f"TP={self.tv_tps}"
@@ -6665,7 +6659,7 @@ class PositionSupervisorBinance:
                     and not getattr(self, "_radar_activation_notified", False)
                 ):
                     self._flush_pending_radar_notify(real_amt, curr_px)
-                actions.append(f"雷达激活·进度{health.get('radar_progress', 0):.0%}")
+                actions.append(f"阶段二·进度{health.get('radar_progress', 0):.0%}")
 
             self._radar_guardian_audit(real_amt, curr_px)
         except Exception as e:
@@ -7365,7 +7359,7 @@ class PositionSupervisorBinance:
             return False
         if self._has_stop_sl_near(new_sl, exclude_shield=False):
             self._last_applied_exchange_sl = new_sl
-            logger.info(f"📡 雷达止损已在 @{new_sl:.2f}，跳过撤挂")
+            logger.info(f"📡 呼吸止损已在 @{new_sl:.2f}，跳过撤挂")
             return True
         last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
         if last > 0 and abs(last - new_sl) <= SHIELD_STOP_TOLERANCE:
@@ -8550,13 +8544,15 @@ class PositionSupervisorBinance:
                 # 现价未过任何档却 expected=0 → 异常；若已过1+2则只挂3
                 if self._price_reached_tp_zone(2, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP2 → 只挂 TP3"
+                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP2 → 余仓交阶段二"
+                        f"（不挂 TP3 限价）"
                     )
                     self.tp_levels_consumed = [1, 2]
                     self._save_state()
                 elif self._price_reached_tp_zone(1, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 只挂 TP23"
+                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 仅余 TP2 限价"
+                        f"（PLACE_TP_LEVELS=2）"
                     )
                     self.tp_levels_consumed = [1]
                     self._save_state()
@@ -10502,24 +10498,11 @@ class PositionSupervisorBinance:
         铁律（清晰）：
         - 带开仓的 TV（OPEN / LONG|SHORT 建仓）→ 一律先平现有仓再开（刷新仓位）
         - 同时收到平仓+开仓 → 缓冲已先平后开；此处开仓仍走先平后开净场
-        - PYRAMID / PROFIT_ADD → 已废除，忽略（pyramiding=1）
         - 单独平仓由 CLOSE* 分支清零等待（不进本函数）
+        - 加仓/PYRAMID 已废除（normalize_entry_type 恒为 OPEN）
         """
         payload = payload or {}
         entry_type = normalize_entry_type(payload.get("entry_type"))
-
-        if entry_type in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
-            logger.warning(
-                f"🚫 [{self.symbol}] pyramiding=1 已废除追加仓位 | entry_type={entry_type} → 忽略"
-            )
-            try:
-                dingtalk.report_system_alert(
-                    f"追加仓位已忽略 [{self.symbol}]",
-                    f"收到 {entry_type}，妈妈版 pyramiding=1，已忽略（请用 LONG/SHORT 先平后开）",
-                )
-            except Exception:
-                pass
-            return
 
         curr_px = binance_client.get_current_price(self.symbol) or self.tv_price
         # 空仓短时重复开仓信号：忽略（无仓可刷，耐心等下次有效 TV）
@@ -12313,7 +12296,8 @@ class PositionSupervisorBinance:
 
     def _emergency_flatten_naked_open(self, reason="硬止损失败·撤销开仓防裸奔"):
         """
-        开仓后硬止损挂不上 → 立即市价平掉，禁止裸仓持有。
+        【保留·安全网】开仓后硬止损挂不上 → 立即市价平掉，禁止裸仓持有。
+        非旧版「保护性全平」；属呼吸止损武装失败的硬中止（自查清单允许的安全路径）。
         （自查清单 7.6：硬止损挂单失败，开仓单自动撤销）
         """
         logger.error(f"🚨 [{self.symbol}] {reason} → 强制市价撤仓")
