@@ -41,7 +41,8 @@ class BinanceClient:
         self._pub_ws_lock = threading.Lock()
         self._pub_ws_restart = False
         self._rest_price_min_interval = 30
-        self._last_rest_price_fetch = 0.0
+        self._last_rest_price_fetch = 0.0  # 兼容旧字段
+        self._last_rest_price_fetch_by_sym = {}
         # markPrice tick 回调：symbol → callable(symbol, price)
         self._price_tick_cbs = {}
         # 私有 User Data Stream：持仓 / 订单实时同步
@@ -481,7 +482,8 @@ class BinanceClient:
                 backoff = min(backoff * 2.0, 60.0)
 
     def get_current_price(self, symbol="ETHUSDT", prefer_ws=True):
-        """优先 WS 缓存；REST 仅作兜底且限频（有 WS 时 ≥30s 一次）"""
+        """优先 WS 缓存；REST 仅作兜底且按 symbol 限频（有 WS 时 ≥30s 一次）"""
+        symbol = str(symbol or "ETHUSDT").upper()
         if prefer_ws:
             ws_px = self._get_ws_price(symbol)
             if ws_px:
@@ -491,10 +493,12 @@ class BinanceClient:
         cached = self._get_ws_price(symbol, max_age=min_gap)
         if cached:
             return cached
-        if now - self._last_rest_price_fetch < min_gap:
+        last = float(self._last_rest_price_fetch_by_sym.get(symbol) or 0)
+        if last > 0 and (now - last) < min_gap:
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
         try:
+            self._last_rest_price_fetch_by_sym[symbol] = now
             self._last_rest_price_fetch = now
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             price = float(ticker["price"])
