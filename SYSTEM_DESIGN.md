@@ -1,11 +1,11 @@
 # ETH Webhook Trading System - 系统设计文档
 
 > **唯一权威**：见 [`README.md`](README.md)  
-> **TV v6.5.6** · **VPS v15.5.3-rigor-checks** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
+> **TV v6.5.6** · **VPS v15.5.13-prod-gate** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v15.5.3-rigor-checks）
+## 当前有效架构（2026-07 · v15.5.13-prod-gate）
 
 ```
 TradingView v6.5.6 Alert (secret=528586)

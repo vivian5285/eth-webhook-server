@@ -47,7 +47,7 @@
 
 ## 部署检查清单
 
-- [ ] GitHub `origin/main` 提交哈希: （部署后填）
-- [ ] VPS `/health` version = `v15.5.13-prod-gate`
-- [ ] 重启后空仓待命或正确接管；无 ATR=30 虚构止损
-- [ ] 观察窗口 30–60min，禁止中途 rebuild
+- [x] GitHub `origin/main` 提交哈希: `8ede59a7d424bcc4c96211a464f8f800b41f8198`
+- [x] VPS `/health` version = `v15.5.13-prod-gate`（2026-07-22 10:12:53 UTC 重启）
+- [x] 重启后空仓待命；无 ATR=30 虚构止损；未暂停
+- [x] 观察窗口已启动：`logs/prod_gate_observe_60m.txt`，起 `2026-07-22T10:20:37Z`，时长 2700s（约45min），禁止中途 rebuild

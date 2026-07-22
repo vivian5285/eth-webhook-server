@@ -33,6 +33,8 @@ from webhook_parser import (
     ENTRY_TYPE_PROFIT_ADD,
     CLOSE_TYPE_TP3,
     CLOSE_TYPE_PROTECT,
+    CLOSE_TYPE_QUICK,
+    CLOSE_TYPE_RSI,
     CLOSE_TYPE_BREAKEVEN,
     CLOSE_TYPE_HARD_SL,
     CLOSE_TYPE_VPS_SHIELD,
@@ -158,8 +160,13 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
             "status": _g("阶段二收网离场。" + ("（含扫尾）" if is_dust_ctx else ""), G_LIGHT),
             "header": G_TITLE,
         }
-    if ct == CLOSE_TYPE_PROTECT:
+    if ct in (CLOSE_TYPE_PROTECT, CLOSE_TYPE_QUICK, CLOSE_TYPE_RSI):
         reason = (tv_reason or r or "反转保护").strip()
+        # 防御：旧拼接残留「TV档位 R3」等不得进入标题
+        import re
+        reason = re.sub(r"\s*\|\s*TV档位\s*R\d+", "", reason)
+        reason = re.sub(r"\bR[1-4]\b", "", reason)
+        reason = re.sub(r"\s{2,}", " ", reason).strip(" |")
         return {
             "title": f"反转保护平仓：{reason[:80]}",
             "tag": _g("**反转保护**", G_ACCENT),
@@ -459,18 +466,10 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
 def get_regime_name(regime_code):
     """
     旧「评分档位/中势推升」文案已废除。
-    regime 若仍传入，仅作内部兼容编号展示；算仓一律 RISK20_NOTIONAL5。
+    regime 内部编号可保留供逻辑使用，但用户可见文案一律只展示 RISK20 算仓模式，
+    禁止再输出 R1/R2/R3/R4。
     """
-    try:
-        r = int(regime_code or 0)
-    except (TypeError, ValueError):
-        r = 0
-    if r <= 0:
-        return _g("算仓=本金20%风险资金×5x杠杆（RISK20）", G_MUTED)
-    return _g(
-        f"内部兼容编号 R{r}（不影响算仓；算仓=本金20%风险×5x·RISK20）",
-        G_MUTED,
-    )
+    return _g("算仓=本金20%风险资金×5x杠杆（RISK20）", G_MUTED)
 
 
 def _sizing_mode_label():
@@ -575,7 +574,6 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
     }
     if regime and margin_pct is not None:
         data["📐 算仓模式"] = _sizing_mode_label()
-        data["🔢 内部编号"] = get_regime_name(int(regime))
         if meta:
             data["📐 预算公式"] = _g(
                 _format_vps_sizing_basis(principal, meta=meta, leverage=f"{lev}x"),
@@ -803,9 +801,8 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
         data["📈 盈亏"] = _g(f"**{pnl:+.2f}%**", G_ACCENT if pnl >= 0 else G_DEEP)
     if tv_regime is not None:
         data["📐 算仓模式"] = _sizing_mode_label()
-        data["🔢 TV内部编号"] = get_regime_name(int(tv_regime))
     if tv_atr is not None and float(tv_atr or 0) > 0:
-        data["📏 TV ATR"] = _g(f"`{float(tv_atr):.4f}`", G_MUTED)
+        data["📏 ATR"] = _g(f"`{float(tv_atr):.4f}`", G_MUTED)
     if tv_field_sources:
         data["📡 TV字段"] = _g(format_tv_field_sources(tv_field_sources), G_MUTED)
     if verify_note:
@@ -921,15 +918,6 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         "📦 核实头寸": _g(f"**{qty}** {_u()} @ `{entry:.2f}`", G_MAIN),
         "📐 算仓模式": _sizing_mode_label(),
     }
-    if open_reg:
-        data["🔢 内部兼容编号"] = get_regime_name(open_reg)
-    if tv_reg:
-        data["📡 TV信号编号"] = get_regime_name(tv_reg)
-        if regime_mismatch:
-            data["⚠️ 编号对账"] = _g(
-                f"TV=R{tv_reg} vs 内部=R{open_reg}（均不影响 RISK20 算仓）",
-                G_MUTED,
-            )
     if hard_sl_pct is not None and sl_price:
         data["🫁 呼吸止损"] = _g(
             f"**{float(sl_price):.2f}** USDT (entry±1.5×ATR 起)",
@@ -982,14 +970,14 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
     if decision == "skip_duplicate_flat":
         title = "🧠 智能筛选：短时重复同向 · 已忽略"
         status = _g(
-            f"**5 分钟内** ATR 未变 ({atr_txt})，价差 **{diff_pct:.3f}%** < **{threshold_pct}%**，"
-            f"内部编号 **R{tv_regime}** → **未重复下单**。",
+            f"**5 分钟内** ATR 未变 ({atr_txt})，价差 **{diff_pct:.3f}%** < **{threshold_pct}%** "
+            f"→ **未重复下单**。",
             G_ACCENT,
         )
     elif decision.startswith("reentry_"):
         reason_map = {
             "reentry_atr_changed": f"**① ATR 变化** ({atr_txt}) → **先平后开** 刷新仓位",
-            "reentry_regime_changed": f"**② 内部编号** R{open_regime}→R{tv_regime} → **先平后开** 刷新仓位",
+            "reentry_regime_changed": "**② 内部参数变化** → **先平后开** 刷新仓位",
             "reentry_spread_ok": (
                 f"**③ 理论价差** **{diff_pct:.3f}%** ≥ **{threshold_pct}%** "
                 f"(ATR 未变 {atr_txt}) → **先平后开**"
@@ -1001,7 +989,7 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
         title = "🧠 智能筛选：同向持仓 · 仅刷新止盈"
         status = _g(
             f"**① ATR 未变** ({atr_txt}) + **③ 价差** **{diff_pct:.3f}%** < **{threshold_pct}%** "
-            f"(内部编号 R{open_regime}) → **未再开仓**，已核实持仓并按新 TV 价刷新 TP123。",
+            f"→ **未再开仓**，已核实持仓并按新 TV 价刷新 TP。",
             G_LIGHT,
         )
     data = {
@@ -1014,7 +1002,6 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
             G_ACCENT if atr_changed else G_MUTED,
         ),
         "📏 理论价差": _g(f"{diff_pct:.3f}% / 阈值 {threshold_pct}%", G_ACCENT),
-        "🔢 内部编号": _g(f"开仓 R{open_regime} · TV R{tv_regime}（不影响算仓）", G_MUTED),
         "📐 算仓模式": _sizing_mode_label(),
         "📦 持有": _g(f"**{qty}** {_u()}" if qty > 0 else "无持仓", G_ACCENT),
     }

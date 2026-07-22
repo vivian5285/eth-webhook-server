@@ -134,7 +134,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.13-prod-gate"
+BINANCE_VPS_VERSION = "v15.5.14-copy-tp-timeout"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -3395,10 +3395,9 @@ class PositionSupervisorBinance:
             base_note += f" | 平仓 {float(meta['closed_qty']):.3f} ETH"
         if meta.get("live_exit_px") and float(meta.get("live_exit_px") or 0) > 0:
             base_note += f" | 现价 {float(meta['live_exit_px']):.2f}"
-        if meta.get("regime"):
-            base_note += f" | TV档位 R{int(meta.get('regime'))}"
+        # regime 仅内部逻辑使用，禁止拼进用户可见 verify_note
         if meta.get("atr") and float(meta.get("atr") or 0) > 0:
-            base_note += f" | TV ATR {float(meta['atr']):.2f}"
+            base_note += f" | ATR {float(meta['atr']):.2f}"
         src_note = format_tv_field_sources(meta.get("field_sources") or {})
         if src_note and "TV透传" not in src_note:
             base_note += f" | {src_note}"
@@ -9336,13 +9335,12 @@ class PositionSupervisorBinance:
         return format_tv_field_sources(payload or {})
 
     def _format_close_extra(self, close_side, pnl_pct, tv_price, regime=None, atr=None):
+        """用户可见平仓附注：禁止拼接内部 regime/R1-R4 编号。"""
         parts = []
         if close_side:
             parts.append(f"TV方向 {close_side}")
-        if regime:
-            parts.append(f"TV档位 R{int(regime)}")
         if atr and float(atr) > 0:
-            parts.append(f"TV ATR {float(atr):.2f}")
+            parts.append(f"ATR {float(atr):.2f}")
         if tv_price and float(tv_price) > 0:
             parts.append(f"TV价 {float(tv_price):.2f}")
         if pnl_pct is not None and pnl_pct != "":
@@ -9912,23 +9910,41 @@ class PositionSupervisorBinance:
             logger.warning(f"对账钉钉失败: {e}")
 
     def _cancel_tp_level_if_still_open(self, level, handoff_radar=True):
-        """若 TP 限价仍挂着 → 取消并禁止重挂；可选移交雷达。"""
+        """
+        若 TP 限价仍挂着 → 取消。
+        仅在盘口确认已无该档后才 handoff + 钉钉。
+        返回 True=已确认盘口无该档；False=仍在或无法确认。
+        """
         level = int(level or 0)
         if level not in (1, 2, 3):
             return False
-        canceled = False
-        # 优先按持久化 orderId 撤单
+
+        def _tp_still_on_book():
+            tps = list(self.tv_tps or [0, 0, 0])
+            target_px = float(tps[level - 1] or 0) if level <= len(tps) else 0.0
+            try:
+                orders = binance_client.get_open_orders(self.symbol) or []
+            except Exception:
+                return True  # 查询失败：保守视为仍在
+            for o in orders:
+                otype = str(o.get("type") or o.get("origType") or "").upper()
+                if "LIMIT" not in otype and otype not in ("LIMIT", "LIMIT_MAKER"):
+                    continue
+                opx = float(o.get("price") or o.get("stopPrice") or 0)
+                if target_px > 0 and abs(opx - target_px) <= max(0.5, target_px * 0.001):
+                    return True
+            return False
+
         stored_oid = str(
             (getattr(self, "_defense_order_ids", {}) or {}).get(f"tp{level}") or ""
         ).strip()
         if stored_oid:
             try:
-                if binance_client.cancel_order(self.symbol, order_id=stored_oid):
-                    canceled = True
-                    self._clear_defense_order_ids(f"tp{level}", save=False)
-                    logger.info(
-                        f"📋 [{self.symbol}] 按持久化ID取消 TP{level} orderId={stored_oid}"
-                    )
+                binance_client.cancel_order(self.symbol, order_id=stored_oid)
+                self._clear_defense_order_ids(f"tp{level}", save=False)
+                logger.info(
+                    f"📋 [{self.symbol}] 按持久化ID取消 TP{level} orderId={stored_oid}"
+                )
             except Exception as e:
                 logger.debug(f"按ID取消 TP{level} 跳过: {e}")
         try:
@@ -9942,37 +9958,52 @@ class PositionSupervisorBinance:
                 otype = str(o.get("type") or o.get("origType") or "").upper()
                 if "LIMIT" not in otype and otype not in ("LIMIT", "LIMIT_MAKER"):
                     continue
-                if str(o.get("reduceOnly") or o.get("reduce_only") or "").lower() not in (
-                    "true", "1", True
-                ) and not o.get("reduceOnly"):
-                    # 仍尝试按价格匹配
-                    pass
                 opx = float(o.get("price") or o.get("stopPrice") or 0)
                 if target_px > 0 and abs(opx - target_px) <= max(0.5, target_px * 0.001):
                     binance_client.cancel_order(self.symbol, order=o)
-                    canceled = True
                     logger.info(
-                        f"📋 [{self.symbol}] 取消未成交 TP{level} @{opx} → 移交雷达"
+                        f"📋 [{self.symbol}] 取消未成交 TP{level} @{opx}"
                     )
             except Exception as e:
                 logger.debug(f"取消 TP{level} 单跳过: {e}")
+
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         placed.pop(str(level), None)
         placed.pop(level, None)
         self._tp_order_placed_ts = placed
         self._clear_defense_order_ids(f"tp{level}", save=False)
+
+        if _tp_still_on_book():
+            self._save_state()
+            logger.warning(
+                f"⚠️ [{self.symbol}] TP{level} 撤单后盘口仍有限价 → 不宣称移交成功"
+            )
+            try:
+                dingtalk.report_system_alert(
+                    f"TP超时撤单未净 [{self.symbol}]",
+                    f"TP{level} 已尝试撤单，但盘口仍可见该档限价；"
+                    f"未标记移交。这不是「已转雷达」。",
+                    level="提示",
+                    suggestion="核对币安该档 LIMIT；哨兵将重试",
+                )
+            except Exception:
+                pass
+            return False
+
         self._save_state()
-        if canceled and handoff_radar:
+        if handoff_radar:
             self.radar_activated = True
             self._mark_tp_radar_handoff([level], source=f"取消TP{level}移交")
             try:
                 dingtalk.report_system_alert(
-                    f"TP未成交转雷达 [{self.symbol}]",
-                    f"TP{level} 限价未成交已取消，禁止重复挂单，移交雷达管理",
+                    f"TP超时已撤单·改由呼吸止损 [{self.symbol}]",
+                    f"TP{level} 限价已确认从盘口撤销；该档禁止重挂；"
+                    f"剩余仓位止盈改由呼吸止损管理。",
+                    level="提示",
                 )
             except Exception:
                 pass
-        return canceled
+        return True
 
     def _reset_after_flat(self, source=""):
         """持仓清零后重置雷达/挂单状态（统一走完整呼吸账本清零）。"""
@@ -11689,7 +11720,11 @@ class PositionSupervisorBinance:
         self._save_state()
 
     def _check_tp_order_timeouts(self, curr_px=0.0):
-        """TP1/TP2/TP3 挂单超过 5 分钟未成交 → 取消并移交雷达，禁止重挂。"""
+        """
+        TP 限价超时策略（防误伤正常等待）：
+        - 现价从未进入该档触及区 → 正常等待，不撤不告警（即使已挂满 timeout 秒）
+        - 现价已进入触及区但仍未成交且超时 → 撤单并移交呼吸止损；仅确认盘口已无该档后才标记
+        """
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         if not placed:
             return
@@ -11706,21 +11741,34 @@ class PositionSupervisorBinance:
                 continue
             if now - ts < timeout:
                 continue
-            consumed = list(getattr(self, "tp_levels_consumed", []) or [])
-            if level in consumed:
+            if self._tp_level_consumed(level):
                 placed.pop(str(level), None)
                 changed = True
                 continue
+            # 价未到 → 正常等待，推迟复查，禁止「未成交转雷达」误报
+            if not self._price_reached_tp_zone(level, curr_px, live_only=True):
+                logger.debug(
+                    f"⏳ [{self.symbol}] TP{level} 已挂 {now - ts:.0f}s 但现价未进触及区 "
+                    f"→ 正常等待，不撤单"
+                )
+                placed[str(level)] = now - timeout + 60.0
+                changed = True
+                continue
             logger.warning(
-                f"⏰ [{self.symbol}] TP{level} 挂单超时 {timeout:.0f}s → 取消移交雷达"
+                f"⏰ [{self.symbol}] TP{level} 价已触及却超时 {timeout:.0f}s 未成交 "
+                f"→ 撤单移交呼吸止损"
             )
-            self._cancel_tp_level_if_still_open(level, handoff_radar=True)
-            if level not in consumed:
-                consumed.append(level)
-                self.tp_levels_consumed = sorted(set(consumed))
-            self._mark_tp_radar_handoff([level], source="TP限价超时")
-            placed.pop(str(level), None)
-            changed = True
+            ok = self._cancel_tp_level_if_still_open(level, handoff_radar=True)
+            if ok:
+                consumed = list(getattr(self, "tp_levels_consumed", []) or [])
+                if level not in consumed:
+                    consumed.append(level)
+                    self.tp_levels_consumed = sorted(set(consumed))
+                placed.pop(str(level), None)
+                changed = True
+            else:
+                placed[str(level)] = now - timeout + 30.0
+                changed = True
         if changed:
             self._tp_order_placed_ts = placed
             self._save_state()
