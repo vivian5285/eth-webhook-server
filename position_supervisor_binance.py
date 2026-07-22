@@ -6,6 +6,7 @@ import time
 import threading
 import os
 import json
+import math
 import queue
 import inspect
 from datetime import datetime
@@ -134,7 +135,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.15-restart-flat-clear"
+BINANCE_VPS_VERSION = "v15.5.17-incident-sticky"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -1277,6 +1278,13 @@ class PositionSupervisorBinance:
         et = normalize_entry_type(payload.get("entry_type"))
         open_sizing_meta = None
         if et == ENTRY_TYPE_OPEN and self.tv_price > 0:
+            # 铁律：信号播报 sizing 必须与本笔 payload 同步，禁止沿用上笔残留 tv_suggested_qty
+            # （2026-07-22 事故：钉钉显示 0.02，真实下单却用巨大 TV.qty→notional=4.445）
+            try:
+                self._apply_tv_sl_from_payload(payload, source="信号预览sizing")
+                self._apply_tv_sizing_params(payload)
+            except Exception as e:
+                logger.warning(f"信号预览 sizing 参数绑定跳过: {e}")
             _, open_sizing_meta = self._calc_vps_open_qty(self.tv_price)
             sizing_note = " | " + format_vps_sizing_note(open_sizing_meta, entry_type=ENTRY_TYPE_OPEN)
         elif et in (ENTRY_TYPE_PYRAMID, ENTRY_TYPE_PROFIT_ADD):
@@ -1294,7 +1302,12 @@ class PositionSupervisorBinance:
             price=self.tv_price,
             regime=self.regime,
             atr=self.current_atr,
-            tv_sl=payload.get("tv_sl"),
+            tv_sl=(
+                payload.get("tv_sl")
+                or payload.get("stop_loss")
+                or getattr(self, "tv_sl_ref", 0)
+                or None
+            ),
             risk_pct=payload.get("risk_pct") or getattr(self, "tv_risk_pct", 0),
             leverage=payload.get("leverage") or getattr(self, "tv_sizing_leverage", 0),
             qty_ratio=payload.get("qty_ratio") or getattr(self, "tv_qty_ratio", 1.0),
@@ -1305,7 +1318,11 @@ class PositionSupervisorBinance:
             vps_hard_sl_note=(
                 format_tv_vps_sl_compare(
                     raw_action, self.tv_price, self.current_atr, self.regime,
-                    tv_sl_ref=payload.get("tv_sl"),
+                    tv_sl_ref=(
+                        payload.get("tv_sl")
+                        or payload.get("stop_loss")
+                        or getattr(self, "tv_sl_ref", 0)
+                    ),
                 )
                 if raw_action in ("LONG", "SHORT") and self.tv_price > 0
                 else ""
@@ -2963,9 +2980,9 @@ class PositionSupervisorBinance:
         self.tv_qty_ratio = 1.0
         self.tv_sizing_leverage = float(FIXED_LEVERAGE)
         self.leverage = float(FIXED_LEVERAGE)
+        # 每次绑定覆盖（含 <=0）：禁止沿用上笔残留 TV.qty / SL 参考
         tv_qty = self._safe_float((payload or {}).get("qty"), 0)
-        if tv_qty > 0:
-            self.tv_suggested_qty = tv_qty
+        self.tv_suggested_qty = float(tv_qty) if tv_qty > 0 else 0.0
         # TV 分腿数量意图（qty3 不挂；qty1/qty2 按实开仓缩放后挂限价）
         self.tv_qty1 = self._safe_float((payload or {}).get("qty1"), 0)
         self.tv_qty2 = self._safe_float((payload or {}).get("qty2"), 0)
@@ -2977,8 +2994,7 @@ class PositionSupervisorBinance:
             or (payload or {}).get("sl"),
             0,
         )
-        if tv_sl > 0:
-            self.tv_sl_ref = float(tv_sl)
+        self.tv_sl_ref = float(tv_sl) if tv_sl > 0 else 0.0
         ratios = get_leg_tp_ratios(payload)
         for k in self.regime_settings:
             self.regime_settings[k]["ratios"] = list(ratios)
@@ -3230,6 +3246,50 @@ class PositionSupervisorBinance:
         meta["atr_degraded"] = bool(atr_meta.get("degrade"))
         meta["atr_degrade_reason"] = atr_meta.get("reason") or ""
         meta["atr_meta"] = atr_meta
+        # 天文 TV.qty（Pine equity 膨胀）→ 上限失效，记录明确；真实生效约束见 binding
+        try:
+            q_notional = float(meta.get("qty_by_notional") or 0)
+            q_risk = float(meta.get("qty_by_risk") or 0)
+            sane_ref = max(q_notional, q_risk, 1.0)
+            if tv_qty > sane_ref * 50:
+                meta["tv_qty_absurd"] = True
+                logger.warning(
+                    f"⚠️ [{self.symbol}] TV.qty 异常巨大 {tv_qty} "
+                    f"(≫ VPS候选 max={sane_ref:.4f}) → 仅作失效上限，"
+                    f"生效约束={meta.get('binding')} qty={float(qty or 0):.4f}"
+                )
+        except Exception:
+            pass
+        # 保证金安全网：名义按权益×5 可能贴近全仓保证金 → 交易所 -2019
+        # 用 availableBalance×杠杆×0.92 再裁一次，保证「算出口」与「下得进」一致
+        try:
+            summary = binance_client.get_futures_account_summary() or {}
+            avail = float(summary.get("available_balance") or 0)
+            if avail <= 0:
+                avail = float(binance_client.get_available_balance() or 0)
+            if avail > 0 and px > 0 and float(qty or 0) > 0:
+                margin_cap = (avail * float(FIXED_LEVERAGE) * 0.92) / px
+                step = float(getattr(self, "qty_step", 0.001) or 0.001)
+                min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
+                if margin_cap > 0 and float(qty) > margin_cap:
+                    clipped = math.floor(margin_cap / step) * step if step > 0 else margin_cap
+                    if clipped < min_q:
+                        clipped = 0.0
+                    logger.warning(
+                        f"🛡️ [{self.symbol}] 保证金裁剪 "
+                        f"qty {float(qty):.4f} → {clipped:.4f} "
+                        f"(available={avail:.2f}U · {FIXED_LEVERAGE}x · 92%)"
+                    )
+                    meta["qty_before_margin_cap"] = float(qty)
+                    meta["margin_cap_qty"] = round(float(clipped), 6)
+                    meta["available_balance"] = round(avail, 4)
+                    meta["binding"] = f"{meta.get('binding')}+margin_cap"
+                    qty = float(clipped)
+                    meta["qty"] = float(qty)
+                    meta["notional"] = round(float(qty) * px, 2)
+                    meta["order_amount"] = meta["notional"]
+        except Exception as e:
+            logger.warning(f"保证金裁剪跳过: {e}")
         self.leverage = float(FIXED_LEVERAGE)
         self.tv_sizing_leverage = float(FIXED_LEVERAGE)
         logger.info(
@@ -9610,6 +9670,8 @@ class PositionSupervisorBinance:
                 reason.startswith("CLOSE_THEN_OPEN_FAIL")
                 or reason.startswith("restart_")
                 or reason.startswith("ATR_DEGRADE")
+                or reason.startswith("INCIDENT_")
+                or "PENDING_RESUME" in reason
             )
             live = self._get_active_position()
             live_qty = float((live or {}).get("size") or 0)
@@ -10542,7 +10604,14 @@ class PositionSupervisorBinance:
             # 成功进入开仓路径 → 解除非人工中止类暂停
             if getattr(self, "trading_paused", False):
                 pause_r = str(getattr(self, "trading_pause_reason", "") or "")
-                if pause_r.startswith("CLOSE_THEN_OPEN_FAIL") or pause_r.startswith("ATR_DEGRADE"):
+                sticky = (
+                    pause_r.startswith("CLOSE_THEN_OPEN_FAIL")
+                    or pause_r.startswith("ATR_DEGRADE")
+                    or pause_r.startswith("restart_")
+                    or pause_r.startswith("INCIDENT_")
+                    or "PENDING_RESUME" in pause_r
+                )
+                if sticky:
                     logger.error(
                         f"🚫 [{self.symbol}] 人工恢复类暂停中，拒绝下单 | {pause_r}"
                     )
