@@ -18,6 +18,8 @@ FIXED_LEVERAGE = 5
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
+ABSURD_TV_QTY_VS_CAPS = 50.0
+NOTIONAL_MARGIN_HAIRCUT = 0.85
 VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
 VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
@@ -432,27 +434,38 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     adjusted_tv_qty = tv_ref * sl_adj
 
     risk_capital = principal * risk_pct
-    notional_cap = principal * notional_mult
+    notional_cap = principal * notional_mult * NOTIONAL_MARGIN_HAIRCUT
     qty_by_risk = risk_capital / vps_stop_dist
     qty_by_notional = notional_cap / price
-    raw_qty = min(qty_by_risk, qty_by_notional, adjusted_tv_qty)
+    tv_qty_ignored_absurd = False
+    cap_ref = max(qty_by_risk, qty_by_notional)
+    if cap_ref > 0 and adjusted_tv_qty > cap_ref * ABSURD_TV_QTY_VS_CAPS:
+        raw_qty = min(qty_by_risk, qty_by_notional)
+        tv_qty_ignored_absurd = True
+    else:
+        raw_qty = min(qty_by_risk, qty_by_notional, adjusted_tv_qty)
 
     # 哪个约束生效（便于开仓日志核对）
-    _cands = (
-        ("risk", qty_by_risk),
-        ("notional", qty_by_notional),
-        ("adjusted_tv_qty", adjusted_tv_qty),
-    )
-    binding = min(_cands, key=lambda x: x[1])[0]
+    if tv_qty_ignored_absurd:
+        binding = "risk" if qty_by_risk <= qty_by_notional + 1e-12 else "notional"
+    else:
+        _cands = (
+            ("risk", qty_by_risk),
+            ("notional", qty_by_notional),
+            ("adjusted_tv_qty", adjusted_tv_qty),
+        )
+        binding = min(_cands, key=lambda x: x[1])[0]
 
     meta["risk_capital"] = round(risk_capital, 4)
     meta["notional_cap"] = round(notional_cap, 2)
     meta["nominal_value"] = round(notional_cap, 2)
+    meta["notional_margin_haircut"] = NOTIONAL_MARGIN_HAIRCUT
     meta["stop_dist"] = round(vps_stop_dist, 4)
     meta["vps_stop_dist"] = round(vps_stop_dist, 4)
     meta["tv_implied_dist"] = round(tv_implied_dist, 4)
     meta["sl_adj"] = round(sl_adj, 6)
     meta["adjusted_tv_qty"] = round(adjusted_tv_qty, 6)
+    meta["tv_qty_ignored_absurd"] = tv_qty_ignored_absurd
     meta["qty_by_risk"] = round(qty_by_risk, 6)
     meta["qty_by_notional"] = round(qty_by_notional, 6)
     meta["binding"] = binding
