@@ -16,12 +16,12 @@
 | 6 | 反转保护仅 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |
 | 7 | 去重 60s · 挂单超时 5min · 90m ATR/ADX | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` · `market_engine` |
 | 8 | 实盘/重启与方向背离 → **FORCE_ALIGN** 先全平 | `_close_all(..., force_align=)` |
-| 9 | token 必须 = `528586` | `app.py` webhook |
+| 9 | secret 必须 = `528586`（兼容旧字段 `token`） | `app.py` webhook |
 | 10 | **ETH / XAU** 独立状态 | `symbol_config.py` · `SUPERVISORS` |
 | 11 | TV 消息缓存 **1.0s** → 同窗**先平后开** | `collapse_batch_for_execution` |
 | 12 | TP/止损 **订单 ID 持久化** | `_defense_order_ids` |
 | 13 | 哨兵 **0.5s** | `SENTINEL_POLL_*=0.5` |
-| 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT** | `_trim` no-op · `report_hard_sl_fail_abort` |
+| 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT**；先平后开净场失败 → **CLOSE_THEN_OPEN_FAIL_ABORT** | `_trim` no-op · `report_hard_sl_fail_abort` · `report_close_then_open_fail_abort` |
 | 15 | 90m **UTC epoch** 对齐；上线前 `check_90m_align.py --live` 与 TV 逐根对时 | `bucket_90m_open_ms` · `merge_30m_to_90m` |
 | 16 | ATR≤0 或 < 近50根中位数×30% → **拒本笔开仓** + 钉钉 | `check_atr_anomaly` · `_calc_vps_open_qty` |
 | 17 | 可选 `bar_time`：早于已处理 → 忽略不交易 | `enqueue_signal` · `webhook_parser` |
@@ -71,7 +71,7 @@ TV.stop_loss **只**调 sl_adj，不挂盘。
 |------|------|
 | TP 限价未成交 | 取消 + 移交呼吸引擎 + 禁止重挂 |
 | 重复消息 | 60s 同 action+symbol 忽略 |
-| 开仓前 | 强制清仓（先平后开） |
+| 开仓前 | 强制清仓（先平后开）；失败重试 1s/3s/6s → CLOSE_THEN_OPEN_FAIL_ABORT |
 | 改单失败 | 重试 3 次 → HARD_SL_FAIL_ABORT 告警保持现状 |
 | 方向不一致 | FORCE_ALIGN 先全平 + 钉钉 |
 | TP3 | **不挂限价**；余仓由阶段二追踪退出 |

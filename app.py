@@ -40,6 +40,8 @@ def webhook(ticker=None):
     if not data:
         return jsonify({"status": "error", "message": "Empty payload"}), 400
     # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值须 = WEBHOOK_SECRET
+    # TODO(remove-token): 当全部 TradingView 警报已改为 secret 字段、且确认无旧 bot
+    # 仍投递 token 后，删除 data.get("token") 分支（预计：生产稳定 2 周且无 403 兼容命中日志）。
     auth = str(
         data.get("secret") or data.get("token") or ""
     ).strip()

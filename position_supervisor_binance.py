@@ -134,7 +134,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.14-copy-tp-timeout"
+BINANCE_VPS_VERSION = "v15.5.15-restart-flat-clear"
 
 
 SENTINEL_POLL_NORMAL = 0.5
@@ -12941,14 +12941,11 @@ class PositionSupervisorBinance:
                 elif recover_err:
                     self._post_recover_radar_pulse = True
             else:
-                # 确认空仓：禁止误平仓；仅清理本品种孤儿挂单
+                # 确认空仓：禁止误平仓；完整清零呼吸账本（禁止半清理残留 entry/sl/atr）
                 logger.info(
                     f"🔄 [{self.symbol}] 系统重启点火：REST确认无持仓，账本复位为空仓待命。"
                 )
-                self.monitoring = False
-                self.watched_qty = 0.0
-                self.base_qty = 0.0
-                self.current_side = None
+                self._reset_breath_ledger_on_flat(source="重启确认空仓")
                 self._open_regime_sticky = False
                 self._save_state()
                 flat_ok = self._wait_verify(
