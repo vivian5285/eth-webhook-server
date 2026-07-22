@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.45.1-query-fail-safe"
+BINANCE_CLIENT_VERSION = "v13.45.2-merged-pos-cache"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -53,6 +53,10 @@ class BinanceClient:
         self._pos_cache = {}
         self._pos_cache_ts = {}
         self._pos_lock = threading.Lock()
+        # 全账户持仓合并缓存：双雷达共用一次 REST，避免每 symbol 各打一次
+        self._all_pos_rows = {}
+        self._all_pos_ts = 0.0
+        self._all_pos_ttl = 1.0
         self._last_order_event_ts = 0.0
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
 
@@ -603,38 +607,77 @@ class BinanceClient:
             logger.error(f"[查询余额失败] {e}")
             return 0.0
 
+    def _refresh_all_positions(self, force=False):
+        """一次拉取全部 USDT 永续持仓，写入 per-symbol 缓存。"""
+        now = time.time()
+        with self._pos_lock:
+            if (
+                not force
+                and self._all_pos_ts > 0
+                and (now - self._all_pos_ts) < float(self._all_pos_ttl)
+            ):
+                return dict(self._all_pos_rows)
+        try:
+            rows = self.client.futures_position_information() or []
+        except Exception as e:
+            logger.error(f"[合并持仓查询失败] {e}")
+            with self._pos_lock:
+                if self._all_pos_rows and (now - self._all_pos_ts) < 60.0:
+                    return dict(self._all_pos_rows)
+            return None
+        by_sym = {}
+        for p in rows:
+            try:
+                sym = str(p.get("symbol") or "").upper()
+                if not sym:
+                    continue
+                by_sym[sym] = p
+                self._set_pos_cache(
+                    sym, p.get("positionAmt"), p.get("entryPrice"),
+                )
+            except Exception:
+                continue
+        with self._pos_lock:
+            self._all_pos_rows = by_sym
+            self._all_pos_ts = time.time()
+        return by_sym
+
     def get_position(self, symbol="ETHUSDT", prefer_ws=True):
         """
         返回币安持仓 dict，或 None（确认无仓）。
         REST 失败且无可用缓存时返回 POSITION_QUERY_FAILED，禁止上层当空仓清账本。
+        双雷达：优先短 TTL 合并查询，减少 IP 权重。
         """
+        sym = str(symbol or "").upper()
         if prefer_ws:
-            cached = self._get_pos_cache(symbol, max_age=8.0)
+            cached = self._get_pos_cache(sym, max_age=8.0)
             if cached is not None:
                 return cached
-        try:
-            positions = self.client.futures_position_information(symbol=symbol)
-            pos = positions[0] if positions else None
-            if pos:
-                self._set_pos_cache(
-                    symbol,
-                    pos.get("positionAmt"),
-                    pos.get("entryPrice"),
-                )
-            return pos
-        except Exception as e:
-            logger.error(f"[查询持仓失败] {symbol}: {e}")
-            stale = self._get_pos_cache(symbol, max_age=60.0)
+        # 合并查询（1s TTL）：ETH/XAU 哨兵共享同一次 REST
+        all_rows = self._refresh_all_positions(force=False)
+        if all_rows is None:
+            stale = self._get_pos_cache(sym, max_age=60.0)
             if stale is not None:
                 logger.warning(
-                    f"[查询持仓失败] {symbol}: 回退≤60s缓存，禁止当空仓"
+                    f"[查询持仓失败] {sym}: 回退≤60s缓存，禁止当空仓"
                 )
                 return stale
             logger.error(
-                f"[查询持仓失败] {symbol}: 无可用缓存 → 返回 QUERY_FAILED "
+                f"[查询持仓失败] {sym}: 无可用缓存 → 返回 QUERY_FAILED "
                 f"（上层必须保留账本/跳过空仓判定）"
             )
             return dict(POSITION_QUERY_FAILED)
+        pos = all_rows.get(sym)
+        if not pos:
+            # 交易所返回里无该 symbol → 确认无仓
+            return None
+        try:
+            amt = abs(float(pos.get("positionAmt") or 0))
+        except (TypeError, ValueError):
+            amt = 0.0
+        if amt <= 0:
+            return None
+        return pos
 
     def get_recent_user_trades(self, symbol="ETHUSDT", limit=50):
         """最近用户成交（核对 TP 限价成交 vs 手工减仓）"""

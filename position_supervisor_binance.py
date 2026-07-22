@@ -9,6 +9,7 @@ import json
 import math
 import queue
 import inspect
+import random
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from binance_client import binance_client
@@ -135,14 +136,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.24-xau-breath"
+BINANCE_VPS_VERSION = "v15.5.25-dual-rate"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
 
-SENTINEL_POLL_NORMAL = 0.5
-SENTINEL_POLL_ARMING = 0.5
-SENTINEL_POLL_RADAR = 0.5
+# 双雷达：每 symbol 独立哨兵；REST 降到 ≥1s + 抖动，成交优先靠 User Data WS
+SENTINEL_POLL_NORMAL = 1.0
+SENTINEL_POLL_ARMING = 1.0
+SENTINEL_POLL_RADAR = 1.0
+SENTINEL_POLL_JITTER_SEC = 0.2
 IDLE_PATROL_INTERVAL_SEC = 12
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
 DUST_QTY_ETH = 0.004
@@ -11726,10 +11729,16 @@ class PositionSupervisorBinance:
                 self.best_price = new_best
 
     def _sentinel_poll_sec(self, curr_px=0.0):
-        """雷达已激活=5s；有仓位常态=8s（5~10s 区间）"""
+        """
+        REST 哨兵间隔：常态/雷达均 ≥1.0s，再加 0~200ms 抖动，避免双币种整秒撞峰。
+        成交感知优先 User Data WS；markPrice WS 驱动呼吸改单。
+        """
         if self._is_radar_active() or self._radar_legitimately_armed(self.watched_qty, curr_px):
-            return SENTINEL_POLL_RADAR
-        return SENTINEL_POLL_NORMAL
+            base = float(SENTINEL_POLL_RADAR)
+        else:
+            base = float(SENTINEL_POLL_NORMAL)
+        jitter = random.uniform(0.0, float(SENTINEL_POLL_JITTER_SEC))
+        return base + jitter
 
     def _maybe_refresh_atr(self):
         """
