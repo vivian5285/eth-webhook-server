@@ -22,7 +22,7 @@ class TestTempStop(unittest.TestCase):
         self.assertEqual(sl_hard, sl_temp)
 
     def test_long_buffer_20pct(self):
-        # |1930.49-1916.75|×1.2 = 13.74×1.2 = 16.488 → stop=1914.00
+        # 唯一公式、atr=0、tv_entry=fill：|1930.49-1916.75|×1.2 → stop=1914.00
         sl = temp_hard_stop_price("LONG", 1930.49, 1916.75)
         self.assertAlmostEqual(sl, round(1930.49 - abs(1930.49 - 1916.75) * 1.2, 2))
 
@@ -33,6 +33,39 @@ class TestTempStop(unittest.TestCase):
     def test_invalid(self):
         self.assertEqual(temp_hard_stop_price("LONG", 0, 1916), 0.0)
         self.assertEqual(temp_hard_stop_price("LONG", 1930, 0), 0.0)
+
+    def test_v1578_pad_beats_tight_tv_and_adds_slip(self):
+        """ETH SHORT 实盘回放：雷达地板+滑点 → 硬止损宽于仅 TV×1.2。"""
+        from atr_scenario import compute_hard_stop_distance
+
+        tv_e, tv_sl, fill, atr = 1897.03, 1912.1805023992, 1900.51, 12.6897
+        parts = compute_hard_stop_distance(tv_e, tv_sl, fill, atr)
+        # radar_floor = 12.6897*1.5*1.05 ≈ 19.986 > tv_implied≈18.18
+        self.assertGreater(parts["radar_floor"], parts["tv_implied"])
+        self.assertAlmostEqual(parts["slip"], abs(fill - tv_e) * 2.0, places=4)
+        sl = hard_stop_price(
+            "SHORT", fill, tv_sl, tv_entry=tv_e, initial_atr=atr, fill_entry=fill,
+        )
+        only_tv = round(fill + abs(tv_e - tv_sl) * 1.2, 2)
+        self.assertGreater(sl, only_tv)
+        radar = round(fill + 1.5 * atr, 2)
+        self.assertGreater(sl, radar)
+
+    def test_no_dual_path_divergence(self):
+        """显式 tv_entry=fill、atr=0 与三参旧调用结果一致（禁止分叉）。"""
+        a = hard_stop_price("SHORT", 1900.0, 1912.0)
+        b = hard_stop_price(
+            "SHORT", 1900.0, 1912.0, tv_entry=1900.0, initial_atr=0.0, fill_entry=1900.0,
+        )
+        self.assertEqual(a, b)
+
+    def test_v1578_xau_short_replay(self):
+        tv_e, tv_sl, fill, atr = 4063.2, 4077.1636257844, 4065.76, 15.4683
+        sl = hard_stop_price(
+            "SHORT", fill, tv_sl, tv_entry=tv_e, initial_atr=atr, fill_entry=fill,
+        )
+        radar = round(fill + 1.5 * atr, 2)
+        self.assertGreater(sl, radar)
 
 
 class TestResolveScenario(unittest.TestCase):

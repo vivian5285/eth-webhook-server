@@ -106,6 +106,8 @@ from atr_1h import get_atr_1h_engine
 from atr_scenario import (
     SCENARIO_TV,
     SCENARIO_VPS,
+    compute_hard_stop_distance,
+    hard_stop_price,
     place_tp_levels_for_scenario,
     resolve_atr_scenario,
     scenario_notice,
@@ -150,7 +152,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.6-iron-dup"
+BINANCE_VPS_VERSION = "v15.7.9-hard-unify"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -3242,7 +3244,14 @@ class PositionSupervisorBinance:
         return place_tp_levels_for_scenario(SCENARIO_VPS)
 
     def _temp_hard_stop_from_tv(self, entry=None, side=None, tv_sl=None):
-        entry = float(
+        """
+        永久硬止损价（v15.7.8）：
+          基础 = max(|TV价−TV.SL|×1.2, 1.5×initial_atr×1.05)
+          + 滑点缓冲 |成交价−TV价|×2
+          挂在成交价外侧。
+        entry 参数 = 交易所成交价；TV 理论开仓价取 self.tv_price。
+        """
+        fill = float(
             entry if entry is not None else (self.watched_entry or self.tv_price or 0)
         )
         side = str(side or self.current_side or "").strip().upper()
@@ -3251,7 +3260,118 @@ class PositionSupervisorBinance:
                 getattr(self, "tv_sl_ref", 0) or 0
             )
         )
-        return temp_hard_stop_price(side, entry, tv_sl)
+        tv_entry = float(getattr(self, "tv_price", 0) or 0)
+        if tv_entry <= 0:
+            # 无 TV 信号价时退化为成交价（滑点=0）
+            tv_entry = fill
+        atr = float(
+            self._get_locked_initial_atr()
+            or getattr(self, "open_atr", 0)
+            or getattr(self, "_tv_signal_atr", 0)
+            or 0
+        )
+        return hard_stop_price(
+            side,
+            fill,
+            tv_sl,
+            tv_entry=tv_entry,
+            initial_atr=atr,
+            fill_entry=fill,
+        )
+
+    def _hard_stop_distance_meta(self, fill=None, tv_sl=None, tv_entry=None, atr=None):
+        """调试/钉钉：硬止损距离拆解。"""
+        fill = float(fill if fill is not None else (self.watched_entry or 0))
+        tv_entry = float(
+            tv_entry if tv_entry is not None else (getattr(self, "tv_price", 0) or fill)
+        )
+        tv_sl = float(
+            tv_sl if tv_sl is not None else (getattr(self, "tv_sl_ref", 0) or 0)
+        )
+        atr = float(
+            atr if atr is not None else (
+                self._get_locked_initial_atr()
+                or getattr(self, "open_atr", 0)
+                or 0
+            )
+        )
+        return compute_hard_stop_distance(tv_entry, tv_sl, fill, atr)
+
+    def _remount_frozen_hard_sl_wider(self, reason="硬止损加宽重挂·v15.7.8"):
+        """
+        公式升级：仅当新硬止损比旧更宽（更多缓冲）时，撤 closePosition 旧硬止损并重挂。
+        不触碰雷达 reduceOnly 定量腿。
+        """
+        side = str(self.current_side or "").strip().upper()
+        fill = float(self.watched_entry or 0)
+        live_qty = float(self._resolve_live_qty(self.watched_qty) or 0)
+        if side not in ("LONG", "SHORT") or fill <= 0 or live_qty <= 0:
+            logger.warning(f"🛡️ [{self.symbol}] {reason} 跳过：无持仓")
+            return False
+
+        # 尽力恢复 tv_sl_ref（曾被雷达价覆盖）
+        tv_sl = float(getattr(self, "tv_sl_ref", 0) or 0)
+        if tv_sl <= 0:
+            last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
+            pl = last.get("payload") if isinstance(last.get("payload"), dict) else {}
+            tv_sl = float(
+                self._safe_float(pl.get("stop_loss") or pl.get("tv_sl") or last.get("stop_loss"), 0)
+                or 0
+            )
+            if tv_sl > 0:
+                self.tv_sl_ref = tv_sl
+        tv_entry = float(getattr(self, "tv_price", 0) or 0)
+        if tv_entry <= 0:
+            last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
+            tv_entry = float(self._safe_float(last.get("price") or last.get("tv_price"), 0) or 0)
+            if tv_entry > 0:
+                self.tv_price = tv_entry
+
+        new_hard = float(self._temp_hard_stop_from_tv(fill, side, tv_sl=tv_sl) or 0)
+        old_hard = self._frozen_hard_px()
+        if new_hard <= 0:
+            logger.error(f"🛡️ [{self.symbol}] {reason} 失败：无法计算新硬止损")
+            return False
+
+        # SHORT：更宽=更高；LONG：更宽=更低
+        wider = (
+            (side == "SHORT" and new_hard > old_hard + 0.05)
+            or (side == "LONG" and (old_hard <= 0 or new_hard < old_hard - 0.05))
+        )
+        meta = self._hard_stop_distance_meta(fill=fill, tv_sl=tv_sl, tv_entry=tv_entry)
+        if not wider and old_hard > 0:
+            logger.info(
+                f"🛡️ [{self.symbol}] {reason} 跳过：新@{new_hard:.2f} 未宽于旧@{old_hard:.2f} "
+                f"| dist={meta}"
+            )
+            return True
+
+        if not self._orders_book_readable():
+            logger.error(f"🛡️ [{self.symbol}] {reason} 中止：挂单不可读")
+            return False
+
+        cancelled = self._purge_all_close_position_stops()
+        if cancelled < 0:
+            logger.error(f"🛡️ [{self.symbol}] {reason} 中止：无法撤旧 closePosition")
+            return False
+        self.frozen_hard_sl_px = float(new_hard)
+        self._save_state()
+        time.sleep(0.35)
+        ok = self._ensure_frozen_hard_sl(live_qty, reason=reason)
+        logger.warning(
+            f"🛡️ [{self.symbol}] {reason}: 旧@{old_hard:.2f} → 新@{new_hard:.2f} "
+            f"撤closePos={cancelled} ok={ok} | {meta}"
+        )
+        try:
+            dingtalk.report_system_alert(
+                f"硬止损加宽重挂 [{self.symbol}]",
+                f"{side} fill={fill:.2f} | 旧@{old_hard:.2f} → 新@{new_hard:.2f} | "
+                f"base={meta.get('base'):.2f} slip={meta.get('slip'):.2f} "
+                f"final={meta.get('final'):.2f} | radar不动",
+            )
+        except Exception:
+            pass
+        return bool(ok)
 
     def _lock_initial_atr_value(self, atr, *, upgrade=False):
         """写入/锁定 initial_atr；upgrade=True 允许场景二→一覆盖。"""
@@ -3279,8 +3399,8 @@ class PositionSupervisorBinance:
 
     def _arm_temp_stop_and_tp12(self, live_qty, entry, side, source="开仓共同第一步"):
         """
-        两场景共同第一步：永久硬止损(TV.stop_loss×1.2) + TP1/TP2(30%/30%)，不挂TP3。
-        frozen_hard_sl_px 挂出后直至 flat 才清零。
+        两场景共同第一步：永久硬止损(max(TV×1.2,1.5×ATR×1.05)+滑点×2) + TP1/TP2，不挂TP3。
+        frozen_hard_sl_px 挂出后直至 flat 才清零（公式升级重挂除外）。
         """
         live_qty = float(live_qty or 0)
         entry = float(entry or 0)
@@ -3302,6 +3422,14 @@ class PositionSupervisorBinance:
             logger.error(f"🚨 [{self.symbol}] {source} 无法计算永久硬止损")
             return False
 
+        meta = self._hard_stop_distance_meta(fill=entry)
+        logger.info(
+            f"🛡️ [{self.symbol}] {source} 硬止损算距: "
+            f"tv_implied={meta.get('tv_implied'):.2f} "
+            f"radar_floor={meta.get('radar_floor'):.2f} "
+            f"slip={meta.get('slip'):.2f} final={meta.get('final'):.2f} "
+            f"→ @{temp_sl:.2f}"
+        )
         self._atr_scenario = 0
         self._temp_stop_active = True
         self._tp3_fallback_active = False
@@ -5304,8 +5432,20 @@ class PositionSupervisorBinance:
         else:
             logger.info(msg)
 
-    def _locked_initial_atr(self):
-        """开仓 ATR 锁定：全程固定，禁止实时 ATR 重算止损距离。"""
+    def _get_locked_initial_atr(self):
+        """
+        读取开仓锁定 ATR（全程固定，禁止用实时 ATR 重算止损距离）。
+        注意：实例属性 `_locked_initial_atr` 是 LockedInitialAtr 对象，禁止同名方法，
+        否则属性遮蔽方法 → TypeError: LockedInitialAtr object is not callable。
+        """
+        lock = getattr(self, "_locked_initial_atr", None)
+        if lock is not None and getattr(lock, "value", 0):
+            try:
+                v = float(lock.value or 0)
+                if v > 0:
+                    return v
+            except Exception:
+                pass
         atr = float(getattr(self, "open_atr", 0) or 0)
         if atr > 0:
             return atr
@@ -5337,7 +5477,7 @@ class PositionSupervisorBinance:
             entry if entry is not None else (self.watched_entry or self.tv_price or 0)
         )
         side = str(side or self.current_side or "").strip().upper()
-        atr = self._locked_initial_atr()
+        atr = self._get_locked_initial_atr()
         if atr <= 0:
             return 0.0
         return initial_stop_price(
@@ -5579,9 +5719,15 @@ class PositionSupervisorBinance:
         return self._clamp_radar_to_vps_floor(radar_sl)
 
     def _purge_all_close_position_stops(self):
-        """撤净所有 closePosition 止损（TV硬止损与雷达共用单槽）"""
+        """撤净所有 closePosition 止损（硬止损腿；雷达为 reduceOnly 定量，不在此撤）。"""
         cancelled = 0
-        for o in binance_client.get_open_orders(self.symbol):
+        orders = binance_client.get_open_orders(self.symbol)
+        if is_orders_query_failed(orders):
+            logger.error(
+                f"🛡️ [{self.symbol}] 撤 closePosition 中止：挂单不可读"
+            )
+            return -1
+        for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP", "STOP_MARKET"):
                 continue
@@ -11554,7 +11700,7 @@ class PositionSupervisorBinance:
         """
         开仓后防线（两场景定稿）：
         1) 核实持仓 → 绑回本笔 TV TP1/TP2/TP3 价
-        2) 共同第一步：临时硬止损(|entry−TV.stop_loss|×1.2) + TP1/TP2(30%/30%)，不挂TP3
+        2) 共同第一步：永久硬止损(max(TV×1.2,1.5×ATR×1.05)+滑点×2) + TP1/TP2(30%/30%)，不挂TP3
         3) 同步拉原生1h ATR：
            · 场景一：真实ATR重算 initialStop，撤临时止损，不挂TP3
            · 场景二：TV atr 运作雷达，挂TP3(40%)兜底，不暂停；tick可持续恢复场景一
@@ -12119,7 +12265,7 @@ class PositionSupervisorBinance:
             self.best_price = min(bp, float(curr_px)) if bp > 0 else float(curr_px)
 
         # 确保 initial_stop 存在
-        atr = self._locked_initial_atr()
+        atr = self._get_locked_initial_atr()
         side = str(self.current_side or "").strip().upper()
         if float(getattr(self, "initial_stop", 0) or 0) <= 0 and atr > 0:
             self.initial_stop = initial_stop_price(
@@ -12296,7 +12442,7 @@ class PositionSupervisorBinance:
         side = str(self.current_side or "").strip().upper()
         if entry <= 0 or side not in ("LONG", "SHORT"):
             return None
-        atr = self._locked_initial_atr()
+        atr = self._get_locked_initial_atr()
         profile = getattr(self, "breath_profile", None)
         init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
