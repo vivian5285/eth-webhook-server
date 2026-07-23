@@ -1,21 +1,22 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.3-dual-stop-coexist`**  
+**当前版本：`v15.7.4-anti-spam-flat`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`**（`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
+**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
 **呼吸锁定表：ETH 1.2~2.5 / XAU 0.5~1.2**（冷启动 1.525 / 0.675）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
 
-> **双 STOP 说明**：盘口两笔接近的止损 = **硬止损(|entry−TV.SL|×1.2)** + **雷达(1.5×ATR)**，不是「TV原价 + ×1.2」两档。TV 原 `stop_loss` **不挂盘**。
+> **双 STOP 说明**：盘口两笔接近的止损 = **硬止损(|entry−TV.SL|×1.2)** + **雷达(1.5×ATR)**，不是「TV原价 + ×1.2」两档。TV 原 `stop_loss` **不挂盘**。  
+> **叠单铁律（v15.7.4）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损（废除「允许首挂」）；空仓必须挂单=0；LIMIT≥6 熔断拒挂。
 
 > **权威依据**：桌面《Gemini终极生产级全功能白皮书》+ 本文。冲突时以白皮书为准。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.7.2-breath-lock · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.7.4-anti-spam-flat · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_two_scenario_atr.py
@@ -278,13 +279,45 @@ python3 test_breath_radar_upgrade.py
 | 旧逻辑 | 状态 |
 |--------|------|
 | 临时硬止损被场景一 ATR **替换** | 废除 |
-| 硬止损+雷达 **单槽合并** | 废除 |
-| TP 后 `preserve_hard=False` 清双止损再挂 | **已修（v15.7.1）** |
+| 硬止损+雷达 **单槽合并** | 废除（v15.7.3 对账不再「合并为单槽」） |
+| TP 后 `preserve_hard=False` 清双止损再挂 | 已修（v15.7.1） |
+| 查单失败「允许首挂」限价/止损 | **废除（v15.7.4）** → fail-closed |
+| 空仓不扫残留挂单 | **已修（v15.7.4）** 空闲巡检强制净场 |
 | 同窗仅 1s / 5s 迟到 CLOSE | 改为 **15s** |
 | webhook 必须 qty | 废除 |
 | CAP_ALIGN / 加仓 / 旧雷达 activated | 废除 |
 
 详见 [`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)。
+
+---
+
+## 十二-B、事故与防护：空仓幽灵限价 / 同价 TP 叠单击穿（2026-07-23）
+
+### 现象（内测截图）
+1. **仓位=0，当前委托仍有 reduceOnly 限价**（ETH 卖出 TP 残留）→ 幽灵单，可能被扫成交成反向蚂蚁仓。  
+2. **一笔 ETH 多 + 一笔 XAU 多，却出现多方向多笔限价**（含多单卖出 TP + 空单买入 TP 并存）→ 反手未净场干净。  
+3. 历史更严重：查单失败时哨兵以为「TP 缺失」→ **同价限价叠到 50+ 笔**，有击穿实盘风险。
+
+### 根因
+- 平仓/反手后撤单未完全确认，或空闲巡检在「账本已空」时**直接 return，不扫残留挂单**。  
+- `place_limit` / `place_stop` 在挂单 REST 失败时曾 **「允许首挂」**；上层 `_has_tp_limit_at_price` 失败时返回 False，形成「查不到→再挂」循环。
+
+### 现行防护（必须保持）
+| 层 | 行为 |
+|----|------|
+| `place_limit` / `place_stop` | 查单失败 → **return None**（仅 120s 本地缓存可复用，不新挂） |
+| LIMIT 熔断 | 同 symbol 可读 LIMIT≥6 → 拒挂 |
+| `_has_tp_limit_at_price` / `_has_stop_sl_near` | 查失败 → **保守 True**（禁止补挂） |
+| `_place_tp_levels_only` / `_patch_missing_tp` / nuclear | `orders_unreadable` → 中止，禁止盲补 |
+| 空闲巡检 | 仓=0 且挂单>0 → `_purge_all_defense_orders_on_flat` |
+| 开仓前 | `_verify_sterile_flat`：qty=0 **且** LIMIT+STOP=0，否则拒开 |
+
+### 头寸公式（ETH/XAU 同一规则，防「精度/算错导致没开单」）
+```
+qty = (合约本金余额 × 20% × 5) / 开仓价
+```
+- 使用交易所 `format_quantity` / `format_price` 精度；TV.qty 可选 soft-cap，天文值忽略。  
+- 缺 `atr` 拒开；有 `stop_loss` 可再按风险距离收紧，但**不得**因收紧为 0 而静默跳过——校验失败钉钉告警。
 
 ---
 

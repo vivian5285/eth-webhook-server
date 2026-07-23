@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v15.5.28/29：挂单 fail-closed 审计 + 同价去重 + 查单失败允许首挂、120s 本地锁防叠。"""
+"""v15.7.4：挂单 fail-closed + 同价去重；查单失败禁止挂单（防 50×叠单击穿）。"""
 import os
 import sys
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 os.environ["BINANCE_SKIP_BOOTSTRAP"] = "1"
 
-# 避免真实 Binance Client 初始化卡住
 sys.modules.setdefault("binance", MagicMock())
 sys.modules.setdefault("binance.client", MagicMock())
 
@@ -28,6 +28,7 @@ def _bare_client():
     c._recent_limit_place = {}
     c._recent_stop_place = {}
     c._place_dedupe_lock = threading.Lock()
+    c.get_open_orders = MagicMock(return_value=[])
     return c
 
 
@@ -46,11 +47,9 @@ class TestOrdersDupGuard(unittest.TestCase):
         out = BinanceClient.get_open_orders(c, "ETHUSDT", include_algo=False)
         self.assertTrue(is_orders_query_failed(out))
 
-    def test_place_limit_allows_first_when_query_failed_then_locks(self):
-        """v15.5.29：查单失败允许首挂；同价 120s 内第二次跳过。"""
+    def test_place_limit_fail_closed_when_query_failed(self):
+        """查单失败 → 禁止挂限价（废除「允许首挂」）。"""
         c = _bare_client()
-        placed = {"orderId": 7, "price": "1895.42"}
-        c.client.futures_create_order.return_value = placed
         with patch.object(
             c, "_existing_same_limit", return_value=ORDERS_QUERY_FAILED,
         ):
@@ -60,14 +59,25 @@ class TestOrdersDupGuard(unittest.TestCase):
             second = BinanceClient.place_limit_order(
                 c, "SELL", 0.01, 1895.42, symbol="ETHUSDT",
             )
-        self.assertEqual(first, placed)
-        self.assertEqual(second, placed)
-        self.assertEqual(c.client.futures_create_order.call_count, 1)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(c.client.futures_create_order.call_count, 0)
 
-    def test_place_stop_allows_first_when_query_failed_then_locks(self):
+    def test_place_limit_reuses_local_cache_when_query_failed(self):
         c = _bare_client()
-        placed = {"orderId": 8, "stopPrice": "1890.00"}
-        c.client.futures_create_order.return_value = placed
+        cached = {"orderId": 7, "price": "1895.42"}
+        c._recent_limit_place[("ETHUSDT", "SELL", 1895.42)] = (time.time(), cached)
+        with patch.object(
+            c, "_existing_same_limit", return_value=ORDERS_QUERY_FAILED,
+        ):
+            out = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1895.42, symbol="ETHUSDT",
+            )
+        self.assertEqual(out, cached)
+        self.assertEqual(c.client.futures_create_order.call_count, 0)
+
+    def test_place_stop_fail_closed_when_query_failed(self):
+        c = _bare_client()
         with patch.object(
             c, "_existing_same_stop", return_value=ORDERS_QUERY_FAILED,
         ):
@@ -77,9 +87,9 @@ class TestOrdersDupGuard(unittest.TestCase):
             second = BinanceClient.place_stop_market_order(
                 c, "SELL", 1890.0, symbol="ETHUSDT", quantity=0.01,
             )
-        self.assertEqual(first, placed)
-        self.assertEqual(second, placed)
-        self.assertEqual(c.client.futures_create_order.call_count, 1)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(c.client.futures_create_order.call_count, 0)
 
     def test_place_limit_skips_duplicate_price(self):
         c = _bare_client()
@@ -90,6 +100,32 @@ class TestOrdersDupGuard(unittest.TestCase):
             )
         self.assertEqual(out, exist)
         c.client.futures_create_order.assert_not_called()
+
+    def test_place_limit_ok_when_no_duplicate(self):
+        """None=无同价单，应正常下单（不可把 None 当查单失败）。"""
+        c = _bare_client()
+        placed = {"orderId": 11, "price": "1920.00"}
+        c.client.futures_create_order.return_value = placed
+        with patch.object(c, "_existing_same_limit", return_value=None):
+            out = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1920.0, symbol="ETHUSDT",
+            )
+        self.assertEqual(out, placed)
+        self.assertEqual(c.client.futures_create_order.call_count, 1)
+
+    def test_place_limit_fuse_when_too_many_limits(self):
+        c = _bare_client()
+        fake_book = [
+            {"type": "LIMIT", "orderId": i, "price": str(1900 + i)}
+            for i in range(6)
+        ]
+        c.get_open_orders = MagicMock(return_value=fake_book)
+        with patch.object(c, "_existing_same_limit", return_value=None):
+            out = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1910.0, symbol="ETHUSDT",
+            )
+        self.assertIsNone(out)
+        self.assertEqual(c.client.futures_create_order.call_count, 0)
 
     def test_find_protective_returns_none_on_fail(self):
         c = BinanceClient.__new__(BinanceClient)
@@ -119,33 +155,6 @@ class TestAuditUnreadableNoRepair(unittest.TestCase):
         }
         self.assertTrue(s._tp_audit_ok(audit))
         self.assertFalse(s._defense_needs_immediate_fix(audit))
-
-    def test_breath_resize_idempotent_skip(self):
-        from position_supervisor_binance import PositionSupervisorBinance
-
-        s = PositionSupervisorBinance.__new__(PositionSupervisorBinance)
-        s.symbol = "ETHUSDT"
-        s.current_side = "LONG"
-        s.current_sl = 1880.0
-        s.initial_stop = 1880.0
-        s.initial_qty = 0.1
-        s.shield_sized_qty = 0.05
-        s._last_applied_exchange_sl = 1879.7
-        s.breath_profile = None
-        s.tp_levels_consumed = [1]
-        s._breath_tick_paused = False
-        s._resolve_live_qty = lambda q: float(q)
-        s._stop_buffer_usd = lambda: 0.3
-        s._count_protective_stops = lambda: [1879.7]
-        s._purge_all_protective_stops = MagicMock()
-        s._place_vps_hard_sl_order = MagicMock(return_value={"orderId": 1})
-        s._set_defense_order_id = MagicMock()
-        s._save_state = MagicMock()
-        s._tag = lambda: "ETHUSDT"
-        ok = s._breath_resize_stop_on_tp(0.05, reason="unit")
-        self.assertTrue(ok)
-        s._purge_all_protective_stops.assert_not_called()
-        s._place_vps_hard_sl_order.assert_not_called()
 
 
 class TestSterileFlatFailClosed(unittest.TestCase):

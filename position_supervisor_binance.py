@@ -149,7 +149,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.3-dual-stop-coexist"
+BINANCE_VPS_VERSION = "v15.7.4-anti-spam-flat"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -774,6 +774,20 @@ class PositionSupervisorBinance:
                     close_meta=flat_meta,
                     curr_px=curr_px,
                 )
+                return
+            # 账本空 + 仓位空：仍必须扫残留限价/条件单（防幽灵 TP 空仓挂着）
+            try:
+                n = self._remaining_open_order_count()
+                if n is not None and n > 0:
+                    logger.warning(
+                        f"🧹 [空闲巡检] {self.symbol} 空仓但仍有挂单 {n} 笔 "
+                        f"→ 强制净场（杜绝幽灵限价）"
+                    )
+                    self._purge_all_defense_orders_on_flat(
+                        "空闲巡检·空仓残留挂单", max_rounds=6,
+                    )
+            except Exception as e:
+                logger.debug(f"空闲巡检空仓净场跳过: {e}")
             return
 
         if self._enforce_tv_direction_or_flat(pos, source="空闲巡检"):
@@ -8662,7 +8676,7 @@ class PositionSupervisorBinance:
         """
         盘口是否已有贴近目标价的 STOP。
         硬止损与雷达可同价共存检测：任一带量/closePosition STOP 贴近即 True。
-        挂单查询失败：仅当本地 120s 内刚成功挂过同价才当已有；否则 False 允许首挂。
+        挂单查询失败：保守 True（禁止上层再挂，防叠单击穿）。
         """
         target = round(float(sl_price), 2)
         shield_prices = self._shield_tier_prices() if exclude_shield else []
@@ -8679,9 +8693,9 @@ class PositionSupervisorBinance:
                 return True
             logger.warning(
                 f"🛡️ [{self.symbol}] 挂单查询失败 → _has_stop_sl_near "
-                f"@{target:.2f} 未确认（允许首挂路径）"
+                f"@{target:.2f} 保守当作已有（禁止补挂）"
             )
-            return False
+            return True
         for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP_MARKET", "STOP"):
@@ -8703,14 +8717,18 @@ class PositionSupervisorBinance:
         if price <= 0:
             return False
         orders = self._collect_tp_limit_orders()
-        # 查不到：仅本地刚挂过同价才当已有；否则 False 允许首挂
+        # 查不到：保守视为「已有」→ 禁止上层补挂（防叠单击穿）
         if is_orders_query_failed(orders):
             close_side = "BUY" if self.current_side == "SHORT" else "SELL"
             key = (self.symbol, close_side, round(float(price), 2))
             cached = getattr(binance_client, "_recent_limit_place", {}).get(key)
             if cached and (time.time() - float(cached[0])) < 120.0:
                 return True
-            return False
+            logger.warning(
+                f"🛡️ [{self.symbol}] TP查单失败 @{float(price):.2f} "
+                f"→ 保守当作已有，禁止补挂"
+            )
+            return True
         for o in orders:
             if abs(o["price"] - price) <= tolerance:
                 return True

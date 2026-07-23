@@ -743,7 +743,7 @@ def audit_module4_radar(a: Audit):
     )
     _bc = _read(os.path.join(ROOT, "binance_client.py"))
     a.check(
-        "4.5c2 挂单查询失败 fail-closed + 同价去重 + 首挂本地锁",
+        "4.5c2 挂单查询失败 fail-closed + 同价去重 + 禁盲补",
         "ORDERS_QUERY_FAILED" in _bc
         and "is_orders_query_failed" in _bc
         and "_existing_same_limit" in _bc
@@ -751,7 +751,7 @@ def audit_module4_radar(a: Audit):
         and "_recent_limit_place" in _bc
         and "_recent_stop_place" in _bc
         and "_place_dedupe_lock" in _bc
-        and "允许首挂" in _bc
+        and "fail-closed 禁止挂单" in _bc
         and "orders_unreadable" in sup
         and ("止损收缩幂等跳过" in sup or "止损数量收缩" in sup or "止损收缩签名幂等" in sup)
         and "本轮不再重挂" in sup
@@ -760,7 +760,8 @@ def audit_module4_radar(a: Audit):
         and "limits=0 stops=0" in sup
         and "下单前挂单未净" in sup
         and "_verify_sterile_flat" in sup
-        and "frozen_hard_sl_px" in sup,
+        and "frozen_hard_sl_px" in sup
+        and "空仓残留挂单" in sup,
     )
     a.check(
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",

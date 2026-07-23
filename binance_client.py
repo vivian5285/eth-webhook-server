@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.45.4-place-on-unread"
+BINANCE_CLIENT_VERSION = "v15.7.4-fail-closed-place"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -81,7 +81,7 @@ class BinanceClient:
         self._all_pos_ts = 0.0
         self._all_pos_ttl = 1.0
         self._last_order_event_ts = 0.0
-        # 查单失败时的进程内同价锁：允许首挂保护，120s 内禁叠同价
+        # 查单失败时的进程内同价锁：仅复用刚挂成功的缓存，禁止盲补首挂
         self._recent_limit_place = {}
         self._recent_stop_place = {}
         self._place_dedupe_lock = threading.Lock()
@@ -842,9 +842,10 @@ class BinanceClient:
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(px_str), 2)
         key = (symbol, want_side, want_px)
-        # 防重复：同价已有 LIMIT 则复用；查单失败用本地同价锁允许首挂、禁叠单
+        # 防重复：同价已有 LIMIT 则复用。
+        # 仅当返回 ORDERS_QUERY_FAILED 哨兵时 fail-closed（None=无同价，可挂）
         exist = self._existing_same_limit(symbol, side, float(px_str), quantity=qty)
-        if is_orders_query_failed(exist):
+        if exist is not None and is_orders_query_failed(exist):
             with self._place_dedupe_lock:
                 cached = self._recent_limit_place.get(key)
                 if cached and (time.time() - float(cached[0])) < 120.0:
@@ -853,16 +854,33 @@ class BinanceClient:
                         f"@ {px_str} → 跳过叠单"
                     )
                     return cached[1]
-            logger.warning(
-                f"[限价单] {symbol} 挂单查询失败 → 允许首挂（本地锁防叠） "
-                f"{side} {qty} @ {px_str}"
+            logger.error(
+                f"[限价单] {symbol} 挂单查询失败 → fail-closed 禁止挂单 "
+                f"{side} {qty} @ {px_str}（防盲补叠单）"
             )
-        elif exist:
+            return None
+        if exist:
             logger.warning(
                 f"[限价单去重] {symbol} 已有同价 LIMIT "
                 f"id={exist.get('orderId')} @ {px_str} → 跳过重复挂单"
             )
             return exist
+        # 硬上限：同 symbol 可读盘口 LIMIT 过多时禁止再挂（防击穿）
+        try:
+            book = self.get_open_orders(symbol, include_algo=False)
+            if not is_orders_query_failed(book):
+                lim_n = sum(
+                    1 for o in (book or [])
+                    if str(o.get("type") or o.get("orderType") or "").upper() == "LIMIT"
+                )
+                if lim_n >= 6:
+                    logger.error(
+                        f"[限价单熔断] {symbol} 已有 LIMIT={lim_n}≥6 → 禁止再挂 "
+                        f"（期望≤3；请先净场）"
+                    )
+                    return None
+        except Exception:
+            pass
         try:
             binance_side = want_side
             params = {
@@ -918,9 +936,10 @@ class BinanceClient:
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(stop_price or 0), 2)
         key = (symbol, want_side, want_px)
-        # 防重复：同触发价已有 STOP 则复用；查单失败用本地同价锁允许首挂
+        # 防重复：同触发价已有 STOP 则复用。
+        # 仅 ORDERS_QUERY_FAILED 哨兵 → fail-closed（None=无同价，可挂）
         exist = self._existing_same_stop(symbol, side, stop_price)
-        if is_orders_query_failed(exist):
+        if exist is not None and is_orders_query_failed(exist):
             with self._place_dedupe_lock:
                 cached = self._recent_stop_place.get(key)
                 if cached and (time.time() - float(cached[0])) < 120.0:
@@ -929,11 +948,12 @@ class BinanceClient:
                         f"Stop @ {stop_price} → 跳过叠单"
                     )
                     return cached[1]
-            logger.warning(
-                f"[止损单] {symbol} 挂单查询失败 → 允许首挂（本地锁防叠） "
-                f"{side} Stop @ {stop_price}"
+            logger.error(
+                f"[止损单] {symbol} 挂单查询失败 → fail-closed 禁止挂单 "
+                f"{side} Stop @ {stop_price}（防盲补叠单）"
             )
-        elif exist:
+            return None
+        if exist:
             logger.warning(
                 f"[止损单去重] {symbol} 已有同价 STOP "
                 f"id={exist.get('orderId') or exist.get('algoId')} @ {stop_price} "
