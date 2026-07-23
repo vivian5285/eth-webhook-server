@@ -15,6 +15,7 @@ from logging.handlers import TimedRotatingFileHandler
 from binance_client import (
     binance_client,
     is_orders_query_failed,
+    is_position_query_failed,
     ORDERS_QUERY_FAILED,
 )
 from position_manager import position_manager
@@ -149,7 +150,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.4-anti-spam-flat"
+BINANCE_VPS_VERSION = "v15.7.5-query-fail-closed"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -159,7 +160,8 @@ SENTINEL_POLL_NORMAL = 1.0
 SENTINEL_POLL_ARMING = 1.0
 SENTINEL_POLL_RADAR = 1.0
 SENTINEL_POLL_JITTER_SEC = 0.2
-IDLE_PATROL_INTERVAL_SEC = 12
+IDLE_PATROL_INTERVAL_SEC = 45  # 双品种空闲轮询；过密会触发 -1003 IP ban
+IDLE_PATROL_BACKOFF_SEC = 120  # 查仓 QUERY_FAILED / 限流后拉长间隔
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
@@ -425,10 +427,18 @@ class PositionSupervisorBinance:
             logger.warning(f"启动 WS 订阅跳过: {e}")
 
     def _start_idle_flat_patrol(self):
-        """空仓待命时激进实盘巡检：反向强平 / 同向接管 / 人工异动 / 漏报全平 / 蚂蚁扫尾"""
+        """空仓待命时实盘巡检：反向强平 / 同向接管 / 人工异动 / 漏报全平 / 蚂蚁扫尾。
+        间隔默认 45s；QUERY_FAILED/限流后退避 120s，避免 -1003 雪崩。"""
         def loop():
             while True:
-                time.sleep(IDLE_PATROL_INTERVAL_SEC)
+                now = time.time()
+                backoff_until = float(
+                    getattr(self, "_idle_patrol_backoff_until", 0.0) or 0.0
+                )
+                sleep_for = float(IDLE_PATROL_INTERVAL_SEC)
+                if now < backoff_until:
+                    sleep_for = max(sleep_for, backoff_until - now)
+                time.sleep(max(1.0, sleep_for))
                 if self.monitoring:
                     continue
                 if not self._lock.acquire(timeout=2.0):
@@ -443,6 +453,15 @@ class PositionSupervisorBinance:
                     self._lock.release()
 
         threading.Thread(target=loop, daemon=True, name="idle-live-watch").start()
+
+    def _mark_idle_patrol_backoff(self, reason="QUERY_FAILED"):
+        """限流/查仓失败后拉长空闲巡检间隔，保护共享 IP 配额。"""
+        until = time.time() + float(IDLE_PATROL_BACKOFF_SEC)
+        self._idle_patrol_backoff_until = until
+        logger.warning(
+            f"⏳ [{self.symbol}] 空闲巡检退避 {IDLE_PATROL_BACKOFF_SEC:.0f}s "
+            f"| {reason}"
+        )
 
     def _book_thinks_active(self):
         return (
@@ -738,6 +757,7 @@ class PositionSupervisorBinance:
         pos = self._get_active_position()
         if pos == "QUERY_FAILED":
             self._on_position_query_failed("空闲巡检")
+            self._mark_idle_patrol_backoff("空闲巡检·QUERY_FAILED")
             return
         live_qty = float(pos["size"]) if pos else 0.0
 
@@ -2908,8 +2928,15 @@ class PositionSupervisorBinance:
         # 1) 先撤一切防御单，避免平仓过程中 TP 成交反向开仓
         self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
         time.sleep(0.35)
-        # 2) 有仓则阶梯强平（含平后撤单）
-        if not self._verify_flat():
+        # 2) 查仓失败 → fail-closed 拒开（禁止把 QUERY_FAILED 当残留仓去强平）
+        pos_now = self._get_active_position()
+        if pos_now == "QUERY_FAILED":
+            detail = "持仓=QUERY_FAILED | REST不可读·禁当残留强平"
+            logger.error(f"❌ [{tag}] {detail} → 拒绝开仓")
+            self._last_sterile_flat_fail_detail = detail
+            return False
+        # 3) 有仓则阶梯强平（含平后撤单）
+        if pos_now is not None:
             if not force_close:
                 logger.error(f"❌ [{tag}] 盘口非空且未授权强平，拒绝开仓")
                 return False
@@ -2920,12 +2947,12 @@ class PositionSupervisorBinance:
             if not self._wait_verify(self._verify_flat, retries=8, delay=0.45):
                 logger.error(f"❌ [{tag}] 空仓核查未通过，拒绝开仓")
                 return False
-        # 3) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价/幽灵单）
+        # 4) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价/幽灵单）
         purge = self._purge_all_defense_orders_on_flat(f"{tag}·平后净挂单", max_rounds=8)
-        # 4) 扫孤儿反向（残留 TP 在空仓成交）
+        # 5) 扫孤儿反向（残留 TP 在空仓成交）
         self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
         time.sleep(0.35)
-        # 5) 终检：仓+单皆零（含任意 LIMIT 幽灵单）
+        # 6) 终检：仓+单皆零（含任意 LIMIT 幽灵单）
         if self._wait_verify(self._verify_sterile_flat, retries=8, delay=0.45):
             logger.info(
                 f"🧹 [{tag}] 无菌空仓通过 | qty=0 limits=0 stops=0 | "
@@ -3770,7 +3797,10 @@ class PositionSupervisorBinance:
     def _trim_position_to_target(self, target_qty, action, reason_tag="叠仓Remediation"):
         """已废除 CAP_ALIGN：禁止 reduceOnly 主动减仓；返回当前实盘数量。"""
         pos = self._get_active_position()
-        live = float(pos["size"]) if pos else 0.0
+        if pos == "QUERY_FAILED" or not isinstance(pos, dict):
+            live = 0.0
+        else:
+            live = float(pos.get("size") or 0)
         logger.warning(
             f"🚫 [{self.symbol}] CAP_ALIGN/_trim 已废除 | {reason_tag} | "
             f"目标 {target_qty} 实盘 {live} → 不减仓"
@@ -3922,11 +3952,14 @@ class PositionSupervisorBinance:
     def _scan_and_sweep_dust_on_startup(self, was_monitoring=False):
         """重启首检：发现蚂蚁仓/止盈残量 → 扫尾收网，避免误接管为正常持仓"""
         pos = self._get_active_position()
-        if not pos or pos["size"] <= 0:
+        if pos == "QUERY_FAILED":
+            self._on_position_query_failed("重启蚂蚁扫描")
+            return False
+        if not isinstance(pos, dict) or float(pos.get("size") or 0) <= 0:
             return False
         if not self.current_side:
             self.current_side = pos["side"]
-        real_amt = pos["size"]
+        real_amt = float(pos["size"])
         ref = max(float(self.initial_qty or 0), float(self.watched_qty or 0))
         if was_monitoring and not self._is_dust_qty(real_amt):
             if ref <= 0 or real_amt > max(
@@ -3952,7 +3985,10 @@ class PositionSupervisorBinance:
     def _recover_missed_flat_on_startup(self, was_monitoring=False):
         """重启对账：服务宕机/重启期间已全平，但账本仍有仓 → 补发完美胜利钉钉"""
         pos = self._get_active_position()
-        if pos and pos["size"] > 0:
+        if pos == "QUERY_FAILED":
+            self._on_position_query_failed("重启对账补发")
+            return False
+        if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
             return False
 
         prev_watched = float(self.watched_qty or 0)
@@ -12780,6 +12816,7 @@ class PositionSupervisorBinance:
             while self.monitoring:
                 try:
                     if not self._lock.acquire(timeout=2.0):
+                        time.sleep(0.5)
                         continue
                     try:
                         ws_pulse = bool(getattr(self, "_ws_defense_pulse", False))
@@ -12789,6 +12826,9 @@ class PositionSupervisorBinance:
                         pos = self._get_active_position()
                         if pos == "QUERY_FAILED":
                             self._on_position_query_failed("哨兵")
+                            self._mark_idle_patrol_backoff("哨兵·QUERY_FAILED")
+                            # 必须在 continue 前休眠，否则跳过底部 sleep → REST 雪崩
+                            time.sleep(float(IDLE_PATROL_BACKOFF_SEC))
                             continue
                         real_amt = pos["size"] if pos else 0.0
                         actual_side = pos["side"] if pos else None
@@ -12799,6 +12839,16 @@ class PositionSupervisorBinance:
                                     "哨兵宽限期：跳过空仓判定（防重启误清场）"
                                 )
                                 continue
+                            if float(self.watched_qty or 0) <= 0:
+                                logger.info(
+                                    f"📭 [{self.symbol}] 哨兵确认空仓待命 → 退出巡检"
+                                )
+                                self.monitoring = False
+                                try:
+                                    self._save_state()
+                                except Exception:
+                                    pass
+                                break
                             if self.watched_qty > 0:
                                 self._purge_all_defense_orders_on_flat(
                                     "哨兵感知空仓·抢先撤TP123",
@@ -13138,26 +13188,71 @@ class PositionSupervisorBinance:
 
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):
-        """先撤全部挂单再阶梯强平；返回是否已空仓"""
+        """先撤全部挂单再阶梯强平；返回是否已空仓。
+        持仓 QUERY_FAILED → fail-closed 返回 False（禁止 float(None) 崩溃 / 禁止当空仓）。
+        """
         prev_side = self.current_side
         self._purge_all_defense_orders_on_flat(reason or "强平前撤单")
         closed_successfully = False
+        query_failed = False
 
         for round_i in range(6):
             pos = position_manager.get_position(self.symbol)
-            if not pos or float(pos.get("positionAmt", 0)) == 0:
+            if is_position_query_failed(pos):
+                query_failed = True
+                logger.error(
+                    f"❌ [{self.symbol}] 强平中持仓查询失败 → fail-closed 中止"
+                    f"（禁当空仓/禁 float(None)）| {reason}"
+                )
+                closed_successfully = False
+                break
+            amt_raw = None if not pos else pos.get("positionAmt")
+            if amt_raw is None and pos:
+                # 非哨兵但缺字段：同样 fail-closed，勿 float(None)
+                query_failed = True
+                logger.error(
+                    f"❌ [{self.symbol}] 强平中 positionAmt 缺失 → fail-closed | {reason}"
+                )
+                closed_successfully = False
+                break
+            if not pos or float(amt_raw or 0) == 0:
                 closed_successfully = True
                 break
 
-            amt = float(pos["positionAmt"])
+            amt = float(amt_raw)
             close_side = "SELL" if amt > 0 else "BUY"
             live_sz = round(abs(amt), 3)
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
             binance_client.place_market_order(close_side, live_sz, symbol=self.symbol, reduce_only=True)
             time.sleep(1.5)
 
+        if query_failed:
+            self._last_sterile_flat_fail_detail = (
+                f"持仓=QUERY_FAILED | 强平中止 | {reason}"
+            )
+            if reset_state:
+                # 不明仓位：保留账本，禁止假装归零
+                try:
+                    self._save_state()
+                except Exception:
+                    pass
+            return False
+
         if not closed_successfully:
             residual = self._get_active_position()
+            if residual == "QUERY_FAILED":
+                logger.error(
+                    f"❌ [{self.symbol}] 强平后复核 QUERY_FAILED → fail-closed | {reason}"
+                )
+                self._last_sterile_flat_fail_detail = (
+                    f"持仓=QUERY_FAILED | 强平后复核失败 | {reason}"
+                )
+                if reset_state:
+                    try:
+                        self._save_state()
+                    except Exception:
+                        pass
+                return False
             residual_sz = residual["size"] if residual else 0.0
             if residual_sz > 0 and self._is_dust_qty(residual_sz):
                 close_side = "SELL" if residual["side"] == "LONG" else "BUY"
@@ -13167,8 +13262,12 @@ class PositionSupervisorBinance:
                 closed_successfully = self._verify_flat()
             if not closed_successfully:
                 residual = self._get_active_position()
-                residual_sz = residual["size"] if residual else 0.0
-                logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} ETH")
+                if residual == "QUERY_FAILED":
+                    residual_sz = -1.0
+                    logger.error(f"❌ 6 轮强平后持仓不可读 (QUERY_FAILED)")
+                else:
+                    residual_sz = residual["size"] if residual else 0.0
+                    logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} ETH")
                 dingtalk.report_system_alert(
                     "强平未完全归零",
                     f"6 轮市价平仓后仍剩 {residual_sz} ETH，请人工核查币安盘口",
@@ -13180,7 +13279,7 @@ class PositionSupervisorBinance:
                 self._snapshot_sizing_principal("全平后本金重置")
             else:
                 residual = self._get_active_position()
-                if residual:
+                if residual and residual != "QUERY_FAILED":
                     self.watched_qty = residual["size"]
                     self.current_side = residual["side"]
                     self.watched_entry = residual["entry_price"]
@@ -13433,6 +13532,16 @@ class PositionSupervisorBinance:
                     "已启动哨兵接力核对 TP123 + TV硬止损（雷达仅现价达激活线后）",
                     suggestion="请在币安核对持仓；勿手动乱撤，等待哨兵对齐",
                 )
+                self.monitoring = True
+                self._ensure_sentinel_running_quiet()
+                self._last_idle_takeover_ts = 0.0
+                return
+            if pos == "QUERY_FAILED" or (pos is not None and not isinstance(pos, dict)):
+                logger.error(
+                    f"🚨 [{self.symbol}] 重启持仓探测返回非持仓哨兵 {pos!r} "
+                    f"→ fail-closed 启哨兵，禁止当有仓/空仓"
+                )
+                self._on_position_query_failed("VPS重启·探测哨兵")
                 self.monitoring = True
                 self._ensure_sentinel_running_quiet()
                 self._last_idle_takeover_ts = 0.0
@@ -13896,13 +14005,16 @@ class PositionSupervisorBinance:
             err_detail = traceback.format_exc()[-1200:]
             logger.error(f"❌ 闪电接管异常: {e}\n{err_detail}")
             pos = self._get_active_position()
-            if pos:
+            if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
                 self.monitoring = True
                 self._post_recover_radar_pulse = True
                 if not self._sentinel_active:
                     threading.Thread(
                         target=self._sentinel_loop, daemon=True, name="sentinel",
                     ).start()
+            elif pos == "QUERY_FAILED":
+                self.monitoring = True
+                self._ensure_sentinel_running_quiet()
             dingtalk.report_system_alert("重启接管失败", f"{e}\n{err_detail[-400:]}")
 
 
@@ -13958,8 +14070,14 @@ def bootstrap_supervisors():
                 except Exception:
                     before = None
                 # 空仓且账本无仓：禁止因脏 state 误标 trading_paused
+                # QUERY_FAILED 是 str 哨兵，禁止 (before or {}).get
                 try:
-                    flat = not before or float((before or {}).get("size") or 0) <= 0
+                    if before == "QUERY_FAILED":
+                        flat = False  # 不明 → 不清 restart 暂停标记
+                    elif isinstance(before, dict):
+                        flat = float(before.get("size") or 0) <= 0
+                    else:
+                        flat = not before
                     if flat and float(getattr(sup, "watched_qty", 0) or 0) <= 0:
                         if getattr(sup, "trading_paused", False) and str(
                             getattr(sup, "trading_pause_reason", "") or ""
@@ -13982,12 +14100,14 @@ def bootstrap_supervisors():
                     after = sup._get_active_position(prefer_ws=False)
                 except Exception:
                     after = None
-                if after:
+                if after == "QUERY_FAILED":
+                    summaries.append(f"{sym}:QUERY_FAILED·哨兵接力")
+                elif isinstance(after, dict) and float(after.get("size") or 0) > 0:
                     summaries.append(
                         f"{sym}:有仓 {after.get('side')} {after.get('size')} "
                         f"@ {after.get('entry_price')} monitoring={sup.monitoring}"
                     )
-                elif before:
+                elif isinstance(before, dict) and float(before.get("size") or 0) > 0:
                     summaries.append(f"{sym}:探测曾有仓但恢复后REST空 → 哨兵巡检")
                 else:
                     summaries.append(f"{sym}:空仓待命")

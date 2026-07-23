@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.4-anti-spam-flat`**  
+**当前版本：`v15.7.5-query-fail-closed`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
@@ -9,14 +9,15 @@
 **通知：钉钉（`dingtalk.py`）**
 
 > **双 STOP 说明**：盘口两笔接近的止损 = **硬止损(|entry−TV.SL|×1.2)** + **雷达(1.5×ATR)**，不是「TV原价 + ×1.2」两档。TV 原 `stop_loss` **不挂盘**。  
-> **叠单铁律（v15.7.4）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损（废除「允许首挂」）；空仓必须挂单=0；LIMIT≥6 熔断拒挂。
+> **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损（废除「允许首挂」）；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
+> **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → 开仓前净场/强平 **fail-closed 拒开**（禁止 `float(None)`）；空闲巡检 45s + 失败退避 120s；哨兵 `QUERY_FAILED` 必须先休眠再轮询。
 
 > **权威依据**：桌面《Gemini终极生产级全功能白皮书》+ 本文。冲突时以白皮书为准。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.7.4-anti-spam-flat · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.7.5-query-fail-closed · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_two_scenario_atr.py
@@ -283,6 +284,7 @@ python3 test_breath_radar_upgrade.py
 | TP 后 `preserve_hard=False` 清双止损再挂 | 已修（v15.7.1） |
 | 查单失败「允许首挂」限价/止损 | **废除（v15.7.4）** → fail-closed |
 | 空仓不扫残留挂单 | **已修（v15.7.4）** 空闲巡检强制净场 |
+| 查仓失败当残留仓强平 / `float(None)` | **已修（v15.7.5）** QUERY_FAILED fail-closed 拒开 |
 | 同窗仅 1s / 5s 迟到 CLOSE | 改为 **15s** |
 | webhook 必须 qty | 废除 |
 | CAP_ALIGN / 加仓 / 旧雷达 activated | 废除 |
