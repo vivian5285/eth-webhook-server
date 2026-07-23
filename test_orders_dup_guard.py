@@ -156,6 +156,66 @@ class TestAuditUnreadableNoRepair(unittest.TestCase):
         self.assertTrue(s._tp_audit_ok(audit))
         self.assertFalse(s._defense_needs_immediate_fix(audit))
 
+    def test_stop_near_false_when_unreadable_no_cache(self):
+        """挂单不可读且无本地缓存 → 不得谎称已有硬止损。"""
+        from position_supervisor_binance import PositionSupervisorBinance
+        import binance_client as bc
+
+        s = PositionSupervisorBinance.__new__(PositionSupervisorBinance)
+        s.symbol = "XAUUSDT"
+        s.current_side = "SHORT"
+        bc.binance_client.get_open_orders = MagicMock(
+            return_value=ORDERS_QUERY_FAILED,
+        )
+        bc.binance_client._recent_stop_place = {}
+        self.assertFalse(s._has_stop_sl_near(4080.0))
+
+    def test_rebuild_aborts_when_book_unreadable(self):
+        from position_supervisor_binance import PositionSupervisorBinance
+
+        s = PositionSupervisorBinance.__new__(PositionSupervisorBinance)
+        s.symbol = "ETHUSDT"
+        s.current_side = "LONG"
+        s._resolve_live_qty = MagicMock(return_value=0.4)
+        s._orders_book_readable = MagicMock(return_value=False)
+        s._cancel_all_tp_limit_orders = MagicMock()
+        self.assertEqual(s._rebuild_defenses(0.4, 1900.0), 0)
+        s._cancel_all_tp_limit_orders.assert_not_called()
+
+    def test_cancel_tp_aborts_without_cancel_all_on_unreadable(self):
+        from position_supervisor_binance import PositionSupervisorBinance
+        import binance_client as bc
+
+        s = PositionSupervisorBinance.__new__(PositionSupervisorBinance)
+        s.symbol = "ETHUSDT"
+        s.current_side = "LONG"
+        bc.binance_client.get_open_orders = MagicMock(
+            return_value=ORDERS_QUERY_FAILED,
+        )
+        bc.binance_client.cancel_all_open_orders = MagicMock()
+        total = s._cancel_all_tp_limit_orders(max_rounds=2)
+        self.assertEqual(total, 0)
+        bc.binance_client.cancel_all_open_orders.assert_not_called()
+
+    def test_prune_keeps_one_per_price(self):
+        from position_supervisor_binance import PositionSupervisorBinance
+        import binance_client as bc
+
+        s = PositionSupervisorBinance.__new__(PositionSupervisorBinance)
+        s.symbol = "ETHUSDT"
+        s.current_side = "LONG"
+        s._collect_tp_limit_orders = MagicMock(
+            return_value=[
+                {"orderId": 1, "price": 1950.0, "qty": 0.1},
+                {"orderId": 2, "price": 1950.0, "qty": 0.1},
+                {"orderId": 3, "price": 2000.0, "qty": 0.1},
+            ]
+        )
+        bc.binance_client.cancel_order = MagicMock(return_value=True)
+        n = s._prune_duplicate_tp_limits()
+        self.assertEqual(n, 1)
+        bc.binance_client.cancel_order.assert_called_once_with("ETHUSDT", 2)
+
 
 class TestSterileFlatFailClosed(unittest.TestCase):
     def _make_sup(self):

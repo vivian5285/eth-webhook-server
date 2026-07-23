@@ -150,7 +150,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.5-query-fail-closed"
+BINANCE_VPS_VERSION = "v15.7.6-iron-dup"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -5743,6 +5743,7 @@ class PositionSupervisorBinance:
         """
         永久硬止损：仅按 frozen_hard_sl_px 挂出/确认存在；永不改价、永不替换。
         使用 closePosition（quantity=None），TP 减仓后自动覆盖剩余仓位，无需撤单改量。
+        挂单不可读且无本地刚挂缓存 → 返回 False（禁止谎称已挂）。
         """
         hard = self._frozen_hard_px()
         live_qty = self._resolve_live_qty(live_qty)
@@ -5755,6 +5756,12 @@ class PositionSupervisorBinance:
         ) or hard), 2)
         if self._has_stop_sl_near(exchange_target, exclude_shield=False):
             return True
+        if not self._orders_book_readable():
+            logger.error(
+                f"🛡️ [{self.symbol}] {reason} 中止：挂单不可读且无本地缓存 "
+                f"@{exchange_target:.2f} → 禁止谎称已挂"
+            )
+            return False
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         # closePosition：仓位归零前数量自动匹配剩余头寸，禁止为改量而撤硬止损
         order = binance_client.place_stop_market_order(
@@ -7584,6 +7591,50 @@ class PositionSupervisorBinance:
                 return True
         return False
 
+    def _prune_duplicate_tp_limits(self, tolerance=1.0):
+        """
+        同价多张 LIMIT：每价只留 1 张（最早 orderId），其余撤销。
+        挂单不可读 → 0（禁止盲撤）。用于巡检轻量去重，避免核武连环撤挂。
+        """
+        orders = self._collect_tp_limit_orders()
+        if is_orders_query_failed(orders) or not orders:
+            return 0
+        clusters = []
+        for o in orders:
+            px = float(o.get("price") or 0)
+            if px <= 0:
+                continue
+            placed = False
+            for cluster in clusters:
+                if abs(cluster[0]["price"] - px) <= tolerance:
+                    cluster.append(o)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([o])
+        cancelled = 0
+        for cluster in clusters:
+            if len(cluster) <= 1:
+                continue
+            keep = sorted(
+                cluster,
+                key=lambda x: int(x.get("orderId") or 0),
+            )[0]
+            for o in cluster:
+                if o is keep:
+                    continue
+                oid = o.get("orderId")
+                if not oid:
+                    continue
+                if binance_client.cancel_order(self.symbol, oid):
+                    cancelled += 1
+                    logger.warning(
+                        f"🧹 [{self.symbol}] 同价叠单去重 撤 id={oid} "
+                        f"@{o.get('price')}（保留 {keep.get('orderId')}）"
+                    )
+                time.sleep(0.12)
+        return cancelled
+
     def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=1.0, qty_tol=0.005):
         """头寸对应的 TP123 价位+数量均已正确挂好，且雷达/VPS 止损（若需要）也在"""
         tp_pxs = self.tv_tps
@@ -7815,18 +7866,17 @@ class PositionSupervisorBinance:
 
     def _cancel_all_tp_limit_orders(self, max_rounds=4):
         """撤销全部限价止盈（不动 STOP）；多轮直到盘口无残留 TP。
-        查单失败时不假装已净，继续 cancel_all 兜底。
+        查单失败：立即中止（禁止 cancel_all 误伤硬止损/雷达，并加剧 -1003）。
         """
         total = 0
         for round_i in range(max_rounds):
             raw = binance_client.get_open_orders(self.symbol)
             if is_orders_query_failed(raw):
                 logger.error(
-                    f"🧹 撤限价止盈第{round_i + 1}轮：挂单不可读 → cancel_all 兜底"
+                    f"🧹 撤限价止盈第{round_i + 1}轮：挂单不可读 → 中止撤单 "
+                    f"（禁止 cancel_all 误伤 STOP / 叠单风暴）"
                 )
-                binance_client.cancel_all_open_orders(self.symbol)
-                time.sleep(0.6)
-                continue
+                return total
             orders = [o for o in (raw or []) if self._is_tp_limit_order(o)]
             # 空仓净场：非 reduceOnly 的 LIMIT 幽灵单也撤（_is_tp_limit_order 在无 side 时可能漏）
             if not self.current_side:
@@ -8642,9 +8692,21 @@ class PositionSupervisorBinance:
             f"{self._format_audit_summary(audit)}"
         )
 
+        if self._has_duplicate_tp_orders():
+            pruned = self._prune_duplicate_tp_limits()
+            if pruned:
+                logger.warning(
+                    f"🧹 [{self.symbol}] 同价叠单轻量去重 {pruned} 张 → 再审计"
+                )
+                time.sleep(0.4)
+                audit = self._audit_tp_levels(live_qty)
+                matched = audit["matched_full"]
+                pending_prices = audit["pending_prices"]
+                expected = audit["expected"]
+
         if self._audit_requires_nuclear(audit) or self._has_duplicate_tp_orders():
             logger.warning(
-                f"☢️ 审计触发核武级重挂: {len(self._collect_tp_limit_orders())} 张止盈 | "
+                f"☢️ 审计触发核武级重挂: {len(self._collect_tp_limit_orders() or [])} 张止盈 | "
                 f"{self._format_audit_summary(audit)}"
             )
             audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
@@ -8712,7 +8774,8 @@ class PositionSupervisorBinance:
         """
         盘口是否已有贴近目标价的 STOP。
         硬止损与雷达可同价共存检测：任一带量/closePosition STOP 贴近即 True。
-        挂单查询失败：保守 True（禁止上层再挂，防叠单击穿）。
+        挂单查询失败：仅当本地 120s 内刚挂同价才 True；否则 False
+        （禁止谎称「已有保护」导致裸仓开仓；place_stop 本身仍 fail-closed 防叠单）。
         """
         target = round(float(sl_price), 2)
         shield_prices = self._shield_tier_prices() if exclude_shield else []
@@ -8729,9 +8792,9 @@ class PositionSupervisorBinance:
                 return True
             logger.warning(
                 f"🛡️ [{self.symbol}] 挂单查询失败 → _has_stop_sl_near "
-                f"@{target:.2f} 保守当作已有（禁止补挂）"
+                f"@{target:.2f} 不可确认（禁止谎称已有）"
             )
-            return True
+            return False
         for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP_MARKET", "STOP"):
@@ -13048,6 +13111,13 @@ class PositionSupervisorBinance:
         live_qty = self._resolve_live_qty(qty)
         if live_qty <= 0:
             logger.warning(f"重建防线跳过：交易所无可用持仓 (传入 {qty} ETH)")
+            return 0
+
+        # 查单失败禁止撤/补：否则会撤光 TP 再盲挂叠出几十张
+        if not self._orders_book_readable():
+            logger.error(
+                f"🛡️ [{self.symbol}] 重建防线中止：挂单不可读 → 禁止撤挂/盲补"
+            )
             return 0
 
         if cancel_first:
