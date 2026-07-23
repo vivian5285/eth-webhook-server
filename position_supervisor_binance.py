@@ -141,7 +141,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.28-dup-guard"
+BINANCE_VPS_VERSION = "v15.5.29-place-unread"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
@@ -8428,19 +8428,27 @@ class PositionSupervisorBinance:
     def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=False):
         """
         盘口是否已有贴近目标价的 STOP。
-        默认 exclude_shield=False：统一 closePosition 硬止损/雷达同槽，
-        若排除 shield 会把唯一 VPS 止损当成「缺失」→ 核武永远失败秒挂秒撤。
-        挂单查询失败 → True（fail-closed：当作已有，禁止据此补挂重复单）。
+        默认 exclude_shield=False：统一 closePosition 硬止损/雷达同槽。
+        挂单查询失败：仅当本地 120s 内刚成功挂过同价才当已有；否则 False 允许首挂。
         """
         target = round(float(sl_price), 2)
         shield_prices = self._shield_tier_prices() if exclude_shield else []
         orders = binance_client.get_open_orders(self.symbol)
         if is_orders_query_failed(orders):
+            close_side = "BUY" if self.current_side == "SHORT" else "SELL"
+            key = (self.symbol, close_side, target)
+            cached = getattr(binance_client, "_recent_stop_place", {}).get(key)
+            if cached and (time.time() - float(cached[0])) < 120.0:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 挂单不可读但本地刚挂 Stop "
+                    f"@{target:.2f} → 按已有"
+                )
+                return True
             logger.warning(
                 f"🛡️ [{self.symbol}] 挂单查询失败 → _has_stop_sl_near "
-                f"@{target:.2f} 按已有处理（禁补挂）"
+                f"@{target:.2f} 未确认（允许首挂路径）"
             )
-            return True
+            return False
         for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP_MARKET", "STOP"):
@@ -8462,9 +8470,14 @@ class PositionSupervisorBinance:
         if price <= 0:
             return False
         orders = self._collect_tp_limit_orders()
-        # 查不到 → 假定已有，禁止补挂（fail-closed）
+        # 查不到：仅本地刚挂过同价才当已有；否则 False 允许首挂
         if is_orders_query_failed(orders):
-            return True
+            close_side = "BUY" if self.current_side == "SHORT" else "SELL"
+            key = (self.symbol, close_side, round(float(price), 2))
+            cached = getattr(binance_client, "_recent_limit_place", {}).get(key)
+            if cached and (time.time() - float(cached[0])) < 120.0:
+                return True
+            return False
         for o in orders:
             if abs(o["price"] - price) <= tolerance:
                 return True

@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.28-dup-guard`**  
+**当前版本：`v15.5.29-place-unread`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（单币名义≈本金×1；ETH+XAU 并存合计≈本金×2）**  
 **保护引擎：双雷达呼吸止损（`breath_profiles` · ETH/XAU 分档 · TV `atr`=initial_atr · 1h ATR 呼吸系数 · markPrice WS）**  
@@ -20,7 +20,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.28-dup-guard
+# version: v15.5.29-place-unread
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
 # radar: breath_dual_eth_xau · trading_paused: false
 
@@ -446,7 +446,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.28-dup-guard
+# 期望: v15.5.29-place-unread
 
 bash deploy_binance.sh
 # 或: systemctl restart binance-engine.service

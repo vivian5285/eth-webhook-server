@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.45.3-dup-guard"
+BINANCE_CLIENT_VERSION = "v13.45.4-place-on-unread"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -81,6 +81,10 @@ class BinanceClient:
         self._all_pos_ts = 0.0
         self._all_pos_ttl = 1.0
         self._last_order_event_ts = 0.0
+        # 查单失败时的进程内同价锁：允许首挂保护，120s 内禁叠同价
+        self._recent_limit_place = {}
+        self._recent_stop_place = {}
+        self._place_dedupe_lock = threading.Lock()
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
 
     @staticmethod
@@ -835,22 +839,32 @@ class BinanceClient:
         if qty <= 0:
             logger.error(f"[限价单跳过] 数量无效 {quantity}")
             return None
-        # 防重复：查单失败拒挂；同价已有 LIMIT 则复用
+        want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
+        want_px = round(float(px_str), 2)
+        key = (symbol, want_side, want_px)
+        # 防重复：同价已有 LIMIT 则复用；查单失败用本地同价锁允许首挂、禁叠单
         exist = self._existing_same_limit(symbol, side, float(px_str), quantity=qty)
         if is_orders_query_failed(exist):
-            logger.error(
-                f"[限价单拒挂] {symbol} 挂单查询失败 → 禁止盲补 "
+            with self._place_dedupe_lock:
+                cached = self._recent_limit_place.get(key)
+                if cached and (time.time() - float(cached[0])) < 120.0:
+                    logger.warning(
+                        f"[限价单去重] {symbol} 查单失败但本地 120s 内已挂同价 "
+                        f"@ {px_str} → 跳过叠单"
+                    )
+                    return cached[1]
+            logger.warning(
+                f"[限价单] {symbol} 挂单查询失败 → 允许首挂（本地锁防叠） "
                 f"{side} {qty} @ {px_str}"
             )
-            return None
-        if exist:
+        elif exist:
             logger.warning(
                 f"[限价单去重] {symbol} 已有同价 LIMIT "
                 f"id={exist.get('orderId')} @ {px_str} → 跳过重复挂单"
             )
             return exist
         try:
-            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            binance_side = want_side
             params = {
                 "symbol": symbol, "side": binance_side, "type": "LIMIT",
                 "timeInForce": "GTC", "quantity": qty, "price": px_str,
@@ -859,6 +873,8 @@ class BinanceClient:
                 params["reduceOnly"] = True
             order = self.client.futures_create_order(**params)
             logger.info(f"[限价单成功] {side} {qty} @ {px_str} orderId={order.get('orderId', '')}")
+            with self._place_dedupe_lock:
+                self._recent_limit_place[key] = (time.time(), order)
             return order
         except Exception as e:
             logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
@@ -899,15 +915,25 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT", quantity=None):
-        # 防重复：查单失败拒挂；同触发价已有 STOP 则复用
+        want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
+        want_px = round(float(stop_price or 0), 2)
+        key = (symbol, want_side, want_px)
+        # 防重复：同触发价已有 STOP 则复用；查单失败用本地同价锁允许首挂
         exist = self._existing_same_stop(symbol, side, stop_price)
         if is_orders_query_failed(exist):
-            logger.error(
-                f"[止损单拒挂] {symbol} 挂单查询失败 → 禁止盲补 "
+            with self._place_dedupe_lock:
+                cached = self._recent_stop_place.get(key)
+                if cached and (time.time() - float(cached[0])) < 120.0:
+                    logger.warning(
+                        f"[止损单去重] {symbol} 查单失败但本地 120s 内已挂同价 "
+                        f"Stop @ {stop_price} → 跳过叠单"
+                    )
+                    return cached[1]
+            logger.warning(
+                f"[止损单] {symbol} 挂单查询失败 → 允许首挂（本地锁防叠） "
                 f"{side} Stop @ {stop_price}"
             )
-            return None
-        if exist:
+        elif exist:
             logger.warning(
                 f"[止损单去重] {symbol} 已有同价 STOP "
                 f"id={exist.get('orderId') or exist.get('algoId')} @ {stop_price} "
@@ -915,7 +941,7 @@ class BinanceClient:
             )
             return exist
         try:
-            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            binance_side = want_side
             params = {
                 "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
                 "stopPrice": self.format_price(stop_price, symbol),
@@ -932,17 +958,23 @@ class BinanceClient:
             order = self.client.futures_create_order(**params)
             tag = f"{quantity} " if quantity is not None else "全仓 "
             logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price}")
+            with self._place_dedupe_lock:
+                self._recent_stop_place[key] = (time.time(), order)
             return order
         except Exception as e:
             if self._is_algo_switch_error(e):
                 logger.info(
                     f"[止损单] 普通通道不可用({e}) → 切换 Algo @ {stop_price}"
                 )
-                return self.place_algo_stop_market_order(
+                order = self.place_algo_stop_market_order(
                     side, stop_price, symbol=symbol,
                     close_position=(quantity is None),
                     quantity=quantity,
                 )
+                if order:
+                    with self._place_dedupe_lock:
+                        self._recent_stop_place[key] = (time.time(), order)
+                return order
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 
