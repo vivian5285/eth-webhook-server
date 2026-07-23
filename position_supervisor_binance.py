@@ -152,7 +152,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.9-hard-unify"
+BINANCE_VPS_VERSION = "v15.7.10-atr-alert-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -1385,6 +1385,9 @@ class PositionSupervisorBinance:
             # 铁律：信号播报 sizing 必须与本笔 payload 同步，禁止沿用上笔残留 tv_suggested_qty
             # （2026-07-22 事故：钉钉显示 0.02，真实下单却用巨大 TV.qty→notional=4.445）
             try:
+                self._tv_signal_atr = float(
+                    self._safe_float(payload.get("atr") or payload.get("ATR"), 0) or 0
+                )
                 self._apply_tv_sl_from_payload(payload, source="信号预览sizing")
                 self._apply_tv_sizing_params(payload)
             except Exception as e:
@@ -3220,15 +3223,12 @@ class PositionSupervisorBinance:
         meta["source"] = "reject"
         self.atr_source = "reject"
         self.atr_degraded = False
-        try:
-            dingtalk.report_system_alert(
-                f"[{self._tag()}] 开仓拒绝·缺TV atr",
-                f"{self.symbol} webhook 无 atr 或 atr≤0 → 拒绝开仓（禁止用1h/90m冒充 initial_atr）",
-                level="紧急",
-                suggestion="检查 TV get_entry_json 是否传 atr 字段",
-            )
-        except Exception:
-            pass
+        # 不在此发钉钉「开仓拒绝」：本函数也被 sizing 预览调用，
+        # atr 可能尚未写入 _tv_signal_atr；真正拒开仅在 _handle_smart_entry。
+        logger.warning(
+            f"⚠️ [{self.symbol}] _resolve_open_atr：尚无 TV atr "
+            f"（若为 sizing 预览可忽略；开仓主路径会再校验）"
+        )
         return 0.0, meta
 
     def _atr_1h_engine(self):
