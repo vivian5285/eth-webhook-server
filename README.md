@@ -1,17 +1,17 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.30-phase-sw-env`**  
+**当前版本：`v15.7.0-triple-defense`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`（单币名义≈本金×1；ETH+XAU 并存合计≈本金×2）**  
-**保护引擎：双雷达呼吸止损（`breath_profiles` · ETH/XAU 分档 · TV `atr`=initial_atr · 1h ATR 呼吸系数 · markPrice WS）**  
+**仓位模式：`RISK20_NOTIONAL5`（主公式 `(本金×20%×5)/价`；TV.qty 非必须）**  
+**保护引擎：永久硬止损 + 雷达止损双 STOP + 两场景 ATR（VPS 1h 优先；失败 TV atr+TP3）**  
 **生产唯一大脑：`position_supervisor_binance.py`（每 symbol 一实例，状态/WS/ATR 互不串台）**  
 **通知渠道：钉钉（`dingtalk.py`；VPS 已配置，暂不迁 Telegram）**
 
-> 本文档为**唯一权威说明**。凡与旧文档（妈妈版阶梯雷达、TP3 挂限价、CAP_ALIGN、TV `stop_loss` 作盘口止损基准、同向跳过平仓、名义×0.85 折扣等）冲突，一律以本文为准。  
-> 旧逻辑清除对照表：[`docs/DELETED_LEGACY_LOGIC_v15.5.13.md`](docs/DELETED_LEGACY_LOGIC_v15.5.13.md)  
+> 本文档为**唯一权威说明**。凡与旧文档冲突，一律以本文与《币安单一系统终极生产级全功能白皮书》为准。  
+> 旧逻辑清除对照表：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)  
 > 天文 qty 事故：[`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md)
 
-TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_atr（缺则拒开）** + 1h ATR 呼吸系数 → **先平后开** → 市价开仓 → 挂 **TP1/TP2** + **呼吸止损开仓即工作** → 平仓钉钉诚实归因。
+TradingView Alert → Webhook → VPS 接收/校验 → **开仓成交后永久硬止损(|entry−TV.stop_loss|×1.2)+TP1/TP2** → **同步拉原生1h ATR**：场景一雷达用真实ATR（不挂TP3）/ 场景二雷达用TV.atr+挂TP3 → 呼吸雷达止损 → 平仓钉钉诚实归因。
 
 | 工厂 | VPS 目录 | 端口 | 品种 | 仓位逻辑 | 钉钉主题 |
 |------|----------|------|------|----------|----------|
@@ -20,12 +20,12 @@ TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.30-phase-sw-env
+# version: v15.7.0-triple-defense
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
 # radar: breath_dual_eth_xau · trading_paused: false
-# 可选验收环境变量：BINANCE_TEST_PHASE_SWITCH_ATR（仅测试；默认不设=生产 phase_switch=3.0）
 
 python3 check_vps_logic.py
+python3 test_two_scenario_atr.py
 python3 test_breath_radar_upgrade.py
 python3 check_deploy_events.py --live
 ```
@@ -43,20 +43,20 @@ python3 check_deploy_events.py --live
    任意时刻一个 symbol 只允许一笔持仓。无多笔 trade 并存、无加权均价重算、无浮盈加仓。
 
 3. **下单数量铁律（永远）**  
-   - 风险资金 = **合约账户本金 × 20%**  
-   - 名义上限 = **(本金 × 20%) × 5 倍杠杆 = 本金 × 1**（≈余额 1 倍，绝不是本金×5）  
-   - `qty = min(风险/|价−initialStop|, 名义/价, TV.qty′)`，向下取整  
-   - **绝不采信天文 TV.qty 为最终下单量**（Pine equity 膨胀时忽略该上限）  
+   - 主公式：`qty = (本金 × 20% × 5 × NOTIONAL_MARGIN_HAIRCUT) / price`  
+   - `stop_loss` 可选：若给出则用 `risk/|价−stop|` 作额外 min 收紧  
+   - `TV.qty` 可选 soft-cap；天文值忽略  
    - 交易所保证金再裁：`availableBalance × 20% × 5 × 0.92`（防 -2019）  
-   无状态纯函数，不读历史仓位/加仓次数。真实挂止损价只用 VPS `initialStop`。
+   无状态纯函数，不读历史仓位。雷达挂止损价用 VPS `initialStop`（与硬止损独立）。
 
-4. **止损单全局唯一写入方 = 呼吸止损引擎**  
-   下单 / 改单 / 触发平仓只由呼吸引擎执行。订单监控、重启恢复等模块**不得**直接调用止损类交易所 API，只能通知引擎执行。  
+4. **双 STOP 防线**  
+   - **永久硬止损**：`_ensure_frozen_hard_sl` 唯一写入，`frozen_hard_sl_px` flat 前不改价  
+   - **雷达止损**：`_sync_exchange_stop` 唯一写入，随呼吸/场景演进  
    保留兜底：`HARD_SL_FAIL_ABORT`、`CLOSE_THEN_OPEN_FAIL_ABORT`、`FORCE_ALIGN`。  
-   **已删除：`CAP_ALIGN`（仓位上限主动减仓）**。
+   **已删除：单槽 merge 硬+雷达**
 
-5. **同窗先平后开**  
-   同 symbol 消息缓存 **固定 1.0s**；平仓优先于开仓；平干净确认后再开。
+5. **15s 开平窗口**  
+   同 symbol 15s 铁律：CLOSE 先到→先平后开；OPEN 先到→丢弃同批 CLOSE。平仓优先于开仓。
 ---
 
 ## 一、信号流与架构

@@ -138,6 +138,7 @@ def audit_module1_symbol(a: Audit):
         collapse_batch_for_execution,
         SAME_BAR_SETTLE_SEC,
         LEGACY_SETTLE_SEC,
+        OPEN_CLOSE_WINDOW_SEC,
     )
     ordered = sort_webhooks_by_seq([
         {"action": "OPEN", "bar_index": 200, "seq": 2},
@@ -158,24 +159,38 @@ def audit_module1_symbol(a: Audit):
         inverted[0].get("action") == "CLOSE_PROTECT"
         and inverted[1].get("action") == "LONG",
     )
-    collapsed = collapse_batch_for_execution([
-        {"action": "SHORT", "price": 100},
+    # CLOSE 先到 + OPEN：先平后开
+    collapsed_close_first = collapse_batch_for_execution([
         {"action": "CLOSE_QUICK_EXIT", "price": 100},
         {"action": "CLOSE_RSI_EXIT", "price": 101},
+        {"action": "SHORT", "price": 100},
         {"action": "LONG", "price": 102},
     ])
     a.check(
-        "1.5d3 缓存折叠：平一次+最新开仓",
-        len(collapsed) == 2
-        and collapsed[0].get("action") == "CLOSE_QUICK_EXIT"
-        and collapsed[1].get("action") == "LONG",
-        str([m.get("action") for m in collapsed]),
+        "1.5d3 缓存折叠：CLOSE先到→平一次+最新开仓",
+        len(collapsed_close_first) == 2
+        and collapsed_close_first[0].get("action") == "CLOSE_QUICK_EXIT"
+        and collapsed_close_first[1].get("action") == "LONG",
+        str([m.get("action") for m in collapsed_close_first]),
+    )
+    # OPEN 先到 + CLOSE：丢弃 CLOSE
+    collapsed_open_first = collapse_batch_for_execution([
+        {"action": "SHORT", "price": 100},
+        {"action": "CLOSE_QUICK_EXIT", "price": 100},
+        {"action": "LONG", "price": 102},
+    ])
+    a.check(
+        "1.5d3b OPEN先到→丢弃CLOSE只留最新开仓",
+        len(collapsed_open_first) == 1
+        and collapsed_open_first[0].get("action") == "LONG",
+        str([m.get("action") for m in collapsed_open_first]),
     )
     a.check(
-        "1.5d4 缓存窗口固定 1.0s",
+        "1.5d4 短settle=1.0s + 开平权威窗=15s",
         abs(float(SAME_BAR_SETTLE_SEC) - 1.0) < 1e-9
-        and abs(float(LEGACY_SETTLE_SEC) - 1.0) < 1e-9,
-        f"bar={SAME_BAR_SETTLE_SEC} legacy={LEGACY_SETTLE_SEC}",
+        and abs(float(LEGACY_SETTLE_SEC) - 1.0) < 1e-9
+        and abs(float(OPEN_CLOSE_WINDOW_SEC) - 15.0) < 1e-9,
+        f"bar={SAME_BAR_SETTLE_SEC} legacy={LEGACY_SETTLE_SEC} win={OPEN_CLOSE_WINDOW_SEC}",
     )
     a.check(
         "1.5e 幂等键含 action",
@@ -195,8 +210,10 @@ def audit_module1_symbol(a: Audit):
         and "collapse_batch_for_execution" in sup
         and "reorder_batch_close_then_open" in sup
         and "action_exec_rank" in tvseq
-        and "永远先平后开" in tvseq
+        and "OPEN_CLOSE_WINDOW_SEC" in tvseq
         and "defense_order_ids" in sup
+        and "frozen_hard_sl_px" in sup
+        and "LATE_CLOSE_SUPPRESS_SEC = 15.0" in sup
         and "_set_defense_order_id" in sup
         and "TimedRotatingFileHandler" in sup
         and "SENTINEL_POLL_NORMAL = 1.0" in sup
@@ -323,7 +340,11 @@ def audit_module2_sizing(a: Audit):
     a.check(
         "2.4 mode/bind RISK20",
         meta.get("sizing_mode") == "RISK20_NOTIONAL5"
-        and "risk20" in str(meta.get("bind") or ""),
+        and str(meta.get("bind") or "") in (
+            "notional_primary",
+            "equity_x20pct_x5_over_price",
+            "risk20_x5_equals_1x_equity_tv_sl_adj",
+        ),
         f"mode={meta.get('sizing_mode')} bind={meta.get('bind')}",
     )
     a.check(
@@ -339,9 +360,9 @@ def audit_module2_sizing(a: Audit):
 
     qty0, meta0 = compute_fixed_order_qty(1000, 3300.5)
     a.check(
-        "2.4b 缺 stop/tv_qty → qty0+error",
-        qty0 == 0 and bool(meta0.get("error")),
-        f"qty={qty0} err={meta0.get('error')}",
+        "2.4b 缺 stop/tv_qty → 仍按名义下单(白皮书)",
+        qty0 > 0 and not meta0.get("error"),
+        f"qty={qty0} err={meta0.get('error')} bind={meta0.get('binding')}",
     )
 
     qty_tv, meta_tv = compute_fixed_order_qty(1000, 1800, stop_loss=1000, tv_qty=0.5)
@@ -351,15 +372,16 @@ def audit_module2_sizing(a: Audit):
         f"qty={qty_tv} meta={meta_tv.get('tv_qty')}",
     )
 
-    # VPS距60、TV距40 → adj=2/3；tv_qty=2 → 调整上限≈1.333；名义=本金×1/价≈0.333 → 生效=notional
+    # 白皮书：sl_adj 已废除；名义主约束；TV.qty=2 软上限不影响名义≈0.333
     qty_adj, meta_adj = compute_fixed_order_qty(
         1000, 3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
     )
     a.check(
-        "2.5b TV止损距调整系数≈0.6667",
-        abs(float(meta_adj.get("sl_adj") or 0) - (40.0 / 60.0)) < 1e-6,
-        f"sl_adj={meta_adj.get('sl_adj')} tv_dist={meta_adj.get('tv_implied_dist')} "
-        f"vps_dist={meta_adj.get('vps_stop_dist')}",
+        "2.5b 白皮书无sl_adj·名义主约束",
+        abs(float(meta_adj.get("sl_adj") or 0) - 1.0) < 1e-9
+        and meta_adj.get("binding") in ("notional", "risk", "tv_qty"),
+        f"sl_adj={meta_adj.get('sl_adj')} bind={meta_adj.get('binding')} "
+        f"vps_dist={meta_adj.get('vps_stop_dist')} qty={qty_adj}",
     )
     a.check(
         "2.5c 名义=本金×1 约束生效 → qty≈0.333",
@@ -507,7 +529,9 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.7b 开仓禁止 recover 核武连环撤",
-        "开仓后防线对齐" in sup and "recover_mode=False" in sup,
+        ("开仓后防线对齐" in sup or "开仓共同第一步" in sup or "_arm_temp_stop_and_tp12" in sup)
+        and "recover_mode=False" in sup
+        and "frozen_hard_sl_px" in sup,
     )
     a.check(
         "3.8 防线 thrash 刹车",
@@ -729,13 +753,14 @@ def audit_module4_radar(a: Audit):
         and "_place_dedupe_lock" in _bc
         and "允许首挂" in _bc
         and "orders_unreadable" in sup
-        and "止损收缩幂等跳过" in sup
+        and ("止损收缩幂等跳过" in sup or "止损数量收缩" in sup or "止损收缩签名幂等" in sup)
         and "本轮不再重挂" in sup
         and "_sentinel_start_lock" in sup
         and "_count_open_limits_and_stops" in sup
         and "limits=0 stops=0" in sup
         and "下单前挂单未净" in sup
-        and "_verify_sterile_flat" in sup,
+        and "_verify_sterile_flat" in sup
+        and "frozen_hard_sl_px" in sup,
     )
     a.check(
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.5.6"
 
-# ── RISK20：min(风险/止损距, 名义/价, TV.qty)，无状态纯函数 ───────────────
+# ── RISK20：名义=(本金×20%×5)/价；stop/TV.qty 可选收紧，无状态纯函数 ─────
 FIXED_RISK_PCT = 0.20
 FIXED_NOTIONAL_MULT = 5.0  # 杠杆倍数：作用在「本金×20%」上，不是全本金
 FIXED_MARGIN_PCT = FIXED_RISK_PCT
@@ -35,9 +35,9 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：只挂 TP1+TP2（各30%）；余仓40%由呼吸止损阶段二收网
+# 分腿：TP1/TP2 各30%；场景二另挂 TP3=40%；场景一余仓交呼吸阶段二
 LEG_TP_RATIOS = [0.30, 0.30, 0.40]
-PLACE_TP_LEVELS = 2
+PLACE_TP_LEVELS = 2  # 默认场景一；场景二运行时升为 3（见 atr_scenario）
 
 # ── 旧雷达常量已废除（实盘走 breath_stop；保留名防旧 import）────────────────
 # 旧值：activate=0.85 / step=0.5 / lock=0.3 / tp3_trail=2.0 — 禁止再用于决策
@@ -357,12 +357,11 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
                             stop_loss=None, tv_qty=None, tv_sl=None,
                             tv_price=None, **_kw):
     """
-    无状态纯函数（仅开仓时算一次；不读历史仓位）——铁律永远：
-      risk_capital = 合约本金 × 0.20          # 风险资金（也作保证金预算）
-      notional_cap = risk_capital × 5        # = 本金 × 20% × 5 = 本金 × 1
-      qty = min(risk_capital/|price−initialStop|, notional_cap/price, TV.qty′)
-    天文 TV.qty（≫ 风险/名义候选）直接忽略，防止 Pine equity 膨胀把上限顶穿。
-    TV.stop_loss 只参与 sl_adj，绝不作为盘口止损价。
+    无状态纯函数（仅开仓时算一次；不读历史仓位）——白皮书定稿：
+      主公式：qty = (principal × 0.20 × 5 × NOTIONAL_MARGIN_HAIRCUT) / price
+      stop_loss 可选：若给出则用 risk/|price−stop| 作额外 min 收紧
+      TV.qty 可选：非天文则 soft-cap；天文则忽略
+    TV.stop_loss 不参与挂止损价，仅历史兼容字段。
     """
     principal = float(principal or 0)
     price = float(price or 0)
@@ -371,9 +370,7 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     notional_mult = float(leverage if leverage is not None else FIXED_NOTIONAL_MULT)
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
-    # VPS 实际止损价（initialStop）
     vps_stop = float(stop_loss or 0)
-    # TV 参考止损（仅算调整系数）
     tv_stop = float(tv_sl or 0)
     tv_ref = float(tv_qty) if tv_qty is not None and float(tv_qty or 0) > 0 else None
 
@@ -394,82 +391,56 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
         "tv_qty": tv_ref,
         "tv_qty_ref_only": False,
         "regime": 0,
-        "bind": "risk20_x5_equals_1x_equity_tv_sl_adj",
+        "bind": "notional_primary",
         "formula": (
-            "min(risk/vps_dist, (risk×5)/price, TV.qty×(tv_dist/vps_dist))"
-            " · notional=equity×20%×5(=1×equity)"
+            "(principal×0.20×5×NOTIONAL_MARGIN_HAIRCUT)/price"
+            " · optional min(risk/dist, TV.qty soft-cap)"
         ),
         "sl_adj": 1.0,
-        "tv_sl_adj_skipped": False,
+        "tv_sl_adj_skipped": True,
     }
     if principal <= 0 or price <= 0 or risk_pct <= 0 or notional_mult <= 0:
         meta["error"] = "invalid_inputs"
         return 0.0, meta
-    if vps_stop <= 0:
-        meta["error"] = "missing_stop_loss"
-        return 0.0, meta
-    if tv_ref is None or tv_ref <= 0:
-        meta["error"] = "missing_tv_qty"
-        return 0.0, meta
-
-    vps_stop_dist = abs(price - vps_stop)
-    if vps_stop_dist <= 1e-12:
-        meta["error"] = "zero_stop_dist"
-        meta["stop_dist"] = 0.0
-        return 0.0, meta
-
-    # 调整系数：把 TV.qty（按 TV 隐含止损距算出）换算到 VPS 止损距下的等效上限
-    sl_adj = 1.0
-    tv_implied_dist = 0.0
-    if tv_stop > 0 and tv_px > 0:
-        tv_implied_dist = abs(tv_px - tv_stop)
-        if tv_implied_dist > 1e-12:
-            sl_adj = tv_implied_dist / vps_stop_dist
-        else:
-            meta["tv_sl_adj_skipped"] = True
-            meta["tv_sl_adj_reason"] = "zero_tv_implied_dist"
-    else:
-        meta["tv_sl_adj_skipped"] = True
-        meta["tv_sl_adj_reason"] = "missing_tv_stop_loss"
-
-    adjusted_tv_qty = tv_ref * sl_adj
 
     risk_capital = principal * risk_pct
-    # 名义 = (本金×20%) × 5倍杠杆 = 本金×1；绝不是本金×5
     notional_cap = risk_capital * notional_mult * NOTIONAL_MARGIN_HAIRCUT
-    qty_by_risk = risk_capital / vps_stop_dist
     qty_by_notional = notional_cap / price
-    tv_qty_ignored_absurd = False
-    cap_ref = max(qty_by_risk, qty_by_notional)
-    if cap_ref > 0 and adjusted_tv_qty > cap_ref * ABSURD_TV_QTY_VS_CAPS:
-        raw_qty = min(qty_by_risk, qty_by_notional)
-        tv_qty_ignored_absurd = True
-    else:
-        raw_qty = min(qty_by_risk, qty_by_notional, adjusted_tv_qty)
+    raw_qty = qty_by_notional
+    binding = "notional"
+    qty_by_risk = None
+    vps_stop_dist = 0.0
 
-    # 哪个约束生效（便于开仓日志核对）
-    if tv_qty_ignored_absurd:
-        binding = "risk" if qty_by_risk <= qty_by_notional + 1e-12 else "notional"
-    else:
-        _cands = (
-            ("risk", qty_by_risk),
-            ("notional", qty_by_notional),
-            ("adjusted_tv_qty", adjusted_tv_qty),
-        )
-        binding = min(_cands, key=lambda x: x[1])[0]
+    if vps_stop > 0:
+        vps_stop_dist = abs(price - vps_stop)
+        if vps_stop_dist > 1e-12:
+            qty_by_risk = risk_capital / vps_stop_dist
+            if qty_by_risk < raw_qty:
+                raw_qty = qty_by_risk
+                binding = "risk"
+        else:
+            meta["zero_stop_dist"] = True
+
+    tv_qty_ignored_absurd = False
+    adjusted_tv_qty = tv_ref
+    if tv_ref is not None and tv_ref > 0:
+        cap_ref = max(qty_by_notional, qty_by_risk or 0.0)
+        if cap_ref > 0 and tv_ref > cap_ref * ABSURD_TV_QTY_VS_CAPS:
+            tv_qty_ignored_absurd = True
+        elif tv_ref < raw_qty:
+            raw_qty = tv_ref
+            binding = "tv_qty"
 
     meta["risk_capital"] = round(risk_capital, 4)
     meta["notional_cap"] = round(notional_cap, 2)
     meta["nominal_value"] = round(notional_cap, 2)
     meta["notional_margin_haircut"] = NOTIONAL_MARGIN_HAIRCUT
-    meta["stop_dist"] = round(vps_stop_dist, 4)
-    meta["vps_stop_dist"] = round(vps_stop_dist, 4)
-    meta["tv_implied_dist"] = round(tv_implied_dist, 4)
-    meta["sl_adj"] = round(sl_adj, 6)
-    meta["adjusted_tv_qty"] = round(adjusted_tv_qty, 6)
+    meta["stop_dist"] = round(vps_stop_dist, 4) if vps_stop_dist else 0.0
+    meta["vps_stop_dist"] = meta["stop_dist"]
     meta["tv_qty_ignored_absurd"] = tv_qty_ignored_absurd
-    meta["qty_by_risk"] = round(qty_by_risk, 6)
+    meta["qty_by_risk"] = round(qty_by_risk, 6) if qty_by_risk is not None else 0.0
     meta["qty_by_notional"] = round(qty_by_notional, 6)
+    meta["adjusted_tv_qty"] = round(adjusted_tv_qty, 6) if adjusted_tv_qty else 0.0
     meta["binding"] = binding
     meta["margin"] = round(risk_capital, 4)
     meta["notional"] = round(min(raw_qty * price, notional_cap), 2)
@@ -480,8 +451,10 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     if face_value and float(face_value) > 0:
         fv = float(face_value)
         qty = max(1, int(math.floor(raw_qty / fv)))
-        adj_cap = int(math.floor(adjusted_tv_qty / fv)) if adjusted_tv_qty > 0 else qty
-        qty = min(qty, int(max_position), adj_cap)
+        if adjusted_tv_qty and adjusted_tv_qty > 0 and not tv_qty_ignored_absurd:
+            adj_cap = int(math.floor(adjusted_tv_qty / fv))
+            qty = min(qty, adj_cap)
+        qty = min(qty, int(max_position))
         meta["base_qty"] = float(qty)
         meta["qty"] = float(qty)
         return float(qty), meta
@@ -494,8 +467,12 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
             qty = 0.0
     if qty > max_position:
         qty = float(max_position)
-    # 最终不超过调整后的 TV 上限（禁止再夹回未调整的原始 TV.qty）
-    if adjusted_tv_qty > 0 and qty > adjusted_tv_qty:
+    if (
+        adjusted_tv_qty
+        and adjusted_tv_qty > 0
+        and not tv_qty_ignored_absurd
+        and qty > adjusted_tv_qty
+    ):
         qty = _floor_qty_3dp(adjusted_tv_qty, min_qty=min_qty)
     meta["base_qty"] = float(qty)
     meta["qty"] = float(qty)

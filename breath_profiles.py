@@ -168,3 +168,15 @@ class LockedInitialAtr:
         if v > 0:
             self._value = v
         return self._value
+
+    def upgrade_to_vps(self, atr: float) -> float:
+        """
+        两场景定稿：允许场景二(TV atr) → 场景一(VPS 真实 1h ATR) 覆盖锁定值。
+        仅用于开仓同步接管 / tick 恢复；禁止随意改小改大以外的路径调用。
+        """
+        v = float(atr or 0)
+        if v <= 0:
+            raise ValueError("upgrade_to_vps requires atr>0")
+        self._value = v
+        self._locked = True
+        return self._value

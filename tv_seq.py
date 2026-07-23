@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TV Webhook 时序：bar_index + seq + 缓存窗口
-- 缓存窗口：同 symbol 首包后 **固定 1.0s** settle，到期统一处理（不无限等待）
-- 排序：先 bar_index 升序；同 bar 内 **动作优先**（CLOSE → UPDATE → OPEN），再 seq
-- 铁律：同窗有平仓时 **一律先平后开**（平仓一次 + 最新开仓）；禁止先开后秒平
-- 折叠：平仓消息幂等只执行一次；开仓只执行窗口内最新一条
+TV Webhook 时序：bar_index + seq + 15 秒开平窗口（白皮书定稿）
+- 短 settle：同 symbol 首包后短暂聚合再冲刷（不无限等待）
+- 15s 铁律（权威）：
+  · CLOSE 先到、OPEN 在 15s 内到 → 先平后开
+  · OPEN 先到、CLOSE 在 15s 内到 → 执行 OPEN，丢弃 CLOSE（不比时间戳）
+  · 超过 15s 的 CLOSE → 独立平仓事件
+- 折叠：平仓幂等一次；开仓只留最新一条
 - 幂等：symbol_bar_index_seq_action（Redis 优先，否则本地文件 TTL）
-- CLOSE 后释放开仓幂等键，允许同 bar 再开（刷新仓位）
-- 乱序：前置 seq 缺失时暂存等待，超时报警后按已有顺序执行
 """
 from __future__ import annotations
 
@@ -24,12 +24,14 @@ logger = logging.getLogger(__name__)
 
 SEQ_IDEMPOTENCY_TTL_SEC = int(os.getenv("TV_SEQ_IDEMPOTENCY_TTL", "86400"))  # 24h
 SEQ_PENDING_WAIT_SEC = float(os.getenv("TV_SEQ_PENDING_WAIT", "3.0"))  # 2~5s 窗口
-# 缓存窗口固定 1.0s（需求锁定；忽略环境变量漂移）
+# 短 settle 仅聚合同批到达；开平关系由 15s 窗口规则决定
 SAME_BAR_SETTLE_SEC = 1.0
 LEGACY_SETTLE_SEC = 1.0
-# 仅开仓先到：最多再等一会，给迟到平仓拼进同窗（先平后开）
-OPEN_ALONE_MAX_WAIT_SEC = 2.5
+# 白皮书：OPEN 先到后不等待 CLOSE 拼窗（迟到 CLOSE 由 15s 丢弃规则处理）
+OPEN_ALONE_MAX_WAIT_SEC = 0.0
 MAX_PAIR_WAIT_SEC = 3.0
+# OPEN 成交后丢弃迟到 CLOSE 的权威窗口（与 supervisor LATE_CLOSE_SUPPRESS_SEC 对齐）
+OPEN_CLOSE_WINDOW_SEC = 15.0
 SEQ_STORE_FILE = os.getenv("TV_SEQ_STORE_FILE", "logs/tv_seq_idempotency.json")
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
@@ -512,15 +514,38 @@ def reorder_batch_close_then_open(messages: List[dict]) -> List[dict]:
 
 def collapse_batch_for_execution(messages: List[dict]) -> List[dict]:
     """
-    缓存窗口到期后折叠执行集（无论到达顺序）：
-    1. P0 平仓（CLOSE_QUICK_EXIT / CLOSE_RSI_EXIT）→ 只保留一条（幂等）
-    2. 其它非开仓消息（RECONCILE 等）按原序保留
-    3. P1 开仓（LONG/SHORT）→ 只保留最新一条（msgs[-1]）
-    最终顺序：平仓 → 其它 → 开仓（至多一条）
+    缓存窗口到期后折叠执行集（白皮书 15s 开平铁律）：
+    1. 若同批既有 OPEN 又有 CLOSE：按到达序判定
+       · OPEN 先到 → 丢弃全部 CLOSE，只执行开仓
+       · CLOSE 先到 → 先平后开
+    2. P0 平仓只保留一条；P1 开仓只保留最新一条
+    最终顺序：平仓(若保留) → 其它 → 开仓(至多一条)
     """
     msgs = list(messages or [])
     if not msgs:
         return []
+
+    first_open_i = None
+    first_close_i = None
+    for i, m in enumerate(msgs):
+        act = str((m or {}).get("action", "") or "").strip().upper()
+        if first_open_i is None and is_open_action(act):
+            first_open_i = i
+        if first_close_i is None and (
+            is_flatten_action(act) or is_close_action(act)
+        ):
+            first_close_i = i
+
+    # OPEN 先到：同批 CLOSE 一律丢弃（迟到 CLOSE 由 15s 执行窗再拦）
+    drop_closes = (
+        first_open_i is not None
+        and first_close_i is not None
+        and first_open_i < first_close_i
+    )
+    if drop_closes:
+        logger.info(
+            "📬 15s窗口规则：OPEN先到 → 丢弃同批CLOSE，只执行开仓"
+        )
 
     exit_msgs: List[dict] = []
     entry_msgs: List[dict] = []
@@ -543,7 +568,11 @@ def collapse_batch_for_execution(messages: List[dict]) -> List[dict]:
     for m in msgs:
         act = str((m or {}).get("action", "") or "").strip().upper()
         fp = _fp(m)
-        if is_flatten_action(act):
+        if is_flatten_action(act) or (
+            is_close_action(act) and not is_open_action(act)
+        ):
+            if drop_closes:
+                continue
             if fp in seen_exit_fp:
                 continue  # 窗口内相同平仓合并
             seen_exit_fp.add(fp)
