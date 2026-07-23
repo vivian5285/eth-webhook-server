@@ -810,8 +810,11 @@ def audit_module4_radar(a: Audit):
         and "_qty_reduction_looks_like_tp" in sup,
     )
     a.check(
-        "4.17 closePosition 单槽",
-        "closePosition" in sup and "reduceOnly" in sup,
+        "4.17 双STOP共存(硬+雷达) closePosition/reduceOnly",
+        "closePosition" in sup
+        and "reduceOnly" in sup
+        and ("双STOP共存" in sup or "frozen_hard_sl_px" in sup)
+        and "合并为单槽" not in sup,
     )
     a.check("4.18 钉钉标题含品种", "[sym]" in dt or "[{sym}]" in dt)
 

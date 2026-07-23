@@ -1,12 +1,14 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.2-breath-lock`**  
+**当前版本：`v15.7.3-dual-stop-coexist`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
 **呼吸锁定表：ETH 1.2~2.5 / XAU 0.5~1.2**（冷启动 1.525 / 0.675）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
+
+> **双 STOP 说明**：盘口两笔接近的止损 = **硬止损(|entry−TV.SL|×1.2)** + **雷达(1.5×ATR)**，不是「TV原价 + ×1.2」两档。TV 原 `stop_loss` **不挂盘**。
 
 > **权威依据**：桌面《Gemini终极生产级全功能白皮书》+ 本文。冲突时以白皮书为准。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)

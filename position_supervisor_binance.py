@@ -149,7 +149,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.2-breath-lock"
+BINANCE_VPS_VERSION = "v15.7.3-dual-stop-coexist"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -9482,8 +9482,8 @@ class PositionSupervisorBinance:
 
     def _reconcile_open_qty_vs_tp123(self, live_qty, entry=None, source=""):
         """
-        开仓/成交后对账：总头寸 ≈ TP1+TP2+TP3 切片之和；
-        硬止损 closePosition 与雷达共用单槽，不占 TP reduceOnly 额度。
+        开仓/成交后对账：总头寸 ≈ TP1+TP2(+TP3场景二) 切片之和；
+        硬止损与雷达为双 STOP 永久共存（非单槽），不占 TP reduceOnly 额度。
         """
         live_qty = float(live_qty or 0)
         if live_qty <= 0:
@@ -9505,8 +9505,8 @@ class PositionSupervisorBinance:
         note = (
             f"开仓基线 {baseline} {self._unit()} | "
             f"TP切片合计 {slice_sum} "
-            f"(TP1={q1}/TP2={q2}/TP3={q3}·余仓不挂) | "
-            f"硬止损+雷达=closePosition单槽·TP=reduceOnly"
+            f"(TP1={q1}/TP2={q2}/TP3={q3}·余仓视场景) | "
+            f"硬止损+雷达=双STOP共存·TP=reduceOnly"
         )
         if not ok:
             logger.warning(
@@ -9515,7 +9515,7 @@ class PositionSupervisorBinance:
             )
         else:
             logger.info(f"✅ [{self.symbol}] [{source or '对账'}] {note}")
-        # 盘口：TP 限价张数 vs 未消费档；STOP 应 ≤1（单槽）
+        # 盘口：TP 限价张数 vs 未消费档；STOP 允许 1~2（硬+雷达），>2 才视为叠单垃圾
         try:
             tp_orders = self._collect_tp_limit_orders()
             stops = binance_client.find_protective_stop_prices(self.symbol)
@@ -9525,11 +9525,30 @@ class PositionSupervisorBinance:
                     f"⚠️ [{self.symbol}] TP限价偏多 {len(tp_orders)}>{expected} "
                     f"→ 哨兵将纠偏（不撤硬止损）"
                 )
-            if len(stops) > 1:
-                logger.warning(
-                    f"⚠️ [{self.symbol}] 保护STOP叠单 {stops} → 合并为单槽 "
-                    f"(雷达/硬止损不抢份额)"
+            if stops is None:
+                pass
+            elif len(stops) == 2:
+                hard = self._frozen_hard_px()
+                logger.info(
+                    f"✅ [{self.symbol}] 双STOP共存确认 {stops} "
+                    f"(硬止损账本@{hard:.2f} + 雷达；非叠单)"
                 )
+            elif len(stops) > 2:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 保护STOP过多 {stops} "
+                    f"(期望≤2：硬止损+雷达) → 保留硬止损、清理多余雷达腿"
+                )
+                self._maintain_hard_shield(
+                    live_qty,
+                    binance_client.get_current_price(self.symbol) or 0,
+                    force=True,
+                    radar_sl=self._radar_sl_to_pass(),
+                )
+            elif len(stops) < 1:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 盘口无保护STOP → 补挂双防线"
+                )
+                self._ensure_frozen_hard_sl(live_qty, reason="对账补永久硬止损")
                 self._maintain_hard_shield(
                     live_qty,
                     binance_client.get_current_price(self.symbol) or 0,
