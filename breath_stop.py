@@ -188,6 +188,14 @@ def calculate_stop_long(
     step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
     step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR)
+    # 仅验收用：systemd/环境 BINANCE_TEST_PHASE_SWITCH_ATR 可压阶段切换门槛（默认不设=生产 3.0）
+    try:
+        import os as _os
+        _ov = _os.environ.get("BINANCE_TEST_PHASE_SWITCH_ATR", "").strip()
+        if _ov:
+            phase_sw = float(_ov)
+    except (TypeError, ValueError):
+        pass
     early_be = float(p.get("early_be_atr") or 0)
     tp1_a = float(p.get("tp1_atr") or TP1_ATR)
     tp1_f = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)
@@ -272,6 +280,14 @@ def calculate_stop_short(
     step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
     step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR)
+    # 仅验收用：systemd/环境 BINANCE_TEST_PHASE_SWITCH_ATR 可压阶段切换门槛（默认不设=生产 3.0）
+    try:
+        import os as _os
+        _ov = _os.environ.get("BINANCE_TEST_PHASE_SWITCH_ATR", "").strip()
+        if _ov:
+            phase_sw = float(_ov)
+    except (TypeError, ValueError):
+        pass
     early_be = float(p.get("early_be_atr") or 0)
     tp1_a = float(p.get("tp1_atr") or TP1_ATR)
     tp1_f = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)

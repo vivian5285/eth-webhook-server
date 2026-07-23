@@ -199,7 +199,7 @@ def audit_module1_symbol(a: Audit):
         and "defense_order_ids" in sup
         and "_set_defense_order_id" in sup
         and "TimedRotatingFileHandler" in sup
-        and "SENTINEL_POLL_NORMAL = 0.5" in sup
+        and "SENTINEL_POLL_NORMAL = 1.0" in sup
         and "restart_no_persistence_with_position" in sup,
     )
     a.check(
@@ -460,10 +460,12 @@ def audit_module3_hard_sl(a: Audit):
         f"stop={out2['stop']} phase={out2['breakeven_phase']}",
     )
     from breath_stop import get_breathing_coefficient, order_stop_price
-    coeff, _, _ = get_breathing_coefficient(20.0, 20.0, [])
+    coeff, smooth, _ = get_breathing_coefficient(20.0, 20.0, [])
+    # ratio=1.0 → 连续插值中间值（ETH: floor0.6/ceil2.2 · min1.2/max2.5 → 1.525）
     a.check(
-        "3.1h 呼吸系数正常档=1.0",
-        abs(coeff - 1.0) < 1e-9,
+        "3.1h 呼吸系数 ratio=1 → 插值中间值",
+        abs(coeff - 1.525) < 1e-6 and abs(smooth - 1.0) < 1e-9,
+        f"coeff={coeff} smooth={smooth}",
     )
     a.check(
         "3.1i 挂单缓冲±0.3",
@@ -543,10 +545,10 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check("3.16 POST_OPEN_RADAR_BLOCK_SEC=0", "POST_OPEN_RADAR_BLOCK_SEC = 0" in sup)
     a.check(
-        "3.18 哨兵周期 0.5s",
-        "SENTINEL_POLL_NORMAL = 0.5" in sup
-        and "SENTINEL_POLL_ARMING = 0.5" in sup
-        and "SENTINEL_POLL_RADAR = 0.5" in sup,
+        "3.18 哨兵周期 1.0s（限频友好）",
+        "SENTINEL_POLL_NORMAL = 1.0" in sup
+        and "SENTINEL_POLL_ARMING = 1.0" in sup
+        and "SENTINEL_POLL_RADAR = 1.0" in sup,
     )
     a.check(
         "3.20 版本 final-spec/breath",
@@ -717,18 +719,30 @@ def audit_module4_radar(a: Audit):
     )
     _bc = _read(os.path.join(ROOT, "binance_client.py"))
     a.check(
-        "4.5c2 挂单查询失败 fail-closed + 同价去重",
+        "4.5c2 挂单查询失败 fail-closed + 同价去重 + 首挂本地锁",
         "ORDERS_QUERY_FAILED" in _bc
         and "is_orders_query_failed" in _bc
         and "_existing_same_limit" in _bc
         and "_existing_same_stop" in _bc
+        and "_recent_limit_place" in _bc
+        and "_recent_stop_place" in _bc
+        and "_place_dedupe_lock" in _bc
+        and "允许首挂" in _bc
         and "orders_unreadable" in sup
         and "止损收缩幂等跳过" in sup
         and "本轮不再重挂" in sup
         and "_sentinel_start_lock" in sup
         and "_count_open_limits_and_stops" in sup
         and "limits=0 stops=0" in sup
-        and "下单前挂单未净" in sup,
+        and "下单前挂单未净" in sup
+        and "_verify_sterile_flat" in sup,
+    )
+    a.check(
+        "4.5c3 开仓 atr 只认 TV（禁止本地回填）",
+        '_atr_reject' in wp
+        and '"tv_invalid"' in wp
+        and "RADAR_ACTIVATE_TP1_FRAC = 0.0" in wp
+        and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
     a.check("4.5d SIGNAL_DEDUP_SEC=60", int(_DEDUP) == 60, str(_DEDUP))

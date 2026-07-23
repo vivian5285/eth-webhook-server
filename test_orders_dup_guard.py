@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v15.5.28：挂单查询失败 fail-closed + 同价去重 + 审计不可读不补挂。"""
+"""v15.5.28/29：挂单 fail-closed 审计 + 同价去重 + 查单失败允许首挂、120s 本地锁防叠。"""
 import os
 import sys
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +18,17 @@ from binance_client import (  # noqa: E402
     ORDERS_QUERY_FAILED,
     is_orders_query_failed,
 )
+
+
+def _bare_client():
+    c = BinanceClient.__new__(BinanceClient)
+    c.format_quantity = lambda q, symbol="ETHUSDT": float(q)
+    c.format_price = lambda p, symbol="ETHUSDT": f"{float(p):.2f}"
+    c.client = MagicMock()
+    c._recent_limit_place = {}
+    c._recent_stop_place = {}
+    c._place_dedupe_lock = threading.Lock()
+    return c
 
 
 class TestOrdersDupGuard(unittest.TestCase):
@@ -34,26 +46,43 @@ class TestOrdersDupGuard(unittest.TestCase):
         out = BinanceClient.get_open_orders(c, "ETHUSDT", include_algo=False)
         self.assertTrue(is_orders_query_failed(out))
 
-    def test_place_limit_refuses_when_query_failed(self):
-        c = BinanceClient.__new__(BinanceClient)
-        c.format_quantity = lambda q, symbol="ETHUSDT": float(q)
-        c.format_price = lambda p, symbol="ETHUSDT": f"{float(p):.2f}"
-        c.client = MagicMock()
+    def test_place_limit_allows_first_when_query_failed_then_locks(self):
+        """v15.5.29：查单失败允许首挂；同价 120s 内第二次跳过。"""
+        c = _bare_client()
+        placed = {"orderId": 7, "price": "1895.42"}
+        c.client.futures_create_order.return_value = placed
         with patch.object(
             c, "_existing_same_limit", return_value=ORDERS_QUERY_FAILED,
         ):
-            self.assertIsNone(
-                BinanceClient.place_limit_order(
-                    c, "SELL", 0.01, 1895.42, symbol="ETHUSDT",
-                )
+            first = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1895.42, symbol="ETHUSDT",
             )
-        c.client.futures_create_order.assert_not_called()
+            second = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1895.42, symbol="ETHUSDT",
+            )
+        self.assertEqual(first, placed)
+        self.assertEqual(second, placed)
+        self.assertEqual(c.client.futures_create_order.call_count, 1)
+
+    def test_place_stop_allows_first_when_query_failed_then_locks(self):
+        c = _bare_client()
+        placed = {"orderId": 8, "stopPrice": "1890.00"}
+        c.client.futures_create_order.return_value = placed
+        with patch.object(
+            c, "_existing_same_stop", return_value=ORDERS_QUERY_FAILED,
+        ):
+            first = BinanceClient.place_stop_market_order(
+                c, "SELL", 1890.0, symbol="ETHUSDT", quantity=0.01,
+            )
+            second = BinanceClient.place_stop_market_order(
+                c, "SELL", 1890.0, symbol="ETHUSDT", quantity=0.01,
+            )
+        self.assertEqual(first, placed)
+        self.assertEqual(second, placed)
+        self.assertEqual(c.client.futures_create_order.call_count, 1)
 
     def test_place_limit_skips_duplicate_price(self):
-        c = BinanceClient.__new__(BinanceClient)
-        c.format_quantity = lambda q, symbol="ETHUSDT": float(q)
-        c.format_price = lambda p, symbol="ETHUSDT": f"{float(p):.2f}"
-        c.client = MagicMock()
+        c = _bare_client()
         exist = {"orderId": 99, "price": "1895.42", "type": "LIMIT", "side": "SELL"}
         with patch.object(c, "_existing_same_limit", return_value=exist):
             out = BinanceClient.place_limit_order(
@@ -130,17 +159,20 @@ class TestSterileFlatFailClosed(unittest.TestCase):
 
     def test_verify_sterile_rejects_unread_book(self):
         s = self._make_sup()
+        s._verify_flat = lambda: True
         s._count_open_limits_and_stops = lambda: None
         self.assertFalse(s._verify_sterile_flat())
 
     def test_verify_sterile_rejects_ghost_limit(self):
         s = self._make_sup()
+        s._verify_flat = lambda: True
         ghost = [{"type": "LIMIT", "price": "4162", "orderId": 1, "side": "SELL"}]
         s._count_open_limits_and_stops = lambda: (1, 0, ghost)
         self.assertFalse(s._verify_sterile_flat())
 
     def test_verify_sterile_ok_when_empty(self):
         s = self._make_sup()
+        s._verify_flat = lambda: True
         s._count_open_limits_and_stops = lambda: (0, 0, [])
         s._collect_tp_limit_orders = lambda: []
         self.assertTrue(s._verify_sterile_flat())
