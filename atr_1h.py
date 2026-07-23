@@ -46,6 +46,17 @@ class Atr1hEngine:
     def refresh(self, force: bool = False) -> float:
         now = time.time()
         with self._lock:
+            # 验收用：强制场景二（不进生产常态；systemd Environment=BINANCE_FORCE_ATR1H_FAIL=1）
+            try:
+                import os as _os
+                if str(_os.environ.get("BINANCE_FORCE_ATR1H_FAIL", "")).strip() in (
+                    "1", "true", "TRUE", "yes", "YES",
+                ):
+                    self.last_error = "forced_atr1h_fail"
+                    self.last_refresh_ts = now
+                    return 0.0
+            except Exception:
+                pass
             if (
                 not force
                 and self.atr > 0

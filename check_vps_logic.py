@@ -441,7 +441,7 @@ def audit_module2_sizing(a: Audit):
 
 
 def audit_module3_hard_sl(a: Audit):
-    a.section("模块三 · 呼吸止损（硬止损+雷达合并）")
+    a.section("模块三 · 呼吸止损（永久硬止损+独立雷达双 STOP）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
     from breath_stop import (
         INITIAL_SL_ATR,
@@ -965,20 +965,24 @@ def audit_readme_consistency(a: Audit):
     )
     a.check(
         "README 仅挂 TP1+TP2",
-        ("TP1+TP2" in readme or "只挂" in readme)
-        and ("不挂 TP3" in readme or "余仓" in readme or "阶段二" in readme),
+        ("TP1+TP2" in readme or "TP1 / TP2" in readme or "只挂" in readme)
+        and ("不挂 TP3" in readme or "余仓" in readme or "阶段二" in readme or "场景二" in readme),
     )
     a.check(
         "README 核心铁律保留",
         "先平后开" in readme
-        and ("reduceOnly" in readme or "TP1+TP2" in readme)
-        and ("呼吸止损" in readme or "双轨" in readme),
+        and ("reduceOnly" in readme or "TP1+TP2" in readme or "双 STOP" in readme or "三层防线" in readme)
+        and ("呼吸止损" in readme or "双轨" in readme or "雷达止损" in readme),
     )
     a.check(
         "README 废弃对账已说明",
         "CLOSE_QUICK_EXIT" in readme or "仅 LONG" in readme or "Webhook" in readme,
     )
-    a.check("README secret/token 528586", "528586" in readme and ("secret" in readme.lower() or "token" in readme.lower()))
+    a.check(
+        "README secret 鉴权说明",
+        ("secret" in readme.lower() or "token" in readme.lower())
+        and ("鉴权" in readme or "auth" in readme.lower()),
+    )
     a.check(
         "README v15/arch-align",
         "v15." in readme or "arch-align" in readme or "RISK20" in readme,

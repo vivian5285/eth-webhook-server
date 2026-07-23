@@ -91,7 +91,7 @@ def webhook(ticker=None):
                 "message": "LONG/SHORT require valid price (ATR/ADX computed on VPS)",
                 "got": {"price": px},
             }), 400
-        # stop_loss 仅作 sizing 调整系数 / 调试对比，不参与挂盘
+        # stop_loss → 永久硬止损距离基准（×1.2）；亦可作 sizing 收紧 / 调试对比
         sl = data.get("stop_loss") or data.get("tv_sl")
         if sl is not None:
             data["_tv_sl_ref"] = sl

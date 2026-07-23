@@ -149,7 +149,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.0-triple-defense"
+BINANCE_VPS_VERSION = "v15.7.1-triple-defense"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -5555,7 +5555,8 @@ class PositionSupervisorBinance:
         撤净全部保护性 STOP / STOP_MARKET（含 Stop-Limit reduceOnly + Algo closePosition）。
         keep_near: 若给出目标价，保留触发价贴近该价的单；其余一律撤。
         also_keep_near: float 或 list，贴近这些价的 STOP 不撤。
-        preserve_hard=False 时不清 frozen 硬止损（flat/TP收缩用）。
+        preserve_hard=True（默认）时保留 frozen 硬止损价位，禁止触碰永久防线。
+        preserve_hard=False 仅允许在仓位归零清场时使用。
         """
         keep_near = float(keep_near or 0)
         tol = float(tolerance if tolerance is not None else SHIELD_STOP_TOLERANCE)
@@ -5689,7 +5690,10 @@ class PositionSupervisorBinance:
         ]
 
     def _ensure_frozen_hard_sl(self, live_qty, reason="永久硬止损"):
-        """Place/resize hard SL at frozen_hard_sl_px only; never change price."""
+        """
+        永久硬止损：仅按 frozen_hard_sl_px 挂出/确认存在；永不改价、永不替换。
+        使用 closePosition（quantity=None），TP 减仓后自动覆盖剩余仓位，无需撤单改量。
+        """
         hard = self._frozen_hard_px()
         live_qty = self._resolve_live_qty(live_qty)
         if hard <= 0 or live_qty <= 0:
@@ -5701,19 +5705,24 @@ class PositionSupervisorBinance:
         ) or hard), 2)
         if self._has_stop_sl_near(exchange_target, exclude_shield=False):
             return True
-        order = self._place_vps_hard_sl_order(live_qty, exchange_target)
+        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        # closePosition：仓位归零前数量自动匹配剩余头寸，禁止为改量而撤硬止损
+        order = binance_client.place_stop_market_order(
+            close_side, exchange_target, symbol=self.symbol, quantity=None,
+        )
         if order:
             self._set_defense_order_id("hard_stop", order, save=False)
             logger.info(
                 f"🛡️ [{self.symbol}] {reason} @{exchange_target:.2f} "
-                f"(账本硬止损{hard:.2f})"
+                f"closePosition (账本硬止损{hard:.2f})"
             )
             return True
         return False
 
     def _breath_resize_stop_on_tp(self, live_qty, reason=""):
         """
-        TP1/TP2 成交后：清双止损 → 硬止损收缩数量 → 雷达按 currentStop 重挂。
+        TP1/TP2 成交后：两笔止损独立收缩数量；硬止损价格只读、绝不撤销。
+        硬止损用 closePosition 自动覆盖剩余仓；雷达撤旧挂新（仅触碰雷达腿）。
         """
         self._breath_tick_paused = True
         try:
@@ -5738,16 +5747,23 @@ class PositionSupervisorBinance:
             logger.info(
                 f"🫁 [{self.symbol}] 止损数量收缩 | {reason} | "
                 f"qty={live_qty} ({float(getattr(self, 'remaining_qty_pct', 1) or 1):.0%}) "
-                f"radar@{stop:.2f}"
+                f"radar@{stop:.2f} | 硬止损保留只读"
             )
-            self._purge_all_protective_stops(preserve_hard=False)
-            time.sleep(0.4)
-            if not self._ensure_frozen_hard_sl(live_qty, reason="TP后硬止损收缩"):
-                logger.error(f"🫁 [{self._tag()}] TP后硬止损收缩失败")
+            # 永久防线：只确认仍挂着，禁止 purge hard
+            if not self._ensure_frozen_hard_sl(live_qty, reason="TP后确认永久硬止损"):
+                logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败")
                 return False
+            # 仅撤雷达腿（preserve_hard=True），再按剩余 qty 重挂雷达
+            self._purge_all_protective_stops(preserve_hard=True)
+            time.sleep(0.35)
             order = self._place_vps_hard_sl_order(live_qty, exchange_target)
             if not order:
-                logger.error(f"🫁 [{self._tag()}] 雷达止损数量收缩重挂失败 @{stop:.2f}")
+                # 雷达暂缺时硬止损仍在 → 非裸奔；继续告警由哨兵补雷达
+                logger.error(
+                    f"🫁 [{self._tag()}] 雷达止损数量收缩重挂失败 @{stop:.2f} "
+                    f"| 硬止损仍在保护"
+                )
+                self._save_state()
                 return False
             self.shield_sized_qty = live_qty
             self._last_applied_exchange_sl = exchange_target
@@ -7389,7 +7405,7 @@ class PositionSupervisorBinance:
         return adopted > 0
 
     def _maintain_hard_shield(self, real_amt, curr_px=None, force=False, radar_sl=None):
-        """维护呼吸止损 closePosition；阶段二激活时合并为追踪止损单槽"""
+        """维护双 STOP：永久硬止损只读确认 + 雷达止损独立同步（禁止单槽合并）。"""
         if real_amt <= 0 or not self.watched_entry:
             return False
         if getattr(self, "_stop_write_blocked", False):
@@ -7417,15 +7433,18 @@ class PositionSupervisorBinance:
         if float(getattr(self, "tv_sl", 0) or 0) <= 0 and not radar_sl:
             self._ensure_hard_sl_ledger(real_amt, source="维护硬止损自愈")
 
-        if getattr(self, "tv_sl", 0) > 0 or radar_sl:
+        # 永久硬止损与雷达独立维护；硬止损绝不因雷达改单而撤销/改价
+        hard_ok = self._ensure_frozen_hard_sl(real_amt, reason="维护永久硬止损")
+        if getattr(self, "tv_sl", 0) > 0 or radar_sl or self._frozen_hard_px() > 0:
             if not force and not self._can_maintain_shield_now(force=force):
-                return getattr(self, "shield_active", False)
-            return self._sync_exchange_stop(
+                return bool(hard_ok or getattr(self, "shield_active", False))
+            radar_ok = self._sync_exchange_stop(
                 real_amt,
                 radar_sl=radar_sl,
-                reason="维护TV硬止损/雷达合并",
+                reason="维护独立雷达止损",
                 force=force,
             ).get("ok", False)
+            return bool(hard_ok or radar_ok)
 
         # 最终核对：盘口已有 STOP → 对齐 TV；禁止「拒紧止损改挂VPS宽」旧逻辑
         live_stops = binance_client.find_protective_stop_prices(self.symbol)
@@ -8642,7 +8661,7 @@ class PositionSupervisorBinance:
     def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=False):
         """
         盘口是否已有贴近目标价的 STOP。
-        默认 exclude_shield=False：统一 closePosition 硬止损/雷达同槽。
+        硬止损与雷达可同价共存检测：任一带量/closePosition STOP 贴近即 True。
         挂单查询失败：仅当本地 120s 内刚成功挂过同价才当已有；否则 False 允许首挂。
         """
         target = round(float(sl_price), 2)
