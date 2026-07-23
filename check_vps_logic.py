@@ -715,6 +715,21 @@ def audit_module4_radar(a: Audit):
         "4.5c trading_paused/暂停交易 在 supervisor",
         "trading_paused" in sup and "暂停交易" in sup,
     )
+    _bc = _read(os.path.join(ROOT, "binance_client.py"))
+    a.check(
+        "4.5c2 挂单查询失败 fail-closed + 同价去重",
+        "ORDERS_QUERY_FAILED" in _bc
+        and "is_orders_query_failed" in _bc
+        and "_existing_same_limit" in _bc
+        and "_existing_same_stop" in _bc
+        and "orders_unreadable" in sup
+        and "止损收缩幂等跳过" in sup
+        and "本轮不再重挂" in sup
+        and "_sentinel_start_lock" in sup
+        and "_count_open_limits_and_stops" in sup
+        and "limits=0 stops=0" in sup
+        and "下单前挂单未净" in sup,
+    )
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
     a.check("4.5d SIGNAL_DEDUP_SEC=60", int(_DEDUP) == 60, str(_DEDUP))
 

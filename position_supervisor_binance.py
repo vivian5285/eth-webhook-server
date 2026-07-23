@@ -12,7 +12,11 @@ import inspect
 import random
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
-from binance_client import binance_client
+from binance_client import (
+    binance_client,
+    is_orders_query_failed,
+    ORDERS_QUERY_FAILED,
+)
 from position_manager import position_manager
 import dingtalk
 from webhook_parser import (
@@ -137,7 +141,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.5.27-breath-interp"
+BINANCE_VPS_VERSION = "v15.5.28-dup-guard"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
 LATE_CLOSE_SUPPRESS_SEC = 5.0
@@ -272,6 +276,7 @@ class PositionSupervisorBinance:
         )
         self._signal_worker_started = False
         self._sentinel_active = False
+        self._sentinel_start_lock = threading.Lock()
         self.open_regime = 3
         self.open_atr = 30.0  # 展示默认；真开仓后由 LockedInitialAtr 锁定
         self._locked_initial_atr = LockedInitialAtr(strict=False)
@@ -1913,29 +1918,32 @@ class PositionSupervisorBinance:
 
             # 重启：盘口已有贴近账本的唯一 STOP → 禁止 force 撤挂
             live_stops = binance_client.find_protective_stop_prices(self.symbol)
-            uniq = sorted({round(float(p), 2) for p in live_stops if float(p) > 0})
-            target = round(float(self._tv_hard_sl_target(entry, side) or 0), 2)
-            if target > 0 and len(uniq) == 1 and abs(uniq[0] - target) <= SHIELD_STOP_TOLERANCE:
-                self._last_applied_exchange_sl = uniq[0]
-                notes.append(f"盘口止损已齐@{uniq[0]:.2f}·跳过改挂")
-            elif target > 0 and (
-                len(uniq) > 1
-                or (uniq and all(abs(p - target) > SHIELD_STOP_TOLERANCE for p in uniq))
-                or not uniq
-            ):
-                qty = float(pos.get("size") or pos.get("positionAmt") or self.watched_qty or 0)
-                qty = abs(qty)
-                if qty <= 0:
-                    qty = float(self.watched_qty or 0)
-                if qty > 0:
-                    sync = self._sync_exchange_stop(
-                        qty, radar_sl=None, reason="接管强制呼吸止损", force=True,
-                    )
-                    if sync.get("ok"):
-                        notes.append(
-                            f"呼吸止损@{sync.get('target'):.2f}"
-                            f"(撤{sync.get('purged', 0)})"
+            if live_stops is None:
+                notes.append("挂单查询失败·跳过强制改挂")
+            else:
+                uniq = sorted({round(float(p), 2) for p in live_stops if float(p) > 0})
+                target = round(float(self._tv_hard_sl_target(entry, side) or 0), 2)
+                if target > 0 and len(uniq) == 1 and abs(uniq[0] - target) <= SHIELD_STOP_TOLERANCE:
+                    self._last_applied_exchange_sl = uniq[0]
+                    notes.append(f"盘口止损已齐@{uniq[0]:.2f}·跳过改挂")
+                elif target > 0 and (
+                    len(uniq) > 1
+                    or (uniq and all(abs(p - target) > SHIELD_STOP_TOLERANCE for p in uniq))
+                    or not uniq
+                ):
+                    qty = float(pos.get("size") or pos.get("positionAmt") or self.watched_qty or 0)
+                    qty = abs(qty)
+                    if qty <= 0:
+                        qty = float(self.watched_qty or 0)
+                    if qty > 0:
+                        sync = self._sync_exchange_stop(
+                            qty, radar_sl=None, reason="接管强制呼吸止损", force=True,
                         )
+                        if sync.get("ok"):
+                            notes.append(
+                                f"呼吸止损@{sync.get('target'):.2f}"
+                                f"(撤{sync.get('purged', 0)})"
+                            )
 
         self.monitoring = True
         self._save_state()
@@ -2320,14 +2328,14 @@ class PositionSupervisorBinance:
                 )
 
         # 终检：盘口无保护 STOP / 剩余 TP 未齐 → 强制闭环（接管模式：禁重挂已过价档）
+        # hung is None = 查询失败，禁止当成裸仓
         hung = binance_client.find_protective_stop_prices(self.symbol)
-        if live_qty > 0 and (
-            not hung
-            or (
-                int(audit.get("expected") or 0) > 0
-                and int(audit.get("matched_full") or 0) < int(audit.get("expected") or 0)
-            )
-        ):
+        stop_missing = hung is not None and not hung
+        tp_incomplete = (
+            int(audit.get("expected") or 0) > 0
+            and int(audit.get("matched_full") or 0) < int(audit.get("expected") or 0)
+        )
+        if live_qty > 0 and (stop_missing or tp_incomplete):
             logger.error(
                 f"🚨 [{source}] 终检防线未齐 TP "
                 f"{audit.get('matched_full', 0)}/{audit.get('expected', 0)} "
@@ -2337,7 +2345,7 @@ class PositionSupervisorBinance:
                 live_qty, entry, rounds=2, takeover_mode=True,
             )
             shield_ok = bool(hung)
-            if not hung:
+            if hung is not None and not hung:
                 dingtalk.report_system_alert(
                     f"{source} · 裸仓无硬止损 [{self.symbol}]",
                     f"{self.current_side} {live_qty} @ {entry:.2f} | "
@@ -2811,24 +2819,51 @@ class PositionSupervisorBinance:
             return False
         return pos is None
 
+    def _count_open_limits_and_stops(self):
+        """
+        统计盘口 LIMIT + STOP（含 Algo）。
+        成功返回 (n_limit, n_stop, all_orders)；查单失败返回 None。
+        开仓前净场：任意 LIMIT/STOP >0 都算未净（含非 reduceOnly 幽灵限价）。
+        """
+        orders = binance_client.get_open_orders(self.symbol, include_algo=True)
+        if is_orders_query_failed(orders):
+            return None
+        n_limit = 0
+        n_stop = 0
+        for o in orders or []:
+            ot = str(o.get("type") or o.get("orderType") or "").upper()
+            if ot == "LIMIT":
+                n_limit += 1
+            elif ot in ("STOP", "STOP_MARKET") or "STOP" in ot:
+                n_stop += 1
+        return n_limit, n_stop, list(orders or [])
+
     def _verify_sterile_flat(self):
-        """无菌空仓：持仓=0 且挂单=0（防先平后开竞态残留 TP/STOP 成交）。"""
+        """
+        无菌空仓铁律：持仓=0 且 挂单=0（含全部限价/止损/Algo）。
+        查仓/查单失败 → False（禁止当成已净场去开仓）。
+        """
         if not self._verify_flat():
             return False
-        remaining = self._remaining_open_order_count()
-        if remaining < 0:
+        counted = self._count_open_limits_and_stops()
+        if counted is None:
+            logger.warning(
+                f"🛡️ [{self.symbol}] 无菌核查：挂单不可读 → 判未净（禁开仓）"
+            )
             return False
-        if remaining > 0:
+        n_limit, n_stop, orders = counted
+        if n_limit > 0 or n_stop > 0 or len(orders) > 0:
             return False
-        try:
-            tp_left = self._collect_tp_limit_orders()
-        except Exception:
-            tp_left = []
-        return not tp_left
+        # 双保险：TP 分类收集也必须可读且为空
+        tp_left = self._collect_tp_limit_orders()
+        if is_orders_query_failed(tp_left):
+            return False
+        return len(tp_left) == 0
 
     def _sterile_flat_gate(self, reason_tag="开仓前", force_close=True, notify=True):
         """
         先平后开无菌闸：撤单 → 平仓 → 再撤单 → 扫孤儿 → 验 qty=0+orders=0。
+        「平」= 无持仓 + 无限价 + 无止损/Algo，清爽后再开。
         TV 同K线 / 同秒开+平：永远先平后开；开仓前必须净场。
         即使 TV 把 OPEN 标成更小 seq，缓冲层已强制重排。
         notify=False 时仅记日志（供外层重试汇总告警，避免刷屏）。
@@ -2850,38 +2885,47 @@ class PositionSupervisorBinance:
             if not self._wait_verify(self._verify_flat, retries=8, delay=0.45):
                 logger.error(f"❌ [{tag}] 空仓核查未通过，拒绝开仓")
                 return False
-        # 3) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价）
+        # 3) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价/幽灵单）
         purge = self._purge_all_defense_orders_on_flat(f"{tag}·平后净挂单", max_rounds=8)
         # 4) 扫孤儿反向（残留 TP 在空仓成交）
         self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
         time.sleep(0.35)
-        # 5) 终检：仓+单皆零
-        if self._wait_verify(self._verify_sterile_flat, retries=6, delay=0.4):
+        # 5) 终检：仓+单皆零（含任意 LIMIT 幽灵单）
+        if self._wait_verify(self._verify_sterile_flat, retries=8, delay=0.45):
             logger.info(
-                f"🧹 [{tag}] 无菌空仓通过 | qty=0 orders=0 | "
+                f"🧹 [{tag}] 无菌空仓通过 | qty=0 limits=0 stops=0 | "
                 f"撤轮={purge.get('rounds')} TP撤={purge.get('tp_cancelled', 0)}"
             )
             self._last_close_flat_ts = time.time()
             return True
         remaining = self._remaining_open_order_count()
-        tp_left = []
-        try:
+        counted = self._count_open_limits_and_stops()
+        if counted is None:
+            n_limit, n_stop = -1, -1
+            tp_left = []
+        else:
+            n_limit, n_stop, _ = counted
             tp_left = self._collect_tp_limit_orders()
-        except Exception:
-            pass
+            if is_orders_query_failed(tp_left):
+                tp_left = []
         pos = self._get_active_position()
-        if not pos:
+        if pos == "QUERY_FAILED":
+            pos_txt = "QUERY_FAILED"
+        elif not pos:
             pos_txt = "无"
         else:
             pos_txt = f"{pos.get('side')} {pos.get('size')}"
-        detail = f"持仓={pos_txt} | 挂单={remaining} | TP残留={len(tp_left)}"
+        detail = (
+            f"持仓={pos_txt} | 挂单={remaining} | "
+            f"LIMIT={n_limit} STOP={n_stop} | TP残留={len(tp_left)}"
+        )
         logger.error(f"❌ [{tag}] 无菌空仓失败 → 拒绝开仓 | {detail}")
         if notify:
             try:
                 self._call_dingtalk(
                     dingtalk.report_system_alert,
                     title=f"无菌空仓失败·拒绝开仓 [{self.symbol}]",
-                    detail=f"{tag} | {detail} | 防残留限价成交导致反手/超档位",
+                    detail=f"{tag} | {detail} | 防残留限价/幽灵单成交导致反手/超档位",
                     level="紧急",
                     suggestion="币安 APP 手动全部撤单+平仓后，等下一根 TV 信号",
                 )
@@ -3771,8 +3815,9 @@ class PositionSupervisorBinance:
         val = o.get("reduceOnly")
         if val is True or str(val).lower() in ("true", "1"):
             return True
+        # 空仓净场：无持仓方向时，任意 LIMIT 都视为须撤的幽灵/残留单
         if not self.current_side:
-            return False
+            return True
         close_side = "BUY" if self.current_side == "SHORT" else "SELL"
         return str(o.get("side") or "").upper() == close_side
 
@@ -4719,6 +4764,18 @@ class PositionSupervisorBinance:
         """严格审计：每档价位唯一 + 数量符合 regime 比例 + 无孤儿单"""
         live_qty = self._resolve_live_qty(live_qty)
         orders = self._collect_tp_limit_orders()
+        expected = self._expected_tp_count()
+        if is_orders_query_failed(orders):
+            return {
+                "matched_full": 0,
+                "expected": expected,
+                "levels": [],
+                "issues": ["orders_unreadable"],
+                "orphans": [],
+                "pending_prices": [],
+                "live_qty": live_qty,
+                "orders_unreadable": True,
+            }
         levels = []
         matched_full = 0
         issues = []
@@ -4756,7 +4813,6 @@ class PositionSupervisorBinance:
         for o in orphans:
             issues.append(f"孤儿止盈 @{o['price']:.2f} qty={o['qty']}")
 
-        expected = self._expected_tp_count()
         pending_prices = sorted({o["price"] for o in orders})
         return {
             "matched_full": matched_full,
@@ -4766,6 +4822,7 @@ class PositionSupervisorBinance:
             "orphans": orphans,
             "pending_prices": pending_prices,
             "live_qty": live_qty,
+            "orders_unreadable": False,
         }
 
     def _format_audit_summary(self, audit):
@@ -4832,10 +4889,19 @@ class PositionSupervisorBinance:
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
             return self._audit_tp_levels(live_qty), 0
+        # -1003/查单失败时禁止当「全缺失」盲补（曾刷出同价 50+ 限价）
+        if not self._orders_book_readable():
+            logger.error(
+                f"🛡️ [{self.symbol}] 智能修复中止：挂单不可读 → 禁止补/撤 TP"
+            )
+            audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
+            return audit, 0
 
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         actions = 0
         audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
+        if audit.get("orders_unreadable"):
+            return audit, 0
 
         actions += self._cancel_orphan_tp_orders(live_qty, tolerance)
         if actions:
@@ -5341,7 +5407,18 @@ class PositionSupervisorBinance:
         return cancelled
 
     def _count_protective_stops(self):
+        """成功返回价位 list；查询失败返回 None（勿当空列表）。"""
         return binance_client.find_protective_stop_prices(self.symbol)
+
+    def _orders_book_readable(self):
+        """盘口挂单 REST 是否可读；失败时禁止撤挂/补挂。"""
+        orders = binance_client.get_open_orders(self.symbol, include_algo=True)
+        if is_orders_query_failed(orders):
+            logger.error(
+                f"🛡️ [{self.symbol}] 挂单查询失败 → 盘口不可读，禁止撤/补挂"
+            )
+            return False
+        return True
 
     def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=False):
         """
@@ -5379,6 +5456,7 @@ class PositionSupervisorBinance:
         """
         TP1/TP2 成交后：原子撤旧止损 → 按剩余仓位数量 + currentStop 重挂。
         过程中暂停呼吸价格 tick，避免与改价竞态。
+        幂等：同价同量已挂则跳过（防 consumed 误清后反复 force_replace 死循环）。
         """
         self._breath_tick_paused = True
         try:
@@ -5392,6 +5470,50 @@ class PositionSupervisorBinance:
                     f"🫁 [{self.symbol}] 止损数量收缩跳过 | qty={live_qty} stop={stop} | {reason}"
                 )
                 return False
+            exchange_target = round(
+                float(order_stop_price(
+                    self.current_side, stop,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or stop),
+                2,
+            )
+            live_stops = self._count_protective_stops()
+            if live_stops is None:
+                logger.error(
+                    f"🫁 [{self.symbol}] 止损收缩：挂单查询失败 → 禁止撤/重挂 | {reason}"
+                )
+                return False
+            sized = float(getattr(self, "shield_sized_qty", 0) or 0)
+            last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
+            near = [
+                p for p in live_stops
+                if abs(float(p) - exchange_target) <= SHIELD_STOP_TOLERANCE
+            ]
+            qty_tol = max(0.001, float(getattr(self, "qty_step", 0.001) or 0.001) * 2)
+            # 同价唯一 STOP + 账本数量已对齐 → 禁止再 purge/replace（深币同类死循环）
+            if (
+                len(live_stops) == 1
+                and len(near) == 1
+                and abs(sized - live_qty) <= qty_tol
+                and (last <= 0 or abs(last - exchange_target) <= SHIELD_STOP_TOLERANCE)
+            ):
+                logger.info(
+                    f"🫁 [{self.symbol}] 止损收缩幂等跳过 | qty={live_qty} "
+                    f"stop@{exchange_target:.2f} 已齐 | {reason}"
+                )
+                return True
+            resize_sig = (
+                round(live_qty, 4),
+                exchange_target,
+                tuple(sorted(int(x) for x in (getattr(self, "tp_levels_consumed", []) or []))),
+            )
+            last_sig = getattr(self, "_last_tp_resize_sig", None)
+            if last_sig == resize_sig and near:
+                logger.info(
+                    f"🫁 [{self.symbol}] 止损收缩签名幂等 | {resize_sig} | {reason}"
+                )
+                return True
             logger.info(
                 f"🫁 [{self.symbol}] 止损数量收缩 | {reason} | "
                 f"qty={live_qty} ({float(getattr(self, 'remaining_qty_pct', 1) or 1):.0%}) "
@@ -5399,31 +5521,25 @@ class PositionSupervisorBinance:
             )
             self._purge_all_protective_stops()
             time.sleep(0.4)
-            # 确认旧止损已撤
+            # 确认旧止损已撤（查询失败 → 中止，禁止盲挂）
             for _ in range(6):
-                if not self._count_protective_stops():
+                left = self._count_protective_stops()
+                if left is None:
+                    logger.error(
+                        f"🫁 [{self.symbol}] 止损收缩：挂单查询失败 → 禁止重挂"
+                    )
+                    return False
+                if not left:
                     break
                 time.sleep(0.25)
                 self._purge_all_protective_stops()
-            order = self._place_vps_hard_sl_order(
-                live_qty,
-                order_stop_price(
-                    self.current_side, stop,
-                    buffer_usd=self._stop_buffer_usd(),
-                    profile=getattr(self, "breath_profile", None),
-                ) or stop,
-            )
+            order = self._place_vps_hard_sl_order(live_qty, exchange_target)
             if not order:
                 logger.error(f"🫁 [{self._tag()}] 止损数量收缩重挂失败 @{stop:.2f}")
                 return False
             self.shield_sized_qty = live_qty
-            self._last_applied_exchange_sl = round(
-                float(order_stop_price(
-                    self.current_side, stop,
-                    buffer_usd=self._stop_buffer_usd(),
-                    profile=getattr(self, "breath_profile", None),
-                ) or stop), 2,
-            )
+            self._last_applied_exchange_sl = exchange_target
+            self._last_tp_resize_sig = resize_sig
             self.shield_active = True
             self._set_defense_order_id("stop", order, save=False)
             self._save_state()
@@ -5484,6 +5600,14 @@ class PositionSupervisorBinance:
             exchange_target = ledger_target
 
         live_stops = self._count_protective_stops()
+        if live_stops is None:
+            logger.error(
+                f"🛡️ [{self.symbol}] 挂单查询失败 → 禁止补/改呼吸止损 | {reason}"
+            )
+            return {
+                "ok": False, "skipped": True, "reason": "orders_query_failed",
+                "target": ledger_target, "exchange_target": exchange_target,
+            }
         # 安全铁律：禁止把已挂止损改宽（LONG 下调 / SHORT 上调）——重启误用默认ATR=30 曾把 1910 改成 1886
         # 比较用盘口价 vs 本次拟挂 exchange_target（含缓冲），避免 0.3 缓冲误判改宽
         if live_stops and self.current_side in ("LONG", "SHORT"):
@@ -5566,10 +5690,18 @@ class PositionSupervisorBinance:
                 live_qty, exchange_target, use_stop_limit=False,
             )
             time.sleep(0.45 if attempt == 0 else 0.7)
-            ok = res is not None and self._has_stop_sl_near(
-                exchange_target, exclude_shield=False,
-            )
-            if ok:
+            if res is not None:
+                # 交易所已接受 → 立刻记账；核实失败也不在同轮再挂（曾叠 25×@1895.42）
+                self._last_applied_exchange_sl = exchange_target
+                self._last_hard_sl_sync_ts = time.time()
+                if self._has_stop_sl_near(exchange_target, exclude_shield=False):
+                    ok = True
+                    break
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 止损 API 已成功但核实延迟 "
+                    f"@{exchange_target:.2f} → 本轮不再重挂（防叠单）| {reason}"
+                )
+                ok = True
                 break
             logger.warning(
                 f"🛡️ [{self.symbol}] 呼吸止损挂单未核实 "
@@ -5799,6 +5931,11 @@ class PositionSupervisorBinance:
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
+            return 0
+        if not self._orders_book_readable():
+            logger.error(
+                f"🛡️ [{self.symbol}] place_tp_levels_only 中止：挂单不可读 → 禁止盲补"
+            )
             return 0
         self._clear_spurious_tp_consumed_if_full_size(
             live_qty, source="place_tp_levels_only",
@@ -6390,7 +6527,9 @@ class PositionSupervisorBinance:
             )
         ):
             try:
-                if not binance_client.find_protective_stop_prices(self.symbol):
+                _stops = binance_client.find_protective_stop_prices(self.symbol)
+                # None=查询失败：不当「缺失」，避免 REST 风暴期连环补挂
+                if _stops is not None and not _stops:
                     missing_shield = True
             except Exception:
                 pass
@@ -6497,6 +6636,8 @@ class PositionSupervisorBinance:
         # 盘口任意非目标价 STOP（如重启残留旧档位%）→ 视为叠单，触发统一
         target_px = float(tier_prices[0] or 0) if tier_prices else 0.0
         live_stops = binance_client.find_protective_stop_prices(self.symbol)
+        if live_stops is None:
+            live_stops = []
         orphan_px = [
             p for p in live_stops
             if target_px <= 0 or abs(float(p) - target_px) > SHIELD_STOP_TOLERANCE
@@ -6661,7 +6802,11 @@ class PositionSupervisorBinance:
             return False
 
     def _ensure_sentinel_running_quiet(self):
-        if not self._sentinel_active:
+        """单一哨兵（静默）：与 _ensure_sentinel_running 同锁，禁止并行多雷达。"""
+        with self._sentinel_start_lock:
+            if self._sentinel_active:
+                return
+            self._sentinel_active = True
             threading.Thread(
                 target=self._sentinel_loop, daemon=True,
                 name=f"sentinel-{self.symbol}",
@@ -6696,8 +6841,12 @@ class PositionSupervisorBinance:
 
         stop_px = self._shield_stop_price(entry)
         hung_stops = binance_client.find_protective_stop_prices(self.symbol)
-        hung_uniq = sorted({round(float(p), 2) for p in hung_stops if float(p) > 0})
-        hung_px = hung_uniq[0] if len(hung_uniq) == 1 else None
+        if hung_stops is None:
+            hung_uniq = []
+            hung_px = None
+        else:
+            hung_uniq = sorted({round(float(p), 2) for p in hung_stops if float(p) > 0})
+            hung_px = hung_uniq[0] if len(hung_uniq) == 1 else None
         if should_radar or radar_active:
             radar_sl = (
                 self._clamp_radar_to_tv_floor(self.current_sl)
@@ -6931,7 +7080,7 @@ class PositionSupervisorBinance:
         entry = float(self.watched_entry or 0)
         side = (self.current_side or "").upper()
         stops = binance_client.find_protective_stop_prices(self.symbol)
-        if not stops:
+        if stops is None or not stops:
             return 0.0
         uniq = sorted({round(float(p), 2) for p in stops if float(p) > 0})
         if not uniq:
@@ -7110,9 +7259,18 @@ class PositionSupervisorBinance:
         return self.current_sl if self._is_radar_active() else None
 
     def _collect_tp_limit_orders(self):
-        """reduceOnly / 平仓方向限价止盈单明细"""
+        """reduceOnly / 平仓方向限价止盈单明细。
+        查询失败返回 ORDERS_QUERY_FAILED（for 安全空转；调用方须 is_orders_query_failed）。
+        """
+        raw = binance_client.get_open_orders(self.symbol)
+        if is_orders_query_failed(raw):
+            logger.warning(
+                f"🛡️ [{self.symbol}] TP挂单查询失败 → ORDERS_QUERY_FAILED"
+                f"（禁止据此当空盘补挂/核武）"
+            )
+            return ORDERS_QUERY_FAILED
         orders = []
-        for o in binance_client.get_open_orders(self.symbol):
+        for o in raw or []:
             if not self._is_tp_limit_order(o):
                 continue
             px = float(o.get("price", 0) or 0)
@@ -7128,6 +7286,8 @@ class PositionSupervisorBinance:
     def _has_duplicate_tp_orders(self, tolerance=1.0):
         """同一 TP 价位出现多张单，或总张数超过应有档数"""
         orders = self._collect_tp_limit_orders()
+        if is_orders_query_failed(orders):
+            return False
         expected = self._expected_tp_count()
         if expected <= 0:
             return False
@@ -7194,11 +7354,18 @@ class PositionSupervisorBinance:
         TP=reduceOnly；雷达/TV硬止损=closePosition 单槽，互不抢份额。
         """
         live_qty = self._resolve_live_qty(live_qty)
+        if not self._orders_book_readable():
+            logger.error(
+                f"🛡️ [{self.symbol}] 补挂中止：挂单不可读 → 禁止盲补 TP"
+            )
+            return 0
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         note = self._block_rehang_filled_tps_note(live_qty, curr_px)
         if note:
             logger.warning(f"🧩 [{self.symbol}] {note}")
         audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
+        if audit.get("orders_unreadable"):
+            return 0
         if self._defense_anomaly_is_severe(audit):
             logger.warning("补挂跳过：检测到重复/偏差/孤儿，改走核武对齐")
             return 0
@@ -7285,6 +7452,11 @@ class PositionSupervisorBinance:
                     f"(现价未达·限价缺失=真漏挂)"
                 )
             orders = self._collect_tp_limit_orders()
+            if is_orders_query_failed(orders):
+                logger.error(
+                    f"🛡️ [{self.symbol}] 补挂 TP{level} 中止：中途挂单不可读"
+                )
+                break
             at_px = [o for o in orders if abs(o["price"] - px) <= tolerance]
             if len(at_px) == 1 and abs(at_px[0]["qty"] - q) <= qty_tol:
                 logger.info(f"  ✓ TP{level} @ {px:.2f} 已存在 {at_px[0]['qty']} ETH，跳过")
@@ -7333,12 +7505,16 @@ class PositionSupervisorBinance:
         """仅叠单/偏差/孤儿算严重（绕过冷却）；纯缺失走补挂+冷却。"""
         if not audit:
             return False
+        if audit.get("orders_unreadable"):
+            return False
         if audit.get("orphans"):
             return True
         for lv in audit.get("levels", []) or []:
             if lv.get("status") in ("duplicate", "qty_mismatch"):
                 return True
         orders = self._collect_tp_limit_orders()
+        if is_orders_query_failed(orders):
+            return False
         expected = int(audit.get("expected", 0) or 0)
         if expected > 0 and len(orders) > expected:
             return True
@@ -7355,13 +7531,28 @@ class PositionSupervisorBinance:
         return max(0.0, left)
 
     def _cancel_all_tp_limit_orders(self, max_rounds=4):
-        """撤销全部限价止盈（不动 STOP）；多轮直到盘口无残留 TP"""
+        """撤销全部限价止盈（不动 STOP）；多轮直到盘口无残留 TP。
+        查单失败时不假装已净，继续 cancel_all 兜底。
+        """
         total = 0
         for round_i in range(max_rounds):
-            orders = [
-                o for o in binance_client.get_open_orders(self.symbol)
-                if self._is_tp_limit_order(o)
-            ]
+            raw = binance_client.get_open_orders(self.symbol)
+            if is_orders_query_failed(raw):
+                logger.error(
+                    f"🧹 撤限价止盈第{round_i + 1}轮：挂单不可读 → cancel_all 兜底"
+                )
+                binance_client.cancel_all_open_orders(self.symbol)
+                time.sleep(0.6)
+                continue
+            orders = [o for o in (raw or []) if self._is_tp_limit_order(o)]
+            # 空仓净场：非 reduceOnly 的 LIMIT 幽灵单也撤（_is_tp_limit_order 在无 side 时可能漏）
+            if not self.current_side:
+                ghost = [
+                    o for o in (raw or [])
+                    if str(o.get("type") or "").upper() == "LIMIT"
+                    and o not in orders
+                ]
+                orders = orders + ghost
             if not orders:
                 break
             for o in orders:
@@ -7387,6 +7578,11 @@ class PositionSupervisorBinance:
             self._cancel_all_tp_limit_orders(max_rounds=4)
             time.sleep(0.6)
             remaining = self._collect_tp_limit_orders()
+            if is_orders_query_failed(remaining):
+                logger.warning(
+                    f"⚠️ 撤TP后挂单不可读 → 重试 {attempt + 1}/6（不按已净）"
+                )
+                continue
             if not remaining:
                 logger.info(
                     f"☢️ 重启撤TP完成，限价止盈已清零 (第 {attempt + 1} 轮) | "
@@ -7403,7 +7599,10 @@ class PositionSupervisorBinance:
 
     def _remaining_open_order_count(self):
         try:
-            return len(binance_client.get_open_orders(self.symbol) or [])
+            orders = binance_client.get_open_orders(self.symbol)
+            if is_orders_query_failed(orders):
+                return -1
+            return len(orders or [])
         except Exception:
             return -1
 
@@ -7411,6 +7610,7 @@ class PositionSupervisorBinance:
         """
         全平/人工平仓后：多轮撤净 TP123 + tv_sl/雷达 STOP + Algo 条件单。
         防止残留 reduceOnly 止盈在空仓后成交 → 反向开 orphan 仓。
+        查单失败绝不当成「已清零」。
         """
         tag = reason or "全平撤单"
         tp_cancelled = 0
@@ -7421,8 +7621,21 @@ class PositionSupervisorBinance:
             purged_stops = self._purge_all_close_position_stops()
             time.sleep(0.45)
             remaining = self._remaining_open_order_count()
+            counted = self._count_open_limits_and_stops()
+            if counted is None or remaining < 0:
+                logger.warning(
+                    f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮后挂单不可读 "
+                    f"→ 继续撤（禁当已净）| stops_purged={purged_stops}"
+                )
+                continue
+            n_limit, n_stop, _ = counted
             tp_left = self._collect_tp_limit_orders()
-            if remaining == 0 and not tp_left:
+            if is_orders_query_failed(tp_left):
+                logger.warning(
+                    f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮 TP 列表不可读 → 继续撤"
+                )
+                continue
+            if remaining == 0 and n_limit == 0 and n_stop == 0 and not tp_left:
                 logger.info(
                     f"🧹 [{tag}] 挂单已清零 (第 {attempt + 1} 轮) | "
                     f"撤 TP {tp_cancelled} 张"
@@ -7433,33 +7646,43 @@ class PositionSupervisorBinance:
                     "tp_cancelled": tp_cancelled,
                     "remaining": 0,
                 }
-            if tp_left:
+            if tp_left or n_limit:
+                sample = tp_left[:4] if tp_left else []
                 remain_txt = ", ".join(
-                    f"{o['qty']}@{o['price']}" for o in tp_left[:4]
-                )
+                    f"{o['qty']}@{o['price']}" for o in sample
+                ) or f"LIMIT={n_limit}"
                 logger.warning(
                     f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮后仍剩 "
-                    f"{len(tp_left)} 张 TP ({remain_txt}) | 全盘 {remaining} 单"
+                    f"LIMIT={n_limit} STOP={n_stop} TP样例({remain_txt}) | "
+                    f"全盘 {remaining} 单"
                 )
             else:
                 logger.warning(
                     f"⚠️ [{tag}] 第 {attempt + 1}/{max_rounds} 轮后仍剩 "
-                    f"{remaining} 张挂单"
+                    f"{remaining} 张挂单 (STOP={n_stop})"
                 )
-        tp_left = self._collect_tp_limit_orders()
+        counted = self._count_open_limits_and_stops()
         remaining = self._remaining_open_order_count()
-        ok = remaining == 0 and not tp_left
+        if counted is None or remaining < 0:
+            ok = False
+            n_limit, n_stop = -1, -1
+            tp_n = -1
+        else:
+            n_limit, n_stop, _ = counted
+            tp_left = self._collect_tp_limit_orders()
+            tp_n = -1 if is_orders_query_failed(tp_left) else len(tp_left)
+            ok = remaining == 0 and n_limit == 0 and n_stop == 0 and tp_n == 0
         if not ok:
             logger.error(
                 f"❌ [{tag}] 全平后挂单未净：剩余 {remaining} 单 | "
-                f"TP {len(tp_left)} 张"
+                f"LIMIT={n_limit} STOP={n_stop} TP={tp_n}"
             )
         return {
             "ok": ok,
             "rounds": max_rounds,
             "tp_cancelled": tp_cancelled,
             "remaining": remaining,
-            "tp_remaining": len(tp_left),
+            "tp_remaining": tp_n,
         }
 
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None, for_handoff=False):
@@ -7612,6 +7835,12 @@ class PositionSupervisorBinance:
             )
             self._nuclear_fail_streak = 0
 
+        if not self._orders_book_readable():
+            logger.error(
+                f"☢️ [{self.symbol}] 核武中止：挂单查询失败 → 禁止撤挂防裸奔"
+            )
+            return last_audit
+
         self._last_nuclear_realign_ts = time.time()
         for r in range(rounds):
             logger.warning(
@@ -7653,6 +7882,9 @@ class PositionSupervisorBinance:
         return last_audit
 
     def _tp_audit_ok(self, audit):
+        # 挂单不可读 ≠ 缺失：禁止触发补挂/核武
+        if audit.get("orders_unreadable"):
+            return True
         expected = audit.get("expected", 0)
         place_n = max(1, min(3, int(PLACE_TP_LEVELS or 3)))
         if expected <= 0:
@@ -7687,6 +7919,8 @@ class PositionSupervisorBinance:
         - 严重（叠单/偏差/孤儿）→ True
         - 纯缺失 → True（但 guardian 用 severe 区分是否绕过冷却）
         """
+        if audit.get("orders_unreadable"):
+            return False
         if self._audit_requires_nuclear(audit):
             return True
         for lv in audit.get("levels", []):
@@ -7858,8 +8092,32 @@ class PositionSupervisorBinance:
                     }
 
             if recover_mode:
+                if not self._orders_book_readable():
+                    logger.error(
+                        f"🛡️ [{self.symbol}] 重启对齐中止：挂单查询失败 → 禁止焦土撤单"
+                    )
+                    return {
+                        "matched": audit["matched_full"],
+                        "expected": audit["expected"],
+                        "pending_prices": audit["pending_prices"],
+                        "rebuilt": False,
+                        "audit": audit,
+                        "nuclear": False,
+                    }
                 self._scorched_earth_cancel_for_recover()
             elif self._defense_anomaly_is_severe(audit):
+                if not self._orders_book_readable():
+                    logger.error(
+                        f"🛡️ [{self.symbol}] 严重异常但挂单查询失败 → 禁止撤TP"
+                    )
+                    return {
+                        "matched": audit["matched_full"],
+                        "expected": audit["expected"],
+                        "pending_prices": audit["pending_prices"],
+                        "rebuilt": False,
+                        "audit": audit,
+                        "nuclear": False,
+                    }
                 self._cancel_all_tp_limit_orders()
             time.sleep(0.45)
             audit = self._audit_tp_levels(live_qty)
@@ -7984,10 +8242,15 @@ class PositionSupervisorBinance:
                 dynamic_sl=(sl if self._is_radar_active() else None),
                 reason="雷达守护·裸仓强制补TP", rounds=3,
             )
-            if not binance_client.find_protective_stop_prices(self.symbol):
+            _stops = binance_client.find_protective_stop_prices(self.symbol)
+            if _stops is not None and not _stops:
                 self._sync_exchange_stop(
                     real_amt, radar_sl=None,
                     reason="雷达守护·裸仓强制TV硬止损", force=True,
+                )
+            elif _stops is None:
+                logger.error(
+                    f"📡 [雷达守护] 挂单查询失败 → 禁止裸仓强制补止损 | {self.symbol}"
                 )
             return result
         if (in_grace or in_cooldown) and not severe:
@@ -8167,10 +8430,18 @@ class PositionSupervisorBinance:
         盘口是否已有贴近目标价的 STOP。
         默认 exclude_shield=False：统一 closePosition 硬止损/雷达同槽，
         若排除 shield 会把唯一 VPS 止损当成「缺失」→ 核武永远失败秒挂秒撤。
+        挂单查询失败 → True（fail-closed：当作已有，禁止据此补挂重复单）。
         """
         target = round(float(sl_price), 2)
         shield_prices = self._shield_tier_prices() if exclude_shield else []
-        for o in binance_client.get_open_orders(self.symbol):
+        orders = binance_client.get_open_orders(self.symbol)
+        if is_orders_query_failed(orders):
+            logger.warning(
+                f"🛡️ [{self.symbol}] 挂单查询失败 → _has_stop_sl_near "
+                f"@{target:.2f} 按已有处理（禁补挂）"
+            )
+            return True
+        for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP_MARKET", "STOP"):
                 continue
@@ -8190,7 +8461,11 @@ class PositionSupervisorBinance:
     def _has_tp_limit_at_price(self, price, tolerance=2.0):
         if price <= 0:
             return False
-        for o in self._collect_tp_limit_orders():
+        orders = self._collect_tp_limit_orders()
+        # 查不到 → 假定已有，禁止补挂（fail-closed）
+        if is_orders_query_failed(orders):
+            return True
+        for o in orders:
             if abs(o["price"] - price) <= tolerance:
                 return True
         return False
@@ -10283,9 +10558,16 @@ class PositionSupervisorBinance:
         )
 
     def _ensure_sentinel_running(self):
-        if self.monitoring and not self._sentinel_active:
+        """单一哨兵：先占位 _sentinel_active 再起线程，禁止竞态多启。"""
+        if not self.monitoring:
+            return
+        with self._sentinel_start_lock:
+            if self._sentinel_active:
+                return
+            self._sentinel_active = True
             threading.Thread(
-                target=self._sentinel_loop, daemon=True, name="sentinel",
+                target=self._sentinel_loop, daemon=True,
+                name=f"sentinel-{self.symbol}",
             ).start()
 
     def _full_reentry(self, action, close_reason, payload=None):
@@ -10779,6 +11061,33 @@ class PositionSupervisorBinance:
                 )
                 return
 
+            # 下单前最后一道：必须无持仓 + 无限价/止损（防幽灵单残留）
+            if not self._verify_sterile_flat():
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 下单前挂单未净 → 再撤一轮后复检"
+                )
+                self._purge_all_defense_orders_on_flat(
+                    f"开仓下单前·补清幽灵挂单", max_rounds=4,
+                )
+                if not self._wait_verify(self._verify_sterile_flat, retries=6, delay=0.4):
+                    counted = self._count_open_limits_and_stops()
+                    detail = (
+                        f"LIMIT/STOP 不可读"
+                        if counted is None
+                        else f"LIMIT={counted[0]} STOP={counted[1]} total={len(counted[2])}"
+                    )
+                    logger.error(
+                        f"❌ 开仓中止：市价下单前挂单未净 | {detail}"
+                    )
+                    dingtalk.report_system_alert(
+                        f"开仓中止 · 下单前挂单未净 [{self.symbol}]",
+                        f"TV {action} 目标 {qty} {self.unit_label} | {detail} | "
+                        f"拒绝在幽灵限价未清时开仓",
+                        level="紧急",
+                        suggestion="币安 APP 全部撤单后再发信号",
+                    )
+                    return
+
             open_side = "BUY" if action == "LONG" else "SELL"
             logger.info(
                 f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} {self.unit_label} "
@@ -10984,21 +11293,26 @@ class PositionSupervisorBinance:
             # 开仓后硬闸：无论 TP 是否齐，强制挂呼吸止损
             hung = binance_client.find_protective_stop_prices(self.symbol)
             tv_target = self._tv_hard_sl_target(verified["entry_price"])
-            bad = [
-                p for p in hung
-                if (
-                    tv_target > 0
-                    and abs(float(p) - tv_target) > SHIELD_STOP_TOLERANCE
+            if hung is None:
+                logger.error(
+                    f"🚨 [{self.symbol}] 开仓后挂单查询失败 → 禁止盲补止损"
                 )
-            ]
-            self._sync_exchange_stop(
-                live_qty, radar_sl=self.current_sl,
-                reason=(
-                    "开仓后强制呼吸止损" if (bad or not hung or tv_target <= 0)
-                    else "开仓后确认呼吸止损"
-                ),
-                force=True,
-            )
+            else:
+                bad = [
+                    p for p in hung
+                    if (
+                        tv_target > 0
+                        and abs(float(p) - tv_target) > SHIELD_STOP_TOLERANCE
+                    )
+                ]
+                self._sync_exchange_stop(
+                    live_qty, radar_sl=self.current_sl,
+                    reason=(
+                        "开仓后强制呼吸止损" if (bad or not hung or tv_target <= 0)
+                        else "开仓后确认呼吸止损"
+                    ),
+                    force=True,
+                )
             audit = self._wait_defense_settled(live_qty, retries=10, delay=0.9)
             matched, expected = audit["matched_full"], audit["expected"]
             curr_px = binance_client.get_current_price(self.symbol) or entry_price
@@ -11029,13 +11343,18 @@ class PositionSupervisorBinance:
                 audit = self._wait_defense_settled(live_qty, retries=8, delay=0.8)
                 matched, expected = audit["matched_full"], audit["expected"]
             hung_final = binance_client.find_protective_stop_prices(self.symbol)
-            if not hung_final:
+            if hung_final is None:
+                logger.error(
+                    f"🚨 [{self.symbol}] 开仓终检：挂单查询失败 → "
+                    f"禁止当裸仓强平/连环补挂"
+                )
+            elif not hung_final:
                 logger.error(f"🚨 [{self.symbol}] 开仓终检：盘口无硬止损 → 再强制补挂")
                 self._sync_exchange_stop(
                     live_qty, radar_sl=None, reason="开仓终检裸仓补挂", force=True,
                 )
                 hung_final = binance_client.find_protective_stop_prices(self.symbol)
-                if not hung_final:
+                if hung_final is not None and not hung_final:
                     dingtalk.report_system_alert(
                         f"开仓后裸仓无硬止损 [{self.symbol}]",
                         f"{self.current_side} {live_qty} {self.unit_label} @ "
@@ -11048,7 +11367,10 @@ class PositionSupervisorBinance:
                     )
                     return
             # 终检：应有 TP 却不齐 / 无硬止损 → 强制闭环挂齐（清假成交+推离+重挂）
-            if (expected > 0 and matched < expected) or not hung_final:
+            # hung_final is None：查询失败，勿当裸仓
+            if (expected > 0 and matched < expected) or (
+                hung_final is not None and not hung_final
+            ):
                 logger.error(
                     f"🚨 [{self.symbol}] 开仓终检未齐 TP {matched}/{expected} "
                     f"stop={hung_final} → 强制闭环挂防线"
@@ -11059,7 +11381,7 @@ class PositionSupervisorBinance:
                 matched = int(audit.get("matched_full") or 0)
                 expected = int(audit.get("expected") or self._expected_tp_count() or 0)
                 tp_pxs = list(self.tv_tps or tp_pxs)
-                if not hung_final:
+                if hung_final is not None and not hung_final:
                     self._emergency_flatten_naked_open(
                         "硬止损失败·强制闭环后仍无STOP·撤开仓",
                     )
@@ -11182,7 +11504,7 @@ class PositionSupervisorBinance:
                     f"{self.current_side} {live_qty} {self.unit_label} | 仅 {matched}/{expected} 档 | "
                     f"{self._format_audit_summary(audit)} | {hint}",
                 )
-            if not hung_final:
+            if hung_final is not None and not hung_final:
                 self._open_tp_unconfirmed = True
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过 → 延迟再探并尽量挂防线")
@@ -11222,7 +11544,11 @@ class PositionSupervisorBinance:
                         reason="开仓滞后核实·强制TV硬止损", force=True,
                     )
                     hung_late = binance_client.find_protective_stop_prices(self.symbol)
-                    if not hung_late:
+                    if hung_late is None:
+                        logger.error(
+                            f"🚨 [{self.symbol}] 开仓滞后核实：挂单查询失败 → 禁止撤开仓"
+                        )
+                    elif not hung_late:
                         dingtalk.report_system_alert(
                             f"开仓滞后核实仍无硬止损 [{self.symbol}]",
                             f"{self.current_side} {late_qty} @ {late_entry:.2f} | "
@@ -12152,8 +12478,9 @@ class PositionSupervisorBinance:
             self._radar_notify_pending = True
 
     def _sentinel_loop(self):
-        """哨兵：持仓/TP 防线 + 呼吸止损追踪（WS推送优先，轮询兜底）"""
-        self._sentinel_active = True
+        """哨兵：持仓/TP 防线 + 呼吸止损追踪（WS推送优先，轮询兜底）。
+        启动前调用方已置 _sentinel_active=True（占位防双启）。
+        """
         self._ensure_price_ws()
         last_px = 0.0
         try:

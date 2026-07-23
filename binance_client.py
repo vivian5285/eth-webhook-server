@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v13.45.2-merged-pos-cache"
+BINANCE_CLIENT_VERSION = "v13.45.3-dup-guard"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -21,9 +21,31 @@ WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
 POSITION_QUERY_FAILED = {"_query_failed": True, "positionAmt": None, "entryPrice": None}
 
 
+class OrdersQueryFailedList(list):
+    """空 list 子类：for-loop 安全空转，但 is_orders_query_failed=True。"""
+    __slots__ = ()
+
+    @property
+    def _orders_query_failed(self):
+        return True
+
+
+# 挂单查询失败哨兵（可迭代空列表，禁止当成「真·零挂单」）
+ORDERS_QUERY_FAILED = OrdersQueryFailedList()
+
+
 def is_position_query_failed(pos):
     """仅当显式 QUERY_FAILED 哨兵时为 True；禁止把 MagicMock/普通持仓误判。"""
     return isinstance(pos, dict) and pos.get("_query_failed") is True
+
+
+def is_orders_query_failed(orders):
+    """挂单查询失败 → True；上层必须 fail-closed，禁止补挂限价/止损。"""
+    if orders is None:
+        return True
+    if isinstance(orders, dict) and orders.get("_orders_query_failed") is True:
+        return True
+    return getattr(orders, "_orders_query_failed", False) is True
 
 
 class BinanceClient:
@@ -104,7 +126,9 @@ class BinanceClient:
         }
 
     def get_open_algo_orders(self, symbol="ETHUSDT"):
-        """币安 2025+ 条件单（含 closePosition 硬止损）在 Algo 通道"""
+        """币安 2025+ 条件单（含 closePosition 硬止损）在 Algo 通道。
+        失败返回 ORDERS_QUERY_FAILED（勿当空列表）。
+        """
         try:
             rows = self._futures_signed_request(
                 "get", "openAlgoOrders", {"symbol": symbol},
@@ -119,17 +143,28 @@ class BinanceClient:
             return out
         except Exception as e:
             logger.warning(f"[Algo挂单查询] {symbol}: {e}")
-            return []
+            return ORDERS_QUERY_FAILED
 
     def get_open_orders(self, symbol="ETHUSDT", include_algo=True):
+        """
+        成功返回 list；REST 失败返回 ORDERS_QUERY_FAILED。
+        铁律：查询失败 ≠ 盘口无单；上层禁止据此补挂限价/止损。
+        """
         try:
             orders = list(self.client.futures_get_open_orders(symbol=symbol) or [])
         except Exception as e:
             logger.error(f"[获取挂单失败] {symbol}: {e}")
-            orders = []
+            return ORDERS_QUERY_FAILED
         if not include_algo:
             return orders
         algo_orders = self.get_open_algo_orders(symbol)
+        if is_orders_query_failed(algo_orders):
+            # 普通单已拿到；Algo 失败时仍返回普通单
+            logger.warning(
+                f"[挂单合并] {symbol} Algo 查询失败 → 仅用普通挂单 "
+                f"({len(orders)} 笔)；补挂前须再核实"
+            )
+            return orders
         if not algo_orders:
             return orders
         seen = {str(o.get("orderId")) for o in orders if o.get("orderId")}
@@ -145,6 +180,13 @@ class BinanceClient:
                 f"→ 合计 {len(merged)}"
             )
         return merged
+
+    def _iter_open_orders(self, symbol="ETHUSDT", include_algo=True):
+        """供 for-loop：查询失败时 yield 空并让调用方先检查 is_orders_query_failed。"""
+        orders = self.get_open_orders(symbol, include_algo=include_algo)
+        if is_orders_query_failed(orders):
+            return orders
+        return orders
 
     def _load_symbol_filters(self, symbol="ETHUSDT"):
         if symbol in self._symbol_filters:
@@ -694,9 +736,15 @@ class BinanceClient:
             return []
 
     def find_protective_stop_prices(self, symbol="ETHUSDT"):
-        """盘口已挂 STOP / STOP_MARKET（含 Algo）的触发价列表"""
+        """
+        盘口已挂 STOP / STOP_MARKET（含 Algo）的触发价列表。
+        查询失败返回 None（禁止当成 [] 去补挂）。
+        """
+        orders = self.get_open_orders(symbol, include_algo=True)
+        if is_orders_query_failed(orders):
+            return None
         out = []
-        for o in self.get_open_orders(symbol, include_algo=True):
+        for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP", "STOP_MARKET"):
                 continue
@@ -712,6 +760,53 @@ class BinanceClient:
                     out.append(px)
                 break
         return out
+
+    def _existing_same_limit(self, symbol, side, price, quantity=None, tol=0.02):
+        """同向同价已有 reduceOnly LIMIT → 返回该单，避免重复挂。"""
+        orders = self.get_open_orders(symbol, include_algo=False)
+        if is_orders_query_failed(orders):
+            return ORDERS_QUERY_FAILED
+        want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
+        want_px = round(float(price or 0), 2)
+        for o in orders or []:
+            if str(o.get("type") or "").upper() != "LIMIT":
+                continue
+            if str(o.get("side") or "").upper() != want_side:
+                continue
+            try:
+                opx = round(float(o.get("price") or 0), 2)
+            except (TypeError, ValueError):
+                continue
+            if abs(opx - want_px) <= tol:
+                return o
+        return None
+
+    def _existing_same_stop(self, symbol, side, stop_price, tol=0.05):
+        """同向同触发价已有 STOP → 返回该单。"""
+        orders = self.get_open_orders(symbol, include_algo=True)
+        if is_orders_query_failed(orders):
+            return ORDERS_QUERY_FAILED
+        want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
+        want_px = round(float(stop_price or 0), 2)
+        for o in orders or []:
+            ot = str(o.get("type") or o.get("orderType") or "").upper()
+            if ot not in ("STOP", "STOP_MARKET"):
+                continue
+            if str(o.get("side") or "").upper() != want_side:
+                continue
+            px = None
+            for key in ("stopPrice", "triggerPrice", "activatePrice"):
+                val = o.get(key)
+                if val is None or str(val).strip() in ("", "0"):
+                    continue
+                try:
+                    px = round(float(val), 2)
+                except (TypeError, ValueError):
+                    continue
+                break
+            if px is not None and abs(px - want_px) <= tol:
+                return o
+        return None
 
     def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False):
         qty = self.format_quantity(quantity, symbol)
@@ -740,6 +835,20 @@ class BinanceClient:
         if qty <= 0:
             logger.error(f"[限价单跳过] 数量无效 {quantity}")
             return None
+        # 防重复：查单失败拒挂；同价已有 LIMIT 则复用
+        exist = self._existing_same_limit(symbol, side, float(px_str), quantity=qty)
+        if is_orders_query_failed(exist):
+            logger.error(
+                f"[限价单拒挂] {symbol} 挂单查询失败 → 禁止盲补 "
+                f"{side} {qty} @ {px_str}"
+            )
+            return None
+        if exist:
+            logger.warning(
+                f"[限价单去重] {symbol} 已有同价 LIMIT "
+                f"id={exist.get('orderId')} @ {px_str} → 跳过重复挂单"
+            )
+            return exist
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
@@ -790,6 +899,21 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT", quantity=None):
+        # 防重复：查单失败拒挂；同触发价已有 STOP 则复用
+        exist = self._existing_same_stop(symbol, side, stop_price)
+        if is_orders_query_failed(exist):
+            logger.error(
+                f"[止损单拒挂] {symbol} 挂单查询失败 → 禁止盲补 "
+                f"{side} Stop @ {stop_price}"
+            )
+            return None
+        if exist:
+            logger.warning(
+                f"[止损单去重] {symbol} 已有同价 STOP "
+                f"id={exist.get('orderId') or exist.get('algoId')} @ {stop_price} "
+                f"→ 跳过重复挂单"
+            )
+            return exist
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {

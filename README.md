@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· VPS 实盘
 
-**当前版本：`v15.5.27-breath-interp`**  
+**当前版本：`v15.5.28-dup-guard`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`（单币名义≈本金×1；ETH+XAU 并存合计≈本金×2）**  
 **保护引擎：双雷达呼吸止损（`breath_profiles` · ETH/XAU 分档 · TV `atr`=initial_atr · 1h ATR 呼吸系数 · markPrice WS）**  
@@ -20,7 +20,7 @@ TradingView Alert → Webhook → VPS 接收/校验 → **TV.atr 锁定 initial_
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.5.27-breath-interp
+# version: v15.5.28-dup-guard
 # sizing: RISK20_NOTIONAL5 · notional=equity×20%×5(=1×equity) · tv_strategy: v6.5.6
 # radar: breath_dual_eth_xau · trading_paused: false
 
@@ -34,7 +34,8 @@ python3 check_deploy_events.py --live
 ## 零、五条不可动摇的硬性原则
 
 1. **开仓永远先平后开**  
-   不判断新旧仓位方向是否相同；收到 `LONG`/`SHORT` 一律：查实盘 → 有仓则市价全平 + 撤全部挂单 → **等待确认仓位归零** → 再算 qty 开新仓。  
+   不判断新旧仓位方向是否相同；收到 `LONG`/`SHORT` 一律：查实盘 → 有仓则市价全平 + 撤全部挂单 → **等待确认「无菌空仓」**（**无持仓 + 无限价 + 无 STOP/Algo**）→ 再算 qty 开新仓。  
+   空仓若仍有幽灵限价，同样必须撤净后再开。  
    外部/人工仓位与后续 TV 同向时，**同样先平后开**，禁止「方向一致跳过平仓」。
 
 2. **单仓位，不加仓**（pyramiding=1）  
@@ -84,6 +85,7 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 | 同窗折叠 | 平仓只保留一条；开仓只保留**最新**一条；顺序永远 **先平后开**（乱序到达亦然） |
 | 去重 | 60s 内同一 `action+symbol+price` 忽略（**含 price**；同向改价重发会放行） |
 | 哨兵 | `_sentinel_loop`：**WS tick 优先**，REST 轮询兜底；对账仓位、TP 成交、呼吸改单、挂单修复 |
+| 挂单去重 | 同价 LIMIT/STOP 拒重复挂；查单失败（-1003）fail-closed 禁止盲补；止损 API 成功即停重挂 |
 | 状态文件 | `binance_vps_state_{SYMBOL}.json`（ETH / XAU 独立） |
 | 持仓查询失败 | 返回 `POSITION_QUERY_FAILED`，**禁止当空仓清账本**（见 §九.1） |
 
@@ -152,15 +154,16 @@ position_supervisor_binance.py     ← 唯一生产大脑（每 symbol 一实例
 ## 三、LONG / SHORT 开仓流程
 
 1. 查询交易所**实际持仓**（查询失败不得当空仓，见 §九.1）  
-2. 若非空：市价全平 → 撤销所有挂单 → **等待成交回报或仓位归零确认** → 重置该 symbol 呼吸引擎全部状态 → 钉钉「先平后开」  
-3. 净场失败：重试 **3** 次（间隔 **1s / 3s / 6s**）→ 仍失败则 `CLOSE_THEN_OPEN_FAIL_ABORT`，**放弃本笔开仓**  
-4. **独立**拉 30m K → 合成 90m → 算 `initialAtr`（此后锁定）→ `initialStop = entry ± 1.5×initialAtr`（与 TV.stop_loss **零交集**）  
-5. 按第四节公式算最终下单数量（含 `sl_adj`）  
-6. `set_leverage` 固定 **5x** → 市价开仓  
-7. 挂 **TP1+TP2** 限价（价格=`tp1`/`tp2`，数量=`qty1`/`qty2` 按实开缩放）  
-8. **不挂 TP3**（`qty3` 对应余仓由阶段二追踪）  
-9. 呼吸止损初始化：挂 STOP（`quantity=全仓`，价格=`initialStop`）并立即接管  
-10. 钉钉：开仓详情（方向、价格、数量、initialStop；算仓模式=RISK20）
+2. 若非空：市价全平 → 撤销所有挂单 → **等待无菌空仓确认（qty=0 且 LIMIT/STOP/Algo=0）** → 重置该 symbol 呼吸引擎全部状态 → 钉钉「先平后开」  
+3. 若已空但仍有幽灵限价/止损：同样多轮 `cancel_all` + 逐单撤 → 未净则拒绝开仓  
+4. 净场失败：重试 **3** 次（间隔 **1s / 3s / 6s**）→ 仍失败则 `CLOSE_THEN_OPEN_FAIL_ABORT`，**放弃本笔开仓**  
+5. **独立**拉 30m K → 合成 90m → 算 `initialAtr`（此后锁定）→ `initialStop = entry ± 1.5×initialAtr`（与 TV.stop_loss **零交集**）  
+6. 按第四节公式算最终下单数量（含 `sl_adj`）  
+7. `set_leverage` 固定 **5x** → **下单前再验无菌** → 市价开仓  
+8. 挂 **TP1+TP2** 限价（价格=`tp1`/`tp2`，数量=`qty1`/`qty2` 按实开缩放）  
+9. **不挂 TP3**（`qty3` 对应余仓由阶段二追踪）  
+10. 呼吸止损初始化：挂 STOP（`quantity=全仓`，价格=`initialStop`）并立即接管  
+11. 钉钉：开仓详情（方向、价格、数量、initialStop；算仓模式=RISK20）
 
 开仓成功后的**下一个 tick 起**：呼吸引擎逐 tick 更新止损价，直到仓位归零。
 
@@ -443,7 +446,7 @@ cd ~/binance-engine
 git fetch origin && git reset --hard origin/main
 
 grep 'BINANCE_VPS_VERSION' position_supervisor_binance.py
-# 期望: v15.5.27-breath-interp
+# 期望: v15.5.28-dup-guard
 
 bash deploy_binance.sh
 # 或: systemctl restart binance-engine.service
