@@ -3,11 +3,12 @@
 """
 按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
 
-连续插值版（2026-07-22 定稿）：
+连续插值版（最终锁定表 2026-07-23）：
   ratioFloor=0.6 / ratioCeiling=2.2（共用）
-  trailDistanceMultiplier(ratio) = 线性插值 minMult→maxMult
-  平滑：先对 ratio 做近 3 次均值，再代入公式（无离散档跳变）
-  冷启动（0 次采样）：ratio=1.0 → 公式自然中间值
+  ETH min/max = 1.2 / 2.5 → 冷启动(ratio=1.0) = 1.525
+  XAU min/max = 0.5 / 1.2 → 冷启动(ratio=1.0) = 0.675（草稿 0.8~1.8 已作废）
+  平滑：先对 ratio 做近 3 次均值，再代入公式
+  阶段一阶梯倍数永不乘 trailDistanceMultiplier
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ BREATH_ETH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# XAU：更紧，min/max 直接体现收紧（不再 ×0.8）
+# XAU：最终锁定表 0.5~1.2（草稿 0.8~1.8 已作废；冷启动 ratio=1.0 → 0.675）
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
     "initial_sl_atr": 1.5,
@@ -54,8 +55,8 @@ BREATH_XAU: Dict[str, Any] = {
     "tp2_atr": 2.5,
     "tp2_floor_atr": 1.5,
     "phase2_trail_mult": 1.0,
-    "min_mult": 0.8,
-    "max_mult": 1.8,
+    "min_mult": 0.5,
+    "max_mult": 1.2,
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

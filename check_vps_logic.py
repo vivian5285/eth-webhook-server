@@ -651,18 +651,18 @@ def audit_module4_radar(a: Audit):
     try:
         from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile, trail_distance_multiplier
         a.check(
-            "4.2f ETH/XAU 连续插值 min/max（无×0.8层）",
+            "4.2f ETH/XAU 连续插值 min/max（锁定表）",
             abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
             and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
             and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
             and abs(float(BREATH_XAU["early_be_atr"]) - 0.3) < 1e-9
             and abs(float(BREATH_ETH["min_mult"]) - 1.2) < 1e-9
             and abs(float(BREATH_ETH["max_mult"]) - 2.5) < 1e-9
-            and abs(float(BREATH_XAU["min_mult"]) - 0.8) < 1e-9
-            and abs(float(BREATH_XAU["max_mult"]) - 1.8) < 1e-9
+            and abs(float(BREATH_XAU["min_mult"]) - 0.5) < 1e-9
+            and abs(float(BREATH_XAU["max_mult"]) - 1.2) < 1e-9
             and abs(float(BREATH_XAU["phase2_trail_mult"]) - 1.0) < 1e-9
             and abs(trail_distance_multiplier(1.0, BREATH_ETH) - 1.525) < 1e-9
-            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 1.05) < 1e-9,
+            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 0.675) < 1e-9,
         )
         pe = get_breath_profile("ETHUSDT")
         px = get_breath_profile("XAUUSDT")
@@ -680,7 +680,7 @@ def audit_module4_radar(a: Audit):
             _blocked = True
         a.check("4.2g2 LockedInitialAtr 持仓期拒写", _blocked and abs(_lk.value - 20.0) < 1e-9)
     except Exception as e:
-        a.check("4.2f ETH/XAU 连续插值 min/max（无×0.8层）", False, str(e))
+        a.check("4.2f ETH/XAU 连续插值 min/max（锁定表）", False, str(e))
         a.check("4.2g get_breath_profile 路由", False, str(e))
         a.check("4.2g2 LockedInitialAtr 持仓期拒写", False, str(e))
     a.check(

@@ -1,9 +1,10 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.1-triple-defense`**  
+**当前版本：`v15.7.2-breath-lock`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
+**呼吸锁定表：ETH 1.2~2.5 / XAU 0.5~1.2**（冷启动 1.525 / 0.675）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
 
@@ -12,7 +13,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.7.1-triple-defense · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.7.2-breath-lock · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_two_scenario_atr.py
@@ -186,7 +187,7 @@ qty = 名义上限 / entryPrice
 | step_trigger / advance | 0.75 / 0.4 | 0.4 / 0.35 |
 | phase_switch_atr | 3.0 | 3.0 |
 | initial_sl_atr（雷达初值） | 1.5 | 1.5 |
-| 呼吸 min~max | 1.2~2.5 | 0.8~1.8 |
+| 呼吸 min~max | 1.2~2.5（冷启动 1.525） | **0.5~1.2**（冷启动 **0.675**；草稿 0.8~1.8 已作废） |
 
 ---
 

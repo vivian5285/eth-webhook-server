@@ -13,7 +13,7 @@
   阶段二：追踪距离 = initial_atr × trailDistanceMultiplier(smoothedRatio)
 
 呼吸系数 = 连续线性插值（见 breath_profiles.trail_distance_multiplier）；
-XAU 不再额外 ×0.8。
+XAU 锁定表 min/max=0.5/1.2（草稿 0.8~1.8 已作废）。
 
 历史备注：离散档中间版曾错误把 breathing_coefficient 乘进阶段一阶梯
 （step_trigger/advance × coeff）。v15.5.27 起按最终方案纠正为固定倍数。
