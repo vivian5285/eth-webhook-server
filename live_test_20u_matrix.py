@@ -181,11 +181,12 @@ def ensure_flat(sym, reason):
     return True
 
 
-def hard_sl_expected(side, entry, tv_sl):
-    dist = abs(float(entry) - float(tv_sl)) * 1.2
+def hard_sl_expected(side, entry, tv_sl, tv_price=None):
+    tv_e = float(tv_price if tv_price is not None else entry)
+    dist = abs(tv_e - float(tv_sl)) * 1.2
     if side == "LONG":
-        return round(entry - dist, 2)
-    return round(entry + dist, 2)
+        return round(float(entry) - dist, 2)
+    return round(float(entry) + dist, 2)
 
 
 def wait_position(sym, want_side, timeout=100):
@@ -240,7 +241,7 @@ def open_payload(sym, side, bar, seq, reason):
 def verify_defense(sym, side, plan, st, au):
     entry = float(st.get("watched_entry") or plan["sig"] or 0)
     frozen = float(st.get("frozen_hard_sl_px") or 0)
-    expect = hard_sl_expected(side, entry, plan["sl"])
+    expect = hard_sl_expected(side, entry, plan["sl"], tv_price=plan.get("sig"))
     ok = True
     if frozen <= 0:
         fail("no frozen hard sl", symbol=sym)
@@ -260,9 +261,11 @@ def verify_defense(sym, side, plan, st, au):
     if not (1 <= stops <= 2):
         fail("stop count bad", symbol=sym, stops=stops)
         ok = False
-    if not (1 <= limits <= 3):
-        fail("TP limit count bad", symbol=sym, limits=limits)
+    if not (2 <= limits <= 3):
+        fail("TP limit count bad (expect TP123)", symbol=sym, limits=limits)
         ok = False
+    elif limits < 3:
+        log("TP_LIMITS_WARN_expect_3", symbol=sym, limits=limits)
     if au.get("dups"):
         fail("duplicate orders", symbol=sym, dups=au["dups"])
         ok = False

@@ -4,8 +4,8 @@
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
-**止盈比例：10% / 20% / 70%**（`defense_profiles` 可配）  
-**硬止损：`|TV.price−TV.stop_loss| × buffer` 锚定成交价**（无独立 1.5×ATR 地板）  
+**TP 分腿：10% / 20% / 70%**（三级限价常挂）  
+**硬止损：`|TV.price−TV.stop_loss|×buffer` 锚定成交价**（`defense_profiles`，默认 1.2；禁止 1.5×ATR 地板）  
 **波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
 **递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
 **幂等铁律（v15.8.2）**：本地 `reentry_order_tag` 未释放 → 绝对拒挂第二笔；查单失败 fail-closed；无菌净场后才再入  
@@ -13,15 +13,15 @@
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
 
-> **双 STOP 说明**：盘口两笔接近的止损 = **硬止损** + **雷达(1.5×ATR)**。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
-> **硬止损（唯一公式 · v15.9.0）**：`|TV价 − TV.stop_loss| × buffer_multiplier`（默认 1.2，见 `defense_profiles`），挂在**成交价**外侧。已删除 1.5×ATR 地板与 |成交−TV|×2 滑点项。缺 `stop_loss` / 距离过小 → **拒开**。  
-> **TP123（v15.9.0）**：限价常挂 10%/20%/70%；TP3 与雷达互斥（谁先成交撤另一条）。  
+> **双 STOP 说明**：盘口两笔接近的止损 = **硬止损** + **雷达**。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
+> **硬止损（唯一公式 · v15.9.0）**：`|TV价 − TV.stop_loss| × buffer_multiplier`，挂在**成交价**外侧。已删除 1.5×ATR 地板与 `|成交−TV|×2`。缺/异常 `stop_loss` → **拒开**。  
+> **TP（v15.9.0）**：10%/20%/70% 常挂 TP1+TP2+TP3；TP3 与雷达互斥（谁先成交撤另一腿）。  
 > **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
 > **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。  
-> **v15.8.2**：再入闭环 + 本地订单标签幂等；仓归零→无菌→挂限价→成交→硬@fill+TP12+雷达休眠；钉钉核实。  
-> **v15.9.0**：对齐 TV 动态止损 + TP 10/20/70 + TP3 常挂互斥。
+> **v15.8.2**：再入闭环 + 本地订单标签幂等。  
+> **v15.9.0**：对齐 TV 止损距离×buffer + TP 10/20/70 常挂 TP3 + TP3↔雷达互斥。
 
 > **权威依据**：桌面《VPS改造规格说明_TP比例与止损同步》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
@@ -49,20 +49,19 @@ python3 test_orders_dup_guard.py
 开仓成交瞬间**同步**做三件事（不分先后）：
 
 1. **挂永久硬止损**  
-   距离 = `|TV价 − TV.stop_loss| × buffer_multiplier`（默认 1.2，`defense_profiles`）  
-   → 挂在**交易所成交价**外侧（closePosition）。  
+   距离 = `|TV价 − TV.stop_loss| × buffer_multiplier`（默认 1.2，见 `defense_profiles.py`）  
+   → 挂在**交易所成交价**外侧（closePosition）。缺/过小 `stop_loss` → **拒开**。  
    身份：**永久防线**。仓位归零前：**不改价、不撤销**（仅公式升级允许一次性重挂）。  
-   实现：`atr_scenario.hard_stop_price` → `frozen_hard_sl_px` + `_ensure_frozen_hard_sl`。  
-   **缺 stop_loss / 距离 < 5tick → 拒开。**
+   实现：`atr_scenario.hard_stop_price` → `frozen_hard_sl_px` + `_ensure_frozen_hard_sl`。
 
 2. **挂 TP1+TP2+TP3 限价止盈**  
    价格 = TV `tp1`/`tp2`/`tp3`；数量 = VPS 自算总仓位的 **10% / 20% / 70%**。  
-   与硬止损同时挂出。TP3 与雷达互斥（谁先成交撤另一条）。
+   与硬止损同时挂出。TP3 与雷达对同一余仓**互斥**：谁先成交撤另一腿。
 
 3. **启动 VPS 原生 1h ATR 拉取**（呼吸系数 / 场景决议；≠ TV 图表周期）  
    - **场景一**（成功）：雷达用真实 ATR  
    - **场景二**（失败）：雷达用 TV `atr`；可持续恢复场景一  
-   - 两场景均保留 TP123 限价
+   - 两种场景均保留三级 TP 限价（不再因场景一撤 TP3）
 
 ### 硬止损 vs 雷达止损
 
@@ -80,9 +79,8 @@ python3 test_orders_dup_guard.py
 
 ### 部分平仓时数量同步
 
-- TP1 成交 → 仓≈90%：硬止损（closePosition 自动）+ 雷达（独立改量）同步到剩余  
-- TP2 成交 → 仓≈70%：再次同步  
-- TP3 成交 → 全平余仓；互斥撤雷达  
+- TP1 成交 → 仓≈70%：硬止损（closePosition 自动）+ 雷达（独立改量）同步到剩余  
+- TP2 成交 → 仓≈40%：再次同步  
 - 收缩**只改数量、不改硬止损价格**；实现禁止 `preserve_hard=False` 清场（裸奔窗口）
 
 ### 示例（ETH SHORT）
@@ -161,7 +159,8 @@ position_supervisor_binance.py     ← 唯一生产大脑
 | `price` | 开仓参考 / 去重键 |
 | `stop_loss` | 永久硬止损公式输入（与 `atr`/`price`/成交价一并计算）；亦可参与 sizing 收紧 |
 | `atr` | 场景一日志；场景二雷达 ATR；缺则拒开 |
-| `tp1`/`tp2`/`tp3` | 限价止盈价；数量固定 **10%/20%/70%**；三级常挂 |
+| `tp1`/`tp2` | 限价止盈价；数量固定 30%/30% |
+| `tp3` | 仅场景二挂出（40%）；场景一不挂 |
 | `qty` | 可选 soft-cap；天文值忽略 |
 
 ---
@@ -249,8 +248,7 @@ qty = 名义上限 / entryPrice
 | `smart_reentry_engine.py` | 再入决策纯函数（可否再入/计划价） | 无 IO，易单测 |
 | `reentry_profiles.py` | ETH/XAU 五档系数、TTL、双保险公式 | 改档位只动配置表 |
 | `breath_stop.py` / `breath_profiles.py` | 雷达呼吸价 / 品种呼吸表 | 与硬止损独立 |
-| `atr_scenario.py` | 硬止损唯一公式（TV距×buffer） | 禁止再加 ATR 地板 |
-| `defense_profiles.py` | buffer / TP10·20·70 / 最小止损距 | 调参只改配置 |
+| `atr_scenario.py` | 硬止损唯一公式 + 场景一/二 | 滑点按成交价外侧 |
 | `binance_client.py` | REST/WS；限价/止损 fail-closed + 去重 | 查单失败禁止挂 |
 | `dingtalk.py` | 实盘核实通知 | 成交/防线 hung 必报 |
 | `check_vps_logic.py` | 静态逻辑审计（部署门禁） | 新铁律加断言 |
