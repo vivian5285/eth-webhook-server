@@ -111,7 +111,7 @@ def plan_reentry_limit(
     now: Optional[float] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    5m 极值 → 3m → TV 折扣；必须优于 TV。
+    双保险：极值(5m→3m) 与 TV 折扣取更优；必须优于 TV。
     返回 (plan, reason)。
     """
     rp = get_reentry_profile(symbol)

@@ -1,11 +1,11 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.8.0-radar-reentry`**  
+**当前版本：`v15.8.1-wave-roll`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
-**呼吸锁定表：ETH/XAU 统一 1.2~2.5**（冷启动 1.525）  
-**递进雷达：休眠至 50%/65%/80%/95%×TP1距；智能再入（5m 极值优于 TV）**  
+**波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
+**递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
@@ -15,14 +15,14 @@
 > **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
-> **v15.8.0**：开仓仅挂硬止损+TP；雷达休眠至递进激活线；雷达保本/微赚可 5m 极值限价再入（硬止损/亏损不重入）。
+> **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。
 
-> **权威依据**：桌面《双币种智能再入场完整实施计划（终极版）》+ 白皮书 + 本文。  
+> **权威依据**：桌面《智能再入场与波段滚动完整方案（最终文字版）》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.8.0-radar-reentry · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.8.1-wave-roll · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_radar_reentry.py
@@ -183,30 +183,24 @@ qty = 名义上限 / entryPrice
 
 ---
 
-## 六、呼吸雷达 + 智能再入场（独立于硬止损）
+## 六、呼吸雷达 + 波段滚动再入场（独立于硬止损）
 
-- ETH / XAU 参数只读 `breath_profile` + `reentry_profiles`（禁止业务 `if XAU`）  
-- **生产现状（v15.8.0）**：开仓挂 **硬止损+TP1/TP2**；雷达 **休眠** 至递进激活线后再挂 STOP 并呼吸  
-- 启动阈值：attempt 0/1/2/3 → **50%/65%/80%/95%** × TP1距(1.35×ATR)，只增不减  
-- 阶段一：阶梯推进（`early_be`/`step_trigger`/`step_advance` 按 tier 递进）  
-- 阶段二：1h ATR 呼吸系数连续插值追踪（ETH/XAU trail **统一 1.2~2.5**）  
-- 改单只收紧，拒改宽；幂等防撤挂抖动  
-- 雷达改单 **绝不** 触碰 `frozen_hard_sl_px`  
-- **智能再入**：雷达保本/微赚（ETH ±0.5ATR / XAU ±0.3ATR）→ 5m 极值±1tick 限价（备选 3m → TV×0.997/1.003）；必须优于 TV 信号价；TTL 5min；最多 3 次重入 / 5 次未成交刷新；硬止损与亏损不重入；新 TV 彻底清场
+- ETH / XAU 参数只读 `breath_profile` + `reentry_profiles`（`enabled` 可关）  
+- **生产现状（v15.8.1）**：开仓挂硬+TP；雷达休眠至档位激活线；仓位归零且保本/微赚 → 双保险限价再入  
+- 启动阈值档位 **1.0~5.0**：50% / 65% / 80% / **90%** / 95% × TP1距，只增不减  
+- 每档独立 `early_be` / `step_*` / **phase2 trail 带宽**（随档位放宽）  
+- **双保险再入价**：多 `min(5m低+tick, TV×0.997)`；空 `max(5m高−tick, TV×1.003)`（无 K 线则 3m→仅 TV 折扣）  
+- 必须优于 TV；TTL 5min；最多 4 次重入；未成交刷新≤5；硬止损/亏损不重入；新 TV 彻底清场  
 
-| | ETH | XAU |
-|--|-----|-----|
-| TV 图表周期 | **90m** | **45m** |
-| VPS ATR 用途 | 1h ATR → 呼吸系数 / 场景一 | 同左 |
-| stop_exec_buffer | 0.3 | 0.5 |
-| tier0 early_be | 0.50 | **0.65** |
-| tier0 step_trigger / advance | 0.75 / 0.40 | 0.70 / 0.45 |
-| phase_switch_atr | 3.0 | 3.0 |
-| initial_sl_atr（雷达初值） | 1.5 | 1.5 |
-| 呼吸 min~max | 1.2~2.5（冷启动 1.525） | **1.2~2.5**（冷启动 1.525） |
-| 再入微赚区 | ±0.5×ATR | ±0.3×ATR |
+| 档位 | 激活% | ETH early/trig/adv · trail | XAU early/trig/adv · trail |
+|------|-------|----------------------------|----------------------------|
+| 1.0 | 50% | 0.50/0.75/0.40 · 1.2~2.5 | 0.65/0.70/0.45 · 1.2~2.5 |
+| 2.0 | 65% | 0.65/0.90/0.46 · 1.4~2.8 | 0.85/0.85/0.52 · 1.4~2.8 |
+| 3.0 | 80% | 0.85/1.10/0.52 · 1.6~3.0 | 1.10/1.00/0.58 · 1.6~3.0 |
+| 4.0 | 90% | 1.05/1.25/0.58 · 1.8~3.2 | 1.30/1.15/0.64 · 1.8~3.2 |
+| 5.0 | 95% | 1.30/1.40/0.64 · 2.0~3.5 | 1.55/1.30/0.70 · 2.0~3.5 |
 
-配置源：`reentry_profiles.py` / `breath_profiles.py` / `radar_reentry_mixin.py`。
+再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`reentry_profiles.py`。
 
 ---
 

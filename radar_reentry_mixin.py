@@ -14,6 +14,8 @@ from reentry_profiles import (
     activation_frac_for_attempt,
     apply_tier_to_breath_profile,
     get_reentry_profile,
+    reentry_enabled,
+    tier_label,
 )
 from smart_reentry_engine import (
     blank_reentry_state,
@@ -260,7 +262,10 @@ class RadarReentryMixin:
         return k5, k3
 
     def _maybe_start_smart_limit_reentry(self, snap: Dict[str, Any], meta: Dict[str, Any]):
-        """雷达保本出局后挂限价再入；硬止损/亏损/超次不挂。"""
+        """仓位归零且微赚/保本后挂限价再入；硬止损/亏损/超次不挂。"""
+        if not reentry_enabled(self.symbol):
+            logger.info(f"⏸ [{self.symbol}] 智能再入已关闭(enabled=False)")
+            return False
         if getattr(self, "_reentry_cycle_aborted", False):
             return False
         if bool(getattr(self, "reentry_active", False)):
@@ -336,7 +341,8 @@ class RadarReentryMixin:
                 dingtalk.report_system_alert,
                 title=f"智能再入场限价已挂 [{self.symbol}]",
                 detail=(
-                    f"{side} attempt={attempt}/3 | "
+                    f"{side} 档位{tier_label(attempt)}→{tier_label(attempt + 1)} "
+                    f"attempt={attempt}/{int(get_reentry_profile(self.symbol).get('max_reentries') or 4)} | "
                     f"limit@{float(self.reentry_limit_px):.2f} | "
                     f"TV@{float(self.cycle_tv_price):.2f} | "
                     f"exit={exit_src}@{exit_px:.2f}"
@@ -547,6 +553,7 @@ class RadarReentryMixin:
                 title=f"智能再入已成交 [{self.symbol}]",
                 detail=(
                     f"{side} {qty} @ {entry:.2f} | "
+                    f"档位{tier_label(int(self.reentry_attempt))} "
                     f"attempt={self.reentry_attempt} "
                     f"frac={float(self.radar_activation_frac):.0%} | "
                     f"雷达休眠至激活线"

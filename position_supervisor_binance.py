@@ -160,7 +160,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.8.0-radar-reentry"
+BINANCE_VPS_VERSION = "v15.8.1-wave-roll"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
