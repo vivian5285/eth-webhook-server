@@ -232,6 +232,26 @@ qty = 名义上限 / entryPrice
 再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`reentry_profiles.py`。  
 实现：`radar_reentry_mixin.py` + `smart_reentry_engine.py` + `place_limit_order(..., client_order_id=)`。
 
+### 模块地图（后期优化入口）
+
+| 文件 | 职责 | 改这里时注意 |
+|------|------|--------------|
+| `app.py` | Flask webhook → `handle_signal` | 鉴权/路由；不写交易逻辑 |
+| `webhook_parser.py` | TV payload 解析、VALID_ACTIONS、15s 序 | schema 变更必同步 TV |
+| `position_supervisor_binance.py` | 唯一大脑：开平/硬止损/TP/哨兵 | 每 symbol 一实例；无菌开仓 |
+| `radar_reentry_mixin.py` | 递进雷达休眠 + 再入闭环 + 订单标签 | **标签未清禁挂**；无菌后再入 |
+| `smart_reentry_engine.py` | 再入决策纯函数（可否再入/计划价） | 无 IO，易单测 |
+| `reentry_profiles.py` | ETH/XAU 五档系数、TTL、双保险公式 | 改档位只动配置表 |
+| `breath_stop.py` / `breath_profiles.py` | 雷达呼吸价 / 品种呼吸表 | 与硬止损独立 |
+| `atr_scenario.py` | 硬止损唯一公式 + 场景一/二 | 滑点按成交价外侧 |
+| `binance_client.py` | REST/WS；限价/止损 fail-closed + 去重 | 查单失败禁止挂 |
+| `dingtalk.py` | 实盘核实通知 | 成交/防线 hung 必报 |
+| `check_vps_logic.py` | 静态逻辑审计（部署门禁） | 新铁律加断言 |
+
+TV 全链条（空仓待命 → 新信号）：  
+`webhook → handle_signal → _ensure_flat_before_open → 市价开 → _arm_temp_stop_and_tp12 → 雷达休眠 → 哨兵`；  
+平仓归零后若保本：`_maybe_start_smart_limit_reentry → 无菌 → 标签限价 → 成交 → 硬@fill+TP+休眠`。
+
 ---
 
 ## 七、TP 与平仓
