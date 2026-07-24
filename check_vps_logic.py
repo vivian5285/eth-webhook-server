@@ -655,14 +655,14 @@ def audit_module4_radar(a: Audit):
             abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
             and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
             and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
-            and abs(float(BREATH_XAU["early_be_atr"]) - 0.5) < 1e-9
+            and abs(float(BREATH_XAU["early_be_atr"]) - 0.65) < 1e-9
             and abs(float(BREATH_ETH["min_mult"]) - 1.2) < 1e-9
             and abs(float(BREATH_ETH["max_mult"]) - 2.5) < 1e-9
-            and abs(float(BREATH_XAU["min_mult"]) - 0.5) < 1e-9
-            and abs(float(BREATH_XAU["max_mult"]) - 1.2) < 1e-9
+            and abs(float(BREATH_XAU["min_mult"]) - 1.2) < 1e-9
+            and abs(float(BREATH_XAU["max_mult"]) - 2.5) < 1e-9
             and abs(float(BREATH_XAU["phase2_trail_mult"]) - 1.0) < 1e-9
             and abs(trail_distance_multiplier(1.0, BREATH_ETH) - 1.525) < 1e-9
-            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 0.675) < 1e-9,
+            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 1.525) < 1e-9,
         )
         pe = get_breath_profile("ETHUSDT")
         px = get_breath_profile("XAUUSDT")
@@ -729,9 +729,15 @@ def audit_module4_radar(a: Audit):
         or "_state_old_schema" in sup,
     )
     a.check(
-        "4.4 废弃待命回撤",
-        "已废弃：呼吸止损开仓即运行" in sup
+        "4.4 递进雷达休眠闸门",
+        ("_radar_is_dormant" in sup or "radar_pending_arm" in sup)
+        and ("_begin_open_radar_dormant" in sup or "RadarReentryMixin" in sup)
         and "已废弃回撤逻辑" in sup,
+    )
+    a.check(
+        "4.4b 智能再入场配置",
+        os.path.isfile(os.path.join(ROOT, "reentry_profiles.py"))
+        and os.path.isfile(os.path.join(ROOT, "radar_reentry_mixin.py")),
     )
     a.check(
         "4.5 ATR_UPDATE/ORDER_TIMEOUT 在 webhook_parser",
@@ -767,7 +773,7 @@ def audit_module4_radar(a: Audit):
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",
         '_atr_reject' in wp
         and '"tv_invalid"' in wp
-        and "RADAR_ACTIVATE_TP1_FRAC = 0.0" in wp
+        and "RADAR_ACTIVATE_TP1_FRAC = 0.50" in wp
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP

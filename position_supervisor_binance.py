@@ -114,6 +114,14 @@ from atr_scenario import (
     temp_hard_stop_price,
 )
 from breath_profiles import LockedInitialAtr, cold_start_multiplier
+from reentry_profiles import (
+    activation_frac_for_attempt,
+    activation_price as reentry_activation_px,
+    get_reentry_profile,
+    tp1_distance as reentry_tp1_distance,
+)
+from smart_reentry_engine import blank_reentry_state
+from radar_reentry_mixin import RadarReentryMixin
 from market_engine import (
     get_market_engine,
     atr_divergence_pct,
@@ -152,7 +160,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.12-xau-early-be"
+BINANCE_VPS_VERSION = "v15.8.0-radar-reentry"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -173,7 +181,7 @@ SIGNAL_DEDUP_SEC = int(WP_SIGNAL_DEDUP_SEC or 60)
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 SENTINEL_GRACE_AFTER_OPEN_SEC = 90
-# 呼吸止损开仓即运行（无旧「TP1前禁雷达」窗）
+# 递进雷达：开仓后休眠至 activation_frac×TP1距；无固定秒级禁窗
 POST_OPEN_RADAR_BLOCK_SEC = 0
 RADAR_TRAIL_MIN_INTERVAL_SEC = 5  # 呼吸止损改单最短间隔
 RADAR_WS_APPROACH_RATIO = 0.90
@@ -233,7 +241,7 @@ HARD_SL_SYNC_COOLDOWN_SEC = 45
 OPEN_REGIME_ENTRY_MATCH_PCT = 0.008  # 开仓日志匹配入场价容差 0.8%
 
 
-class PositionSupervisorBinance:
+class PositionSupervisorBinance(RadarReentryMixin):
     def __init__(self, symbol="ETHUSDT"):
         from symbol_config import resolve_binance_symbol
         from breath_profiles import get_breath_profile
@@ -364,6 +372,7 @@ class PositionSupervisorBinance:
         self.tv_qty3 = 0.0  # 不挂限价，余仓交阶段二
         self.radar_step_count = 0
         self.radar_activated = False
+        self._init_reentry_runtime()
         self.breakeven_phase = False  # 呼吸止损阶段二
         self.initial_stop = 0.0       # entry±1.5×initialAtr，阶梯基准（理论，不含0.3缓冲）
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
@@ -438,6 +447,8 @@ class PositionSupervisorBinance:
                     getattr(self, "_idle_patrol_backoff_until", 0.0) or 0.0
                 )
                 sleep_for = float(IDLE_PATROL_INTERVAL_SEC)
+                if bool(getattr(self, "reentry_active", False)):
+                    sleep_for = min(sleep_for, 15.0)  # 再入限价期加快巡检
                 if now < backoff_until:
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
@@ -755,6 +766,12 @@ class PositionSupervisorBinance:
             return
         if getattr(self, "_open_in_progress", False):
             return
+        # 智能再入限价：TTL 刷新 / 成交检测
+        try:
+            if bool(getattr(self, "reentry_active", False)):
+                self._reentry_tick()
+        except Exception as e:
+            logger.debug(f"再入场 tick 跳过: {e}")
 
         pos = self._get_active_position()
         if pos == "QUERY_FAILED":
@@ -2738,6 +2755,7 @@ class PositionSupervisorBinance:
                     ),
                     "temp_stop_active": bool(getattr(self, "_temp_stop_active", False)),
                     "last_bar_time_ms": int(getattr(self, "_last_bar_time_ms", 0) or 0),
+                    **self._reentry_state_dict(),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -3482,10 +3500,16 @@ class PositionSupervisorBinance:
                 logger.warning(f"[{self.symbol}] 撤TP3失败: {e}")
 
         if live_qty > 0 and self.initial_stop > 0:
-            self._sync_exchange_stop(
-                live_qty, float(self.initial_stop), force=True,
-                reason=("场景一恢复·雷达止损" if recovered else "场景一·雷达止损"),
-            )
+            if self._radar_is_dormant():
+                logger.info(
+                    f"⏳ [{self.symbol}] 场景一：雷达休眠，仅记账 initialStop="
+                    f"{self.initial_stop:.2f}（不挂雷达 STOP）"
+                )
+            else:
+                self._sync_exchange_stop(
+                    live_qty, float(self.initial_stop), force=True,
+                    reason=("场景一恢复·雷达止损" if recovered else "场景一·雷达止损"),
+                )
         self._save_state()
         msg = scenario_notice(
             SCENARIO_VPS, vps_atr=atr, recovered=recovered,
@@ -3536,10 +3560,16 @@ class PositionSupervisorBinance:
         self._refresh_breathing_coefficient(force=True)
 
         if live_qty > 0 and self.initial_stop > 0:
-            self._sync_exchange_stop(
-                live_qty, float(self.initial_stop), force=True,
-                reason="场景二·雷达止损",
-            )
+            if self._radar_is_dormant():
+                logger.info(
+                    f"⏳ [{self.symbol}] 场景二：雷达休眠，仅记账 initialStop="
+                    f"{self.initial_stop:.2f}（不挂雷达 STOP）"
+                )
+            else:
+                self._sync_exchange_stop(
+                    live_qty, float(self.initial_stop), force=True,
+                    reason="场景二·雷达止损",
+                )
         # 挂 TP3（受既有同价去重/查簿防护约束）
         try:
             placed = self._place_tp_levels_only(live_qty, retries=2)
@@ -5629,7 +5659,10 @@ class PositionSupervisorBinance:
         if force_open or old <= 0:
             self.current_sl = init
             self.breakeven_phase = False
-            self.radar_activated = True
+            # 新开仓：雷达休眠至激活线；接管保留已激活状态
+            if force_open:
+                self.radar_activated = False
+                self.radar_pending_arm = True
             self._radar_stage_last = max(int(getattr(self, "_radar_stage_last", 0) or 0), 1)
             if entry > 0 and force_open:
                 self.best_price = entry
@@ -6000,6 +6033,9 @@ class PositionSupervisorBinance:
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
             return {"ok": False, "skipped": True, "reason": "no_position"}
+        # 休眠窗禁止非强制挂雷达；激活武装路径传 force=True
+        if self._radar_is_dormant() and not force:
+            return {"ok": False, "skipped": True, "reason": "radar_dormant"}
 
         self._lock_open_regime_from_sources(force=False)
         self._sanitize_vps_hard_sl_ledger(source=reason or "同步止损消毒")
@@ -6799,9 +6835,10 @@ class PositionSupervisorBinance:
         self.current_sl = float(safe_sl)
         self.tv_sl = float(safe_sl)
         self.radar_activated = True
+        self.radar_pending_arm = False
         self._radar_handoff_done = True
         self._radar_armed_after_tp1 = True
-        self._radar_trigger_gate = "开仓即呼吸止损"
+        self._radar_trigger_gate = "递进雷达已激活·兼容交棒"
         self._shield_handoff_notified = True
         self._post_open_radar_block_until = 0.0
         self._save_state()
@@ -7215,6 +7252,7 @@ class PositionSupervisorBinance:
                 s.get("tp_levels_radar_handoff", []) or []
             )
             self.radar_activated = bool(s.get("radar_activated", False))
+            self._load_reentry_state_from_dict(s)
             self.breakeven_phase = bool(s.get("breakeven_phase", False))
             self.best_price = float(s.get("best_price", 0) or 0)
             self.breathing_coefficient = float(
@@ -7662,6 +7700,8 @@ class PositionSupervisorBinance:
 
         # 永久硬止损与雷达独立维护；硬止损绝不因雷达改单而撤销/改价
         hard_ok = self._ensure_frozen_hard_sl(real_amt, reason="维护永久硬止损")
+        if self._radar_is_dormant():
+            return bool(hard_ok or getattr(self, "shield_active", False))
         if getattr(self, "tv_sl", 0) > 0 or radar_sl or self._frozen_hard_px() > 0:
             if not force and not self._can_maintain_shield_now(force=force):
                 return bool(hard_ok or getattr(self, "shield_active", False))
@@ -7708,12 +7748,8 @@ class PositionSupervisorBinance:
         return self._maintain_hard_shield(real_amt, curr_px)
 
     def _is_radar_active(self):
-        """呼吸止损开仓即运行（阶段一/二）；有 initial_stop 或 current_sl 即视为活跃。"""
-        if float(getattr(self, "initial_stop", 0) or 0) > 0 and float(self.current_sl or 0) > 0:
-            return True
-        if bool(getattr(self, "radar_activated", False)) and float(self.current_sl or 0) > 0:
-            return True
-        return False
+        """递进雷达：仅激活后视为活跃（休眠窗不算）。"""
+        return bool(getattr(self, "radar_activated", False)) and float(self.current_sl or 0) > 0
 
     def _radar_sl_to_pass(self):
         return self.current_sl if self._is_radar_active() else None
@@ -10466,7 +10502,7 @@ class PositionSupervisorBinance:
             return saved
         if bool(getattr(self, "breakeven_phase", False)):
             return f"保本触发{BREAKEVEN_TRIGGER_ATR}×ATR→ADX追踪"
-        return "开仓即呼吸止损·阶段一阶梯"
+        return "递进雷达·阶段一阶梯"
 
     def _signal_ts_epoch(self, signal_or_ts):
         """兼容 float epoch / 日期字符串，解析失败返回 0。"""
@@ -10548,7 +10584,16 @@ class PositionSupervisorBinance:
             return EXIT_SOURCE_TP3, "TP123三档全部成交 · 完美收网"
 
         # 铁律：仅当现价贴近挂出的止损价，才可归因「止损平仓」。
-        # 呼吸引擎开仓即 armed，不能单凭 armed 就把市价/脚本主动平仓贴成止损。
+        # 优先硬止损：exit 贴近 frozen_hard_sl_px → 禁止误判雷达保本。
+        px_chk = float(curr_px or 0)
+        if px_chk > 0 and self._exit_px_near_hard(px_chk):
+            note = (
+                f"触碰永久硬止损 @ {float(getattr(self, 'frozen_hard_sl_px', 0) or 0):.2f}"
+            )
+            if hint:
+                note += f" | {hint}"
+            return EXIT_SOURCE_VPS_HARD_SL, note
+
         near_stop = self._likely_exchange_stop_exit(curr_px)
         if near_stop:
             sl = float(
@@ -11170,7 +11215,12 @@ class PositionSupervisorBinance:
         铁律原子链：先平现有仓（无菌净场）→ 再按 TV 开仓刷新。
         空仓时同样走净场（清残留挂单）再开；钉钉核实终态。
         开仓前快照 TV TP123，净场后强制绑回，杜绝只开仓不挂防线。
+        新TV：彻底清再入场周期（阈值/系数/计数器归零）。
         """
+        try:
+            self._clear_reentry_cycle(source="新TV·先平后开")
+        except Exception as e:
+            logger.debug(f"清再入周期跳过: {e}")
         payload = payload or {}
         chain = bool(getattr(self, "_close_open_chain_active", False))
         reason = close_reason or "TV开仓·一律先平后开"
@@ -11279,11 +11329,19 @@ class PositionSupervisorBinance:
         self._stop_write_blocked = False
         self._clear_defense_order_ids(save=False)
         self._clear_signal_fingerprint()
+        # 平仓：撤再入限价标记；周期字段留给 _maybe_start（新TV走 _clear_reentry_cycle）
+        try:
+            self._cancel_reentry_limit(reason=source or "平仓清零")
+        except Exception:
+            pass
+        self.reentry_active = False
+        self.radar_pending_arm = True
         logger.info(f"🧹 [{self.symbol}] 呼吸/防线账本已清零 | {source}")
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
-        """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉"""
+        """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉 + 智能再入"""
         prev_side = self.current_side
+        snap = self._snapshot_cycle_for_reentry()
         purge = self._purge_all_defense_orders_on_flat(
             reason or "感知空仓·抢先撤TP123",
         )
@@ -11291,6 +11349,12 @@ class PositionSupervisorBinance:
             close_meta or self._infer_flat_close_meta(curr_px, hint_reason=reason),
             curr_px,
         )
+        exit_px = float(meta.get("live_exit_px") or curr_px or 0)
+        if self._exit_px_near_hard(exit_px):
+            meta["exit_source"] = EXIT_SOURCE_VPS_HARD_SL
+            meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
+                EXIT_SOURCE_VPS_HARD_SL, "永久硬止损"
+            )
         logger.info(f"📭 感知空仓: {meta.get('tv_reason') or reason}")
         self._abnormal_reduce_alert_ts = 0.0
         self._abnormal_reduce_alert_sig = ""
@@ -11313,6 +11377,10 @@ class PositionSupervisorBinance:
             close_meta=meta,
             curr_px=curr_px,
         )
+        try:
+            self._maybe_start_smart_limit_reentry(snap, meta)
+        except Exception as e:
+            logger.error(f"[{self.symbol}] 智能再入启动失败: {e}")
         self._sweep_orphan_reverse_after_flat(
             prev_side=prev_side,
             reason=meta.get("tv_reason") or reason,
@@ -11771,7 +11839,7 @@ class PositionSupervisorBinance:
         3) 同步拉原生1h ATR：
            · 场景一：真实ATR重算 initialStop，撤临时止损，不挂TP3
            · 场景二：TV atr 运作雷达，挂TP3(40%)兜底，不暂停；tick可持续恢复场景一
-        4) 呼吸止损开仓即接管
+        4) 递进雷达休眠至激活线后接管呼吸
         5) 实盘核实后钉钉一条
         """
         entry_price = float(entry_price or 0)
@@ -11802,16 +11870,17 @@ class PositionSupervisorBinance:
         # （禁止在核实前用虚构 ATR 发明止损）
         self.best_price = entry_price
         self.breakeven_phase = False
-        self.radar_activated = True
-        self._radar_stage_last = 1
+        self.radar_activated = False
+        self.radar_pending_arm = True
+        self._radar_stage_last = 0
         self.shield_active = False
         self.shield_tiers_consumed = []
         self.tp_levels_consumed = []
         self._radar_activation_notified = False
         self._radar_notify_pending = False
-        self._radar_trigger_gate = "开仓即呼吸止损·两场景"
-        self._radar_armed_after_tp1 = True
-        self._radar_handoff_done = True
+        self._radar_trigger_gate = "递进雷达待命·硬止损+TP"
+        self._radar_armed_after_tp1 = False
+        self._radar_handoff_done = False
         self._ws_tp1_fill_hint = False
         self._ws_tp_fill_levels = set()
         self._shield_handoff_notified = True  # 不再发「交棒」旧钉钉
@@ -11877,7 +11946,18 @@ class PositionSupervisorBinance:
             )
             vps_sl = float(getattr(self, "current_sl", 0) or 0)
 
-            # 开仓后硬闸：雷达 + 永久硬止损双防线对齐
+            # 开仓后：递进雷达休眠；仅硬止损对齐，雷达待激活线
+            self._begin_open_radar_dormant(
+                side=self.current_side,
+                entry=entry_live,
+                tv_price=float(getattr(self, "tv_price", 0) or entry_live),
+                open_atr=float(
+                    getattr(self, "open_atr", 0)
+                    or getattr(self, "_tv_signal_atr", 0)
+                    or 0
+                ),
+                reentry_attempt=int(getattr(self, "reentry_attempt", 0) or 0),
+            )
             hung = binance_client.find_protective_stop_prices(self.symbol)
             frozen = self._frozen_hard_px()
             hard_ex = round(float(order_stop_price(
@@ -11890,11 +11970,14 @@ class PositionSupervisorBinance:
                     f"🚨 [{self.symbol}] 开仓后挂单查询失败 → 禁止盲补止损"
                 )
             else:
-                self._sync_exchange_stop(
-                    live_qty, radar_sl=self.current_sl,
-                    reason="开仓后雷达止损对齐",
-                    force=True,
-                )
+                if not self._radar_is_dormant():
+                    self._sync_exchange_stop(
+                        live_qty, radar_sl=self.current_sl,
+                        reason="开仓后雷达止损对齐",
+                        force=True,
+                    )
+                else:
+                    self._strip_radar_stop_keep_hard(reason="开仓后雷达休眠")
                 self._ensure_frozen_hard_sl(live_qty, reason="开仓后永久硬止损对齐")
             audit = self._wait_defense_settled(live_qty, retries=10, delay=0.9)
             matched, expected = audit["matched_full"], audit["expected"]
@@ -12357,11 +12440,20 @@ class PositionSupervisorBinance:
                 self.current_sl = min(cur, float(clamped)) if cur > 0 else float(clamped)
             self.tv_sl = float(self.current_sl)
 
-        self.radar_activated = True
-        self._radar_armed_after_tp1 = True
-        self._radar_handoff_done = True
-        self._radar_trigger_gate = "开仓即呼吸止损"
-        self._radar_stage_last = 2 if getattr(self, "breakeven_phase", False) else 1
+        if not self._radar_is_dormant():
+            self.radar_activated = True
+            self._radar_armed_after_tp1 = True
+            self._radar_handoff_done = True
+            self._radar_trigger_gate = "递进雷达·重启对齐"
+        else:
+            self.radar_activated = False
+            self.radar_pending_arm = True
+            self._radar_armed_after_tp1 = False
+            self._radar_handoff_done = False
+            self._radar_trigger_gate = "递进雷达休眠·重启待命"
+        self._radar_stage_last = 2 if getattr(self, "breakeven_phase", False) else (
+            1 if self.radar_activated else 0
+        )
         logger.info(
             f"🫁 [{self.symbol}] 重启呼吸止损对齐: "
             f"阶段{'二·ADX' if getattr(self, 'breakeven_phase', False) else '一·阶梯'} | "
@@ -12485,16 +12577,38 @@ class PositionSupervisorBinance:
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """连续阶梯：entry→TP1 路程 85% 激活。"""
-        return float(RADAR_ACTIVATE_TP1_FRAC)
+        """递进阈值：attempt 0/1/2/3 → 50%/65%/80%/95% × TP1距。"""
+        frac = float(getattr(self, "radar_activation_frac", 0) or 0)
+        if frac > 0:
+            return frac
+        return float(
+            activation_frac_for_attempt(
+                int(getattr(self, "reentry_attempt", 0) or 0),
+                get_reentry_profile(self.symbol),
+            )
+        )
 
     def _radar_activation_price(self):
-        """价触此价 → 首次激活保本。"""
+        """价触此价 → 首次激活雷达呼吸。"""
         entry = float(self.watched_entry or 0)
+        atr = float(
+            getattr(self, "open_atr", 0)
+            or getattr(self, "cycle_open_atr", 0)
+            or 0
+        )
+        if atr <= 0:
+            try:
+                atr = float(self._get_locked_initial_atr() or 0)
+            except Exception:
+                atr = 0.0
+        frac = float(self._radar_activation_ratio() or 0.5)
+        px = reentry_activation_px(self.current_side, entry, atr, frac)
+        if px > 0:
+            return px
         tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
         if tp1 <= 0:
             tp1 = entry + self._tp1_distance() if self.current_side == "LONG" else entry - self._tp1_distance()
-        return radar_activation_price(self.current_side, entry, tp1)
+        return radar_activation_price(self.current_side, entry, tp1, frac=frac)
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
         """兼容旧调用：一律走呼吸止损。"""
@@ -12502,14 +12616,27 @@ class PositionSupervisorBinance:
 
     def _apply_breath_stop_tick(self, curr_px=0.0):
         """
-        每个 tick 更新呼吸止损状态（按品种 breath_profile）。
-        返回 dict(stop, best, breakeven_phase, meta) 或 None。
+        每个 tick 更新呼吸止损状态（按品种 breath_profile + tier overlay）。
+        雷达休眠窗：只更新 best，不推进止损/不激活。
         """
         entry = float(self.watched_entry or 0)
         side = str(self.current_side or "").strip().upper()
         if entry <= 0 or side not in ("LONG", "SHORT"):
             return None
+        px0 = float(curr_px or 0)
+        if px0 > 0:
+            if side == "LONG":
+                self.best_price = max(float(self.best_price or 0), px0)
+            else:
+                bp = float(self.best_price or 0)
+                self.best_price = min(bp, px0) if bp > 0 else px0
+        if self._radar_is_dormant():
+            return None
         atr = self._get_locked_initial_atr()
+        try:
+            self._apply_tier_breath_overlay()
+        except Exception:
+            pass
         profile = getattr(self, "breath_profile", None)
         init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
@@ -12558,7 +12685,7 @@ class PositionSupervisorBinance:
             self.tv_sl = float(self.current_sl)
         was_phase = phase
         self.breakeven_phase = new_phase
-        self.radar_activated = True
+        # 激活状态由 _maybe_arm_radar_on_activation 控制，禁止 tick 强行打开
         steps = int(meta.get("step_count") or 0)
         if steps > int(getattr(self, "radar_step_count", 0) or 0):
             self.radar_step_count = steps
@@ -12649,12 +12776,10 @@ class PositionSupervisorBinance:
         return 0.0
 
     def _radar_legitimately_armed(self, live_qty=None, curr_px=0.0):
-        """呼吸止损开仓即武装。"""
+        """递进雷达：价触激活线并挂出后才武装。"""
         if getattr(self, "_open_in_progress", False):
             return False
-        return self._is_radar_active() or bool(
-            getattr(self, "_radar_handoff_done", False)
-        )
+        return bool(getattr(self, "radar_activated", False))
 
     def _effective_radar_stage(self, curr_px):
         """雷达阶段：已武装后只升不降"""
@@ -12674,10 +12799,14 @@ class PositionSupervisorBinance:
         return max(0.0, min(1.0, self._tp1_direction_progress(curr_px) / ratio))
 
     def _should_radar_trail(self, curr_px):
-        """呼吸止损：有监控仓位即追踪。"""
+        """递进雷达：激活后才追踪。"""
         if getattr(self, "_open_in_progress", False):
             return False
-        return bool(self.watched_entry and self.current_side)
+        if not (self.watched_entry and self.current_side):
+            return False
+        if self._radar_is_dormant():
+            return False
+        return bool(getattr(self, "radar_activated", False))
 
     def _sync_radar_sl_from_best(self, curr_px):
         if not self._should_radar_trail(curr_px):
@@ -12896,17 +13025,23 @@ class PositionSupervisorBinance:
 
     def _process_radar_trailing(self, real_amt, curr_px):
         """
-        呼吸止损追踪：开仓即运行，只向有利方向改挂止损价（数量由 TP 成交路径收缩）。
+        呼吸止损追踪：达激活线后运行；休眠窗仅尝试武装。
         同价已挂 / 未达最小步进 / 冷却中 → 禁止撤挂死循环。
         """
         if getattr(self, "_breath_tick_paused", False):
             return False
         if self._radar_placement_blocked(real_amt, curr_px, reason="trailing", silent=True):
             return False
-        if not self._should_radar_trail(curr_px):
-            return False
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
+            return False
+        if self._radar_is_dormant():
+            self._maybe_arm_radar_on_activation(
+                real_amt, curr_px, source="trailing·激活闸",
+            )
+            if self._radar_is_dormant():
+                return False
+        if not self._should_radar_trail(curr_px):
             return False
 
         try:
@@ -13708,6 +13843,7 @@ class PositionSupervisorBinance:
                     self.tv_qty3 = float(s.get("tv_qty3", 0) or 0)
                     self.radar_step_count = int(s.get("radar_step_count", 0) or 0)
                     self.radar_activated = bool(s.get("radar_activated", False))
+                    self._load_reentry_state_from_dict(s)
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)

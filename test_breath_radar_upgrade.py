@@ -37,15 +37,15 @@ class TestContinuousInterp(unittest.TestCase):
         self.assertLess(abs(a - b), 0.02)
 
     def test_xau_bounds_and_mid(self):
-        # 最终锁定表：min=0.5 max=1.2 → ratio=1.0 → 0.675
-        self.assertAlmostEqual(trail_distance_multiplier(0.5, BREATH_XAU), 0.5, places=5)
-        self.assertAlmostEqual(trail_distance_multiplier(0.6, BREATH_XAU), 0.5, places=5)
-        self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_XAU), 1.2, places=5)
-        self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_XAU), 0.675, places=5)
+        # v15.8.0：XAU trail 对齐 ETH 1.2~2.5；ratio=1.0 → 1.525
+        self.assertAlmostEqual(trail_distance_multiplier(0.5, BREATH_XAU), 1.2, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(0.6, BREATH_XAU), 1.2, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_XAU), 2.5, places=5)
+        self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_XAU), 1.525, places=5)
 
     def test_cold_start(self):
         self.assertAlmostEqual(cold_start_multiplier(BREATH_ETH), 1.525, places=5)
-        self.assertAlmostEqual(cold_start_multiplier(BREATH_XAU), 0.675, places=5)
+        self.assertAlmostEqual(cold_start_multiplier(BREATH_XAU), 1.525, places=5)
         coeff, smooth, hist = get_breathing_coefficient(0, 20.0, [], profile=BREATH_ETH)
         self.assertEqual(hist, [])
         self.assertAlmostEqual(smooth, 1.0, places=5)
@@ -78,13 +78,13 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(eth["stop_exec_buffer"], 0.3)
         self.assertEqual(xau["stop_exec_buffer"], 0.5)
         self.assertEqual(eth["early_be_atr"], 0.5)
-        self.assertEqual(xau["early_be_atr"], 0.5)
+        self.assertEqual(xau["early_be_atr"], 0.65)
         self.assertEqual(eth["step_trigger_atr"], 0.75)
-        self.assertEqual(xau["step_trigger_atr"], 0.4)
+        self.assertEqual(xau["step_trigger_atr"], 0.70)
         self.assertEqual(eth["min_mult"], 1.2)
         self.assertEqual(eth["max_mult"], 2.5)
-        self.assertEqual(xau["min_mult"], 0.5)
-        self.assertEqual(xau["max_mult"], 1.2)
+        self.assertEqual(xau["min_mult"], 1.2)
+        self.assertEqual(xau["max_mult"], 2.5)
         # 额外 ×0.8 层已删除；草稿 XAU 0.8~1.8 已作废
         self.assertEqual(eth["phase2_trail_mult"], 1.0)
         self.assertEqual(xau["phase2_trail_mult"], 1.0)
@@ -142,19 +142,19 @@ class TestEarlyBreakeven(unittest.TestCase):
         self.assertTrue(out.get("early_be_done"))
         self.assertGreaterEqual(out["stop"], 1900.01)
 
-    def test_xau_early_be_at_0_5_atr(self):
-        # 0.5×ATR=5：价 2655 触发；2654 不触发
+    def test_xau_early_be_at_0_65_atr(self):
+        # v15.8.0 tier0 early_be=0.65×ATR：atr=10 → 6.5；价 2656.5 触发；2656 不触发
         out = calculate_breath_stop(
-            "LONG", 2655.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
-            breathing_coefficient=0.675,
+            "LONG", 2656.5, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
+            breathing_coefficient=1.525,
             profile=BREATH_XAU,
             early_be_done=False,
         )
         self.assertTrue(out.get("early_be_done"))
         self.assertGreaterEqual(out["stop"], 2650.01)
         out2 = calculate_breath_stop(
-            "LONG", 2654.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
-            breathing_coefficient=0.675,
+            "LONG", 2656.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
+            breathing_coefficient=1.525,
             profile=BREATH_XAU,
             early_be_done=False,
         )
@@ -208,11 +208,12 @@ class TestBreathStopWithCoeff(unittest.TestCase):
         self.assertAlmostEqual(out4["meta"]["trail_distance"], 50.0)
 
     def test_xau_tighter_ladder(self):
+        # tier0: step_trigger=0.70 / advance=0.45；价走 1.5ATR → ≥2 步
         p = dict(BREATH_XAU)
         p["early_be_atr"] = 0
         out = calculate_breath_stop(
-            "LONG", 1916.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
-            breathing_coefficient=0.675,
+            "LONG", 1930.0, 1900.0, 20.0, 1870.0, 1870.0, 1900.0, False,
+            breathing_coefficient=1.525,
             profile=p,
         )
         self.assertGreaterEqual(out["meta"]["step_count"], 2)

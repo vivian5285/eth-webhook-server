@@ -1,10 +1,11 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.12-xau-early-be`**  
+**当前版本：`v15.8.0-radar-reentry`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
-**呼吸锁定表：ETH 1.2~2.5 / XAU 0.5~1.2**（冷启动 1.525 / 0.675）  
+**呼吸锁定表：ETH/XAU 统一 1.2~2.5**（冷启动 1.525）  
+**递进雷达：休眠至 50%/65%/80%/95%×TP1距；智能再入（5m 极值优于 TV）**  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
@@ -14,19 +15,19 @@
 > **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
-> **待回测（指令 Part2/3，生产未启用）**：动态雷达启动阈值 50%~85%、考核窗口未推进收紧；当前仍为「开仓即呼吸」。勿与阶段一 `step_trigger`（阶梯步长）混淆。
+> **v15.8.0**：开仓仅挂硬止损+TP；雷达休眠至递进激活线；雷达保本/微赚可 5m 极值限价再入（硬止损/亏损不重入）。
 
-> **权威依据**：桌面《币安单一系统硬止损修复与雷达启动阈值合并指令》+ 白皮书 + 本文。  
+> **权威依据**：桌面《双币种智能再入场完整实施计划（终极版）》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.7.12-xau-early-be · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.8.0-radar-reentry · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
-python3 test_two_scenario_atr.py
-python3 test_tv_seq_collapse.py
+python3 test_radar_reentry.py
 python3 test_breath_radar_upgrade.py
+python3 test_two_scenario_atr.py
 ```
 
 | 工厂 | VPS 目录 | 端口 | 品种 |
@@ -182,34 +183,30 @@ qty = 名义上限 / entryPrice
 
 ---
 
-## 六、呼吸雷达（独立于硬止损）
+## 六、呼吸雷达 + 智能再入场（独立于硬止损）
 
-- ETH / XAU 参数只读 `breath_profile`（禁止业务 `if XAU`）  
-- **生产现状**：开仓即呼吸接管（`RADAR_ACTIVATE_TP1_FRAC=0`）  
-- 阶段一：阶梯推进（`step_trigger`/`step_advance` = **阶梯步长**，不是雷达启动阈值）+ TP 底线  
-- 阶段二：1h ATR 呼吸系数连续插值追踪  
+- ETH / XAU 参数只读 `breath_profile` + `reentry_profiles`（禁止业务 `if XAU`）  
+- **生产现状（v15.8.0）**：开仓挂 **硬止损+TP1/TP2**；雷达 **休眠** 至递进激活线后再挂 STOP 并呼吸  
+- 启动阈值：attempt 0/1/2/3 → **50%/65%/80%/95%** × TP1距(1.35×ATR)，只增不减  
+- 阶段一：阶梯推进（`early_be`/`step_trigger`/`step_advance` 按 tier 递进）  
+- 阶段二：1h ATR 呼吸系数连续插值追踪（ETH/XAU trail **统一 1.2~2.5**）  
 - 改单只收紧，拒改宽；幂等防撤挂抖动  
-- 雷达改单 **绝不** 触碰 `frozen_hard_sl_px`
+- 雷达改单 **绝不** 触碰 `frozen_hard_sl_px`  
+- **智能再入**：雷达保本/微赚（ETH ±0.5ATR / XAU ±0.3ATR）→ 5m 极值±1tick 限价（备选 3m → TV×0.997/1.003）；必须优于 TV 信号价；TTL 5min；最多 3 次重入 / 5 次未成交刷新；硬止损与亏损不重入；新 TV 彻底清场
 
 | | ETH | XAU |
 |--|-----|-----|
-| TV 图表周期 | **90m** | **45m**（文档已与实盘对齐；旧「1h」记录作废） |
-| VPS ATR 用途 | 1h ATR → 呼吸系数 / 场景一 | 同左（近似采样，≠图表周期） |
+| TV 图表周期 | **90m** | **45m** |
+| VPS ATR 用途 | 1h ATR → 呼吸系数 / 场景一 | 同左 |
 | stop_exec_buffer | 0.3 | 0.5 |
-| early_be_atr | 0.5 | **0.5**（2026-07-24 由 0.3 对齐 ETH；step 暂不动） |
-| step_trigger / advance | 0.75 / 0.4 | 0.4 / 0.35 |
+| tier0 early_be | 0.50 | **0.65** |
+| tier0 step_trigger / advance | 0.75 / 0.40 | 0.70 / 0.45 |
 | phase_switch_atr | 3.0 | 3.0 |
 | initial_sl_atr（雷达初值） | 1.5 | 1.5 |
-| 呼吸 min~max | 1.2~2.5（冷启动 1.525） | **0.5~1.2**（冷启动 **0.675**） |
+| 呼吸 min~max | 1.2~2.5（冷启动 1.525） | **1.2~2.5**（冷启动 1.525） |
+| 再入微赚区 | ±0.5×ATR | ±0.3×ATR |
 
-### 待回测后上线（指令 Part2 / Part3 · 生产禁止启用）
-
-| 项 | 设计 | 现状 |
-|----|------|------|
-| Part2 动态启动阈值 | 50%~85% × TP1距离(1.35×ATR)；触发前钉 initialStop | **未上线**（仍开仓即呼吸） |
-| Part3 考核收紧 | ETH 90m / XAU≈60m 窗口内未推进 → 雷达侧收紧到 TV 原始距；**硬止损不动** | **未上线** |
-
-两部分须同一套回测/冒烟通过后再替换生产逻辑；禁止与现行「开仓即呼吸」并存两套启动判断。
+配置源：`reentry_profiles.py` / `breath_profiles.py` / `radar_reentry_mixin.py`。
 
 ---
 
@@ -308,7 +305,7 @@ python3 test_breath_radar_upgrade.py
 | 硬止损新旧双路径并存 | **已清（v15.7.9）** 单一 `hard_stop_price`；README/注释对齐 |
 | sizing 预览未绑 atr 误发「缺TV atr」钉钉 | **已修（v15.7.10）** 预览先绑 atr；拒开钉钉仅主路径 |
 | 双持仓时后开品种按 available×20%×5 裁仓 | **已修（v15.7.11）** 仅保证金不足才裁；雷达查重排除硬腿 |
-| XAU early_be 0.3×ATR 噪声易扫保本 | **已调（v15.7.12）** XAU early_be→0.5；step 观察后再议 |
+| XAU early_be 噪声易扫保本 | **v15.8.0** 递进雷达 + tier0 early_be=0.65；trail 对齐 1.2~2.5；智能再入 |
 | 同窗仅 1s / 5s 迟到 CLOSE | 改为 **15s** |
 | webhook 必须 qty | 废除 |
 | CAP_ALIGN / 加仓 / 旧雷达 activated | 废除 |

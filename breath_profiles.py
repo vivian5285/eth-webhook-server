@@ -3,12 +3,10 @@
 """
 按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
 
-连续插值版（最终锁定表 2026-07-23）：
-  ratioFloor=0.6 / ratioCeiling=2.2（共用）
-  ETH min/max = 1.2 / 2.5 → 冷启动(ratio=1.0) = 1.525
-  XAU min/max = 0.5 / 1.2 → 冷启动(ratio=1.0) = 0.675（草稿 0.8~1.8 已作废）
-  平滑：先对 ratio 做近 3 次均值，再代入公式
-  阶段一阶梯倍数永不乘 trailDistanceMultiplier
+v15.8.0：
+  - 雷达启动改为递进阈值（见 reentry_profiles），本文件仅存阶段一/二系数基线（tier0）
+  - ETH/XAU phase2 trail 统一 1.2~2.5
+  - XAU tier0: early_be=0.65 / step_trigger=0.70 / step_advance=0.45
 """
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ from typing import Any, Dict, List, Optional
 RATIO_FLOOR = 0.6
 RATIO_CEILING = 2.2
 
-# ETH：追踪距离 1.2~2.5×ATR
+# ETH：追踪距离 1.2~2.5×ATR；tier0 系数
 BREATH_ETH: Dict[str, Any] = {
     "name": "ETH",
     "initial_sl_atr": 1.5,
@@ -31,7 +29,7 @@ BREATH_ETH: Dict[str, Any] = {
     "tp1_floor_atr": 0.5,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 1.5,
-    "phase2_trail_mult": 1.0,  # 已废弃额外收紧；保留键兼容，恒为 1.0
+    "phase2_trail_mult": 1.0,
     "min_mult": 1.2,
     "max_mult": 2.5,
     "ratio_floor": RATIO_FLOOR,
@@ -41,23 +39,22 @@ BREATH_ETH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# XAU：early_be 对齐 ETH 0.5（2026-07-24：0.3×ATR≈3-5点易被噪声扫保本）
-# step_trigger/advance 暂保持原档，观察 1-2 周后再议
+# XAU：tier0（v15.8.0 递进表首档）；trail 与 ETH 对齐 1.2~2.5
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
     "initial_sl_atr": 1.5,
     "stop_exec_buffer": 0.5,
-    "early_be_atr": 0.5,
-    "step_trigger_atr": 0.4,
-    "step_advance_atr": 0.35,
+    "early_be_atr": 0.65,
+    "step_trigger_atr": 0.70,
+    "step_advance_atr": 0.45,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.5,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 1.5,
     "phase2_trail_mult": 1.0,
-    "min_mult": 0.5,
-    "max_mult": 1.2,
+    "min_mult": 1.2,
+    "max_mult": 2.5,
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -112,11 +109,7 @@ def cold_start_multiplier(profile: Optional[Dict[str, Any]] = None) -> float:
 
 
 def map_coeff_from_tiers(smooth_ratio: float, tiers: Optional[List] = None) -> float:
-    """
-    兼容旧名：现改为连续插值。
-    tiers 参数忽略；若传入 profile dict 作第二参则用之（旧调用可能传 tiers list）。
-    """
-    # 旧签名 map_coeff_from_tiers(smooth, tiers_list) — tiers_list 忽略，用 ETH 默认
+    """兼容旧名：现改为连续插值。"""
     profile = None
     if isinstance(tiers, dict):
         profile = tiers
@@ -174,7 +167,6 @@ class LockedInitialAtr:
     def upgrade_to_vps(self, atr: float) -> float:
         """
         两场景定稿：允许场景二(TV atr) → 场景一(VPS 真实 1h ATR) 覆盖锁定值。
-        仅用于开仓同步接管 / tick 恢复；禁止随意改小改大以外的路径调用。
         """
         v = float(atr or 0)
         if v <= 0:
