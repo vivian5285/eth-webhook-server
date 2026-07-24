@@ -665,7 +665,7 @@ def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, r
         return  # TP3 不挂限价，禁止旧文案
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    remain_pct = {1: "70%", 2: "40%"}.get(lv, "—")
+    remain_pct = {1: "90%", 2: "70%"}.get(lv, "—")
     stop = float(current_stop or 0)
     title = f"🎯 [{sym}] TP{lv} 止盈成交，剩余仓位 {remain_pct}"
     body = {

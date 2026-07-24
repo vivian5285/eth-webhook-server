@@ -320,12 +320,27 @@ def audit_module2_sizing(a: Audit):
     mult_ok = float(FIXED_NOTIONAL_MULT) == 5.0 or float(FIXED_LEVERAGE) == 5
     a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=5", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
     a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5, str(EXCHANGE_LEVERAGE))
-    a.check("2.1d LEG_TP_RATIOS=30/30/40", LEG_TP_RATIOS == [0.30, 0.30, 0.40], str(LEG_TP_RATIOS))
-    a.check("2.1e PLACE_TP_LEVELS=2(仅TP1+TP2)", PLACE_TP_LEVELS == 2, str(PLACE_TP_LEVELS))
-    a.check("2.1f SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
-    a.check("2.1g SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
-    a.check("2.1h ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
-    a.check("2.1i ORDER_TIMEOUT_SEC=300", int(ORDER_TIMEOUT_SEC) == 300, str(ORDER_TIMEOUT_SEC))
+    a.check("2.1d LEG_TP_RATIOS=10/20/70", LEG_TP_RATIOS == [0.10, 0.20, 0.70], str(LEG_TP_RATIOS))
+    a.check("2.1e PLACE_TP_LEVELS=3", PLACE_TP_LEVELS == 3, str(PLACE_TP_LEVELS))
+    _df = _read(os.path.join(ROOT, "defense_profiles.py"))
+    a.check(
+        "2.1f defense_profiles 缓冲+分腿可配置",
+        "buffer_multiplier" in _df
+        and "tp1_pct" in _df
+        and "validate_tv_stop_loss" in _df,
+    )
+    _as = _read(os.path.join(ROOT, "atr_scenario.py"))
+    a.check(
+        "2.1g 硬止损仅TV距×buffer（无1.5ATR地板）",
+        "actual_stop_distance" in _as
+        and "HARD_SL_RADAR_ATR_MULT = 0.0" in _as
+        and "place_tp_levels_for_scenario" in _as
+        and "return 3" in _as,
+    )
+    a.check("2.1h SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
+    a.check("2.1i SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
+    a.check("2.1j ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
+    a.check("2.1k ORDER_TIMEOUT_SEC=300", int(ORDER_TIMEOUT_SEC) == 300, str(ORDER_TIMEOUT_SEC))
     a.check("2.2 HARD_NOTIONAL_CAP=0", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.3 MAX_TOTAL_NOTIONAL_MULT=13", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
@@ -936,7 +951,7 @@ def audit_module8_dingtalk(a: Audit):
     )
     a.check(
         "钉钉档位对账字段",
-        "format_regime_tp_ratios_label" in dt or "30/30/40" in dt,
+        "format_regime_tp_ratios_label" in dt or "10/20/70" in dt or "30/30/40" in dt,
     )
 
 

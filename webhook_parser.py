@@ -35,9 +35,9 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：TP1/TP2 各30%；场景二另挂 TP3=40%；场景一余仓交呼吸阶段二
-LEG_TP_RATIOS = [0.30, 0.30, 0.40]
-PLACE_TP_LEVELS = 2  # 默认场景一；场景二运行时升为 3（见 atr_scenario）
+# 分腿：TP1=10% / TP2=20% / TP3=70%（v15.9.0 对齐 TV）；三级限价常挂
+LEG_TP_RATIOS = [0.10, 0.20, 0.70]
+PLACE_TP_LEVELS = 3  # 始终挂 TP1+TP2+TP3；TP3 与雷达互斥
 
 # ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
 RADAR_ACTIVATE_TP1_FRAC = 0.50
@@ -204,17 +204,17 @@ def close_type_display_label(close_type, fallback_reason=""):
 
 
 def get_regime_tp_ratios(regime=None):
-    """固定 30/30/40（不再按档位）。"""
+    """固定 10/20/70（v15.9.0；不再按档位）。"""
     return list(LEG_TP_RATIOS)
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30/40(挂TP1+TP2·余仓交阶段二)"
+    return "10/20/70(挂TP1+TP2+TP3·TP3与雷达互斥)"
 
 
 def get_leg_tp_ratios(payload=None):
     """
-    默认 30/30/40（缺 qty1/qty2 时回退）。
+    默认 10/20/70（缺 qty1/qty2 时回退）。
     有 TV qty1/qty2 时，supervisor._tp_slices_for_initial 按 qty 缩放挂单，不走本比例。
     """
     return list(LEG_TP_RATIOS)

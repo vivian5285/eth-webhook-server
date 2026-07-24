@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-三层防线 + 两场景 ATR（白皮书定稿纯函数）：
+三层防线 + 两场景 ATR（v15.9.0 · 对齐 TV 动态止损）：
 
-硬止损（永久，唯一公式 · v15.7.8+）：
-  基础距离 = max(|TV理论开仓价 − TV.stop_loss| × 1.2, 1.5 × initial_atr × 1.05)
-  滑点缓冲 = |交易所成交价 − TV理论开仓价| × 2
-  最终距离 = 基础距离 + 滑点缓冲
-  挂单价 = 成交价 ± 最终距离
-  挂出后禁止改价/撤单，直至仓位归零（仅公式升级允许一次性重挂）
+硬止损（永久，唯一公式）：
+  tv_stop_distance = |TV.price − TV.stop_loss|
+  actual_stop_distance = tv_stop_distance × buffer_multiplier（默认 1.2，见 defense_profiles）
+  挂单价 = 成交价 ± actual_stop_distance
+  无 TV.stop_loss → 距离=0 → 禁止开仓（上层拒开，本函数返回 0）
+  已删除：1.5×ATR 雷达地板、|成交−TV|×2 滑点项（由 buffer 统一覆盖延迟/滑点）
 
-已删除：单独的「|成交价−TV.SL|×1.2」旧路径（与上式在 atr=0、tv_entry=fill 时等价，不再分叉）。
-
-雷达止损（独立）：场景一用 VPS 原生 ATR；场景二用 TV.atr；可持续恢复场景一
-TP1/TP2 始终挂；TP3 仅场景二挂
+雷达止损（独立）：场景一用 VPS 原生 ATR；场景二用 TV.atr
+TP1/TP2/TP3 始终挂限价（10%/20%/70%）；TP3 与雷达互斥
 """
 from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-HARD_SL_BUFFER_MULT = 1.2
-HARD_SL_RADAR_ATR_MULT = 1.5
-HARD_SL_RADAR_PAD = 1.05  # 雷达初始距 ×1.05 作地板
-HARD_SL_SLIPPAGE_MULT = 2.0
-TEMP_STOP_BUFFER_MULT = HARD_SL_BUFFER_MULT  # 兼容旧名
+HARD_SL_BUFFER_MULT = 1.2  # 默认；运行时优先用 defense_profiles.buffer_multiplier
+# 以下常量保留名以避免外部 import 崩；数值已废弃（硬止损不再使用）
+HARD_SL_RADAR_ATR_MULT = 0.0  # 已废弃：不再用 ATR 地板
+HARD_SL_RADAR_PAD = 0.0       # 已废弃
+HARD_SL_SLIPPAGE_MULT = 0.0   # 已废弃：不再单独加滑点×2
+TEMP_STOP_BUFFER_MULT = HARD_SL_BUFFER_MULT
 SCENARIO_VPS = 1
 SCENARIO_TV = 2
 
@@ -31,38 +30,38 @@ SCENARIO_TV = 2
 def compute_hard_stop_distance(
     tv_entry: float,
     tv_stop_loss: float,
-    fill_entry: float,
+    fill_entry: float = 0.0,
     initial_atr: float = 0.0,
     *,
     tv_mult: float = HARD_SL_BUFFER_MULT,
-    radar_atr_mult: float = HARD_SL_RADAR_ATR_MULT,
-    radar_pad: float = HARD_SL_RADAR_PAD,
-    slip_mult: float = HARD_SL_SLIPPAGE_MULT,
+    radar_atr_mult: float = 0.0,
+    radar_pad: float = 0.0,
+    slip_mult: float = 0.0,
 ) -> Dict[str, float]:
     """
-    返回硬止损距离拆解（不含方向）。
-    tv_entry/tv_stop_loss 为 TV 理论价；fill_entry 为交易所成交价。
+    硬止损距离拆解（不含方向）。
+    v15.9.0：仅 TV 止损距 × buffer；radar_floor/slip 恒为 0（兼容旧字段名）。
     """
     tv_e = float(tv_entry or 0)
     tv_sl = float(tv_stop_loss or 0)
-    fill = float(fill_entry or 0)
-    atr = float(initial_atr or 0)
     tv_m = float(tv_mult or HARD_SL_BUFFER_MULT)
-    r_m = float(radar_atr_mult or HARD_SL_RADAR_ATR_MULT)
-    r_pad = float(radar_pad or HARD_SL_RADAR_PAD)
-    s_m = float(slip_mult if slip_mult is not None else HARD_SL_SLIPPAGE_MULT)
 
-    tv_implied = abs(tv_e - tv_sl) * tv_m if tv_e > 0 and tv_sl > 0 and tv_m > 0 else 0.0
-    radar_floor = atr * r_m * r_pad if atr > 0 and r_m > 0 and r_pad > 0 else 0.0
-    base = max(tv_implied, radar_floor)
-    slip = abs(fill - tv_e) * s_m if fill > 0 and tv_e > 0 and s_m > 0 else 0.0
-    final = base + slip if base > 0 else 0.0
+    tv_dist = abs(tv_e - tv_sl) if tv_e > 0 and tv_sl > 0 else 0.0
+    tv_implied = tv_dist * tv_m if tv_dist > 0 and tv_m > 0 else 0.0
+    # 废弃项显式归零，日志仍可读
+    radar_floor = 0.0
+    slip = 0.0
+    base = tv_implied
+    final = tv_implied
     return {
+        "tv_stop_distance": float(tv_dist),
         "tv_implied": float(tv_implied),
+        "actual_stop_distance": float(final),
         "radar_floor": float(radar_floor),
         "base": float(base),
         "slip": float(slip),
         "final": float(final),
+        "buffer_multiplier": float(tv_m),
     }
 
 
@@ -75,19 +74,19 @@ def hard_stop_price(
     tv_entry: Optional[float] = None,
     initial_atr: float = 0.0,
     fill_entry: Optional[float] = None,
-    slip_mult: float = HARD_SL_SLIPPAGE_MULT,
+    slip_mult: float = 0.0,
 ) -> float:
     """
-    永久硬止损价（唯一路径）。
+    永久硬止损价（唯一路径 · v15.9.0）。
 
-    - fill = fill_entry 或 entry（交易所成交价）
-    - tv_entry 缺省 = fill（无滑点项）
-    - atr=0 时雷达地板为 0，退化为 max(TV隐含×1.2, 0)+滑点
+    - fill = 交易所成交价
+    - tv_entry = TV 信号价（算距离）；缺省 = fill
+    - 距离 = |tv_entry − tv_stop_loss| × buffer_mult
+    - 无有效 stop_loss → 0（上层必须拒开，禁止 ATR 兜底）
     """
     side_u = str(side or "").strip().upper()
     fill = float(fill_entry if fill_entry is not None else (entry or 0))
     sl = float(tv_stop_loss or 0)
-    atr = float(initial_atr or 0)
     mult = float(buffer_mult or HARD_SL_BUFFER_MULT)
     tv_e = float(tv_entry) if tv_entry is not None else fill
     if tv_e <= 0:
@@ -95,16 +94,11 @@ def hard_stop_price(
 
     if fill <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
-    if sl <= 0 and atr <= 0:
+    if sl <= 0:
         return 0.0
 
     parts = compute_hard_stop_distance(
-        tv_e,
-        sl,
-        fill,
-        atr,
-        tv_mult=mult if sl > 0 else 0.0,
-        slip_mult=slip_mult,
+        tv_e, sl, fill, 0.0, tv_mult=mult, slip_mult=0.0,
     )
     dist = float(parts["final"])
     if dist <= 0:
@@ -126,7 +120,7 @@ def resolve_atr_scenario(vps_atr: float, tv_atr: float) -> Tuple[int, float, str
     """
     返回 (scenario, radar_initial_atr, source)。
     场景一优先：vps_atr>0；否则场景二要求 tv_atr>0。
-    仅决定雷达 ATR / 是否挂 TP3；绝不改写硬止损价。
+    仅决定雷达 ATR；TP1/2/3 始终挂，与场景无关。
     """
     vps = float(vps_atr or 0)
     tv = float(tv_atr or 0)
@@ -138,8 +132,8 @@ def resolve_atr_scenario(vps_atr: float, tv_atr: float) -> Tuple[int, float, str
 
 
 def place_tp_levels_for_scenario(scenario: int) -> int:
-    """场景一=2（不挂TP3）；场景二=3（挂TP3兜底）。"""
-    return 3 if int(scenario or 0) == SCENARIO_TV else 2
+    """v15.9.0：无论场景一律挂 TP1+TP2+TP3。"""
+    return 3
 
 
 def scenario_notice(scenario: int, vps_atr: float = 0.0, tv_atr: float = 0.0,
@@ -148,13 +142,12 @@ def scenario_notice(scenario: int, vps_atr: float = 0.0, tv_atr: float = 0.0,
     sc = int(scenario or 0)
     if recovered and sc == SCENARIO_VPS:
         return (
-            f"VPS真实ATR已恢复接管 atr={float(vps_atr or 0):.4f}，"
-            f"已撤销TP3兜底，切回场景一雷达（硬止损未动）"
+            f"场景一恢复：VPS ATR={float(vps_atr):.4f} 接管雷达 "
+            f"（TP123 限价保留，硬止损不变）"
         )
     if sc == SCENARIO_TV:
         return (
-            "本次VPS真实ATR获取失败，已用TV理论ATR继续运作雷达，"
-            f"TP3已按TV价位挂出兜底（tv_atr={float(tv_atr or 0):.4f}）；"
-            "硬止损保持永久挂出"
+            f"场景二：TV ATR={float(tv_atr):.4f} 运作雷达 "
+            f"| TP1/TP2/TP3 限价常挂"
         )
     return None
