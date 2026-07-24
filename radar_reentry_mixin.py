@@ -11,9 +11,11 @@ import time
 from typing import Any, Dict, Optional
 
 from reentry_profiles import (
+    STERILE_MAX_RETRY,
     activation_frac_for_attempt,
     apply_tier_to_breath_profile,
     get_reentry_profile,
+    make_reentry_client_order_id,
     reentry_enabled,
     tier_label,
 )
@@ -60,6 +62,10 @@ class RadarReentryMixin:
             "reentry_unfilled_refreshes": int(
                 getattr(self, "reentry_unfilled_refreshes", 0) or 0
             ),
+            "reentry_order_tag": getattr(self, "reentry_order_tag", None),
+            "reentry_sterile_fail_count": int(
+                getattr(self, "reentry_sterile_fail_count", 0) or 0
+            ),
             "last_exit_source": str(getattr(self, "last_exit_source", "") or ""),
             "last_exit_px": float(getattr(self, "last_exit_px", 0) or 0),
             "radar_pending_arm": bool(getattr(self, "radar_pending_arm", True)),
@@ -73,7 +79,10 @@ class RadarReentryMixin:
             if k not in s:
                 continue
             val = s.get(k, default)
-            if k in ("reentry_attempt", "radar_tier", "reentry_unfilled_refreshes"):
+            if k in (
+                "reentry_attempt", "radar_tier", "reentry_unfilled_refreshes",
+                "reentry_sterile_fail_count",
+            ):
                 setattr(self, k, int(val or 0))
             elif k in (
                 "radar_activation_frac", "cycle_tv_price", "cycle_open_atr",
@@ -83,6 +92,8 @@ class RadarReentryMixin:
                 setattr(self, k, float(val or 0))
             elif k in ("reentry_active", "radar_pending_arm"):
                 setattr(self, k, bool(val))
+            elif k == "reentry_order_tag":
+                setattr(self, k, str(val) if val else None)
             else:
                 setattr(self, k, val)
 
@@ -261,6 +272,112 @@ class RadarReentryMixin:
             logger.debug(f"[{self.symbol}] 拉3m K线失败: {e}")
         return k5, k3
 
+    def _clear_reentry_order_tag(self, reason=""):
+        """仅在成交 / 确认撤销 / TTL 刷新前调用：释放本地标签后才允许新挂。"""
+        old = getattr(self, "reentry_order_tag", None)
+        self.reentry_order_tag = None
+        if old:
+            logger.info(
+                f"🏷️ [{self.symbol}] 再入订单标签已释放 tag={old} | {reason}"
+            )
+
+    def _ensure_sterile_for_reentry(self, reason="再入前清场") -> bool:
+        """
+        仓位归零后挂再入限价前：必须 qty=0 且挂单列表为空。
+        最多 STERILE_MAX_RETRY 轮；失败 → 钉钉 + 暂停该品种。
+        """
+        max_n = int(STERILE_MAX_RETRY)
+        last_detail = ""
+        for i in range(1, max_n + 1):
+            try:
+                self._purge_all_defense_orders_on_flat(
+                    f"{reason}·第{i}轮", max_rounds=6,
+                )
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] 再入清场撤单异常: {e}")
+            # 再撤可能残留的开仓向限价（含旧再入单）
+            try:
+                from binance_client import binance_client, is_orders_query_failed
+                book = binance_client.get_open_orders(self.symbol)
+                if is_orders_query_failed(book):
+                    last_detail = "挂单=QUERY_FAILED"
+                    logger.error(
+                        f"🚫 [{self.symbol}] {reason} 查单失败 → 拒挂（fail-closed）"
+                    )
+                    time.sleep(0.6 * i)
+                    continue
+                for o in (book or []):
+                    if not isinstance(o, dict):
+                        continue
+                    oid = o.get("orderId") or o.get("algoId")
+                    if oid:
+                        try:
+                            binance_client.cancel_order(
+                                self.symbol, order_id=oid,
+                            )
+                        except Exception:
+                            try:
+                                binance_client.cancel_order(
+                                    self.symbol, order=o,
+                                )
+                            except Exception:
+                                pass
+            except Exception as e:
+                last_detail = f"撤单异常:{e}"
+                time.sleep(0.6 * i)
+                continue
+
+            if hasattr(self, "_wait_verify") and hasattr(self, "_verify_sterile_flat"):
+                ok = self._wait_verify(
+                    self._verify_sterile_flat, retries=6, delay=0.4,
+                )
+            elif hasattr(self, "_verify_sterile_flat"):
+                ok = bool(self._verify_sterile_flat())
+            else:
+                pos = self._get_active_position(prefer_ws=False)
+                ok = pos != "QUERY_FAILED" and not (
+                    pos and float(pos.get("size") or 0) > 0
+                )
+            if ok:
+                self.reentry_sterile_fail_count = 0
+                logger.info(
+                    f"🧹 [{self.symbol}] {reason} 无菌通过 | 第{i}/{max_n}轮"
+                )
+                return True
+            last_detail = str(
+                getattr(self, "_last_sterile_flat_fail_detail", "") or "无菌未过"
+            )
+            logger.warning(
+                f"⚠️ [{self.symbol}] {reason} 第{i}/{max_n}轮未过 | {last_detail}"
+            )
+            time.sleep(0.8 * i)
+
+        self.reentry_sterile_fail_count = int(
+            getattr(self, "reentry_sterile_fail_count", 0) or 0
+        ) + 1
+        try:
+            self.trading_paused = True
+        except Exception:
+            pass
+        try:
+            import dingtalk
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title=f"再入前无菌失败·已暂停 [{self.symbol}]",
+                detail=(
+                    f"{reason} 连续{max_n}轮未净场 | {last_detail} | "
+                    f"已 trading_paused=True，禁止再挂限价（防叠单击穿）"
+                ),
+                level="紧急",
+                suggestion="币安 APP 手动全部撤单确认净场后 /admin/resume",
+            )
+        except Exception:
+            pass
+        logger.error(
+            f"🚨 [{self.symbol}] {reason} 失败超限 → 暂停交易 | {last_detail}"
+        )
+        return False
+
     def _maybe_start_smart_limit_reentry(self, snap: Dict[str, Any], meta: Dict[str, Any]):
         """仓位归零且微赚/保本后挂限价再入；硬止损/亏损/超次不挂。"""
         if not reentry_enabled(self.symbol):
@@ -269,6 +386,13 @@ class RadarReentryMixin:
         if getattr(self, "_reentry_cycle_aborted", False):
             return False
         if bool(getattr(self, "reentry_active", False)):
+            return False
+        # 红色铁律：本地标签未清 → 绝不再挂
+        if getattr(self, "reentry_order_tag", None):
+            logger.error(
+                f"🚫 [{self.symbol}] 本地再入标签仍在 "
+                f"tag={self.reentry_order_tag} → 拒启动（防狂挂）"
+            )
             return False
         if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
             return False
@@ -314,6 +438,10 @@ class RadarReentryMixin:
                 self._clear_reentry_cycle(source=why)
             return False
 
+        # 闭环第一步：无菌确认（仓+单皆零）后才允许挂再入限价
+        if not self._ensure_sterile_for_reentry(reason="智能再入·仓位归零清场"):
+            return False
+
         self.cycle_tv_side = side
         self.cycle_tv_price = float(snap.get("tv_price") or 0)
         self.cycle_open_atr = atr
@@ -344,8 +472,9 @@ class RadarReentryMixin:
                     f"{side} 档位{tier_label(attempt)}→{tier_label(attempt + 1)} "
                     f"attempt={attempt}/{int(get_reentry_profile(self.symbol).get('max_reentries') or 4)} | "
                     f"limit@{float(self.reentry_limit_px):.2f} | "
+                    f"tag={getattr(self, 'reentry_order_tag', None)} | "
                     f"TV@{float(self.cycle_tv_price):.2f} | "
-                    f"exit={exit_src}@{exit_px:.2f}"
+                    f"exit={exit_src}@{exit_px:.2f} | 无菌已确认"
                 ),
                 level="提示",
             )
@@ -354,11 +483,21 @@ class RadarReentryMixin:
         return True
 
     def _place_reentry_limit(self, side=None, reason="", *, is_refresh=False):
-        from binance_client import binance_client
-
         side = str(side or getattr(self, "cycle_tv_side", "") or "").upper()
         if side not in ("LONG", "SHORT"):
             return False
+
+        # 红色铁律：本地标签未清且非刷新 → 绝对拒挂（即使交易所查单为空）
+        # 必须在 import binance_client 之前判断，避免查单失败路径误入下单。
+        pending_tag = getattr(self, "reentry_order_tag", None)
+        if pending_tag and not is_refresh:
+            logger.error(
+                f"🚫 [{self.symbol}] 本地订单标签未释放 tag={pending_tag} "
+                f"→ 拒挂第二笔（防查不到单狂挂）| {reason}"
+            )
+            return False
+
+        from binance_client import binance_client, is_orders_query_failed
 
         if is_refresh:
             n = int(getattr(self, "reentry_unfilled_refreshes", 0) or 0) + 1
@@ -372,14 +511,38 @@ class RadarReentryMixin:
                 self.reentry_active = False
                 self._clear_reentry_cycle(source="unfilled_refresh_cap")
                 return False
+            # TTL：必须先撤旧 + 释放旧标签，才能生成新标签
+            self._cancel_reentry_limit(reason="TTL刷新·先撤旧标签")
+        elif getattr(self, "reentry_limit_order_id", None):
+            # 非刷新却已有 oid：禁止叠挂
+            logger.error(
+                f"🚫 [{self.symbol}] 已有再入限价 id={self.reentry_limit_order_id} "
+                f"→ 拒挂 | {reason}"
+            )
+            return False
 
-        # 挂单前确认无持仓
+        # 挂单前确认无持仓 + 无菌（刷新路径也再验一次，但不计入失败暂停计数翻倍）
         pos = self._get_active_position(prefer_ws=False)
         if pos == "QUERY_FAILED":
             return False
         if pos and float(pos.get("size") or 0) > 0:
             logger.warning(f"🚫 [{self.symbol}] 再入挂单前仍有仓 → 中止")
             return False
+        if not is_refresh:
+            # 首次挂单前无菌已在 _maybe_start 做过；此处再验一次轻量
+            if hasattr(self, "_verify_sterile_flat") and not self._verify_sterile_flat():
+                if not self._ensure_sterile_for_reentry(reason="再入挂单前复检"):
+                    return False
+        else:
+            # 刷新：撤旧后必须确认盘口空（查不到单 → 拒挂，不清标签已在 cancel 清）
+            if hasattr(self, "_verify_sterile_flat"):
+                if not self._wait_verify(
+                    self._verify_sterile_flat, retries=5, delay=0.35,
+                ):
+                    logger.error(
+                        f"🚫 [{self.symbol}] TTL刷新后无菌未过 → 拒挂新限价"
+                    )
+                    return False
 
         tv = float(getattr(self, "cycle_tv_price", 0) or 0)
         k5, k3 = self._fetch_reentry_klines()
@@ -404,13 +567,64 @@ class RadarReentryMixin:
             logger.error(f"🚨 [{self.symbol}] 再入限价无数量")
             return False
 
-        self._cancel_reentry_limit(reason="刷新前撤旧")
-        open_side = "BUY" if side == "LONG" else "SELL"
         lim = float(plan["limit_px"])
+        open_side = "BUY" if side == "LONG" else "SELL"
+        # 先持久化新标签，再下单：崩溃中途也不会无标签狂挂
+        tag = make_reentry_client_order_id(self.symbol, side, lim, time.time())
+        self.reentry_order_tag = tag
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
+        # 交易所侧再确认：查单失败 → 释放标签并拒挂（绝不盲补）
+        try:
+            book = binance_client.get_open_orders(self.symbol)
+            if is_orders_query_failed(book):
+                logger.error(
+                    f"🚫 [{self.symbol}] 挂单前查单失败 → 释放标签并拒挂 tag={tag}"
+                )
+                self._clear_reentry_order_tag(reason="查单失败拒挂")
+                return False
+            # 同向同价已存在 → 复用，不新挂
+            for o in (book or []):
+                if not isinstance(o, dict):
+                    continue
+                if str(o.get("type") or "").upper() != "LIMIT":
+                    continue
+                if str(o.get("side") or "").upper() != open_side:
+                    continue
+                try:
+                    opx = float(o.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(opx - lim) <= max(lim * 1e-8, 1e-6):
+                    oid = o.get("orderId")
+                    self.reentry_active = True
+                    self.reentry_limit_order_id = oid
+                    self.reentry_limit_px = lim
+                    self.reentry_limit_deadline_ts = float(plan["deadline_ts"])
+                    # 复用盘口单时，标签对齐其 clientOrderId（若有）
+                    coid = str(o.get("clientOrderId") or "") or tag
+                    self.reentry_order_tag = coid
+                    self._save_state()
+                    logger.warning(
+                        f"♻️ [{self.symbol}] 复用已有同价再入限价 id={oid} "
+                        f"@{lim:.2f} tag={coid}"
+                    )
+                    return True
+        except Exception as e:
+            logger.error(f"🚫 [{self.symbol}] 挂单前查单异常 → 拒挂: {e}")
+            self._clear_reentry_order_tag(reason="查单异常拒挂")
+            return False
+
         order = binance_client.place_limit_order(
             open_side, qty, lim, symbol=self.symbol, reduce_only=False,
+            client_order_id=tag,
         )
         if not order:
+            # 下单失败：释放标签，允许后续重试（否则永久卡死）
+            self._clear_reentry_order_tag(reason="下单失败释放")
             return False
         oid = order.get("orderId") or order.get("algoId")
         self.reentry_active = True
@@ -420,7 +634,7 @@ class RadarReentryMixin:
         self._save_state()
         logger.info(
             f"📥 [{self.symbol}] 再入限价已挂 {side} {qty} @{lim:.2f} "
-            f"src={plan.get('source')} id={oid} | {reason} | "
+            f"src={plan.get('source')} id={oid} tag={tag} | {reason} | "
             f"refresh={int(getattr(self, 'reentry_unfilled_refreshes', 0) or 0)}"
         )
         return True
@@ -429,11 +643,12 @@ class RadarReentryMixin:
         from binance_client import binance_client
 
         oid = getattr(self, "reentry_limit_order_id", None)
+        tag = getattr(self, "reentry_order_tag", None)
         if oid:
             try:
                 binance_client.cancel_order(self.symbol, order_id=oid)
                 logger.info(
-                    f"🗑️ [{self.symbol}] 撤再入限价 id={oid} | {reason}"
+                    f"🗑️ [{self.symbol}] 撤再入限价 id={oid} tag={tag} | {reason}"
                 )
             except Exception as e:
                 try:
@@ -445,6 +660,8 @@ class RadarReentryMixin:
         self.reentry_limit_order_id = None
         self.reentry_limit_px = 0.0
         self.reentry_limit_deadline_ts = 0.0
+        # 撤后必须释放标签，才允许下一周期新标签
+        self._clear_reentry_order_tag(reason=reason or "撤单释放标签")
 
     def _reentry_tick(self):
         """空仓时：TTL 刷新 / 成交检测 / 终止条件。"""
@@ -477,7 +694,7 @@ class RadarReentryMixin:
         return True
 
     def _on_reentry_limit_filled(self, pos: Dict[str, Any]) -> bool:
-        """再入限价成交 → attempt+1，按新档休眠雷达，挂 hard+TP。"""
+        """再入限价成交 → attempt+1，按新成交价挂 hard+TP12，雷达休眠候命。"""
         side = str(pos.get("side") or getattr(self, "cycle_tv_side", "") or "").upper()
         entry = float(pos.get("entry_price") or 0)
         qty = float(pos.get("size") or 0)
@@ -486,10 +703,12 @@ class RadarReentryMixin:
         prev = int(getattr(self, "reentry_attempt", 0) or 0)
         prev_frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
         bumped = bump_after_reentry_fill(prev, prev_frac, self.symbol)
+        # 成交：释放本地标签（允许下次再入周期）
         self.reentry_limit_order_id = None
         self.reentry_limit_px = 0.0
         self.reentry_limit_deadline_ts = 0.0
         self.reentry_active = False
+        self._clear_reentry_order_tag(reason="再入成交释放")
         for k, v in bumped.items():
             if k == "tier_coeffs":
                 continue
@@ -517,54 +736,95 @@ class RadarReentryMixin:
         self._tv_signal_atr = atr
         self.monitoring = True
         self._apply_tier_breath_overlay()
+
+        # 成交价可能偏离 TV：TP 方向无效则按新成交价重算；硬止损一律按 fill+滑点
+        try:
+            if hasattr(self, "_ensure_tp123_prices_from_tv"):
+                if not self._tp_prices_valid_for_side(side, entry):
+                    self.tv_tps = [0.0, 0.0, 0.0]
+                self._ensure_tp123_prices_from_tv(entry)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 再入成交 TP 重算跳过: {e}")
+
         self._begin_open_radar_dormant(
             side=side, entry=entry, tv_price=tv_price, open_atr=atr,
             reentry_attempt=int(bumped["reentry_attempt"]),
         )
+        radar_init = 0.0
         try:
             from breath_stop import initial_stop_price
             init = initial_stop_price(
                 side, entry, atr, profile=getattr(self, "breath_profile", None),
             )
             if init > 0:
-                self.initial_stop = float(init)
-                self.current_sl = float(init)
-                self.tv_sl = float(init)
+                radar_init = float(init)
+                self.initial_stop = radar_init
+                self.current_sl = radar_init
+                self.tv_sl = radar_init
         except Exception:
             pass
 
         self._save_state()
         self._ensure_price_ws()
         self._ensure_sentinel_running()
+        hard_px = 0.0
+        arm_ok = False
         try:
-            self._arm_temp_stop_and_tp12(
+            arm_ok = bool(self._arm_temp_stop_and_tp12(
                 qty, entry, side,
                 source=f"再入成交·attempt={self.reentry_attempt}",
-            )
+            ))
+            hard_px = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
             self._resolve_atr_scenario_after_open(entry, side, qty)
+            # 恢复雷达账本价（arm 会暂用硬止损覆写 initial_stop）
+            if radar_init > 0:
+                self.initial_stop = radar_init
+                self.current_sl = radar_init
+                self.tv_sl = radar_init
             if self._radar_is_dormant():
                 self._strip_radar_stop_keep_hard(reason="再入后雷达仍休眠")
         except Exception as e:
             logger.error(f"[{self.symbol}] 再入后防线失败: {e}")
+
+        # 成交后检查点：硬止损 + TP12 必须已挂；钉钉实盘核实
+        hard_hung = hard_px > 0 and arm_ok
+        tp_note = ""
+        try:
+            tps = list(getattr(self, "tv_tps", None) or [])
+            tp_note = (
+                f"TP1={float(tps[0] or 0):.2f} TP2={float(tps[1] or 0):.2f}"
+                if len(tps) >= 2 else "TP=?"
+            )
+        except Exception:
+            tp_note = "TP=?"
+        slip = abs(entry - tv_price) if tv_price > 0 else 0.0
         try:
             import dingtalk
             self._call_dingtalk(
                 dingtalk.report_system_alert,
-                title=f"智能再入已成交 [{self.symbol}]",
+                title=f"智能再入已成交·防线核实 [{self.symbol}]",
                 detail=(
-                    f"{side} {qty} @ {entry:.2f} | "
+                    f"{side} {qty} @ fill={entry:.2f} (TV@{tv_price:.2f} 滑点={slip:.2f}) | "
                     f"档位{tier_label(int(self.reentry_attempt))} "
                     f"attempt={self.reentry_attempt} "
                     f"frac={float(self.radar_activation_frac):.0%} | "
-                    f"雷达休眠至激活线"
+                    f"硬止损@{hard_px:.2f} hung={1 if hard_hung else 0} | "
+                    f"{tp_note} | 雷达休眠候命 | "
+                    f"标签已释放 tag=None"
                 ),
-                level="提示",
+                level="紧急" if not hard_hung else "提示",
+                suggestion=(
+                    "硬止损未确认挂出：立即币安核对 STOP；"
+                    if not hard_hung else
+                    "核对 hard+TP12 与雷达休眠状态"
+                ),
             )
         except Exception:
             pass
         logger.info(
             f"✅ [{self.symbol}] 再入成交 {side} {qty}@{entry:.2f} "
-            f"attempt={self.reentry_attempt} dormant=1"
+            f"attempt={self.reentry_attempt} hard@{hard_px:.2f} "
+            f"dormant=1 hung={1 if hard_hung else 0}"
         )
         return True
 

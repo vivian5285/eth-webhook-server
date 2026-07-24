@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种智能再入场 + 波段滚动档位（v15.8.1 最终文字版）。
+双币种智能再入场 + 波段滚动档位（v15.8.2 幂等闭环）。
 
 - 档位 1.0~5.0（attempt 0..4）：启动阈值 50/65/80/90/95% × TP1距
 - 每档独立 early_be / step_* / phase2 trail 带宽
 - 双保险限价：多取 min(5m低+tick, TV×0.997)；空取 max(5m高−tick, TV×1.003)
 - TTL 5min；最多 4 次重入（到 5.0 后再扫出终止）；未成交刷新最多 5 次
 - 硬止损 / 亏损出局禁止重入；新 TV 清场重置档位
+- 本地订单标签（newClientOrderId）：标签未清前绝对禁挂第二笔（防查不到单狂挂）
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 ACTIVATION_FRACS: List[float] = [0.50, 0.65, 0.80, 0.90, 0.95]
@@ -21,6 +23,23 @@ MAX_REENTRIES = 4  # attempt 0..3 可再入；attempt>=4（已在5.0）再扫出
 MAX_TIER_INDEX = 4  # 0..4 → 档位 1.0..5.0
 MAX_UNFILLED_REFRESHES = 5
 DEFAULT_TICK = 0.01
+# 清场确认失败最多重试；超限暂停该品种（防脏盘挂单）
+STERILE_MAX_RETRY = 3
+
+
+def make_reentry_client_order_id(
+    symbol: str, side: str, price: float, ts: Optional[float] = None,
+) -> str:
+    """
+    交易所 newClientOrderId（≤36）：本地订单标签，幂等防狂挂的核心。
+    同一标签在本地状态未清除前，绝对不允许再挂第二笔重入限价。
+    """
+    sym_u = str(symbol or "").upper()
+    sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
+    sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
+    px = abs(int(round(float(price or 0) * 100))) % 10_000_000
+    t = abs(int(float(ts if ts is not None else time.time()))) % 100_000
+    return f"RE{sym}{sd}{px}{t}"[:36]
 
 # tier index = reentry_attempt（0=首次开仓 … 4=第四次重入后 / 档位5.0）
 ETH_TIERS: List[Dict[str, float]] = [

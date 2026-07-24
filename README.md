@@ -1,11 +1,12 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.8.1-wave-roll`**  
+**当前版本：`v15.8.2-idempotent-loop`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
 **波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
 **递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
+**幂等铁律（v15.8.2）**：本地 `reentry_order_tag` 未释放 → 绝对拒挂第二笔；查单失败 fail-closed；无菌净场后才再入  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
@@ -15,19 +16,21 @@
 > **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
-> **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。
+> **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。  
+> **v15.8.2**：再入闭环 + 本地订单标签幂等；仓归零→无菌→挂限价→成交→硬@fill+TP12+雷达休眠；钉钉核实。
 
 > **权威依据**：桌面《智能再入场与波段滚动完整方案（最终文字版）》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.8.1-wave-roll · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.8.2-idempotent-loop · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_radar_reentry.py
 python3 test_breath_radar_upgrade.py
 python3 test_two_scenario_atr.py
+python3 test_orders_dup_guard.py
 ```
 
 | 工厂 | VPS 目录 | 端口 | 品种 |
@@ -186,11 +189,37 @@ qty = 名义上限 / entryPrice
 ## 六、呼吸雷达 + 波段滚动再入场（独立于硬止损）
 
 - ETH / XAU 参数只读 `breath_profile` + `reentry_profiles`（`enabled` 可关）  
-- **生产现状（v15.8.1）**：开仓挂硬+TP；雷达休眠至档位激活线；仓位归零且保本/微赚 → 双保险限价再入  
+- **生产现状（v15.8.2）**：开仓挂硬+TP；雷达休眠至档位激活线；仓位归零且保本/微赚 → **无菌净场** → 双保险限价再入 → 成交后硬止损按 **新成交价+滑点** 重挂 + TP12 + 雷达休眠候命  
 - 启动阈值档位 **1.0~5.0**：50% / 65% / 80% / **90%** / 95% × TP1距，只增不减  
 - 每档独立 `early_be` / `step_*` / **phase2 trail 带宽**（随档位放宽）  
 - **双保险再入价**：多 `min(5m低+tick, TV×0.997)`；空 `max(5m高−tick, TV×1.003)`（无 K 线则 3m→仅 TV 折扣）  
 - 必须优于 TV；TTL 5min；最多 4 次重入；未成交刷新≤5；硬止损/亏损不重入；新 TV 彻底清场  
+
+### 两次 TV 之间：只有三条路（无第四种）
+
+1. **开仓 → TP1/2/3 兑现** → 周期结束，等待下一 TV  
+2. **开仓 → 雷达保本/微赚扫出 → 更优价再入 → 再冲击 TP**（可多次波段滚动）  
+3. **开仓 → 硬止损触发 → 坚决离场，禁止再入**  
+
+雷达扫出不是失败，是「等一下再上一次车」；唯一主动认输 = 硬止损。
+
+### 闭环检查点（v15.8.2）
+
+| 阶段 | 必须通过 |
+|------|----------|
+| 仓归零 | 撤该品种全部限价/止损；`_verify_sterile_flat`（qty=0 且 orders=0） |
+| 再入判断 | 非硬止损、非亏损、未超 `max_reentries`、TV 方向仍有效 |
+| 挂限价前 | 本地 `reentry_order_tag` **为空**；交易所查单可读；无同向同价 LIMIT |
+| 挂限价 | 生成唯一 `newClientOrderId` 写入本地状态后再下单；TTL 5min |
+| TTL 刷新 | **先撤旧单并释放旧标签** → 再生成新标签挂单（每周期仅一笔） |
+| 成交后 | 释放标签；硬止损按 fill 重算（含 \|fill−TV\|×2）；TP 方向无效则按 fill 重算；雷达休眠 |
+| 钉钉 | 挂限价 / 成交防线核实（hard hung + TP12 + 滑点） |
+
+### 红色警告：查不到单绝不可狂挂
+
+本地状态表存在该品种 `reentry_order_tag` 时，**即使交易所 openOrders 返回空，也绝对不允许再挂**。  
+查单失败 → fail-closed 拒挂。标签仅在：成交确认 / 确认撤销 / TTL 刷新前释放。  
+这是防止「查不到 TP/雷达/止损就循环补挂 50+ 单击穿实盘」的最后一道防线。
 
 | 档位 | 激活% | ETH early/trig/adv · trail | XAU early/trig/adv · trail |
 |------|-------|----------------------------|----------------------------|
@@ -200,7 +229,8 @@ qty = 名义上限 / entryPrice
 | 4.0 | 90% | 1.05/1.25/0.58 · 1.8~3.2 | 1.30/1.15/0.64 · 1.8~3.2 |
 | 5.0 | 95% | 1.30/1.40/0.64 · 2.0~3.5 | 1.55/1.30/0.70 · 2.0~3.5 |
 
-再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`reentry_profiles.py`。
+再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`reentry_profiles.py`。  
+实现：`radar_reentry_mixin.py` + `smart_reentry_engine.py` + `place_limit_order(..., client_order_id=)`。
 
 ---
 
@@ -299,7 +329,7 @@ python3 test_breath_radar_upgrade.py
 | 硬止损新旧双路径并存 | **已清（v15.7.9）** 单一 `hard_stop_price`；README/注释对齐 |
 | sizing 预览未绑 atr 误发「缺TV atr」钉钉 | **已修（v15.7.10）** 预览先绑 atr；拒开钉钉仅主路径 |
 | 双持仓时后开品种按 available×20%×5 裁仓 | **已修（v15.7.11）** 仅保证金不足才裁；雷达查重排除硬腿 |
-| XAU early_be 噪声易扫保本 | **v15.8.0** 递进雷达 + tier0 early_be=0.65；trail 对齐 1.2~2.5；智能再入 |
+| XAU early_be 噪声易扫保本 | **v15.8.2** 递进雷达 + 幂等再入闭环；查不到单绝不狂挂 |
 | 同窗仅 1s / 5s 迟到 CLOSE | 改为 **15s** |
 | webhook 必须 qty | 废除 |
 | CAP_ALIGN / 加仓 / 旧雷达 activated | 废除 |

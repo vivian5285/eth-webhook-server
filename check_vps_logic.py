@@ -739,6 +739,19 @@ def audit_module4_radar(a: Audit):
         os.path.isfile(os.path.join(ROOT, "reentry_profiles.py"))
         and os.path.isfile(os.path.join(ROOT, "radar_reentry_mixin.py")),
     )
+    _rr = _read(os.path.join(ROOT, "radar_reentry_mixin.py"))
+    _rp = _read(os.path.join(ROOT, "reentry_profiles.py"))
+    _bc = _read(os.path.join(ROOT, "binance_client.py"))
+    a.check(
+        "4.4c 再入订单标签幂等+无菌闭环",
+        "reentry_order_tag" in _rr
+        and "make_reentry_client_order_id" in _rp
+        and "_ensure_sterile_for_reentry" in _rr
+        and "_clear_reentry_order_tag" in _rr
+        and "防查不到单狂挂" in _rr
+        and "client_order_id" in _bc
+        and "newClientOrderId" in _bc,
+    )
     a.check(
         "4.5 ATR_UPDATE/ORDER_TIMEOUT 在 webhook_parser",
         "ATR_UPDATE_SEC" in wp and "ORDER_TIMEOUT_SEC" in wp,
@@ -747,7 +760,6 @@ def audit_module4_radar(a: Audit):
         "4.5c trading_paused/暂停交易 在 supervisor",
         "trading_paused" in sup and "暂停交易" in sup,
     )
-    _bc = _read(os.path.join(ROOT, "binance_client.py"))
     a.check(
         "4.5c2 挂单查询失败 fail-closed + 同价去重 + 禁盲补",
         "ORDERS_QUERY_FAILED" in _bc

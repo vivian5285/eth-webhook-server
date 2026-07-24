@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v15.8.1 五档波段滚动 + 双保险再入场纯单元测试。"""
+"""v15.8.2 五档波段滚动 + 双保险再入场 + 订单标签幂等纯单元测试。"""
 from __future__ import annotations
 
 import unittest
@@ -17,6 +17,7 @@ from reentry_profiles import (
     exit_in_reentry_zone,
     get_reentry_profile,
     is_better_than_tv,
+    make_reentry_client_order_id,
     next_activation_frac,
     pick_dual_insurance,
     reentry_enabled,
@@ -201,10 +202,54 @@ class TestCycleState(unittest.TestCase):
         self.assertTrue(reentry_enabled("ETHUSDT"))
         self.assertTrue(reentry_enabled("XAUUSDT"))
         self.assertIn("reentry_attempt", blank_reentry_state())
+        self.assertIn("reentry_order_tag", blank_reentry_state())
+        self.assertIsNone(blank_reentry_state()["reentry_order_tag"])
         st = init_cycle_on_open(
             side="LONG", tv_price=3000, entry=2999, open_atr=20, symbol="XAUUSDT",
         )
         self.assertAlmostEqual(st["radar_activation_frac"], 0.50)
+        self.assertIsNone(st.get("reentry_order_tag"))
+
+
+class TestOrderTagIdempotency(unittest.TestCase):
+    def test_client_order_id_shape(self):
+        tag = make_reentry_client_order_id("ETHUSDT", "LONG", 2999.5, 1719000000.0)
+        # RE + E + L + px + ts → REEL...
+        self.assertEqual(tag[:4], "REEL", msg=repr(tag))
+        self.assertLessEqual(len(tag), 36)
+        tag_x = make_reentry_client_order_id("XAUUSDT", "SHORT", 2650.12, 1719000001.0)
+        self.assertEqual(tag_x[:4], "REXS", msg=repr(tag_x))
+        self.assertNotEqual(tag, tag_x)
+
+    def test_refuse_second_place_when_tag_pending(self):
+        """本地标签未清 → _place_reentry_limit 必须拒挂（即使无交易所单）。"""
+        from radar_reentry_mixin import RadarReentryMixin
+
+        class _T(RadarReentryMixin):
+            symbol = "ETHUSDT"
+            monitoring = False
+            watched_qty = 0
+            cycle_tv_side = "LONG"
+            cycle_tv_price = 3000.0
+            reentry_order_tag = "REEL299950000"
+            reentry_limit_order_id = None
+            reentry_unfilled_refreshes = 0
+            base_qty = 0.01
+            _reentry_open_snap = {"qty": 0.01}
+
+            def _get_active_position(self, prefer_ws=False):
+                return None
+
+            def _save_state(self):
+                pass
+
+            def _fetch_reentry_klines(self):
+                return None, None
+
+        t = _T()
+        self.assertFalse(t._place_reentry_limit(side="LONG", reason="单测叠挂"))
+        # 标签仍在（未误释放）
+        self.assertEqual(t.reentry_order_tag, "REEL299950000")
 
 
 if __name__ == "__main__":

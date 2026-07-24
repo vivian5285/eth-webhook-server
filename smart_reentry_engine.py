@@ -56,6 +56,9 @@ def blank_reentry_state() -> Dict[str, Any]:
         "reentry_limit_px": 0.0,
         "reentry_limit_deadline_ts": 0.0,
         "reentry_unfilled_refreshes": 0,
+        # 本地订单标签：未清除前禁止再挂（即使交易所查单为空）
+        "reentry_order_tag": None,
+        "reentry_sterile_fail_count": 0,
         "last_exit_source": "",
         "last_exit_px": 0.0,
         "radar_pending_arm": True,
@@ -87,6 +90,8 @@ def init_cycle_on_open(
         "reentry_limit_px": 0.0,
         "reentry_limit_deadline_ts": 0.0,
         "reentry_unfilled_refreshes": 0,
+        "reentry_order_tag": None,
+        "reentry_sterile_fail_count": 0,
         "radar_pending_arm": True,
     }
 

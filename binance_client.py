@@ -833,7 +833,12 @@ class BinanceClient:
             logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
 
-    def place_limit_order(self, side, quantity, price, symbol="ETHUSDT", reduce_only=True):
+    def place_limit_order(self, side, quantity, price, symbol="ETHUSDT",
+                          reduce_only=True, client_order_id=None):
+        """
+        限价挂单。client_order_id → newClientOrderId（订单标签幂等）。
+        查单失败 fail-closed；同价/同标签已存在则复用，禁止狂挂。
+        """
         qty = self.format_quantity(quantity, symbol)
         px_str = self.format_price(price, symbol)
         if qty <= 0:
@@ -841,19 +846,37 @@ class BinanceClient:
             return None
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(px_str), 2)
-        key = (symbol, want_side, want_px)
+        coid = str(client_order_id or "").strip()[:36] or None
+        key = (symbol, want_side, want_px, coid or "")
+        legacy_key = (symbol, want_side, want_px)  # 兼容旧缓存键
+
+        def _cache_hit():
+            with self._place_dedupe_lock:
+                for k in (key, legacy_key):
+                    cached = self._recent_limit_place.get(k)
+                    if cached and (time.time() - float(cached[0])) < 120.0:
+                        return cached[1]
+            return None
+
+        # 本地短窗：同标签/同价 120s 内已挂 → 复用
+        hit = _cache_hit()
+        if hit is not None:
+            logger.warning(
+                f"[限价单去重] {symbol} 本地120s内已挂 "
+                f"{want_side}@{px_str} tag={coid or '-'} → 复用"
+            )
+            return hit
         # 防重复：同价已有 LIMIT 则复用。
         # 仅当返回 ORDERS_QUERY_FAILED 哨兵时 fail-closed（None=无同价，可挂）
         exist = self._existing_same_limit(symbol, side, float(px_str), quantity=qty)
         if exist is not None and is_orders_query_failed(exist):
-            with self._place_dedupe_lock:
-                cached = self._recent_limit_place.get(key)
-                if cached and (time.time() - float(cached[0])) < 120.0:
-                    logger.warning(
-                        f"[限价单去重] {symbol} 查单失败但本地 120s 内已挂同价 "
-                        f"@ {px_str} → 跳过叠单"
-                    )
-                    return cached[1]
+            hit = _cache_hit()
+            if hit is not None:
+                logger.warning(
+                    f"[限价单去重] {symbol} 查单失败但本地 120s 内已挂同价 "
+                    f"@ {px_str} → 跳过叠单"
+                )
+                return hit
             logger.error(
                 f"[限价单] {symbol} 挂单查询失败 → fail-closed 禁止挂单 "
                 f"{side} {qty} @ {px_str}（防盲补叠单）"
@@ -869,6 +892,19 @@ class BinanceClient:
         try:
             book = self.get_open_orders(symbol, include_algo=False)
             if not is_orders_query_failed(book):
+                # 同 clientOrderId 直接复用
+                if coid:
+                    for o in (book or []):
+                        if not isinstance(o, dict):
+                            continue
+                        if str(o.get("clientOrderId") or "") == coid:
+                            logger.warning(
+                                f"[限价单去重] {symbol} 同标签已存在 "
+                                f"clientOrderId={coid} id={o.get('orderId')} → 复用"
+                            )
+                            with self._place_dedupe_lock:
+                                self._recent_limit_place[key] = (time.time(), o)
+                            return o
                 lim_n = sum(
                     1 for o in (book or [])
                     if str(o.get("type") or o.get("orderType") or "").upper() == "LIMIT"
@@ -879,8 +915,18 @@ class BinanceClient:
                         f"（期望≤3；请先净场）"
                     )
                     return None
+            elif coid:
+                # 查单失败且带标签：绝不新挂（上层本地标签应已拦住）
+                logger.error(
+                    f"[限价单] {symbol} 查单失败且带标签 {coid} → fail-closed 拒挂"
+                )
+                return None
         except Exception:
-            pass
+            if coid:
+                logger.error(
+                    f"[限价单] {symbol} 查单异常且带标签 {coid} → fail-closed 拒挂"
+                )
+                return None
         try:
             binance_side = want_side
             params = {
@@ -889,13 +935,18 @@ class BinanceClient:
             }
             if reduce_only:
                 params["reduceOnly"] = True
+            if coid:
+                params["newClientOrderId"] = coid
             order = self.client.futures_create_order(**params)
-            logger.info(f"[限价单成功] {side} {qty} @ {px_str} orderId={order.get('orderId', '')}")
+            logger.info(
+                f"[限价单成功] {side} {qty} @ {px_str} "
+                f"orderId={order.get('orderId', '')} tag={coid or '-'}"
+            )
             with self._place_dedupe_lock:
                 self._recent_limit_place[key] = (time.time(), order)
             return order
         except Exception as e:
-            logger.error(f"[限价单失败] {side} {qty} @ {px_str}: {e}")
+            logger.error(f"[限价单失败] {side} {qty} @ {px_str} tag={coid or '-'}: {e}")
             return None
 
     def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
