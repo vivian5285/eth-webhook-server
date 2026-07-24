@@ -80,18 +80,31 @@ class TestHugeTvQtySizing(unittest.TestCase):
         self.assertAlmostEqual(real_qty, expect, places=3)
         self.assertNotAlmostEqual(stale_qty, real_qty, places=3)
 
-    def test_margin_cap_clips_notional_to_available(self):
-        """available×20%×5×0.92 must shrink qty below raw notional(=1×equity)."""
-        px = 1932.4
-        raw_qty = 0.889  # ~1719/1932
-        avail = 1500.0
-        risk_pct = 0.20
+    def test_margin_fit_only_when_insufficient(self):
+        """
+        新口径：仅当所需保证金(qty×px/lev) > available×0.92 才裁。
+        禁止对 available 再套 20%×5（双持仓时会错误压扁后开品种）。
+        """
+        px = 4063.52
+        principal_qty = 0.424  # ~本金×1 / px
+        avail = 1410.0  # ETH 已占保证金后的可用
         lev = 5.0
-        margin_cap = (avail * risk_pct * lev * 0.92) / px
-        self.assertLess(margin_cap, raw_qty)
-        clipped = math.floor(margin_cap / 0.001) * 0.001
-        self.assertGreater(clipped, 0.5)
-        self.assertLess(clipped, 0.9)
+        required = principal_qty * px / lev  # ~344.7
+        avail_budget = avail * 0.92  # ~1297
+        # 可用预算远大于所需保证金 → 不应裁剪
+        self.assertLess(required, avail_budget)
+        # 旧错误公式会裁到 avail×0.2×5×0.92/px ≈ 0.319
+        old_wrong = (avail * 0.20 * lev * 0.92) / px
+        self.assertLess(old_wrong, principal_qty)
+        # 真不够时才裁到 avail×0.92×lev/px
+        tiny_avail = 200.0
+        max_qty = (tiny_avail * 0.92 * lev) / px
+        self.assertLess(max_qty, principal_qty)
+        self.assertGreater(max_qty, 0.2)
+
+    def test_margin_cap_clips_notional_to_available(self):
+        """兼容旧名：改为验证「真不足才裁」而非 available×20%×5。"""
+        self.test_margin_fit_only_when_insufficient()
 
     def test_qty_zero_rejected(self):
         qty, meta = compute_fixed_order_qty(

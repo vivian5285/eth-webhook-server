@@ -152,7 +152,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.7.10-atr-alert-fix"
+BINANCE_VPS_VERSION = "v15.7.11-dual-hold-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -3785,31 +3785,36 @@ class PositionSupervisorBinance:
                 )
         except Exception:
             pass
-        # 保证金安全网：名义按「本金×20%×5(=本金×1)」算出后，
-        # 再用 available×20%×5×0.92 裁一次，杜绝 -2019。
+        # 保证金安全网：本金名义算完后，仅当「所需保证金」> available×0.92 才裁。
+        # 禁止对 available 再套 20%×5（2026-07-24：ETH 占保证金后 XAU 被压成可用余额×1）。
         try:
             summary = binance_client.get_futures_account_summary() or {}
             avail = float(summary.get("available_balance") or 0)
             if avail <= 0:
                 avail = float(binance_client.get_available_balance() or 0)
-            if avail > 0 and px > 0 and float(qty or 0) > 0:
-                margin_cap = (
-                    avail * float(FIXED_RISK_PCT) * float(FIXED_LEVERAGE) * 0.92
-                ) / px
-                step = float(getattr(self, "qty_step", 0.001) or 0.001)
-                min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
-                if margin_cap > 0 and float(qty) > margin_cap:
-                    clipped = math.floor(margin_cap / step) * step if step > 0 else margin_cap
+            lev = float(FIXED_LEVERAGE) or 5.0
+            haircut = 0.92
+            if avail > 0 and px > 0 and lev > 0 and float(qty or 0) > 0:
+                required_margin = float(qty) * px / lev
+                avail_budget = avail * haircut
+                meta["available_balance"] = round(avail, 4)
+                meta["required_margin"] = round(required_margin, 4)
+                if required_margin > avail_budget:
+                    max_qty = (avail_budget * lev) / px
+                    step = float(getattr(self, "qty_step", 0.001) or 0.001)
+                    min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
+                    clipped = math.floor(max_qty / step) * step if step > 0 else max_qty
                     if clipped < min_q:
                         clipped = 0.0
                     logger.warning(
                         f"🛡️ [{self.symbol}] 保证金裁剪 "
                         f"qty {float(qty):.4f} → {clipped:.4f} "
-                        f"(available={avail:.2f}U · {FIXED_RISK_PCT*100:.0f}%×{FIXED_LEVERAGE:.0f}x · 92%)"
+                        f"(需保证金={required_margin:.2f}U > "
+                        f"available×{haircut:.0%}={avail_budget:.2f}U · "
+                        f"avail={avail:.2f}U · {lev:.0f}x)"
                     )
                     meta["qty_before_margin_cap"] = float(qty)
                     meta["margin_cap_qty"] = round(float(clipped), 6)
-                    meta["available_balance"] = round(avail, 4)
                     meta["binding"] = f"{meta.get('binding')}+margin_cap"
                     qty = float(clipped)
                     meta["qty"] = float(qty)
@@ -6102,7 +6107,10 @@ class PositionSupervisorBinance:
             < HARD_SL_SYNC_COOLDOWN_SEC
         ):
             if not orphans and (
-                near or self._has_stop_sl_near(exchange_target, exclude_shield=False)
+                near or self._has_stop_sl_near(
+                    exchange_target, exclude_shield=False,
+                    exclude_close_position=True,
+                )
             ):
                 return {
                     "ok": True, "skipped": True, "target": ledger_target,
@@ -6115,7 +6123,10 @@ class PositionSupervisorBinance:
         res = None
         had_old_stops = bool(live_stops)
         for attempt in range(3):
-            if self._has_stop_sl_near(exchange_target, exclude_shield=False):
+            if self._has_stop_sl_near(
+                exchange_target, exclude_shield=False,
+                exclude_close_position=True,
+            ):
                 ok = True
                 break
             res = self._place_vps_hard_sl_order(
@@ -6126,7 +6137,10 @@ class PositionSupervisorBinance:
                 # 交易所已接受 → 立刻记账；核实失败也不在同轮再挂（曾叠 25×@1895.42）
                 self._last_applied_exchange_sl = exchange_target
                 self._last_hard_sl_sync_ts = time.time()
-                if self._has_stop_sl_near(exchange_target, exclude_shield=False):
+                if self._has_stop_sl_near(
+                    exchange_target, exclude_shield=False,
+                    exclude_close_position=True,
+                ):
                     ok = True
                     break
                 logger.warning(
@@ -6149,13 +6163,17 @@ class PositionSupervisorBinance:
                     f"(原盘口{live_stops})"
                 )
                 time.sleep(0.35)
-                if not self._has_stop_sl_near(exchange_target, exclude_shield=False):
+                if not self._has_stop_sl_near(
+                    exchange_target, exclude_shield=False,
+                    exclude_close_position=True,
+                ):
                     res = self._place_vps_hard_sl_order(
                         live_qty, exchange_target, use_stop_limit=False,
                     )
                     time.sleep(0.45)
                     ok = res is not None and self._has_stop_sl_near(
                         exchange_target, exclude_shield=False,
+                        exclude_close_position=True,
                     )
         elif had_old_stops:
             # HARD_SL_FAIL_ABORT：保留原盘口止损，不撤净裸仓，不自主平仓
@@ -6213,12 +6231,18 @@ class PositionSupervisorBinance:
             purged += extra
             logger.warning(f"🛡️ 二次清孤儿 STOP{leftovers} 撤 {extra} 笔")
             time.sleep(0.3)
-            if not self._has_stop_sl_near(exchange_target, exclude_shield=False):
+            if not self._has_stop_sl_near(
+                exchange_target, exclude_shield=False,
+                exclude_close_position=True,
+            ):
                 self._place_vps_hard_sl_order(
                     live_qty, exchange_target, use_stop_limit=False,
                 )
                 time.sleep(0.4)
-                ok = self._has_stop_sl_near(exchange_target, exclude_shield=False)
+                ok = self._has_stop_sl_near(
+                    exchange_target, exclude_shield=False,
+                    exclude_close_position=True,
+                )
 
         if ok:
             self._last_applied_exchange_sl = exchange_target
@@ -8916,10 +8940,21 @@ class PositionSupervisorBinance:
                 last = self._audit_tp_levels(live_qty)
         return last
 
-    def _has_stop_sl_near(self, sl_price, tolerance=2.0, exclude_shield=False):
+    @staticmethod
+    def _order_is_close_position_stop(order):
+        """closePosition 硬止损腿（与 reduceOnly+qty 雷达腿区分）。"""
+        cp = (order or {}).get("closePosition")
+        if cp is True or str(cp).strip().lower() in ("true", "1", "yes"):
+            return True
+        return False
+
+    def _has_stop_sl_near(
+        self, sl_price, tolerance=2.0, exclude_shield=False,
+        exclude_close_position=False,
+    ):
         """
         盘口是否已有贴近目标价的 STOP。
-        硬止损与雷达可同价共存检测：任一带量/closePosition STOP 贴近即 True。
+        exclude_close_position=True：忽略硬止损腿（雷达查重专用，防 2U 容差吞并硬腿）。
         挂单查询失败：仅当本地 120s 内刚挂同价才 True；否则 False
         （禁止谎称「已有保护」导致裸仓开仓；place_stop 本身仍 fail-closed 防叠单）。
         """
@@ -8944,6 +8979,8 @@ class PositionSupervisorBinance:
         for o in orders or []:
             order_type = str(o.get("type") or o.get("orderType") or "").upper()
             if order_type not in ("STOP_MARKET", "STOP"):
+                continue
+            if exclude_close_position and self._order_is_close_position_stop(o):
                 continue
             if exclude_shield and shield_prices and self._is_shield_stop_order(o, shield_prices):
                 continue
@@ -9807,6 +9844,36 @@ class PositionSupervisorBinance:
                     force=True,
                     radar_sl=self._radar_sl_to_pass(),
                 )
+            elif len(stops) == 1:
+                # 仅一条：常见为硬腿吞并雷达（容差命中 closePosition）→ 补雷达；
+                # 若仅有雷达则补硬止损。不改价、不改仓。
+                hard = self._frozen_hard_px()
+                hard_ex = round(float(order_stop_price(
+                    self.current_side, hard,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or hard), 2) if hard > 0 else 0.0
+                only = float(stops[0])
+                near_hard = (
+                    hard > 0
+                    and (
+                        abs(only - hard) <= SHIELD_STOP_TOLERANCE
+                        or abs(only - hard_ex) <= SHIELD_STOP_TOLERANCE
+                    )
+                )
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 盘口仅1条保护STOP {stops} "
+                    f"→ {'补挂雷达' if near_hard else '补挂硬止损'}"
+                )
+                if near_hard:
+                    self._maintain_hard_shield(
+                        live_qty,
+                        binance_client.get_current_price(self.symbol) or 0,
+                        force=True,
+                        radar_sl=self._radar_sl_to_pass(),
+                    )
+                else:
+                    self._ensure_frozen_hard_sl(live_qty, reason="对账补永久硬止损")
             elif len(stops) < 1:
                 logger.warning(
                     f"⚠️ [{self.symbol}] 盘口无保护STOP → 补挂双防线"
