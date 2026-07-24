@@ -78,7 +78,7 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(eth["stop_exec_buffer"], 0.3)
         self.assertEqual(xau["stop_exec_buffer"], 0.5)
         self.assertEqual(eth["early_be_atr"], 0.5)
-        self.assertEqual(xau["early_be_atr"], 0.3)
+        self.assertEqual(xau["early_be_atr"], 0.5)
         self.assertEqual(eth["step_trigger_atr"], 0.75)
         self.assertEqual(xau["step_trigger_atr"], 0.4)
         self.assertEqual(eth["min_mult"], 1.2)
@@ -142,15 +142,23 @@ class TestEarlyBreakeven(unittest.TestCase):
         self.assertTrue(out.get("early_be_done"))
         self.assertGreaterEqual(out["stop"], 1900.01)
 
-    def test_xau_early_be_at_0_3_atr(self):
+    def test_xau_early_be_at_0_5_atr(self):
+        # 0.5×ATR=5：价 2655 触发；2654 不触发
         out = calculate_breath_stop(
-            "LONG", 2653.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
+            "LONG", 2655.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
             breathing_coefficient=0.675,
             profile=BREATH_XAU,
             early_be_done=False,
         )
         self.assertTrue(out.get("early_be_done"))
         self.assertGreaterEqual(out["stop"], 2650.01)
+        out2 = calculate_breath_stop(
+            "LONG", 2654.0, 2650.0, 10.0, 2635.0, 2635.0, 2650.0, False,
+            breathing_coefficient=0.675,
+            profile=BREATH_XAU,
+            early_be_done=False,
+        )
+        self.assertFalse(out2.get("early_be_done"))
 
     def test_eth_not_early_before_0_5(self):
         out = calculate_breath_stop(

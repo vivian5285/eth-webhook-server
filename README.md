@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.7.11-dual-hold-fix`**  
+**当前版本：`v15.7.12-xau-early-be`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2；场景二另挂 TP3）  
@@ -21,7 +21,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.7.11-dual-hold-fix · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.7.12-xau-early-be · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_two_scenario_atr.py
@@ -196,7 +196,7 @@ qty = 名义上限 / entryPrice
 | TV 图表周期 | **90m** | **45m**（文档已与实盘对齐；旧「1h」记录作废） |
 | VPS ATR 用途 | 1h ATR → 呼吸系数 / 场景一 | 同左（近似采样，≠图表周期） |
 | stop_exec_buffer | 0.3 | 0.5 |
-| early_be_atr | 0.5 | 0.3 |
+| early_be_atr | 0.5 | **0.5**（2026-07-24 由 0.3 对齐 ETH；step 暂不动） |
 | step_trigger / advance | 0.75 / 0.4 | 0.4 / 0.35 |
 | phase_switch_atr | 3.0 | 3.0 |
 | initial_sl_atr（雷达初值） | 1.5 | 1.5 |
@@ -308,6 +308,7 @@ python3 test_breath_radar_upgrade.py
 | 硬止损新旧双路径并存 | **已清（v15.7.9）** 单一 `hard_stop_price`；README/注释对齐 |
 | sizing 预览未绑 atr 误发「缺TV atr」钉钉 | **已修（v15.7.10）** 预览先绑 atr；拒开钉钉仅主路径 |
 | 双持仓时后开品种按 available×20%×5 裁仓 | **已修（v15.7.11）** 仅保证金不足才裁；雷达查重排除硬腿 |
+| XAU early_be 0.3×ATR 噪声易扫保本 | **已调（v15.7.12）** XAU early_be→0.5；step 观察后再议 |
 | 同窗仅 1s / 5s 迟到 CLOSE | 改为 **15s** |
 | webhook 必须 qty | 废除 |
 | CAP_ALIGN / 加仓 / 旧雷达 activated | 废除 |

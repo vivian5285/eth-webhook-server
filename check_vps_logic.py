@@ -655,7 +655,7 @@ def audit_module4_radar(a: Audit):
             abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
             and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
             and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
-            and abs(float(BREATH_XAU["early_be_atr"]) - 0.3) < 1e-9
+            and abs(float(BREATH_XAU["early_be_atr"]) - 0.5) < 1e-9
             and abs(float(BREATH_ETH["min_mult"]) - 1.2) < 1e-9
             and abs(float(BREATH_ETH["max_mult"]) - 2.5) < 1e-9
             and abs(float(BREATH_XAU["min_mult"]) - 0.5) < 1e-9

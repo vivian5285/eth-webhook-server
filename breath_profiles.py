@@ -41,12 +41,13 @@ BREATH_ETH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# XAU：最终锁定表 0.5~1.2（草稿 0.8~1.8 已作废；冷启动 ratio=1.0 → 0.675）
+# XAU：early_be 对齐 ETH 0.5（2026-07-24：0.3×ATR≈3-5点易被噪声扫保本）
+# step_trigger/advance 暂保持原档，观察 1-2 周后再议
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
     "initial_sl_atr": 1.5,
     "stop_exec_buffer": 0.5,
-    "early_be_atr": 0.3,
+    "early_be_atr": 0.5,
     "step_trigger_atr": 0.4,
     "step_advance_atr": 0.35,
     "phase_switch_atr": 3.0,
