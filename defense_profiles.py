@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-执行层防御配置（v16.0.0 / 白皮书 v2.0）：硬止损缓冲 + TP 分腿比例。
+执行层防御配置（白皮书 v3.0）：硬止损缓冲 + TP 分腿比例。
 
 与 TV 策略对齐：
-  - 硬止损距离 = |TV.price − TV.stop_loss| × buffer_multiplier，锚定成交价
-  - buffer 按 ADX 档：弱 1.1 / 中 1.2 / 强 1.3
+  - 硬止损距离 = |TV.price − TV.stop_loss| × 1.15，锚定成交价
+  - 呼吸垫系数统一 1.15（废止 v2.0 弱/中/强 1.1/1.2/1.3 分档）
   - TP 仓位 10% / 20% / 70%，三级限价常挂；TP3 与雷达互斥
   - 禁止 VPS 再维护独立的 1.5×ATR 硬止损倍数
 
@@ -16,15 +16,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from reentry_profiles import (
-    BUFFER_BY_TIER,
+    HARD_SL_BUFFER_MULT,
     adx_to_tier,
-    buffer_for_adx,
-    buffer_for_tier,
     clamp_tier,
 )
 
-# 默认起步值（中趋势档）
-DEFAULT_BUFFER_MULT = 1.2
+# 白皮书 v3.0：统一呼吸垫，不分档
+DEFAULT_BUFFER_MULT = float(HARD_SL_BUFFER_MULT)
 DEFAULT_TP1_PCT = 0.10
 DEFAULT_TP2_PCT = 0.20
 DEFAULT_MIN_STOP_TICKS = 5
@@ -33,7 +31,6 @@ DEFAULT_TICK = 0.01
 DEFENSE_ETH: Dict[str, Any] = {
     "name": "ETH",
     "buffer_multiplier": DEFAULT_BUFFER_MULT,
-    "buffer_by_tier": list(BUFFER_BY_TIER),
     "tp1_pct": DEFAULT_TP1_PCT,
     "tp2_pct": DEFAULT_TP2_PCT,
     "min_stop_ticks": DEFAULT_MIN_STOP_TICKS,
@@ -42,7 +39,6 @@ DEFENSE_ETH: Dict[str, Any] = {
 DEFENSE_XAU: Dict[str, Any] = {
     "name": "XAU",
     "buffer_multiplier": DEFAULT_BUFFER_MULT,
-    "buffer_by_tier": list(BUFFER_BY_TIER),
     "tp1_pct": DEFAULT_TP1_PCT,
     "tp2_pct": DEFAULT_TP2_PCT,
     "min_stop_ticks": DEFAULT_MIN_STOP_TICKS,
@@ -69,18 +65,10 @@ def buffer_multiplier(
     tier: Optional[int] = None,
 ) -> float:
     """
-    硬止损呼吸垫系数。
-    优先：显式 tier → ADX → 配置默认（中趋势 1.2）。
+    硬止损呼吸垫系数（白皮书 v3.0：恒为 1.15）。
+    adx/tier 参数保留签名兼容，不再参与查表。
     """
     p = get_defense_profile(symbol)
-    if tier is not None:
-        rows = list(p.get("buffer_by_tier") or BUFFER_BY_TIER)
-        idx = clamp_tier(int(tier))
-        if idx < len(rows):
-            return float(rows[idx])
-        return buffer_for_tier(idx)
-    if adx is not None:
-        return float(buffer_for_adx(float(adx)))
     return float(p.get("buffer_multiplier") or DEFAULT_BUFFER_MULT)
 
 

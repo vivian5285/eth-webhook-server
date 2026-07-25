@@ -189,7 +189,7 @@ def ensure_flat(sym, reason):
 
 def hard_sl_expected(side, entry, tv_sl, tv_price=None):
     tv_e = float(tv_price if tv_price is not None else entry)
-    dist = abs(tv_e - float(tv_sl)) * 1.2
+    dist = abs(tv_e - float(tv_sl)) * 1.15
     if side == "LONG":
         return round(float(entry) - dist, 2)
     return round(float(entry) + dist, 2)

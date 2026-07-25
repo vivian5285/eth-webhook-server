@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v16.0.0 / 白皮书 v2.0：ADX 三档 + 固定 0.85 激活 + 最多 1 次重入。"""
+"""白皮书 v3.0：ADX 三档雷达 + 首次0.85/重入1.00 激活 + 最多 1 次重入。"""
 from __future__ import annotations
 
 import time
@@ -10,7 +10,9 @@ from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
 from reentry_profiles import (
     ACTIVATION_FRACS,
     ACTIVATION_TP1_FRAC,
+    ACTIVATION_TP1_FRAC_REENTRY,
     ARM_SL_ATR,
+    HARD_SL_BUFFER_MULT,
     MAX_REENTRIES,
     activation_frac_for_attempt,
     activation_price,
@@ -48,10 +50,11 @@ class TestAdxTiers(unittest.TestCase):
         self.assertEqual(adx_to_tier(30.0), 1)
         self.assertEqual(adx_to_tier(30.1), 2)
 
-    def test_buffer_by_tier(self):
-        self.assertAlmostEqual(buffer_for_tier(0), 1.1)
-        self.assertAlmostEqual(buffer_for_tier(1), 1.2)
-        self.assertAlmostEqual(buffer_for_tier(2), 1.3)
+    def test_buffer_unified_115(self):
+        self.assertAlmostEqual(HARD_SL_BUFFER_MULT, 1.15)
+        self.assertAlmostEqual(buffer_for_tier(0), 1.15)
+        self.assertAlmostEqual(buffer_for_tier(1), 1.15)
+        self.assertAlmostEqual(buffer_for_tier(2), 1.15)
 
     def test_looser_tier(self):
         self.assertEqual(looser_tier(0), 1)
@@ -59,13 +62,15 @@ class TestAdxTiers(unittest.TestCase):
         self.assertEqual(looser_tier(2), 2)
 
 
-class TestActivationFixed(unittest.TestCase):
-    def test_frac_fixed_085(self):
+class TestActivationFirstVsReentry(unittest.TestCase):
+    def test_frac_first_085_reentry_100(self):
         self.assertAlmostEqual(ACTIVATION_TP1_FRAC, 0.85)
-        self.assertEqual(ACTIVATION_FRACS, [0.85])
+        self.assertAlmostEqual(ACTIVATION_TP1_FRAC_REENTRY, 1.00)
+        self.assertEqual(ACTIVATION_FRACS, [0.85, 1.00])
         self.assertEqual(MAX_REENTRIES, 1)
-        for i in range(5):
-            self.assertAlmostEqual(activation_frac_for_attempt(i), 0.85)
+        self.assertAlmostEqual(activation_frac_for_attempt(0), 0.85)
+        self.assertAlmostEqual(activation_frac_for_attempt(1), 1.00)
+        self.assertAlmostEqual(activation_frac_for_attempt(2), 1.00)
         self.assertEqual(tier_label(0), "弱趋势")
         self.assertEqual(tier_label(2), "强趋势")
 
@@ -81,15 +86,37 @@ class TestActivationFixed(unittest.TestCase):
             entry - atr * 1.1475, places=2,
         )
 
+    def test_whitepaper_distance_examples(self):
+        """白皮书 §4.1 算例：距离用 TV.price，锚点用成交价。"""
+        # 首次：TV.price=1900, tp1=1925.65, fill=1900.80 → 1922.60
+        act = activation_price_from_tp1(
+            "LONG", 1900.80, 1925.65, 0.85, tv_price=1900.00,
+        )
+        self.assertAlmostEqual(act, 1922.60, places=2)
+        # 重入：必须走到 100% TP1 距（相对 TV 信号距）
+        act_r = activation_price_from_tp1(
+            "LONG", 1895.00, 1925.65, 1.00, tv_price=1900.00,
+        )
+        self.assertAlmostEqual(act_r, 1895.00 + 25.65, places=2)
+        # 85% 时重入不应等同于激活线
+        early = activation_price_from_tp1(
+            "LONG", 1895.00, 1925.65, 0.85, tv_price=1900.00,
+        )
+        self.assertLess(early, act_r)
+
     def test_activation_from_tv_tp1(self):
         entry, tp1 = 3000.0, 3100.0
         self.assertAlmostEqual(
             activation_price_from_tp1("LONG", entry, tp1, 0.85),
             entry + 0.85 * 100, places=2,
         )
+        self.assertAlmostEqual(
+            activation_price_from_tp1("LONG", entry, tp1, 1.00),
+            entry + 100, places=2,
+        )
 
-    def test_frac_no_longer_raises(self):
-        self.assertAlmostEqual(next_activation_frac(0.85, 1), 0.85)
+    def test_frac_raises_on_reentry_attempt(self):
+        self.assertAlmostEqual(next_activation_frac(0.85, 1), 1.00)
 
     def test_arm_stop_half_atr(self):
         self.assertAlmostEqual(ARM_SL_ATR, 0.5)
@@ -203,12 +230,12 @@ class TestDualInsurance(unittest.TestCase):
 
 
 class TestEngine(unittest.TestCase):
-    def test_bump_loosens_tier(self):
+    def test_bump_loosens_tier_and_frac_100(self):
         b = bump_after_reentry_fill(0, 0.85, "ETHUSDT", adx_tier=0)
         self.assertEqual(b["reentry_attempt"], 1)
         self.assertEqual(b["adx_tier"], 0)
         self.assertEqual(b["radar_tier"], 1)  # looser
-        self.assertAlmostEqual(b["radar_activation_frac"], 0.85)
+        self.assertAlmostEqual(b["radar_activation_frac"], 1.00)
 
     def test_init_cycle(self):
         st = init_cycle_on_open(

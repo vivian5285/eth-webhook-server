@@ -3,9 +3,10 @@
 """
 按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
 
-v16.0.0 / 白皮书 v2.0：
+v16.1.0 / 白皮书 v3.0：
   - 雷达激活臂 initial_sl_atr = 0.5（entry±0.5ATR）
   - 禁用早保本（early_be_atr=0）；ADX 三档步进/呼吸由 reentry_profiles overlay
+  - 硬止损呼吸垫已迁至 defense_profiles 统一 1.15（本文件不管 buffer）
   - 本文件存基线；运行时 apply_tier_to_breath_profile 覆盖 step/breath/trail
 """
 from __future__ import annotations

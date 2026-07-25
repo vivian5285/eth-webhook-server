@@ -229,11 +229,13 @@ class RadarReentryMixin:
         self._radar_handoff_done = True
         self._radar_armed_after_tp1 = True
         frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
         self._radar_trigger_gate = (
-            f"递进雷达已激活·{int(frac * 100)}%×TP1 | {source or '价触'}"
+            f"雷达已激活·{open_kind}·{int(frac * 100)}%×TP1距 | {source or '价触'}"
         )
         self._radar_stage_last = 1
-        if not getattr(self, "_radar_activation_notified", False):
+        if not getattr(self, "_radar_arm_ding_sent", False):
             self._radar_notify_pending = True
             try:
                 self._report_radar_first_activation(
@@ -242,8 +244,6 @@ class RadarReentryMixin:
                 )
             except Exception as e:
                 logger.debug(f"雷达激活钉钉跳过: {e}")
-            self._radar_activation_notified = True
-            self._radar_notify_pending = False
         self._save_state()
         logger.info(
             f"📡 [{self.symbol}] 雷达已激活 @{init:.2f} | "

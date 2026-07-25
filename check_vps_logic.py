@@ -825,6 +825,16 @@ def audit_module4_radar(a: Audit):
         and "RADAR_ACTIVATE_TP1_FRAC = 0.85" in wp
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
+    from reentry_profiles import (
+        ACTIVATION_TP1_FRAC as _ACT0,
+        ACTIVATION_TP1_FRAC_REENTRY as _ACT1,
+        HARD_SL_BUFFER_MULT as _BUF,
+        activation_frac_for_attempt as _act_frac,
+    )
+    a.check("4.5c3b 首次激活0.85/重入1.00", abs(_ACT0 - 0.85) < 1e-9 and abs(_ACT1 - 1.0) < 1e-9
+            and abs(_act_frac(0) - 0.85) < 1e-9 and abs(_act_frac(1) - 1.0) < 1e-9,
+            f"first={_ACT0} reentry={_ACT1}")
+    a.check("4.5c3c 硬止损呼吸垫统一1.15", abs(_BUF - 1.15) < 1e-9, str(_BUF))
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
     a.check("4.5d SIGNAL_DEDUP_SEC=60", int(_DEDUP) == 60, str(_DEDUP))
 
@@ -952,6 +962,11 @@ def audit_module8_dingtalk(a: Audit):
         "report_tv_reconcile",
     ):
         a.check(f"钉钉 {fn}", f"def {fn}" in dt)
+    a.check("钉钉 report_breath_phase2", "def report_breath_phase2" in dt)
+    a.check(
+        "钉钉雷达激活区分首次/重入",
+        "开仓类型" in dt and "首次开仓" in dt and "重入开仓" in dt,
+    )
     a.check(
         "钉钉攒批+重试+标题去重",
         "DINGTALK_BATCH" in dt and "_post_with_retry" in dt and "WECHAT_WEBHOOK" in dt
@@ -1018,9 +1033,10 @@ def audit_readme_consistency(a: Audit):
     )
     a.check(
         "README 呼吸止损参数",
-        ("呼吸止损" in readme or "breath" in readme.lower())
-        and ("3.0" in readme or "呼吸系数" in readme or "breathing" in readme.lower())
-        and "85%" not in readme,
+        ("呼吸止损" in readme or "breath" in readme.lower() or "雷达" in readme)
+        and ("1.15" in readme or "呼吸系数" in readme or "breathing" in readme.lower())
+        and ("0.85" in readme or "85%" in readme)
+        and ("1.00" in readme or "100%" in readme),
     )
     a.check(
         "README TP123 常挂",

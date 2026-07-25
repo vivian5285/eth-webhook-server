@@ -17,7 +17,7 @@ position_supervisor_binance.py   ← 唯一生产大脑
 ├── 订单标签持久化（TP1/TP2/TP3/HARD/RADAR · SHA-256 clientOrderId）
 ├── 仓位：名义=权益×20%×5 / 价（可选 SL/TV.qty 收紧）
 ├── TP 10/20/70 常挂三级限价；TP3↔雷达 exit_ownership 互斥
-├── 永久硬止损 |TV−SL|×1.2 @ 成交价 + 独立雷达呼吸止损
+├── 永久硬止损 |TV−SL|×1.15 @ 成交价 + 独立雷达呼吸止损
 ├── 挂单 fail-closed · 硬上限 5 · 竞态/限流 → trading_paused
 ├── 档位 config/reentry_tiers.json · 30s 状态快照 · ops_log 四级
 ├── Webhook 仅 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT（+PING）

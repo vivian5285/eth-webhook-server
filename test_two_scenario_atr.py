@@ -21,25 +21,25 @@ class TestTempStop(unittest.TestCase):
         sl_temp = temp_hard_stop_price("LONG", 1930.49, 1916.75)
         self.assertEqual(sl_hard, sl_temp)
 
-    def test_long_buffer_20pct(self):
+    def test_long_buffer_115(self):
         sl = temp_hard_stop_price("LONG", 1930.49, 1916.75)
-        self.assertAlmostEqual(sl, round(1930.49 - abs(1930.49 - 1916.75) * 1.2, 2))
+        self.assertAlmostEqual(sl, round(1930.49 - abs(1930.49 - 1916.75) * 1.15, 2))
 
     def test_short_symmetric(self):
         sl = temp_hard_stop_price("SHORT", 1930.49, 1944.23)
-        self.assertAlmostEqual(sl, round(1930.49 + abs(1930.49 - 1944.23) * 1.2, 2))
+        self.assertAlmostEqual(sl, round(1930.49 + abs(1930.49 - 1944.23) * 1.15, 2))
 
     def test_invalid(self):
         self.assertEqual(temp_hard_stop_price("LONG", 0, 1916), 0.0)
         self.assertEqual(temp_hard_stop_price("LONG", 1930, 0), 0.0)
 
-    def test_v1590_tv_distance_only_no_atr_floor(self):
-        """距离仅 |TV−SL|×1.2，锚定成交价；忽略 ATR 地板与滑点×2。"""
+    def test_v1610_tv_distance_only_no_atr_floor(self):
+        """距离仅 |TV−SL|×1.15，锚定成交价；忽略 ATR 地板与滑点×2。"""
         tv_e, tv_sl, fill, atr = 1897.03, 1912.1805023992, 1900.51, 12.6897
         parts = compute_hard_stop_distance(tv_e, tv_sl, fill, atr)
         self.assertEqual(parts["radar_floor"], 0.0)
         self.assertEqual(parts["slip"], 0.0)
-        expect = abs(tv_e - tv_sl) * 1.2
+        expect = abs(tv_e - tv_sl) * 1.15
         self.assertAlmostEqual(parts["final"], expect, places=4)
         sl = hard_stop_price(
             "SHORT", fill, tv_sl, tv_entry=tv_e, initial_atr=atr, fill_entry=fill,
@@ -58,7 +58,7 @@ class TestTempStop(unittest.TestCase):
         sl = hard_stop_price(
             "SHORT", fill, tv_sl, tv_entry=tv_e, initial_atr=15.0, fill_entry=fill,
         )
-        expect = round(fill + abs(tv_e - tv_sl) * 1.2, 2)
+        expect = round(fill + abs(tv_e - tv_sl) * 1.15, 2)
         self.assertAlmostEqual(sl, expect)
 
 

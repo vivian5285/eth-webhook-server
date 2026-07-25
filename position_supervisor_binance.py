@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.0.0-radar-v2"
+BINANCE_VPS_VERSION = "v16.1.0-radar-v3"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -357,6 +357,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._shield_handoff_notified = False
         self.shield_sized_qty = 0.0
         self._radar_activation_notified = False
+        self._radar_arm_ding_sent = False
         self._radar_notify_pending = False  # 交棒成功但钉钉未发出 → 哨兵补发
         self._radar_trigger_gate = ""  # TP1成交 / 档位激活线
         self._radar_armed_after_tp1 = False
@@ -409,7 +410,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._defense_ops_locked = False
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
         self.adx_tier = 1
-        self.hard_sl_buffer = 1.2
+        self.hard_sl_buffer = 1.15
         self.breathing_coefficient = cold_start_multiplier(
             getattr(self, "breath_profile", None)
         )
@@ -2111,6 +2112,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.tp_levels_consumed = []
         self.shield_tiers_consumed = []
         self._radar_activation_notified = False
+        self._radar_arm_ding_sent = False
         self._radar_notify_pending = False
         self._radar_trigger_gate = ""
         self._shield_handoff_notified = False
@@ -2773,6 +2775,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     "radar_activation_notified": bool(
                         getattr(self, "_radar_activation_notified", False)
                     ),
+                    "radar_arm_ding_sent": bool(
+                        getattr(self, "_radar_arm_ding_sent", False)
+                    ),
                     "radar_notify_pending": bool(
                         getattr(self, "_radar_notify_pending", False)
                     ),
@@ -2811,7 +2816,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
                     "last_adx": float(getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
                     "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
-                    "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.2) or 1.2),
+                    "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.15) or 1.15),
                     "remaining_qty_pct": float(getattr(self, "remaining_qty_pct", 1.0) or 1.0),
                     "breathing_coefficient": float(
                         getattr(self, "breathing_coefficient", 1.0) or 1.0
@@ -3386,8 +3391,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _temp_hard_stop_from_tv(self, entry=None, side=None, tv_sl=None):
         """
-        永久硬止损价（v15.9.0）：
-          dist = |TV价 − TV.SL| × buffer_multiplier（defense_profiles，默认 1.2）
+        永久硬止损价（白皮书 v3.0）：
+          dist = |TV价 − TV.SL| × 1.15（统一呼吸垫，不分档）
           挂在成交价外侧。禁止 1.5×ATR / 滑点×2 旧路径。
         entry 参数 = 交易所成交价；TV 理论开仓价取 self.tv_price。
         """
@@ -3545,7 +3550,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             logger.warning(f"[{self.symbol}] ADX档绑定失败，默认中趋势: {e}")
             self.adx_tier = 1
             self.radar_tier = 1
-            self.hard_sl_buffer = 1.2
+            self.hard_sl_buffer = 1.15
 
         temp_sl = self._temp_hard_stop_from_tv(entry, side)
         if temp_sl <= 0:
@@ -8911,28 +8916,51 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _report_radar_first_activation(self, real_amt, curr_px, new_sl, sl_placed,
                                        trigger_gate=""):
-        """兼容旧入口：仅阶段二才发钉钉，阶段一静默。"""
-        if getattr(self, "_radar_activation_notified", False):
-            self._radar_notify_pending = False
+        """白皮书 §10.1：雷达激活钉钉（注明首次开仓 / 重入开仓）。"""
+        if getattr(self, "_radar_arm_ding_sent", False):
             return True
-        if not bool(getattr(self, "breakeven_phase", False)):
-            # 开仓/阶段一禁止发旧「雷达交棒」钉钉
-            return False
-        self._report_breath_phase2(
-            real_amt, curr_px, new_sl, sl_placed=bool(sl_placed),
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
+        frac = float(self._radar_activation_ratio() or 0)
+        act_px = float(self._radar_activation_price() or 0)
+        tier = int(
+            getattr(self, "radar_tier", None)
+            if getattr(self, "radar_tier", None) is not None
+            else (getattr(self, "adx_tier", None) or 1)
         )
-        return bool(getattr(self, "_radar_activation_notified", False))
+        try:
+            self._call_dingtalk(
+                dingtalk.report_radar_activated,
+                side=self.current_side,
+                qty=real_amt,
+                entry=self.watched_entry,
+                new_sl=new_sl,
+                radar_progress=frac,
+                regime=int(getattr(self, "open_regime", None) or self.regime or 3),
+                shield_cleared=True,
+                verify_note=(
+                    f"{open_kind} · 启动阈值={frac:.0%}×TP1距 | "
+                    f"激活价={act_px:.2f} | 止损上移@{float(new_sl):.2f} | "
+                    f"持仓 {real_amt} {self._unit()}"
+                ),
+                verified=bool(sl_placed),
+                trigger_gate=str(trigger_gate or "")[:120],
+                activation_price=act_px if act_px > 0 else round(float(curr_px or 0), 2),
+                open_kind=open_kind,
+                activation_frac=frac,
+                tier=tier,
+            )
+            self._radar_arm_ding_sent = True
+            self._radar_notify_pending = False
+            self._save_state()
+            return True
+        except Exception as e:
+            logger.warning(f"📡 雷达激活钉钉失败: {e}")
+            self._radar_notify_pending = True
+            return False
 
     def _flush_pending_radar_notify(self, real_amt, curr_px):
-        """哨兵补发：仅阶段二切入钉钉失败时重试（禁止因 handoff_done 误发）。"""
-        if getattr(self, "_radar_activation_notified", False):
-            self._radar_notify_pending = False
-            return False
-        if not getattr(self, "_radar_notify_pending", False):
-            return False
-        # 阶段二才补发；阶段一禁止伪装成「雷达交棒」钉钉
-        if not bool(getattr(self, "breakeven_phase", False)):
-            return False
+        """哨兵补发：雷达激活钉钉 或 阶段二切入钉钉。"""
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
             return False
@@ -8942,6 +8970,24 @@ class PositionSupervisorBinance(RadarReentryMixin):
             or 0
         )
         if sl <= 0:
+            return False
+        # 优先补发雷达激活（首次接管）
+        if (
+            bool(getattr(self, "radar_activated", False))
+            and not getattr(self, "_radar_arm_ding_sent", False)
+        ):
+            ok = self._report_radar_first_activation(
+                real_amt, curr_px, sl, sl_placed=True,
+                trigger_gate=getattr(self, "_radar_trigger_gate", "") or "",
+            )
+            if ok:
+                return True
+        if getattr(self, "_radar_activation_notified", False):
+            self._radar_notify_pending = False
+            return False
+        if not getattr(self, "_radar_notify_pending", False):
+            return False
+        if not bool(getattr(self, "breakeven_phase", False)):
             return False
         logger.warning(
             f"🫁 [{self.symbol}] 补发阶段二钉钉 | SL={sl:.2f} | "
@@ -11947,6 +11993,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._last_hard_sl_sync_ts = 0.0
         self._tv_sl_missing_alerted = False
         self._radar_activation_notified = False
+        self._radar_arm_ding_sent = False
         self._radar_notify_pending = False
         self._radar_trigger_gate = ""
         self._shield_handoff_notified = False
@@ -12533,6 +12580,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.shield_tiers_consumed = []
         self.tp_levels_consumed = []
         self._radar_activation_notified = False
+        self._radar_arm_ding_sent = False
         self._radar_notify_pending = False
         self._radar_trigger_gate = "递进雷达待命·硬止损+TP"
         self._radar_armed_after_tp1 = False
@@ -13223,9 +13271,16 @@ class PositionSupervisorBinance(RadarReentryMixin):
             logger.debug(f"📡 [{self.symbol}] UD-WS 脉冲 {et}")
 
     def _tp1_distance(self):
+        """白皮书：tp1_distance = |TV.tp1 − TV.price|（优先信号价）。"""
+        tp1 = 0.0
+        if self.tv_tps and float(self.tv_tps[0] or 0) > 0:
+            tp1 = float(self.tv_tps[0])
+        tv_px = float(getattr(self, "tv_price", 0) or 0)
+        if tp1 > 0 and tv_px > 0:
+            return abs(tp1 - tv_px)
         entry = float(self.watched_entry or 0)
-        if self.tv_tps and float(self.tv_tps[0] or 0) > 0 and entry > 0:
-            return abs(float(self.tv_tps[0]) - entry)
+        if tp1 > 0 and entry > 0:
+            return abs(tp1 - entry)
         atr = float(
             getattr(self, "open_atr", None) or self.current_atr or 30.0
         )
@@ -13233,26 +13288,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """白皮书 v2.0：固定 0.85 × TP1距（与档位无关）。"""
+        """白皮书 v3.0：首次 0.85 / 重入 1.00 × TP1距。"""
         frac = float(getattr(self, "radar_activation_frac", 0) or 0)
         if frac > 0:
             return frac
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         return float(
             activation_frac_for_attempt(
-                0, get_reentry_profile(self.symbol),
+                attempt, get_reentry_profile(self.symbol),
             )
             or ACTIVATION_TP1_FRAC
         )
 
 
     def _radar_activation_price(self):
-        """价触此价 → 首次激活雷达呼吸（优先 TV TP1 距离 ×0.85）。"""
+        """价触此价 → 激活雷达；距离按 TV.price，锚点按成交价。"""
         entry = float(self.watched_entry or 0)
         frac = float(self._radar_activation_ratio() or ACTIVATION_TP1_FRAC)
         tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
+        tv_px = float(getattr(self, "tv_price", 0) or 0)
         if entry > 0 and tp1 > 0:
             px = activation_price_from_tp1(
                 self.current_side, entry, tp1, frac=frac,
+                tv_price=tv_px if tv_px > 0 else None,
             )
             if px > 0:
                 return px
@@ -13858,7 +13916,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         breath_meta = getattr(self, "_breath_coeff_meta", None) or {}
         try:
             self._call_dingtalk(
-                dingtalk.report_radar_activated,
+                dingtalk.report_breath_phase2,
                 side=self.current_side,
                 qty=real_amt,
                 entry=self.watched_entry,
@@ -14501,6 +14559,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self._radar_activation_notified = bool(
                         s.get("radar_activation_notified", False)
                     )
+                    self._radar_arm_ding_sent = bool(
+                        s.get("radar_arm_ding_sent", False)
+                    )
                     self._radar_notify_pending = bool(
                         s.get("radar_notify_pending", False)
                     )
@@ -14513,7 +14574,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     # 交棒已成功但钉钉未记 → 强制补发队列（修实盘「雷达启了无钉钉」）
                     if (
                         self._radar_handoff_done
+                        and not getattr(self, "_radar_arm_ding_sent", False)
+                    ):
+                        self._radar_notify_pending = True
+                    if (
+                        self._radar_handoff_done
                         and not self._radar_activation_notified
+                        and bool(getattr(self, "breakeven_phase", False))
                     ):
                         self._radar_notify_pending = True
                     self._open_settled_qty = float(
@@ -14545,7 +14612,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)
                     self.adx_tier = int(s.get("adx_tier", 1) or 1)
-                    self.hard_sl_buffer = float(s.get("hard_sl_buffer", 1.2) or 1.2)
+                    self.hard_sl_buffer = float(s.get("hard_sl_buffer", 1.15) or 1.15)
                     self.remaining_qty_pct = float(s.get("remaining_qty_pct", 1.0) or 1.0)
                     self.breathing_coefficient = float(
                         s.get("breathing_coefficient", 1.0) or 1.0

@@ -109,7 +109,8 @@ def _class_has(cls, name: str) -> bool:
 DINGTALK_EVENT_FUNCS = [
     ("开仓", "report_supervisor_open"),
     ("先平后开", "report_close_then_open_chain"),
-    ("阶段切换一→二", "report_radar_activated"),
+    ("雷达激活通知", "report_radar_activated"),
+    ("阶段切换一→二", "report_breath_phase2"),
     ("止损移动", "report_intervention"),
     ("TP1/TP2成交", "report_tp_fill"),
     ("止损触发/全平", "report_supervisor_close"),

@@ -365,9 +365,9 @@ def force_arm_via_admin(sym):
 
 
 def reentry_engine_live_smoke():
-    """不挂单：实盘 K 线 + 档位递进纯函数验证。"""
+    """不挂单：实盘 K 线 + 档位/激活阈值纯函数验证（白皮书 v3）。"""
     ok_all = True
-    if list(ACTIVATION_FRACS) != [0.50, 0.65, 0.80, 0.90, 0.95]:
+    if list(ACTIVATION_FRACS) != [0.85, 1.00]:
         fail("activation_fracs mismatch", fracs=list(ACTIVATION_FRACS))
         ok_all = False
     for sym, side in (
@@ -397,7 +397,7 @@ def reentry_engine_live_smoke():
         rp = get_reentry_profile(sym)
         t0 = tier_coeffs(0, rp)
         t1 = tier_coeffs(1, rp)
-        frac1 = next_activation_frac(0.50, 1, rp)
+        frac1 = next_activation_frac(0.85, 1, rp)
         log(
             "TIER_CHECK",
             symbol=sym,
@@ -405,28 +405,18 @@ def reentry_engine_live_smoke():
             t1_early=t1.get("early_be_atr"),
             frac1=frac1,
         )
-        if sym.startswith("ETH"):
-            if abs(float(t0["early_be_atr"]) - 0.50) > 1e-9:
-                fail("ETH tier0 early_be", t0=t0)
-                ok_all = False
-            if abs(float(t1["early_be_atr"]) - 0.65) > 1e-9:
-                fail("ETH tier1 early_be", t1=t1)
-                ok_all = False
-        else:
-            if abs(float(t0["early_be_atr"]) - 0.65) > 1e-9:
-                fail("XAU tier0 early_be", t0=t0)
-                ok_all = False
-            if abs(float(t1["early_be_atr"]) - 0.85) > 1e-9:
-                fail("XAU tier1 early_be", t1=t1)
-                ok_all = False
-        if abs(frac1 - 0.65) > 1e-9:
-            fail("frac bump 0.5→0.65", frac1=frac1)
+        # v3：早保本禁用，early_be_atr 恒 0
+        if abs(float(t0["early_be_atr"])) > 1e-9 or abs(float(t1["early_be_atr"])) > 1e-9:
+            fail("early_be must be 0", t0=t0, t1=t1)
             ok_all = False
-        bumped = bump_after_reentry_fill(0, 0.50, sym)
+        if abs(frac1 - 1.00) > 1e-9:
+            fail("frac bump 0.85→1.00 on reentry", frac1=frac1)
+            ok_all = False
+        bumped = bump_after_reentry_fill(0, 0.85, sym)
         if int(bumped.get("reentry_attempt") or 0) != 1:
             fail("bump attempt", bumped=bumped)
             ok_all = False
-        if abs(float(bumped.get("radar_activation_frac") or 0) - 0.65) > 1e-9:
+        if abs(float(bumped.get("radar_activation_frac") or 0) - 1.00) > 1e-9:
             fail("bump frac", bumped=bumped)
             ok_all = False
         init = init_cycle_on_open(
@@ -437,7 +427,7 @@ def reentry_engine_live_smoke():
             reentry_attempt=0,
             symbol=sym,
         )
-        if abs(float(init.get("radar_activation_frac") or 0) - 0.50) > 1e-9:
+        if abs(float(init.get("radar_activation_frac") or 0) - 0.85) > 1e-9:
             fail("init frac", init=init)
             ok_all = False
     return ok_all
@@ -446,7 +436,7 @@ def reentry_engine_live_smoke():
 def main():
     os.makedirs("logs", exist_ok=True)
     sym = "ETHUSDT"
-    log("RADAR_SMOKE_START", version="v15.9.5-radar-arm-fix", symbol=sym)
+    log("RADAR_SMOKE_START", version="v16.1.0-radar-v3", symbol=sym)
     log("COOLDOWN_25s")
     time.sleep(25)
 

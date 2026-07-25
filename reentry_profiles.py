@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（白皮书 v2.0 · ADX 三档）。
+双币种雷达 + 智能再入场（白皮书 v3.0 · ADX 三档）。
 
-- 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）
-- 雷达启动：固定 0.85 × TP1距（三档相同）
+- 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）— 仅影响雷达步进/呼吸
+- 硬止损呼吸垫：统一 1.15（不分档）
+- 雷达启动：按「距离」计算；首次 0.85×TP1距，重入 1.00×TP1距
 - 激活臂：entry ± 0.5×ATR
 - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
 - 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量
@@ -21,8 +22,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # ── 默认（config/reentry_tiers.json 可覆盖）────────────────────────────────
 _DEFAULT_ACTIVATION_FRAC = 0.85
+_DEFAULT_ACTIVATION_FRAC_REENTRY = 1.00
 _DEFAULT_ARM_SL_ATR = 0.5
-_DEFAULT_BUFFER_BY_TIER: List[float] = [1.1, 1.2, 1.3]
+_DEFAULT_HARD_SL_BUFFER = 1.15
 _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
 
@@ -66,8 +68,13 @@ ACTIVATION_TP1_FRAC = float(
     if _CFG.get("activation_tp1_frac") is not None
     else _DEFAULT_ACTIVATION_FRAC
 )
-# 兼容旧名
-ACTIVATION_FRACS: List[float] = [ACTIVATION_TP1_FRAC]
+ACTIVATION_TP1_FRAC_REENTRY = float(
+    _CFG.get("activation_tp1_frac_reentry")
+    if _CFG.get("activation_tp1_frac_reentry") is not None
+    else _DEFAULT_ACTIVATION_FRAC_REENTRY
+)
+# 兼容旧名：首次 / 重入两档
+ACTIVATION_FRACS: List[float] = [ACTIVATION_TP1_FRAC, ACTIVATION_TP1_FRAC_REENTRY]
 ARM_SL_ATR = float(
     _CFG.get("arm_sl_atr")
     if _CFG.get("arm_sl_atr") is not None
@@ -81,17 +88,19 @@ MAX_UNFILLED_REFRESHES = int(_CFG.get("max_unfilled_refreshes") or 5)
 DEFAULT_TICK = 0.01
 STERILE_MAX_RETRY = 3
 TP1_ATR_MULT = 1.35  # 仅当无 TV TP1 价时的距离回退
+HARD_SL_BUFFER_MULT = float(
+    _CFG.get("hard_sl_buffer_mult")
+    if _CFG.get("hard_sl_buffer_mult") is not None
+    else _DEFAULT_HARD_SL_BUFFER
+)
 
 _bounds = _CFG.get("adx_bounds") or {}
 ADX_WEAK_LT = float(_bounds.get("weak_lt") if _bounds.get("weak_lt") is not None else _DEFAULT_ADX_WEAK_LT)
 ADX_STRONG_GT = float(
     _bounds.get("strong_gt") if _bounds.get("strong_gt") is not None else _DEFAULT_ADX_STRONG_GT
 )
-BUFFER_BY_TIER: List[float] = [
-    float(x) for x in (_CFG.get("buffer_by_tier") or _DEFAULT_BUFFER_BY_TIER)
-]
-while len(BUFFER_BY_TIER) < 3:
-    BUFFER_BY_TIER.append(BUFFER_BY_TIER[-1] if BUFFER_BY_TIER else 1.2)
+# 兼容旧名：三档同值 1.15（白皮书 v3 废止分档）
+BUFFER_BY_TIER: List[float] = [HARD_SL_BUFFER_MULT, HARD_SL_BUFFER_MULT, HARD_SL_BUFFER_MULT]
 
 ETH_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("ETH") or {}).get("tiers") or _DEFAULT_ETH_TIERS)
@@ -127,6 +136,7 @@ REENTRY_ETH: Dict[str, Any] = {
     "tv_tf_sec": _ETH_TF_SEC,
     "enabled": True,
     "activation_tp1_frac": ACTIVATION_TP1_FRAC,
+    "activation_tp1_frac_reentry": ACTIVATION_TP1_FRAC_REENTRY,
     "arm_sl_atr": ARM_SL_ATR,
     "tiers": ETH_TIERS,
     "reentry_zone_atr": _ETH_ZONE,
@@ -143,6 +153,7 @@ REENTRY_XAU: Dict[str, Any] = {
     "tv_tf_sec": _XAU_TF_SEC,
     "enabled": True,
     "activation_tp1_frac": ACTIVATION_TP1_FRAC,
+    "activation_tp1_frac_reentry": ACTIVATION_TP1_FRAC_REENTRY,
     "arm_sl_atr": ARM_SL_ATR,
     "tiers": XAU_TIERS,
     "reentry_zone_atr": _XAU_ZONE,
@@ -208,22 +219,31 @@ def tier_label_short(tier: int) -> str:
     return f"T{clamp_tier(tier)}"
 
 
-def buffer_for_tier(tier: int) -> float:
-    idx = clamp_tier(tier)
-    if idx < len(BUFFER_BY_TIER):
-        return float(BUFFER_BY_TIER[idx])
-    return float(BUFFER_BY_TIER[-1] if BUFFER_BY_TIER else 1.2)
+def buffer_for_tier(tier: int = 0) -> float:
+    """白皮书 v3.0：统一 1.15，tier 忽略。"""
+    return float(HARD_SL_BUFFER_MULT)
 
 
-def buffer_for_adx(adx: float) -> float:
-    return buffer_for_tier(adx_to_tier(adx))
+def buffer_for_adx(adx: float = 0.0) -> float:
+    return float(HARD_SL_BUFFER_MULT)
 
 
 def activation_frac_for_attempt(
     attempt: int = 0, profile: Optional[Dict[str, Any]] = None,
 ) -> float:
-    """v2.0：固定 0.85，与 attempt/档位无关（保留签名兼容旧调用）。"""
+    """
+    白皮书 v3.0：
+      首次开仓（attempt=0）→ 0.85 × TP1距
+      重入开仓（attempt≥1）→ 1.00 × TP1距
+    作用对象是距离，不是 TP1 绝对价格。
+    """
     p = profile if isinstance(profile, dict) else REENTRY_ETH
+    if int(attempt or 0) >= 1:
+        return float(
+            p.get("activation_tp1_frac_reentry")
+            if p.get("activation_tp1_frac_reentry") is not None
+            else ACTIVATION_TP1_FRAC_REENTRY
+        )
     return float(
         p.get("activation_tp1_frac")
         if p.get("activation_tp1_frac") is not None
@@ -232,6 +252,7 @@ def activation_frac_for_attempt(
 
 
 def activation_frac_fixed(profile: Optional[Dict[str, Any]] = None) -> float:
+    """兼容旧名：返回首次开仓阈值 0.85。"""
     return activation_frac_for_attempt(0, profile)
 
 
@@ -327,15 +348,24 @@ def activation_price_from_tp1(
     entry: float,
     tp1: float,
     frac: float = ACTIVATION_TP1_FRAC,
+    *,
+    tv_price: Optional[float] = None,
 ) -> float:
-    """优先：entry ± frac × |TP1−entry|。"""
+    """
+    白皮书 §4.1：
+      tp1_distance = |TP1 − TV.price|（优先 TV 信号价，不是成交价）
+      多：激活价 = 成交价 + tp1_distance × frac
+      空：激活价 = 成交价 − tp1_distance × frac
+    entry = VPS 实际成交价锚点；tv_price 缺省时回退用 entry 算距离。
+    """
     side_u = str(side or "").strip().upper()
     e = float(entry or 0)
     t = float(tp1 or 0)
     f = float(frac if frac is not None else ACTIVATION_TP1_FRAC)
     if e <= 0 or t <= 0 or f <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
-    dist = abs(t - e) * f
+    tv = float(tv_price) if tv_price is not None and float(tv_price) > 0 else e
+    dist = abs(t - tv) * f
     if dist <= 0:
         return 0.0
     if side_u == "LONG":
@@ -347,8 +377,8 @@ def next_activation_frac(
     current_frac: float, attempt_after_bump: int,
     profile: Optional[Dict[str, Any]] = None,
 ) -> float:
-    """v2.0：激活线固定，不再抬升。"""
-    return activation_frac_fixed(profile)
+    """重入后按 attempt 取阈值（首次 0.85 / 重入 1.00）。"""
+    return activation_frac_for_attempt(int(attempt_after_bump or 0), profile)
 
 
 def reentry_window_sec(symbol: str) -> float:

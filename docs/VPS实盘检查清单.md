@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **`v15.9.3-prod-gate`** · sizing **RISK20_NOTIONAL5**  
+> **当前**：TV **v6.5.6** · VPS **`v16.1.0-radar-v3`** · sizing **RISK20_NOTIONAL5** · 白皮书 **v3.0**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -9,8 +9,8 @@
 | # | 原则 | 代码落点 |
 |---|------|----------|
 | 1 | **风险仓位**：名义=`权益×20%×5`；`qty=名义/价`（可选 SL/TV.qty 收紧） | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
-| 2 | **永久硬止损**：`\|TV.price−TV.stop_loss\|×1.2` 锚定成交价；**禁止** 1.5×ATR 地板 | `atr_scenario.hard_stop_price` · `_ensure_frozen_hard_sl` |
-| 3 | **独立雷达止损**：呼吸 initialStop=`entry±1.5×ATR`；步进/跟进见 `breath_profiles` | `breath_stop.py` · `_sync_exchange_stop()` |
+| 2 | **永久硬止损**：`\|TV.price−TV.stop_loss\|×1.15` 锚定成交价（**不分档**）；**禁止** 1.5×ATR 地板 | `atr_scenario.hard_stop_price` · `_ensure_frozen_hard_sl` |
+| 3 | **独立雷达止损**：首次 0.85×TP1距 / 重入 1.00×TP1距 启动；激活臂 entry±0.5ATR；步进见 ADX 档 | `breath_stop.py` · `reentry_profiles` · `_sync_exchange_stop()` |
 | 4 | TP **10/20/70**；盘口常挂 **TP1+TP2+TP3**；TP3↔雷达 `exit_ownership` 互斥 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=3` |
 | 5 | 部分成交原子同步：硬/雷达/TP3 数量对齐；失败 → **`trading_paused`** | `_atomic_resize_after_partial_tp` |
 | 6 | 反转保护仅 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |

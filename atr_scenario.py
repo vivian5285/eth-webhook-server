@@ -3,9 +3,9 @@
 """
 三层防线 + 两场景 ATR（白皮书定稿纯函数）：
 
-硬止损（永久，唯一公式 · v15.9.0）：
+硬止损（永久，唯一公式 · 白皮书 v3.0）：
   tv_stop_distance = |TV.price − TV.stop_loss|
-  actual_stop_distance = tv_stop_distance × buffer_multiplier（默认 1.2，见 defense_profiles）
+  actual_stop_distance = tv_stop_distance × 1.15（统一系数，不分档）
   多：硬止损 = 成交价 − actual_stop_distance
   空：硬止损 = 成交价 + actual_stop_distance
   禁止再用 1.5×ATR 地板 / 滑点×2 旧路径；缺 stop_loss → 距离=0（上层拒开）
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-HARD_SL_BUFFER_MULT = 1.2
+HARD_SL_BUFFER_MULT = 1.15
 # 兼容旧常量名（已废弃语义，保留 import 不崩；不再参与计算）
 HARD_SL_RADAR_ATR_MULT = 0.0
 HARD_SL_RADAR_PAD = 0.0

@@ -40,7 +40,7 @@ LEG_TP_RATIOS = [0.10, 0.20, 0.70]
 PLACE_TP_LEVELS = 3  # 始终挂 TP1+TP2+TP3；与雷达对 TP3 余仓互斥
 
 # ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
-RADAR_ACTIVATE_TP1_FRAC = 0.85  # 白皮书 v2.0：固定 0.85×TP1距
+RADAR_ACTIVATE_TP1_FRAC = 0.85  # 白皮书 v3.0：首次 0.85×TP1距；重入见 ACTIVATION_TP1_FRAC_REENTRY=1.00
 RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
 RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
 RADAR_TP1_FLOOR_ATR = 0.5
@@ -583,10 +583,10 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
 
 # ── 递进雷达启动价（v15.8.0）──────────────────────────────────────────────
 
-def radar_activation_price(side, entry, tp1, frac=None):
+def radar_activation_price(side, entry, tp1, frac=None, tv_price=None):
     """
-    激活价：多=entry+frac×|tp1−entry|；空=entry−frac×|tp1−entry|。
-    frac 默认 RADAR_ACTIVATE_TP1_FRAC(0.50)。tp1 可为价格或距离（>entry 视为价格）。
+    白皮书 §4.1：距离 = |tp1 − TV.price|；锚点 = 成交价 entry。
+    frac 默认 RADAR_ACTIVATE_TP1_FRAC(0.85)。
     """
     side_u = str(side or "").strip().upper()
     entry_f = float(entry or 0)
@@ -598,11 +598,12 @@ def radar_activation_price(side, entry, tp1, frac=None):
     tp1_f = float(tp1 or 0)
     if tp1_f <= 0:
         return 0.0
+    tv_f = float(tv_price) if tv_price is not None and float(tv_price) > 0 else entry_f
     # tp1 当作价格；若给的是距离（远小于 entry 的小数）则当距离
-    if tp1_f < entry_f * 0.2:
+    if tp1_f < tv_f * 0.2:
         dist = abs(tp1_f)
     else:
-        dist = abs(tp1_f - entry_f)
+        dist = abs(tp1_f - tv_f)
     if dist <= 0:
         return 0.0
     if side_u == "LONG":

@@ -1418,13 +1418,56 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     send_alert(f"🫁 [{sym}] 呼吸止损 · 单槽维护", data, G_TITLE)
 
 
-# breath-stop phase2 (breathing coefficient trail)
+# breath-stop / 白皮书 v3.0：雷达首次接管通知
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
                            symbol=None, unit_label=None, trigger_gate="",
                            activation_price=None, adx=None, trail_dist=None,
-                           breathing_coefficient=None):
-    """阶段切换：浮盈达 3.0×ATR，进入呼吸系数自适应追踪。"""
+                           breathing_coefficient=None, open_kind=None,
+                           activation_frac=None, tier=None):
+    """
+    雷达激活通知（白皮书 §10.1）。
+    open_kind: "首次开仓" | "重入开仓"；activation_frac: 0.85 或 1.00。
+    """
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    kind = str(open_kind or "").strip() or "首次开仓"
+    frac = float(activation_frac) if activation_frac is not None else float(radar_progress or 0)
+    act_px = float(activation_price or 0)
+    tier_txt = ""
+    if tier is not None:
+        try:
+            from reentry_profiles import tier_label
+            tier_txt = tier_label(int(tier))
+        except Exception:
+            tier_txt = f"T{tier}"
+    data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
+        "事件": _g("雷达激活", G_ACCENT),
+        "开仓类型": _g(f"**{kind}**", G_MAIN),
+        "启动阈值": _g(
+            f"**{frac:.0%}×TP1距**" if frac > 0 else "—",
+            G_LIGHT,
+        ),
+        "激活价": _g(f"**{act_px:.2f}**" if act_px > 0 else "—", G_MAIN),
+        "初始止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
+        "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),
+    }
+    if tier_txt:
+        data["档位"] = _g(f"**{tier_txt}**", G_ACCENT)
+    if trigger_gate:
+        data["触发"] = _g(str(trigger_gate)[:120], G_MUTED)
+    if verify_note:
+        data["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    send_alert(f"📡 [{sym}] 雷达激活 · {kind}", data, G_DEEP)
+
+
+def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
+                         shield_cleared=True, verify_note="", verified=True,
+                         symbol=None, unit_label=None, trigger_gate="",
+                         activation_price=None, adx=None, trail_dist=None,
+                         breathing_coefficient=None):
+    """阶段切换：浮盈达阈值，进入呼吸系数自适应追踪。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     coeff = float(breathing_coefficient or 0)
