@@ -725,7 +725,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
             G_MUTED,
         )
         data["🫁 呼吸止损"] = _g(
-            "开仓即挂 entry±1.5×ATR · 阶段一阶梯 · 浮盈≥3×ATR 切入呼吸追踪",
+            "硬止损 |TV−SL|×1.15 @成交价 · 雷达达TP1距阈值后 entry±0.5×ATR 接管",
             G_MUTED,
         )
         data["📐 算仓模式"] = _sizing_mode_label()
@@ -908,7 +908,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
         action_txt += " · 呼吸止损哨兵已点火"
     else:
         radar_txt = _g(
-            "呼吸止损待对齐 (开仓即 entry±1.5×ATR · 哨兵补挂)",
+            "硬止损待对齐 (|TV−SL|×1.15 · 哨兵补挂)；雷达未激活",
             G_MUTED,
         )
 
@@ -936,7 +936,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     }
     if hard_sl_pct is not None and sl_price:
         data["🫁 呼吸止损"] = _g(
-            f"**{float(sl_price):.2f}** USDT (entry±1.5×ATR 起)",
+            f"**{float(sl_price):.2f}** USDT (|TV−SL|×1.15 硬止损)",
             G_ACCENT,
         )
     if initial_qty and float(initial_qty) > float(qty) + 0.001:
@@ -1362,7 +1362,7 @@ def report_adverse_shield_armed(side, entry, live_qty, adverse_pct, tier_prices,
         "💰 开仓成本": _g(f"`{entry:.2f}` USDT", G_MUTED),
         "📦 保护头寸": _g(f"**{live_qty}** {_u()} 全平", G_MAIN),
         "🫁 呼吸止损": _g(
-            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition · entry±1.5×ATR",
+            vps_hard_sl_note or f"`{stop_px:.2f}` USDT closePosition · |TV−SL|×1.15",
             G_ACCENT,
         ),
         "✅ 风控动作": _g(

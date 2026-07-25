@@ -295,7 +295,7 @@ class RadarReentryMixin:
         return abs(px - hard) <= max(2.5, px * 0.002)
 
     def _fetch_reentry_klines(self):
-        """拉取 5m / 3m 最近一根 K 线。"""
+        """拉取 5m / 3m K 线（≥3 根，供 parse_kline_extreme 取最近已收盘根）。"""
         from binance_client import binance_client
         k5, k3 = None, None
         try:

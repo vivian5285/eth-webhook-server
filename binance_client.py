@@ -91,12 +91,53 @@ class BinanceClient:
         self._rest_last_by_sym = {}
         self._rest_throttle_lock = threading.Lock()
         self._rate_limit_hooks = []
+        self._order_reject_hooks = []
+        self._recent_local_cancels = {}
+        self._local_cancel_lock = threading.Lock()
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
 
     def register_rate_limit_hook(self, cb):
         """限流回调：cb(symbol, err_text)。supervisor 用其暂停品种。"""
         if callable(cb) and cb not in self._rate_limit_hooks:
             self._rate_limit_hooks.append(cb)
+
+    def register_order_reject_hook(self, cb):
+        """开仓/关键挂单被拒（保证金等）回调：cb(symbol, err_text)。不自动重试。"""
+        if not hasattr(self, "_order_reject_hooks"):
+            self._order_reject_hooks = []
+        if callable(cb) and cb not in self._order_reject_hooks:
+            self._order_reject_hooks.append(cb)
+
+    def _mark_local_cancel(self, symbol, order_id):
+        """记录本地主动撤单，供 WS 区分交易所单方面取消（规格 12.3）。"""
+        if not hasattr(self, "_recent_local_cancels"):
+            self._recent_local_cancels = {}
+            self._local_cancel_lock = threading.Lock()
+        oid = str(order_id or "").strip()
+        if not oid:
+            return
+        key = (str(symbol or "").upper(), oid)
+        with self._local_cancel_lock:
+            now = time.time()
+            self._recent_local_cancels[key] = now
+            # 清理 2 分钟外的记录
+            cut = now - 120.0
+            dead = [k for k, t in self._recent_local_cancels.items() if float(t) < cut]
+            for k in dead:
+                self._recent_local_cancels.pop(k, None)
+
+    def was_local_cancel(self, symbol, order_id, window_sec=90.0):
+        if not hasattr(self, "_recent_local_cancels"):
+            return False
+        oid = str(order_id or "").strip()
+        if not oid:
+            return False
+        key = (str(symbol or "").upper(), oid)
+        with getattr(self, "_local_cancel_lock", threading.Lock()):
+            ts = self._recent_local_cancels.get(key)
+        if ts is None:
+            return False
+        return (time.time() - float(ts)) <= float(window_sec)
 
     def _throttle_rest(self, symbol=""):
         """单品种 REST 间隔硬下限（默认 100ms）。"""
@@ -137,6 +178,31 @@ class BinanceClient:
                     pass
             return True
         return False
+
+    def _note_order_reject(self, err, symbol="", *, reduce_only=False):
+        """规格 12.1：保证金不足等拒单 → 钩子暂停，禁止自动重试。"""
+        if reduce_only:
+            return False
+        if not hasattr(self, "_order_reject_hooks"):
+            self._order_reject_hooks = []
+        text = str(err or "")
+        low = text.lower()
+        is_reject = (
+            "-2019" in text
+            or "-2018" in text
+            or "-4164" in text
+            or "insufficient" in low
+            or "margin is insufficient" in low
+            or "notional" in low and "filter" in low
+        )
+        if not is_reject:
+            return False
+        for h in list(self._order_reject_hooks):
+            try:
+                h(str(symbol or ""), text)
+            except Exception:
+                pass
+        return True
 
     @staticmethod
     def _is_algo_switch_error(err):
@@ -889,6 +955,9 @@ class BinanceClient:
             return order
         except Exception as e:
             tag = "平仓" if reduce_only else "开仓"
+            self._note_api_error(e, symbol)
+            if not reduce_only:
+                self._note_order_reject(e, symbol, reduce_only=False)
             logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
 
@@ -1160,6 +1229,7 @@ class BinanceClient:
             res = self._futures_signed_request(
                 "delete", "algoOrder", {"symbol": symbol, "algoId": int(algo_id)},
             )
+            self._mark_local_cancel(symbol, algo_id)
             logger.info(f"[Algo撤单成功] {symbol} algoId={algo_id}")
             return res
         except Exception as e:
@@ -1177,6 +1247,7 @@ class BinanceClient:
             return None
         try:
             res = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
+            self._mark_local_cancel(symbol, order_id)
             logger.info(f"[撤单成功] {symbol} orderId={order_id}")
             return res
         except Exception as e:

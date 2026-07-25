@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.1.0-radar-v3`**  
+**当前版本：`v16.2.0-spec-full`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
@@ -17,22 +17,23 @@
 
 > **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：盘口两笔接近的止损 = **硬止损** + **雷达**。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
-> **硬止损（唯一公式 · v16.1.0）**：`|TV价 − TV.stop_loss| × 1.15`，挂在**成交价**外侧。已删除 1.5×ATR 地板、`|成交−TV|×2`、以及 v2.0 分档 buffer(1.1/1.2/1.3)。缺/异常 `stop_loss` → **拒开**。  
+> **硬止损（唯一公式 · v16.2.0）**：`|TV价 − TV.stop_loss| × 1.15`，挂在**成交价**外侧。已删除 1.5×ATR 地板、`|成交−TV|×2`、以及 v2.0 分档 buffer(1.1/1.2/1.3)。缺/异常 `stop_loss` → **拒开**。  
 > **TP（v15.9.0）**：10%/20%/70% 常挂 TP1+TP2+TP3；TP3 与雷达互斥（谁先成交撤另一腿）。  
 > **雷达（白皮书 v3.0）**：按「距离」计算启动线；首次 0.85×TP1距、重入 1.00×TP1距；达线前仅硬止损；弱趋势收紧、强趋势放宽（步进/呼吸分档，呼吸垫不分档）。  
 > **叠单铁律（v15.9.1）**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**；持仓期 30s 监管对账。  
 > **API 限流**：REST 仅下单/改撤/对账；价格与成交靠 WebSocket；空闲巡检 45s + 失败退避 120s；单品种 REST ≥100ms；触发 -1003 → 暂停品种；禁止 REST 狂轮询。  
+> **v16.2.0**：规格整合版落地 — 重入取已收盘K线、恢复期 webhook 缓存、拒单/单方面撤单暂停、孤儿仓禁 0.5ATR 伪硬止损。  
 > **v16.1.0**：白皮书 v3.0 — 统一 1.15 呼吸垫 + 重入启动 1.00 + 雷达激活钉钉区分首次/重入。  
 > **v16.0.0**：ADX 三档参数表 + 固定 0.85 启动 + 激活±0.5ATR + 重入最多 1 次（K 线窗口）。  
 > **v15.9.0–v15.9.5**：TV 止损距离×buffer、TP 10/20/70、互斥、幂等、生产闸门、雷达激活臂修复。
 
-> **权威依据**：白皮书《双币种雷达与重入系统完整开发计划》**v3.0**（2026-07-25）+ 本文。  
+> **权威依据**：[《VPS完整系统规格_币安单账户版》](docs/VPS完整系统规格_币安单账户版.md)（2026-07-25）+ 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.1.0-radar-v3 · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v16.2.0-spec-full · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
@@ -355,7 +356,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v16.1.0-radar-v3
+# 期望: v16.2.0-spec-full
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
@@ -365,7 +366,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 # 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.1.0-radar-v3`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.2.0-spec-full`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
 
 ### 20U 矩阵观察点
 

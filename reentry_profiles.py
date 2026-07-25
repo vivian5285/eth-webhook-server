@@ -411,10 +411,25 @@ def reentry_limit_price(side: str, ref_price: float, discount: float = LIMIT_DIS
 
 
 def parse_kline_extreme(klines: Any) -> Tuple[float, float]:
+    """取最近一根已收盘 K 线的 low/high（规格 8.3；跳过正在形成的 [-1]）。"""
     if not klines:
         return 0.0, 0.0
     try:
-        row = klines[-1]
+        import time as _time
+        rows = list(klines)
+        now_ms = int(_time.time() * 1000)
+        row = None
+        for cand in reversed(rows):
+            try:
+                close_t = int(cand[6])
+            except (TypeError, ValueError, IndexError):
+                close_t = 0
+            if close_t > 0 and close_t < now_ms:
+                row = cand
+                break
+        if row is None:
+            # 无 close_time 时：≥2 根则 [-2] 通常已收盘，[-1] 为形成中
+            row = rows[-2] if len(rows) >= 2 else rows[-1]
         hi = float(row[2])
         lo = float(row[3])
         if lo > 0 and hi > 0:

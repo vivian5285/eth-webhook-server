@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.1.0-radar-v3"
+BINANCE_VPS_VERSION = "v16.2.0-spec-full"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -472,6 +472,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         except Exception as e:
             logger.warning(f"启动 WS 订阅跳过: {e}")
         self._ensure_rate_limit_hook()
+        self._ensure_order_reject_hook()
 
     def _ensure_rate_limit_hook(self):
         """API 限流 → 暂停本品种（规格 5.7）。"""
@@ -495,6 +496,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._rate_limit_hook_registered = True
         except Exception as e:
             logger.warning(f"[{self.symbol}] 注册限流钩子失败: {e}")
+
+    def _ensure_order_reject_hook(self):
+        """规格 12.1：开仓拒单（保证金不足等）→ 暂停，不自动重试。"""
+        if getattr(self, "_order_reject_hook_registered", False):
+            return
+        try:
+            def _on_reject(sym, err_text):
+                sym_u = str(sym or self.symbol or "").upper()
+                if sym_u and sym_u not in ("", "_GLOBAL") and sym_u != str(self.symbol).upper():
+                    return
+                self._pause_symbol_trading(
+                    f"order_reject:{str(err_text or '')[:120]}",
+                    title=f"下单被拒暂停 [{self.symbol}]",
+                    detail=(
+                        f"交易所拒单（可能保证金不足）→ 已暂停新开仓，不自动重试 | "
+                        f"{str(err_text or '')[:240]}"
+                    ),
+                )
+
+            binance_client.register_order_reject_hook(_on_reject)
+            self._order_reject_hook_registered = True
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 注册拒单钩子失败: {e}")
 
     def _pause_symbol_trading(self, reason, *, title=None, detail=None, ding=True):
         """规格：异常/竞态/限流 → 暂停该品种，等待人工。"""
@@ -1117,6 +1141,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _signal_worker_loop(self):
         while True:
+            # 规格 7.4：恢复流程期间不消费 webhook，仅缓存；完成后处理，过期>5min丢弃
+            if getattr(self, "_recover_in_progress", False):
+                time.sleep(0.25)
+                continue
             batch = []
             try:
                 batch.extend(self._seq_buffer.pop_ready(timeout=0.5) or [])
@@ -1141,8 +1169,18 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 )
             batch = reorder_batch_close_then_open(batch)
             self._annotate_close_open_chain(batch)
+            now_ts = time.time()
             for payload in batch:
                 try:
+                    enq = float((payload or {}).get("_enqueued_at") or 0)
+                    age = (now_ts - enq) if enq > 0 else 0.0
+                    if age > 300.0:
+                        act = str((payload or {}).get("action", "")).upper()
+                        logger.warning(
+                            f"📬 [{self.symbol}] 恢复后丢弃过期信号 "
+                            f"action={act} age={age:.0f}s>300s"
+                        )
+                        continue
                     bi, sq = extract_seq_meta(payload or {})
                     act = str((payload or {}).get("action", "")).upper()
                     if bi is not None:
@@ -1280,6 +1318,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             return
         self._last_signal_fp = fp
         self._last_signal_fp_ts = now
+        payload["_enqueued_at"] = now
         if bar_time > 0:
             self._last_bar_time_ms = max(int(getattr(self, "_last_bar_time_ms", 0) or 0), bar_time)
         # 有 bar_index+seq：幂等键去重 + 有序缓冲
@@ -13268,7 +13307,74 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     "NEW", "PARTIALLY_FILLED", "FILLED",
                 ):
                     self._tv_sl_missing_alerted = False
+                elif status in ("CANCELED", "CANCELLED", "EXPIRED"):
+                    # 规格 12.3：非本地发起的取消 → 异常取消告警 + 强制对账
+                    self._handle_unilateral_order_cancel(o)
             logger.debug(f"📡 [{self.symbol}] UD-WS 脉冲 {et}")
+
+    def _handle_unilateral_order_cancel(self, order_obj):
+        """交易所单方面取消：告警、对账、重挂保护；10min≥3次 → 暂停。"""
+        try:
+            oid = str(
+                (order_obj or {}).get("i")
+                or (order_obj or {}).get("orderId")
+                or ""
+            )
+            if not oid:
+                return
+            if binance_client.was_local_cancel(self.symbol, oid):
+                return
+            now = time.time()
+            hist = getattr(self, "_unilateral_cancel_ts", None)
+            if not isinstance(hist, list):
+                hist = []
+            hist = [t for t in hist if now - float(t) < 600.0]
+            hist.append(now)
+            self._unilateral_cancel_ts = hist
+            otype = str(
+                (order_obj or {}).get("o") or (order_obj or {}).get("orderType") or ""
+            ).upper()
+            logger.error(
+                f"🚨 [{self.symbol}] 交易所异常取消 orderId={oid} type={otype} "
+                f"| 10min内第{len(hist)}次 → 强制对账"
+            )
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"交易所异常取消 [{self.symbol}]",
+                    detail=(
+                        f"orderId={oid} type={otype} | 非本地撤单 | "
+                        f"10min内累计{len(hist)}次 → 强制持仓核对并补保护单"
+                    ),
+                    level="紧急",
+                    suggestion="核对挂单；若为止损被取消已优先重挂",
+                )
+            except Exception:
+                pass
+            try:
+                self._force_reconcile_position_vs_local(reason="unilateral_cancel")
+            except Exception as e:
+                logger.error(f"[{self.symbol}] 异常取消后对账失败: {e}")
+            try:
+                # 优先确保硬止损/雷达仍在
+                live = self._get_active_position(prefer_ws=False)
+                if live and live != "QUERY_FAILED" and float(live.get("size") or 0) > 0:
+                    self._sync_exchange_stop(
+                        float(live.get("size") or 0),
+                        radar_sl=None,
+                        reason="异常取消后重挂保护",
+                        force=True,
+                    )
+            except Exception as e:
+                logger.error(f"[{self.symbol}] 异常取消后重挂止损失败: {e}")
+            if len(hist) >= 3:
+                self._pause_symbol_trading(
+                    "exchange_unilateral_cancel_x3",
+                    title=f"异常取消熔断 [{self.symbol}]",
+                    detail="10分钟内≥3次交易所单方面取消，暂停该品种自动化",
+                )
+        except Exception as e:
+            logger.error(f"[{self.symbol}] unilateral cancel handler: {e}")
 
     def _tp1_distance(self):
         """白皮书：tp1_distance = |TV.tp1 − TV.price|（优先信号价）。"""
@@ -14807,12 +14913,42 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         self.last_adx = adx
                     entry = float(pos.get("entry_price") or 0)
                     side = str(pos.get("side") or "")
-                    if entry > 0 and atr > 0 and float(getattr(self, "initial_stop", 0) or 0) <= 0:
-                        self.initial_stop = initial_stop_price(
-                            side, entry, atr, profile=getattr(self, "breath_profile", None),
-                        )
-                        self.current_sl = float(self.initial_stop)
-                        self.best_price = entry
+                    if entry > 0 and float(getattr(self, "initial_stop", 0) or 0) <= 0:
+                        frozen = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                        tv_sl = float(getattr(self, "tv_sl_ref", 0) or 0)
+                        if frozen > 0:
+                            self.initial_stop = frozen
+                            self.current_sl = frozen
+                            self.best_price = entry
+                        elif tv_sl > 0 and atr > 0:
+                            # 有 TV 止损锚点 → 按统一 1.15 重算硬止损（规格 7.3）
+                            try:
+                                hs = self._temp_hard_stop_from_tv(
+                                    entry, side, tv_sl=tv_sl,
+                                )
+                                if hs and float(hs) > 0:
+                                    self.initial_stop = float(hs)
+                                    self.current_sl = float(hs)
+                                    self.frozen_hard_sl_px = float(hs)
+                                    self.best_price = entry
+                            except Exception as _hs_e:
+                                logger.warning(
+                                    f"重启硬止损重算失败: {_hs_e}"
+                                )
+                        else:
+                            # 禁止用 entry±0.5ATR 臂冒充硬止损（规格 7.3）
+                            logger.error(
+                                f"🚨 [{self.symbol}] 孤儿仓无硬止损锚点 "
+                                f"→ 暂停，禁止 0.5ATR 伪硬止损"
+                            )
+                            self._pause_symbol_trading(
+                                "restart_orphan_no_hard_sl",
+                                title=f"重启孤儿仓缺硬止损 [{self.symbol}]",
+                                detail=(
+                                    f"实盘 {side} @ {entry} 无 frozen_hard_sl / tv_sl；"
+                                    "已暂停新开仓，请人工挂止损后 resume"
+                                ),
+                            )
                 except Exception as e:
                     logger.warning(f"重启补算呼吸态失败: {e}")
 

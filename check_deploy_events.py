@@ -309,14 +309,14 @@ def audit_breath_and_sizing_smoke(a: Audit):
         a.check("导入 breath/sizing", False, str(e))
         return
 
-    a.check("INITIAL_SL_ATR=1.5", abs(INITIAL_SL_ATR - 1.5) < 1e-9)
+    a.check("INITIAL_SL_ATR=0.5", abs(INITIAL_SL_ATR - 0.5) < 1e-9)
     a.check("STEP=0.75/0.4", abs(STEP_TRIGGER_ATR - 0.75) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.4) < 1e-9)
     a.check("BREAKEVEN=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
     a.check("RISK20/NOTIONAL5", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 5.0)
 
     entry, atr = 3000.0, 40.0
     init_sl = initial_stop_price("LONG", entry, atr)
-    expect_sl = round(entry - 1.5 * atr, 2)
+    expect_sl = round(entry - 0.5 * atr, 2)
     a.check("initial_stop LONG", abs(init_sl - expect_sl) < 1e-6, f"{init_sl} vs {expect_sl}")
 
     # 阶段一：推进约 1 步 (0.75 ATR)

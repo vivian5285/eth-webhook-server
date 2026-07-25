@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **`v16.1.0-radar-v3`** · sizing **RISK20_NOTIONAL5** · 白皮书 **v3.0**  
+> **当前**：TV **v6.5.6** · VPS **`v16.2.0-spec-full`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -55,12 +55,13 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 
 | # | 检查项 | 值 |
 |---|--------|-----|
-| 4.1 | 永久硬止损 | `\|TV−SL\|×1.2` @ 成交价外侧 |
-| 4.2 | 雷达初始距 | entry ± **1.5** ×ATR（雷达腿，非硬止损） |
-| 4.3 | 雷达步进 / 跟进 | 档位表 `config/reentry_tiers.json`（默认 0.75 / 0.4） |
+| 4.1 | 永久硬止损 | `\|TV−SL\|×1.15` @ 成交价外侧（不分档） |
+| 4.2 | 雷达激活臂 | entry ± **0.5** ×ATR（达启动线后上移） |
+| 4.3 | 雷达步进 / 跟进 | 档位表 `config/reentry_tiers.json`（ETH/XAU ADX 三档） |
 | 4.4 | TP 比例 / 档数 | **10/20/70** · `PLACE_TP_LEVELS=3` |
 | 4.5 | 互斥 | `exit_ownership`：NONE / TP3_LIMIT / RADAR_STOP |
-| 4.6 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
+| 4.6 | 启动阈值 | 首次 **0.85×TP1距** · 重入 **1.00×TP1距**（按距离，非绝对价） |
+| 4.7 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
 
 ---
 
@@ -86,5 +87,6 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 python check_vps_logic.py
 python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry
 curl -s http://127.0.0.1:5003/health | python -m json.tool
-# 期望 version: v15.9.3-prod-gate
+# 期望 version: v16.2.0-spec-full · trading_paused=false
+# 20U 实盘矩阵（VPS）: sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
