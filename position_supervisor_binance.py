@@ -18,6 +18,11 @@ from binance_client import (
     is_position_query_failed,
     ORDERS_QUERY_FAILED,
 )
+from order_idempotency import (
+    MAX_OPEN_ORDERS_HARD_CAP,
+    blank_ownership_state,
+    make_defense_client_order_id,
+)
 from position_manager import position_manager
 import dingtalk
 from webhook_parser import (
@@ -165,7 +170,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.0-tp70-tvsl"
+BINANCE_VPS_VERSION = "v15.9.1-risk-iron"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -178,6 +183,7 @@ SENTINEL_POLL_JITTER_SEC = 0.2
 IDLE_PATROL_INTERVAL_SEC = 45  # 双品种空闲轮询；过密会触发 -1003 IP ban
 IDLE_PATROL_BACKOFF_SEC = 120  # 查仓 QUERY_FAILED / 限流后拉长间隔
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
+HELD_RECONCILE_INTERVAL_SEC = 30  # 持仓期监管对账（本地 vs 交易所）
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
@@ -374,12 +380,20 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.tv_suggested_qty = 0.0  # TV webhook qty 上限
         self.tv_qty1 = 0.0  # TV TP1 数量意图（按实开仓缩放后挂限价）
         self.tv_qty2 = 0.0
-        self.tv_qty3 = 0.0  # 不挂限价，余仓交阶段二
+        self.tv_qty3 = 0.0  # TP3=70% 常挂限价；与雷达互斥
         self.radar_step_count = 0
         self.radar_activated = False
         self._init_reentry_runtime()
         self.breakeven_phase = False  # 呼吸止损阶段二
-        self.initial_stop = 0.0       # entry±1.5×initialAtr，阶梯基准（理论，不含0.3缓冲）
+        self.initial_stop = 0.0       # 雷达初始止损基准（与永久硬止损分离）
+        # v15.9.1：TP3↔雷达退出路径所有权 + 防御单本地标签
+        _own = blank_ownership_state()
+        self.exit_ownership = str(_own["exit_ownership"])
+        self.ownership_locked_at = float(_own["ownership_locked_at"] or 0)
+        self._pending_order_tags = dict(_own["pending_order_tags"] or {})
+        self._mutex_leg = ""
+        self._last_held_reconcile_ts = 0.0
+        self._defense_ops_locked = False
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
         self.breathing_coefficient = cold_start_multiplier(
             getattr(self, "breath_profile", None)
@@ -2760,6 +2774,16 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     ),
                     "temp_stop_active": bool(getattr(self, "_temp_stop_active", False)),
                     "last_bar_time_ms": int(getattr(self, "_last_bar_time_ms", 0) or 0),
+                    "exit_ownership": str(
+                        getattr(self, "exit_ownership", "NONE") or "NONE"
+                    ),
+                    "ownership_locked_at": float(
+                        getattr(self, "ownership_locked_at", 0) or 0
+                    ),
+                    "pending_order_tags": dict(
+                        getattr(self, "_pending_order_tags", {}) or {}
+                    ),
+                    "mutex_leg": str(getattr(self, "_mutex_leg", "") or ""),
                     **self._reentry_state_dict(),
                 }, f)
         except Exception as e:
@@ -3436,6 +3460,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._atr_scenario = 0
         self._temp_stop_active = True
         self._tp3_fallback_active = True  # v15.9.0：TP3 常挂
+        self.exit_ownership = "NONE"
+        self.ownership_locked_at = 0.0
+        self._mutex_leg = ""
+        for lv in (1, 2, 3):
+            self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
         self.frozen_hard_sl_px = float(temp_sl)
         self.initial_stop = float(temp_sl)
         self.current_sl = float(temp_sl)
@@ -3485,6 +3514,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.radar_pending_arm = False
         self._radar_handoff_done = True
         self._mutex_leg = "tp3"
+        self.exit_ownership = "TP3_LIMIT"
+        self.ownership_locked_at = time.time()
+        self._clear_pending_tags_for_kind("RADAR")
         self._save_state()
         if already_filled:
             self._force_reconcile_position_vs_local(
@@ -3534,6 +3566,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 already_filled = True
             logger.error(f"🚨 [{self.symbol}] 雷达互斥撤TP3异常: {e}")
         self._mutex_leg = "radar"
+        self.exit_ownership = "RADAR_STOP"
+        self.ownership_locked_at = time.time()
+        self._clear_pending_tags_for_kind("TP3")
         self._save_state()
         if already_filled:
             self._force_reconcile_position_vs_local(
@@ -3590,6 +3625,235 @@ class PositionSupervisorBinance(RadarReentryMixin):
             f"side={live_side} | {reason}"
         )
         return True
+
+    def _clear_pending_tags_for_kind(self, kind_prefix, save=False):
+        """释放某类防御单本地标签（TP1/TP2/TP3/RADAR/HARD）。"""
+        pref = str(kind_prefix or "").upper()
+        tags = dict(getattr(self, "_pending_order_tags", {}) or {})
+        changed = False
+        for tag, meta in list(tags.items()):
+            k = str((meta or {}).get("kind") or "").upper()
+            if pref and (k == pref or k.startswith(pref)):
+                tags.pop(tag, None)
+                changed = True
+        if changed:
+            self._pending_order_tags = tags
+            if save:
+                self._save_state()
+
+    def _has_open_pending_defense_tag(self, kind=None):
+        """本地未完成订单标签存在 → 禁止再挂（幂等最终裁决）。"""
+        want = str(kind or "").upper()
+        for tag, meta in dict(getattr(self, "_pending_order_tags", {}) or {}).items():
+            st = str((meta or {}).get("status") or "open").lower()
+            if st in ("done", "filled", "cancelled", "canceled"):
+                continue
+            k = str((meta or {}).get("kind") or "").upper()
+            if want and k != want and not k.startswith(want):
+                continue
+            return True, tag, meta
+        return False, "", {}
+
+    def _register_pending_defense_tag(self, tag, kind, price=0.0, order_id=""):
+        tags = dict(getattr(self, "_pending_order_tags", {}) or {})
+        tags[str(tag)] = {
+            "kind": str(kind or "").upper(),
+            "ts": time.time(),
+            "price": float(price or 0),
+            "order_id": str(order_id or ""),
+            "status": "open" if order_id else "pending",
+        }
+        self._pending_order_tags = tags
+
+    def _complete_pending_defense_tag(self, tag=None, kind=None, order_id=None):
+        tags = dict(getattr(self, "_pending_order_tags", {}) or {})
+        changed = False
+        for t, meta in list(tags.items()):
+            if tag and str(t) != str(tag):
+                continue
+            if kind and str((meta or {}).get("kind") or "").upper() != str(kind).upper():
+                if not (tag or order_id):
+                    continue
+            if order_id and str((meta or {}).get("order_id") or "") != str(order_id):
+                if not tag:
+                    continue
+            tags.pop(t, None)
+            changed = True
+        if changed:
+            self._pending_order_tags = tags
+
+    def _place_defense_tp_limit(self, close_side, qty, price, level, retries=0):
+        """
+        防御 TP 限价：先写本地标签再下单；失败释放标签。
+        本地已有同档未完成标签 → 拒挂（宁可错过）。
+        """
+        level = int(level or 0)
+        kind = f"TP{level}"
+        if level not in (1, 2, 3):
+            return None
+        own = str(getattr(self, "exit_ownership", "NONE") or "NONE").upper()
+        if level == 3 and own == "RADAR_STOP":
+            logger.error(
+                f"🚫 [{self.symbol}] exit_ownership=RADAR_STOP → 禁止再挂 TP3"
+            )
+            return None
+        blocked, tag0, _ = self._has_open_pending_defense_tag(kind)
+        if blocked:
+            logger.error(
+                f"🚫 [{self.symbol}] 本地未完成标签 tag={tag0} kind={kind} "
+                f"→ 拒挂 TP{level}（防查不到单狂挂）"
+            )
+            return None
+        if not self._orders_book_readable():
+            logger.error(
+                f"🚫 [{self.symbol}] 挂单不可读 → 拒挂 TP{level}（fail-closed）"
+            )
+            return None
+        tag = make_defense_client_order_id(self.symbol, kind, float(price or 0))
+        self._register_pending_defense_tag(tag, kind, price=price)
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        last = None
+        for _ in range(max(1, int(retries or 0) + 1)):
+            last = binance_client.place_limit_order(
+                close_side, qty, price, symbol=self.symbol, reduce_only=True,
+                client_order_id=tag,
+            )
+            if last:
+                break
+            time.sleep(0.2)
+        if not last:
+            self._complete_pending_defense_tag(tag=tag)
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            return None
+        oid = str(last.get("orderId") or last.get("algoId") or "")
+        self._register_pending_defense_tag(tag, kind, price=price, order_id=oid)
+        self._mark_tp_order_placed(level, order_res=last)
+        return last
+
+    def _held_position_reconcile(self, live_qty, curr_px=0.0):
+        """
+        持仓期监管（约 30s）：核对挂单硬上限 + 本地标签 vs 盘口。
+        查单失败 → 保守跳过，绝不因此补挂。
+        """
+        live_qty = float(live_qty or 0)
+        if live_qty <= 0:
+            return True
+        book = binance_client.get_open_orders(self.symbol)
+        if is_orders_query_failed(book):
+            logger.warning(
+                f"⚠️ [{self.symbol}] 持仓对账：挂单查询失败 → 保守跳过（不补挂）"
+            )
+            return False
+        n = len(book or [])
+        if n > MAX_OPEN_ORDERS_HARD_CAP:
+            msg = (
+                f"{self.symbol} 未成交挂单={n}>{MAX_OPEN_ORDERS_HARD_CAP} "
+                f"→ 暂停交易等待人工"
+            )
+            logger.error(f"🚨 [硬上限熔断] {msg}")
+            self.trading_paused = True
+            self.trading_pause_reason = f"open_orders_cap:{n}"
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"挂单硬上限击穿 [{self.symbol}]",
+                    detail=msg,
+                    level="紧急",
+                    suggestion="先净场核对盘口；禁止自动再挂",
+                )
+            except Exception:
+                pass
+            return False
+        # 本地未完成标签但盘口已无对应单：标记告警，不自动重挂
+        pending = dict(getattr(self, "_pending_order_tags", {}) or {})
+        if pending and n == 0:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 本地有未完成标签 {list(pending)[:3]} "
+                f"但盘口挂单=0 → 以本地为准拒挂，等待下一周期/人工"
+            )
+        return True
+
+    def _atomic_resize_after_partial_tp(self, live_qty, reason=""):
+        """
+        TP 部分成交后原子同步：更新头寸 → 收缩硬/雷达数量 → 调整剩余 TP（含 TP3）。
+        任一步失败 → 告警；不在中间状态继续开新挂单路径。
+        """
+        if getattr(self, "_defense_ops_locked", False):
+            logger.warning(
+                f"⏳ [{self.symbol}] 防御操作锁占用中 → 跳过原子收缩 | {reason}"
+            )
+            return False
+        self._defense_ops_locked = True
+        self._breath_tick_paused = True
+        try:
+            pos = self._get_active_position(prefer_ws=False)
+            if pos == "QUERY_FAILED":
+                logger.error(
+                    f"🚨 [{self.symbol}] 部分成交原子同步失败：持仓不可读 | {reason}"
+                )
+                return False
+            if pos and float(pos.get("size") or 0) > 0:
+                live_qty = float(pos.get("size") or live_qty or 0)
+                self.watched_qty = live_qty
+                if float(pos.get("entry_price") or 0) > 0:
+                    self.watched_entry = float(pos["entry_price"])
+            init_q = float(getattr(self, "initial_qty", 0) or 0)
+            if init_q > 0 and live_qty > 0:
+                self.remaining_qty_pct = max(0.0, min(1.0, live_qty / init_q))
+            # 1) 止损数量（硬 closePosition + 雷达按剩余仓）
+            ok_sl = self._breath_resize_stop_on_tp(
+                live_qty, reason=reason or "部分成交原子收缩",
+            )
+            # 2) 剩余 TP（含 TP3）数量对齐
+            self._cancel_tp_orders_at_levels(
+                getattr(self, "tp_levels_consumed", []) or []
+            )
+            time.sleep(0.25)
+            self._cancel_mismatched_remaining_tps(live_qty)
+            time.sleep(0.25)
+            placed = self._patch_missing_tp_levels(live_qty)
+            audit = self._audit_tp_levels(live_qty)
+            self._save_state()
+            if not ok_sl or not self._tp_audit_ok(audit):
+                logger.error(
+                    f"🚨 [{self.symbol}] 部分成交原子同步未齐 "
+                    f"sl_ok={ok_sl} placed={placed} | "
+                    f"{self._format_audit_summary(audit)} | {reason}"
+                )
+                try:
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"部分成交同步异常 [{self.symbol}]",
+                        detail=(
+                            f"{reason} | qty={live_qty} sl_ok={ok_sl} "
+                            f"| {self._format_audit_summary(audit)}"
+                        ),
+                        level="紧急",
+                    )
+                except Exception:
+                    pass
+                return False
+            logger.info(
+                f"✅ [{self.symbol}] 部分成交原子同步完成 qty={live_qty} "
+                f"placed={placed} | {reason}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"🚨 [{self.symbol}] 部分成交原子同步异常: {e}")
+            return False
+        finally:
+            self._breath_tick_paused = False
+            self._defense_ops_locked = False
 
     def _enter_atr_scenario_1(self, entry, side, live_qty, vps_atr, *, recovered=False):
         """场景一：VPS真实ATR接管；TP3 限价保留（与雷达互斥），不撤。"""
@@ -4883,7 +5147,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
     def _mark_tp_levels_consumed(self, levels):
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         for lv in levels:
-            consumed.add(int(lv))
+            lv = int(lv)
+            consumed.add(lv)
+            self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
         self.tp_levels_consumed = self._sequential_tp_prefix(sorted(consumed))
         self._save_state()
 
@@ -5247,7 +5513,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         """
         应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂，
         杜绝「TP1 成交后当漏挂 → 补挂 → 头寸在 TP1 吃光」低级 bug。
-        只返回 PLACE_TP_LEVELS 内档位（默认 TP1+TP2，不挂 TP3）。
+        返回 PLACE_TP_LEVELS 内档位（v15.9.0+ 恒=3，含 TP3）。
         """
         place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
@@ -5464,22 +5730,28 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         binance_client.cancel_order(self.symbol, oid)
                         actions += 1
                         time.sleep(0.3)
-                    res = binance_client.place_limit_order(close_side, target_q, price, symbol=self.symbol, reduce_only=True,
+                    self._clear_pending_tags_for_kind(
+                        f"TP{int(lv['level'])}", save=False,
+                    )
+                    res = self._place_defense_tp_limit(
+                        close_side, target_q, price, int(lv["level"]), retries=0,
                     )
                     if res:
                         actions += 1
-                        self._mark_tp_order_placed(lv['level'], order_res=res)
                         logger.info(
                             f"🔧 重启纠偏 TP{lv['level']} @{price:.2f} → {target_q} ETH"
                         )
                     time.sleep(0.35)
                 continue
 
-            res = binance_client.place_limit_order(close_side, target_q, price, symbol=self.symbol, reduce_only=True,
+            self._clear_pending_tags_for_kind(
+                f"TP{int(lv['level'])}", save=False,
+            )
+            res = self._place_defense_tp_limit(
+                close_side, target_q, price, int(lv["level"]), retries=0,
             )
             if res:
                 actions += 1
-                self._mark_tp_order_placed(lv['level'], order_res=res)
                 logger.info(f"🔧 重启补挂 TP{lv['level']} @{price:.2f} qty={target_q} ETH")
             time.sleep(0.35)
 
@@ -6151,6 +6423,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"🛡️ [{self.symbol}] 止损写入已阻断（账本未热加载完整）| {reason}"
             )
             return {"ok": False, "skipped": True, "reason": "stop_write_blocked"}
+        if str(getattr(self, "exit_ownership", "NONE") or "NONE").upper() == "TP3_LIMIT":
+            logger.info(
+                f"🔀 [{self.symbol}] exit_ownership=TP3_LIMIT → 禁止再挂/改雷达 | {reason}"
+            )
+            return {"ok": False, "skipped": True, "reason": "exit_ownership_tp3"}
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
             return {"ok": False, "skipped": True, "reason": "no_position"}
@@ -6590,7 +6867,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
             ok = False
             last_res = None
             for attempt in range(max(1, retries + 1)):
-                res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True,
+                res = self._place_defense_tp_limit(
+                    close_side, q, px, int(lv["level"]), retries=0,
                 )
                 if res:
                     ok = True
@@ -6599,7 +6877,6 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 time.sleep(0.2)
             if ok:
                 placed += 1
-                self._mark_tp_order_placed(int(lv["level"]), order_res=last_res)
                 logger.info(f"📈 UPDATE_TP 挂 TP{lv['level']} {q} @ {px:.2f}")
             else:
                 logger.error(f"❌ UPDATE_TP 挂 TP{lv['level']} @ {px:.2f} 失败")
@@ -8126,11 +8403,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 if o.get("orderId"):
                     binance_client.cancel_order(self.symbol, order=o)
                     time.sleep(0.25)
+            # 撤旧后释放本地标签，才允许带新标签重挂（防拒挂死锁）
+            self._clear_pending_tags_for_kind(f"TP{int(level)}", save=False)
             logger.info(f"  + 补挂 TP{level} @ {px:.2f} qty={q} ETH")
-            res = binance_client.place_limit_order(close_side, q, px, symbol=self.symbol, reduce_only=True)
+            res = self._place_defense_tp_limit(
+                close_side, q, px, int(level), retries=0,
+            )
             if res:
                 placed += 1
-                self._mark_tp_order_placed(level, order_res=res)
             else:
                 logger.error(f"  ❌ 补挂 TP{level} @ {px:.2f} 失败")
             time.sleep(0.4)
@@ -9470,8 +9750,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     binance_client.cancel_order(self.symbol, order=o)
                     cancelled += 1
                     time.sleep(0.2)
+            self._clear_pending_tags_for_kind(f"TP{int(level)}", save=False)
         if cancelled:
             logger.info(f"🧹 撤净已成交 TP 残留单 {cancelled} 笔")
+            try:
+                self._save_state()
+            except Exception:
+                pass
         return cancelled
 
     def _cancel_stale_tp_beyond_radar(self, radar_sl, live_qty=None, tolerance=1.5):
@@ -9682,8 +9967,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self._save_state()
                 elif self._price_reached_tp_zone(1, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 仅余 TP2 限价"
-                        f"（PLACE_TP_LEVELS=2）"
+                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 仅余 TP2+TP3 限价"
+                        f"（PLACE_TP_LEVELS=3）"
                     )
                     self.tp_levels_consumed = [1]
                     self._save_state()
@@ -9731,7 +10016,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _realign_remaining_tps_after_fill(self, live_qty, dynamic_sl=None, reason=""):
         """
-        TP 成交后：只维护剩余 TP2（不挂 TP3）；同步呼吸止损数量。
+        TP 成交后：维护剩余未成交 TP（含 TP3）+ 原子同步硬/雷达数量。
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
@@ -9743,36 +10028,25 @@ class PositionSupervisorBinance(RadarReentryMixin):
         consumed = getattr(self, "tp_levels_consumed", []) or []
         logger.info(
             f"🎯 TP 成交后静默对齐: 剩余 {live_qty} ETH | "
-            f"已成交 TP{consumed} | 只补未成交档"
+            f"已成交 TP{consumed} | 补未成交档+原子收缩止损"
         )
-        self._cancel_tp_orders_at_levels(consumed)
-        time.sleep(0.35)
-        n_fix = self._cancel_mismatched_remaining_tps(live_qty)
-        if n_fix:
-            logger.info(f"🔧 TP 成交对齐：撤偏差剩余档 {n_fix} 笔")
-            time.sleep(0.35)
-        placed = self._patch_missing_tp_levels(live_qty)
-        time.sleep(0.5)
+        ok = self._atomic_resize_after_partial_tp(
+            live_qty, reason=reason or "TP成交后对齐",
+        )
         audit = self._audit_tp_levels(live_qty)
-        # 止损数量收缩收拢在呼吸引擎（价格不在此强制改）
-        self._breath_resize_stop_on_tp(live_qty, reason=reason or "TP成交后对齐")
-        if placed == 0 and self._tp_audit_ok(audit):
-            logger.info(
-                f"✅ TP 成交后盘口已齐 ({audit['matched_full']}/{audit['expected']})，"
-                f"未重挂已成交档"
-            )
-        elif not self._tp_audit_ok(audit):
+        if not ok and not self._tp_audit_ok(audit):
             logger.warning(
                 f"⚠️ TP 成交后仍不齐 → 增量修复 | {self._format_audit_summary(audit)}"
             )
             repaired, _ = self._surgical_repair_tp_defenses(live_qty, self.watched_entry)
             audit = repaired
+            self._breath_resize_stop_on_tp(live_qty, reason=reason or "TP成交后兜底收缩")
         self._mark_defense_align_ok()
         return {
             "matched": audit["matched_full"],
             "expected": audit["expected"],
             "pending_prices": audit["pending_prices"],
-            "rebuilt": placed > 0,
+            "rebuilt": True,
             "audit": audit,
             "nuclear": False,
         }
@@ -11466,6 +11740,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._stop_write_blocked = False
         self._clear_defense_order_ids(save=False)
         self._clear_signal_fingerprint()
+        # v15.9.1：清退出所有权 + 防御标签
+        self.exit_ownership = "NONE"
+        self.ownership_locked_at = 0.0
+        self._pending_order_tags = {}
+        self._mutex_leg = ""
+        self._defense_ops_locked = False
         # 平仓：撤再入限价标记；周期字段留给 _maybe_start（新TV走 _clear_reentry_cycle）
         try:
             self._cancel_reentry_limit(reason=source or "平仓清零")
@@ -12096,7 +12376,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             )
             self._nuclear_fail_streak = 0
 
-            # ① 共同第一步：临时止损 + TP1/TP2（不挂TP3）
+            # ① 共同第一步：永久硬止损 + TP1/TP2/TP3（10/20/70）
             self._arm_temp_stop_and_tp12(
                 live_qty, entry_live, self.current_side, source="开仓共同第一步",
             )
@@ -13511,6 +13791,17 @@ class PositionSupervisorBinance(RadarReentryMixin):
                             self._check_tp_order_timeouts(curr_px)
                         except Exception as e:
                             logger.debug(f"挂单超时检查跳过: {e}")
+                        # v15.9.1：持仓期监管对账（约 30s）
+                        try:
+                            now_rc = time.time()
+                            last_rc = float(
+                                getattr(self, "_last_held_reconcile_ts", 0) or 0
+                            )
+                            if now_rc - last_rc >= float(HELD_RECONCILE_INTERVAL_SEC):
+                                self._last_held_reconcile_ts = now_rc
+                                self._held_position_reconcile(real_amt, curr_px)
+                        except Exception as e:
+                            logger.debug(f"持仓对账跳过: {e}")
 
                         qty_changed = False
                         if abs(real_amt - self.watched_qty) > REGIME_CAP_TOLERANCE_ETH:
@@ -13630,6 +13921,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
         if cancel_first:
             self._cancel_all_tp_limit_orders()
+            for lv in (1, 2, 3):
+                self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
             time.sleep(0.35)
 
         if abs(live_qty - qty) > 0.001:
@@ -13721,12 +14014,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
                     if px <= 0:
                         continue
-                res = binance_client.place_limit_order(
-                    close_side, q, px, symbol=self.symbol, reduce_only=True,
+                res = self._place_defense_tp_limit(
+                    close_side, q, px, int(lv["level"]), retries=0,
                 )
                 if res:
                     placed += 1
-                    self._mark_tp_order_placed(int(lv["level"]), order_res=res)
                 else:
                     logger.error(
                         f"❌ 挂 TP{lv['level']} 失败 {q} @ {px:.2f} {self.symbol}"
@@ -14081,6 +14373,19 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     )
                     self._temp_stop_active = bool(s.get("temp_stop_active", False))
                     self._last_bar_time_ms = int(s.get("last_bar_time_ms", 0) or 0)
+                    self.exit_ownership = str(
+                        s.get("exit_ownership", "NONE") or "NONE"
+                    ).upper()
+                    if self.exit_ownership not in ("NONE", "TP3_LIMIT", "RADAR_STOP"):
+                        self.exit_ownership = "NONE"
+                    self.ownership_locked_at = float(
+                        s.get("ownership_locked_at", 0) or 0
+                    )
+                    raw_tags = s.get("pending_order_tags") or {}
+                    self._pending_order_tags = (
+                        dict(raw_tags) if isinstance(raw_tags, dict) else {}
+                    )
+                    self._mutex_leg = str(s.get("mutex_leg", "") or "")
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:

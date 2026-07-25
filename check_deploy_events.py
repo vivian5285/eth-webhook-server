@@ -263,7 +263,7 @@ def audit_supervisor_methods(a: Audit):
     a.check("FORCE_ALIGN 保留", "force_align" in src and "report_force_align" in src)
     a.check("呼吸唯一写止损", "_sync_exchange_stop" in src and "calculate_breath_stop" in src)
     a.check("TP后暂停 tick", "_breath_tick_paused" in src)
-    a.check("PLACE_TP_LEVELS=2 接线", "PLACE_TP_LEVELS" in src)
+    a.check("PLACE_TP_LEVELS=3 接线", "PLACE_TP_LEVELS" in src)
 
 
 def audit_webhook_actions(a: Audit):
@@ -281,7 +281,7 @@ def audit_webhook_actions(a: Audit):
         FLATTEN_ACTIONS == frozenset({"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}),
         str(FLATTEN_ACTIONS),
     )
-    a.check("PLACE_TP_LEVELS=2", int(PLACE_TP_LEVELS) == 2, str(PLACE_TP_LEVELS))
+    a.check("PLACE_TP_LEVELS=3", int(PLACE_TP_LEVELS) == 3, str(PLACE_TP_LEVELS))
 
     banned = (
         "CLOSE_TP", "CLOSE_TRAIL", "CLOSE_SL_INITIAL", "CLOSE_SL_BREAKEVEN",

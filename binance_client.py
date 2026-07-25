@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v15.7.4-fail-closed-place"
+BINANCE_CLIENT_VERSION = "v15.9.1-risk-iron"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -909,10 +909,12 @@ class BinanceClient:
                     1 for o in (book or [])
                     if str(o.get("type") or o.get("orderType") or "").upper() == "LIMIT"
                 )
-                if lim_n >= 6:
+                all_n = len(book or [])
+                # v15.9.1：硬上限 5（规格：未成交挂单总数不得超过 5）
+                if all_n >= 5 or lim_n >= 5:
                     logger.error(
-                        f"[限价单熔断] {symbol} 已有 LIMIT={lim_n}≥6 → 禁止再挂 "
-                        f"（期望≤3；请先净场）"
+                        f"[限价单熔断] {symbol} 挂单总数={all_n} LIMIT={lim_n}≥5 "
+                        f"→ 禁止再挂（防击穿；请先净场）"
                     )
                     return None
             elif coid:

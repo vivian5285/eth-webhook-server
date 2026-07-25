@@ -204,17 +204,17 @@ def close_type_display_label(close_type, fallback_reason=""):
 
 
 def get_regime_tp_ratios(regime=None):
-    """固定 30/30/40（不再按档位）。"""
+    """固定 10/20/70（v15.9.0+；不再按档位）。"""
     return list(LEG_TP_RATIOS)
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "30/30/40(挂TP1+TP2·余仓交阶段二)"
+    return "10/20/70(挂TP1+TP2+TP3·TP3与雷达互斥)"
 
 
 def get_leg_tp_ratios(payload=None):
     """
-    默认 30/30/40（缺 qty1/qty2 时回退）。
+    默认 10/20/70。
     有 TV qty1/qty2 时，supervisor._tp_slices_for_initial 按 qty 缩放挂单，不走本比例。
     """
     return list(LEG_TP_RATIOS)

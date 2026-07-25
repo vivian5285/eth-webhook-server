@@ -752,6 +752,18 @@ def audit_module4_radar(a: Audit):
         and "client_order_id" in _bc
         and "newClientOrderId" in _bc,
     )
+    _oi = _read(os.path.join(ROOT, "order_idempotency.py"))
+    a.check(
+        "4.4d v15.9.1 防御标签+硬上限5+exit_ownership",
+        "make_defense_client_order_id" in _oi
+        and "MAX_OPEN_ORDERS_HARD_CAP" in _oi
+        and "exit_ownership" in sup
+        and "_place_defense_tp_limit" in sup
+        and "_held_position_reconcile" in sup
+        and "_atomic_resize_after_partial_tp" in sup
+        and "挂单总数=" in _bc
+        and "≥5" in _bc,
+    )
     a.check(
         "4.5 ATR_UPDATE/ORDER_TIMEOUT 在 webhook_parser",
         "ATR_UPDATE_SEC" in wp and "ORDER_TIMEOUT_SEC" in wp,
@@ -936,7 +948,7 @@ def audit_module8_dingtalk(a: Audit):
     )
     a.check(
         "钉钉档位对账字段",
-        "format_regime_tp_ratios_label" in dt or "10/20/70" in dt or "30/30/40" in dt,
+        "format_regime_tp_ratios_label" in dt or "10/20/70" in dt,
     )
 
 
@@ -986,9 +998,9 @@ def audit_readme_consistency(a: Audit):
         and "85%" not in readme,
     )
     a.check(
-        "README 仅挂 TP1+TP2",
-        ("TP1+TP2" in readme or "TP1 / TP2" in readme or "只挂" in readme)
-        and ("不挂 TP3" in readme or "余仓" in readme or "阶段二" in readme or "场景二" in readme),
+        "README TP123 常挂",
+        ("TP1+TP2+TP3" in readme or "10%/20%/70%" in readme or "10/20/70" in readme)
+        and ("互斥" in readme or "TP3" in readme),
     )
     a.check(
         "README 核心铁律保留",

@@ -117,7 +117,7 @@ class TestOrdersDupGuard(unittest.TestCase):
         c = _bare_client()
         fake_book = [
             {"type": "LIMIT", "orderId": i, "price": str(1900 + i)}
-            for i in range(6)
+            for i in range(5)
         ]
         c.get_open_orders = MagicMock(return_value=fake_book)
         with patch.object(c, "_existing_same_limit", return_value=None):
@@ -126,6 +126,31 @@ class TestOrdersDupGuard(unittest.TestCase):
             )
         self.assertIsNone(out)
         self.assertEqual(c.client.futures_create_order.call_count, 0)
+
+    def test_place_limit_fuse_when_total_orders_cap(self):
+        """总数≥5（含 STOP）也熔断。"""
+        c = _bare_client()
+        fake_book = [
+            {"type": "LIMIT", "orderId": 1, "price": "1901"},
+            {"type": "LIMIT", "orderId": 2, "price": "1902"},
+            {"type": "STOP_MARKET", "orderId": 3, "stopPrice": "1800"},
+            {"type": "STOP_MARKET", "orderId": 4, "stopPrice": "1790"},
+            {"type": "LIMIT", "orderId": 5, "price": "1903"},
+        ]
+        c.get_open_orders = MagicMock(return_value=fake_book)
+        with patch.object(c, "_existing_same_limit", return_value=None):
+            out = BinanceClient.place_limit_order(
+                c, "SELL", 0.01, 1910.0, symbol="ETHUSDT",
+            )
+        self.assertIsNone(out)
+        self.assertEqual(c.client.futures_create_order.call_count, 0)
+
+    def test_defense_client_order_id_length(self):
+        from order_idempotency import make_defense_client_order_id, MAX_OPEN_ORDERS_HARD_CAP
+        self.assertEqual(MAX_OPEN_ORDERS_HARD_CAP, 5)
+        coid = make_defense_client_order_id("ETHUSDT", "TP1", 1900.5)
+        self.assertLessEqual(len(coid), 36)
+        self.assertTrue(coid.startswith("DE"))
 
     def test_find_protective_returns_none_on_fail(self):
         c = BinanceClient.__new__(BinanceClient)

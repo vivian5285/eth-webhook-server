@@ -77,7 +77,7 @@ class TestMutexSourcePresent(unittest.TestCase):
         self.assertIn("def _mutex_on_tp3_filled", src)
         self.assertIn("def _mutex_on_radar_filled", src)
         self.assertIn("def _force_reconcile_position_vs_local", src)
-        self.assertIn("v15.9.0-tp70-tvsl", src)
+        self.assertIn("v15.9.1-risk-iron", src)
 
 
 if __name__ == "__main__":

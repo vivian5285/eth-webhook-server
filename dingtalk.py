@@ -659,13 +659,14 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verif
 def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
                    verify_note="", verified=True, symbol=None, unit_label=None,
                    current_stop=None):
-    """TP1/TP2 成交通知（不挂 TP3，故无 TP3 成交播报）。"""
+    """TP1/TP2/TP3 成交通知（v15.9.0+ 三级限价常挂）。"""
     lv = int(tp_level or 0)
-    if lv >= 3:
-        return  # TP3 不挂限价，禁止旧文案
+    if lv < 1 or lv > 3:
+        return
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    remain_pct = {1: "90%", 2: "70%"}.get(lv, "—")
+    # 开仓后剩余示意：TP1→90% · TP2→70% · TP3→0%
+    remain_pct = {1: "90%", 2: "70%", 3: "0%"}.get(lv, "—")
     stop = float(current_stop or 0)
     title = f"🎯 [{sym}] TP{lv} 止盈成交，剩余仓位 {remain_pct}"
     body = {

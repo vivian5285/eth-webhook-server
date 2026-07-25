@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.9.0-tp70-tvsl`**  
+**当前版本：`v15.9.1-risk-iron`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
@@ -8,7 +8,7 @@
 **硬止损：`|TV.price−TV.stop_loss|×buffer` 锚定成交价**（`defense_profiles`，默认 1.2；禁止 1.5×ATR 地板）  
 **波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
 **递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
-**幂等铁律（v15.8.2）**：本地 `reentry_order_tag` 未释放 → 绝对拒挂第二笔；查单失败 fail-closed；无菌净场后才再入  
+**幂等铁律（v15.9.1）**：本地订单标签（再入+防御TP）未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**；`exit_ownership` 持久化互斥  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
@@ -16,19 +16,20 @@
 > **双 STOP 说明**：盘口两笔接近的止损 = **硬止损** + **雷达**。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
 > **硬止损（唯一公式 · v15.9.0）**：`|TV价 − TV.stop_loss| × buffer_multiplier`，挂在**成交价**外侧。已删除 1.5×ATR 地板与 `|成交−TV|×2`。缺/异常 `stop_loss` → **拒开**。  
 > **TP（v15.9.0）**：10%/20%/70% 常挂 TP1+TP2+TP3；TP3 与雷达互斥（谁先成交撤另一腿）。  
-> **叠单铁律（v15.7.4+）**：挂单查询失败 → **fail-closed 禁止挂** TP/止损；空仓必须挂单=0；LIMIT≥6 熔断拒挂。  
+> **叠单铁律（v15.9.1）**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**；持仓期 30s 监管对账。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
 > **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。  
 > **v15.8.2**：再入闭环 + 本地订单标签幂等。  
-> **v15.9.0**：对齐 TV 止损距离×buffer + TP 10/20/70 常挂 TP3 + TP3↔雷达互斥。
+> **v15.9.0**：对齐 TV 止损距离×buffer + TP 10/20/70 常挂 TP3 + TP3↔雷达互斥。  
+> **v15.9.1**：防御 TP `clientOrderId`、硬上限 5、持久化 `exit_ownership`、部分成交原子同步、30s 持仓对账。
 
 > **权威依据**：桌面《VPS改造规格说明_TP比例与止损同步》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.9.0-tp70-tvsl · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.9.1-risk-iron · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
@@ -169,7 +170,7 @@ position_supervisor_binance.py     ← 唯一生产大脑
 
 1. 查实盘；非空 → 市价全平 + 撤全部挂单 → **无菌确认**  
 2. `qty = (本金×20%×5)/price`（可选 sl/TV.qty 收紧）→ 杠杆 5x → 市价开仓  
-3. **共同第一步**：永久硬止损 + TP1/TP2（不挂 TP3）  
+3. **共同第一步**：永久硬止损 + TP1/TP2/TP3（10/20/70）  
 4. **同步拉原生 1h ATR** → 场景一或场景二 → **独立挂雷达止损**  
 5. 开仓后核对：盘口至少硬止损在；雷达按场景挂出；钉钉播报  
 
@@ -378,7 +379,7 @@ python3 test_breath_radar_upgrade.py
 | 层 | 行为 |
 |----|------|
 | `place_limit` / `place_stop` | 查单失败 → **return None**（仅 120s 本地缓存可复用，不新挂） |
-| LIMIT 熔断 | 同 symbol 可读 LIMIT≥6 → 拒挂 |
+| LIMIT 熔断 | 同 symbol 未成交挂单总数≥5 或 LIMIT≥5 → 拒挂 |
 | `_has_tp_limit_at_price` / `_has_stop_sl_near` | 查失败 → **保守 True**（禁止补挂） |
 | `_place_tp_levels_only` / `_patch_missing_tp` / nuclear | `orders_unreadable` → 中止，禁止盲补 |
 | 空闲巡检 | 仓=0 且挂单>0 → `_purge_all_defense_orders_on_flat` |
