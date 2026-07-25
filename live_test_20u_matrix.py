@@ -370,7 +370,7 @@ def run_cycle(sym, side, tag):
 def main():
     os.makedirs("logs", exist_ok=True)
     only = (os.getenv("LIVE20U_ONLY") or "").strip().upper()
-    log("LIVE20U_START", version="v15.9.2-ops-harden", target_notional=TARGET_NOTIONAL, only=only or "ALL")
+    log("LIVE20U_START", version="v15.9.3-prod-gate", target_notional=TARGET_NOTIONAL, only=only or "ALL")
     matrix = (
         ("ETHUSDT", "LONG", "ETH_LONG"),
         ("ETHUSDT", "SHORT", "ETH_SHORT"),

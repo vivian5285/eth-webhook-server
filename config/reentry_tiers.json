@@ -1,0 +1,28 @@
+{
+  "activation_fracs": [0.50, 0.65, 0.80, 0.90, 0.95],
+  "tp1_atr_mult": 1.35,
+  "limit_discount": 0.003,
+  "limit_ttl_sec": 300,
+  "max_reentries": 4,
+  "max_unfilled_refreshes": 5,
+  "ETH": {
+    "reentry_zone_atr": 0.5,
+    "tiers": [
+      {"early_be_atr": 0.50, "step_trigger_atr": 0.75, "step_advance_atr": 0.40, "min_mult": 1.2, "max_mult": 2.5},
+      {"early_be_atr": 0.65, "step_trigger_atr": 0.90, "step_advance_atr": 0.46, "min_mult": 1.4, "max_mult": 2.8},
+      {"early_be_atr": 0.85, "step_trigger_atr": 1.10, "step_advance_atr": 0.52, "min_mult": 1.6, "max_mult": 3.0},
+      {"early_be_atr": 1.05, "step_trigger_atr": 1.25, "step_advance_atr": 0.58, "min_mult": 1.8, "max_mult": 3.2},
+      {"early_be_atr": 1.30, "step_trigger_atr": 1.40, "step_advance_atr": 0.64, "min_mult": 2.0, "max_mult": 3.5}
+    ]
+  },
+  "XAU": {
+    "reentry_zone_atr": 0.3,
+    "tiers": [
+      {"early_be_atr": 0.65, "step_trigger_atr": 0.70, "step_advance_atr": 0.45, "min_mult": 1.2, "max_mult": 2.5},
+      {"early_be_atr": 0.85, "step_trigger_atr": 0.85, "step_advance_atr": 0.52, "min_mult": 1.4, "max_mult": 2.8},
+      {"early_be_atr": 1.10, "step_trigger_atr": 1.00, "step_advance_atr": 0.58, "min_mult": 1.6, "max_mult": 3.0},
+      {"early_be_atr": 1.30, "step_trigger_atr": 1.15, "step_advance_atr": 0.64, "min_mult": 1.8, "max_mult": 3.2},
+      {"early_be_atr": 1.55, "step_trigger_atr": 1.30, "step_advance_atr": 0.70, "min_mult": 2.0, "max_mult": 3.5}
+    ]
+  }
+}

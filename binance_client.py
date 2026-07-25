@@ -12,7 +12,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v15.9.2-ops-harden"
+BINANCE_CLIENT_VERSION = "v15.9.3-prod-gate"
+# 规格：单品种 REST 调用间隔不得小于 100ms
+REST_MIN_INTERVAL_SEC = 0.1
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -85,7 +87,56 @@ class BinanceClient:
         self._recent_limit_place = {}
         self._recent_stop_place = {}
         self._place_dedupe_lock = threading.Lock()
+        self._rest_min_interval = float(REST_MIN_INTERVAL_SEC)
+        self._rest_last_by_sym = {}
+        self._rest_throttle_lock = threading.Lock()
+        self._rate_limit_hooks = []
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
+
+    def register_rate_limit_hook(self, cb):
+        """限流回调：cb(symbol, err_text)。supervisor 用其暂停品种。"""
+        if callable(cb) and cb not in self._rate_limit_hooks:
+            self._rate_limit_hooks.append(cb)
+
+    def _throttle_rest(self, symbol=""):
+        """单品种 REST 间隔硬下限（默认 100ms）。"""
+        if not hasattr(self, "_rest_throttle_lock"):
+            self._rest_throttle_lock = threading.Lock()
+            self._rest_last_by_sym = {}
+            self._rest_min_interval = float(REST_MIN_INTERVAL_SEC)
+        if not hasattr(self, "_rate_limit_hooks"):
+            self._rate_limit_hooks = []
+        sym = str(symbol or "_GLOBAL").upper()
+        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.1)
+        if gap <= 0:
+            return
+        with self._rest_throttle_lock:
+            now = time.time()
+            last = float(self._rest_last_by_sym.get(sym) or 0)
+            wait = gap - (now - last)
+            if wait > 0:
+                time.sleep(wait)
+            self._rest_last_by_sym[sym] = time.time()
+
+    def _note_api_error(self, err, symbol=""):
+        """检测 -1003 / TOO_MANY_REQUESTS → 通知钩子暂停品种。"""
+        if not hasattr(self, "_rate_limit_hooks"):
+            self._rate_limit_hooks = []
+        text = str(err or "")
+        low = text.lower()
+        if (
+            "-1003" in text
+            or "too_many_requests" in low
+            or "banned until" in low
+            or "way too much request" in low
+        ):
+            for h in list(self._rate_limit_hooks):
+                try:
+                    h(str(symbol or ""), text)
+                except Exception:
+                    pass
+            return True
+        return False
 
     @staticmethod
     def _is_algo_switch_error(err):
@@ -100,9 +151,15 @@ class BinanceClient:
 
     def _futures_signed_request(self, method, path, params=None):
         params = dict(params or {})
-        return self.client._request_futures_api(
-            method.lower(), path, signed=True, data=params,
-        )
+        symbol = str(params.get("symbol") or "")
+        self._throttle_rest(symbol)
+        try:
+            return self.client._request_futures_api(
+                method.lower(), path, signed=True, data=params,
+            )
+        except Exception as e:
+            self._note_api_error(e, symbol)
+            raise
 
     def _normalize_algo_order(self, raw):
         """Algo 条件单 → 与普通 open order 兼容的结构（供硬止损/雷达审计）"""
@@ -154,9 +211,11 @@ class BinanceClient:
         成功返回 list；REST 失败返回 ORDERS_QUERY_FAILED。
         铁律：查询失败 ≠ 盘口无单；上层禁止据此补挂限价/止损。
         """
+        self._throttle_rest(symbol)
         try:
             orders = list(self.client.futures_get_open_orders(symbol=symbol) or [])
         except Exception as e:
+            self._note_api_error(e, symbol)
             logger.error(f"[获取挂单失败] {symbol}: {e}")
             return ORDERS_QUERY_FAILED
         if not include_algo:
@@ -929,6 +988,7 @@ class BinanceClient:
                     f"[限价单] {symbol} 查单异常且带标签 {coid} → fail-closed 拒挂"
                 )
                 return None
+        self._throttle_rest(symbol)
         try:
             binance_side = want_side
             params = {
@@ -948,11 +1008,13 @@ class BinanceClient:
                 self._recent_limit_place[key] = (time.time(), order)
             return order
         except Exception as e:
+            self._note_api_error(e, symbol)
             logger.error(f"[限价单失败] {side} {qty} @ {px_str} tag={coid or '-'}: {e}")
             return None
 
     def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
-                                     close_position=True, quantity=None):
+                                     close_position=True, quantity=None,
+                                     client_order_id=None):
         """Algo 通道 STOP_MARKET：优先 quantity+reduceOnly；否则 closePosition。"""
         try:
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
@@ -963,6 +1025,9 @@ class BinanceClient:
                 "type": "STOP_MARKET",
                 "triggerPrice": self.format_price(stop_price, symbol),
             }
+            coid = str(client_order_id or "").strip()[:36] or None
+            if coid:
+                params["clientAlgoId"] = coid
             if quantity is not None:
                 qty = self.format_quantity(quantity, symbol)
                 if qty <= 0:
@@ -982,19 +1047,24 @@ class BinanceClient:
                 order.setdefault("isAlgoOrder", True)
             return order
         except Exception as e:
+            self._note_api_error(e, symbol)
             logger.error(f"[Algo止损失败] {side} Stop @ {stop_price}: {e}")
             return None
 
-    def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT", quantity=None):
+    def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
+                                quantity=None, client_order_id=None):
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(stop_price or 0), 2)
-        key = (symbol, want_side, want_px)
+        coid = str(client_order_id or "").strip()[:36] or None
+        key = (symbol, want_side, want_px, coid or "")
         # 防重复：同触发价已有 STOP 则复用。
         # 仅 ORDERS_QUERY_FAILED 哨兵 → fail-closed（None=无同价，可挂）
         exist = self._existing_same_stop(symbol, side, stop_price)
         if exist is not None and is_orders_query_failed(exist):
             with self._place_dedupe_lock:
                 cached = self._recent_stop_place.get(key)
+                if cached is None:
+                    cached = self._recent_stop_place.get((symbol, want_side, want_px))
                 if cached and (time.time() - float(cached[0])) < 120.0:
                     logger.warning(
                         f"[止损单去重] {symbol} 查单失败但本地 120s 内已挂同价 "
@@ -1013,12 +1083,15 @@ class BinanceClient:
                 f"→ 跳过重复挂单"
             )
             return exist
+        self._throttle_rest(symbol)
         try:
             binance_side = want_side
             params = {
                 "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
                 "stopPrice": self.format_price(stop_price, symbol),
             }
+            if coid:
+                params["newClientOrderId"] = coid
             if quantity is not None:
                 qty = self.format_quantity(quantity, symbol)
                 if qty <= 0:
@@ -1030,7 +1103,7 @@ class BinanceClient:
                 params["closePosition"] = "true"
             order = self.client.futures_create_order(**params)
             tag = f"{quantity} " if quantity is not None else "全仓 "
-            logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price}")
+            logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price} tag={coid or '-'}")
             with self._place_dedupe_lock:
                 self._recent_stop_place[key] = (time.time(), order)
             return order
@@ -1043,11 +1116,13 @@ class BinanceClient:
                     side, stop_price, symbol=symbol,
                     close_position=(quantity is None),
                     quantity=quantity,
+                    client_order_id=coid,
                 )
                 if order:
                     with self._place_dedupe_lock:
                         self._recent_stop_place[key] = (time.time(), order)
                 return order
+            self._note_api_error(e, symbol)
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 

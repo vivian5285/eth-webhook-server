@@ -151,11 +151,11 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
     ct = close_type or classify_tv_close(close_action, tv_reason or r)
 
     if ct == CLOSE_TYPE_TP3:
-        # TP3 不挂限价：归入阶段二止损收网文案
+        # TP3 限价成交（70% 余仓）
         return {
-            "title": "止损平仓（阶段二/趋势追踪）",
-            "tag": _g("**止损平仓**", G_LIGHT),
-            "status": _g("阶段二收网离场。" + ("（含扫尾）" if is_dust_ctx else ""), G_LIGHT),
+            "title": "止盈平仓（TP3限价）",
+            "tag": _g("**止盈平仓**", G_LIGHT),
+            "status": _g("TP3限价成交离场。" + ("（含扫尾）" if is_dust_ctx else ""), G_LIGHT),
             "header": G_TITLE,
         }
     if ct in (CLOSE_TYPE_PROTECT, CLOSE_TYPE_QUICK, CLOSE_TYPE_RSI):

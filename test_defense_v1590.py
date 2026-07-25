@@ -77,7 +77,8 @@ class TestMutexSourcePresent(unittest.TestCase):
         self.assertIn("def _mutex_on_tp3_filled", src)
         self.assertIn("def _mutex_on_radar_filled", src)
         self.assertIn("def _force_reconcile_position_vs_local", src)
-        self.assertIn("v15.9.2-ops-harden", src)
+        self.assertIn("v15.9.3-prod-gate", src)
+        self.assertIn("def _pause_symbol_trading", src)
 
 
 if __name__ == "__main__":

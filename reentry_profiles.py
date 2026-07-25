@@ -12,80 +12,84 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-ACTIVATION_FRACS: List[float] = [0.50, 0.65, 0.80, 0.90, 0.95]
-TP1_ATR_MULT = 1.35
-LIMIT_DISCOUNT = 0.003
-LIMIT_TTL_SEC = 300
-MAX_REENTRIES = 4  # attempt 0..3 可再入；attempt>=4（已在5.0）再扫出终止
+# 内置默认（config/reentry_tiers.json 可覆盖，改配置后重启生效）
+_DEFAULT_ACTIVATION_FRACS: List[float] = [0.50, 0.65, 0.80, 0.90, 0.95]
+_DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
+    {"early_be_atr": 0.50, "step_trigger_atr": 0.75, "step_advance_atr": 0.40, "min_mult": 1.2, "max_mult": 2.5},
+    {"early_be_atr": 0.65, "step_trigger_atr": 0.90, "step_advance_atr": 0.46, "min_mult": 1.4, "max_mult": 2.8},
+    {"early_be_atr": 0.85, "step_trigger_atr": 1.10, "step_advance_atr": 0.52, "min_mult": 1.6, "max_mult": 3.0},
+    {"early_be_atr": 1.05, "step_trigger_atr": 1.25, "step_advance_atr": 0.58, "min_mult": 1.8, "max_mult": 3.2},
+    {"early_be_atr": 1.30, "step_trigger_atr": 1.40, "step_advance_atr": 0.64, "min_mult": 2.0, "max_mult": 3.5},
+]
+_DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
+    {"early_be_atr": 0.65, "step_trigger_atr": 0.70, "step_advance_atr": 0.45, "min_mult": 1.2, "max_mult": 2.5},
+    {"early_be_atr": 0.85, "step_trigger_atr": 0.85, "step_advance_atr": 0.52, "min_mult": 1.4, "max_mult": 2.8},
+    {"early_be_atr": 1.10, "step_trigger_atr": 1.00, "step_advance_atr": 0.58, "min_mult": 1.6, "max_mult": 3.0},
+    {"early_be_atr": 1.30, "step_trigger_atr": 1.15, "step_advance_atr": 0.64, "min_mult": 1.8, "max_mult": 3.2},
+    {"early_be_atr": 1.55, "step_trigger_atr": 1.30, "step_advance_atr": 0.70, "min_mult": 2.0, "max_mult": 3.5},
+]
+
+REENTRY_TIERS_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
+)
+
+
+def _load_tiers_file() -> Dict[str, Any]:
+    path = REENTRY_TIERS_JSON
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_CFG = _load_tiers_file()
+ACTIVATION_FRACS: List[float] = [
+    float(x) for x in (_CFG.get("activation_fracs") or _DEFAULT_ACTIVATION_FRACS)
+]
+TP1_ATR_MULT = float(_CFG.get("tp1_atr_mult") or 1.35)
+LIMIT_DISCOUNT = float(_CFG.get("limit_discount") or 0.003)
+LIMIT_TTL_SEC = int(_CFG.get("limit_ttl_sec") or 300)
+MAX_REENTRIES = int(_CFG.get("max_reentries") or 4)
 MAX_TIER_INDEX = 4  # 0..4 → 档位 1.0..5.0
-MAX_UNFILLED_REFRESHES = 5
+MAX_UNFILLED_REFRESHES = int(_CFG.get("max_unfilled_refreshes") or 5)
 DEFAULT_TICK = 0.01
-# 清场确认失败最多重试；超限暂停该品种（防脏盘挂单）
 STERILE_MAX_RETRY = 3
+
+ETH_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("ETH") or {}).get("tiers") or _DEFAULT_ETH_TIERS)
+)
+XAU_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("XAU") or {}).get("tiers") or _DEFAULT_XAU_TIERS)
+)
+_ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
+_XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 
 
 def make_reentry_client_order_id(
     symbol: str, side: str, price: float, ts: Optional[float] = None,
 ) -> str:
     """
-    交易所 newClientOrderId（≤36）：本地订单标签，幂等防狂挂的核心。
+    交易所 newClientOrderId（≤36）：SHA-256 订单标签，幂等防狂挂。
     同一标签在本地状态未清除前，绝对不允许再挂第二笔重入限价。
     """
     sym_u = str(symbol or "").upper()
     sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
     sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
-    px = abs(int(round(float(price or 0) * 100))) % 10_000_000
+    px = abs(int(round(float(price or 0) * 100))) % 1_000_000
     t = abs(int(float(ts if ts is not None else time.time()))) % 100_000
-    return f"RE{sym}{sd}{px}{t}"[:36]
-
-# tier index = reentry_attempt（0=首次开仓 … 4=第四次重入后 / 档位5.0）
-ETH_TIERS: List[Dict[str, float]] = [
-    {  # 1.0
-        "early_be_atr": 0.50, "step_trigger_atr": 0.75, "step_advance_atr": 0.40,
-        "min_mult": 1.2, "max_mult": 2.5,
-    },
-    {  # 2.0
-        "early_be_atr": 0.65, "step_trigger_atr": 0.90, "step_advance_atr": 0.46,
-        "min_mult": 1.4, "max_mult": 2.8,
-    },
-    {  # 3.0
-        "early_be_atr": 0.85, "step_trigger_atr": 1.10, "step_advance_atr": 0.52,
-        "min_mult": 1.6, "max_mult": 3.0,
-    },
-    {  # 4.0
-        "early_be_atr": 1.05, "step_trigger_atr": 1.25, "step_advance_atr": 0.58,
-        "min_mult": 1.8, "max_mult": 3.2,
-    },
-    {  # 5.0
-        "early_be_atr": 1.30, "step_trigger_atr": 1.40, "step_advance_atr": 0.64,
-        "min_mult": 2.0, "max_mult": 3.5,
-    },
-]
-XAU_TIERS: List[Dict[str, float]] = [
-    {
-        "early_be_atr": 0.65, "step_trigger_atr": 0.70, "step_advance_atr": 0.45,
-        "min_mult": 1.2, "max_mult": 2.5,
-    },
-    {
-        "early_be_atr": 0.85, "step_trigger_atr": 0.85, "step_advance_atr": 0.52,
-        "min_mult": 1.4, "max_mult": 2.8,
-    },
-    {
-        "early_be_atr": 1.10, "step_trigger_atr": 1.00, "step_advance_atr": 0.58,
-        "min_mult": 1.6, "max_mult": 3.0,
-    },
-    {
-        "early_be_atr": 1.30, "step_trigger_atr": 1.15, "step_advance_atr": 0.64,
-        "min_mult": 1.8, "max_mult": 3.2,
-    },
-    {
-        "early_be_atr": 1.55, "step_trigger_atr": 1.30, "step_advance_atr": 0.70,
-        "min_mult": 2.0, "max_mult": 3.5,
-    },
-]
+    raw = f"{sym_u}|RE|{sd}|{px}|{t}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return f"RE{sym}{sd}{digest}{t % 10000}"[:36]
 
 REENTRY_ETH: Dict[str, Any] = {
     "name": "ETH",
@@ -93,7 +97,7 @@ REENTRY_ETH: Dict[str, Any] = {
     "enabled": True,
     "activation_fracs": list(ACTIVATION_FRACS),
     "tiers": ETH_TIERS,
-    "reentry_zone_atr": 0.5,
+    "reentry_zone_atr": _ETH_ZONE,
     "limit_discount": LIMIT_DISCOUNT,
     "limit_ttl_sec": LIMIT_TTL_SEC,
     "max_reentries": MAX_REENTRIES,
@@ -106,7 +110,7 @@ REENTRY_XAU: Dict[str, Any] = {
     "enabled": True,
     "activation_fracs": list(ACTIVATION_FRACS),
     "tiers": XAU_TIERS,
-    "reentry_zone_atr": 0.3,
+    "reentry_zone_atr": _XAU_ZONE,
     "limit_discount": LIMIT_DISCOUNT,
     "limit_ttl_sec": LIMIT_TTL_SEC,
     "max_reentries": MAX_REENTRIES,

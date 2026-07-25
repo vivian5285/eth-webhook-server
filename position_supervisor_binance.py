@@ -23,6 +23,7 @@ from order_idempotency import (
     blank_ownership_state,
     make_defense_client_order_id,
 )
+import ops_log
 from position_manager import position_manager
 import dingtalk
 from webhook_parser import (
@@ -170,7 +171,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.2-ops-harden"
+BINANCE_VPS_VERSION = "v15.9.3-prod-gate"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -184,6 +185,7 @@ IDLE_PATROL_INTERVAL_SEC = 45  # 双品种空闲轮询；过密会触发 -1003 I
 IDLE_PATROL_BACKOFF_SEC = 120  # 查仓 QUERY_FAILED / 限流后拉长间隔
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
 HELD_RECONCILE_INTERVAL_SEC = 30  # 持仓期监管对账（本地 vs 交易所）
+STATE_SNAPSHOT_INTERVAL_SEC = 30  # 规格：状态快照每 30 秒持久化
 # 当日日亏/连亏/次数/回撤「拒开仓」闸门：暂时关闭（v15.9.2）。
 # risk_manager 仍记账与日志；真正防击穿靠挂单幂等硬上限，不靠日熔断挡 TV。
 CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False
@@ -396,6 +398,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._pending_order_tags = dict(_own["pending_order_tags"] or {})
         self._mutex_leg = ""
         self._last_held_reconcile_ts = 0.0
+        self._last_state_snapshot_ts = 0.0
+        self._rate_limit_hook_registered = False
         self._defense_ops_locked = False
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
         self.breathing_coefficient = cold_start_multiplier(
@@ -458,6 +462,56 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._ensure_price_ws()
         except Exception as e:
             logger.warning(f"启动 WS 订阅跳过: {e}")
+        self._ensure_rate_limit_hook()
+
+    def _ensure_rate_limit_hook(self):
+        """API 限流 → 暂停本品种（规格 5.7）。"""
+        if getattr(self, "_rate_limit_hook_registered", False):
+            return
+        try:
+            def _on_rl(sym, err_text):
+                sym_u = str(sym or self.symbol or "").upper()
+                if sym_u and sym_u not in ("", "_GLOBAL") and sym_u != str(self.symbol).upper():
+                    return
+                self._pause_symbol_trading(
+                    f"api_rate_limit:{str(err_text or '')[:120]}",
+                    title=f"API限流暂停 [{self.symbol}]",
+                    detail=(
+                        f"检测到限流/封禁错误 → 已暂停该品种全部操作 | "
+                        f"{str(err_text or '')[:240]}"
+                    ),
+                )
+
+            binance_client.register_rate_limit_hook(_on_rl)
+            self._rate_limit_hook_registered = True
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 注册限流钩子失败: {e}")
+
+    def _pause_symbol_trading(self, reason, *, title=None, detail=None, ding=True):
+        """规格：异常/竞态/限流 → 暂停该品种，等待人工。"""
+        self.trading_paused = True
+        self.trading_pause_reason = str(reason or "paused")[:240]
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        ops_log.alert(
+            f"[{self.symbol}] trading_paused reason={self.trading_pause_reason}"
+        )
+        logger.error(
+            f"🛑 [{self.symbol}] trading_paused | {self.trading_pause_reason}"
+        )
+        if ding:
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=title or f"品种交易已暂停 [{self.symbol}]",
+                    detail=detail or str(reason or ""),
+                    level="紧急",
+                    suggestion="人工核对持仓与挂单后手动恢复 trading_paused",
+                )
+            except Exception:
+                pass
 
     def _start_idle_flat_patrol(self):
         """空仓待命时实盘巡检：反向强平 / 同向接管 / 人工异动 / 漏报全平 / 蚂蚁扫尾。
@@ -3525,19 +3579,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._force_reconcile_position_vs_local(
                 reason=f"TP3与雷达竞态·{source}",
             )
-            try:
-                import dingtalk
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"TP3↔雷达竞态告警 [{self.symbol}]",
-                    detail=(
-                        f"TP3先记账但雷达撤单疑似已成交 | {source} | "
-                        f"已强制持仓核对，请人工复核"
-                    ),
-                    level="紧急",
-                )
-            except Exception:
-                pass
+            self._pause_symbol_trading(
+                f"tp3_radar_race:{source}",
+                title=f"TP3↔雷达竞态告警 [{self.symbol}]",
+                detail=(
+                    f"TP3先记账但雷达撤单疑似已成交 | {source} | "
+                    f"已强制持仓核对并暂停该品种，请人工复核"
+                ),
+            )
         return {"cancelled_radar": cancelled, "race": already_filled}
 
     def _mutex_on_radar_filled(self, live_qty=0.0, curr_px=0.0, source=""):
@@ -3577,19 +3626,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._force_reconcile_position_vs_local(
                 reason=f"雷达与TP3竞态·{source}",
             )
-            try:
-                import dingtalk
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"雷达↔TP3竞态告警 [{self.symbol}]",
-                    detail=(
-                        f"雷达先成交但 TP3 撤单疑似已成交 | {source} | "
-                        f"已强制持仓核对，请人工复核"
-                    ),
-                    level="紧急",
-                )
-            except Exception:
-                pass
+            self._pause_symbol_trading(
+                f"radar_tp3_race:{source}",
+                title=f"雷达↔TP3竞态告警 [{self.symbol}]",
+                detail=(
+                    f"雷达先成交但 TP3 撤单疑似已成交 | {source} | "
+                    f"已强制持仓核对并暂停该品种，请人工复核"
+                ),
+            )
         return {"cancelled_tp3": cancelled, "race": already_filled}
 
     def _force_reconcile_position_vs_local(self, reason=""):
@@ -3598,6 +3642,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
         if pos == "QUERY_FAILED":
             logger.error(
                 f"🚨 [{self.symbol}] 强制核对失败·持仓不可读 | {reason}"
+            )
+            self._pause_symbol_trading(
+                f"force_reconcile_query_failed:{reason}",
+                title=f"强制核对失败 [{self.symbol}]",
+                detail=f"持仓不可读 | {reason}",
             )
             return False
         if not pos or float(pos.get("size") or 0) <= 0:
@@ -3777,13 +3826,21 @@ class PositionSupervisorBinance(RadarReentryMixin):
             except Exception:
                 pass
             return False
-        # 本地未完成标签但盘口已无对应单：标记告警，不自动重挂
+        # 本地未完成标签但盘口已无对应单：以本地为准拒挂 + 钉钉 + 暂停
         pending = dict(getattr(self, "_pending_order_tags", {}) or {})
         if pending and n == 0:
-            logger.warning(
-                f"⚠️ [{self.symbol}] 本地有未完成标签 {list(pending)[:3]} "
-                f"但盘口挂单=0 → 以本地为准拒挂，等待下一周期/人工"
+            msg = (
+                f"本地有未完成标签 {list(pending)[:5]} 但盘口挂单=0 "
+                f"→ 以本地为准拒挂，暂停等待人工"
             )
+            logger.warning(f"⚠️ [{self.symbol}] {msg}")
+            ops_log.alert(f"[{self.symbol}] {msg}")
+            self._pause_symbol_trading(
+                "local_tags_vs_empty_book",
+                title=f"本地标签与盘口不一致 [{self.symbol}]",
+                detail=msg,
+            )
+            return False
         return True
 
     def _atomic_resize_after_partial_tp(self, live_qty, reason=""):
@@ -3803,6 +3860,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
             if pos == "QUERY_FAILED":
                 logger.error(
                     f"🚨 [{self.symbol}] 部分成交原子同步失败：持仓不可读 | {reason}"
+                )
+                self._pause_symbol_trading(
+                    f"partial_tp_query_failed:{reason}",
+                    title=f"部分成交同步失败 [{self.symbol}]",
+                    detail=f"持仓不可读 | {reason}",
                 )
                 return False
             if pos and float(pos.get("size") or 0) > 0:
@@ -3833,26 +3895,30 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     f"sl_ok={ok_sl} placed={placed} | "
                     f"{self._format_audit_summary(audit)} | {reason}"
                 )
-                try:
-                    self._call_dingtalk(
-                        dingtalk.report_system_alert,
-                        title=f"部分成交同步异常 [{self.symbol}]",
-                        detail=(
-                            f"{reason} | qty={live_qty} sl_ok={ok_sl} "
-                            f"| {self._format_audit_summary(audit)}"
-                        ),
-                        level="紧急",
-                    )
-                except Exception:
-                    pass
+                self._pause_symbol_trading(
+                    f"partial_tp_sync_fail:{reason}",
+                    title=f"部分成交同步异常 [{self.symbol}]",
+                    detail=(
+                        f"{reason} | qty={live_qty} sl_ok={ok_sl} "
+                        f"| {self._format_audit_summary(audit)}"
+                    ),
+                )
                 return False
             logger.info(
                 f"✅ [{self.symbol}] 部分成交原子同步完成 qty={live_qty} "
                 f"placed={placed} | {reason}"
             )
+            ops_log.ops(
+                f"[{self.symbol}] partial_tp_resize ok qty={live_qty} | {reason}"
+            )
             return True
         except Exception as e:
             logger.error(f"🚨 [{self.symbol}] 部分成交原子同步异常: {e}")
+            self._pause_symbol_trading(
+                f"partial_tp_exception:{e}",
+                title=f"部分成交同步异常 [{self.symbol}]",
+                detail=str(e),
+            )
             return False
         finally:
             self._breath_tick_paused = False
@@ -5491,7 +5557,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
     def _split_remaining_tp_quantities(self, live_qty, ratios=None):
         """
         已成交档跳过；仅对 PLACE_TP_LEVELS 内档位拆量。
-        无成交时用绝对比例（TP1/TP2 各 30%，余仓 40% 不挂）；
+        无成交时用绝对比例（TP1/TP2/TP3 = 10%/20%/70% 常挂）；
         有成交后仅在仍应挂档间分配剩余仓位。
         """
         ratios = list(
@@ -6304,13 +6370,45 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 )
                 return None
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        kind = "RADAR"
+        blocked, tag0, _ = self._has_open_pending_defense_tag(kind)
+        if blocked:
+            logger.error(
+                f"🚫 [{self.symbol}] 本地未完成标签 tag={tag0} kind={kind} "
+                f"→ 拒挂雷达止损（防查不到单狂挂）"
+            )
+            return None
+        if not self._orders_book_readable():
+            logger.error(
+                f"🚫 [{self.symbol}] 挂单不可读 → 拒挂雷达止损（fail-closed）"
+            )
+            return None
+        tag = make_defense_client_order_id(self.symbol, kind, float(trigger_px or 0))
+        self._register_pending_defense_tag(tag, kind, price=trigger_px)
+        try:
+            self._save_state()
+        except Exception:
+            pass
         if use_stop_limit:
-            return binance_client.place_stop_limit_order(
+            order = binance_client.place_stop_limit_order(
                 close_side, live_qty, trigger_px, symbol=self.symbol, limit_price=trigger_px,
             )
-        return binance_client.place_stop_market_order(
-            close_side, trigger_px, symbol=self.symbol, quantity=live_qty,
-        )
+        else:
+            order = binance_client.place_stop_market_order(
+                close_side, trigger_px, symbol=self.symbol, quantity=live_qty,
+                client_order_id=tag,
+            )
+        if not order:
+            self._complete_pending_defense_tag(tag=tag)
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            return None
+        oid = str(order.get("orderId") or order.get("algoId") or "")
+        self._register_pending_defense_tag(tag, kind, price=trigger_px, order_id=oid)
+        ops_log.ops(f"[{self.symbol}] place RADAR stop @{trigger_px} id={oid} tag={tag}")
+        return order
 
     def _frozen_hard_px(self):
         return round(float(getattr(self, "frozen_hard_sl_px", 0) or 0), 2)
@@ -6358,17 +6456,44 @@ class PositionSupervisorBinance(RadarReentryMixin):
             )
             return False
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+        kind = "HARD"
+        blocked, tag0, _ = self._has_open_pending_defense_tag(kind)
+        if blocked:
+            logger.error(
+                f"🚫 [{self.symbol}] 本地未完成标签 tag={tag0} kind={kind} "
+                f"→ 拒挂硬止损（防查不到单狂挂）"
+            )
+            return False
         # closePosition：仓位归零前数量自动匹配剩余头寸，禁止为改量而撤硬止损
+        tag = make_defense_client_order_id(self.symbol, kind, float(exchange_target or 0))
+        self._register_pending_defense_tag(tag, kind, price=exchange_target)
+        try:
+            self._save_state()
+        except Exception:
+            pass
         order = binance_client.place_stop_market_order(
             close_side, exchange_target, symbol=self.symbol, quantity=None,
+            client_order_id=tag,
         )
         if order:
+            oid = str(order.get("orderId") or order.get("algoId") or "")
+            self._register_pending_defense_tag(
+                tag, kind, price=exchange_target, order_id=oid,
+            )
             self._set_defense_order_id("hard_stop", order, save=False)
             logger.info(
                 f"🛡️ [{self.symbol}] {reason} @{exchange_target:.2f} "
-                f"closePosition (账本硬止损{hard:.2f})"
+                f"closePosition (账本硬止损{hard:.2f}) tag={tag}"
+            )
+            ops_log.ops(
+                f"[{self.symbol}] place HARD stop @{exchange_target} id={oid} tag={tag}"
             )
             return True
+        self._complete_pending_defense_tag(tag=tag)
+        try:
+            self._save_state()
+        except Exception:
+            pass
         return False
 
     def _breath_resize_stop_on_tp(self, live_qty, reason=""):
@@ -9978,14 +10103,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 # 现价未过任何档却 expected=0 → 异常；若已过1+2则只挂3
                 if self._price_reached_tp_zone(2, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP2 → 余仓交阶段二"
-                        f"（不挂 TP3 限价）"
+                        f"⚠️ 仍有 {live_qty} 仓位且现价已过TP2 → "
+                        f"推断 TP1+TP2 已成交，仅余 TP3 限价（PLACE_TP_LEVELS=3）"
                     )
                     self.tp_levels_consumed = [1, 2]
                     self._save_state()
                 elif self._price_reached_tp_zone(1, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} ETH 且现价已过TP1 → 仅余 TP2+TP3 限价"
+                        f"⚠️ 仍有 {live_qty} 仓位且现价已过TP1 → 仅余 TP2+TP3 限价"
                         f"（PLACE_TP_LEVELS=3）"
                     )
                     self.tp_levels_consumed = [1]
@@ -11880,7 +12005,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._safe_float(payload.get("tv_tp3"), 0)
             or (self.tv_tps[2] if self.tv_tps and len(self.tv_tps) > 2 else 0),
         ])
-        # TP3 不挂限价，但仍可保留 TV 价作日志；缺 TP1/TP2 时再回落日志
+        # TP3 常挂限价（10/20/70）；缺 TP1/TP2 时再回落上一 TV 快照
         if sum(1 for t in tps[:2] if float(t or 0) > 0) < 2:
             last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
             last_tps = last.get("tv_tps") or []
@@ -13818,6 +13943,20 @@ class PositionSupervisorBinance(RadarReentryMixin):
                             if now_rc - last_rc >= float(HELD_RECONCILE_INTERVAL_SEC):
                                 self._last_held_reconcile_ts = now_rc
                                 self._held_position_reconcile(real_amt, curr_px)
+                            last_snap = float(
+                                getattr(self, "_last_state_snapshot_ts", 0) or 0
+                            )
+                            if now_rc - last_snap >= float(STATE_SNAPSHOT_INTERVAL_SEC):
+                                self._last_state_snapshot_ts = now_rc
+                                try:
+                                    self._save_state()
+                                    ops_log.state(
+                                        f"[{self.symbol}] 30s snapshot "
+                                        f"qty={real_amt} side={self.current_side} "
+                                        f"own={getattr(self, 'exit_ownership', 'NONE')}"
+                                    )
+                                except Exception as se:
+                                    logger.debug(f"状态快照跳过: {se}")
                         except Exception as e:
                             logger.debug(f"持仓对账跳过: {e}")
 

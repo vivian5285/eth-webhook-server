@@ -1,34 +1,33 @@
 # ETH Webhook Trading System - 系统设计文档
 
 > **唯一权威**：见 [`README.md`](README.md)  
-> **TV v6.5.6** · **VPS v15.5.13-prod-gate** · sizing **RISK20_NOTIONAL5** · 呼吸止损 · `position_supervisor_binance.py` 唯一大脑。
+> **TV v6.5.6** · **VPS `v15.9.3-prod-gate`** · sizing **RISK20_NOTIONAL5** · 三层防线 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
-## 当前有效架构（2026-07 · v15.5.13-prod-gate）
+## 当前有效架构（2026-07 · v15.9.3-prod-gate）
 
 ```
-TradingView v6.5.6 Alert (secret=528586)
+TradingView v6.5.6 Alert (secret)
         ↓
 app.py (网关 + health: RISK20_NOTIONAL5 / fixed_5)
         ↓
 position_supervisor_binance.py   ← 唯一生产大脑
-├── TV 消息缓存固定 1.0s + 同窗先平后开折叠（tv_seq.py）
-├── 订单 ID 持久化（TP1/TP2/止损；不挂 TP3）
-├── 仓位：风险20%/VPS止损距 ∩ 名义×5 ∩ TV.qty×(TV距/VPS距)
-├── TP 30/30/40 比例；盘口只挂 TP1+TP2；余仓40%交阶段二
-├── 呼吸止损唯一写止损（entry±1.5×ATR → 0.75/0.4 阶梯 → ADX 1.2~2.5）
-├── Webhook 仅 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT（+PING）；可选 bar_time 乱序兜底
-├── 行情引擎：30m×3→90m（UTC epoch 对齐）Wilder ATR/ADX(14)；ATR 中位数异常拒单
+├── TV 消息缓存固定 1.0s + 15s OPEN/CLOSE 铁律（tv_seq.py）
+├── 订单标签持久化（TP1/TP2/TP3/HARD/RADAR · SHA-256 clientOrderId）
+├── 仓位：名义=权益×20%×5 / 价（可选 SL/TV.qty 收紧）
+├── TP 10/20/70 常挂三级限价；TP3↔雷达 exit_ownership 互斥
+├── 永久硬止损 |TV−SL|×1.2 @ 成交价 + 独立雷达呼吸止损
+├── 挂单 fail-closed · 硬上限 5 · 竞态/限流 → trading_paused
+├── 档位 config/reentry_tiers.json · 30s 状态快照 · ops_log 四级
+├── Webhook 仅 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT（+PING）
 ├── CAP_ALIGN 已废除；保留 HARD_SL_FAIL_ABORT / FORCE_ALIGN
-├── 旧 schema（缺 initial_stop/open_atr/breakeven_phase）→ 暂停，不自动转换
-├── ATR 随 90m 闭合刷新 · 挂单 5min 超时 · 60s 去重 · 哨兵 0.5s
 └── 开仓永远先平后开（无菌空仓闸）
 ```
 
-静态自查：`python check_vps_logic.py` · 对齐：`python check_90m_align.py [--live]`
+静态自查：`python check_vps_logic.py`
 
-币安 / 深币共用同一套逻辑（哨兵统一 **0.5s**）。
+币安 / 深币共用同一套逻辑。
 
 ---
 
@@ -37,9 +36,9 @@ position_supervisor_binance.py   ← 唯一生产大脑
 | 规则 | 实现 |
 |------|------|
 | 缓存窗口 **固定 1.0s** | `SAME_BAR_SETTLE_SEC` / `LEGACY_SETTLE_SEC` = 1.0 |
-| 同窗有平仓 → **一律先平后开** | 平仓一次 + 最新开仓；开仓内强制清仓兜底 |
-| 60s 去重 | `action+symbol`（同窗折叠另计） |
-| TP 分腿 | **硬编码 30/30/40**，只挂 TP1+TP2 |
+| 同窗有平仓 → **一律先平后开** | 平仓一次 + 最新开仓 |
+| 60s 去重 | `action+symbol+price` |
+| TP 分腿 | **10/20/70**，常挂 TP1+TP2+TP3 |
 
 ---
 
@@ -47,5 +46,5 @@ position_supervisor_binance.py   ← 唯一生产大脑
 
 1. 开仓永远先平后开
 2. 单仓位，不加仓（pyramiding=1）
-3. 下单数量每次独立计算，无状态
-4. 止损单全局唯一写入方 = 呼吸止损引擎
+3. 下单数量每次独立计算
+4. 宁可错过，不要做错（查不到单绝不狂挂）

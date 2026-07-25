@@ -765,6 +765,18 @@ def audit_module4_radar(a: Audit):
         and "≥5" in _bc,
     )
     a.check(
+        "4.4d2 v15.9.3 竞态/限流暂停+REST100ms+档位JSON+快照+四级日志",
+        "_pause_symbol_trading" in sup
+        and "STATE_SNAPSHOT_INTERVAL_SEC" in sup
+        and "REST_MIN_INTERVAL_SEC" in _bc
+        and "register_rate_limit_hook" in _bc
+        and "_throttle_rest" in _bc
+        and os.path.isfile(os.path.join(ROOT, "config", "reentry_tiers.json"))
+        and os.path.isfile(os.path.join(ROOT, "ops_log.py"))
+        and "REENTRY_TIERS_JSON" in _rp
+        and "[OPS]" in _read(os.path.join(ROOT, "ops_log.py")),
+    )
+    a.check(
         "4.4e 日熔断开仓闸门可关闭",
         "CIRCUIT_BREAKER_OPEN_GATE_ENABLED" in sup
         and "CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False" in sup,

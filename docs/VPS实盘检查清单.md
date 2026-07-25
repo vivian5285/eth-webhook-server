@@ -1,30 +1,30 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **v15.5.21-notional-1x** · sizing **RISK20_NOTIONAL5**（名义=本金×1）  
+> **当前**：TV **v6.5.6** · VPS **`v15.9.3-prod-gate`** · sizing **RISK20_NOTIONAL5**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
 
 | # | 原则 | 代码落点 |
 |---|------|----------|
-| 1 | **风险仓位**：风险=权益×20%；名义=权益×20%×5(=权益×1)；`min(风险/VPS止损距, 名义/价, TV.qty×(TV距/VPS距))` | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
-| 2 | **呼吸止损唯一写入**：initialStop=entry±1.5×ATR；不使用 TV `stop_loss` 作基准 | `breath_stop.py` · `_sync_exchange_stop()` |
-| 3 | **呼吸阶段一**：0.75 ATR 步进 / 0.4 ATR 跟进（基准=initialStop） | `calculate_breath_stop()` |
-| 4 | TP **30/30/40**；盘口只挂 **TP1+TP2**；余仓交阶段二 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=2` |
-| 5 | 订单监控只报告 TP 成交，**不直接改止损单**（通知引擎收缩） | `_breath_resize_stop_on_tp` |
+| 1 | **风险仓位**：名义=`权益×20%×5`；`qty=名义/价`（可选 SL/TV.qty 收紧） | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
+| 2 | **永久硬止损**：`\|TV.price−TV.stop_loss\|×1.2` 锚定成交价；**禁止** 1.5×ATR 地板 | `atr_scenario.hard_stop_price` · `_ensure_frozen_hard_sl` |
+| 3 | **独立雷达止损**：呼吸 initialStop=`entry±1.5×ATR`；步进/跟进见 `breath_profiles` | `breath_stop.py` · `_sync_exchange_stop()` |
+| 4 | TP **10/20/70**；盘口常挂 **TP1+TP2+TP3**；TP3↔雷达 `exit_ownership` 互斥 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=3` |
+| 5 | 部分成交原子同步：硬/雷达/TP3 数量对齐；失败 → **`trading_paused`** | `_atomic_resize_after_partial_tp` |
 | 6 | 反转保护仅 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |
-| 7 | 去重 60s · 挂单超时 5min · 90m ATR/ADX | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` · `market_engine` |
+| 7 | 去重 60s · 挂单超时 5min · 90m ATR/ADX（对比用） | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` |
 | 8 | 实盘/重启与方向背离 → **FORCE_ALIGN** 先全平 | `_close_all(..., force_align=)` |
-| 9 | secret 必须 = `528586`（兼容旧字段 `token`） | `app.py` webhook |
+| 9 | secret 必须匹配环境配置（兼容旧字段 `token`） | `app.py` webhook |
 | 10 | **ETH / XAU** 独立状态 | `symbol_config.py` · `SUPERVISORS` |
-| 11 | TV 消息缓存 **1.0s** → 同窗**先平后开** | `collapse_batch_for_execution` |
-| 12 | TP/止损 **订单 ID 持久化** | `_defense_order_ids` |
-| 13 | 哨兵 **0.5s** | `SENTINEL_POLL_*=0.5` |
-| 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT**；先平后开净场失败 → **CLOSE_THEN_OPEN_FAIL_ABORT** | `_trim` no-op · `report_hard_sl_fail_abort` · `report_close_then_open_fail_abort` |
-| 15 | 90m **UTC epoch** 对齐；上线前 `check_90m_align.py --live` 与 TV 逐根对时 | `bucket_90m_open_ms` · `merge_30m_to_90m` |
-| 16 | ATR≤0 或 < 近50根中位数×30% → **拒本笔开仓** + 钉钉 | `check_atr_anomaly` · `_calc_vps_open_qty` |
-| 17 | 可选 `bar_time`：早于已处理 → 忽略不交易 | `enqueue_signal` · `webhook_parser` |
+| 11 | TV 消息缓存 **1.0s** → 同窗**先平后开**；15s OPEN/CLOSE 铁律 | `collapse_batch_for_execution` |
+| 12 | TP/硬/雷达 **订单标签** 持久化（SHA-256 `clientOrderId`） | `order_idempotency` · `_pending_order_tags` |
+| 13 | 查单失败 **fail-closed**；未成交挂单硬上限 **5** | `ORDERS_QUERY_FAILED` · `MAX_OPEN_ORDERS_HARD_CAP` |
+| 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT** | `report_hard_sl_fail_abort` |
+| 15 | REST 单品种间隔 ≥**100ms**；`-1003` → 暂停该品种 | `REST_MIN_INTERVAL_SEC` · rate-limit hook |
+| 16 | ATR≤0 或异常 → **拒本笔开仓** + 钉钉 | `check_atr_anomaly` · `_calc_vps_open_qty` |
+| 17 | 档位配置外置 JSON；状态快照 30s；日志 `[OPS\|STATE\|ALERT\|AUDIT]` | `config/reentry_tiers.json` · `ops_log.py` |
 
 ---
 
@@ -32,9 +32,9 @@
 
 | # | 项 | 阻塞? | 验证 |
 |---|----|-------|------|
-| 1 | 90m 边界与 TV 对齐 | **是** | `python check_90m_align.py --live` → TV 90m 开盘时间完全重合；ATR/ADX 抽样误差 <5% |
+| 1 | 90m 边界与 TV 对齐 | **是** | `python check_90m_align.py --live` |
 | 2 | Webhook `bar_time` | 否 | JSON 带 `bar_time`；乱序旧消息只记日志 |
-| 3 | ATR 异常兜底 | **是** | atr=0 / 过低中位数 → 拒单钉钉，非永久暂停 |
+| 3 | 防叠单铁律 | **是** | `python test_orders_dup_guard.py` · `test_risk_iron_v1591.py` |
 
 ---
 
@@ -42,26 +42,25 @@
 
 ```
 风险资金 = 账户权益 × 20%
-名义上限 = 账户权益 × 5
-VPS止损距 = |entry − initialStop|          # initialStop = entry ± 1.5×ATR
-TV隐含距 = |TV.price − TV.stop_loss|
-sl_adj = TV隐含距 / VPS止损距               # 缺 TV.stop_loss → 1.0
-qty = floor( min(风险/VPS止损距, 名义/entry, TV.qty×sl_adj) )
+名义上限 = 账户权益 × 20% × 5 = 权益 × 1
+qty = 名义上限 / entryPrice
+# 可选：stop_loss 收紧；TV.qty soft-cap（天文忽略）
 ```
 
-TV.stop_loss **只**调 sl_adj，不挂盘。
+TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**不单独挂 TV 原价止损**。
 
 ---
 
-## 模块四：呼吸止损（替代旧阶梯雷达）
+## 模块四：三层防线（硬 + 雷达 + TP123）
 
 | # | 检查项 | 值 |
 |---|--------|-----|
-| 4.1 | 初始止损 | **1.5** ×ATR |
-| 4.2 | 步进 / 跟进 | **0.75 / 0.4** ATR（基准 initialStop） |
-| 4.3 | TP1/TP2 底线 | 触及 1.35/2.5 ATR → 底线 **0.5 / 1.5** ATR |
-| 4.4 | 阶段二 | 触及 **3.0** ATR → ADX 追踪 **1.2~2.5** ATR |
-| 4.5 | 旧 85%/0.5/0.3/2.0 | **已删除生效路径** |
+| 4.1 | 永久硬止损 | `\|TV−SL\|×1.2` @ 成交价外侧 |
+| 4.2 | 雷达初始距 | entry ± **1.5** ×ATR（雷达腿，非硬止损） |
+| 4.3 | 雷达步进 / 跟进 | 档位表 `config/reentry_tiers.json`（默认 0.75 / 0.4） |
+| 4.4 | TP 比例 / 档数 | **10/20/70** · `PLACE_TP_LEVELS=3` |
+| 4.5 | 互斥 | `exit_ownership`：NONE / TP3_LIMIT / RADAR_STOP |
+| 4.6 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
 
 ---
 
@@ -69,13 +68,15 @@ TV.stop_loss **只**调 sl_adj，不挂盘。
 
 | 规则 | 处理 |
 |------|------|
-| TP 限价未成交 | 取消 + 移交呼吸引擎 + 禁止重挂 |
-| 重复消息 | 60s 同 action+symbol 忽略 |
-| 开仓前 | 强制清仓（先平后开）；失败重试 1s/3s/6s → CLOSE_THEN_OPEN_FAIL_ABORT |
-| 改单失败 | 重试 3 次 → HARD_SL_FAIL_ABORT 告警保持现状 |
-| 方向不一致 | FORCE_ALIGN 先全平 + 钉钉 |
-| TP3 | **不挂限价**；余仓由阶段二追踪退出 |
-| CAP_ALIGN | **已删除**（禁止 VPS 自主减仓） |
+| 查单失败 | fail-closed，禁止「没挂单就再挂」 |
+| 本地标签未释放 | 绝对拒挂（即使交易所返回空） |
+| 未成交挂单 ≥5 | 熔断拒挂 + `trading_paused` |
+| 竞态双腿成交 | 强制对账 + **暂停品种** + 钉钉 |
+| 部分成交同步失败 | 告警 + **暂停品种** |
+| API 限流 -1003 | 退避 + **暂停品种** |
+| 重复消息 | 60s 同 action+symbol+price 忽略 |
+| 开仓前 | 强制清仓（先平后开）；失败 → CLOSE_THEN_OPEN_FAIL_ABORT |
+| CAP_ALIGN | **已删除** |
 
 ---
 
@@ -83,6 +84,7 @@ TV.stop_loss **只**调 sl_adj，不挂盘。
 
 ```bash
 python check_vps_logic.py
-python check_90m_align.py --live
+python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry
 curl -s http://127.0.0.1:5003/health | python -m json.tool
+# 期望 version: v15.9.3-prod-gate
 ```

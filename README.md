@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.9.2-ops-harden`**  
+**当前版本：`v15.9.3-prod-gate`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
@@ -9,6 +9,7 @@
 **波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
 **递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
 **幂等铁律（v15.9.1+）**：本地订单标签未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**；`exit_ownership` 持久化互斥  
+**生产闸门（v15.9.3）**：竞态/部分成交失败/限流/`本地标签vs空盘` → **`trading_paused`**；REST 单品种 ≥100ms；档位 `config/reentry_tiers.json`；30s 状态快照；日志 `[OPS|STATE|ALERT|AUDIT]`  
 **日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
@@ -33,7 +34,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.9.2-ops-harden · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.9.3-prod-gate · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
@@ -223,10 +224,9 @@ position_supervisor_binance.py     ← 唯一生产大脑
 | 字段 | 用途 |
 |------|------|
 | `price` | 开仓参考 / 去重键 |
-| `stop_loss` | 永久硬止损公式输入（与 `atr`/`price`/成交价一并计算）；亦可参与 sizing 收紧 |
+| `stop_loss` | 永久硬止损公式输入（`|price−stop_loss|×buffer`）；亦可参与 sizing 收紧 |
 | `atr` | 场景一日志；场景二雷达 ATR；缺则拒开 |
-| `tp1`/`tp2` | 限价止盈价；数量固定 30%/30% |
-| `tp3` | 仅场景二挂出（40%）；场景一不挂 |
+| `tp1`/`tp2`/`tp3` | 限价止盈价；数量固定 **10% / 20% / 70%**（三级常挂） |
 | `qty` | 可选 soft-cap；天文值忽略 |
 
 ---
@@ -375,7 +375,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v15.9.2-ops-harden
+# 期望: v15.9.3-prod-gate
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
@@ -385,7 +385,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 # 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v15.9.2-ops-harden`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v15.9.3-prod-gate`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
 
 ### 20U 矩阵观察点
 
