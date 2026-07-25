@@ -133,8 +133,24 @@ def admin_resume(symbol):
     sup = get_supervisor(sym)
     prev = str(getattr(sup, "trading_pause_reason", "") or "")
     was = bool(getattr(sup, "trading_paused", False))
+    was_mon = bool(getattr(sup, "api_monitor_only", False))
     sup.trading_paused = False
     sup.trading_pause_reason = ""
+    try:
+        if hasattr(sup, "_exit_api_monitor_only") and (
+            was_mon or str(prev).startswith("api_monitor_only")
+        ):
+            # 人工 resume：清仅监控标志，但不强制再走 probe 对账路径的钉钉轰炸
+            from binance_client import binance_client as _bc
+            getattr(sup, "api_monitor_only", None)
+            sup.api_monitor_only = False
+            _bc.set_monitor_only(sym, False)
+        elif was_mon:
+            from binance_client import binance_client as _bc
+            sup.api_monitor_only = False
+            _bc.set_monitor_only(sym, False)
+    except Exception as e:
+        logger.warning(f"[admin/resume] 清仅监控跳过: {e}")
     # 持仓期误跑开仓sizing留下的污染（假 ATR 降级）一并清掉
     try:
         sup._atr_div_streak = 0
@@ -231,6 +247,7 @@ def admin_smoke_arm_radar(symbol):
 @app.route('/health', methods=['GET'])
 def health():
     from webhook_parser import SIZING_MODE
+    from binance_client import binance_client as _bc
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
@@ -248,6 +265,11 @@ def health():
         },
         "trading_paused": {
             s: bool(getattr(sup, "trading_paused", False))
+            for s, sup in SUPERVISORS.items()
+        },
+        "api_monitor_only": {
+            s: bool(getattr(sup, "api_monitor_only", False))
+            or bool(_bc.is_monitor_only(s))
             for s, sup in SUPERVISORS.items()
         },
         "trading_pause_reason": {

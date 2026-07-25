@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.2.0-spec-full"
+BINANCE_VPS_VERSION = "v16.2.1-api-monitor"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -433,6 +433,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         }
         self.trading_paused = False
         self.trading_pause_reason = ""
+        self.api_monitor_only = False
         self._state_old_schema = False
         self._last_bar_time_ms = 0  # 最近处理过的 bar_time（乱序/过期兜底）
         self._atr_div_streak = 0
@@ -473,6 +474,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
             logger.warning(f"启动 WS 订阅跳过: {e}")
         self._ensure_rate_limit_hook()
         self._ensure_order_reject_hook()
+        self._ensure_api_unavailable_hook()
+        self._start_api_probe_loop()
 
     def _ensure_rate_limit_hook(self):
         """API 限流 → 暂停本品种（规格 5.7）。"""
@@ -519,6 +522,122 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._order_reject_hook_registered = True
         except Exception as e:
             logger.warning(f"[{self.symbol}] 注册拒单钩子失败: {e}")
+
+    def _ensure_api_unavailable_hook(self):
+        """规格 12.2：交易 REST 退避耗尽 → 仅监控；30s 只读探测后自动恢复。"""
+        if getattr(self, "_api_unavailable_hook_registered", False):
+            return
+        try:
+            def _on_unavail(sym, err_text):
+                sym_u = str(sym or self.symbol or "").upper()
+                if sym_u and sym_u not in ("", "_GLOBAL") and sym_u != str(self.symbol).upper():
+                    return
+                self._enter_api_monitor_only(err_text)
+
+            binance_client.register_api_unavailable_hook(_on_unavail)
+            self._api_unavailable_hook_registered = True
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 注册 API 不可用钩子失败: {e}")
+
+    def _enter_api_monitor_only(self, err_text=""):
+        """进入仅监控：价格 WS 继续，禁止下单/改撤；可自动探测恢复。"""
+        if getattr(self, "api_monitor_only", False):
+            return
+        self.api_monitor_only = True
+        try:
+            binance_client.set_monitor_only(self.symbol, True)
+        except Exception:
+            pass
+        self._pause_symbol_trading(
+            f"api_monitor_only:{str(err_text or '')[:120]}",
+            title=f"API不可用·仅监控 [{self.symbol}]",
+            detail=(
+                f"交易 REST 指数退避 5 次失败 → 仅监控不操作 | "
+                f"每 {30}s 只读探测，恢复后自动对账 | {str(err_text or '')[:240]}"
+            ),
+        )
+        logger.error(
+            f"📡 [{self.symbol}] api_monitor_only=ON | {str(err_text or '')[:200]}"
+        )
+
+    def _exit_api_monitor_only(self, source="probe"):
+        """API 恢复：退出仅监控，解除暂停，强制持仓核对。"""
+        was = bool(getattr(self, "api_monitor_only", False))
+        self.api_monitor_only = False
+        try:
+            binance_client.set_monitor_only(self.symbol, False)
+        except Exception:
+            pass
+        reason = str(getattr(self, "trading_pause_reason", "") or "")
+        if reason.startswith("api_monitor_only"):
+            self.trading_paused = False
+            self.trading_pause_reason = ""
+            try:
+                self._save_state()
+            except Exception:
+                pass
+        logger.info(
+            f"✅ [{self.symbol}] api_monitor_only=OFF source={source} was={was}"
+        )
+        try:
+            self._call_dingtalk(
+                dingtalk.report_system_alert,
+                title=f"API已恢复 [{self.symbol}]",
+                detail=f"仅监控解除 source={source} → 立即持仓核对",
+                level="提示",
+                suggestion="已自动恢复自动化；请确认止损仍在",
+            )
+        except Exception:
+            pass
+        try:
+            self._force_reconcile_position_vs_local(reason=f"api_recover:{source}")
+        except Exception as e:
+            logger.error(f"[{self.symbol}] API恢复后对账失败: {e}")
+        try:
+            live = self._get_active_position(prefer_ws=False)
+            if live and live != "QUERY_FAILED" and float(live.get("size") or 0) > 0:
+                self._sync_exchange_stop(
+                    float(live.get("size") or 0),
+                    radar_sl=None,
+                    reason="API恢复后重挂保护",
+                    force=True,
+                )
+        except Exception as e:
+            logger.error(f"[{self.symbol}] API恢复后重挂止损失败: {e}")
+
+    def _start_api_probe_loop(self):
+        """规格 12.2：仅监控期间每 30s 只读探测账户，成功则自动恢复。"""
+        if getattr(self, "_api_probe_started", False):
+            return
+        self._api_probe_started = True
+        self.api_monitor_only = bool(getattr(self, "api_monitor_only", False))
+
+        def loop():
+            from binance_client import API_PROBE_INTERVAL_SEC
+            while True:
+                try:
+                    time.sleep(float(API_PROBE_INTERVAL_SEC or 30.0))
+                    if not getattr(self, "api_monitor_only", False):
+                        continue
+                    # 只读探测：账户摘要
+                    summary = binance_client.get_futures_account_summary()
+                    if not summary:
+                        logger.warning(
+                            f"📡 [{self.symbol}] API探测失败·仍仅监控"
+                        )
+                        continue
+                    logger.info(
+                        f"📡 [{self.symbol}] API探测成功 → 退出仅监控"
+                    )
+                    self._exit_api_monitor_only(source="probe_ok")
+                except Exception as e:
+                    logger.warning(
+                        f"📡 [{self.symbol}] API探测异常·仍仅监控: {e}"
+                    )
+
+        threading.Thread(
+            target=loop, daemon=True, name=f"api-probe-{self.symbol}",
+        ).start()
 
     def _pause_symbol_trading(self, reason, *, title=None, detail=None, ding=True):
         """规格：异常/竞态/限流 → 暂停该品种，等待人工。"""
@@ -2875,6 +2994,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     "defense_order_ids": dict(getattr(self, "_defense_order_ids", {}) or {}),
                     "frozen_hard_sl_px": float(getattr(self, "frozen_hard_sl_px", 0) or 0),
                     "trading_paused": bool(getattr(self, "trading_paused", False)),
+                    "api_monitor_only": bool(getattr(self, "api_monitor_only", False)),
                     "trading_pause_reason": str(getattr(self, "trading_pause_reason", "") or ""),
                     "atr_div_streak": int(getattr(self, "_atr_div_streak", 0) or 0),
                     "atr_source": str(getattr(self, "atr_source", "vps") or "vps"),
@@ -11471,8 +11591,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 or reason.startswith("restart_")
                 or reason.startswith("ATR_DEGRADE")
                 or reason.startswith("INCIDENT_")
+                or reason.startswith("api_monitor_only")
+                or reason.startswith("order_reject")
                 or "PENDING_RESUME" in reason
             )
+            if getattr(self, "api_monitor_only", False):
+                needs_manual = True
             live = self._get_active_position()
             live_qty = float((live or {}).get("size") or 0)
             if needs_manual or live_qty > float(getattr(self, "min_qty", 0.001) or 0.001):
@@ -14781,6 +14905,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         s.get("frozen_hard_sl_px", 0) or 0
                     )
                     self.trading_paused = bool(s.get("trading_paused", False))
+                    self.api_monitor_only = bool(s.get("api_monitor_only", False))
+                    if self.api_monitor_only:
+                        try:
+                            binance_client.set_monitor_only(self.symbol, True)
+                        except Exception:
+                            pass
                     self.trading_pause_reason = str(
                         s.get("trading_pause_reason", "") or ""
                     )

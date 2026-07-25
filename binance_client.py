@@ -12,9 +12,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v15.9.3-prod-gate"
+BINANCE_CLIENT_VERSION = "v16.2.1-api-monitor"
 # 规格：单品种 REST 调用间隔不得小于 100ms
 REST_MIN_INTERVAL_SEC = 0.1
+# 规格 12.2：首次立即重试，之后 1/2/4/8s，最多 5 次重试
+TRADE_RETRY_DELAYS_SEC = (0.0, 1.0, 2.0, 4.0, 8.0)
+API_PROBE_INTERVAL_SEC = 30.0
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"
@@ -92,8 +95,13 @@ class BinanceClient:
         self._rest_throttle_lock = threading.Lock()
         self._rate_limit_hooks = []
         self._order_reject_hooks = []
+        self._api_unavailable_hooks = []
         self._recent_local_cancels = {}
         self._local_cancel_lock = threading.Lock()
+        self._monitor_only_syms = set()
+        self._monitor_only_lock = threading.Lock()
+        self._trade_retry_locks = {}
+        self._trade_retry_lock_guard = threading.Lock()
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
 
     def register_rate_limit_hook(self, cb):
@@ -107,6 +115,147 @@ class BinanceClient:
             self._order_reject_hooks = []
         if callable(cb) and cb not in self._order_reject_hooks:
             self._order_reject_hooks.append(cb)
+
+    def register_api_unavailable_hook(self, cb):
+        """规格 12.2：交易 REST 5 次退避失败 → cb(symbol, err_text) 进入仅监控。"""
+        if not hasattr(self, "_api_unavailable_hooks"):
+            self._api_unavailable_hooks = []
+        if callable(cb) and cb not in self._api_unavailable_hooks:
+            self._api_unavailable_hooks.append(cb)
+
+    def set_monitor_only(self, symbol, enabled=True):
+        """仅监控：拒绝下单/改撤，只读与 WS 价格仍可用。"""
+        if not hasattr(self, "_monitor_only_syms"):
+            self._monitor_only_syms = set()
+            self._monitor_only_lock = threading.Lock()
+        sym = str(symbol or "").upper()
+        if not sym:
+            return
+        with self._monitor_only_lock:
+            if enabled:
+                self._monitor_only_syms.add(sym)
+            else:
+                self._monitor_only_syms.discard(sym)
+
+    def is_monitor_only(self, symbol=""):
+        if not hasattr(self, "_monitor_only_syms"):
+            return False
+        sym = str(symbol or "").upper()
+        with getattr(self, "_monitor_only_lock", threading.Lock()):
+            return sym in self._monitor_only_syms
+
+    @staticmethod
+    def _is_transient_api_error(err):
+        """网络超时 / 5xx / 连接中断 → 可指数退避；拒单与限流不算 transient。"""
+        text = str(err or "")
+        low = text.lower()
+        if (
+            "-1003" in text
+            or "too_many_requests" in low
+            or "banned until" in low
+            or "-2019" in text
+            or "-2018" in text
+            or "-4164" in text
+            or "insufficient" in low
+            or "margin is insufficient" in low
+        ):
+            return False
+        markers = (
+            "timeout", "timed out", "time out",
+            "connection", "connecterror", "connectionreset",
+            "remotedisconnected", "temporarily unavailable",
+            "502", "503", "504", "500",
+            "-1001", "internal error", "read timed out",
+            "broken pipe", "network", "ssl",
+        )
+        return any(m in low or m in text for m in markers)
+
+    def _trade_lock_for(self, symbol):
+        if not hasattr(self, "_trade_retry_lock_guard"):
+            self._trade_retry_lock_guard = threading.Lock()
+            self._trade_retry_locks = {}
+        sym = str(symbol or "_GLOBAL").upper()
+        with self._trade_retry_lock_guard:
+            lk = self._trade_retry_locks.get(sym)
+            if lk is None:
+                lk = threading.Lock()
+                self._trade_retry_locks[sym] = lk
+            return lk
+
+    def _fire_api_unavailable(self, symbol, err):
+        if not hasattr(self, "_api_unavailable_hooks"):
+            self._api_unavailable_hooks = []
+        text = str(err or "")[:400]
+        for h in list(self._api_unavailable_hooks):
+            try:
+                h(str(symbol or ""), text)
+            except Exception:
+                pass
+
+    def _with_trade_retry(self, symbol, op_name, fn, *, reduce_only=False):
+        """
+        规格 12.2：交易类 REST 指数退避重试。
+        首次失败后按 0/1/2/4/8s 再试最多 5 次；全失败 → 仅监控钩子。
+        重试期间同品种串行，禁止并发下单/改撤。
+        """
+        sym = str(symbol or "").upper()
+        if self.is_monitor_only(sym):
+            logger.error(f"[仅监控] 拒绝 {op_name} {sym}")
+            return None
+        delays = tuple(TRADE_RETRY_DELAYS_SEC)
+        lk = self._trade_lock_for(sym)
+        with lk:
+            if self.is_monitor_only(sym):
+                logger.error(f"[仅监控] 拒绝 {op_name} {sym}")
+                return None
+            last_err = None
+            # 第 1 次尝试
+            try:
+                return fn()
+            except Exception as e:
+                last_err = e
+                if self._note_api_error(e, sym):
+                    raise
+                if (not reduce_only) and self._note_order_reject(e, sym, reduce_only=False):
+                    raise
+                if not self._is_transient_api_error(e):
+                    raise
+                logger.warning(
+                    f"[API退避] {sym} {op_name} 首次失败(transient): {e}"
+                )
+            for i, delay in enumerate(delays):
+                if self.is_monitor_only(sym):
+                    logger.error(f"[仅监控] 中止重试 {op_name} {sym}")
+                    return None
+                if delay and delay > 0:
+                    time.sleep(float(delay))
+                try:
+                    out = fn()
+                    logger.info(
+                        f"[API退避] {sym} {op_name} 第{i + 1}次重试成功 "
+                        f"(delay={delay}s)"
+                    )
+                    return out
+                except Exception as e:
+                    last_err = e
+                    if self._note_api_error(e, sym):
+                        raise
+                    if (not reduce_only) and self._note_order_reject(
+                        e, sym, reduce_only=False
+                    ):
+                        raise
+                    if not self._is_transient_api_error(e):
+                        raise
+                    logger.warning(
+                        f"[API退避] {sym} {op_name} 重试 {i + 1}/{len(delays)} "
+                        f"delay={delay}s 失败: {e}"
+                    )
+            logger.error(
+                f"[API不可用] {sym} {op_name} 已重试{len(delays)}次仍失败 → 仅监控 | "
+                f"{last_err}"
+            )
+            self._fire_api_unavailable(sym, last_err)
+            return None
 
     def _mark_local_cancel(self, symbol, order_id):
         """记录本地主动撤单，供 WS 区分交易所单方面取消（规格 12.3）。"""
@@ -942,7 +1091,9 @@ class BinanceClient:
         if qty <= 0:
             logger.error(f"[市价单跳过] 数量无效 {quantity}")
             return None
-        try:
+
+        def _do():
+            self._throttle_rest(symbol)
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "MARKET", "quantity": qty,
@@ -953,11 +1104,13 @@ class BinanceClient:
             tag = "平仓" if reduce_only else "开仓"
             logger.info(f"[市价{tag}成功] {side} {qty} {symbol}")
             return order
+
+        try:
+            return self._with_trade_retry(
+                symbol, "market", _do, reduce_only=bool(reduce_only),
+            )
         except Exception as e:
             tag = "平仓" if reduce_only else "开仓"
-            self._note_api_error(e, symbol)
-            if not reduce_only:
-                self._note_order_reject(e, symbol, reduce_only=False)
             logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
 
@@ -1057,11 +1210,14 @@ class BinanceClient:
                     f"[限价单] {symbol} 查单异常且带标签 {coid} → fail-closed 拒挂"
                 )
                 return None
-        self._throttle_rest(symbol)
-        try:
-            binance_side = want_side
+        if self.is_monitor_only(symbol):
+            logger.error(f"[仅监控] 拒绝 limit {symbol}")
+            return None
+
+        def _do_limit():
+            self._throttle_rest(symbol)
             params = {
-                "symbol": symbol, "side": binance_side, "type": "LIMIT",
+                "symbol": symbol, "side": want_side, "type": "LIMIT",
                 "timeInForce": "GTC", "quantity": qty, "price": px_str,
             }
             if reduce_only:
@@ -1076,8 +1232,12 @@ class BinanceClient:
             with self._place_dedupe_lock:
                 self._recent_limit_place[key] = (time.time(), order)
             return order
+
+        try:
+            return self._with_trade_retry(
+                symbol, "limit", _do_limit, reduce_only=bool(reduce_only),
+            )
         except Exception as e:
-            self._note_api_error(e, symbol)
             logger.error(f"[限价单失败] {side} {qty} @ {px_str} tag={coid or '-'}: {e}")
             return None
 
@@ -1085,27 +1245,28 @@ class BinanceClient:
                                      close_position=True, quantity=None,
                                      client_order_id=None):
         """Algo 通道 STOP_MARKET：优先 quantity+reduceOnly；否则 closePosition。"""
-        try:
-            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
-            params = {
-                "algoType": "CONDITIONAL",
-                "symbol": symbol,
-                "side": binance_side,
-                "type": "STOP_MARKET",
-                "triggerPrice": self.format_price(stop_price, symbol),
-            }
-            coid = str(client_order_id or "").strip()[:36] or None
-            if coid:
-                params["clientAlgoId"] = coid
-            if quantity is not None:
-                qty = self.format_quantity(quantity, symbol)
-                if qty <= 0:
-                    logger.error(f"[Algo止损跳过] 数量无效 {quantity}")
-                    return None
-                params["quantity"] = qty
-                params["reduceOnly"] = "true"
-            elif close_position:
-                params["closePosition"] = "true"
+        binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+        params = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": binance_side,
+            "type": "STOP_MARKET",
+            "triggerPrice": self.format_price(stop_price, symbol),
+        }
+        coid = str(client_order_id or "").strip()[:36] or None
+        if coid:
+            params["clientAlgoId"] = coid
+        if quantity is not None:
+            qty = self.format_quantity(quantity, symbol)
+            if qty <= 0:
+                logger.error(f"[Algo止损跳过] 数量无效 {quantity}")
+                return None
+            params["quantity"] = qty
+            params["reduceOnly"] = "true"
+        elif close_position:
+            params["closePosition"] = "true"
+
+        def _do():
             order = self._futures_signed_request("post", "algoOrder", params)
             tag = f"qty={quantity}" if quantity is not None else "closePosition"
             logger.info(
@@ -1115,8 +1276,12 @@ class BinanceClient:
             if isinstance(order, dict):
                 order.setdefault("isAlgoOrder", True)
             return order
+
+        try:
+            return self._with_trade_retry(
+                symbol, "algo_stop", _do, reduce_only=True,
+            )
         except Exception as e:
-            self._note_api_error(e, symbol)
             logger.error(f"[Algo止损失败] {side} Stop @ {stop_price}: {e}")
             return None
 
@@ -1152,11 +1317,14 @@ class BinanceClient:
                 f"→ 跳过重复挂单"
             )
             return exist
-        self._throttle_rest(symbol)
-        try:
-            binance_side = want_side
+        if self.is_monitor_only(symbol):
+            logger.error(f"[仅监控] 拒绝 stop {symbol}")
+            return None
+
+        def _do_stop():
+            self._throttle_rest(symbol)
             params = {
-                "symbol": symbol, "side": binance_side, "type": "STOP_MARKET",
+                "symbol": symbol, "side": want_side, "type": "STOP_MARKET",
                 "stopPrice": self.format_price(stop_price, symbol),
             }
             if coid:
@@ -1164,8 +1332,7 @@ class BinanceClient:
             if quantity is not None:
                 qty = self.format_quantity(quantity, symbol)
                 if qty <= 0:
-                    logger.error(f"[止损单跳过] 数量无效 {quantity}")
-                    return None
+                    raise ValueError(f"invalid stop qty {quantity}")
                 params["quantity"] = qty
                 params["reduceOnly"] = True
             else:
@@ -1176,6 +1343,11 @@ class BinanceClient:
             with self._place_dedupe_lock:
                 self._recent_stop_place[key] = (time.time(), order)
             return order
+
+        try:
+            return self._with_trade_retry(
+                symbol, "stop", _do_stop, reduce_only=True,
+            )
         except Exception as e:
             if self._is_algo_switch_error(e):
                 logger.info(
@@ -1191,7 +1363,6 @@ class BinanceClient:
                     with self._place_dedupe_lock:
                         self._recent_stop_place[key] = (time.time(), order)
                 return order
-            self._note_api_error(e, symbol)
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 
@@ -1225,13 +1396,19 @@ class BinanceClient:
     def cancel_algo_order(self, symbol="ETHUSDT", algo_id=None):
         if not algo_id:
             return None
-        try:
+
+        def _do():
             res = self._futures_signed_request(
                 "delete", "algoOrder", {"symbol": symbol, "algoId": int(algo_id)},
             )
             self._mark_local_cancel(symbol, algo_id)
             logger.info(f"[Algo撤单成功] {symbol} algoId={algo_id}")
             return res
+
+        try:
+            return self._with_trade_retry(
+                symbol, "cancel_algo", _do, reduce_only=True,
+            )
         except Exception as e:
             logger.error(f"[Algo撤单失败] {symbol} algoId={algo_id}: {e}")
             return None
@@ -1245,11 +1422,18 @@ class BinanceClient:
             order_id = order.get("orderId") or order_id
         if not order_id:
             return None
-        try:
+
+        def _do():
+            self._throttle_rest(symbol)
             res = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
             self._mark_local_cancel(symbol, order_id)
             logger.info(f"[撤单成功] {symbol} orderId={order_id}")
             return res
+
+        try:
+            return self._with_trade_retry(
+                symbol, "cancel", _do, reduce_only=True,
+            )
         except Exception as e:
             err = str(e)
             if "-2011" in err or "Unknown order" in err or "Order does not exist" in err:
@@ -1258,14 +1442,29 @@ class BinanceClient:
             return None
 
     def cancel_all_open_orders(self, symbol="ETHUSDT"):
-        try:
+        if self.is_monitor_only(symbol):
+            logger.error(f"[仅监控] 拒绝 cancel_all {symbol}")
+            return
+
+        def _do_plain():
+            self._throttle_rest(symbol)
             self.client.futures_cancel_all_open_orders(symbol=symbol)
             logger.info(f"[撤单成功] {symbol} 全部普通挂单已撤销")
+            return True
+
+        def _do_algo():
+            self._futures_signed_request(
+                "delete", "algoOpenOrders", {"symbol": symbol},
+            )
+            logger.info(f"[撤单成功] {symbol} 全部 Algo 条件单已撤销")
+            return True
+
+        try:
+            self._with_trade_retry(symbol, "cancel_all", _do_plain, reduce_only=True)
         except Exception as e:
             logger.error(f"[撤单失败] {symbol} 普通挂单: {e}")
         try:
-            self._futures_signed_request("delete", "algoOpenOrders", {"symbol": symbol})
-            logger.info(f"[撤单成功] {symbol} 全部 Algo 条件单已撤销")
+            self._with_trade_retry(symbol, "cancel_all_algo", _do_algo, reduce_only=True)
         except Exception as e:
             logger.warning(f"[撤单] {symbol} Algo 条件单: {e}")
 

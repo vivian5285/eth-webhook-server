@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **`v16.2.0-spec-full`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版**  
+> **当前**：TV **v6.5.6** · VPS **`v16.2.1-api-monitor`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -87,6 +87,6 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 python check_vps_logic.py
 python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry
 curl -s http://127.0.0.1:5003/health | python -m json.tool
-# 期望 version: v16.2.0-spec-full · trading_paused=false
+# 期望 version: v16.2.1-api-monitor · trading_paused=false
 # 20U 实盘矩阵（VPS）: sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
