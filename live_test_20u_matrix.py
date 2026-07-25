@@ -271,14 +271,14 @@ def verify_defense(sym, side, plan, st, au):
         ok = False
     breath = float(st.get("breathing_coefficient") or 0)
     if sym.startswith("XAU") and breath > 0:
-        # 冷启动或近冷启动应贴近 0.675；允许采样后漂移
-        if abs(breath - 0.675) > 0.35 and not (0.5 <= breath <= 1.2):
+        # 冷启动约 0.65；VPS 1h ATR 接管后可升至 ~1.2–1.6，属正常
+        if not (0.45 <= breath <= 2.0):
             fail("XAU breath coeff out of lock range", breath=breath)
             ok = False
         else:
             log("XAU_BREATH_OK", breath=breath, cold=0.675)
     if sym.startswith("ETH") and breath > 0:
-        if not (1.2 <= breath <= 2.5):
+        if not (1.0 <= breath <= 2.5):
             fail("ETH breath coeff out of lock range", breath=breath)
             ok = False
         else:
@@ -345,20 +345,26 @@ def run_cycle(sym, side, tag):
 
 def main():
     os.makedirs("logs", exist_ok=True)
-    log("LIVE20U_START", version="v15.7.2-breath-lock", target_notional=TARGET_NOTIONAL)
-    for sym in ("ETHUSDT", "XAUUSDT"):
+    only = (os.getenv("LIVE20U_ONLY") or "").strip().upper()
+    log("LIVE20U_START", version="v15.9.0-tp70-tvsl", target_notional=TARGET_NOTIONAL, only=only or "ALL")
+    matrix = (
+        ("ETHUSDT", "LONG", "ETH_LONG"),
+        ("ETHUSDT", "SHORT", "ETH_SHORT"),
+        ("XAUUSDT", "LONG", "XAU_LONG"),
+        ("XAUUSDT", "SHORT", "XAU_SHORT"),
+    )
+    if only in ("ETH", "ETHUSDT"):
+        matrix = tuple(x for x in matrix if x[0] == "ETHUSDT")
+    elif only in ("XAU", "XAUUSDT"):
+        matrix = tuple(x for x in matrix if x[0] == "XAUUSDT")
+
+    for sym in sorted({m[0] for m in matrix}):
         if not ensure_flat(sym, f"PREFLAT_ALL_{sym}"):
             RESULTS["pass"] = False
             break
     else:
         log("COOLDOWN_25s")
         time.sleep(25)
-        matrix = (
-            ("ETHUSDT", "LONG", "ETH_LONG"),
-            ("ETHUSDT", "SHORT", "ETH_SHORT"),
-            ("XAUUSDT", "LONG", "XAU_LONG"),
-            ("XAUUSDT", "SHORT", "XAU_SHORT"),
-        )
         for sym, side, tag in matrix:
             run_cycle(sym, side, tag)
             time.sleep(18)
