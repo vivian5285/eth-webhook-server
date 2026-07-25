@@ -446,7 +446,7 @@ def reentry_engine_live_smoke():
 def main():
     os.makedirs("logs", exist_ok=True)
     sym = "ETHUSDT"
-    log("RADAR_SMOKE_START", version="v15.9.4-reentry-verify", symbol=sym)
+    log("RADAR_SMOKE_START", version="v15.9.5-radar-arm-fix", symbol=sym)
     log("COOLDOWN_25s")
     time.sleep(25)
 

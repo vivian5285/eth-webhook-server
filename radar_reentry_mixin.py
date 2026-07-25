@@ -188,6 +188,12 @@ class RadarReentryMixin:
         self.tv_sl = float(init)
         self._apply_tier_breath_overlay()
         ok = self._ensure_radar_sl(init, live_qty=live_qty, for_handoff=True)
+        if not ok:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 达激活线但雷达 STOP 未挂出 @{init:.2f} | "
+                f"{source or '价触'} → 保持休眠重试"
+            )
+            return False
         self.radar_activated = True
         self.radar_pending_arm = False
         self._radar_handoff_done = True
@@ -201,7 +207,7 @@ class RadarReentryMixin:
             self._radar_notify_pending = True
             try:
                 self._report_radar_first_activation(
-                    live_qty, curr_px, init, sl_placed=bool(ok),
+                    live_qty, curr_px, init, sl_placed=True,
                     trigger_gate=self._radar_trigger_gate,
                 )
             except Exception as e:
@@ -211,7 +217,7 @@ class RadarReentryMixin:
         self._save_state()
         logger.info(
             f"📡 [{self.symbol}] 雷达已激活 @{init:.2f} | "
-            f"{self._radar_trigger_gate} | hung={bool(ok)}"
+            f"{self._radar_trigger_gate} | hung=True"
         )
         return True
 

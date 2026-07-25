@@ -171,7 +171,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.4-reentry-verify"
+BINANCE_VPS_VERSION = "v15.9.5-radar-arm-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -7250,9 +7250,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _clamp_radar_sl_for_market(self, curr_px, sl):
         """
-        雷达保本只能在浮盈侧：
-        LONG: SL < entry 且 ≤ mark-gap；SHORT: SL > entry 禁止！必须 < entry 且 ≥ mark+gap。
-        禁止把 SHORT 保本线抬过开仓价变成近市亏损止损（会秒平）。
+        雷达 STOP 市价安全夹取：
+        - 阶段一（initialStop）：多 SL<entry、空 SL>entry — 保护向，只要距 mark 够远即可挂
+        - 阶段二（保本/追踪）：多 SL>entry、空 SL<entry — 浮盈侧锁定
+        禁止挂出会被立刻触发的贴市单。
         """
         if not sl or curr_px <= 0:
             return None
@@ -7260,28 +7261,42 @@ class PositionSupervisorBinance(RadarReentryMixin):
         gap = self._radar_min_stop_gap(curr_px)
         sl = round(float(sl), 2)
         if self.current_side == "LONG":
-            if entry > 0 and sl <= entry + 0.01:
-                return None  # 未越过成本，不是合法雷达
             safe_cap = round(curr_px - gap, 2)
-            # 不得超过市价安全距，也不得压回成本以下
-            floor = round(entry + 0.01, 2) if entry > 0 else 0.0
+            if safe_cap <= 0:
+                return None
             if sl >= safe_cap:
                 sl = safe_cap
+            if sl >= curr_px or sl > safe_cap:
+                return None
+            # 阶段一：成本下方保护止损（激活线后挂 initialStop）
+            if entry > 0 and sl <= entry + 0.01:
+                if sl >= entry:  # 贴成本不算阶段一
+                    return None
+                return round(float(sl), 2)
+            # 阶段二：成本上方保本/追踪
+            floor = round(entry + 0.01, 2) if entry > 0 else 0.0
             if floor > 0 and sl < floor:
                 return None
-            if sl >= safe_cap and safe_cap < floor:
+            if floor > 0 and safe_cap < floor:
                 return None
             return round(float(sl), 2)
         if self.current_side == "SHORT":
-            if entry > 0 and sl >= entry - 0.01:
-                return None  # 禁止抬到成本及以上（近市亏损侧）
             safe_floor = round(curr_px + gap, 2)
-            # 合法 SHORT 雷达：entry 下方、市价上方
-            ceiling = round(entry - 0.01, 2) if entry > 0 else sl
+            if safe_floor <= 0:
+                return None
             if sl <= safe_floor:
                 sl = safe_floor
+            if sl <= curr_px or sl < safe_floor:
+                return None
+            # 阶段一：成本上方保护止损
+            if entry > 0 and sl >= entry - 0.01:
+                if sl <= entry:
+                    return None
+                return round(float(sl), 2)
+            # 阶段二：成本下方保本/追踪
+            ceiling = round(entry - 0.01, 2) if entry > 0 else sl
             if sl >= ceiling:
-                return None  # 市价尚未离开成本足够远，无法安全挂保本
+                return None
             if safe_floor >= ceiling:
                 return None
             return round(float(sl), 2)
