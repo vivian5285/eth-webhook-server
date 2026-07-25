@@ -198,9 +198,34 @@ class TestReentryGate(unittest.TestCase):
             exit_source="radar_be", side="LONG", entry=3000,
             exit_px=3005, initial_atr=20, reentry_attempt=0,
             window_deadline_ts=time.time() + 3600,
+            tp1_ever_filled=False,
+            adx_tier=2,
         )
         self.assertTrue(ok)
         self.assertEqual(why, "ok")
+
+    def test_tp1_already_filled_blocks(self):
+        ok, why = can_smart_reenter(
+            exit_source="radar_be", side="LONG", entry=3000,
+            exit_px=3005, initial_atr=20, reentry_attempt=0,
+            window_deadline_ts=time.time() + 3600,
+            tp1_ever_filled=True,
+            adx_tier=2,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(why, "tp1_already_filled")
+
+    def test_tier_not_strong_blocks(self):
+        for tier in (0, 1):
+            ok, why = can_smart_reenter(
+                exit_source="radar_be", side="LONG", entry=3000,
+                exit_px=3005, initial_atr=20, reentry_attempt=0,
+                window_deadline_ts=time.time() + 3600,
+                tp1_ever_filled=False,
+                adx_tier=tier,
+            )
+            self.assertFalse(ok, msg=f"tier={tier}")
+            self.assertEqual(why, "tier_not_strong")
 
     def test_window_bars(self):
         # ETH 2×90m=10800；XAU 3×45m=8100

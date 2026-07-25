@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.2.1-api-monitor`**  
+**当前版本：`v16.3.0-slice-reentry`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
@@ -22,6 +22,7 @@
 > **雷达（白皮书 v3.0）**：按「距离」计算启动线；首次 0.85×TP1距、重入 1.00×TP1距；达线前仅硬止损；弱趋势收紧、强趋势放宽（步进/呼吸分档，呼吸垫不分档）。  
 > **叠单铁律（v15.9.1）**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**；持仓期 30s 监管对账。  
 > **API 限流**：REST 仅下单/改撤/对账；价格与成交靠 WebSocket；空闲巡检 45s + 失败退避 120s；单品种 REST ≥100ms；触发 -1003 → 暂停品种；禁止 REST 狂轮询。  
+> **v16.3.0**：规格(1) — TP切片动态头寸同步、重入 TP1未成交+强趋势闸门、持仓REST≈30s、平仓无菌/防反向；堵死查不到持仓叠50限价。  
 > **v16.2.1**：规格 12.2 — REST 交易 0/1/2/4/8s×5 退避 → 仅监控 + 30s 只读探测自动恢复。  
 > **v16.2.0**：规格整合版落地 — 重入取已收盘K线、恢复期 webhook 缓存、拒单/单方面撤单暂停、孤儿仓禁 0.5ATR 伪硬止损。  
 > **v16.1.0**：白皮书 v3.0 — 统一 1.15 呼吸垫 + 重入启动 1.00 + 雷达激活钉钉区分首次/重入。  
@@ -34,7 +35,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.2.1-api-monitor · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v16.3.0-slice-reentry · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
@@ -357,7 +358,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v16.2.1-api-monitor
+# 期望: v16.3.0-slice-reentry
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
@@ -367,7 +368,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 # 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.2.1-api-monitor`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.3.0-slice-reentry`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
 
 ### 20U 矩阵观察点
 

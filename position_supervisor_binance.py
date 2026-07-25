@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.2.1-api-monitor"
+BINANCE_VPS_VERSION = "v16.3.0-slice-reentry"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -408,6 +408,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._last_state_snapshot_ts = 0.0
         self._rate_limit_hook_registered = False
         self._defense_ops_locked = False
+        self._partial_resize_pending = False
+        self._last_partial_resize_ts = 0.0
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
         self.adx_tier = 1
         self.hard_sl_buffer = 1.15
@@ -3049,10 +3051,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 out.append(0.0)
         return out
 
-    def _get_active_position(self, prefer_ws=True):
-        # 重启探测必须 prefer_ws=False，避免空缓存误判空仓
+    def _get_active_position(self, prefer_ws=True, force_rest=False):
+        # 重启/平仓探测：prefer_ws=False 或 force_rest=True，避免空缓存误判空仓
         from binance_client import is_position_query_failed
-        pos = binance_client.get_position(self.symbol, prefer_ws=prefer_ws)
+        pos = binance_client.get_position(
+            self.symbol, prefer_ws=prefer_ws, force_rest=force_rest,
+        )
         if is_position_query_failed(pos):
             return "QUERY_FAILED"
         if not pos or float(pos.get("positionAmt", 0) or 0) == 0:
@@ -4005,12 +4009,36 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _held_position_reconcile(self, live_qty, curr_px=0.0):
         """
-        持仓期监管（约 30s）：核对挂单硬上限 + 本地标签 vs 盘口。
+        持仓期监管（约 30s）：强制 REST 核对真实头寸 + 挂单硬上限 + 标签。
         查单失败 → 保守跳过，绝不因此补挂。
         """
         live_qty = float(live_qty or 0)
         if live_qty <= 0:
             return True
+        # 规格 10：持仓 REST 约 30s 一次；此处强制刷新，避免仅靠 WS 漂移
+        try:
+            rest_pos = self._get_active_position(prefer_ws=False, force_rest=True)
+            if rest_pos == "QUERY_FAILED":
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 持仓对账：REST 持仓不可读 → 保守跳过"
+                )
+                return False
+            if rest_pos and float(rest_pos.get("size") or 0) > 0:
+                rq = float(rest_pos["size"])
+                if abs(rq - live_qty) > 0.0005:
+                    logger.info(
+                        f"📎 [{self.symbol}] 30s对账头寸 {live_qty}→{rq}"
+                    )
+                    live_qty = rq
+                    self.watched_qty = rq
+                    if float(rest_pos.get("entry_price") or 0) > 0:
+                        self.watched_entry = float(rest_pos["entry_price"])
+                    if not self._is_dust_qty(rq):
+                        self._atomic_resize_after_partial_tp(
+                            rq, reason="held_reconcile_30s",
+                        )
+        except Exception as e:
+            logger.debug(f"持仓REST对账跳过: {e}")
         book = binance_client.get_open_orders(self.symbol)
         if is_orders_query_failed(book):
             logger.warning(
@@ -4071,7 +4099,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._defense_ops_locked = True
         self._breath_tick_paused = True
         try:
-            pos = self._get_active_position(prefer_ws=False)
+            pos = self._get_active_position(prefer_ws=False, force_rest=True)
             if pos == "QUERY_FAILED":
                 logger.error(
                     f"🚨 [{self.symbol}] 部分成交原子同步失败：持仓不可读 | {reason}"
@@ -8990,6 +9018,18 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"❌ [{tag}] 全平后挂单未净：剩余 {remaining} 单 | "
                 f"LIMIT={n_limit} STOP={n_stop} TP={tp_n}"
             )
+            # 规格 9.4：连续多轮仍残留 → 暂停品种，防幽灵/蚂蚁单带入下一笔
+            try:
+                self._pause_symbol_trading(
+                    f"flat_purge_residual:{tag}",
+                    title=f"平仓后盘口未净 [{self.symbol}]",
+                    detail=(
+                        f"{tag} | remaining={remaining} LIMIT={n_limit} "
+                        f"STOP={n_stop} TP={tp_n} | 已暂停新开仓，人工清盘后 resume"
+                    ),
+                )
+            except Exception:
+                pass
         return {
             "ok": ok,
             "rounds": max_rounds,
@@ -10224,29 +10264,54 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return cancelled
 
     def _sweep_orphan_reverse_after_flat(self, prev_side=None, reason=""):
-        """全平后复核：残留限价反向成交 → 反向蚂蚁仓扫尾"""
+        """全平后复核：残留限价反向成交 → 扫尾；方向翻转 → 规格9.5最高级暂停。"""
         prev_side = (prev_side or self.current_side or "").upper()
         time.sleep(1.0)
-        pos = self._get_active_position()
+        pos = self._get_active_position(prefer_ws=False, force_rest=True)
+        if pos == "QUERY_FAILED":
+            logger.error(
+                f"🚨 [{self.symbol}] 全平后反向复核 QUERY_FAILED | {reason}"
+            )
+            return False
         if not pos or float(pos.get("size", 0) or 0) <= 0:
             return False
         amt = float(pos["size"])
         side = pos["side"]
         if prev_side and side != prev_side:
-            logger.warning(
-                f"🐜 孤儿单反向成交: 原{prev_side} → 现{side} {amt} ETH | {reason}"
-            )
-            dingtalk.report_system_alert(
-                "孤儿单反向蚂蚁仓",
-                f"全平后检测到反向持仓 {side} {amt} ETH @ {pos['entry_price']:.2f} | "
-                f"疑似残留 TP 成交 → 立即扫尾",
+            logger.error(
+                f"🚨 超卖变反向: 原{prev_side} → 现{side} {amt} | {reason}"
             )
             close_side = "SELL" if side == "LONG" else "BUY"
-            res = binance_client.place_market_order(close_side, amt, symbol=self.symbol, reduce_only=True)
-            self._log_exchange_api("孤儿反向扫尾", f"{close_side} {amt} ETH", res)
+            res = binance_client.place_market_order(
+                close_side, amt, symbol=self.symbol, reduce_only=True,
+            )
+            self._log_exchange_api("反向仓扫尾", f"{close_side} {amt}", res)
             time.sleep(1.0)
-            self._purge_all_defense_orders_on_flat("孤儿反向扫尾后撤单")
-            return self._verify_flat()
+            self._purge_all_defense_orders_on_flat("反向仓扫尾后撤单")
+            flat_ok = self._verify_flat()
+            self._pause_symbol_trading(
+                f"reverse_open_after_flat:{prev_side}->{side}",
+                title=f"平仓超卖变反向 [{self.symbol}]",
+                detail=(
+                    f"原{prev_side}→现{side} qty={amt} @ "
+                    f"{float(pos.get('entry_price') or 0):.2f} | {reason} | "
+                    f"已尝试扫尾 flat={flat_ok} | 暂停自动化，需人工核对盘口"
+                ),
+            )
+            try:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"最高级·超卖变反向 [{self.symbol}]",
+                    detail=(
+                        f"原{prev_side} → {side} {amt} | {reason} | "
+                        f"扫尾flat={flat_ok}"
+                    ),
+                    level="紧急",
+                    suggestion="立即人工核对持仓与挂单；确认无菌后再 resume",
+                )
+            except Exception:
+                pass
+            return flat_ok
         if self._is_dust_qty(amt):
             self._sweep_dust_and_finalize(reason or "全平后蚂蚁仓扫尾")
             return True
@@ -13427,6 +13492,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                                 f"📡 [{self.symbol}] UD-WS TP{matched} 限价成交提示 "
                                 f"@ {px:.2f} → 脉冲头寸对账（禁当漏挂补挂）"
                             )
+                    # 规格 6.3：任意 reduceOnly LIMIT 部分/全部成交 → 动态头寸核算
+                    if reduce_only:
+                        self._schedule_partial_fill_resize(
+                            source=f"ws_limit_{status.lower()}",
+                        )
                 elif otype in ("STOP", "STOP_MARKET") and status in (
                     "NEW", "PARTIALLY_FILLED", "FILLED",
                 ):
@@ -13435,6 +13505,56 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     # 规格 12.3：非本地发起的取消 → 异常取消告警 + 强制对账
                     self._handle_unilateral_order_cancel(o)
             logger.debug(f"📡 [{self.symbol}] UD-WS 脉冲 {et}")
+
+    def _schedule_partial_fill_resize(self, source=""):
+        """规格 6.3：TP/减仓成交后按实时头寸同步硬/雷达数量（防超卖变反向）。"""
+        if getattr(self, "api_monitor_only", False) or getattr(self, "trading_paused", False):
+            return
+        if not getattr(self, "monitoring", False):
+            return
+        now = time.time()
+        last = float(getattr(self, "_last_partial_resize_ts", 0) or 0)
+        if now - last < 0.75:
+            self._partial_resize_pending = True
+            return
+        self._last_partial_resize_ts = now
+        self._partial_resize_pending = False
+        try:
+            pos = self._get_active_position(prefer_ws=True)
+            if pos == "QUERY_FAILED":
+                # 状态未知：不挂新单，仅标记待同步，等下轮 REST
+                self._partial_resize_pending = True
+                logger.warning(
+                    f"⏳ [{self.symbol}] 部分成交核算跳过·持仓不可读 | {source}"
+                )
+                return
+            live = float((pos or {}).get("size") or 0)
+            if live <= 0:
+                logger.info(
+                    f"🧹 [{self.symbol}] WS成交后已空仓 → 清挂单 | {source}"
+                )
+                self._purge_all_defense_orders_on_flat(f"WS成交空仓|{source}")
+                return
+            if self._is_dust_qty(live):
+                logger.warning(
+                    f"🐜 [{self.symbol}] 部分成交后零头={live} → 市价扫尾 | {source}"
+                )
+                self._sweep_dust_and_finalize(f"partial_fill_dust|{source}")
+                return
+            self.watched_qty = live
+            if float((pos or {}).get("entry_price") or 0) > 0:
+                self.watched_entry = float(pos["entry_price"])
+            self._atomic_resize_after_partial_tp(
+                live, reason=f"动态头寸|{source}",
+            )
+        except Exception as e:
+            logger.error(f"[{self.symbol}] partial_fill_resize: {e}")
+
+    def _flush_pending_partial_resize(self):
+        if not getattr(self, "_partial_resize_pending", False):
+            return
+        self._partial_resize_pending = False
+        self._schedule_partial_fill_resize(source="pending_flush")
 
     def _handle_unilateral_order_cancel(self, order_obj):
         """交易所单方面取消：告警、对账、重挂保护；10min≥3次 → 暂停。"""
@@ -14374,17 +14494,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
                                 if drift >= QTY_DRIFT_TOLERANCE_PCT:
                                     logger.info(
                                         f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} ETH "
-                                        f"({drift:.2%}，未达 {QTY_ALIGN_MIN_PCT:.0%} 对齐阈值)，仅同步账本"
+                                        f"({drift:.2%}，未达 {QTY_ALIGN_MIN_PCT:.0%} 对齐阈值)"
                                     )
                                 self.watched_qty = real_amt
                                 self.watched_entry = pos["entry_price"]
-                                # 即使微漂也尝试减仓记账（防漏检后守护补挂）
+                                # 规格 6.3：任意减仓都同步止损数量（防超卖反向）
                                 if real_amt < old_qty - 0.0005:
                                     self._reconcile_tp_consumed_from_live_qty(
                                         real_amt, curr_px, source="哨兵微漂对账",
                                         notify=False,
                                     )
+                                    if self._is_dust_qty(real_amt):
+                                        self._sweep_dust_and_finalize("哨兵微漂零头")
+                                    else:
+                                        self._atomic_resize_after_partial_tp(
+                                            real_amt, reason="哨兵微漂动态头寸",
+                                        )
                                 self._save_state()
+
+                        # 消化 WS 挂起的部分成交核算
+                        try:
+                            self._flush_pending_partial_resize()
+                        except Exception:
+                            pass
 
                         self._scan_ticks += 1
                         skip_radar = getattr(self, "_open_in_progress", False) or getattr(
@@ -14600,7 +14732,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         query_failed = False
 
         for round_i in range(6):
-            pos = position_manager.get_position(self.symbol)
+            # 规格 6.4：平仓前强制 REST 真实持仓，禁止用偏大本地值超卖变反向
+            pos = position_manager.get_position(
+                self.symbol, prefer_ws=False, force_rest=True,
+            )
             if is_position_query_failed(pos):
                 query_failed = True
                 logger.error(
@@ -14623,10 +14758,35 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 break
 
             amt = float(amt_raw)
+            # 规格 9.5：若相对 prev_side 已翻转，立刻停手+暂停（禁止继续市价加深反向）
+            cur_side = "LONG" if amt > 0 else "SHORT"
+            if prev_side and cur_side != str(prev_side).upper():
+                logger.error(
+                    f"🚨 [{self.symbol}] 强平中检测到方向翻转 "
+                    f"{prev_side}→{cur_side} | {reason}"
+                )
+                closed_successfully = False
+                try:
+                    self._sweep_orphan_reverse_after_flat(
+                        prev_side=prev_side, reason=f"close_mid_flip|{reason}",
+                    )
+                except Exception as e:
+                    logger.error(f"翻转扫尾异常: {e}")
+                break
             close_side = "SELL" if amt > 0 else "BUY"
             live_sz = round(abs(amt), 3)
+            # 规格 6.4 / 9.5：平仓数量硬上限 = 交易所真实持仓，禁止超卖变反向
+            if live_sz <= 0:
+                closed_successfully = True
+                break
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
-            binance_client.place_market_order(close_side, live_sz, symbol=self.symbol, reduce_only=True)
+            order = binance_client.place_market_order(
+                close_side, live_sz, symbol=self.symbol, reduce_only=True,
+            )
+            if not order:
+                logger.error(
+                    f"❌ [{self.symbol}] 强平下单失败 round={round_i + 1} | {reason}"
+                )
             time.sleep(1.5)
 
         if query_failed:

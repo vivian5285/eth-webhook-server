@@ -588,9 +588,12 @@ def can_smart_reenter(
     profile: Optional[Dict[str, Any]] = None,
     window_deadline_ts: float = 0.0,
     now: Optional[float] = None,
+    tp1_ever_filled: bool = False,
+    adx_tier: Optional[int] = None,
 ) -> Tuple[bool, str]:
     """
-    返回 (ok, reason)。硬止损 / 亏损 / 已重入过 / 窗口过期 / 区间外 → 拒绝。
+    返回 (ok, reason)。硬止损 / 亏损 / 已重入过 / 窗口过期 / 区间外 /
+    TP1已成交 / 非强趋势 → 拒绝。
     """
     p = profile if isinstance(profile, dict) else REENTRY_ETH
     if not bool(p.get("enabled", True)):
@@ -608,6 +611,17 @@ def can_smart_reenter(
         "radar_be", "sl_breakeven", "sl_initial", "breakeven", "radar", "radar_sl",
     ):
         return False, f"exit_source={src}"
+    # 规格 8.1.5：TP1 已成交过 → 禁止重入
+    if bool(tp1_ever_filled):
+        return False, "tp1_already_filled"
+    # 规格 8.1.6：仅强趋势 tier=2 允许重入
+    if adx_tier is not None:
+        try:
+            tier_i = int(adx_tier)
+        except (TypeError, ValueError):
+            tier_i = -1
+        if tier_i >= 0 and tier_i != 2:
+            return False, "tier_not_strong"
     deadline = float(window_deadline_ts or 0)
     if deadline > 0:
         ts = float(now if now is not None else time.time())

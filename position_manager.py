@@ -14,10 +14,17 @@ class PositionManager:
 
     # ==================== 持仓相关 ====================
 
-    def get_position(self, symbol: str = "ETHUSDT") -> Optional[Dict[str, Any]]:
-        """获取当前持仓完整信息"""
+    def get_position(
+        self,
+        symbol: str = "ETHUSDT",
+        prefer_ws: bool = True,
+        force_rest: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """获取当前持仓完整信息（平仓路径请 force_rest=True）"""
         try:
-            return self.client.get_position(symbol)
+            return self.client.get_position(
+                symbol, prefer_ws=prefer_ws, force_rest=force_rest,
+            )
         except Exception as e:
             logger.error(f"[PositionManager] 获取持仓失败: {e}")
             return None

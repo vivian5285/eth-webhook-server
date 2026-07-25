@@ -216,6 +216,8 @@ def evaluate_flat_for_reentry(
     symbol: str,
     window_deadline_ts: float = 0.0,
     now: Optional[float] = None,
+    tp1_ever_filled: bool = False,
+    adx_tier: Optional[int] = None,
 ) -> Tuple[bool, str]:
     return can_smart_reenter(
         exit_source=exit_source,
@@ -227,4 +229,6 @@ def evaluate_flat_for_reentry(
         profile=get_reentry_profile(symbol),
         window_deadline_ts=window_deadline_ts,
         now=now,
+        tp1_ever_filled=tp1_ever_filled,
+        adx_tier=adx_tier,
     )

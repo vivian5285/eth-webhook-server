@@ -252,6 +252,12 @@ class RadarReentryMixin:
         return True
 
     def _snapshot_cycle_for_reentry(self) -> Dict[str, Any]:
+        consumed = list(getattr(self, "tp_levels_consumed", None) or [])
+        tp1_ever = (
+            1 in consumed
+            or bool(getattr(self, "_tp1_filled_hint", False))
+            or bool(getattr(self, "_ws_tp1_fill_hint", False))
+        )
         return {
             "side": getattr(self, "current_side", None),
             "entry": float(getattr(self, "watched_entry", 0) or 0),
@@ -273,13 +279,16 @@ class RadarReentryMixin:
             ),
             "reentry_attempt": int(getattr(self, "reentry_attempt", 0) or 0),
             "radar_activation_frac": float(
-                getattr(self, "radar_activation_frac", 0.5) or 0.5
+                getattr(self, "radar_activation_frac", 0) or 0.85
             ),
             "tv_tps": list(getattr(self, "tv_tps", None) or [0, 0, 0]),
             "frozen_hard_sl_px": float(getattr(self, "frozen_hard_sl_px", 0) or 0),
             "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
             "current_sl": float(getattr(self, "current_sl", 0) or 0),
             "radar_activated": bool(getattr(self, "radar_activated", False)),
+            "tp_levels_consumed": consumed,
+            "tp1_ever_filled": bool(tp1_ever),
+            "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
             "payload": dict(
                 (getattr(self, "last_tv_signal", None) or {}).get("payload")
                 or getattr(self, "last_tv_signal", None)
@@ -467,13 +476,20 @@ class RadarReentryMixin:
             reentry_attempt=attempt,
             symbol=self.symbol,
             window_deadline_ts=window_ts,
+            tp1_ever_filled=bool(snap.get("tp1_ever_filled")),
+            adx_tier=int(snap.get("adx_tier") if snap.get("adx_tier") is not None else 1),
         )
         if not ok:
             logger.info(
                 f"🚫 [{self.symbol}] 不启动再入场: {why} | "
-                f"src={exit_src} exit={exit_px:.2f} attempt={attempt}"
+                f"src={exit_src} exit={exit_px:.2f} attempt={attempt} "
+                f"tp1_filled={bool(snap.get('tp1_ever_filled'))} "
+                f"tier={snap.get('adx_tier')}"
             )
-            if why in ("hard_sl_no_reentry", "max_reentries", "tv_close_no_reentry"):
+            if why in (
+                "hard_sl_no_reentry", "max_reentries", "tv_close_no_reentry",
+                "tp1_already_filled", "tier_not_strong",
+            ):
                 self._clear_reentry_cycle(source=why)
             return False
 

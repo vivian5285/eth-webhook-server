@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **`v16.2.1-api-monitor`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版**  
+> **当前**：TV **v6.5.6** · VPS **`v16.3.0-slice-reentry`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版(1)**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -12,7 +12,7 @@
 | 2 | **永久硬止损**：`\|TV.price−TV.stop_loss\|×1.15` 锚定成交价（**不分档**）；**禁止** 1.5×ATR 地板 | `atr_scenario.hard_stop_price` · `_ensure_frozen_hard_sl` |
 | 3 | **独立雷达止损**：首次 0.85×TP1距 / 重入 1.00×TP1距 启动；激活臂 entry±0.5ATR；步进见 ADX 档 | `breath_stop.py` · `reentry_profiles` · `_sync_exchange_stop()` |
 | 4 | TP **10/20/70**；盘口常挂 **TP1+TP2+TP3**；TP3↔雷达 `exit_ownership` 互斥 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=3` |
-| 5 | 部分成交原子同步：硬/雷达/TP3 数量对齐；失败 → **`trading_paused`** | `_atomic_resize_after_partial_tp` |
+| 5 | **部分成交动态头寸**：任意 TP 切片成交 → REST/WS 实时总头寸 → 硬/雷达/剩余TP数量同步；失败 → **`trading_paused`** | `_schedule_partial_fill_resize` · `_atomic_resize_after_partial_tp` |
 | 6 | 反转保护仅 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |
 | 7 | 去重 60s · 挂单超时 5min · 90m ATR/ADX（对比用） | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` |
 | 8 | 实盘/重启与方向背离 → **FORCE_ALIGN** 先全平 | `_close_all(..., force_align=)` |
@@ -22,9 +22,11 @@
 | 12 | TP/硬/雷达 **订单标签** 持久化（SHA-256 `clientOrderId`） | `order_idempotency` · `_pending_order_tags` |
 | 13 | 查单失败 **fail-closed**；未成交挂单硬上限 **5** | `ORDERS_QUERY_FAILED` · `MAX_OPEN_ORDERS_HARD_CAP` |
 | 14 | **CAP_ALIGN 已废除**；改单失败 → **HARD_SL_FAIL_ABORT** | `report_hard_sl_fail_abort` |
-| 15 | REST 单品种间隔 ≥**100ms**；`-1003` → 暂停该品种 | `REST_MIN_INTERVAL_SEC` · rate-limit hook |
+| 15 | REST 单品种间隔 ≥**100ms**；持仓核对 ≈**30s**（WS优先）；`-1003` → 暂停该品种 | `REST_MIN_INTERVAL_SEC` · `_all_pos_ttl=30` · rate-limit hook |
 | 16 | ATR≤0 或异常 → **拒本笔开仓** + 钉钉 | `check_atr_anomaly` · `_calc_vps_open_qty` |
 | 17 | 档位配置外置 JSON；状态快照 30s；日志 `[OPS\|STATE\|ALERT\|AUDIT]` | `config/reentry_tiers.json` · `ops_log.py` |
+| 18 | **重入双闸门**：TP1 从未成交 + `tier==2`（强趋势）；硬止/TV平/已重入1次一律禁 | `can_smart_reenter` · `evaluate_flat_for_reentry` |
+| 19 | **平仓无菌盘**：撤光全部挂单（含蚂蚁单）→ REST 真实 qty 平仓 → 翻转则最高级暂停 | `_purge_all_defense_orders_on_flat` · `_close_all` · `_sweep_orphan_reverse_after_flat` |
 
 ---
 
@@ -61,7 +63,8 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 | 4.4 | TP 比例 / 档数 | **10/20/70** · `PLACE_TP_LEVELS=3` |
 | 4.5 | 互斥 | `exit_ownership`：NONE / TP3_LIMIT / RADAR_STOP |
 | 4.6 | 启动阈值 | 首次 **0.85×TP1距** · 重入 **1.00×TP1距**（按距离，非绝对价） |
-| 4.7 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
+| 4.7 | 切片成交 | 任意 `PARTIALLY_FILLED` → 按**当时实时总头寸**缩硬/雷达/剩余TP |
+| 4.8 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
 
 ---
 
@@ -77,7 +80,22 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 | API 限流 -1003 | 退避 + **暂停品种** |
 | 重复消息 | 60s 同 action+symbol+price 忽略 |
 | 开仓前 | 强制清仓（先平后开）；失败 → CLOSE_THEN_OPEN_FAIL_ABORT |
+| 平仓后盘口残留 | 多轮 purge；仍残留 → **暂停品种** |
+| 超卖变反向 | 扫尾 + **最高级暂停** + 钉钉 |
 | CAP_ALIGN | **已删除** |
+
+---
+
+## 生产就绪（三端对齐 + 等真 TV）
+
+| # | 项 | 标准 |
+|---|----|------|
+| P1 | 本地 = GitHub = VPS | `git rev-parse HEAD` 三端一致 |
+| P2 | health.version | `v16.3.0-slice-reentry` |
+| P3 | ETH/XAU 空仓无菌 | 持仓=0 · 挂单=0 · `trading_paused=false` · `api_monitor_only=false` |
+| P4 | 钉钉 | 开仓/雷达/TP/平仓/重入/异常均可达 |
+| P5 | 单元测试 | `test_radar_reentry`（含 TP1/tier 闸门）· dup_guard · risk_iron · api_monitor |
+| P6 | 等真 TV | **禁止**再发测试 webhook 开仓；双品种待命收真实信号 |
 
 ---
 
@@ -85,8 +103,7 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 
 ```bash
 python check_vps_logic.py
-python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry
+python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry test_api_monitor_v1621
 curl -s http://127.0.0.1:5003/health | python -m json.tool
-# 期望 version: v16.2.1-api-monitor · trading_paused=false
-# 20U 实盘矩阵（VPS）: sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
+# 期望 version: v16.3.0-slice-reentry · trading_paused=false
 ```

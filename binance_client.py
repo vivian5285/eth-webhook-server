@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.2.1-api-monitor"
+BINANCE_CLIENT_VERSION = "v16.3.0-slice-reentry"
 # 规格：单品种 REST 调用间隔不得小于 100ms
 REST_MIN_INTERVAL_SEC = 0.1
 # 规格 12.2：首次立即重试，之后 1/2/4/8s，最多 5 次重试
@@ -84,7 +84,9 @@ class BinanceClient:
         # 全账户持仓合并缓存：双雷达共用一次 REST，避免每 symbol 各打一次
         self._all_pos_rows = {}
         self._all_pos_ts = 0.0
-        self._all_pos_ttl = 1.0
+        # 规格 10：持仓核对 REST ≈30s；WS 优先，合并缓存短窗口仅用于强制 REST
+        self._all_pos_ttl = 30.0
+        self._all_pos_force_ttl = 1.0
         self._last_order_event_ts = 0.0
         # 查单失败时的进程内同价锁：仅复用刚挂成功的缓存，禁止盲补首挂
         self._recent_limit_place = {}
@@ -934,17 +936,26 @@ class BinanceClient:
     def _refresh_all_positions(self, force=False):
         """一次拉取全部 USDT 永续持仓，写入 per-symbol 缓存。"""
         now = time.time()
+        ttl = float(
+            getattr(self, "_all_pos_force_ttl", 1.0)
+            if force
+            else getattr(self, "_all_pos_ttl", 30.0)
+        )
         with self._pos_lock:
             if (
-                not force
-                and self._all_pos_ts > 0
-                and (now - self._all_pos_ts) < float(self._all_pos_ttl)
+                self._all_pos_ts > 0
+                and (now - self._all_pos_ts) < ttl
             ):
                 return dict(self._all_pos_rows)
         try:
+            self._throttle_rest("_POS_ALL")
             rows = self.client.futures_position_information() or []
         except Exception as e:
             logger.error(f"[合并持仓查询失败] {e}")
+            try:
+                self._note_api_error(e, symbol="")
+            except Exception:
+                pass
             with self._pos_lock:
                 if self._all_pos_rows and (now - self._all_pos_ts) < 60.0:
                     return dict(self._all_pos_rows)
@@ -966,19 +977,21 @@ class BinanceClient:
             self._all_pos_ts = time.time()
         return by_sym
 
-    def get_position(self, symbol="ETHUSDT", prefer_ws=True):
+    def get_position(self, symbol="ETHUSDT", prefer_ws=True, force_rest=False):
         """
         返回币安持仓 dict，或 None（确认无仓）。
         REST 失败且无可用缓存时返回 POSITION_QUERY_FAILED，禁止上层当空仓清账本。
-        双雷达：优先短 TTL 合并查询，减少 IP 权重。
+        双雷达：WS 优先；常规 REST 合并缓存约 30s；force_rest 用于平仓/恢复。
         """
         sym = str(symbol or "").upper()
-        if prefer_ws:
-            cached = self._get_pos_cache(sym, max_age=8.0)
+        if prefer_ws and not force_rest:
+            # UD-WS 健康时允许更长缓存；否则短窗口尽快回退 REST
+            max_age = 30.0 if getattr(self, "_ud_ws_running", False) else 8.0
+            cached = self._get_pos_cache(sym, max_age=max_age)
             if cached is not None:
                 return cached
-        # 合并查询（1s TTL）：ETH/XAU 哨兵共享同一次 REST
-        all_rows = self._refresh_all_positions(force=False)
+        # 合并查询：哨兵共享；force_rest 走 1s 强制窗口
+        all_rows = self._refresh_all_positions(force=bool(force_rest or not prefer_ws))
         if all_rows is None:
             stale = self._get_pos_cache(sym, max_age=60.0)
             if stale is not None:
