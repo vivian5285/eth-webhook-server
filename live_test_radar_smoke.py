@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-v15.9.4 防线就绪 + 雷达强制激活(双STOP) + 重入引擎实盘烟测（~20U）
+v16.2.1 防线就绪 + 雷达强制激活(双STOP) + 重入引擎实盘烟测（~20U）
 
 验证点（弥补「开平几十秒」矩阵未覆盖的部分）：
-1) 开仓后：硬止损 + TP123(limits=3) + 雷达休眠(activated=False, frac=0.50)
+1) ETH/XAU × LONG/SHORT 各一轮：开仓后硬止损(|TV−SL|×1.15@成交价) + TP123 + 雷达休眠(frac=0.85)
 2) POST /admin/smoke_arm_radar → 主进程挂雷达 STOP → stops≥2，无叠单，total≤5
 3) 实盘拉 5m K 线跑双保险再入价（ETH/XAU×多空）+ 档位递进纯函数
-4) 平仓无菌
+4) 每轮结束后仓位+挂单全平无菌
 
 说明：强制激活走主进程 admin 接口，避免外部脚本双写军师状态。
 自然雷达扫出→限价再入→成交的完整闭环由 test_radar_reentry 覆盖；
 本烟测证明「开仓防线 + 激活双 STOP + 重入定价/档位」。
 
 环境：VPS binance-engine，密钥可用。
+周期间冷却防 -1003。
 """
 from __future__ import annotations
 
@@ -199,18 +200,27 @@ def ensure_flat(sym, tag):
     return False
 
 
-def open_long(sym):
+def open_side(sym, side):
+    """市价开仓 webhook（~20U）；硬止损按 |TV.price−SL|×1.15 锚成交价。"""
+    side_u = str(side or "LONG").upper()
     px = float(c.get_current_price(sym) or 0)
     flt = filters(sym)
     atr = atr_guess(sym, px)
     qty = qty_20u(sym, px, flt)
-    sig = round(px * 0.9999, 2)
-    sl = round(sig - 1.5 * atr, 2)
-    tp1 = round(sig + 1.35 * atr, 2)
-    tp2 = round(sig + 2.5 * atr, 2)
-    tp3 = round(sig + 3.5 * atr, 2)
+    if side_u == "LONG":
+        sig = round(px * 0.9999, 2)
+        sl = round(sig - 1.5 * atr, 2)
+        tp1 = round(sig + 1.35 * atr, 2)
+        tp2 = round(sig + 2.5 * atr, 2)
+        tp3 = round(sig + 3.5 * atr, 2)
+    else:
+        sig = round(px * 1.0001, 2)
+        sl = round(sig + 1.5 * atr, 2)
+        tp1 = round(sig - 1.35 * atr, 2)
+        tp2 = round(sig - 2.5 * atr, 2)
+        tp3 = round(sig - 3.5 * atr, 2)
     payload = {
-        "action": "LONG",
+        "action": side_u,
         "symbol": sym,
         "price": sig,
         "qty": qty,
@@ -220,14 +230,18 @@ def open_long(sym):
         "tp2": tp2,
         "tp3": tp3,
         "secret": secret(),
-        "reason": "RADAR_SMOKE_ETH_LONG",
+        "reason": f"RADAR_SMOKE_{sym}_{side_u}",
         "bar_index": int(time.time()),
         "seq": 1,
         "leverage": 5.0,
     }
-    log("OPEN_PLAN", symbol=sym, qty=qty, px=px, sl=sl, tp1=tp1, atr=atr)
+    log("OPEN_PLAN", symbol=sym, side=side_u, qty=qty, px=px, sl=sl, tp1=tp1, atr=atr)
     post(payload)
     return payload
+
+
+def open_long(sym):
+    return open_side(sym, "LONG")
 
 
 def wait_defense(sym, timeout=45):
@@ -245,6 +259,7 @@ def wait_defense(sym, timeout=45):
             "exit_ownership": st.get("exit_ownership"),
             "reentry_attempt": st.get("reentry_attempt"),
             "initial_stop": st.get("initial_stop"),
+            "watched_entry": st.get("watched_entry"),
         }
         last = {"amt": a, "audit": au, "state": live}
         log("WAIT_DEFENSE", **last)
@@ -264,7 +279,7 @@ def wait_defense(sym, timeout=45):
 
 
 def assert_dormant_radar(sym, last):
-    """规格：开仓后雷达休眠至 50%×TP1，盘口只有硬止损(+TP123)。"""
+    """规格：开仓后雷达休眠至 0.85×TP1距，盘口只有硬止损(+TP123)。"""
     st = (last or {}).get("state") or load_state(sym)
     au = (last or {}).get("audit") or audit(sym)
     frac = float(st.get("radar_activation_frac") or 0)
@@ -274,11 +289,13 @@ def assert_dormant_radar(sym, last):
     if activated:
         fail("radar should be dormant after open", state=st)
         return False
-    if frac and abs(frac - 0.50) > 1e-6:
-        fail("expected frac 0.50 on first open", frac=frac)
+    # 白皮书 v3：首次 0.85（兼容旧 0.50 日志但不判失败为硬错误若已是 0.85）
+    if frac and abs(frac - 0.85) > 1e-6 and abs(frac - 0.50) > 1e-6:
+        fail("expected frac 0.85 on first open", frac=frac)
         return False
-    if pending is False:
-        log("WARN_pending_arm_false_or_missing", pending=pending)
+    if frac and abs(frac - 0.50) <= 1e-6:
+        fail("stale frac 0.50 still in state (expect 0.85)", frac=frac)
+        return False
     if int(au.get("stops") or 0) != 1:
         log(
             "STOPS_NOTE",
@@ -288,11 +305,11 @@ def assert_dormant_radar(sym, last):
     if int(au.get("limits") or 0) != 3:
         fail("tp123 missing", audit=au)
         return False
-    log("DORMANT_OK", frac=frac or 0.50, stops=au.get("stops"), limits=3)
+    log("DORMANT_OK", frac=frac or 0.85, stops=au.get("stops"), limits=3)
     return True
 
 
-def hold_observe(sym, seconds=24):
+def hold_observe(sym, seconds=16):
     """持有观察：确认 TP123/硬止损不漂移、无叠单。"""
     t0 = time.time()
     n = 0
@@ -347,6 +364,7 @@ def force_arm_via_admin(sym):
         "radar_activated": st.get("radar_activated"),
         "radar_pending_arm": st.get("radar_pending_arm"),
         "frac": st.get("radar_activation_frac"),
+        "exit_ownership": st.get("exit_ownership"),
     })
     if au.get("dups"):
         fail("dups after arm", audit=au)
@@ -362,6 +380,40 @@ def force_arm_via_admin(sym):
         return False
     log("DUAL_STOP_OK", stops=au.get("stops"), limits=au.get("limits"), total=au.get("total"))
     return True
+
+
+def run_live_arm_cycle(sym, side):
+    """开仓→TP123+硬止损→休眠雷达→强制双STOP→持有观察→全平无菌。"""
+    tag = f"{sym}_{side}"
+    log("CYCLE_START", tag=tag)
+    if not ensure_flat(sym, f"PREFLAT_{tag}"):
+        return False
+    open_side(sym, side)
+    ready, last = wait_defense(sym, timeout=70)
+    if not ready:
+        ensure_flat(sym, f"ABORT_{tag}")
+        return False
+    ok = True
+    if not assert_dormant_radar(sym, last):
+        ok = False
+    if not hold_observe(sym, seconds=12):
+        ok = False
+    if not force_arm_via_admin(sym):
+        ok = False
+    else:
+        time.sleep(8)
+        au = audit(sym)
+        log("HOLD_AFTER_ARM", tag=tag, audit=au)
+        if au.get("dups") or au.get("total", 0) > 5:
+            fail("post-arm drift", tag=tag, audit=au)
+            ok = False
+        if int(au.get("stops") or 0) < 2 or int(au.get("limits") or 0) != 3:
+            fail("post-arm defense incomplete", tag=tag, audit=au)
+            ok = False
+    if not ensure_flat(sym, f"FINAL_FLAT_{tag}"):
+        ok = False
+    log("CYCLE_END", tag=tag, ok=ok)
+    return ok
 
 
 def reentry_engine_live_smoke():
@@ -405,7 +457,6 @@ def reentry_engine_live_smoke():
             t1_early=t1.get("early_be_atr"),
             frac1=frac1,
         )
-        # v3：早保本禁用，early_be_atr 恒 0
         if abs(float(t0["early_be_atr"])) > 1e-9 or abs(float(t1["early_be_atr"])) > 1e-9:
             fail("early_be must be 0", t0=t0, t1=t1)
             ok_all = False
@@ -435,10 +486,10 @@ def reentry_engine_live_smoke():
 
 def main():
     os.makedirs("logs", exist_ok=True)
-    sym = "ETHUSDT"
-    log("RADAR_SMOKE_START", version="v16.1.0-radar-v3", symbol=sym)
-    log("COOLDOWN_25s")
-    time.sleep(25)
+    only = (os.getenv("RADAR_SMOKE_ONLY") or "").strip().upper()
+    log("RADAR_SMOKE_START", version="v16.2.1-api-monitor", only=only or "ALL")
+    log("COOLDOWN_22s_rate_limit")
+    time.sleep(22)
 
     if not reentry_engine_live_smoke():
         log("ENGINE_SMOKE_FAIL")
@@ -446,29 +497,37 @@ def main():
     else:
         log("ENGINE_SMOKE_OK")
 
-    if not ensure_flat(sym, "PREFLAT"):
-        R["pass"] = False
-    else:
-        open_long(sym)
-        ready, last = wait_defense(sym, timeout=50)
-        if ready:
-            if not assert_dormant_radar(sym, last):
-                R["pass"] = False
-            if not hold_observe(sym, seconds=16):
-                R["pass"] = False
-            if not force_arm_via_admin(sym):
-                R["pass"] = False
-            else:
-                time.sleep(10)
-                au = audit(sym)
-                log("HOLD_AFTER_ARM", audit=au)
-                if au.get("dups") or au.get("total", 0) > 5:
-                    fail("post-arm drift", audit=au)
-        else:
-            R["pass"] = False
-        ensure_flat(sym, "FINAL_FLAT")
+    matrix = [
+        ("ETHUSDT", "LONG"),
+        ("ETHUSDT", "SHORT"),
+        ("XAUUSDT", "LONG"),
+        ("XAUUSDT", "SHORT"),
+    ]
+    if only in ("ETH", "ETHUSDT"):
+        matrix = [x for x in matrix if x[0] == "ETHUSDT"]
+    elif only in ("XAU", "XAUUSDT"):
+        matrix = [x for x in matrix if x[0] == "XAUUSDT"]
+    elif only in ("LONG", "SHORT"):
+        matrix = [x for x in matrix if x[1] == only]
 
-    log("RADAR_SMOKE_END", passed=R["pass"], errors=R["errors"])
+    for sym in sorted({m[0] for m in matrix}):
+        if not ensure_flat(sym, f"PREFLAT_ALL_{sym}"):
+            R["pass"] = False
+
+    cycles = []
+    if R["pass"]:
+        for sym, side in matrix:
+            ok = run_live_arm_cycle(sym, side)
+            cycles.append({"tag": f"{sym}_{side}", "ok": ok})
+            if not ok:
+                R["pass"] = False
+            log("INTER_CYCLE_COOLDOWN_20s", after=f"{sym}_{side}")
+            time.sleep(20)
+
+    for sym in ("ETHUSDT", "XAUUSDT"):
+        ensure_flat(sym, f"CLEANUP_{sym}")
+
+    log("RADAR_SMOKE_END", passed=R["pass"], errors=R["errors"], cycles=cycles)
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(R, f, ensure_ascii=False, indent=2)
     print("OUT=", OUT)
