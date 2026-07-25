@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-20U 名义 · ETH/XAU · LONG/SHORT 生产内测矩阵（v15.7.2-breath-lock）
+20U 名义 · ETH/XAU · LONG/SHORT 生产内测矩阵（v15.9.2-ops-harden）
 - soft-cap ~20U（不低于交易所 minNotional）
-- 校验：永久硬止损×1.2、雷达共存、TP1/TP2、洁净平仓
-- 校验：XAU 冷启动系数 ≈0.675（状态 breathing_coefficient）
+- 校验：永久硬止损(TV×buffer)、雷达共存、TP1+TP2+TP3=3、挂单总数≤5、零同价重复
+- 校验：持仓观察窗无叠单漂移；平仓后无菌
+- 限流：周期间冷却，避免 -1003
 """
 from __future__ import annotations
 
@@ -145,7 +146,12 @@ def audit_orders(sym):
     for k, n in Counter([(s, p) for s, p, *_ in stops]).items():
         if n > 1:
             dups.append(("STOP", k, n))
-    ok = len(dups) == 0 and 1 <= len(stops) <= 2 and 1 <= len(limits) <= 3 and len(raw or []) < 10
+    ok = (
+        len(dups) == 0
+        and 1 <= len(stops) <= 2
+        and len(limits) == 3
+        and len(raw or []) <= 5  # 硬上限：未成交挂单总数 ≤5（防 50×叠单）
+    )
     return {
         "ok": ok, "err": "", "limits": len(limits), "stops": len(stops),
         "dups": dups, "limit_detail": limits, "stop_detail": stops, "total": len(raw or []),
@@ -203,11 +209,11 @@ def wait_position(sym, want_side, timeout=100):
             radar=st.get("current_sl"), open_atr=st.get("open_atr"),
             breath=st.get("breathing_coefficient"),
         )
-        if side == want_side and au.get("ok") and au.get("stops", 0) >= 1 and au.get("limits", 0) >= 1:
-            if not au.get("dups") and au.get("total", 99) < 10:
+        if side == want_side and au.get("ok") and au.get("stops", 0) >= 1 and au.get("limits", 0) >= 3:
+            if not au.get("dups") and au.get("total", 99) <= 5:
                 return True, au, st
-        if au.get("dups") or (au.get("total") or 0) > 15:
-            fail("duplicate/spam orders", symbol=sym, audit=au)
+        if au.get("dups") or (au.get("total") or 0) > 5:
+            fail("duplicate/spam orders (hard cap>5 or dups)", symbol=sym, audit=au)
             return False, au, st
         time.sleep(5)
     return False, audit_orders(sym), load_state(sym)
@@ -261,13 +267,19 @@ def verify_defense(sym, side, plan, st, au):
     if not (1 <= stops <= 2):
         fail("stop count bad", symbol=sym, stops=stops)
         ok = False
-    if not (2 <= limits <= 3):
-        fail("TP limit count bad (expect TP123)", symbol=sym, limits=limits)
+    if limits != 3:
+        fail("TP limit count bad (expect exactly TP1+TP2+TP3)", symbol=sym, limits=limits)
         ok = False
-    elif limits < 3:
-        log("TP_LIMITS_WARN_expect_3", symbol=sym, limits=limits)
+    if (au.get("total") or 0) > 5:
+        fail("open orders exceed hard cap 5", symbol=sym, total=au.get("total"))
+        ok = False
     if au.get("dups"):
         fail("duplicate orders", symbol=sym, dups=au["dups"])
+        ok = False
+    own = str(st.get("exit_ownership") or "NONE").upper() or "NONE"
+    log("EXIT_OWNERSHIP", symbol=sym, ownership=own)
+    if own not in ("NONE", "TP3_LIMIT", "RADAR_STOP"):
+        fail("bad exit_ownership", symbol=sym, ownership=own)
         ok = False
     breath = float(st.get("breathing_coefficient") or 0)
     if sym.startswith("XAU") and breath > 0:
@@ -333,9 +345,21 @@ def run_cycle(sym, side, tag):
         return False
     time.sleep(10)
     au2 = audit_orders(sym)
-    if au2.get("dups") or (au2.get("total") or 0) > 10:
-        fail("hold dup/spam", symbol=sym, audit=au2)
+    if au2.get("dups") or (au2.get("total") or 0) > 5:
+        fail("hold dup/spam (cap>5)", symbol=sym, audit=au2)
         ensure_flat(sym, f"ABORT_HOLD_{tag}")
+        RESULTS["cycles"].append({"tag": tag, "ok": False})
+        return False
+    # 持仓观察窗口：再扫一轮，确认无叠单漂移
+    time.sleep(8)
+    au3 = audit_orders(sym)
+    log("HOLD_RECHECK", symbol=sym, audit={
+        "limits": au3.get("limits"), "stops": au3.get("stops"),
+        "total": au3.get("total"), "dups": au3.get("dups"),
+    })
+    if au3.get("dups") or (au3.get("total") or 0) > 5 or au3.get("limits") != 3:
+        fail("hold recheck failed", symbol=sym, audit=au3)
+        ensure_flat(sym, f"ABORT_HOLD2_{tag}")
         RESULTS["cycles"].append({"tag": tag, "ok": False})
         return False
     closed = close_sym(sym, f"CLOSE_{tag}", bar + 1)
@@ -346,7 +370,7 @@ def run_cycle(sym, side, tag):
 def main():
     os.makedirs("logs", exist_ok=True)
     only = (os.getenv("LIVE20U_ONLY") or "").strip().upper()
-    log("LIVE20U_START", version="v15.9.0-tp70-tvsl", target_notional=TARGET_NOTIONAL, only=only or "ALL")
+    log("LIVE20U_START", version="v15.9.2-ops-harden", target_notional=TARGET_NOTIONAL, only=only or "ALL")
     matrix = (
         ("ETHUSDT", "LONG", "ETH_LONG"),
         ("ETHUSDT", "SHORT", "ETH_SHORT"),
@@ -363,11 +387,13 @@ def main():
             RESULTS["pass"] = False
             break
     else:
-        log("COOLDOWN_25s")
-        time.sleep(25)
+        # 限流保护：开测前冷却，周期间拉长间隔，避免 -1003
+        log("COOLDOWN_30s_rate_limit")
+        time.sleep(30)
         for sym, side, tag in matrix:
             run_cycle(sym, side, tag)
-            time.sleep(18)
+            log("INTER_CYCLE_COOLDOWN_22s", after=tag)
+            time.sleep(22)
 
     for sym in ("ETHUSDT", "XAUUSDT"):
         ensure_flat(sym, f"FINAL_FLAT_{sym}")

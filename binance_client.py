@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v15.9.1-risk-iron"
+BINANCE_CLIENT_VERSION = "v15.9.2-ops-harden"
 WS_MARKET_BASE = "wss://fstream.binance.com/market/ws"
 WS_MARKET_COMBINED = "wss://fstream.binance.com/stream"
 WS_PRIVATE_BASE = "wss://fstream.binance.com/ws"

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 # risk_manager.py（V2 完整版 - 包含自动回撤计算与峰值记录）
+"""
+日亏/连亏/回撤记账与状态查询。
+
+注意（v15.9.2）：开仓路径上的「熔断拒开」闸门已暂时关闭
+（见 position_supervisor_binance.CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False）。
+本模块仍更新 daily_pnl / consecutive_losses，供监控与日后重新启用。
+防「50 笔同价限价」不靠本模块，靠 order_idempotency + place_* fail-closed。
+"""
 import logging
 from datetime import datetime, date
 from typing import Dict
@@ -9,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class RiskManager:
     def __init__(self):
-        # ==================== 风控参数配置 ====================
+        # ==================== 风控参数配置（记账用；开仓闸门见 CIRCUIT_BREAKER_OPEN_GATE_ENABLED）====================
         self.daily_loss_limit_pct = 0.055          # 单日最大亏损比例（5.5%）
         self.max_consecutive_losses = 3            # 最大连续亏损次数
         self.max_daily_trades = 8                  # 单日最大开仓次数
@@ -26,7 +34,10 @@ class RiskManager:
         # V2 新增：资金峰值记录
         self.peak_equity = 0.0
 
-        logger.info("[RiskManager] 增强版风控（含动态回撤扫描）初始化完成")
+        logger.info(
+            "[RiskManager] 增强版风控初始化完成 "
+            "(开仓熔断闸门默认关闭·仅记账；防叠单见挂单幂等)"
+        )
 
     def _reset_daily_if_needed(self):
         if date.today() != self.today:

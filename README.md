@@ -1,47 +1,112 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v15.9.1-risk-iron`**  
+**当前版本：`v15.9.2-ops-harden`**  
 **TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 非必须）  
+**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线永久共存**（永久硬止损 + 独立雷达止损 + TP1/TP2/TP3；TP3 与雷达互斥）  
-**TP 分腿：10% / 20% / 70%**（三级限价常挂）  
+**TP 分腿：10% / 20% / 70%**（三级限价常挂，盘口应见 **恰好 3** 笔 LIMIT）  
 **硬止损：`|TV.price−TV.stop_loss|×buffer` 锚定成交价**（`defense_profiles`，默认 1.2；禁止 1.5×ATR 地板）  
 **波段滚动：五档 1.0~5.0；双保险再入价（5m极值 ∩ TV×0.997/1.003 取更优）**  
 **递进雷达：休眠至 50/65/80/90/95%×TP1距；微赚归零可再入；硬止损/亏损不重入**  
-**幂等铁律（v15.9.1）**：本地订单标签（再入+防御TP）未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**；`exit_ownership` 持久化互斥  
+**幂等铁律（v15.9.1+）**：本地订单标签未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**；`exit_ownership` 持久化互斥  
+**日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS 1h ATR 仅作呼吸系数采样，不是 XAU 图表周期）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：钉钉（`dingtalk.py`）**
 
+> **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：盘口两笔接近的止损 = **硬止损** + **雷达**。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
 > **硬止损（唯一公式 · v15.9.0）**：`|TV价 − TV.stop_loss| × buffer_multiplier`，挂在**成交价**外侧。已删除 1.5×ATR 地板与 `|成交−TV|×2`。缺/异常 `stop_loss` → **拒开**。  
 > **TP（v15.9.0）**：10%/20%/70% 常挂 TP1+TP2+TP3；TP3 与雷达互斥（谁先成交撤另一腿）。  
 > **叠单铁律（v15.9.1）**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**；持仓期 30s 监管对账。  
+> **API 限流**：REST 仅下单/改撤/对账；价格与成交靠 WebSocket；空闲巡检 45s + 失败退避 120s；禁止 REST 狂轮询。  
 > **查仓铁律（v15.7.5）**：持仓 `QUERY_FAILED` → fail-closed 拒开；空闲巡检 45s + 失败退避 120s。  
 > **防叠铁律（v15.7.6）**：挂单不可读 → 禁止谎称已有硬止损 / 禁止盲撤补。  
-> **v15.8.1**：五档波段滚动 + 双保险再入价；仓位归零且保本/微赚触发；每档独立 trail 带宽。  
+> **v15.8.1**：五档波段滚动 + 双保险再入价。  
 > **v15.8.2**：再入闭环 + 本地订单标签幂等。  
-> **v15.9.0**：对齐 TV 止损距离×buffer + TP 10/20/70 常挂 TP3 + TP3↔雷达互斥。  
-> **v15.9.1**：防御 TP `clientOrderId`、硬上限 5、持久化 `exit_ownership`、部分成交原子同步、30s 持仓对账。
+> **v15.9.0**：TV 止损距离×buffer + TP 10/20/70 常挂 TP3 + TP3↔雷达互斥。  
+> **v15.9.1**：防御 TP `clientOrderId`、硬上限 5、持久化 `exit_ownership`、部分成交原子同步、30s 持仓对账。  
+> **v15.9.2**：日熔断拒开闸门暂时关闭；README/20U 矩阵按生产级防叠单与限流加固。
 
 > **权威依据**：桌面《VPS改造规格说明_TP比例与止损同步》+ 白皮书 + 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v15.9.1-risk-iron · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v15.9.2-ops-harden · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
+python3 test_risk_iron_v1591.py
 python3 test_radar_reentry.py
 python3 test_two_scenario_atr.py
 python3 test_orders_dup_guard.py
+
+# 生产级 20U 实盘矩阵（ETH/XAU × LONG/SHORT；需在 VPS 且密钥可用）
+# sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
 | 工厂 | VPS 目录 | 端口 | 品种 |
 |------|----------|------|------|
 | **币安**（本仓库） | `~/binance-engine` | **5003** | ETHUSDT + XAUUSDT |
 | **深币**（对照） | `~/deepcoin-hft-server` | **5004** | ETH + XAU |
+
+---
+
+## 防叠单专章（红线 · 曾 50+ 同价 LIMIT）
+
+### 事故回顾
+VPS 在 **openOrders 查询失败/超时** 时，错误地认为「没有挂单」，于是反复 `place_limit`，同一价格可叠出 **50+ 笔** 限价单。根因是**幂等性缺失 + 查询失败当空**。
+
+### 现行多层闸门（缺一不可）
+
+| 层 | 机制 | 失败时行为 |
+|----|------|------------|
+| 1 本地标签 | 再入 `reentry_order_tag`；防御 TP `pending_order_tags` + `newClientOrderId` | 标签未释放 → **绝对拒挂**（即使交易所返回空） |
+| 2 fail-closed | `ORDERS_QUERY_FAILED` 哨兵；`place_limit`/`place_stop` 查单失败 | **return None**，禁止「盲补首挂」 |
+| 3 同价去重 | `_existing_same_limit` / 120s 本地缓存 | 已有同价 → 复用，不新挂 |
+| 4 硬上限 5 | 未成交挂单总数 ≥5 **或** LIMIT≥5 | 熔断拒挂 + 可 `trading_paused` |
+| 5 无菌开仓 | `_verify_sterile_flat`：qty=0 且 LIMIT+STOP=0 | 不净 → 拒开 |
+| 6 持仓对账 | 哨兵约 30s `_held_position_reconcile` | 超上限 → 暂停该品种 |
+| 7 TP3↔雷达 | 持久化 `exit_ownership` | 一腿成交锁定，禁止另一腿再挂 |
+
+**原则：宁可错过，不要做错。** 任何「查不到单」默认**不挂不撤**，等下一周期或人工。
+
+相关实现：`order_idempotency.py` · `binance_client.place_limit_order` · `radar_reentry_mixin._place_reentry_limit` · `PositionSupervisorBinance._place_defense_tp_limit`。
+
+---
+
+## 交易所 API 限流与 WebSocket 分工
+
+| 功能 | 通道 | 频率 / 策略 |
+|------|------|-------------|
+| 价格监控 | **WebSocket** 行情 | 实时 |
+| 订单成交 | **WebSocket** User Data | 实时推送优先 |
+| 开仓 / 改撤 | REST | 仅信号触发；单品种调用间隔留余量 |
+| 持仓核对 | REST | 持仓期约 30s；空闲巡检 **45s** |
+| 挂单查询 | REST | 下单前必查；失败 → fail-closed |
+| 5m K 线（再入） | REST | 再入时按需；失败降级 TV×系数 |
+| WS 断线 | 指数退避重连 | 1s → 60s 封顶 |
+
+**限流防护**
+- 空闲巡检 `QUERY_FAILED` / `-1003` → 退避 **120s**（`IDLE_PATROL_BACKOFF_SEC`）  
+- 核武对齐刹车：`NUCLEAR_REALIGN_MIN_INTERVAL_SEC`（防秒挂秒撤打爆 REST）  
+- 雷达改单最短间隔 5s  
+- 20U 实盘矩阵：周期前冷却 30s、周期间 22s，避免演练自身触发 ban  
+- **禁止**用 REST 轮询价格/成交替代 WebSocket  
+
+触发 API ban 时：暂停该品种激进补挂路径，等待窗口结束；**禁止**在 ban 中循环 place。
+
+---
+
+## 日熔断与开仓闸门（v15.9.2）
+
+`risk_manager.py` 仍记录：日亏 5.5%、连续亏 3、日交易 8、回撤 12%。  
+
+**开仓拒开闸门已暂时关闭**：`CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False`。  
+原因：日熔断状态易在演练/恢复路径误挡真实 TV；真正防击穿依赖挂单幂等硬上限，而非日亏挡信号。  
+
+重新启用：将该常量改为 `True` 并走完整回归。监控仍可看 `risk_manager.get_status()`。
 
 ---
 
@@ -57,7 +122,7 @@ python3 test_orders_dup_guard.py
 
 2. **挂 TP1+TP2+TP3 限价止盈**  
    价格 = TV `tp1`/`tp2`/`tp3`；数量 = VPS 自算总仓位的 **10% / 20% / 70%**。  
-   与硬止损同时挂出。TP3 与雷达对同一余仓**互斥**：谁先成交撤另一腿。
+   与硬止损同时挂出。每档带防御 `clientOrderId`。TP3 与雷达对同一余仓**互斥**：谁先成交撤另一腿并写 `exit_ownership`。
 
 3. **启动 VPS 原生 1h ATR 拉取**（呼吸系数 / 场景决议；≠ TV 图表周期）  
    - **场景一**（成功）：雷达用真实 ATR  
@@ -69,26 +134,26 @@ python3 test_orders_dup_guard.py
 | | 永久硬止损 | 雷达止损 |
 |--|-----------|---------|
 | 挂出时机 | 开仓瞬间 | 硬止损+TP 挂好后，引擎独立计算再挂 |
-| 价格来源 | **唯一公式**（TV×1.2 与 1.5×ATR×1.05 取大 + 滑点×2） | 呼吸引擎（场景一/二 ATR） |
+| 价格来源 | **唯一公式** `|TV−SL|×buffer` 锚定成交价 | 呼吸引擎（场景一/二 ATR） |
 | 数量 | closePosition（始终覆盖剩余） | 明确 quantity=剩余仓位 |
 | 改价 | **禁止**（公式升级重挂除外） | 可随呼吸上移（只收紧） |
-| 撤销 | **仅仓位归零** | 仓位归零 / 被另一笔止损触发后撤销 |
+| 撤销 | **仅仓位归零** | 仓位归零 / 互斥撤 / 被触发 |
 | 关系 | 两笔**独立共存**，不是升级/替换/接管 |
 
 **谁先被价格触及谁先平仓；任一归零 → 立即撤销另一笔及全部挂单。**  
 **禁止**：先撤硬止损再挂雷达；禁止因雷达更优而撤硬止损；禁止改硬止损价去「同步」雷达。
 
-### 部分平仓时数量同步
+### 部分平仓时数量同步（原子）
 
-- TP1 成交 → 仓≈70%：硬止损（closePosition 自动）+ 雷达（独立改量）同步到剩余  
-- TP2 成交 → 仓≈40%：再次同步  
-- 收缩**只改数量、不改硬止损价格**；实现禁止 `preserve_hard=False` 清场（裸奔窗口）
+- TP1/TP2 部分或全部成交 → `_atomic_resize_after_partial_tp`：更新头寸 → 收缩雷达数量 → 调整剩余 TP（含 TP3）  
+- 硬止损 closePosition 自动覆盖剩余；**不改硬止损价**  
+- 任一步失败 → 告警，不在中间态继续狂挂
 
 ### 示例（ETH SHORT）
 
-TV 价 1897.03，TV.SL 1912.18，成交 1900.51，initial_atr 12.69：  
-`base=max(18.18, 19.99)=19.99`，`slip=6.96`，`final≈26.95` → **硬止损≈1927.46**（盘口再加执行缓冲）。  
-雷达 initialStop≈1919.54 → 账户同时挂 **硬止损(更宽) + 雷达** 两笔 STOP。
+TV 价 1897.03，TV.SL 1912.18，成交 1900.51：  
+`dist = |1897.03−1912.18|×1.2 ≈ 18.18` → **硬止损 ≈ 成交价 + 18.18**（再加执行缓冲）。  
+雷达另挂独立 STOP。账户同时 **硬止损 + 雷达 + TP123**（总数 ≤5）。
 
 ---
 
@@ -223,9 +288,9 @@ qty = 名义上限 / entryPrice
 
 ### 红色警告：查不到单绝不可狂挂
 
-本地状态表存在该品种 `reentry_order_tag` 时，**即使交易所 openOrders 返回空，也绝对不允许再挂**。  
-查单失败 → fail-closed 拒挂。标签仅在：成交确认 / 确认撤销 / TTL 刷新前释放。  
-这是防止「查不到 TP/雷达/止损就循环补挂 50+ 单击穿实盘」的最后一道防线。
+本地存在该品种 `reentry_order_tag` **或** 防御 `pending_order_tags` 时，**即使交易所 openOrders 返回空，也绝对不允许再挂**。  
+查单失败 → fail-closed 拒挂。未成交挂单总数 **不得超过 5**（含 LIMIT+STOP）。  
+这是防止「查不到就循环补挂 50+ 单击穿实盘」的最后一道防线。详见文首「防叠单专章」。
 
 | 档位 | 激活% | ETH early/trig/adv · trail | XAU early/trig/adv · trail |
 |------|-------|----------------------------|----------------------------|
@@ -299,8 +364,9 @@ TV 全链条（空仓待命 → 新信号）：
 git status   # 工作区应干净（不含密钥）
 git log -1 --oneline
 python3 check_vps_logic.py
-python3 test_two_scenario_atr.py
-python3 test_tv_seq_collapse.py
+python3 test_orders_dup_guard.py
+python3 test_risk_iron_v1591.py
+python3 test_defense_v1590.py
 
 # 推送
 git push origin main
@@ -309,13 +375,29 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v15.7.1-triple-defense
+# 期望: v15.9.2-ops-harden
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
+
+# 20U 生产级全链路（ETH/XAU × 多空；结束后应双品种 FLAT）
+sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
+# 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version 一致；`trading_paused=false`；ETH/XAU 空仓待命。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v15.9.2-ops-harden`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+
+### 20U 矩阵观察点
+
+| 环节 | 期望 |
+|------|------|
+| PREFLAT | qty=0 且 orders=0 |
+| OPEN webhook | HTTP 200；市价成交 |
+| 防线就绪 | stops∈[1,2]，limits=**3**，total≤**5**，dups=[] |
+| HARD_SL | `frozen_hard_sl_px` ≈ \|TV−SL\|×1.2 外侧 |
+| HOLD | 二次扫描无叠单漂移 |
+| CLOSE | 无菌 flat |
+| 限流 | 周期间冷却，日志无持续 -1003 |
 
 ### 回归单测
 

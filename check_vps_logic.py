@@ -765,6 +765,11 @@ def audit_module4_radar(a: Audit):
         and "≥5" in _bc,
     )
     a.check(
+        "4.4e 日熔断开仓闸门可关闭",
+        "CIRCUIT_BREAKER_OPEN_GATE_ENABLED" in sup
+        and "CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False" in sup,
+    )
+    a.check(
         "4.5 ATR_UPDATE/ORDER_TIMEOUT 在 webhook_parser",
         "ATR_UPDATE_SEC" in wp and "ORDER_TIMEOUT_SEC" in wp,
     )

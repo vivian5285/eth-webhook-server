@@ -170,7 +170,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.1-risk-iron"
+BINANCE_VPS_VERSION = "v15.9.2-ops-harden"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -184,6 +184,9 @@ IDLE_PATROL_INTERVAL_SEC = 45  # 双品种空闲轮询；过密会触发 -1003 I
 IDLE_PATROL_BACKOFF_SEC = 120  # 查仓 QUERY_FAILED / 限流后拉长间隔
 IDLE_TAKEOVER_COOLDOWN_SEC = 30
 HELD_RECONCILE_INTERVAL_SEC = 30  # 持仓期监管对账（本地 vs 交易所）
+# 当日日亏/连亏/次数/回撤「拒开仓」闸门：暂时关闭（v15.9.2）。
+# risk_manager 仍记账与日志；真正防击穿靠挂单幂等硬上限，不靠日熔断挡 TV。
+CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False
 DUST_QTY_ETH = 0.004
 TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
@@ -4053,14 +4056,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
             return float(STOP_EXEC_BUFFER_USD)
 
     def _circuit_breaker_blocks_open(self):
-        """日亏 ≥5.5% 本金 / 连续亏 / 次数 / 回撤 → 拒开仓。"""
+        """
+        日亏/连亏/次数/回撤 → 拒开仓（可选）。
+        v15.9.2：CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False → 永不挡开仓；
+        仅打状态日志，避免误伤真实 TV / 20U 实盘演练。
+        """
+        if not CIRCUIT_BREAKER_OPEN_GATE_ENABLED:
+            try:
+                from risk_manager import risk_manager
+                st = risk_manager.get_status() if hasattr(risk_manager, "get_status") else {}
+                if st and not st.get("is_trading_allowed", True):
+                    logger.info(
+                        f"ℹ️ [{self._tag()}] 日熔断状态触发但开仓闸门已关闭 "
+                        f"(CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False) | {st}"
+                    )
+            except Exception:
+                pass
+            return False
         try:
             from risk_manager import risk_manager
             equity = float(self._resolve_cap_sizing_base() or 0)
             if hasattr(risk_manager, "is_trading_allowed_for_equity"):
                 ok = risk_manager.is_trading_allowed_for_equity(equity)
             else:
-                # 兼容：用权益换算日亏阈值
                 risk_manager._reset_daily_if_needed()
                 if equity > 0 and float(risk_manager.daily_pnl or 0) <= -0.055 * equity:
                     ok = False
