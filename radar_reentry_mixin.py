@@ -464,6 +464,16 @@ class RadarReentryMixin:
             logger.warning(f"⚠️ [{self.symbol}] 再入限价挂出失败")
             return False
         try:
+            from ops_log import audit as ops_audit
+            ops_audit(
+                f"{self.symbol} reentry_limit_placed side={side} "
+                f"attempt={attempt} limit={float(getattr(self, 'reentry_limit_px', 0) or 0):.4f} "
+                f"tag={getattr(self, 'reentry_order_tag', None)} "
+                f"exit={exit_src}@{exit_px:.4f} tv={float(getattr(self, 'cycle_tv_price', 0) or 0):.4f}"
+            )
+        except Exception:
+            pass
+        try:
             import dingtalk
             self._call_dingtalk(
                 dingtalk.report_system_alert,

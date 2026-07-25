@@ -171,7 +171,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.3-prod-gate"
+BINANCE_VPS_VERSION = "v15.9.4-reentry-verify"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -11175,7 +11175,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 return EXIT_SOURCE_SL_BREAKEVEN, note
             return EXIT_SOURCE_SL_INITIAL, note
 
-        if getattr(self, "shield_active", False) or self._radar_was_armed():
+        # 雷达已交棒/已激活：优先归因 radar_be（允许微赚区智能再入），
+        # 避免「未贴止损线」误判 manual 导致丢重入机会。
+        if self._radar_was_armed():
+            gate = self._describe_radar_trigger_gate(self.watched_qty, curr_px)
+            note = hint or "雷达交棒后仓位归零（保本/微赚再评估）"
+            note += f" | 闸门={gate}"
+            return EXIT_SOURCE_RADAR_BE, note
+        if getattr(self, "shield_active", False):
             return (
                 EXIT_SOURCE_MANUAL,
                 hint

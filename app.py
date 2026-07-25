@@ -129,6 +129,7 @@ def admin_resume(symbol):
             "message": f"Unknown symbol: {symbol}",
             "allowed": active_binance_symbols(),
         }), 400
+    # resume 保持本地运维兼容（不强制 secret）；smoke_arm 才强制鉴权
     sup = get_supervisor(sym)
     prev = str(getattr(sup, "trading_pause_reason", "") or "")
     was = bool(getattr(sup, "trading_paused", False))
@@ -157,6 +158,74 @@ def admin_resume(symbol):
         "atr_div_streak": 0,
         "atr_degraded": False,
     }), 200
+
+
+@app.route('/admin/smoke_arm_radar/<path:symbol>', methods=['POST'])
+def admin_smoke_arm_radar(symbol):
+    """
+    烟测专用：在主进程军师上强制越过激活线挂雷达 STOP。
+    仅当 monitoring 且有持仓、雷达仍休眠时生效；需 WEBHOOK_SECRET。
+    """
+    expected = str(os.getenv("WEBHOOK_SECRET", "528586")).strip()
+    data = request.get_json(silent=True) or {}
+    auth = str(
+        data.get("secret")
+        or request.form.get("secret")
+        or request.args.get("secret")
+        or request.headers.get("X-Webhook-Secret")
+        or ""
+    ).strip()
+    if not expected or auth != expected:
+        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+    meta = resolve_binance_symbol(symbol, default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({
+            "status": "error",
+            "message": f"Unknown symbol: {symbol}",
+            "allowed": active_binance_symbols(),
+        }), 400
+    sup = get_supervisor(sym)
+    if not bool(getattr(sup, "monitoring", False)):
+        return jsonify({"status": "error", "message": "not monitoring"}), 400
+    live = float(getattr(sup, "watched_qty", 0) or 0)
+    if live <= 0:
+        return jsonify({"status": "error", "message": "no live qty"}), 400
+    if bool(getattr(sup, "radar_activated", False)):
+        return jsonify({
+            "status": "ok",
+            "symbol": sym,
+            "already_activated": True,
+            "radar_activated": True,
+        }), 200
+    try:
+        gate = float(sup._radar_activation_price() or 0)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"gate_err:{e}"}), 500
+    side = str(getattr(sup, "current_side", "") or "").upper()
+    if side == "SHORT":
+        fake = gate * 0.998 if gate > 0 else 0.0
+    else:
+        fake = gate * 1.002 if gate > 0 else 0.0
+    if fake <= 0:
+        return jsonify({"status": "error", "message": "bad fake px"}), 500
+    ok = bool(
+        sup._maybe_arm_radar_on_activation(live, fake, source="admin_smoke_arm")
+    )
+    logger.info(
+        f"[admin/smoke_arm_radar] {sym} ok={ok} gate={gate} fake={fake} "
+        f"activated={getattr(sup, 'radar_activated', False)}"
+    )
+    return jsonify({
+        "status": "success" if ok else "error",
+        "symbol": sym,
+        "armed": ok,
+        "gate": gate,
+        "fake_px": fake,
+        "radar_activated": bool(getattr(sup, "radar_activated", False)),
+        "radar_pending_arm": bool(getattr(sup, "radar_pending_arm", False)),
+        "initial_stop": float(getattr(sup, "initial_stop", 0) or 0),
+    }), 200 if ok else 500
 
 
 @app.route('/health', methods=['GET'])
