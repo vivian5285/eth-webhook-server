@@ -121,14 +121,20 @@ from atr_scenario import (
 )
 from defense_profiles import (
     buffer_multiplier as defense_buffer_mult,
+    resolve_adx_tier,
     tp_leg_ratios,
     validate_tv_stop_loss,
 )
 from breath_profiles import LockedInitialAtr, cold_start_multiplier
 from reentry_profiles import (
+    ACTIVATION_TP1_FRAC,
     activation_frac_for_attempt,
     activation_price as reentry_activation_px,
+    activation_price_from_tp1,
+    adx_to_tier,
+    arm_stop_price,
     get_reentry_profile,
+    tier_label,
     tp1_distance as reentry_tp1_distance,
 )
 from smart_reentry_engine import blank_reentry_state
@@ -171,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v15.9.5-radar-arm-fix"
+BINANCE_VPS_VERSION = "v16.0.0-radar-v2"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -402,6 +408,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._rate_limit_hook_registered = False
         self._defense_ops_locked = False
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
+        self.adx_tier = 1
+        self.hard_sl_buffer = 1.2
         self.breathing_coefficient = cold_start_multiplier(
             getattr(self, "breath_profile", None)
         )
@@ -2802,6 +2810,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     "breakeven_phase": bool(getattr(self, "breakeven_phase", False)),
                     "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
                     "last_adx": float(getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
+                    "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
+                    "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.2) or 1.2),
                     "remaining_qty_pct": float(getattr(self, "remaining_qty_pct", 1.0) or 1.0),
                     "breathing_coefficient": float(
                         getattr(self, "breathing_coefficient", 1.0) or 1.0
@@ -3338,6 +3348,38 @@ class PositionSupervisorBinance(RadarReentryMixin):
     def _atr_1h_engine(self):
         return get_atr_1h_engine(self.symbol, binance_client.fetch_klines)
 
+
+    def _defense_buffer_mult(self):
+        """硬止损呼吸垫：按持久化 adx_tier（缺省中趋势 1.2）。"""
+        tier = getattr(self, "adx_tier", None)
+        if tier is None:
+            adx = float(getattr(self, "last_adx", 0) or 0)
+            if adx > 0:
+                tier = adx_to_tier(adx)
+            else:
+                tier = 1
+        return float(defense_buffer_mult(self.symbol, tier=int(tier)))
+
+    def _bind_adx_tier_on_open(self, adx=None):
+        """开仓时锁定 ADX 档位（影响硬止损 buffer + 雷达系数）。"""
+        if adx is None:
+            adx = float(getattr(self, "last_adx", 0) or 0)
+            if adx <= 0:
+                try:
+                    _, adx = self._refresh_market_metrics(force=False)
+                except Exception:
+                    adx = 25.0
+        tier = int(resolve_adx_tier(adx=float(adx or 25.0)))
+        self.adx_tier = tier
+        self.radar_tier = tier
+        self.last_adx = float(adx or 25.0)
+        self.hard_sl_buffer = float(self._defense_buffer_mult())
+        logger.info(
+            f"📊 [{self.symbol}] ADX档锁定 T{tier}({tier_label(tier)}) "
+            f"ADX={float(adx or 0):.1f} buffer={self.hard_sl_buffer:.2f}"
+        )
+        return tier
+
     def _effective_place_tp_levels(self):
         """v15.9.0：始终挂 TP1+TP2+TP3（10/20/70）。"""
         return 3
@@ -3361,7 +3403,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         tv_entry = float(getattr(self, "tv_price", 0) or 0)
         if tv_entry <= 0:
             tv_entry = fill
-        buf = float(defense_buffer_mult(self.symbol))
+        buf = float(self._defense_buffer_mult())
         return hard_stop_price(
             side,
             fill,
@@ -3380,7 +3422,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         tv_sl = float(
             tv_sl if tv_sl is not None else (getattr(self, "tv_sl_ref", 0) or 0)
         )
-        buf = float(defense_buffer_mult(self.symbol))
+        buf = float(self._defense_buffer_mult())
         return compute_hard_stop_distance(
             tv_entry, tv_sl, fill, 0.0, tv_mult=buf,
         )
@@ -3497,6 +3539,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
         side = str(side or "").strip().upper()
         if live_qty <= 0 or entry <= 0 or side not in ("LONG", "SHORT"):
             return False
+        try:
+            self._bind_adx_tier_on_open()
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] ADX档绑定失败，默认中趋势: {e}")
+            self.adx_tier = 1
+            self.radar_tier = 1
+            self.hard_sl_buffer = 1.2
+
         temp_sl = self._temp_hard_stop_from_tv(entry, side)
         if temp_sl <= 0:
             logger.error(
@@ -3506,11 +3556,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
             return False
 
         meta = self._hard_stop_distance_meta(fill=entry)
+        buf = float(self._defense_buffer_mult())
         logger.info(
             f"🛡️ [{self.symbol}] {source} 硬止损算距: "
             f"tv_sl={float(getattr(self, 'tv_sl_ref', 0) or 0):.2f} "
-            f"tv_dist={meta.get('tv_implied', 0) / max(float(defense_buffer_mult(self.symbol)), 1e-9):.2f} "
-            f"buffer={float(defense_buffer_mult(self.symbol)):.2f} "
+            f"tv_dist={meta.get('tv_implied', 0) / max(buf, 1e-9):.2f} "
+            f"buffer={buf:.2f} "
             f"actual_dist={meta.get('final'):.2f} "
             f"→ @{temp_sl:.2f}"
         )
@@ -13182,20 +13233,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """递进阈值：attempt 0/1/2/3 → 50%/65%/80%/95% × TP1距。"""
+        """白皮书 v2.0：固定 0.85 × TP1距（与档位无关）。"""
         frac = float(getattr(self, "radar_activation_frac", 0) or 0)
         if frac > 0:
             return frac
         return float(
             activation_frac_for_attempt(
-                int(getattr(self, "reentry_attempt", 0) or 0),
-                get_reentry_profile(self.symbol),
+                0, get_reentry_profile(self.symbol),
             )
+            or ACTIVATION_TP1_FRAC
         )
 
+
     def _radar_activation_price(self):
-        """价触此价 → 首次激活雷达呼吸。"""
+        """价触此价 → 首次激活雷达呼吸（优先 TV TP1 距离 ×0.85）。"""
         entry = float(self.watched_entry or 0)
+        frac = float(self._radar_activation_ratio() or ACTIVATION_TP1_FRAC)
+        tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
+        if entry > 0 and tp1 > 0:
+            px = activation_price_from_tp1(
+                self.current_side, entry, tp1, frac=frac,
+            )
+            if px > 0:
+                return px
         atr = float(
             getattr(self, "open_atr", 0)
             or getattr(self, "cycle_open_atr", 0)
@@ -13206,14 +13266,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 atr = float(self._get_locked_initial_atr() or 0)
             except Exception:
                 atr = 0.0
-        frac = float(self._radar_activation_ratio() or 0.5)
         px = reentry_activation_px(self.current_side, entry, atr, frac)
         if px > 0:
             return px
-        tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
         if tp1 <= 0:
             tp1 = entry + self._tp1_distance() if self.current_side == "LONG" else entry - self._tp1_distance()
         return radar_activation_price(self.current_side, entry, tp1, frac=frac)
+
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
         """兼容旧调用：一律走呼吸止损。"""
@@ -13256,6 +13315,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         if coeff <= 0:
             coeff = 1.0
 
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
+        tp2_px = float(tps[1] or 0) if len(tps) > 1 else 0.0
+        tp3_px = float(tps[2] or 0) if len(tps) > 2 else 0.0
         out = calculate_breath_stop(
             side,
             px,
@@ -13268,6 +13331,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
             breathing_coefficient=coeff,
             profile=profile,
             early_be_done=early,
+            tp1_px=tp1_px,
+            tp2_px=tp2_px,
+            tp3_px=tp3_px,
         )
         new_stop = float(out["stop"] or 0)
         new_best = float(out["best"] or best)
@@ -14478,6 +14544,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)
+                    self.adx_tier = int(s.get("adx_tier", 1) or 1)
+                    self.hard_sl_buffer = float(s.get("hard_sl_buffer", 1.2) or 1.2)
                     self.remaining_qty_pct = float(s.get("remaining_qty_pct", 1.0) or 1.0)
                     self.breathing_coefficient = float(
                         s.get("breathing_coefficient", 1.0) or 1.0

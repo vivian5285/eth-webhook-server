@@ -40,7 +40,7 @@ LEG_TP_RATIOS = [0.10, 0.20, 0.70]
 PLACE_TP_LEVELS = 3  # 始终挂 TP1+TP2+TP3；与雷达对 TP3 余仓互斥
 
 # ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
-RADAR_ACTIVATE_TP1_FRAC = 0.50
+RADAR_ACTIVATE_TP1_FRAC = 0.85  # 白皮书 v2.0：固定 0.85×TP1距
 RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
 RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
 RADAR_TP1_FLOOR_ATR = 0.5

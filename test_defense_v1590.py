@@ -63,6 +63,12 @@ class TestTpRatios(unittest.TestCase):
         self.assertEqual(tp_leg_ratios("XAUUSDT"), [0.10, 0.20, 0.70])
         self.assertAlmostEqual(buffer_multiplier("ETHUSDT"), 1.2)
 
+    def test_buffer_by_tier(self):
+        self.assertAlmostEqual(buffer_multiplier("ETHUSDT", tier=0), 1.1)
+        self.assertAlmostEqual(buffer_multiplier("ETHUSDT", tier=1), 1.2)
+        self.assertAlmostEqual(buffer_multiplier("ETHUSDT", tier=2), 1.3)
+        self.assertAlmostEqual(buffer_multiplier("XAUUSDT", tier=1), 1.2)
+
     def test_always_place_three(self):
         self.assertEqual(place_tp_levels_for_scenario(SCENARIO_VPS), 3)
         self.assertEqual(place_tp_levels_for_scenario(SCENARIO_TV), 3)
@@ -77,7 +83,7 @@ class TestMutexSourcePresent(unittest.TestCase):
         self.assertIn("def _mutex_on_tp3_filled", src)
         self.assertIn("def _mutex_on_radar_filled", src)
         self.assertIn("def _force_reconcile_position_vs_local", src)
-        self.assertIn("v15.9.5-radar-arm-fix", src)
+        self.assertIn("v16.0.0-radar-v2", src)
         self.assertIn("def _pause_symbol_trading", src)
 
 

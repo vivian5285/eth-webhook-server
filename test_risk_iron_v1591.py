@@ -113,8 +113,8 @@ class TestRestThrottle(unittest.TestCase):
         from reentry_profiles import ACTIVATION_FRACS, ETH_TIERS, REENTRY_TIERS_JSON
         import os
         self.assertTrue(os.path.isfile(REENTRY_TIERS_JSON))
-        self.assertEqual(len(ACTIVATION_FRACS), 5)
-        self.assertEqual(len(ETH_TIERS), 5)
+        self.assertEqual(len(ACTIVATION_FRACS), 1)
+        self.assertEqual(len(ETH_TIERS), 3)
 
 
 if __name__ == "__main__":

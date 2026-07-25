@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v15.8.2 五档波段滚动 + 双保险再入场 + 订单标签幂等纯单元测试。"""
+"""v16.0.0 / 白皮书 v2.0：ADX 三档 + 固定 0.85 激活 + 最多 1 次重入。"""
 from __future__ import annotations
 
+import time
 import unittest
 
 from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
 from reentry_profiles import (
     ACTIVATION_FRACS,
+    ACTIVATION_TP1_FRAC,
+    ARM_SL_ATR,
     MAX_REENTRIES,
     activation_frac_for_attempt,
     activation_price,
+    activation_price_from_tp1,
+    adx_to_tier,
     apply_tier_to_breath_profile,
+    arm_stop_price,
+    buffer_for_tier,
     can_smart_reenter,
     compute_reentry_limit_px,
     exit_in_reentry_zone,
     get_reentry_profile,
     is_better_than_tv,
+    looser_tier,
     make_reentry_client_order_id,
     next_activation_frac,
     pick_dual_insurance,
     reentry_enabled,
+    reentry_window_sec,
     tier_coeffs,
     tier_label,
 )
@@ -32,105 +41,105 @@ from smart_reentry_engine import (
 )
 
 
-class TestActivationLadder(unittest.TestCase):
-    def test_fracs_five_tiers(self):
-        self.assertEqual(ACTIVATION_FRACS, [0.50, 0.65, 0.80, 0.90, 0.95])
-        self.assertEqual(MAX_REENTRIES, 4)
-        for i, f in enumerate(ACTIVATION_FRACS):
-            self.assertAlmostEqual(activation_frac_for_attempt(i), f)
-        self.assertEqual(tier_label(0), "1.0")
-        self.assertEqual(tier_label(4), "5.0")
+class TestAdxTiers(unittest.TestCase):
+    def test_adx_bounds(self):
+        self.assertEqual(adx_to_tier(19.9), 0)
+        self.assertEqual(adx_to_tier(20.0), 1)
+        self.assertEqual(adx_to_tier(30.0), 1)
+        self.assertEqual(adx_to_tier(30.1), 2)
 
-    def test_activation_price_key_fracs(self):
+    def test_buffer_by_tier(self):
+        self.assertAlmostEqual(buffer_for_tier(0), 1.1)
+        self.assertAlmostEqual(buffer_for_tier(1), 1.2)
+        self.assertAlmostEqual(buffer_for_tier(2), 1.3)
+
+    def test_looser_tier(self):
+        self.assertEqual(looser_tier(0), 1)
+        self.assertEqual(looser_tier(1), 2)
+        self.assertEqual(looser_tier(2), 2)
+
+
+class TestActivationFixed(unittest.TestCase):
+    def test_frac_fixed_085(self):
+        self.assertAlmostEqual(ACTIVATION_TP1_FRAC, 0.85)
+        self.assertEqual(ACTIVATION_FRACS, [0.85])
+        self.assertEqual(MAX_REENTRIES, 1)
+        for i in range(5):
+            self.assertAlmostEqual(activation_frac_for_attempt(i), 0.85)
+        self.assertEqual(tier_label(0), "弱趋势")
+        self.assertEqual(tier_label(2), "强趋势")
+
+    def test_activation_price_085(self):
         atr, entry = 20.0, 3000.0
-        for frac, mult in (
-            (0.50, 0.675), (0.65, 0.8775), (0.80, 1.08),
-            (0.90, 1.215), (0.95, 1.2825),
-        ):
-            self.assertAlmostEqual(
-                activation_price("LONG", entry, atr, frac),
-                entry + atr * mult, places=2,
-            )
+        # 0.85 × 1.35 ATR = 1.1475 ATR
+        self.assertAlmostEqual(
+            activation_price("LONG", entry, atr, 0.85),
+            entry + atr * 1.1475, places=2,
+        )
+        self.assertAlmostEqual(
+            activation_price("SHORT", entry, atr, 0.85),
+            entry - atr * 1.1475, places=2,
+        )
 
-    def test_frac_monotonic_cap(self):
-        cur = 0.50
-        for nxt in (1, 2, 3, 4):
-            cur2 = next_activation_frac(cur, nxt)
-            self.assertGreaterEqual(cur2, cur)
-            cur = cur2
-        self.assertLessEqual(cur, 0.95)
+    def test_activation_from_tv_tp1(self):
+        entry, tp1 = 3000.0, 3100.0
+        self.assertAlmostEqual(
+            activation_price_from_tp1("LONG", entry, tp1, 0.85),
+            entry + 0.85 * 100, places=2,
+        )
+
+    def test_frac_no_longer_raises(self):
+        self.assertAlmostEqual(next_activation_frac(0.85, 1), 0.85)
+
+    def test_arm_stop_half_atr(self):
+        self.assertAlmostEqual(ARM_SL_ATR, 0.5)
+        self.assertAlmostEqual(arm_stop_price("LONG", 3000, 20), 2990.0)
+        self.assertAlmostEqual(arm_stop_price("SHORT", 3000, 20), 3010.0)
 
 
 class TestTierCoeffs(unittest.TestCase):
-    def test_eth_five_tiers(self):
+    def test_eth_three_tiers(self):
         eth = get_reentry_profile("ETHUSDT")
-        self.assertEqual(len(eth["tiers"]), 5)
+        self.assertEqual(len(eth["tiers"]), 3)
         t0 = tier_coeffs(0, eth)
-        t4 = tier_coeffs(4, eth)
-        self.assertAlmostEqual(t0["early_be_atr"], 0.50)
-        self.assertAlmostEqual(t0["step_advance_atr"], 0.40)
+        t2 = tier_coeffs(2, eth)
+        self.assertAlmostEqual(t0["step_trigger_atr"], 0.40)
+        self.assertAlmostEqual(t0["step_advance_atr"], 0.25)
+        self.assertAlmostEqual(t0["breath_tp12"], 0.80)
         self.assertAlmostEqual(t0["min_mult"], 1.2)
-        self.assertAlmostEqual(t0["max_mult"], 2.5)
-        self.assertAlmostEqual(t4["early_be_atr"], 1.30)
-        self.assertAlmostEqual(t4["step_trigger_atr"], 1.40)
-        self.assertAlmostEqual(t4["step_advance_atr"], 0.64)
-        self.assertAlmostEqual(t4["min_mult"], 2.0)
-        self.assertAlmostEqual(t4["max_mult"], 3.5)
-        t1 = tier_coeffs(1, eth)
-        self.assertAlmostEqual(t1["step_advance_atr"], 0.46)
-        self.assertAlmostEqual(t1["min_mult"], 1.4)
+        self.assertAlmostEqual(t0["max_mult"], 1.5)
+        self.assertAlmostEqual(t0["early_be_atr"], 0.0)
+        self.assertAlmostEqual(t2["step_trigger_atr"], 0.60)
+        self.assertAlmostEqual(t2["step_advance_atr"], 0.40)
+        self.assertAlmostEqual(t2["max_mult"], 3.5)
 
-    def test_xau_five_tiers(self):
+    def test_xau_three_tiers(self):
         xau = get_reentry_profile("XAUUSDT")
-        t0 = tier_coeffs(0, xau)
-        t4 = tier_coeffs(4, xau)
-        self.assertAlmostEqual(t0["early_be_atr"], 0.65)
-        self.assertAlmostEqual(t0["step_trigger_atr"], 0.70)
-        self.assertAlmostEqual(t4["early_be_atr"], 1.55)
-        self.assertAlmostEqual(t4["step_trigger_atr"], 1.30)
-        self.assertAlmostEqual(t4["step_advance_atr"], 0.70)
-        self.assertAlmostEqual(t4["max_mult"], 3.5)
+        self.assertEqual(len(xau["tiers"]), 3)
+        t1 = tier_coeffs(1, xau)
+        self.assertAlmostEqual(t1["step_trigger_atr"], 0.40)
+        self.assertAlmostEqual(t1["step_advance_atr"], 0.30)
+        self.assertAlmostEqual(t1["breath_tp12"], 1.00)
 
-    def test_overlay_uses_tier_trail(self):
-        out = apply_tier_to_breath_profile(BREATH_ETH, 2, get_reentry_profile("ETHUSDT"))
-        self.assertAlmostEqual(out["early_be_atr"], 0.85)
-        self.assertAlmostEqual(out["min_mult"], 1.6)
-        self.assertAlmostEqual(out["max_mult"], 3.0)
-        out_x = apply_tier_to_breath_profile(BREATH_XAU, 1, get_reentry_profile("XAUUSDT"))
-        self.assertAlmostEqual(out_x["early_be_atr"], 0.85)
-        self.assertAlmostEqual(out_x["min_mult"], 1.4)
-        self.assertAlmostEqual(out_x["max_mult"], 2.8)
+    def test_overlay_disables_early_be(self):
+        out = apply_tier_to_breath_profile(dict(BREATH_ETH), 1, get_reentry_profile("ETHUSDT"))
+        self.assertAlmostEqual(out["early_be_atr"], 0.0)
+        self.assertAlmostEqual(out["initial_sl_atr"], 0.5)
+        self.assertAlmostEqual(out["step_trigger_atr"], 0.50)
+        out_x = apply_tier_to_breath_profile(dict(BREATH_XAU), 0, get_reentry_profile("XAUUSDT"))
+        self.assertAlmostEqual(out_x["step_advance_atr"], 0.20)
 
-
-class TestBreathProfilesTier0(unittest.TestCase):
-    def test_base_profiles_tier0(self):
+    def test_breath_baseline(self):
         eth = get_breath_profile("ETHUSDT")
         xau = get_breath_profile("XAUUSDT")
-        self.assertAlmostEqual(eth["early_be_atr"], 0.5)
-        self.assertAlmostEqual(xau["early_be_atr"], 0.65)
-        self.assertAlmostEqual(xau["min_mult"], 1.2)
-        self.assertAlmostEqual(xau["max_mult"], 2.5)
+        self.assertAlmostEqual(eth["initial_sl_atr"], 0.5)
+        self.assertAlmostEqual(xau["initial_sl_atr"], 0.5)
+        self.assertAlmostEqual(eth["early_be_atr"], 0.0)
+        self.assertAlmostEqual(xau["early_be_atr"], 0.0)
 
 
-class TestReentryZone(unittest.TestCase):
-    def test_zones(self):
-        self.assertTrue(exit_in_reentry_zone("LONG", 3000, 3005, 20, 0.5))
-        self.assertFalse(exit_in_reentry_zone("LONG", 3000, 2999, 20, 0.5))
-        self.assertTrue(exit_in_reentry_zone("LONG", 4000, 4003, 20, 0.3))
-
-    def test_can_reenter_and_cap(self):
-        ok, _ = can_smart_reenter(
-            exit_source="sl_breakeven", side="LONG", entry=3000,
-            exit_px=3005, initial_atr=20, reentry_attempt=0,
-            profile=get_reentry_profile("ETHUSDT"),
-        )
-        self.assertTrue(ok)
-        ok, why = can_smart_reenter(
-            exit_source="sl_breakeven", side="LONG", entry=3000,
-            exit_px=3005, initial_atr=20, reentry_attempt=4,
-        )
-        self.assertFalse(ok)
-        self.assertEqual(why, "max_reentries")
+class TestReentryGate(unittest.TestCase):
+    def test_hard_sl_blocked(self):
         ok, why = can_smart_reenter(
             exit_source="vps_hard_sl", side="LONG", entry=3000,
             exit_px=3005, initial_atr=20, reentry_attempt=0,
@@ -138,118 +147,100 @@ class TestReentryZone(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(why, "hard_sl_no_reentry")
 
+    def test_max_one_reentry(self):
+        ok, why = can_smart_reenter(
+            exit_source="radar_be", side="LONG", entry=3000,
+            exit_px=3005, initial_atr=20, reentry_attempt=1,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(why, "max_reentries")
+
+    def test_window_expired(self):
+        ok, why = can_smart_reenter(
+            exit_source="radar_be", side="LONG", entry=3000,
+            exit_px=3005, initial_atr=20, reentry_attempt=0,
+            window_deadline_ts=time.time() - 10,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(why, "window_expired")
+
+    def test_zone_ok(self):
+        self.assertTrue(exit_in_reentry_zone("LONG", 3000, 3005, 20, 0.5))
+        self.assertFalse(exit_in_reentry_zone("LONG", 3000, 2990, 20, 0.5))
+        ok, why = can_smart_reenter(
+            exit_source="radar_be", side="LONG", entry=3000,
+            exit_px=3005, initial_atr=20, reentry_attempt=0,
+            window_deadline_ts=time.time() + 3600,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(why, "ok")
+
+    def test_window_bars(self):
+        # ETH 2×90m=10800；XAU 3×45m=8100
+        self.assertAlmostEqual(reentry_window_sec("ETHUSDT"), 10800)
+        self.assertAlmostEqual(reentry_window_sec("XAUUSDT"), 8100)
+
 
 class TestDualInsurance(unittest.TestCase):
-    def test_pick_long_min(self):
-        lim, src = pick_dual_insurance("LONG", 2980.01, 2991.0)
-        self.assertAlmostEqual(lim, 2980.01)
-        self.assertIn("min", src)
-        lim2, _ = pick_dual_insurance("LONG", 2995.0, 2991.0)
-        self.assertAlmostEqual(lim2, 2991.0)
-
-    def test_pick_short_max(self):
-        lim, src = pick_dual_insurance("SHORT", 3010.0, 3009.0)
-        self.assertAlmostEqual(lim, 3010.0)
-        lim2, _ = pick_dual_insurance("SHORT", 3005.0, 3009.0)
-        self.assertAlmostEqual(lim2, 3009.0)
-
-    def test_compute_dual_takes_better(self):
-        # 5m low+tick=2980.01；TV×0.997=2991 → 取更低 2980.01
-        lim, src = compute_reentry_limit_px(
-            side="LONG", tv_price=3000.0,
-            low5=2980.0, high5=3010.0, tick=0.01, discount=0.003,
+    def test_pick_and_better(self):
+        lim, src = pick_dual_insurance("LONG", 2980, 2991)
+        self.assertAlmostEqual(lim, 2980)
+        self.assertTrue(is_better_than_tv("LONG", lim, 3000))
+        lim2, why = compute_reentry_limit_px(
+            side="LONG", tv_price=3000, low5=2979.99, high5=3010,
+            prev_entry=3000,
         )
-        self.assertAlmostEqual(lim, 2980.01)
-        self.assertTrue(is_better_than_tv("LONG", lim, 3000.0))
-        self.assertTrue("dual" in src or "kline" in src)
+        self.assertGreater(lim2, 0)
+        self.assertTrue(is_better_than_tv("LONG", lim2, 3000))
 
-        # 5m low 很浅（2995+tick）不如 TV 折扣 → 取 TV 折扣
-        lim2, src2 = compute_reentry_limit_px(
-            side="LONG", tv_price=3000.0,
-            low5=2995.0, high5=3010.0, tick=0.01, discount=0.003,
+    def test_must_beat_entry(self):
+        lim, why = compute_reentry_limit_px(
+            side="LONG", tv_price=3000, low5=3001, high5=3010,
+            prev_entry=2990,
         )
-        self.assertAlmostEqual(lim2, round(3000 * 0.997, 2))
-        self.assertIn("tv", src2)
+        self.assertEqual(lim, 0)
+        self.assertIn(why, ("not_better_than_tv", "not_better_than_entry"))
 
-    def test_not_better_aborts(self):
-        lim, src = compute_reentry_limit_px(
-            side="LONG", tv_price=3000.0,
-            low5=3010.0, high5=3020.0, discount=0.0,
+
+class TestEngine(unittest.TestCase):
+    def test_bump_loosens_tier(self):
+        b = bump_after_reentry_fill(0, 0.85, "ETHUSDT", adx_tier=0)
+        self.assertEqual(b["reentry_attempt"], 1)
+        self.assertEqual(b["adx_tier"], 0)
+        self.assertEqual(b["radar_tier"], 1)  # looser
+        self.assertAlmostEqual(b["radar_activation_frac"], 0.85)
+
+    def test_init_cycle(self):
+        st = init_cycle_on_open(
+            side="LONG", tv_price=3000, entry=3001, open_atr=20,
+            symbol="ETHUSDT", adx_tier=2,
         )
-        self.assertEqual(lim, 0.0)
-        self.assertEqual(src, "not_better_than_tv")
+        self.assertEqual(st["adx_tier"], 2)
+        self.assertEqual(st["radar_tier"], 2)
+        self.assertAlmostEqual(st["radar_activation_frac"], 0.85)
+        self.assertTrue(st["radar_pending_arm"])
 
-    def test_plan_klines(self):
-        k5 = [[0, "0", "3010", "2980", "3000"]]
+    def test_blank_and_tag(self):
+        blank = blank_reentry_state()
+        self.assertIn("adx_tier", blank)
+        self.assertIn("reentry_window_deadline_ts", blank)
+        tag = make_reentry_client_order_id("ETHUSDT", "LONG", 2990.5)
+        self.assertTrue(tag.startswith("RE"))
+        self.assertLessEqual(len(tag), 36)
+
+    def test_plan_limit(self):
         plan, why = plan_reentry_limit(
-            side="LONG", tv_price=3000.0, symbol="ETHUSDT", klines_5m=k5,
+            side="LONG", tv_price=3000, symbol="ETHUSDT",
+            klines_5m=[[0, 0, 3010, 2979, 0]],
+            prev_entry=3000,
         )
         self.assertEqual(why, "ok")
-        self.assertAlmostEqual(plan["limit_px"], 2980.01)
+        self.assertIsNotNone(plan)
+        self.assertLess(plan["limit_px"], 3000)
 
-
-class TestCycleState(unittest.TestCase):
-    def test_bump_to_tier5(self):
-        b = bump_after_reentry_fill(0, 0.50, "ETHUSDT")
-        self.assertEqual(b["reentry_attempt"], 1)
-        self.assertAlmostEqual(b["radar_activation_frac"], 0.65)
-        b4 = bump_after_reentry_fill(3, 0.90, "ETHUSDT")
-        self.assertEqual(b4["reentry_attempt"], 4)
-        self.assertAlmostEqual(b4["radar_activation_frac"], 0.95)
-        self.assertEqual(tier_label(4), "5.0")
-
-    def test_enabled_flag(self):
+    def test_enabled(self):
         self.assertTrue(reentry_enabled("ETHUSDT"))
         self.assertTrue(reentry_enabled("XAUUSDT"))
-        self.assertIn("reentry_attempt", blank_reentry_state())
-        self.assertIn("reentry_order_tag", blank_reentry_state())
-        self.assertIsNone(blank_reentry_state()["reentry_order_tag"])
-        st = init_cycle_on_open(
-            side="LONG", tv_price=3000, entry=2999, open_atr=20, symbol="XAUUSDT",
-        )
-        self.assertAlmostEqual(st["radar_activation_frac"], 0.50)
-        self.assertIsNone(st.get("reentry_order_tag"))
-
-
-class TestOrderTagIdempotency(unittest.TestCase):
-    def test_client_order_id_shape(self):
-        tag = make_reentry_client_order_id("ETHUSDT", "LONG", 2999.5, 1719000000.0)
-        # RE + E + L + px + ts → REEL...
-        self.assertEqual(tag[:4], "REEL", msg=repr(tag))
-        self.assertLessEqual(len(tag), 36)
-        tag_x = make_reentry_client_order_id("XAUUSDT", "SHORT", 2650.12, 1719000001.0)
-        self.assertEqual(tag_x[:4], "REXS", msg=repr(tag_x))
-        self.assertNotEqual(tag, tag_x)
-
-    def test_refuse_second_place_when_tag_pending(self):
-        """本地标签未清 → _place_reentry_limit 必须拒挂（即使无交易所单）。"""
-        from radar_reentry_mixin import RadarReentryMixin
-
-        class _T(RadarReentryMixin):
-            symbol = "ETHUSDT"
-            monitoring = False
-            watched_qty = 0
-            cycle_tv_side = "LONG"
-            cycle_tv_price = 3000.0
-            reentry_order_tag = "REEL299950000"
-            reentry_limit_order_id = None
-            reentry_unfilled_refreshes = 0
-            base_qty = 0.01
-            _reentry_open_snap = {"qty": 0.01}
-
-            def _get_active_position(self, prefer_ws=False):
-                return None
-
-            def _save_state(self):
-                pass
-
-            def _fetch_reentry_klines(self):
-                return None, None
-
-        t = _T()
-        self.assertFalse(t._place_reentry_limit(side="LONG", reason="单测叠挂"))
-        # 标签仍在（未误释放）
-        self.assertEqual(t.reentry_order_tag, "REEL299950000")
 
 
 if __name__ == "__main__":

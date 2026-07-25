@@ -3,34 +3,36 @@
 """
 按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
 
-v15.8.0：
-  - 雷达启动改为递进阈值（见 reentry_profiles），本文件仅存阶段一/二系数基线（tier0）
-  - ETH/XAU phase2 trail 统一 1.2~2.5
-  - XAU tier0: early_be=0.65 / step_trigger=0.70 / step_advance=0.45
+v16.0.0 / 白皮书 v2.0：
+  - 雷达激活臂 initial_sl_atr = 0.5（entry±0.5ATR）
+  - 禁用早保本（early_be_atr=0）；ADX 三档步进/呼吸由 reentry_profiles overlay
+  - 本文件存基线；运行时 apply_tier_to_breath_profile 覆盖 step/breath/trail
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-# 共用边界
+# 共用边界（ATR 比插值；TP3+ 实际 min/max 由档位 overlay）
 RATIO_FLOOR = 0.6
 RATIO_CEILING = 2.2
 
-# ETH：追踪距离 1.2~2.5×ATR；tier0 系数
+# ETH 基线（中趋势档会 overlay）
 BREATH_ETH: Dict[str, Any] = {
     "name": "ETH",
-    "initial_sl_atr": 1.5,
+    "initial_sl_atr": 0.5,
     "stop_exec_buffer": 0.3,
-    "early_be_atr": 0.5,
-    "step_trigger_atr": 0.75,
-    "step_advance_atr": 0.4,
-    "phase_switch_atr": 3.0,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.50,
+    "step_advance_atr": 0.35,
+    "phase_switch_atr": 99.0,  # v2.0：分区呼吸替代硬切阶段二
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.5,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 1.5,
+    "breath_tp12": 1.20,
+    "breath_tp23": 1.60,
     "phase2_trail_mult": 1.0,
-    "min_mult": 1.2,
+    "min_mult": 2.0,
     "max_mult": 2.5,
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
@@ -39,22 +41,24 @@ BREATH_ETH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# XAU：tier0（v15.8.0 递进表首档）；trail 与 ETH 对齐 1.2~2.5
+# XAU 基线
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
-    "initial_sl_atr": 1.5,
+    "initial_sl_atr": 0.5,
     "stop_exec_buffer": 0.5,
-    "early_be_atr": 0.65,
-    "step_trigger_atr": 0.70,
-    "step_advance_atr": 0.45,
-    "phase_switch_atr": 3.0,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.40,
+    "step_advance_atr": 0.30,
+    "phase_switch_atr": 99.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.5,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 1.5,
+    "breath_tp12": 1.00,
+    "breath_tp23": 1.40,
     "phase2_trail_mult": 1.0,
-    "min_mult": 1.2,
-    "max_mult": 2.5,
+    "min_mult": 1.8,
+    "max_mult": 2.2,
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -82,7 +86,7 @@ def get_breath_profile(symbol: str, exchange: str = "binance") -> Dict[str, Any]
 
 def trail_distance_multiplier(ratio: float, profile: Optional[Dict[str, Any]] = None) -> float:
     """
-    连续线性插值：
+    连续线性插值（TP3+ 动态追踪带宽）：
       ratio<=floor → minMult
       ratio>=ceiling → maxMult
       否则线性
@@ -90,7 +94,7 @@ def trail_distance_multiplier(ratio: float, profile: Optional[Dict[str, Any]] = 
     p = profile if isinstance(profile, dict) and profile else BREATH_ETH
     lo = float(p.get("ratio_floor") if p.get("ratio_floor") is not None else RATIO_FLOOR)
     hi = float(p.get("ratio_ceiling") if p.get("ratio_ceiling") is not None else RATIO_CEILING)
-    mn = float(p.get("min_mult") if p.get("min_mult") is not None else 1.2)
+    mn = float(p.get("min_mult") if p.get("min_mult") is not None else 2.0)
     mx = float(p.get("max_mult") if p.get("max_mult") is not None else 2.5)
     r = float(ratio or 0.0)
     if r <= lo:

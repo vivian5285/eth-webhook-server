@@ -311,7 +311,7 @@ def audit_module2_sizing(a: Audit):
         or ("rigor-checks" in binance_ver)
         or ("final-spec" in binance_ver)
         or ("arch-align" in binance_ver)
-        or ("v15." in binance_ver)
+        or ("v15." in binance_ver) or ("v16." in binance_ver)
         or ("breath" in binance_ver),
         binance_ver,
     )
@@ -456,38 +456,44 @@ def audit_module3_hard_sl(a: Audit):
         compute_vps_hard_sl("LONG", 1800, regime=3) == 0
         and compute_vps_hard_sl("SHORT", 1800, regime=4) == 0,
     )
-    a.check("3.1c INITIAL_SL_ATR=1.5", abs(INITIAL_SL_ATR - 1.5) < 1e-9)
-    a.check("3.1d BREAKEVEN_TRIGGER_ATR=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
+    a.check("3.1c INITIAL_SL_ATR=0.5", abs(INITIAL_SL_ATR - 0.5) < 1e-9)
+    a.check("3.1d phase_switch_atr=99 (v2 zoned)", abs(BREAKEVEN_TRIGGER_ATR - 99.0) < 1e-9)
     a.check(
-        "3.1e initial_stop LONG 1800 atr40 → 1740",
-        abs(initial_stop_price("LONG", 1800, 40) - 1740.0) < 1e-6,
+        "3.1e initial_stop LONG 1800 atr40 → 1780",
+        abs(initial_stop_price("LONG", 1800, 40) - 1780.0) < 1e-6,
     )
 
+    _init_sl = initial_stop_price("LONG", 1800, 40)
     out = calculate_breath_stop(
-        "LONG", 1890, 1800, 40, 1740, 1740, 1890, False,
+        "LONG", 1890, 1800, 40, _init_sl, _init_sl, 1890, False,
         breathing_coefficient=1.0,
     )
     a.check(
         "3.1f 阶段一阶梯推进",
-        float(out["stop"]) > 1740 and not out["breakeven_phase"],
-        f"stop={out['stop']} phase={out['breakeven_phase']}",
+        float(out["stop"]) > _init_sl and out.get("meta", {}).get("phase") == "ladder",
+        f"stop={out['stop']} meta={out.get('meta')}",
     )
     out2 = calculate_breath_stop(
-        "LONG", 1930, 1800, 40, 1740, float(out["stop"]), 1930, False,
+        "LONG", 1960, 1800, 40, _init_sl, float(out["stop"]), 1960, True,
         breathing_coefficient=1.0,
     )
     a.check(
-        "3.1g 浮盈≥3ATR 切入阶段二",
-        out2["breakeven_phase"] is True and float(out2["stop"]) > 1800,
-        f"stop={out2['stop']} phase={out2['breakeven_phase']}",
+        "3.1g tp3+ 分区呼吸",
+        out2.get("meta", {}).get("zone") == "tp3_plus" and float(out2["stop"]) > 1800,
+        f"stop={out2['stop']} meta={out2.get('meta')}",
     )
     from breath_stop import get_breathing_coefficient, order_stop_price
-    coeff, smooth, _ = get_breathing_coefficient(20.0, 20.0, [])
-    # ratio=1.0 → 连续插值中间值（ETH: floor0.6/ceil2.2 · min1.2/max2.5 → 1.525）
+    from breath_profiles import BREATH_ETH, cold_start_multiplier, trail_distance_multiplier
+    _eth_mid = trail_distance_multiplier(1.0, BREATH_ETH)
+    coeff, smooth, _ = get_breathing_coefficient(20.0, 20.0, [], profile=BREATH_ETH)
     a.check(
         "3.1h 呼吸系数 ratio=1 → 插值中间值",
-        abs(coeff - 1.525) < 1e-6 and abs(smooth - 1.0) < 1e-9,
-        f"coeff={coeff} smooth={smooth}",
+        abs(coeff - _eth_mid) < 1e-6 and abs(smooth - 1.0) < 1e-9,
+        f"coeff={coeff} smooth={smooth} expect={_eth_mid}",
+    )
+    a.check(
+        "3.1h2 cold_start=ETH mid trail",
+        abs(cold_start_multiplier(BREATH_ETH) - _eth_mid) < 1e-6,
     )
     a.check(
         "3.1i 挂单缓冲±0.3",
@@ -580,7 +586,7 @@ def audit_module3_hard_sl(a: Audit):
     )
     a.check(
         "3.24 版本含 v15",
-        "v15." in sup or "breath-stop" in sup,
+        "v15." in sup or "v16." in sup or "breath-stop" in sup,
     )
     a.check(
         "3.25 v6.5.6 已废除 UPDATE_SL/TP webhook",
@@ -615,7 +621,7 @@ def audit_module4_radar(a: Audit):
     a.check("4.1d 呼吸系数连续插值", "get_breathing_coefficient" in bs and "trail_distance_multiplier" in open(os.path.join(ROOT, "breath_profiles.py"), encoding="utf-8").read())
     a.check("4.1e atr_1h 引擎", "Atr1hEngine" in a1h and "REFRESH_MIN_SEC = 300" in a1h)
     from breath_stop import STEP_TRIGGER_ATR, STEP_ADVANCE_ATR
-    a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.75) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.4) < 1e-9)
+    a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
 
     for fn in (
         "_apply_breath_stop_tick",
@@ -650,19 +656,21 @@ def audit_module4_radar(a: Audit):
     )
     try:
         from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile, trail_distance_multiplier
+        _em = trail_distance_multiplier(1.0, BREATH_ETH)
+        _xm = trail_distance_multiplier(1.0, BREATH_XAU)
         a.check(
-            "4.2f ETH/XAU 连续插值 min/max（锁定表）",
+            "4.2f ETH/XAU 连续插值 min/max（v2.0 锁定表）",
             abs(float(BREATH_ETH["stop_exec_buffer"]) - 0.3) < 1e-9
             and abs(float(BREATH_XAU["stop_exec_buffer"]) - 0.5) < 1e-9
-            and abs(float(BREATH_ETH["early_be_atr"]) - 0.5) < 1e-9
-            and abs(float(BREATH_XAU["early_be_atr"]) - 0.65) < 1e-9
-            and abs(float(BREATH_ETH["min_mult"]) - 1.2) < 1e-9
+            and abs(float(BREATH_ETH["early_be_atr"]) - 0.0) < 1e-9
+            and abs(float(BREATH_XAU["early_be_atr"]) - 0.0) < 1e-9
+            and abs(float(BREATH_ETH["min_mult"]) - 2.0) < 1e-9
             and abs(float(BREATH_ETH["max_mult"]) - 2.5) < 1e-9
-            and abs(float(BREATH_XAU["min_mult"]) - 1.2) < 1e-9
-            and abs(float(BREATH_XAU["max_mult"]) - 2.5) < 1e-9
+            and abs(float(BREATH_XAU["min_mult"]) - 1.8) < 1e-9
+            and abs(float(BREATH_XAU["max_mult"]) - 2.2) < 1e-9
             and abs(float(BREATH_XAU["phase2_trail_mult"]) - 1.0) < 1e-9
-            and abs(trail_distance_multiplier(1.0, BREATH_ETH) - 1.525) < 1e-9
-            and abs(trail_distance_multiplier(1.0, BREATH_XAU) - 1.525) < 1e-9,
+            and abs(_em - 2.125) < 1e-9
+            and abs(_xm - 1.9) < 1e-9,
         )
         pe = get_breath_profile("ETHUSDT")
         px = get_breath_profile("XAUUSDT")
@@ -814,7 +822,7 @@ def audit_module4_radar(a: Audit):
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",
         '_atr_reject' in wp
         and '"tv_invalid"' in wp
-        and "RADAR_ACTIVATE_TP1_FRAC = 0.50" in wp
+        and "RADAR_ACTIVATE_TP1_FRAC = 0.85" in wp
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
@@ -978,8 +986,8 @@ def audit_readme_consistency(a: Audit):
 
     a.check(
         "README 版本 v15",
-        ("v15." in readme or "risk20" in readme or "tv-direction" in readme)
-        and ("v15." in sup or "risk20" in sup or "tv-direction" in sup),
+        ("v15." in readme or "v16." in readme or "risk20" in readme or "tv-direction" in readme)
+        and ("v15." in sup or "v16." in sup or "risk20" in sup or "tv-direction" in sup),
     )
     a.check(
         "README TV v6.5.6",
@@ -1036,7 +1044,7 @@ def audit_readme_consistency(a: Audit):
     )
     a.check(
         "README v15/arch-align",
-        "v15." in readme or "arch-align" in readme or "RISK20" in readme,
+        "v15." in readme or "v16." in readme or "arch-align" in readme or "RISK20" in readme,
     )
     # Do NOT require EQUITY_20PCT_X5
 

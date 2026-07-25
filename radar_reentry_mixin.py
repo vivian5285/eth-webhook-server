@@ -11,9 +11,11 @@ import time
 from typing import Any, Dict, Optional
 
 from reentry_profiles import (
+    ACTIVATION_TP1_FRAC,
     STERILE_MAX_RETRY,
     activation_frac_for_attempt,
     apply_tier_to_breath_profile,
+    arm_stop_price,
     get_reentry_profile,
     make_reentry_client_order_id,
     reentry_enabled,
@@ -25,6 +27,7 @@ from smart_reentry_engine import (
     evaluate_flat_for_reentry,
     init_cycle_on_open,
     max_unfilled_refreshes,
+    open_reentry_window,
     plan_reentry_limit,
 )
 
@@ -46,8 +49,12 @@ class RadarReentryMixin:
         return {
             "reentry_attempt": int(getattr(self, "reentry_attempt", 0) or 0),
             "radar_tier": int(getattr(self, "radar_tier", 0) or 0),
+            "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
+            "reentry_window_deadline_ts": float(
+                getattr(self, "reentry_window_deadline_ts", 0) or 0
+            ),
             "radar_activation_frac": float(
-                getattr(self, "radar_activation_frac", 0.50) or 0.50
+                getattr(self, "radar_activation_frac", ACTIVATION_TP1_FRAC) or ACTIVATION_TP1_FRAC
             ),
             "cycle_tv_price": float(getattr(self, "cycle_tv_price", 0) or 0),
             "cycle_tv_side": getattr(self, "cycle_tv_side", None),
@@ -80,12 +87,12 @@ class RadarReentryMixin:
                 continue
             val = s.get(k, default)
             if k in (
-                "reentry_attempt", "radar_tier", "reentry_unfilled_refreshes",
+                "reentry_attempt", "radar_tier", "adx_tier", "reentry_unfilled_refreshes",
                 "reentry_sterile_fail_count",
             ):
                 setattr(self, k, int(val or 0))
             elif k in (
-                "radar_activation_frac", "cycle_tv_price", "cycle_open_atr",
+                "radar_activation_frac", "reentry_window_deadline_ts", "cycle_tv_price", "cycle_open_atr",
                 "cycle_entry", "reentry_limit_px", "reentry_limit_deadline_ts",
                 "last_exit_px",
             ):
@@ -122,8 +129,8 @@ class RadarReentryMixin:
             self._base_breath_profile = dict(base)
         attempt = int(
             getattr(self, "radar_tier", 0)
-            or getattr(self, "reentry_attempt", 0)
-            or 0
+            or getattr(self, "adx_tier", 1)
+            or 1
         )
         self.breath_profile = apply_tier_to_breath_profile(
             dict(self._base_breath_profile or base),
@@ -132,11 +139,18 @@ class RadarReentryMixin:
         )
 
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,
-                                  reentry_attempt=None):
+                                  reentry_attempt=None, adx_tier=None, radar_tier=None):
         """开仓后：硬+TP 已挂；雷达休眠至激活线。"""
         attempt = int(
             reentry_attempt if reentry_attempt is not None
             else getattr(self, "reentry_attempt", 0) or 0
+        )
+        at = int(
+            adx_tier if adx_tier is not None else getattr(self, "adx_tier", 1) or 1
+        )
+        rt = int(
+            radar_tier if radar_tier is not None
+            else getattr(self, "radar_tier", at) or at
         )
         st = init_cycle_on_open(
             side=side,
@@ -145,6 +159,8 @@ class RadarReentryMixin:
             open_atr=open_atr,
             reentry_attempt=attempt,
             symbol=self.symbol,
+            adx_tier=at,
+            radar_tier=rt,
         )
         for k, v in st.items():
             setattr(self, k, v)
@@ -153,10 +169,8 @@ class RadarReentryMixin:
         self._radar_armed_after_tp1 = False
         self._radar_activation_notified = False
         self._radar_notify_pending = False
-        frac = float(st["radar_activation_frac"])
-        self._radar_trigger_gate = (
-            f"递进雷达·{int(frac * 100)}%×TP1距·attempt={attempt}"
-        )
+        frac = float(st.get("radar_activation_frac") or ACTIVATION_TP1_FRAC or 0.85)
+        self._radar_trigger_gate = "被动雷达·85%×TP1"
         self._apply_tier_breath_overlay()
         logger.info(
             f"⏳ [{self.symbol}] 雷达休眠至激活 "
@@ -178,12 +192,28 @@ class RadarReentryMixin:
         live_qty = float(live_qty or self.watched_qty or 0)
         if live_qty <= 0:
             return False
-        init = float(getattr(self, "initial_stop", 0) or 0)
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        side = str(getattr(self, "current_side", "") or "").strip().upper()
+        atr = float(
+            getattr(self, "open_atr", 0)
+            or getattr(self, "cycle_open_atr", 0)
+            or getattr(self, "current_atr", 0)
+            or 0
+        )
+        if atr <= 0 and hasattr(self, "_get_locked_initial_atr"):
+            try:
+                atr = float(self._get_locked_initial_atr() or 0)
+            except Exception:
+                atr = 0.0
+        init = float(arm_stop_price(side, entry, atr) or 0)
+        if init <= 0:
+            init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
             init = float(getattr(self, "current_sl", 0) or 0)
         if init <= 0:
             logger.warning(f"⚠️ [{self.symbol}] 达激活线但无 initial_stop | {source}")
             return False
+        self.initial_stop = float(init)
         self.current_sl = float(init)
         self.tv_sl = float(init)
         self._apply_tier_breath_overlay()
@@ -426,6 +456,8 @@ class RadarReentryMixin:
             self._clear_reentry_cycle(source="硬止损出局·禁止再入")
             return False
 
+        window_ts = float(open_reentry_window(self.symbol))
+        self.reentry_window_deadline_ts = window_ts
         ok, why = evaluate_flat_for_reentry(
             exit_source=exit_src,
             side=side,
@@ -434,6 +466,7 @@ class RadarReentryMixin:
             atr=atr,
             reentry_attempt=attempt,
             symbol=self.symbol,
+            window_deadline_ts=window_ts,
         )
         if not ok:
             logger.info(
@@ -485,8 +518,8 @@ class RadarReentryMixin:
                 dingtalk.report_system_alert,
                 title=f"智能再入场限价已挂 [{self.symbol}]",
                 detail=(
-                    f"{side} 档位{tier_label(attempt)}→{tier_label(attempt + 1)} "
-                    f"attempt={attempt}/{int(get_reentry_profile(self.symbol).get('max_reentries') or 4)} | "
+                    f"{side} ADX档{tier_label(int(getattr(self, 'adx_tier', 1) or 1))} "
+                    f"attempt={attempt}/{int(get_reentry_profile(self.symbol).get('max_reentries') or 1)} | "
                     f"limit@{float(self.reentry_limit_px):.2f} | "
                     f"tag={getattr(self, 'reentry_order_tag', None)} | "
                     f"TV@{float(self.cycle_tv_price):.2f} | "
@@ -718,7 +751,10 @@ class RadarReentryMixin:
             return False
         prev = int(getattr(self, "reentry_attempt", 0) or 0)
         prev_frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
-        bumped = bump_after_reentry_fill(prev, prev_frac, self.symbol)
+        bumped = bump_after_reentry_fill(
+            prev, prev_frac, self.symbol,
+            adx_tier=int(getattr(self, "adx_tier", 1) or 1),
+        )
         # 成交：释放本地标签（允许下次再入周期）
         self.reentry_limit_order_id = None
         self.reentry_limit_px = 0.0

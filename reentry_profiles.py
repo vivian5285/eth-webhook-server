@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种智能再入场 + 波段滚动档位（v15.8.2 幂等闭环）。
+双币种雷达 + 智能再入场（白皮书 v2.0 · ADX 三档）。
 
-- 档位 1.0~5.0（attempt 0..4）：启动阈值 50/65/80/90/95% × TP1距
-- 每档独立 early_be / step_* / phase2 trail 带宽
-- 双保险限价：多取 min(5m低+tick, TV×0.997)；空取 max(5m高−tick, TV×1.003)
-- TTL 5min；最多 4 次重入（到 5.0 后再扫出终止）；未成交刷新最多 5 次
-- 硬止损 / 亏损出局禁止重入；新 TV 清场重置档位
-- 本地订单标签（newClientOrderId）：标签未清前绝对禁挂第二笔（防查不到单狂挂）
+- 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）
+- 雷达启动：固定 0.85 × TP1距（三档相同）
+- 激活臂：entry ± 0.5×ATR
+- 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
+- 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量
+- 双保险限价：多 min(5m低+tick, TV×0.997)；空 max(5m高−tick, TV×1.003)
+- 硬止损 / 亏损出局禁止重入；本地订单标签防狂挂
 """
 from __future__ import annotations
 
@@ -18,21 +19,28 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-# 内置默认（config/reentry_tiers.json 可覆盖，改配置后重启生效）
-_DEFAULT_ACTIVATION_FRACS: List[float] = [0.50, 0.65, 0.80, 0.90, 0.95]
+# ── 默认（config/reentry_tiers.json 可覆盖）────────────────────────────────
+_DEFAULT_ACTIVATION_FRAC = 0.85
+_DEFAULT_ARM_SL_ATR = 0.5
+_DEFAULT_BUFFER_BY_TIER: List[float] = [1.1, 1.2, 1.3]
+_DEFAULT_ADX_WEAK_LT = 20.0
+_DEFAULT_ADX_STRONG_GT = 30.0
+
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
-    {"early_be_atr": 0.50, "step_trigger_atr": 0.75, "step_advance_atr": 0.40, "min_mult": 1.2, "max_mult": 2.5},
-    {"early_be_atr": 0.65, "step_trigger_atr": 0.90, "step_advance_atr": 0.46, "min_mult": 1.4, "max_mult": 2.8},
-    {"early_be_atr": 0.85, "step_trigger_atr": 1.10, "step_advance_atr": 0.52, "min_mult": 1.6, "max_mult": 3.0},
-    {"early_be_atr": 1.05, "step_trigger_atr": 1.25, "step_advance_atr": 0.58, "min_mult": 1.8, "max_mult": 3.2},
-    {"early_be_atr": 1.30, "step_trigger_atr": 1.40, "step_advance_atr": 0.64, "min_mult": 2.0, "max_mult": 3.5},
+    {"step_trigger_atr": 0.40, "step_advance_atr": 0.25,
+     "breath_tp12": 0.80, "breath_tp23": 1.00, "min_mult": 1.2, "max_mult": 1.5},
+    {"step_trigger_atr": 0.50, "step_advance_atr": 0.35,
+     "breath_tp12": 1.20, "breath_tp23": 1.60, "min_mult": 2.0, "max_mult": 2.5},
+    {"step_trigger_atr": 0.60, "step_advance_atr": 0.40,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
 ]
 _DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
-    {"early_be_atr": 0.65, "step_trigger_atr": 0.70, "step_advance_atr": 0.45, "min_mult": 1.2, "max_mult": 2.5},
-    {"early_be_atr": 0.85, "step_trigger_atr": 0.85, "step_advance_atr": 0.52, "min_mult": 1.4, "max_mult": 2.8},
-    {"early_be_atr": 1.10, "step_trigger_atr": 1.00, "step_advance_atr": 0.58, "min_mult": 1.6, "max_mult": 3.0},
-    {"early_be_atr": 1.30, "step_trigger_atr": 1.15, "step_advance_atr": 0.64, "min_mult": 1.8, "max_mult": 3.2},
-    {"early_be_atr": 1.55, "step_trigger_atr": 1.30, "step_advance_atr": 0.70, "min_mult": 2.0, "max_mult": 3.5},
+    {"step_trigger_atr": 0.35, "step_advance_atr": 0.20,
+     "breath_tp12": 0.70, "breath_tp23": 0.90, "min_mult": 1.0, "max_mult": 1.3},
+    {"step_trigger_atr": 0.40, "step_advance_atr": 0.30,
+     "breath_tp12": 1.00, "breath_tp23": 1.40, "min_mult": 1.8, "max_mult": 2.2},
+    {"step_trigger_atr": 0.50, "step_advance_atr": 0.35,
+     "breath_tp12": 1.30, "breath_tp23": 1.80, "min_mult": 2.2, "max_mult": 3.0},
 ]
 
 REENTRY_TIERS_JSON = os.path.join(
@@ -53,17 +61,37 @@ def _load_tiers_file() -> Dict[str, Any]:
 
 
 _CFG = _load_tiers_file()
-ACTIVATION_FRACS: List[float] = [
-    float(x) for x in (_CFG.get("activation_fracs") or _DEFAULT_ACTIVATION_FRACS)
-]
-TP1_ATR_MULT = float(_CFG.get("tp1_atr_mult") or 1.35)
+ACTIVATION_TP1_FRAC = float(
+    _CFG.get("activation_tp1_frac")
+    if _CFG.get("activation_tp1_frac") is not None
+    else _DEFAULT_ACTIVATION_FRAC
+)
+# 兼容旧名
+ACTIVATION_FRACS: List[float] = [ACTIVATION_TP1_FRAC]
+ARM_SL_ATR = float(
+    _CFG.get("arm_sl_atr")
+    if _CFG.get("arm_sl_atr") is not None
+    else _DEFAULT_ARM_SL_ATR
+)
 LIMIT_DISCOUNT = float(_CFG.get("limit_discount") or 0.003)
 LIMIT_TTL_SEC = int(_CFG.get("limit_ttl_sec") or 300)
-MAX_REENTRIES = int(_CFG.get("max_reentries") or 4)
-MAX_TIER_INDEX = 4  # 0..4 → 档位 1.0..5.0
+MAX_REENTRIES = int(_CFG.get("max_reentries") or 1)
+MAX_TIER_INDEX = 2  # ADX 档 0..2
 MAX_UNFILLED_REFRESHES = int(_CFG.get("max_unfilled_refreshes") or 5)
 DEFAULT_TICK = 0.01
 STERILE_MAX_RETRY = 3
+TP1_ATR_MULT = 1.35  # 仅当无 TV TP1 价时的距离回退
+
+_bounds = _CFG.get("adx_bounds") or {}
+ADX_WEAK_LT = float(_bounds.get("weak_lt") if _bounds.get("weak_lt") is not None else _DEFAULT_ADX_WEAK_LT)
+ADX_STRONG_GT = float(
+    _bounds.get("strong_gt") if _bounds.get("strong_gt") is not None else _DEFAULT_ADX_STRONG_GT
+)
+BUFFER_BY_TIER: List[float] = [
+    float(x) for x in (_CFG.get("buffer_by_tier") or _DEFAULT_BUFFER_BY_TIER)
+]
+while len(BUFFER_BY_TIER) < 3:
+    BUFFER_BY_TIER.append(BUFFER_BY_TIER[-1] if BUFFER_BY_TIER else 1.2)
 
 ETH_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("ETH") or {}).get("tiers") or _DEFAULT_ETH_TIERS)
@@ -73,15 +101,16 @@ XAU_TIERS: List[Dict[str, float]] = list(
 )
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
+_ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
+_XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
+_ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
+_XAU_TF_SEC = int((_CFG.get("XAU") or {}).get("tv_tf_sec") or 2700)
 
 
 def make_reentry_client_order_id(
     symbol: str, side: str, price: float, ts: Optional[float] = None,
 ) -> str:
-    """
-    交易所 newClientOrderId（≤36）：SHA-256 订单标签，幂等防狂挂。
-    同一标签在本地状态未清除前，绝对不允许再挂第二笔重入限价。
-    """
+    """交易所 newClientOrderId（≤36）：SHA-256 订单标签，幂等防狂挂。"""
     sym_u = str(symbol or "").upper()
     sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
     sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
@@ -91,13 +120,17 @@ def make_reentry_client_order_id(
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
     return f"RE{sym}{sd}{digest}{t % 10000}"[:36]
 
+
 REENTRY_ETH: Dict[str, Any] = {
     "name": "ETH",
     "tv_tf": "90m",
+    "tv_tf_sec": _ETH_TF_SEC,
     "enabled": True,
-    "activation_fracs": list(ACTIVATION_FRACS),
+    "activation_tp1_frac": ACTIVATION_TP1_FRAC,
+    "arm_sl_atr": ARM_SL_ATR,
     "tiers": ETH_TIERS,
     "reentry_zone_atr": _ETH_ZONE,
+    "reentry_window_bars": _ETH_WINDOW_BARS,
     "limit_discount": LIMIT_DISCOUNT,
     "limit_ttl_sec": LIMIT_TTL_SEC,
     "max_reentries": MAX_REENTRIES,
@@ -107,10 +140,13 @@ REENTRY_ETH: Dict[str, Any] = {
 REENTRY_XAU: Dict[str, Any] = {
     "name": "XAU",
     "tv_tf": "45m",
+    "tv_tf_sec": _XAU_TF_SEC,
     "enabled": True,
-    "activation_fracs": list(ACTIVATION_FRACS),
+    "activation_tp1_frac": ACTIVATION_TP1_FRAC,
+    "arm_sl_atr": ARM_SL_ATR,
     "tiers": XAU_TIERS,
     "reentry_zone_atr": _XAU_ZONE,
+    "reentry_window_bars": _XAU_WINDOW_BARS,
     "limit_discount": LIMIT_DISCOUNT,
     "limit_ttl_sec": LIMIT_TTL_SEC,
     "max_reentries": MAX_REENTRIES,
@@ -135,63 +171,131 @@ def reentry_enabled(symbol: str) -> bool:
     return bool(get_reentry_profile(symbol).get("enabled", True))
 
 
-def clamp_tier(attempt: int) -> int:
-    a = int(attempt or 0)
-    if a < 0:
+def adx_to_tier(adx: float) -> int:
+    """ADX → 档位 0弱 / 1中 / 2强。"""
+    try:
+        a = float(adx)
+    except (TypeError, ValueError):
+        a = 25.0  # 缺省按中趋势
+    if a < ADX_WEAK_LT:
         return 0
-    if a > MAX_TIER_INDEX:
+    if a > ADX_STRONG_GT:
+        return 2
+    return 1
+
+
+def clamp_tier(tier: int) -> int:
+    t = int(tier or 0)
+    if t < 0:
+        return 0
+    if t > MAX_TIER_INDEX:
         return MAX_TIER_INDEX
-    return a
+    return t
 
 
-def tier_label(attempt: int) -> str:
-    """档位显示名：1.0 .. 5.0"""
-    return f"{clamp_tier(attempt) + 1}.0"
+def looser_tier(tier: int) -> int:
+    """重入成功后放宽一档（封顶强趋势）。"""
+    return clamp_tier(int(tier or 0) + 1)
 
 
-def activation_frac_for_attempt(attempt: int, profile: Optional[Dict[str, Any]] = None) -> float:
+def tier_label(tier: int) -> str:
+    """档位显示名：弱/中/强。"""
+    names = ("弱趋势", "中趋势", "强趋势")
+    return names[clamp_tier(tier)]
+
+
+def tier_label_short(tier: int) -> str:
+    return f"T{clamp_tier(tier)}"
+
+
+def buffer_for_tier(tier: int) -> float:
+    idx = clamp_tier(tier)
+    if idx < len(BUFFER_BY_TIER):
+        return float(BUFFER_BY_TIER[idx])
+    return float(BUFFER_BY_TIER[-1] if BUFFER_BY_TIER else 1.2)
+
+
+def buffer_for_adx(adx: float) -> float:
+    return buffer_for_tier(adx_to_tier(adx))
+
+
+def activation_frac_for_attempt(
+    attempt: int = 0, profile: Optional[Dict[str, Any]] = None,
+) -> float:
+    """v2.0：固定 0.85，与 attempt/档位无关（保留签名兼容旧调用）。"""
     p = profile if isinstance(profile, dict) else REENTRY_ETH
-    fracs = list(p.get("activation_fracs") or ACTIVATION_FRACS)
-    idx = clamp_tier(attempt)
-    if idx >= len(fracs):
-        idx = len(fracs) - 1
-    return float(fracs[idx])
+    return float(
+        p.get("activation_tp1_frac")
+        if p.get("activation_tp1_frac") is not None
+        else ACTIVATION_TP1_FRAC
+    )
 
 
-def tier_coeffs(attempt: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+def activation_frac_fixed(profile: Optional[Dict[str, Any]] = None) -> float:
+    return activation_frac_for_attempt(0, profile)
+
+
+def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
     p = profile if isinstance(profile, dict) else REENTRY_ETH
     tiers = list(p.get("tiers") or ETH_TIERS)
-    idx = clamp_tier(attempt)
+    idx = clamp_tier(tier)
     if idx >= len(tiers):
         idx = len(tiers) - 1
-    row = dict(tiers[idx])
+    row = dict(tiers[idx] if tiers else {})
     return {
-        "early_be_atr": float(row.get("early_be_atr") or 0.5),
-        "step_trigger_atr": float(row.get("step_trigger_atr") or 0.75),
-        "step_advance_atr": float(row.get("step_advance_atr") or 0.4),
-        "min_mult": float(row.get("min_mult") or 1.2),
+        "step_trigger_atr": float(row.get("step_trigger_atr") or 0.5),
+        "step_advance_atr": float(row.get("step_advance_atr") or 0.35),
+        "breath_tp12": float(row.get("breath_tp12") or 1.2),
+        "breath_tp23": float(row.get("breath_tp23") or 1.6),
+        "min_mult": float(row.get("min_mult") or 2.0),
         "max_mult": float(row.get("max_mult") or 2.5),
+        # 兼容旧 breath overlay 字段名（禁用早保本）
+        "early_be_atr": 0.0,
     }
 
 
 def apply_tier_to_breath_profile(
     breath_profile: Dict[str, Any],
-    attempt: int,
+    tier: int,
     reentry_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Copy breath profile and overlay tier early_be / step_* / trail band."""
+    """Copy breath profile and overlay ADX-tier step/breath/trail band."""
     out = dict(breath_profile or {})
     rp = reentry_profile if isinstance(reentry_profile, dict) else None
     if rp is None:
         name = str(out.get("name") or "").upper()
         rp = REENTRY_XAU if name == "XAU" else REENTRY_ETH
-    coeffs = tier_coeffs(attempt, rp)
-    out["early_be_atr"] = coeffs["early_be_atr"]
+    coeffs = tier_coeffs(tier, rp)
     out["step_trigger_atr"] = coeffs["step_trigger_atr"]
     out["step_advance_atr"] = coeffs["step_advance_atr"]
+    out["breath_tp12"] = coeffs["breath_tp12"]
+    out["breath_tp23"] = coeffs["breath_tp23"]
     out["min_mult"] = coeffs["min_mult"]
     out["max_mult"] = coeffs["max_mult"]
+    out["early_be_atr"] = 0.0
+    out["initial_sl_atr"] = float(
+        rp.get("arm_sl_atr") if rp.get("arm_sl_atr") is not None else ARM_SL_ATR
+    )
+    out["adx_tier"] = clamp_tier(tier)
     return out
+
+
+def arm_stop_price(
+    side: str,
+    entry: float,
+    initial_atr: float,
+    arm_atr: float = ARM_SL_ATR,
+) -> float:
+    """雷达激活时初始止损：多 entry−0.5ATR；空 entry+0.5ATR。"""
+    side_u = str(side or "").strip().upper()
+    e = float(entry or 0)
+    atr = float(initial_atr or 0)
+    mult = abs(float(arm_atr if arm_atr is not None else ARM_SL_ATR))
+    if e <= 0 or atr <= 0 or side_u not in ("LONG", "SHORT"):
+        return 0.0
+    if side_u == "LONG":
+        return round(e - mult * atr, 2)
+    return round(e + mult * atr, 2)
 
 
 def tp1_distance(initial_atr: float, tp1_atr_mult: float = TP1_ATR_MULT) -> float:
@@ -202,13 +306,15 @@ def activation_price(
     side: str,
     entry: float,
     initial_atr: float,
-    frac: float,
+    frac: float = ACTIVATION_TP1_FRAC,
     tp1_atr_mult: float = TP1_ATR_MULT,
 ) -> float:
-    """雷达启动价：多 = entry + frac×TP1距；空 = entry − frac×TP1距。"""
+    """雷达启动价（无 TV TP1 时）：多 = entry + frac×1.35ATR；空对称。"""
     side_u = str(side or "").strip().upper()
     entry_f = float(entry or 0)
-    dist = tp1_distance(initial_atr, tp1_atr_mult) * float(frac or 0)
+    dist = tp1_distance(initial_atr, tp1_atr_mult) * float(
+        frac if frac is not None else ACTIVATION_TP1_FRAC
+    )
     if entry_f <= 0 or dist <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
     if side_u == "LONG":
@@ -216,18 +322,50 @@ def activation_price(
     return round(entry_f - dist, 2)
 
 
-def next_activation_frac(current_frac: float, attempt_after_bump: int,
-                        profile: Optional[Dict[str, Any]] = None) -> float:
-    """Monotonic: max(current, frac_for_attempt); never decrease; cap 0.95."""
-    target = activation_frac_for_attempt(attempt_after_bump, profile)
-    cur = float(current_frac or 0)
-    return min(0.95, max(cur, target))
+def activation_price_from_tp1(
+    side: str,
+    entry: float,
+    tp1: float,
+    frac: float = ACTIVATION_TP1_FRAC,
+) -> float:
+    """优先：entry ± frac × |TP1−entry|。"""
+    side_u = str(side or "").strip().upper()
+    e = float(entry or 0)
+    t = float(tp1 or 0)
+    f = float(frac if frac is not None else ACTIVATION_TP1_FRAC)
+    if e <= 0 or t <= 0 or f <= 0 or side_u not in ("LONG", "SHORT"):
+        return 0.0
+    dist = abs(t - e) * f
+    if dist <= 0:
+        return 0.0
+    if side_u == "LONG":
+        return round(e + dist, 2)
+    return round(e - dist, 2)
+
+
+def next_activation_frac(
+    current_frac: float, attempt_after_bump: int,
+    profile: Optional[Dict[str, Any]] = None,
+) -> float:
+    """v2.0：激活线固定，不再抬升。"""
+    return activation_frac_fixed(profile)
+
+
+def reentry_window_sec(symbol: str) -> float:
+    p = get_reentry_profile(symbol)
+    bars = int(p.get("reentry_window_bars") or 2)
+    tf = int(p.get("tv_tf_sec") or 5400)
+    return float(max(1, bars) * max(60, tf))
+
+
+def reentry_window_deadline(symbol: str, from_ts: Optional[float] = None) -> float:
+    ts = float(from_ts if from_ts is not None else time.time())
+    return ts + reentry_window_sec(symbol)
 
 
 def reentry_limit_price_fallback(
     side: str, tv_price: float, discount: float = LIMIT_DISCOUNT,
 ) -> float:
-    """TV 折扣候选：多 TV×(1-d)；空 TV×(1+d)。"""
     side_u = str(side or "").strip().upper()
     px = float(tv_price or 0)
     d = abs(float(discount if discount is not None else LIMIT_DISCOUNT))
@@ -243,7 +381,6 @@ def reentry_limit_price(side: str, ref_price: float, discount: float = LIMIT_DIS
 
 
 def parse_kline_extreme(klines: Any) -> Tuple[float, float]:
-    """从 Binance kline 行取 (low, high)；失败返回 (0,0)。"""
     if not klines:
         return 0.0, 0.0
     try:
@@ -263,7 +400,6 @@ def reentry_limit_from_extreme(
     high: float,
     tick: float = DEFAULT_TICK,
 ) -> float:
-    """多 = low+tick；空 = high−tick。"""
     side_u = str(side or "").strip().upper()
     t = abs(float(tick or DEFAULT_TICK))
     lo = float(low or 0)
@@ -280,7 +416,6 @@ def reentry_limit_from_extreme(
 
 
 def is_better_than_tv(side: str, limit_px: float, tv_price: float) -> bool:
-    """多 limit < TV；空 limit > TV。"""
     side_u = str(side or "").strip().upper()
     lim = float(limit_px or 0)
     tv = float(tv_price or 0)
@@ -291,15 +426,23 @@ def is_better_than_tv(side: str, limit_px: float, tv_price: float) -> bool:
     return lim > tv + 1e-9
 
 
+def is_better_than_entry(side: str, limit_px: float, entry: float) -> bool:
+    """白皮书：重入价必须优于上一次开仓价。"""
+    side_u = str(side or "").strip().upper()
+    lim = float(limit_px or 0)
+    e = float(entry or 0)
+    if lim <= 0 or e <= 0 or side_u not in ("LONG", "SHORT"):
+        return False
+    if side_u == "LONG":
+        return lim < e - 1e-9
+    return lim > e + 1e-9
+
+
 def pick_dual_insurance(
     side: str,
     extreme_px: float,
     tv_discount_px: float,
 ) -> Tuple[float, str]:
-    """
-    双保险：多取更低；空取更高。
-    仅一侧有效则用该侧；都无效 → (0, none)。
-    """
     side_u = str(side or "").strip().upper()
     ex = float(extreme_px or 0)
     tv = float(tv_discount_px or 0)
@@ -330,9 +473,11 @@ def compute_reentry_limit_px(
     high3: float = 0.0,
     tick: float = DEFAULT_TICK,
     discount: float = LIMIT_DISCOUNT,
+    prev_entry: float = 0.0,
 ) -> Tuple[float, str]:
     """
-    双保险：极值候选（5m→3m）与 TV 折扣取更优；必须优于 TV。
+    双保险：极值候选（5m→3m）与 TV 折扣取更优；必须优于 TV；
+    若给 prev_entry，还必须优于上次开仓价。
     """
     side_u = str(side or "").strip().upper()
     tv = float(tv_price or 0)
@@ -355,6 +500,9 @@ def compute_reentry_limit_px(
         return 0.0, "no_candidate"
     if not is_better_than_tv(side_u, lim, tv):
         return 0.0, "not_better_than_tv"
+    pe = float(prev_entry or 0)
+    if pe > 0 and not is_better_than_entry(side_u, lim, pe):
+        return 0.0, "not_better_than_entry"
     src = pick
     if extreme_src and pick.startswith("dual_") and "kline" in pick:
         src = f"dual_{extreme_src}"
@@ -370,10 +518,7 @@ def exit_in_reentry_zone(
     initial_atr: float,
     zone_atr: float,
 ) -> bool:
-    """
-    保本/微赚区间：多 [entry, entry+zone×ATR]；空 [entry−zone×ATR, entry]。
-    亏损 → False。仓位归零后的最终离场价在此区间才允许重入。
-    """
+    """保本/微赚区间：多 [entry, entry+zone×ATR]；空对称。亏损 → False。"""
     side_u = str(side or "").strip().upper()
     e = float(entry or 0)
     x = float(exit_px or 0)
@@ -396,10 +541,11 @@ def can_smart_reenter(
     initial_atr: float,
     reentry_attempt: int,
     profile: Optional[Dict[str, Any]] = None,
+    window_deadline_ts: float = 0.0,
+    now: Optional[float] = None,
 ) -> Tuple[bool, str]:
     """
-    返回 (ok, reason)。硬止损 / 亏损 / 已达5.0 / 区间外 → 拒绝。
-    任意导致仓位归零且最终价在微赚区的雷达离场均可（含 TP 后余仓雷达扫出）。
+    返回 (ok, reason)。硬止损 / 亏损 / 已重入过 / 窗口过期 / 区间外 → 拒绝。
     """
     p = profile if isinstance(profile, dict) else REENTRY_ETH
     if not bool(p.get("enabled", True)):
@@ -414,9 +560,14 @@ def can_smart_reenter(
     if src in ("tv_close", "tv_protect", "quick_exit", "rsi_exit"):
         return False, "tv_close_no_reentry"
     if src not in (
-        "radar_be", "sl_breakeven", "sl_initial", "breakeven",
+        "radar_be", "sl_breakeven", "sl_initial", "breakeven", "radar", "radar_sl",
     ):
         return False, f"exit_source={src}"
+    deadline = float(window_deadline_ts or 0)
+    if deadline > 0:
+        ts = float(now if now is not None else time.time())
+        if ts > deadline + 1e-6:
+            return False, "window_expired"
     zone = float(p.get("reentry_zone_atr") or 0.5)
     if not exit_in_reentry_zone(side, entry, exit_px, initial_atr, zone):
         return False, "outside_reentry_zone"
