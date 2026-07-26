@@ -15,7 +15,7 @@ from typing import Optional
 
 # 规格第八/九部分：未成交挂单硬上限（含 LIMIT + STOP）
 MAX_OPEN_ORDERS_HARD_CAP = 5
-# 限价单单独上限（TP123 + 可能的重入限价）
+# 限价单单独上限（TP1+TP2 + 可能的重入限价）
 MAX_OPEN_LIMIT_HARD_CAP = 5
 
 
@@ -27,7 +27,7 @@ def make_defense_client_order_id(
 ) -> str:
     """
     防御单 newClientOrderId（≤36）。
-    kind 例：TP1 / TP2 / TP3 / RE / HARD / RADAR
+    kind 例：TP1 / TP2 / RE / HARD / RADAR（TP3 限价已废除）
     """
     sym_u = str(symbol or "").upper()
     sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
@@ -41,7 +41,8 @@ def make_defense_client_order_id(
 
 def blank_ownership_state() -> dict:
     return {
-        "exit_ownership": "NONE",  # NONE | TP3_LIMIT | RADAR_STOP
+        # v16.4.0：TP3↔雷达互斥已废除；字段仅兼容旧状态文件
+        "exit_ownership": "NONE",
         "ownership_locked_at": 0.0,
         "pending_order_tags": {},  # tag -> {kind, ts, order_id}
     }

@@ -35,9 +35,9 @@ MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 
-# 分腿：TP1/TP2/TP3 = 10%/20%/70%（v15.9.0 对齐 TV；三级限价常挂）
+# 分腿：仓位概念仍 10%/20%/70%；限价只挂 TP1+TP2，TP3(70%) 永不挂限价交雷达
 LEG_TP_RATIOS = [0.10, 0.20, 0.70]
-PLACE_TP_LEVELS = 3  # 始终挂 TP1+TP2+TP3；与雷达对 TP3 余仓互斥
+PLACE_TP_LEVELS = 2  # 仅挂 TP1+TP2；TP3 无上限交雷达（白皮书 §6 / §13.1#4）
 
 # ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
 RADAR_ACTIVATE_TP1_FRAC = 0.0  # 兼容旧常量；现行激活见 radar_gate_price_from_tps（中点/TP2）

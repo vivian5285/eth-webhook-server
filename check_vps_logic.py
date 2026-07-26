@@ -321,7 +321,7 @@ def audit_module2_sizing(a: Audit):
     a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=5", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
     a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5, str(EXCHANGE_LEVERAGE))
     a.check("2.1d LEG_TP_RATIOS=10/20/70", LEG_TP_RATIOS == [0.10, 0.20, 0.70], str(LEG_TP_RATIOS))
-    a.check("2.1e PLACE_TP_LEVELS=3(TP123常挂)", PLACE_TP_LEVELS == 3, str(PLACE_TP_LEVELS))
+    a.check("2.1e PLACE_TP_LEVELS=2(仅TP1+TP2)", PLACE_TP_LEVELS == 2, str(PLACE_TP_LEVELS))
     a.check("2.1f SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
     a.check("2.1g SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
     a.check("2.1h ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
@@ -601,7 +601,8 @@ def audit_module4_radar(a: Audit):
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
     bs = _read(os.path.join(ROOT, "breath_stop.py"))
     me = _read(os.path.join(ROOT, "market_engine.py"))
-    a1h = _read(os.path.join(ROOT, "atr_1h.py"))
+    a1h_path = os.path.join(ROOT, "atr_1h.py")
+    a1h = _read(a1h_path) if os.path.isfile(a1h_path) else ""
 
     a.check("4.1 breath_stop.py 存在", "INITIAL_SL_ATR" in bs and "calculate_stop_long" in bs)
     a.check(
@@ -619,7 +620,7 @@ def audit_module4_radar(a: Audit):
         ),
     )
     a.check("4.1d 呼吸系数连续插值", "get_breathing_coefficient" in bs and "trail_distance_multiplier" in open(os.path.join(ROOT, "breath_profiles.py"), encoding="utf-8").read())
-    a.check("4.1e atr_1h 引擎", "Atr1hEngine" in a1h and "REFRESH_MIN_SEC = 300" in a1h)
+    a.check("4.1e atr_1h 已删除(ATR只信TV)", not os.path.isfile(a1h_path) and "from atr_1h import" not in sup)
     from breath_stop import STEP_TRIGGER_ATR, STEP_ADVANCE_ATR
     a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
 

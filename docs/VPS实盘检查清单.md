@@ -11,7 +11,7 @@
 | 1 | **风险仓位**：名义=`权益×20%×5`；`qty=名义/价`（可选 SL/TV.qty 收紧） | `compute_fixed_order_qty()` · `_calc_vps_open_qty()` |
 | 2 | **永久硬止损**：`\|TV.price−TV.stop_loss\|×1.15` 锚定成交价（**不分档**）；**禁止** 1.5×ATR 地板 | `atr_scenario.hard_stop_price` · `_ensure_frozen_hard_sl` |
 | 3 | **独立雷达止损**：首次 0.85×TP1距 / 重入 1.00×TP1距 启动；激活臂 entry±0.5ATR；步进见 ADX 档 | `breath_stop.py` · `reentry_profiles` · `_sync_exchange_stop()` |
-| 4 | TP **10/20/70**；盘口常挂 **TP1+TP2+TP3**；TP3↔雷达 `exit_ownership` 互斥 | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=3` |
+| 4 | TP **10/20/70**；盘口仅挂 **TP1+TP2**；TP3 **永不挂限价** | `LEG_TP_RATIOS` · `PLACE_TP_LEVELS=2` |
 | 5 | **部分成交动态头寸**：任意 TP 切片成交 → REST/WS 实时总头寸 → 硬/雷达/剩余TP数量同步；失败 → **`trading_paused`** | `_schedule_partial_fill_resize` · `_atomic_resize_after_partial_tp` |
 | 6 | 反转保护仅 `CLOSE_QUICK_EXIT` / `CLOSE_RSI_EXIT` → 市价全平 | `FLATTEN_ACTIONS` |
 | 7 | 去重 60s · 挂单超时 5min · 90m ATR/ADX（对比用） | `SIGNAL_DEDUP_SEC` · `ORDER_TIMEOUT_SEC` |

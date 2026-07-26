@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""白皮书 v3.0：TV距×1.15 硬止损 + TP 10/20/70 + 拒开校验。"""
+"""白皮书：TV距×1.15 硬止损 + TP 限价仅 TP1+TP2 + ATR 只信 TV。"""
 from __future__ import annotations
 
 import os
@@ -8,8 +8,6 @@ import unittest
 
 from atr_scenario import (
     HARD_SL_BUFFER_MULT,
-    SCENARIO_TV,
-    SCENARIO_VPS,
     compute_hard_stop_distance,
     hard_stop_price,
     place_tp_levels_for_scenario,
@@ -25,7 +23,6 @@ from webhook_parser import LEG_TP_RATIOS, PLACE_TP_LEVELS
 
 class TestHardStopTvDistance(unittest.TestCase):
     def test_long_only_tv_buffer(self):
-        # 白皮书算例：|1900−1874|×1.15=29.90；成交 1900.80 → 1870.90
         sl = hard_stop_price(
             "LONG", 1900.80, 1874.00, tv_entry=1900.00, fill_entry=1900.80,
         )
@@ -60,38 +57,35 @@ class TestHardStopTvDistance(unittest.TestCase):
 
 
 class TestTpRatios(unittest.TestCase):
-    def test_leg_ratios_10_20_70(self):
+    def test_leg_ratios_10_20_70_place_two(self):
         self.assertEqual(LEG_TP_RATIOS, [0.10, 0.20, 0.70])
-        self.assertEqual(PLACE_TP_LEVELS, 3)
+        self.assertEqual(PLACE_TP_LEVELS, 2)
         self.assertEqual(tp_leg_ratios("ETHUSDT"), [0.10, 0.20, 0.70])
         self.assertEqual(tp_leg_ratios("XAUUSDT"), [0.10, 0.20, 0.70])
         self.assertAlmostEqual(HARD_SL_BUFFER_MULT, 1.15)
         self.assertAlmostEqual(buffer_multiplier("ETHUSDT"), 1.15)
 
     def test_buffer_unified_115(self):
-        """白皮书 v3：弱/中/强档全部 1.15，不再查表分档。"""
         for t in (0, 1, 2):
             self.assertAlmostEqual(buffer_multiplier("ETHUSDT", tier=t), 1.15)
             self.assertAlmostEqual(buffer_multiplier("XAUUSDT", tier=t), 1.15)
-        self.assertAlmostEqual(buffer_multiplier("ETHUSDT", adx=15), 1.15)
-        self.assertAlmostEqual(buffer_multiplier("ETHUSDT", adx=35), 1.15)
 
-    def test_always_place_three(self):
-        self.assertEqual(place_tp_levels_for_scenario(SCENARIO_VPS), 3)
-        self.assertEqual(place_tp_levels_for_scenario(SCENARIO_TV), 3)
-        self.assertEqual(place_tp_levels_for_scenario(0), 3)
+    def test_always_place_two_limits(self):
+        self.assertEqual(place_tp_levels_for_scenario(0), 2)
+        self.assertEqual(place_tp_levels_for_scenario(1), 2)
 
 
-class TestMutexSourcePresent(unittest.TestCase):
-    def test_mutex_methods_in_supervisor(self):
+class TestNoTp3Mutex(unittest.TestCase):
+    def test_no_mutex_methods_and_version(self):
         path = os.path.join(os.path.dirname(__file__), "position_supervisor_binance.py")
         with open(path, encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("def _mutex_on_tp3_filled", src)
-        self.assertIn("def _mutex_on_radar_filled", src)
-        self.assertIn("def _force_reconcile_position_vs_local", src)
-        self.assertIn("v16.3.7-radar-tp12-gate", src)
-        self.assertIn("def _pause_symbol_trading", src)
+        self.assertNotIn("def _mutex_on_tp3_filled", src)
+        self.assertNotIn("def _mutex_on_radar_filled", src)
+        self.assertIn("def _strip_legacy_tp3_limits", src)
+        self.assertIn("def _bind_tv_atr_after_open", src)
+        self.assertIn("v16.4.0-tv-atr-no-tp3", src)
+        self.assertNotIn("from atr_1h import", src)
 
 
 if __name__ == "__main__":

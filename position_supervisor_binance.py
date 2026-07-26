@@ -108,15 +108,10 @@ from breath_stop import (
     STEP_TRIGGER_ATR,
     STEP_ADVANCE_ATR,
 )
-from atr_1h import get_atr_1h_engine
 from atr_scenario import (
-    SCENARIO_TV,
-    SCENARIO_VPS,
     compute_hard_stop_distance,
     hard_stop_price,
     place_tp_levels_for_scenario,
-    resolve_atr_scenario,
-    scenario_notice,
     temp_hard_stop_price,
 )
 from defense_profiles import (
@@ -177,7 +172,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.3.7-radar-tp12-gate"
+BINANCE_VPS_VERSION = "v16.4.0-tv-atr-no-tp3"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -286,7 +281,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 固定分腿 10/20/70；三级限价常挂（TP3 与雷达互斥）
+        # 固定分腿 10/20/70；限价仅 TP1+TP2（TP3 交雷达）
         _leg = list(LEG_TP_RATIOS)
         self.regime_settings = {
             1: {"margin": 0.0, "ratios": list(_leg)},
@@ -3545,8 +3540,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return 0.0, meta
 
     def _atr_1h_engine(self):
-        return get_atr_1h_engine(self.symbol, binance_client.fetch_klines)
-
+        """已废除：VPS 不再独立拉 1h ATR。"""
+        return None
 
     def _defense_buffer_mult(self):
         """硬止损呼吸垫：统一 1.15（规格 3.4），与 adx_tier 无关；tier 仅保留兼容入参。"""
@@ -3580,8 +3575,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return tier
 
     def _effective_place_tp_levels(self):
-        """v15.9.0：始终挂 TP1+TP2+TP3（10/20/70）。"""
-        return 3
+        """v16.4.0：仅挂 TP1+TP2；TP3(70%) 永不挂限价。"""
+        return int(PLACE_TP_LEVELS or 2)
 
     def _temp_hard_stop_from_tv(self, entry=None, side=None, tv_sl=None):
         """
@@ -3729,33 +3724,45 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return bool(ok)
 
     def _lock_initial_atr_value(self, atr, *, upgrade=False):
-        """写入/锁定 initial_atr；upgrade=True 允许场景二→一覆盖。"""
+        """写入/锁定 initial_atr（仅 TV）；upgrade 已废弃，忽略。"""
         atr = float(atr or 0)
         if atr <= 0:
             return 0.0
         try:
-            if upgrade and getattr(self, "_locked_initial_atr", None) is not None:
-                self._locked_initial_atr.upgrade_to_vps(atr)
-            elif getattr(self, "_locked_initial_atr", None) is not None:
+            if getattr(self, "_locked_initial_atr", None) is not None:
                 if self._locked_initial_atr.locked:
-                    if abs(self._locked_initial_atr.value - atr) > 1e-6 and not upgrade:
-                        atr = float(self._locked_initial_atr.value)
-                    elif upgrade:
-                        self._locked_initial_atr.upgrade_to_vps(atr)
-                    else:
-                        atr = float(self._locked_initial_atr.value)
+                    atr = float(self._locked_initial_atr.value)
                 else:
                     self._locked_initial_atr.set_on_open(atr)
         except Exception as e:
             logger.warning(f"[{self.symbol}] initial_atr lock: {e}")
         self.open_atr = float(atr)
         self.current_atr = float(atr)
+        self.atr_source = "tv"
         return float(atr)
+
+    def _strip_legacy_tp3_limits(self, reason="清理历史TP3限价"):
+        """白皮书：TP3 永不挂限价；启动/开仓时撤掉遗留 level=3。"""
+        try:
+            n = int(self._cancel_tp_orders_at_levels([3]) or 0)
+            ids = dict(getattr(self, "_defense_order_ids", {}) or {})
+            if ids.get("tp3"):
+                ids["tp3"] = ""
+                self._defense_order_ids = ids
+            self._clear_pending_tags_for_kind("TP3", save=False)
+            if n:
+                logger.warning(
+                    f"🧹 [{self.symbol}] {reason}: 已撤历史 TP3 限价 n={n}"
+                )
+            return n
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 撤历史TP3失败: {e}")
+            return 0
 
     def _arm_temp_stop_and_tp12(self, live_qty, entry, side, source="开仓共同第一步"):
         """
-        开仓共同第一步（v15.9.0）：永久硬止损(|TV−SL|×buffer 锚定成交价)
-        + TP1/TP2/TP3（10%/20%/70%）三级限价常挂。
+        开仓共同第一步（v16.4.0）：永久硬止损(|TV−SL|×buffer 锚定成交价)
+        + 仅 TP1+TP2 限价（10%/20%）；TP3(70%) 永不挂限价，交雷达。
         frozen_hard_sl_px 挂出后直至 flat 才清零（公式升级重挂除外）。
         无有效 TV.stop_loss → 拒挂/失败（禁止 1.5×ATR 兜底裸奔）。
         """
@@ -3792,12 +3799,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
         )
         self._atr_scenario = 0
         self._temp_stop_active = True
-        self._tp3_fallback_active = True  # v15.9.0：TP3 常挂
+        self._tp3_fallback_active = False
         self.exit_ownership = "NONE"
         self.ownership_locked_at = 0.0
         self._mutex_leg = ""
+        self.atr_source = "tv"
         for lv in (1, 2, 3):
             self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
+        self._strip_legacy_tp3_limits(reason=f"{source}·清历史TP3")
         self.frozen_hard_sl_px = float(temp_sl)
         self.initial_stop = float(temp_sl)
         self.current_sl = float(temp_sl)
@@ -3808,109 +3817,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
         placed_tp = self._place_tp_levels_only(live_qty, retries=2)
         logger.info(
             f"🛡️ [{self.symbol}] {source}: 永久硬止损@{temp_sl:.2f} "
-            f"hard={bool(hard_ok)} TP挂出={placed_tp} (TP123·10/20/70)"
+            f"hard={bool(hard_ok)} TP挂出={placed_tp} (仅TP1+TP2·10/20)"
         )
         return bool(hard_ok) or placed_tp > 0
-
-    def _mutex_on_tp3_filled(self, live_qty=0.0, curr_px=0.0, source=""):
-        """
-        TP3 限价先成交 → 立即撤雷达 STOP；标记雷达终止。
-        竞态：撤雷达若已成交 → 严重告警 + 强制持仓核对。
-        """
-        ids = dict(getattr(self, "_defense_order_ids", {}) or {})
-        rid = ids.get("radar_stop") or ids.get("stop")
-        hard_id = str(ids.get("hard_stop") or "")
-        cancelled = False
-        already_filled = False
-        if rid and str(rid) != hard_id:
-            try:
-                from binance_client import binance_client
-                binance_client.cancel_order(self.symbol, order_id=rid)
-                cancelled = True
-                logger.info(
-                    f"🔀 [{self.symbol}] TP3成交互斥：已撤雷达 id={rid} | {source}"
-                )
-            except Exception as e:
-                err = str(e).lower()
-                if any(x in err for x in ("unknown", "filled", "does not exist", "-2011", "cancel rejected")):
-                    already_filled = True
-                    logger.error(
-                        f"🚨 [{self.symbol}] TP3↔雷达竞态：撤雷达失败疑似已成交 "
-                        f"id={rid} | {e}"
-                    )
-                else:
-                    logger.warning(f"[{self.symbol}] TP3互斥撤雷达失败: {e}")
-            ids["radar_stop"] = ""
-            ids["stop"] = ""
-            self._defense_order_ids = ids
-        self.radar_activated = False
-        self.radar_pending_arm = False
-        self._radar_handoff_done = True
-        self._mutex_leg = "tp3"
-        self.exit_ownership = "TP3_LIMIT"
-        self.ownership_locked_at = time.time()
-        self._clear_pending_tags_for_kind("RADAR")
-        self._save_state()
-        if already_filled:
-            self._force_reconcile_position_vs_local(
-                reason=f"TP3与雷达竞态·{source}",
-            )
-            self._pause_symbol_trading(
-                f"tp3_radar_race:{source}",
-                title=f"TP3↔雷达竞态告警 [{self.symbol}]",
-                detail=(
-                    f"TP3先记账但雷达撤单疑似已成交 | {source} | "
-                    f"已强制持仓核对并暂停该品种，请人工复核"
-                ),
-            )
-        return {"cancelled_radar": cancelled, "race": already_filled}
-
-    def _mutex_on_radar_filled(self, live_qty=0.0, curr_px=0.0, source=""):
-        """
-        雷达止损先成交 → 立即撤未成交 TP3 限价。
-        竞态：撤 TP3 若已成交 → 严重告警 + 强制持仓核对。
-        """
-        already_filled = False
-        cancelled = False
-        try:
-            before = list(
-                (getattr(self, "_defense_order_ids", {}) or {}).get("tp3") and
-                [getattr(self, "_defense_order_ids", {}).get("tp3")] or []
-            )
-            self._cancel_tp_orders_at_levels([3])
-            cancelled = True
-            # 清理本地 TP3 订单标签
-            ids = dict(getattr(self, "_defense_order_ids", {}) or {})
-            if ids.get("tp3"):
-                ids["tp3"] = ""
-                self._defense_order_ids = ids
-            logger.info(
-                f"🔀 [{self.symbol}] 雷达成交互斥：已撤 TP3 | {source} | "
-                f"prev_id={before}"
-            )
-        except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ("unknown", "filled", "does not exist", "-2011")):
-                already_filled = True
-            logger.error(f"🚨 [{self.symbol}] 雷达互斥撤TP3异常: {e}")
-        self._mutex_leg = "radar"
-        self.exit_ownership = "RADAR_STOP"
-        self.ownership_locked_at = time.time()
-        self._clear_pending_tags_for_kind("TP3")
-        self._save_state()
-        if already_filled:
-            self._force_reconcile_position_vs_local(
-                reason=f"雷达与TP3竞态·{source}",
-            )
-            self._pause_symbol_trading(
-                f"radar_tp3_race:{source}",
-                title=f"雷达↔TP3竞态告警 [{self.symbol}]",
-                detail=(
-                    f"雷达先成交但 TP3 撤单疑似已成交 | {source} | "
-                    f"已强制持仓核对并暂停该品种，请人工复核"
-                ),
-            )
-        return {"cancelled_tp3": cancelled, "race": already_filled}
 
     def _force_reconcile_position_vs_local(self, reason=""):
         """以交易所真实持仓为准修正本地账本（竞态/双腿触发后必跑）。"""
@@ -4014,15 +3923,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
         """
         防御 TP 限价：先写本地标签再下单；失败释放标签。
         本地已有同档未完成标签 → 拒挂（宁可错过）。
+        v16.4.0：禁止挂 TP3。
         """
         level = int(level or 0)
         kind = f"TP{level}"
-        if level not in (1, 2, 3):
-            return None
-        own = str(getattr(self, "exit_ownership", "NONE") or "NONE").upper()
-        if level == 3 and own == "RADAR_STOP":
+        if level not in (1, 2):
             logger.error(
-                f"🚫 [{self.symbol}] exit_ownership=RADAR_STOP → 禁止再挂 TP3"
+                f"🚫 [{self.symbol}] 拒挂 TP{level}：仅允许 TP1/TP2 限价"
             )
             return None
         blocked, tag0, _ = self._has_open_pending_defense_tag(kind)
@@ -4224,129 +4131,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._breath_tick_paused = False
             self._defense_ops_locked = False
 
-    def _enter_atr_scenario_1(self, entry, side, live_qty, vps_atr, *, recovered=False):
-        """场景一：VPS真实ATR接管；TP3 限价保留（与雷达互斥），不撤。"""
-        entry = float(entry or 0)
-        side = str(side or "").strip().upper()
-        live_qty = float(live_qty or 0)
-        vps_atr = float(vps_atr or 0)
-        if entry <= 0 or side not in ("LONG", "SHORT") or vps_atr <= 0:
-            return False
-        atr = self._lock_initial_atr_value(vps_atr, upgrade=True)
-        profile = getattr(self, "breath_profile", None)
-        init = initial_stop_price(side, entry, atr, profile=profile)
-        self.initial_stop = float(init or 0)
-        self.current_sl = float(init or 0)
-        self.tv_sl = float(init or 0)
-        self.atr_source = "vps"
-        self.atr_degraded = False
-        self._pending_atr_degrade = None
-        self._atr_scenario = SCENARIO_VPS
-        self._temp_stop_active = False
-        self._tp3_fallback_active = True  # 保留 TP3，禁止旧逻辑撤掉
-        try:
-            self._breath_ratio_history = []
-            self._atr_1h_engine().reset_ratio_history()
-        except Exception:
-            pass
-        self._refresh_breathing_coefficient(force=True)
-
-        # v15.9.0：场景一恢复不再撤 TP3（三级限价常挂 + 与雷达互斥）
-
-        if live_qty > 0 and self.initial_stop > 0:
-            if self._radar_is_dormant():
-                logger.info(
-                    f"⏳ [{self.symbol}] 场景一：雷达休眠，仅记账 initialStop="
-                    f"{self.initial_stop:.2f}（不挂雷达 STOP；TP3 限价保留）"
-                )
-            else:
-                self._sync_exchange_stop(
-                    live_qty, float(self.initial_stop), force=True,
-                    reason=("场景一恢复·雷达止损" if recovered else "场景一·雷达止损"),
-                )
-        self._save_state()
-        msg = scenario_notice(
-            SCENARIO_VPS, vps_atr=atr, recovered=recovered,
-        )
-        if msg:
-            logger.info(f"✅ [{self.symbol}] {msg}")
-            try:
-                dingtalk.report_system_alert(
-                    f"[{self._tag()}] VPS真实ATR已接管",
-                    msg,
-                    level="提示",
-                )
-            except Exception:
-                pass
-        else:
-            logger.info(
-                f"✅ [{self.symbol}] 场景一: VPS真实ATR={atr:.4f} "
-                f"initialStop={self.initial_stop:.2f}（TP123常挂·雷达互斥）"
-            )
-        return True
-
-    def _enter_atr_scenario_2(self, entry, side, live_qty, tv_atr):
-        """场景二：TV atr 降级；确保 TP123 对齐；不暂停交易。"""
-        entry = float(entry or 0)
-        side = str(side or "").strip().upper()
-        live_qty = float(live_qty or 0)
-        tv_atr = float(tv_atr or 0)
-        if entry <= 0 or side not in ("LONG", "SHORT") or tv_atr <= 0:
-            return False
-        atr = self._lock_initial_atr_value(tv_atr, upgrade=False)
-        profile = getattr(self, "breath_profile", None)
-        init = initial_stop_price(side, entry, atr, profile=profile)
-        # 若已有临时止损，正式 initial_stop 用 TV atr 公式；盘口立刻对齐
-        self.initial_stop = float(init or self.initial_stop or 0)
-        self.current_sl = float(self.initial_stop or 0)
-        self.tv_sl = float(self.current_sl or 0)
-        self.atr_source = "tv"
-        self.atr_degraded = False
-        self._pending_atr_degrade = None
-        self._atr_scenario = SCENARIO_TV
-        self._temp_stop_active = False
-        self._tp3_fallback_active = True
-        try:
-            self._breath_ratio_history = []
-            self._atr_1h_engine().reset_ratio_history()
-        except Exception:
-            pass
-        self._refresh_breathing_coefficient(force=True)
-
-        if live_qty > 0 and self.initial_stop > 0:
-            if self._radar_is_dormant():
-                logger.info(
-                    f"⏳ [{self.symbol}] 场景二：雷达休眠，仅记账 initialStop="
-                    f"{self.initial_stop:.2f}（不挂雷达 STOP）"
-                )
-            else:
-                self._sync_exchange_stop(
-                    live_qty, float(self.initial_stop), force=True,
-                    reason="场景二·雷达止损",
-                )
-        # 挂 TP3（受既有同价去重/查簿防护约束）
-        try:
-            placed = self._place_tp_levels_only(live_qty, retries=2)
-            logger.info(f"📈 [{self.symbol}] 场景二 TP 对齐(含TP3) placed={placed}")
-        except Exception as e:
-            logger.error(f"[{self.symbol}] 场景二挂TP3失败: {e}")
-
-        self._save_state()
-        msg = scenario_notice(SCENARIO_TV, tv_atr=atr) or ""
-        logger.warning(f"⚠️ [{self.symbol}] {msg}")
-        try:
-            dingtalk.report_system_alert(
-                f"[{self._tag()}] VPS真实ATR获取失败·已用TV理论ATR",
-                msg,
-                level="提示",
-                suggestion="系统将持续尝试恢复真实ATR并自动撤销TP3",
-            )
-        except Exception:
-            pass
-        return True
-
-    def _resolve_atr_scenario_after_open(self, entry, side, live_qty):
-        """开仓流程内同步完成：拉原生1h ATR → 场景一或场景二。"""
+    def _bind_tv_atr_after_open(self, entry, side, live_qty):
+        """
+        开仓后：雷达 ATR 一律锁定 TV webhook.atr；不再拉 VPS 1h / 场景切换。
+        """
         entry = float(entry or self.watched_entry or 0)
         side = str(side or self.current_side or "").strip().upper()
         live_qty = float(live_qty or self.watched_qty or 0)
@@ -4355,62 +4143,65 @@ class PositionSupervisorBinance(RadarReentryMixin):
             or getattr(self, "open_atr", 0)
             or 0
         )
-        vps_atr = 0.0
-        try:
-            vps_atr = float(self._atr_1h_engine().refresh(force=True) or 0)
-        except Exception as e:
-            logger.warning(f"[{self.symbol}] 开仓拉取1h ATR失败: {e}")
-            vps_atr = 0.0
-        sc, atr, src = resolve_atr_scenario(vps_atr, tv_atr)
-        if sc == SCENARIO_VPS:
-            return self._enter_atr_scenario_1(entry, side, live_qty, atr)
-        if sc == SCENARIO_TV:
-            return self._enter_atr_scenario_2(entry, side, live_qty, atr)
-        logger.error(
-            f"🚨 [{self.symbol}] ATR场景无法决议 vps={vps_atr} tv={tv_atr} "
-            f"→ 维持临时止损，不暂停交易"
+        if entry <= 0 or side not in ("LONG", "SHORT") or tv_atr <= 0:
+            logger.error(
+                f"🚨 [{self.symbol}] TV atr 未就绪 → 无法初始化雷达 ATR "
+                f"entry={entry} side={side} tv_atr={tv_atr}"
+            )
+            return False
+        atr = self._lock_initial_atr_value(tv_atr, upgrade=False)
+        profile = getattr(self, "breath_profile", None)
+        init = initial_stop_price(side, entry, atr, profile=profile)
+        self.initial_stop = float(init or self.initial_stop or 0)
+        # 休眠窗：盘口只留硬止损；initial_stop 仅记账供激活臂使用
+        if float(getattr(self, "frozen_hard_sl_px", 0) or 0) <= 0:
+            self.current_sl = float(self.initial_stop or 0)
+            self.tv_sl = float(self.current_sl or 0)
+        self.atr_source = "tv"
+        self.atr_degraded = False
+        self._pending_atr_degrade = None
+        self._atr_scenario = 0
+        self._temp_stop_active = False
+        self._tp3_fallback_active = False
+        self.breathing_coefficient = 1.0
+        self._breath_ratio_history = []
+        self._breath_coeff_meta = {
+            "atr_1h": 0.0,
+            "ratio": 1.0,
+            "smoothed": 1.0,
+            "source": "tv_fixed",
+        }
+        self._strip_legacy_tp3_limits(reason="开仓后清历史TP3")
+        self._save_state()
+        logger.info(
+            f"✅ [{self.symbol}] ATR=TV锁定 atr={atr:.4f} "
+            f"initialStop={float(self.initial_stop or 0):.2f}（无场景切换）"
         )
-        return False
+        return True
+
+    def _resolve_atr_scenario_after_open(self, entry, side, live_qty):
+        """兼容旧调用名 → TV atr 锁定。"""
+        return self._bind_tv_atr_after_open(entry, side, live_qty)
 
     def _maybe_recover_atr_scenario(self, entry=None, side=None, live_qty=None):
-        """场景二 tick：持续尝试恢复 VPS 真实 ATR → 切场景一并撤TP3。"""
-        if int(getattr(self, "_atr_scenario", 0) or 0) != SCENARIO_TV:
-            return False
-        if not bool(getattr(self, "_tp3_fallback_active", False)):
-            # 仍允许场景二恢复
-            pass
-        entry = float(entry if entry is not None else (self.watched_entry or 0))
-        side = str(side or self.current_side or "").strip().upper()
-        live_qty = float(
-            live_qty if live_qty is not None else (self.watched_qty or 0)
-        )
-        try:
-            vps_atr = float(self._atr_1h_engine().refresh(force=False) or 0)
-        except Exception:
-            return False
-        if vps_atr <= 0:
-            return False
-        return self._enter_atr_scenario_1(
-            entry, side, live_qty, vps_atr, recovered=True,
-        )
+        """已废除场景恢复；恒 False。"""
+        return False
 
     def _refresh_breathing_coefficient(self, force=False):
-        """用币安 1h ATR / initial_atr 更新呼吸系数（3 次平滑 · 按品种档位表）。"""
+        """呼吸系数固定 1.0（ATR 只用 TV 锁值，不再拉 1h 比值）。"""
         init = float(getattr(self, "open_atr", 0) or 0)
-        if init <= 0:
-            return float(getattr(self, "breathing_coefficient", 1.0) or 1.0)
-        eng = self._atr_1h_engine()
-        eng.ratio_history = list(getattr(self, "_breath_ratio_history", None) or [])
-        profile = getattr(self, "breath_profile", None)
-        coeff, meta = eng.breathing_coefficient(
-            init, force_refresh=force, profile=profile,
-        )
-        self.breathing_coefficient = float(coeff or 1.0)
-        self._breath_ratio_history = list(meta.get("ratio_history") or [])
-        self._breath_coeff_meta = meta
-        # current_atr 仅展示实时 1h，不改 open_atr
-        if float(meta.get("atr_1h") or 0) > 0:
-            self.current_atr = float(meta["atr_1h"])
+        self.breathing_coefficient = 1.0
+        self._breath_coeff_meta = {
+            "atr_1h": 0.0,
+            "initial_atr": init,
+            "ratio": 1.0,
+            "smoothed": 1.0,
+            "source": "tv_fixed",
+            "ratio_history": list(getattr(self, "_breath_ratio_history", None) or []),
+        }
+        if init > 0:
+            # 展示用：current_atr 跟随 TV 锁值，禁止用交易所 ATR 覆盖
+            self.current_atr = float(init)
         self._atr_last_update_ts = time.time()
         return self.breathing_coefficient
 
@@ -5050,7 +4841,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             {"level": 3, "price": float(tps[2] or 0), "qty": o3},
         ]
         return [
-            s for s in slices[: int(self._effective_place_tp_levels() or 3)]
+            s for s in slices[: int(self._effective_place_tp_levels() or 2)]
             if float(s.get("price") or 0) > 0 and float(s.get("qty") or 0) > 0
         ]
 
@@ -5063,7 +4854,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
     def _expected_tp_count(self, tp_pxs=None):
         tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-        n = min(int(self._effective_place_tp_levels() or 3), len(tp_pxs or []))
+        n = min(int(self._effective_place_tp_levels() or 2), len(tp_pxs or []))
         return sum(
             1 for i in range(n)
             if float((tp_pxs or [0])[i] or 0) > 0 and (i + 1) not in consumed
@@ -5654,7 +5445,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         live_qty = float(live_qty or 0)
         notes = []
         if entry <= 0 or curr_px <= 0 or not self.current_side:
-            place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+            place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
             return {
                 "consumed": list(getattr(self, "tp_levels_consumed", []) or []),
                 "hang_levels": list(range(1, place_n + 1)),
@@ -5663,7 +5454,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             }
 
         self._ensure_tp123_prices_from_tv(entry)
-        place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
         past = []
         for lv in range(1, place_n + 1):
             if not self.tv_tps or lv - 1 >= len(self.tv_tps):
@@ -5865,7 +5656,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         )
         while len(ratios) < 3:
             ratios.append(0.0)
-        place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         remaining = [i for i in range(place_n) if (i + 1) not in consumed]
         if not remaining or live_qty <= 0:
@@ -5895,11 +5686,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _expected_tp_levels(self, live_qty):
         """
-        应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂，
-        杜绝「TP1 成交后当漏挂 → 补挂 → 头寸在 TP1 吃光」低级 bug。
-        返回 PLACE_TP_LEVELS 内档位（v15.9.0+ 恒=3，含 TP3）。
+        应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂。
+        返回 PLACE_TP_LEVELS 内档位（v16.4.0 恒=2，仅 TP1+TP2）。
         """
-        place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         qty_map = self._split_remaining_tp_quantities(live_qty)
         qty_map = self._normalize_tp_qty_map(qty_map, live_qty)
@@ -6895,11 +6685,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"🛡️ [{self.symbol}] 止损写入已阻断（账本未热加载完整）| {reason}"
             )
             return {"ok": False, "skipped": True, "reason": "stop_write_blocked"}
-        if str(getattr(self, "exit_ownership", "NONE") or "NONE").upper() == "TP3_LIMIT":
-            logger.info(
-                f"🔀 [{self.symbol}] exit_ownership=TP3_LIMIT → 禁止再挂/改雷达 | {reason}"
-            )
-            return {"ok": False, "skipped": True, "reason": "exit_ownership_tp3"}
+        # v16.4.0：TP3↔雷达互斥已废除；若旧状态残留 TP3_LIMIT 则清掉
+        if str(getattr(self, "exit_ownership", "NONE") or "NONE").upper() in (
+            "TP3_LIMIT", "RADAR_STOP",
+        ):
+            self.exit_ownership = "NONE"
+            self.ownership_locked_at = 0.0
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
             return {"ok": False, "skipped": True, "reason": "no_position"}
@@ -9430,7 +9221,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         if audit.get("orders_unreadable"):
             return True
         expected = audit.get("expected", 0)
-        place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
         if expected <= 0:
             # 有仓且 TP 未吃完时 expected=0 = 价位缺失，禁止假「已齐」跳过挂单
             if self.current_side and float(self.watched_entry or 0) > 0:
@@ -9489,7 +9280,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         # 对齐前强制补全 TP 价：禁止 expected=0 假齐跳过挂单
         if entry > 0 and self.current_side and self._expected_tp_count() <= 0:
             consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-            place_n = max(1, min(3, int(self._effective_place_tp_levels() or 3)))
+            place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
             if not set(range(1, place_n + 1)).issubset(consumed):
                 self._ensure_tp123_prices_from_tv(entry)
         if reason:
@@ -10590,14 +10381,15 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 if self._price_reached_tp_zone(2, curr_px, live_only=True):
                     logger.warning(
                         f"⚠️ 仍有 {live_qty} 仓位且现价已过TP2 → "
-                        f"推断 TP1+TP2 已成交，仅余 TP3 限价（PLACE_TP_LEVELS=3）"
+                        f"推断 TP1+TP2 已成交，余仓交雷达（不挂TP3限价）"
                     )
                     self.tp_levels_consumed = [1, 2]
+                    self._strip_legacy_tp3_limits(reason="重启对账·余仓无TP3")
                     self._save_state()
                 elif self._price_reached_tp_zone(1, curr_px, live_only=True):
                     logger.warning(
-                        f"⚠️ 仍有 {live_qty} 仓位且现价已过TP1 → 仅余 TP2+TP3 限价"
-                        f"（PLACE_TP_LEVELS=3）"
+                        f"⚠️ 仍有 {live_qty} 仓位且现价已过TP1 → 仅余 TP2 限价"
+                        f"（PLACE_TP_LEVELS=2）"
                     )
                     self.tp_levels_consumed = [1]
                     self._save_state()
@@ -11155,15 +10947,6 @@ class PositionSupervisorBinance(RadarReentryMixin):
             )
             self._mark_tp_levels_consumed([f["level"] for f in credible])
             curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
-            # v15.9.0：TP3 成交 → 立即互斥撤雷达
-            if any(int(f.get("level") or 0) == 3 for f in credible):
-                try:
-                    self._mutex_on_tp3_filled(
-                        live_qty=new_qty, curr_px=curr_px_safe,
-                        source=f"{levels}成交",
-                    )
-                except Exception as e:
-                    logger.error(f"[{self.symbol}] TP3互斥异常: {e}")
             self._advance_radar_on_tp_fill(credible, curr_px_safe, new_qty)
             self._reconcile_open_qty_vs_tp123(new_qty, source=f"{levels}成交")
             # 只撤/重挂剩余 TP1+TP2；止损数量由呼吸引擎原子收缩
@@ -11192,12 +10975,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         curr_px, hint_reason="雷达保本/追踪止损全平",
                     )
                     try:
-                        self._mutex_on_radar_filled(
-                            live_qty=0.0, curr_px=curr_px,
-                            source="雷达全平·互斥撤TP3",
-                        )
+                        # 雷达全平：顺手清任何历史 TP3 限价残留
+                        self._strip_legacy_tp3_limits(reason="雷达全平·清历史TP3")
                     except Exception as e:
-                        logger.error(f"[{self.symbol}] 雷达互斥异常: {e}")
+                        logger.error(f"[{self.symbol}] 清历史TP3异常: {e}")
                 else:
                     reason = (
                         "触碰硬止损平仓（TV硬止损）"
@@ -12972,10 +12753,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self.breathing_coefficient = 1.0
             self.early_be_done = False
             self.breakeven_phase = False
-            try:
-                self._atr_1h_engine().reset_ratio_history()
-            except Exception:
-                pass
+            self._breath_ratio_history = []
             self.base_qty = float(real_qty)
             # 成交后再绑一次（防无菌/并发冲掉 TV TP）
             self._bind_tv_open_defenses(
@@ -12999,7 +12777,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         """
         开仓后防线（v15.9.0）：
         1) 核实持仓 → 绑回本笔 TV TP1/TP2/TP3 价
-        2) 共同第一步：永久硬止损(|TV−SL|×buffer 锚定成交价) + TP123(10%/20%/70%)
+        2) 共同第一步：永久硬止损(|TV−SL|×buffer 锚定成交价) + TP1+TP2(10%/20%)
         3) 同步拉原生1h ATR：场景一/二仅决定雷达 ATR 源；TP3 常挂不撤
         4) 递进雷达休眠至激活线后接管呼吸（与 TP3 互斥）
         5) 实盘核实后钉钉一条
@@ -13099,12 +12877,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
             )
             self._nuclear_fail_streak = 0
 
-            # ① 共同第一步：永久硬止损 + TP1/TP2/TP3（10/20/70）
+            # ① 共同第一步：永久硬止损 + 仅 TP1+TP2（10/20）；TP3 不挂
             self._arm_temp_stop_and_tp12(
                 live_qty, entry_live, self.current_side, source="开仓共同第一步",
             )
-            # ② 同流程内同步拉原生1h ATR → 场景一或场景二
-            self._resolve_atr_scenario_after_open(
+            # ② 锁定 TV atr（无 VPS 拉 ATR / 无场景切换）
+            self._bind_tv_atr_after_open(
                 entry_live, self.current_side, live_qty,
             )
             vps_sl = float(getattr(self, "current_sl", 0) or 0)
@@ -14241,8 +14019,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self.current_atr = atr
         if adx > 0:
             self.last_adx = adx
-        if float(getattr(self, "open_atr", 0) or 0) <= 0 and atr > 0:
-            self.open_atr = atr
+        # v16.4.0：禁止用 90m ATR 回填 open_atr
         self._atr_last_update_ts = now
         if abs(atr - old_a) > 1e-6 or abs(adx - old_x) > 1e-6:
             logger.info(
@@ -14405,14 +14182,6 @@ class PositionSupervisorBinance(RadarReentryMixin):
         tick = self._apply_breath_stop_tick(curr_px)
         if not tick:
             return False
-        # 场景二：每次呼吸 tick 尝试恢复 VPS 真实 ATR
-        try:
-            if self._maybe_recover_atr_scenario(
-                entry=self.watched_entry, side=self.current_side, live_qty=real_amt,
-            ):
-                tick = self._apply_breath_stop_tick(curr_px) or tick
-        except Exception as e:
-            logger.debug(f"场景二ATR恢复跳过: {e}")
         new_sl = float(tick.get("stop") or 0)
         if new_sl <= 0:
             return False
@@ -15351,8 +15120,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self.exit_ownership = str(
                         s.get("exit_ownership", "NONE") or "NONE"
                     ).upper()
-                    if self.exit_ownership not in ("NONE", "TP3_LIMIT", "RADAR_STOP"):
-                        self.exit_ownership = "NONE"
+                    # 旧互斥状态一律清掉
+                    self.exit_ownership = "NONE"
+                    self.ownership_locked_at = 0.0
+                    try:
+                        self._strip_legacy_tp3_limits(reason="状态恢复·清历史TP3")
+                    except Exception:
+                        pass
                     self.ownership_locked_at = float(
                         s.get("ownership_locked_at", 0) or 0
                     )
@@ -15451,19 +15225,19 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self.monitoring = True
                     self._ensure_sentinel_running_quiet()
                     return
-                # 尽量用 1h ATR 补 initialAtr（不作新开仓权威；仅孤儿仓恢复）
+                # 禁止用交易所 ATR 回填 open_atr（白皮书：ATR 只信 TV）
                 try:
-                    atr = 0.0
+                    atr = float(getattr(self, "open_atr", 0) or 0)
                     adx = 0.0
-                    try:
-                        eng = self._atr_1h_engine()
-                        atr = float(eng.refresh(force=True) or 0)
-                    except Exception:
-                        atr = 0.0
                     if atr <= 0:
-                        atr, adx = self._refresh_market_metrics(force=True)
-                    if atr > 0 and float(getattr(self, "open_atr", 0) or 0) <= 0:
-                        self.open_atr = atr
+                        logger.error(
+                            f"🚨 [{self.symbol}] 孤儿仓缺 TV open_atr → "
+                            f"禁止用 1h/90m ATR 回填"
+                        )
+                    try:
+                        _, adx = self._refresh_market_metrics(force=False)
+                    except Exception:
+                        adx = 0.0
                     if adx > 0:
                         self.last_adx = adx
                     entry = float(pos.get("entry_price") or 0)
@@ -15475,7 +15249,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
                             self.initial_stop = frozen
                             self.current_sl = frozen
                             self.best_price = entry
-                        elif tv_sl > 0 and atr > 0:
+                        elif tv_sl > 0:
                             # 有 TV 止损锚点 → 按统一 1.15 重算硬止损（规格 7.3）
                             try:
                                 hs = self._temp_hard_stop_from_tv(
