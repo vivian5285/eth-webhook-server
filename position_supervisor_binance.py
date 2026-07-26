@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.3.2-brand-notify"
+BINANCE_VPS_VERSION = "v16.3.3-hard-sl-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -2494,7 +2494,18 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._hydrate_tv_defense_context({
                 "side": self.current_side, "entry_price": entry, "size": live_qty,
             })
-        # 无论账本是否有价，一律消毒对齐 TV tv_sl
+        # 接管首要：锁定并挂出 |TV−SL|×1.15 永久硬止损（禁止仅挂 0.5×ATR）
+        hard_locked = self._lock_frozen_hard_sl_from_tv(
+            entry=entry, side=self.current_side, source=f"{source}·硬止损锁定",
+        )
+        if hard_locked > 0:
+            if self._ensure_frozen_hard_sl(
+                live_qty, reason=f"{source}·永久硬止损",
+            ):
+                notes.append(f"永久硬止损@{hard_locked:.2f}")
+            else:
+                notes.append(f"永久硬止损@{hard_locked:.2f}·挂单失败")
+        # 无论账本是否有价，一律消毒对齐呼吸账本（雷达臂，≠永久硬止损）
         self._sanitize_vps_hard_sl_ledger(source=f"{source} boot")
         if float(getattr(self, "tv_sl", 0) or 0) <= 0 and entry > 0:
             self._refresh_vps_hard_sl(
@@ -3580,6 +3591,32 @@ class PositionSupervisorBinance(RadarReentryMixin):
             tv_entry=tv_entry,
             fill_entry=fill,
         )
+
+    def _lock_frozen_hard_sl_from_tv(self, entry=None, side=None, source=""):
+        """
+        规格 3.3：用 |TV.price−TV.stop_loss|×1.15 锁定 frozen_hard_sl_px。
+        已锁定则不覆盖。禁止用 0.5×ATR 雷达激活臂冒充永久硬止损。
+        """
+        cur = float(self._frozen_hard_px() or 0)
+        if cur > 0:
+            return cur
+        hard = float(self._temp_hard_stop_from_tv(entry=entry, side=side) or 0)
+        if hard <= 0:
+            logger.error(
+                f"🚨 [{self.symbol}] 无法锁定永久硬止损（缺 TV.stop_loss）| {source}"
+            )
+            return 0.0
+        self.frozen_hard_sl_px = float(hard)
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        logger.info(
+            f"🛡️ [{self.symbol}] 锁定永久硬止损@{hard:.2f} "
+            f"(TV.sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0):.2f} "
+            f"buffer={float(self._defense_buffer_mult()):.2f}) | {source}"
+        )
+        return float(hard)
 
     def _hard_stop_distance_meta(self, fill=None, tv_sl=None, tv_entry=None, atr=None):
         """调试/钉钉：硬止损距离拆解。"""
@@ -8478,6 +8515,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
             )
             return False
         curr_px = float(curr_px or 0)
+        # 接管/开仓失败恢复：若尚未锁定永久硬止损，先按 TV 距×1.15 锁定再挂
+        if self._frozen_hard_px() <= 0:
+            self._lock_frozen_hard_sl_from_tv(
+                entry=self.watched_entry,
+                side=self.current_side,
+                source="维护硬止损·补锁",
+            )
         self._sanitize_vps_hard_sl_ledger(source="维护硬止损消毒")
         if radar_sl is not None and (
             not self._is_valid_radar_sl(radar_sl)
@@ -8500,6 +8544,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         # 永久硬止损与雷达独立维护；硬止损绝不因雷达改单而撤销/改价
         hard_ok = self._ensure_frozen_hard_sl(real_amt, reason="维护永久硬止损")
         if self._radar_is_dormant():
+            # 雷达未激活：盘口只允许硬止损，禁止把 0.5×ATR 激活臂当唯一 STOP
             return bool(hard_ok or getattr(self, "shield_active", False))
         if getattr(self, "tv_sl", 0) > 0 or radar_sl or self._frozen_hard_px() > 0:
             if not force and not self._can_maintain_shield_now(force=force):
@@ -12704,11 +12749,57 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     f"TV {action} {qty} {self.unit_label} 市价单失败",
                 )
                 return
-            time.sleep(2.0)
-
-            pos = self._get_active_position()
-            if not pos or pos["size"] <= 0:
-                logger.error("开仓失败：成交后 REST 无持仓")
+            # 成交后持仓查询可能短暂滞后；多轮重试，禁止误判空仓而跳过硬止损挂单
+            pos = None
+            for i, delay in enumerate((1.0, 1.5, 2.0, 3.0, 5.0)):
+                time.sleep(delay)
+                try:
+                    pos = self._get_active_position()
+                except Exception as e:
+                    logger.warning(f"成交后持仓查询异常({i + 1}/5): {e}")
+                    pos = None
+                if pos and float(pos.get("size") or 0) > 0:
+                    if i > 0:
+                        logger.info(
+                            f"✅ [{self.symbol}] 成交后持仓查询第 {i + 1} 次成功 "
+                            f"qty={pos.get('size')}"
+                        )
+                    break
+                logger.warning(
+                    f"⏳ [{self.symbol}] 成交后持仓查询重试 {i + 1}/5 仍空 "
+                    f"(市价单已返回成功，疑 REST 滞后)"
+                )
+            if not pos or float(pos.get("size") or 0) <= 0:
+                # 再强制 REST 直查一次
+                try:
+                    raw = binance_client.get_position(self.symbol, prefer_ws=False)
+                    amt = abs(float((raw or {}).get("positionAmt") or 0))
+                    if amt > 0:
+                        pos = self._get_active_position() or {
+                            "size": amt,
+                            "side": action,
+                            "entry_price": float(
+                                (raw or {}).get("entryPrice") or 0
+                            ),
+                        }
+                except Exception as e:
+                    logger.error(f"成交后强制 REST 持仓查询失败: {e}")
+            if not pos or float(pos.get("size") or 0) <= 0:
+                logger.error(
+                    "开仓失败：成交后 REST 无持仓（市价单曾成功——可能已成交但查询滞后；"
+                    "空闲巡检将接管，必须补挂 |TV−SL|×1.15 硬止损）"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"开仓后持仓查询失败 [{self.symbol}]",
+                        f"TV {action} 市价单已返回成功，但 REST 多次查无持仓。"
+                        f"若实盘已有仓，巡检接管时必须挂永久硬止损，禁止仅挂 0.5×ATR。",
+                        level="紧急",
+                        immediate=True,
+                        notify_level=2,
+                    )
+                except Exception:
+                    pass
                 return
 
             real_qty = pos["size"]
