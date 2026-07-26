@@ -14,6 +14,24 @@
 
 ---
 
+## 2026-07-27 · 流水线补强（开仓+补挂预算闸）（v16.6.1）
+
+### 现象
+v16.6.0 首轮督察只在开仓瞬间跑；TP1 成交后补挂 TP2 仍可能把余仓堆进限价。
+
+### 修复
+- `_assert_place_tp_budget`：开仓与补挂均过预算闸（剩余比例帽 + 绝对≤35%）
+- `chief_auditor` / `tp_slice` 暂停空仓可自动清除
+- `get_recent_user_trades` 走节流阀；督察 `hard_sl_live` 禁止「有价=已挂」
+- Deepcoin：PLACE=2 硬帽 + TP 自检（`v13.90.1-pipeline`）
+
+### 复查点
+- [x] README 流水线岗位表 + 今日问题拦截表
+- [ ] `/health`=`v16.6.1-pipeline`；Deepcoin=`v13.90.1-pipeline`
+- [ ] 单测 `test_pipeline_workflow` 通过
+
+---
+
 ## 2026-07-27 · 全域流水线编制（总账本/督察官/节流阀）（v16.6.0）
 
 ### 现象
@@ -31,9 +49,9 @@
 - Deepcoin（5004）同步同套编制与节流
 
 ### 复查点
-- [ ] `/health` version=`v16.6.0-pipeline`，含 `pipeline` 字段
-- [ ] `python -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py`
-- [ ] 持仓中重启后哨兵/雷达仍正常；新开仓日志出现 `📋 … → ORDERS_PLACED` / `督察官通过`
+- [x] `/health` 含 `pipeline` 字段（已上线）
+- [x] `python -m unittest test_pipeline_workflow.py` 本地通过
+- [x] 持仓中重启后哨兵/雷达仍正常（ETH LONG 恢复）
 
 ---
 

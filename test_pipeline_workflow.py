@@ -138,8 +138,8 @@ class TestVersion(unittest.TestCase):
             os.path.join(ROOT, "position_supervisor_binance.py"), "r", encoding="utf-8"
         ) as f:
             sup = f.read()
-        self.assertIn('BINANCE_CLIENT_VERSION = "v16.6.0-pipeline"', bc)
-        self.assertIn('BINANCE_VPS_VERSION = "v16.6.0-pipeline"', sup)
+        self.assertIn('BINANCE_CLIENT_VERSION = "v16.6.1-pipeline"', bc)
+        self.assertIn('BINANCE_VPS_VERSION = "v16.6.1-pipeline"', sup)
         self.assertTrue(soft_gates_enabled())
 
 

@@ -29,6 +29,46 @@ class PipelineBridgeMixin:
         self._pipeline_throttle = get_throttle(ex)
         # 若 state 已 hydrate 过 pipeline，外层会 load_dict
 
+    def _pipeline_align_monitoring_if_held(self) -> None:
+        """重启/热加载后：有仓监控中但阶段仍 IDLE → 对齐到 MONITORING。"""
+        try:
+            from pipeline_ledger import Phase, Role
+            pl = self._pipeline_obj()
+            held = (
+                float(getattr(self, "watched_qty", 0) or 0) > 0
+                and str(getattr(self, "current_side", "") or "").upper() in ("LONG", "SHORT")
+            )
+            if held and pl.phase in (Phase.IDLE, Phase.FAILED, Phase.REPORTED):
+                pl.advance(
+                    Phase.MONITORING,
+                    Role.SYSTEM,
+                    note="align_held_restart",
+                    force=True,
+                    side=str(getattr(self, "current_side", "") or ""),
+                    qty=float(getattr(self, "watched_qty", 0) or 0),
+                    entry=float(getattr(self, "watched_entry", 0) or 0),
+                    hard_sl_px=float(getattr(self, "frozen_hard_sl_px", 0) or 0),
+                    hard_sl_live=float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0,
+                )
+                if float(getattr(self, "initial_qty", 0) or 0) > 0:
+                    pl.sync_position(
+                        side=str(getattr(self, "current_side", "") or ""),
+                        qty=float(getattr(self, "watched_qty", 0) or 0),
+                        entry=float(getattr(self, "watched_entry", 0) or 0),
+                        allow_initial=True,
+                    )
+                try:
+                    if hasattr(self, "_save_state"):
+                        self._save_state()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                logger.info(
+                    f"📋 [{getattr(self, 'symbol', '')}] 有仓对齐 pipeline→MONITORING "
+                    f"qty={getattr(self, 'watched_qty', 0)}"
+                )
+        except Exception as e:
+            logger.debug(f"pipeline align monitoring: {e}")
+
     def _pipeline_obj(self):
         pl = getattr(self, "_pipeline", None)
         if pl is None:
@@ -242,7 +282,8 @@ class PipelineBridgeMixin:
             "tp2_qty": tq2,
             "hard_sl_px": hard_px,
             "hard_sl_expected": hard_px,
-            "hard_sl_live": bool(pl.get("hard_sl_live")) or hard_px > 0,
+            # 禁止「账本有价=已挂」；必须 open 路径用盘口核实后写入 hard_sl_live
+            "hard_sl_live": bool(pl.get("hard_sl_live")),
             "radar_activated": bool(getattr(self, "radar_activated", False)),
             "radar_should_active": should_act,
             "api_recent": int(th.get("recent") or 0),

@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.6.0-pipeline"
+BINANCE_CLIENT_VERSION = "v16.6.1-pipeline"
 # 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
 REST_MIN_INTERVAL_SEC = 0.80
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -1247,9 +1247,13 @@ class BinanceClient:
     def get_recent_user_trades(self, symbol="ETHUSDT", limit=50):
         """最近用户成交（核对 TP 限价成交 vs 手工减仓）"""
         try:
+            self._throttle_rest(symbol, kind="rest_probe")
             limit = max(1, min(int(limit or 50), 100))
             rows = self.client.futures_account_trades(symbol=symbol, limit=limit)
             return list(rows or [])
+        except IpRateLimitedError:
+            logger.warning(f"[成交历史] {symbol}: 节流阀/IP冷却拒绝")
+            return []
         except Exception as e:
             logger.warning(f"[成交历史] {symbol}: {e}")
             return []

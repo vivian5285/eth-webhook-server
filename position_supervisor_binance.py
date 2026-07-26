@@ -175,7 +175,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.6.0-pipeline"
+BINANCE_VPS_VERSION = "v16.6.1-pipeline"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -714,6 +714,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             r.startswith("api_rate_limit")
             or r.startswith("open_orders_cap")
             or r.startswith("local_tags")
+            or r.startswith("chief_auditor")
+            or r.startswith("tp_slice")
             or "open_orders" in r
         )
 
@@ -7453,6 +7455,57 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._save_state()
         return list(self.tv_tps)
 
+    def _assert_place_tp_budget(self, live_qty, levels=None):
+        """
+        执行官预算闸：任意挂限价批次（开仓或 TP1 后补挂）合计不得吞仓。
+        - 未成交：TP1+TP2 ≈ initial×30%
+        - 部分成交：本批剩余档合计 ≤ initial×剩余比例，且绝对 ≤ initial×35%
+        """
+        live_qty = float(live_qty or 0)
+        if live_qty <= 0:
+            return True, "no_qty"
+        ratios = list(
+            getattr(self, "_leg_ratios", None) or LEG_TP_RATIOS or [0.10, 0.20, 0.70]
+        )
+        while len(ratios) < 3:
+            ratios.append(0.0)
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        init_q = float(
+            self._tp_baseline_qty(live_qty)
+            or self.initial_qty
+            or live_qty
+            or 0
+        )
+        if levels is None:
+            levels = self._expected_tp_levels(live_qty)
+        place_sum = round(sum(float(lv.get("qty") or 0) for lv in (levels or [])), 3)
+        rem_ratio = sum(
+            float(ratios[i]) for i in range(place_n) if (i + 1) not in consumed
+        )
+        cap = round(max(init_q * rem_ratio, 0.0) + 1e-6, 3)
+        hard = round(init_q * 0.35 + 1e-6, 3)
+        if not consumed:
+            q_by = {
+                int(lv.get("level") or 0): float(lv.get("qty") or 0)
+                for lv in (levels or [])
+            }
+            item = check_tp_slice_budget(
+                init_q,
+                float(q_by.get(1) or 0),
+                float(q_by.get(2) or 0),
+                place_levels=place_n,
+                ratios=ratios,
+            )
+            if not item.ok:
+                return False, item.detail
+        # 补挂/开仓：本批合计不得超过剩余比例帽，也绝不可超开仓 35%
+        if place_sum > cap + 0.002:
+            return False, f"batch_sum={place_sum} cap={cap} init={init_q} consumed={sorted(consumed)}"
+        if place_sum > hard + 0.002:
+            return False, f"batch_gt_35pct sum={place_sum} hard={hard} init={init_q}"
+        return True, f"ok sum={place_sum} cap={cap}"
+
     def _place_tp_levels_only(self, live_qty, retries=2):
         """只挂未成交 TP 限价档，绝不触碰止损/雷达"""
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
@@ -7467,35 +7520,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._clear_spurious_tp_consumed_if_full_size(
             live_qty, source="place_tp_levels_only",
         )
-        # 执行官自检：开仓瞬间 PLACE=2 切片之和必须≈30%，不过则拒挂
+        # 执行官自检：开仓/补挂均过预算闸（防 TP1 后把余仓堆进 TP2）
         try:
-            consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-            if not consumed:
-                qm = self._split_remaining_tp_quantities(live_qty)
-                init_q = float(
-                    self._tp_baseline_qty(live_qty)
-                    or self.initial_qty
-                    or live_qty
-                    or 0
+            levels_preview = self._expected_tp_levels(live_qty)
+            ok_b, detail_b = self._assert_place_tp_budget(live_qty, levels_preview)
+            if not ok_b:
+                logger.error(
+                    f"🚨 [{self.symbol}] 执行官TP预算闸拒挂 → {detail_b}"
                 )
-                item = check_tp_slice_budget(
-                    init_q,
-                    float((qm or {}).get(1) or 0),
-                    float((qm or {}).get(2) or 0),
-                    place_levels=int(self._effective_place_tp_levels() or 2),
-                    ratios=list(LEG_TP_RATIOS),
-                )
-                if not item.ok:
-                    logger.error(
-                        f"🚨 [{self.symbol}] 执行官TP自检失败 → 拒挂 | {item.detail}"
+                try:
+                    self._pipeline_fail(Role.EXECUTION, f"tp_slice:{detail_b}")
+                except Exception:
+                    pass
+                try:
+                    self._pause_symbol_trading(
+                        f"tp_slice:{str(detail_b)[:120]}",
+                        title=f"TP切片预算拦截 [{self.symbol}]",
+                        detail=str(detail_b),
                     )
-                    try:
-                        self._pipeline_fail(Role.EXECUTION, f"tp_slice:{item.detail}")
-                    except Exception:
-                        pass
-                    return 0
+                except Exception:
+                    pass
+                return 0
         except Exception as e:
-            logger.warning(f"[{self.symbol}] TP自检跳过: {e}")
+            logger.warning(f"[{self.symbol}] TP预算闸跳过: {e}")
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         placed = 0
         for lv in self._expected_tp_levels(live_qty):
@@ -8596,6 +8643,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             try:
                 self._pipeline_load_blob(s.get("pipeline"))
+                self._pipeline_align_monitoring_if_held()
             except Exception:
                 pass
             self._stop_write_blocked = not ok
@@ -15835,6 +15883,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.radar_activated = bool(s.get("radar_activated", False))
                     try:
                         self._pipeline_load_blob(s.get("pipeline"))
+                        self._pipeline_align_monitoring_if_held()
                     except Exception:
                         pass
                     self._load_reentry_state_from_dict(s)

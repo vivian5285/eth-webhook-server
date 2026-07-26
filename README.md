@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.6.0-pipeline`**  
+**当前版本：`v16.6.1-pipeline`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
@@ -35,6 +35,7 @@
 > **v16.4.8**：GEMINI 对照——TP 限价预算硬帽（禁 TP1+TP2=整仓）、挂单帽暂停去重、空仓自清可恢复 pause；深币同步绝对分片。  
 > **v16.5.0**：苹果风 Console（`/console`）——多套 API 档案热切换、每档案风险%/杠杆可改即生效、Webhook secret、日志与 30 日盈亏胜率；口令 `CONSOLE_PASSWORD`。  
 > **v16.6.0**：生产流水线编制——总账本+状态机+督察官+账号级 REST 节流阀；现有开平仓/雷达挂岗位边界（软闸默认开，不打断实盘）。`/health` 含 `pipeline` 阶段。Deepcoin 同步同套编制。  
+> **v16.6.1**：补强——TP **开仓+补挂**双预算闸；`chief_auditor`/`tp_slice` 空仓自清；成交历史走节流阀；督察官硬止损以盘口核实为准；Deepcoin PLACE=2 硬帽+自检。  
 
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）
@@ -42,20 +43,21 @@
 - 档案存 `data/account_profiles.json`；切换 API 默认要求无持仓
 
 > **权威依据**：[《VPS完整系统规格_币安单账户版》](docs/VPS完整系统规格_币安单账户版.md)（第三轮修正：TP3 不挂限价 + ATR 只用 TV）+ 本文。  
-> 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
+> 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)  
+> 事故与复查：[`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md)
 
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.5.0-console · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v16.6.1-pipeline · pipeline: {ETHUSDT, XAUUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 
-python3 check_vps_logic.py
+python3 -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py
 python3 test_defense_v1590.py
 python3 test_risk_iron_v1591.py
 python3 test_radar_reentry.py
-python3 test_two_scenario_atr.py
 python3 test_orders_dup_guard.py
+python3 test_stop_idempotent_and_tp_levels.py
 
 # 生产级 20U 实盘矩阵（ETH/XAU × LONG/SHORT；需在 VPS 且密钥可用）
 # sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
@@ -191,28 +193,64 @@ TV 价 1897.03，TV.SL 1912.18，成交 1900.51：
 TradingView v6.5.6 Alert (secret)
         │
         ▼
-   app.py  /webhook
+   app.py  /webhook  (+ /console 管理页)
         │
         ▼
-position_supervisor_binance.py     ← 唯一生产大脑
+position_supervisor_binance.py     ← 唯一生产大脑（岗位边界挂接）
+   ├── pipeline_ledger.py          总账本 + 状态机（唯一阶段真相源）
+   ├── pipeline_bridge.py          岗位交接桥（不大拆交易所调用）
+   ├── chief_auditor.py            督察官 8 项复查
+   ├── api_throttle.py             账号级 REST 节流阀（ETH/XAU 共用）
    ├── tv_seq.py                   1.0s 缓存折叠 + 15s OPEN/CLOSE 铁律
-   ├── webhook_parser.py           动作白名单 · RISK20 仓位
-   ├── atr_scenario.py             硬止损价 · 场景决议 · TP 档数
-   ├── atr_1h.py                   币安原生 1h ATR(14)
+   ├── webhook_parser.py           动作白名单 · RISK20 · PLACE_TP_LEVELS=2
+   ├── atr_scenario.py             硬止损价公式
    ├── breath_profiles.py          ETH / XAU 呼吸参数
    ├── breath_stop.py              两阶段呼吸止损
    ├── market_engine.py            90m 仅对比/ADX 日志（非止损权威）
-   ├── binance_client.py           REST + markPrice WS + 用户流
-   └── dingtalk.py                 钉钉播报
+   ├── binance_client.py           REST(过节流阀) + markPrice WS + 用户流
+   └── dingtalk.py                 通知（开仓播报在督察后）
 ```
+
+### 流水线岗位与状态机（v16.6）
+
+| 岗位 | 职责 | 红线 |
+|------|------|------|
+| 信号官 | 验 secret、解析字段、写账本 `SIGNAL_RECEIVED` | **不调交易所 API** |
+| 仓位稽查员 | 先平后开 / 无菌净场 → `CLEARED` | 唯一决定是否清场 |
+| 执行官 | 下单→确认成交→挂硬止损+TP1/TP2；TP 自检 30% | 不私自改仓位权重/切片 |
+| 雷达值守员 | 读账本/实盘头寸跟踪；`_pipeline_radar_update` | 禁止影子仓 |
+| 督察官 | 开仓首轮 8 项复查；硬失败可暂停 | 方向/切片/硬止损为硬项 |
+| 通讯官 | 督察后发开仓通知 → `REPORTED`→`MONITORING` | 其他岗位勿直接刷屏通知 |
+
+阶段：`SIGNAL_RECEIVED → PENDING_CLEAR → CLEARED → ENTRY_SUBMITTED → ENTRY_CONFIRMED → ORDERS_PLACED → VERIFIED → REPORTED → MONITORING`  
+失败：`FAILED`（卡住可见；空仓后 `chief_auditor`/`tp_slice`/`api_rate_limit` 等可自动清暂停）。
+
+| 环境变量 | 默认 | 含义 |
+|----------|------|------|
+| `PIPELINE_SOFT_GATES` | `1` | 非法阶段只记日志，不硬挡现有路径（保实盘） |
+| `PIPELINE_AUDITOR_HARD_PAUSE` | `1` | 督察硬失败 → `trading_paused` |
+| `API_BUDGET_PER_MIN` | `48` | 账号 REST 滑动窗口预算 |
+| `API_SILENCE_SEC` | `600` | 撞限流后强制静默秒数 |
+
+### 今日实盘问题 → 现行拦截（复查表）
+
+| 今日问题 | 拦截层 | 状态 |
+|----------|--------|------|
+| TP1+TP2 吞整仓 | `_normalize_tp_qty_map` 硬帽 + `_assert_place_tp_budget`（开仓**与补挂**）+ 督察 `tp_slice` | **已拦** |
+| 假 TP3 / drift | `PLACE_TP_LEVELS=2`；不记 TP3 consumed；对账不含 TP3 | **已拦** |
+| `initial_qty` 被压扁 | 账本 `initial_qty` 只在 `ENTRY_CONFIRMED` 写一次；supervisor `_trusted_initial_qty` 只升不降 | **已拦（双层）** |
+| 限流后巡检仍 REST | `AccountThrottle` 静默 + `_raise_if_ip_rate_limited` + 哨兵/空闲巡检休眠 + `_GLOBAL` | **已拦** |
+| ETH 限流 XAU 不知 | 节流阀按 **账号** `binance` 共用；`-1003` 广播 `_GLOBAL` | **已拦** |
+| 空仓仍暂停 | `_maybe_auto_clear_pause_when_flat`（含 `api_rate_limit`/`chief_auditor`/`tp_slice`） | **已拦** |
+| 雷达余仓偏弱 | 雷达 qty 跟实盘；`_pipeline_radar_update`；TP1/TP2 利润地板 | **已加强** |
 
 | 环节 | 行为 |
 |------|------|
 | 缓存 | 同 symbol 首包后 **1.0s** settle |
 | 15s 铁律 | OPEN 先到丢弃窗内 CLOSE；CLOSE 先到先平后开 |
 | 去重 | 60s 同 `action+symbol+price` |
-| 哨兵 | WS tick 优先；REST ≥1s 兜底 |
-| 状态 | `binance_vps_state_{SYMBOL}.json` 按品种隔离 |
+| 哨兵 | WS tick 优先；REST 兜底且过节流阀 |
+| 状态 | `binance_vps_state_{SYMBOL}.json`（含 `pipeline` 字段） |
 | 查询失败 | fail-closed，禁止当空仓/盲补 |
 
 ---
@@ -243,20 +281,22 @@ position_supervisor_binance.py     ← 唯一生产大脑
 | `price` | 开仓参考 / 去重键 |
 | `stop_loss` | 永久硬止损公式输入（`|price−stop_loss|×buffer`）；亦可参与 sizing 收紧 |
 | `atr` | 场景一日志；场景二雷达 ATR；缺则拒开 |
-| `tp1`/`tp2`/`tp3` | 限价止盈价；数量固定 **10% / 20% / 70%**（三级常挂） |
+| `tp1`/`tp2`/`tp3` | 止盈价；**只挂 TP1+TP2 限价**（10%/20%）；`tp3` 价可传入但不挂单，70% 交雷达 |
 | `qty` | 可选 soft-cap；天文值忽略 |
 
 ---
 
 ## 四、开仓流程（生产路径）
 
-1. 查实盘；非空 → 市价全平 + 撤全部挂单 → **无菌确认**  
-2. `qty = (本金×20%×5)/price`（可选 sl/TV.qty 收紧）→ 杠杆 5x → 市价开仓  
-3. **共同第一步**：永久硬止损 + TP1/TP2/TP3（10/20/70）  
-4. **同步拉原生 1h ATR** → 场景一或场景二 → **独立挂雷达止损**  
-5. 开仓后核对：盘口至少硬止损在；雷达按场景挂出；钉钉播报  
+1. **信号官**登记 `SIGNAL_RECEIVED`（不调交易所）  
+2. **仓位稽查员**先平后开 / 无菌净场 → `CLEARED`  
+3. **执行官** `qty=(本金×20%×5)/price` → 杠杆(档案) → 市价开仓 → `ENTRY_CONFIRMED`（锁定 `initial_qty`）  
+4. **共同第一步**：永久硬止损 + **仅 TP1+TP2**（10%/20%，预算闸自检）→ `ORDERS_PLACED`  
+5. 雷达休眠待命（激活线前盘口仅硬止损）  
+6. **督察官** 8 项复查 → `VERIFIED`（硬失败可暂停）  
+7. **通讯官** 钉钉/TG 开仓播报 → `REPORTED`→`MONITORING`  
 
-**已废除**：临时硬止损被 ATR「替换」；硬+雷达单槽合并；必须带 TV.qty。
+**已废除**：TP3 限价；硬止损被 ATR「替换」；硬+雷达单槽合并；必须带 TV.qty；VPS 自拉 ATR 做止损权威。
 
 ---
 
@@ -392,7 +432,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 |------|------|
 | PREFLAT | qty=0 且 orders=0 |
 | OPEN webhook | HTTP 200；市价成交 |
-| 防线就绪 | stops∈[1,2]，limits=**3**，total≤**5**，dups=[] |
+| 防线就绪 | stops∈[1,2]，limits=**2**（仅TP1+TP2），total≤**5**，dups=[] |
 | HARD_SL | `frozen_hard_sl_px` ≈ \|TV−SL\|×**1.15** 外侧 |
 | HOLD | 二次扫描无叠单漂移 |
 | CLOSE | 无菌 flat |
@@ -402,14 +442,26 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 
 ```bash
 export BINANCE_SKIP_BOOTSTRAP=1
+python3 -m unittest test_pipeline_workflow.py
 python3 test_tv_seq_collapse.py
-python3 test_two_scenario_atr.py
 python3 test_huge_tv_qty_sizing.py
 python3 test_position_query_fail_safe.py
 python3 test_orders_dup_guard.py
 python3 test_attribution_honest.py
 python3 test_breath_radar_upgrade.py
+python3 test_stop_idempotent_and_tp_levels.py
 ```
+
+### 流水线上线验收清单（v16.6.1）
+
+- [x] `/health` → `version=v16.6.1-pipeline`，含 `pipeline` 字段  
+- [x] Deepcoin `/health` → `v13.90.1-pipeline`  
+- [x] `.env` 含 `PIPELINE_SOFT_GATES=1`、`PIPELINE_AUDITOR_HARD_PAUSE=1`、`API_BUDGET_PER_MIN=48`  
+- [x] 持仓中重启：ETH LONG 保留，`pipeline=MONITORING`，硬止损账本在  
+- [x] 单测：`test_pipeline_workflow` 9/9；`check_tp_slice_budget(1,0.5,0.5).ok is False`  
+- [ ] **下一笔新开仓**日志确认：`📋 … → ORDERS_PLACED`、`督察官通过`、TP 预算闸未拒挂  
+- [ ] 限流冷却期人工观察：哨兵不再打穿 REST（日志无连续 -1003）  
+- [ ] 盘口 LIMIT 恒为 2（无 TP3）；TP1+TP2 qty ≈ initial×30%（持仓中核对）
 
 ---
 
@@ -487,12 +539,13 @@ qty = (合约本金余额 × 20% × 5) / 开仓价
 
 ## 十四、生产监管状态
 
-系统进入 **等待真实 TV 信号** 状态后：按本 README / 白皮书自动执行，无需人工干预或额外测试脚本。
+系统进入 **等待真实 TV 信号** 状态后：按本 README / 白皮书 + **流水线编制（v16.6）** 自动执行。出问题先查 `/health.pipeline` 卡在哪个阶段、再查 `docs/SYSTEM_ISSUE_FIX_LOG.md`。
 
 | 文件 | 说明 |
 |------|------|
-| 桌面《Gemini终极生产级全功能白皮书》 | 最终权威 |
+| 桌面《全域生产级工作流架构方案》 | 岗位/账本/督察编制权威 |
 | [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md) | **系统问题/修复日志（查历史事故优先）** |
+| `pipeline_ledger.py` / `chief_auditor.py` / `api_throttle.py` | 总账本 · 督察官 · 节流阀 |
 | [`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md) | 旧逻辑清除表 |
 | [`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md) | 天文 qty 事故 |
-| `check_vps_logic.py` / `check_deploy_events.py` | 静态与部署审计 |
+| `test_pipeline_workflow.py` | 流水线单测门禁 |

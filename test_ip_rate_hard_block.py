@@ -66,7 +66,7 @@ class TestIpHardBlock(unittest.TestCase):
         self.assertEqual(len(out2), 1)
 
     def test_version_tag(self):
-        self.assertIn("v16.6.0", bc.BINANCE_CLIENT_VERSION)
+        self.assertIn("v16.6.1", bc.BINANCE_CLIENT_VERSION)
 
 
 if __name__ == "__main__":
