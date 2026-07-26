@@ -12,9 +12,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.3.0-slice-reentry"
-# 规格：单品种 REST 调用间隔不得小于 100ms
-REST_MIN_INTERVAL_SEC = 0.1
+BINANCE_CLIENT_VERSION = "v16.4.3-slow-rest"
+# 规格：单品种 REST 调用间隔（2026-07-26：0.1s 过密 → 提至 350ms）
+REST_MIN_INTERVAL_SEC = 0.35
+# 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
+REST_GLOBAL_MIN_INTERVAL_SEC = 0.25
+# IP 级 -1003 后强制全局 REST 冷却（秒）
+IP_RATE_LIMIT_BACKOFF_SEC = 300.0
 # 规格 12.2：首次立即重试，之后 1/2/4/8s，最多 5 次重试
 TRADE_RETRY_DELAYS_SEC = (0.0, 1.0, 2.0, 4.0, 8.0)
 API_PROBE_INTERVAL_SEC = 30.0
@@ -85,19 +89,23 @@ class BinanceClient:
         self._all_pos_rows = {}
         self._all_pos_ts = 0.0
         # 规格 10：持仓核对 REST ≈30s；WS 优先，合并缓存短窗口仅用于强制 REST
-        self._all_pos_ttl = 30.0
-        self._all_pos_force_ttl = 1.0
+        self._all_pos_ttl = 45.0
+        self._all_pos_force_ttl = 2.0
         self._last_order_event_ts = 0.0
         # 查单失败时的进程内同价锁：仅复用刚挂成功的缓存，禁止盲补首挂
         self._recent_limit_place = {}
         self._recent_stop_place = {}
         self._place_dedupe_lock = threading.Lock()
         self._rest_min_interval = float(REST_MIN_INTERVAL_SEC)
+        self._rest_global_min_interval = float(REST_GLOBAL_MIN_INTERVAL_SEC)
         self._rest_last_by_sym = {}
+        self._rest_last_global = 0.0
         self._rest_throttle_lock = threading.Lock()
         self._rate_limit_hooks = []
         self._order_reject_hooks = []
         self._api_unavailable_hooks = []
+        self._ip_rate_limit_until = 0.0
+        self._ip_rate_limit_lock = threading.Lock()
         self._recent_local_cancels = {}
         self._local_cancel_lock = threading.Lock()
         self._monitor_only_syms = set()
@@ -110,6 +118,38 @@ class BinanceClient:
         """限流回调：cb(symbol, err_text)。supervisor 用其暂停品种。"""
         if callable(cb) and cb not in self._rate_limit_hooks:
             self._rate_limit_hooks.append(cb)
+
+    def mark_ip_rate_limited(self, seconds=None):
+        """IP 共享配额撞墙 → 全局 REST 冷却窗口。"""
+        sec = float(seconds if seconds is not None else IP_RATE_LIMIT_BACKOFF_SEC)
+        until = time.time() + max(30.0, sec)
+        if not hasattr(self, "_ip_rate_limit_lock"):
+            self._ip_rate_limit_lock = threading.Lock()
+            self._ip_rate_limit_until = 0.0
+        with self._ip_rate_limit_lock:
+            self._ip_rate_limit_until = max(
+                float(getattr(self, "_ip_rate_limit_until", 0) or 0), until
+            )
+        logger.error(
+            f"🧊 [IP限流] REST 全局冷却至 "
+            f"{time.strftime('%H:%M:%S', time.localtime(self._ip_rate_limit_until))} "
+            f"(+{sec:.0f}s)"
+        )
+
+    def ip_rate_limit_remaining(self):
+        until = float(getattr(self, "_ip_rate_limit_until", 0) or 0)
+        return max(0.0, until - time.time())
+
+    def _wait_ip_rate_limit(self, symbol=""):
+        rem = self.ip_rate_limit_remaining()
+        if rem <= 0:
+            return
+        sleep_for = min(rem, 5.0)
+        logger.warning(
+            f"🧊 [IP限流] {symbol or '_'} REST 等待 {sleep_for:.1f}s "
+            f"(剩余冷却 {rem:.0f}s)"
+        )
+        time.sleep(sleep_for)
 
     def register_order_reject_hook(self, cb):
         """开仓/关键挂单被拒（保证金等）回调：cb(symbol, err_text)。不自动重试。"""
@@ -291,24 +331,32 @@ class BinanceClient:
         return (time.time() - float(ts)) <= float(window_sec)
 
     def _throttle_rest(self, symbol=""):
-        """单品种 REST 间隔硬下限（默认 100ms）。"""
+        """单品种 + 全账户 REST 间隔硬下限；IP 限流窗口内额外等待。"""
+        self._wait_ip_rate_limit(symbol)
         if not hasattr(self, "_rest_throttle_lock"):
             self._rest_throttle_lock = threading.Lock()
             self._rest_last_by_sym = {}
+            self._rest_last_global = 0.0
             self._rest_min_interval = float(REST_MIN_INTERVAL_SEC)
+            self._rest_global_min_interval = float(REST_GLOBAL_MIN_INTERVAL_SEC)
         if not hasattr(self, "_rate_limit_hooks"):
             self._rate_limit_hooks = []
         sym = str(symbol or "_GLOBAL").upper()
-        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.1)
-        if gap <= 0:
-            return
+        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.35)
+        g_gap = float(
+            getattr(self, "_rest_global_min_interval", REST_GLOBAL_MIN_INTERVAL_SEC)
+            or 0.25
+        )
         with self._rest_throttle_lock:
             now = time.time()
-            last = float(self._rest_last_by_sym.get(sym) or 0)
-            wait = gap - (now - last)
+            last_sym = float(self._rest_last_by_sym.get(sym) or 0)
+            last_g = float(getattr(self, "_rest_last_global", 0) or 0)
+            wait = max(0.0, gap - (now - last_sym), g_gap - (now - last_g))
             if wait > 0:
                 time.sleep(wait)
-            self._rest_last_by_sym[sym] = time.time()
+            now2 = time.time()
+            self._rest_last_by_sym[sym] = now2
+            self._rest_last_global = now2
 
     def _note_api_error(self, err, symbol=""):
         """检测 -1003 / TOO_MANY_REQUESTS → 通知钩子暂停品种。"""
@@ -322,11 +370,23 @@ class BinanceClient:
             or "banned until" in low
             or "way too much request" in low
         ):
+            try:
+                self.mark_ip_rate_limited()
+            except Exception:
+                pass
             for h in list(self._rate_limit_hooks):
                 try:
                     h(str(symbol or ""), text)
                 except Exception:
                     pass
+            # 同 IP 多品种：广播 _GLOBAL，使 ETH/XAU 一并暂停
+            sym_u = str(symbol or "").upper()
+            if sym_u not in ("", "_GLOBAL"):
+                for h in list(self._rate_limit_hooks):
+                    try:
+                        h("_GLOBAL", text)
+                    except Exception:
+                        pass
             return True
         return False
 

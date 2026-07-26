@@ -188,8 +188,14 @@ class RadarReentryMixin:
         """价触激活线：挂雷达 STOP@initialStop，开始呼吸。"""
         if bool(getattr(self, "radar_activated", False)):
             return True
-        if not self._price_reached_radar_activation(curr_px, live_only=True):
-            return False
+        force = "强制" in str(source or "") or "force" in str(source or "").lower()
+        if not force and not self._price_reached_radar_activation(curr_px, live_only=True):
+            # TP1+TP2 已成交：视为必须启动，不再卡在价触判定
+            consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+            if not (1 in consumed and 2 in consumed):
+                return False
+            force = True
+            source = f"{source or 'arm'}·TP12已成交"
         live_qty = float(live_qty or self.watched_qty or 0)
         if live_qty <= 0:
             return False
@@ -211,6 +217,14 @@ class RadarReentryMixin:
             init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
             init = float(getattr(self, "current_sl", 0) or 0)
+        # 硬止损价可作兜底 initial（避免 atr 丢失导致永不武装）
+        if init <= 0:
+            hard = float(getattr(self, "frozen_hard_sl_px", 0) or getattr(self, "tv_sl", 0) or 0)
+            if hard > 0:
+                init = hard
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 武装用硬止损价兜底 initial_stop={init:.2f} | {source}"
+                )
         if init <= 0:
             logger.warning(f"⚠️ [{self.symbol}] 达激活线但无 initial_stop | {source}")
             return False

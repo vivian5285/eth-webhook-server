@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.4.0-tv-atr-no-tp3`**  
+**当前版本：`v16.4.4-radar-arm-fix`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
@@ -25,6 +25,10 @@
 > **叠单铁律**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**。  
 > **API 限流**：REST 仅下单/改撤/对账；价格与成交靠 WebSocket；空闲巡检 45s + 失败退避 120s；单品种 REST ≥100ms；触发 -1003 → 暂停品种；**禁止运维脚本狂轮询**。  
 > **v16.4.0**：删 TP3 限价/互斥；ATR 只信 TV；清理历史 TP3。  
+> **v16.4.1**：`trading_paused`/限流时哨兵休眠禁 REST 雪崩；限流告警去重；TP1 成交后 TP2 按开仓 20% 绝对量挂，禁止全仓堆 TP2。  
+> **v16.4.2**：禁止压扁开仓基线；IP 全局 REST 冷却 + `_GLOBAL` 双品种暂停；限价档对账不再误报 TP3 drift。事故全文见 [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md)。  
+> **v16.4.3**：REST 全面降速——哨兵 8s/雷达 4s、空闲巡检 90s、持仓对账 90s；单品种 REST≥350ms、全账户≥250ms；限流冷却 300s。  
+> **v16.4.4**：休眠雷达假死修复——价过激活线/TP2 成交后必须武装呼吸止损（不再只打日志）。  
 
 > **权威依据**：[《VPS完整系统规格_币安单账户版》](docs/VPS完整系统规格_币安单账户版.md)（第三轮修正：TP3 不挂限价 + ATR 只用 TV）+ 本文。  
 > 旧逻辑清除对照：[`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md)
@@ -32,7 +36,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.4.0-tv-atr-no-tp3 · sizing: RISK20_NOTIONAL5 · trading_paused: false
+# version: v16.4.4-radar-arm-fix · sizing: RISK20_NOTIONAL5 · trading_paused: false
 
 python3 check_vps_logic.py
 python3 test_defense_v1590.py
@@ -82,19 +86,22 @@ VPS 在 **openOrders 查询失败/超时** 时，错误地认为「没有挂单�
 | 价格监控 | **WebSocket** 行情 | 实时 |
 | 订单成交 | **WebSocket** User Data | 实时推送优先 |
 | 开仓 / 改撤 | REST | 仅信号触发；单品种调用间隔留余量 |
-| 持仓核对 | REST | 持仓期约 30s；空闲巡检 **45s** |
+| 持仓核对 | REST | 持仓期约 **90s**；空闲巡检 **90s** |
 | 挂单查询 | REST | 下单前必查；失败 → fail-closed |
 | 5m K 线（再入） | REST | 再入时按需；失败降级 TV×系数 |
 | WS 断线 | 指数退避重连 | 1s → 60s 封顶 |
 
 **限流防护**
-- 空闲巡检 `QUERY_FAILED` / `-1003` → 退避 **120s**（`IDLE_PATROL_BACKOFF_SEC`）  
-- 核武对齐刹车：`NUCLEAR_REALIGN_MIN_INTERVAL_SEC`（防秒挂秒撤打爆 REST）  
-- 雷达改单最短间隔 5s  
-- 20U 实盘矩阵：周期前冷却 30s、周期间 22s，避免演练自身触发 ban  
+- 哨兵常态 **~8s**、雷达 **~4s**（原 1s 过密，2026-07-26 改）  
+- 空闲巡检 `QUERY_FAILED` / `-1003` → 退避 **300s**  
+- REST 间隔：单品种 ≥**350ms**，全账户合计 ≥**250ms**  
+- **IP 全局冷却 300s**：任一品种 `-1003` → 广播 `_GLOBAL` 暂停 ETH+XAU  
+- `trading_paused` 时哨兵休眠，**禁止**补挂/核武/对账雪崩  
+- 核武对齐刹车：≥90s；雷达改单 ≥8s  
 - **禁止**用 REST 轮询价格/成交替代 WebSocket  
 
-触发 API ban 时：暂停该品种激进补挂路径，等待窗口结束；**禁止**在 ban 中循环 place。
+触发 API ban 时：暂停该品种激进补挂路径，等待窗口结束；**禁止**在 ban 中循环 place。  
+同 IP 报「XAU 限流」而 TV 是 ETH → 见 [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md)（2026-07-26）。
 
 ---
 
@@ -473,6 +480,7 @@ qty = (合约本金余额 × 20% × 5) / 开仓价
 | 文件 | 说明 |
 |------|------|
 | 桌面《Gemini终极生产级全功能白皮书》 | 最终权威 |
+| [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md) | **系统问题/修复日志（查历史事故优先）** |
 | [`docs/DELETED_LEGACY_LOGIC_v15.7.0.md`](docs/DELETED_LEGACY_LOGIC_v15.7.0.md) | 旧逻辑清除表 |
 | [`docs/INCIDENT_20260722_HUGE_TV_QTY.md`](docs/INCIDENT_20260722_HUGE_TV_QTY.md) | 天文 qty 事故 |
 | `check_vps_logic.py` / `check_deploy_events.py` | 静态与部署审计 |
