@@ -172,7 +172,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.4.6-ip-hard-block"
+BINANCE_VPS_VERSION = "v16.4.8-tp-budget-cap"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -201,6 +201,9 @@ SENTINEL_GRACE_AFTER_OPEN_SEC = 90
 # 递进雷达：开仓后休眠至 activation_frac×TP1距；无固定秒级禁窗
 POST_OPEN_RADAR_BLOCK_SEC = 0
 RADAR_TRAIL_MIN_INTERVAL_SEC = 8
+# TP2→TP3 余仓（无 TP3 限价）：收紧追随步进/冷却，更快锁利收尾
+RADAR_RUNNER_TRAIL_MIN_INTERVAL_SEC = 4
+RADAR_RUNNER_MIN_STEP_MULT = 0.45
 RADAR_WS_APPROACH_RATIO = 0.90
 RADAR_WS_URGENT_SLEEP_SEC = 2.0
 # 核武撤挂 thrash 刹车：失败/全缺后最短间隔，避免秒挂秒撤
@@ -697,6 +700,51 @@ class PositionSupervisorBinance(RadarReentryMixin):
             except Exception:
                 pass
 
+    def _pause_reason_auto_clearable(self, reason=""):
+        """空仓后可自动解除的暂停族（人工闸仍需手清）。"""
+        r = str(reason or getattr(self, "trading_pause_reason", "") or "")
+        return (
+            r.startswith("api_rate_limit")
+            or r.startswith("open_orders_cap")
+            or r.startswith("local_tags")
+            or "open_orders" in r
+        )
+
+    def _maybe_auto_clear_pause_when_flat(self, source=""):
+        """
+        实盘已 flat 时自动清可恢复暂停，避免空仓仍 trading_paused 卡死。
+        CLOSE_THEN_OPEN / restart_* / ATR_DEGRADE 等人工闸不自动清。
+        """
+        if not bool(getattr(self, "trading_paused", False)):
+            return False
+        reason = str(getattr(self, "trading_pause_reason", "") or "")
+        if not self._pause_reason_auto_clearable(reason):
+            return False
+        try:
+            pos = self._get_active_position(prefer_ws=False, force_rest=False)
+        except Exception:
+            pos = None
+        if pos == "QUERY_FAILED":
+            return False
+        live = 0.0
+        if isinstance(pos, dict):
+            live = float(pos.get("size") or 0)
+        watched = float(getattr(self, "watched_qty", 0) or 0)
+        if live > float(getattr(self, "dust_qty", 0) or 0.001) or watched > float(
+            getattr(self, "dust_qty", 0) or 0.001
+        ):
+            return False
+        logger.warning(
+            f"🧹 [{self.symbol}] 空仓自动解除暂停 | {reason} | {source or 'flat'}"
+        )
+        self.trading_paused = False
+        self.trading_pause_reason = ""
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        return True
+
     def _start_idle_flat_patrol(self):
         """空仓待命时实盘巡检：反向强平 / 同向接管 / 人工异动 / 漏报全平 / 蚂蚁扫尾。
         间隔默认 45s；QUERY_FAILED/限流后退避 120s，避免 -1003 雪崩。"""
@@ -714,6 +762,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 time.sleep(max(1.0, sleep_for))
                 if self.monitoring:
                     continue
+                # 空仓待命：尝试解除可恢复暂停（防 flat 后仍卡 pause）
+                try:
+                    self._maybe_auto_clear_pause_when_flat(source="idle_patrol")
+                except Exception:
+                    pass
                 if getattr(self, "trading_paused", False):
                     # 暂停期禁止空闲 REST 巡检（与 ETH 共享 IP 配额）
                     continue
@@ -2476,14 +2529,18 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return self._shield_stop_price()
 
     def _normalize_tp_qty_map(self, qty_map, live_qty):
-        """不足最小下单量的小档合并到最后一档，避免 TP3 被静默丢弃"""
+        """
+        不足最小下单量的小档合并到最后一档。
+        铁律（PLACE=2）：禁止把合并/余数扩成「填满现仓」——TP3 份额永不并进限价。
+        """
         if not qty_map:
             return qty_map
         live_qty = float(live_qty or 0)
-        levels = sorted(qty_map.keys())
+        levels = sorted(int(k) for k in qty_map.keys())
         if len(levels) <= 1:
+            # 单档剩余：保持绝对比例切片，禁止静默改成 live 全量
             return qty_map
-        out = dict(qty_map)
+        out = {int(k): float(v or 0) for k, v in qty_map.items()}
         carry = 0.0
         last = levels[-1]
         for lvl in levels[:-1]:
@@ -2495,7 +2552,37 @@ class PositionSupervisorBinance(RadarReentryMixin):
             out[last] = round(float(out.get(last, 0) or 0) + carry, 3)
         total = round(sum(float(out.get(l, 0) or 0) for l in levels), 3)
         if total > live_qty + 0.001:
-            out[last] = round(max(out.get(last, 0) - (total - live_qty), MIN_TP_LEG_QTY), 3)
+            out[last] = round(max(out.get(last, 0) - (total - live_qty), 0.0), 3)
+        # PLACE=2 硬帽：限价合计 ≤ 开仓×(r1+r2)+一步噪声
+        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        if place_n <= 2 and max(levels) <= 2:
+            initial = float(
+                self._tp_baseline_qty(live_qty)
+                or getattr(self, "initial_qty", 0)
+                or live_qty
+                or 0
+            )
+            ratios = list(
+                getattr(self, "_leg_ratios", None)
+                or LEG_TP_RATIOS
+                or [0.10, 0.20, 0.70]
+            )
+            while len(ratios) < 2:
+                ratios.append(0.0)
+            cap = round(initial * (float(ratios[0]) + float(ratios[1])) + 1e-6, 3)
+            # 允许一步精度；禁止接近整笔现仓
+            hard = min(cap, round(live_qty * 0.40, 3)) if live_qty > 0 else cap
+            tot2 = round(sum(float(out.get(l, 0) or 0) for l in levels if l <= 2), 3)
+            if tot2 > hard + 1e-9:
+                logger.error(
+                    f"🚨 [{self.symbol}] TP限价预算超帽 tot={tot2} hard={hard} "
+                    f"initial={initial} live={live_qty} → 按比例压回"
+                )
+                if tot2 > 0:
+                    scale = hard / tot2
+                    for l in list(out.keys()):
+                        if int(l) <= 2:
+                            out[l] = round(float(out.get(l) or 0) * scale, 3)
         return out
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
@@ -4132,22 +4219,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"→ 暂停交易等待人工"
             )
             logger.error(f"🚨 [硬上限熔断] {msg}")
-            self.trading_paused = True
-            self.trading_pause_reason = f"open_orders_cap:{n}"
-            try:
-                self._save_state()
-            except Exception:
-                pass
-            try:
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"挂单硬上限击穿 [{self.symbol}]",
-                    detail=msg,
-                    level="紧急",
-                    suggestion="先净场核对盘口；禁止自动再挂",
-                )
-            except Exception:
-                pass
+            # 走统一暂停闸：同 reason 抑制钉钉/TG 风暴
+            self._pause_symbol_trading(
+                f"open_orders_cap:{n}",
+                title=f"挂单硬上限击穿 [{self.symbol}]",
+                detail=msg,
+            )
             return False
         # 仅「飞行中」pending（无 orderId）与空盘口冲突才熔断；acked 不暂停
         self._gc_stale_pending_defense_tags(save=False)
@@ -6993,7 +7070,22 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
         last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
         now = time.time()
+        # 同价已挂仍须核对数量：TP 部分成交后雷达 qty 可能落后于现仓
+        qty_mismatched = False
         if not orphans and len(near) == 1:
+            book_q = self._radar_stop_book_qty()
+            if book_q is not None and live_qty > 0:
+                tol_q = max(
+                    float(getattr(self, "qty_step", 0) or 0.001) * 2,
+                    float(live_qty) * 0.02,
+                )
+                if abs(float(book_q) - float(live_qty)) > tol_q:
+                    qty_mismatched = True
+                    logger.warning(
+                        f"🫁 [{self.symbol}] 雷达数量落后盘口={book_q} 现仓={live_qty} "
+                        f"→ 强制按现仓重挂 | {reason}"
+                    )
+        if not orphans and len(near) == 1 and not qty_mismatched:
             self._last_applied_exchange_sl = exchange_target
             self._last_hard_sl_sync_ts = now
             self.shield_active = True
@@ -7006,6 +7098,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 "exchange_target": exchange_target,
                 "reason": "idempotent_unified",
             }
+        if qty_mismatched:
+            # 同价但数量不对：先撤雷达腿再重挂（保留硬止损）
+            force = True
+            self._purge_all_protective_stops(preserve_hard=True)
+            time.sleep(0.25)
+            live_stops = self._radar_live_stops() or []
+            near = [p for p in live_stops if abs(p - exchange_target) <= SHIELD_STOP_TOLERANCE]
+            orphans = [p for p in live_stops if abs(p - exchange_target) > SHIELD_STOP_TOLERANCE]
 
         if (
             not force
@@ -7878,7 +7978,150 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self._is_radar_active() or self._should_radar_trail(curr_px)
                 ):
                     radar_sl = float(self.current_sl)
+        # 雷达已挂：每轮核对 qty 与现仓（TP 部分成交后不得残留旧量）
+        if self._is_radar_active():
+            self._ensure_radar_qty_matches_live(
+                real_amt, reason="哨兵·雷达数量贴合",
+            )
+            if self._in_radar_runner_zone(curr_px):
+                self._ratchet_radar_profit_floor(
+                    real_amt, curr_px, source="哨兵·TP2收尾地板",
+                )
         self._maintain_hard_shield(real_amt, curr_px, radar_sl=radar_sl)
+
+    def _radar_stop_book_qty(self):
+        """
+        盘口雷达腿数量（reduceOnly + qty，排除 closePosition 硬止损）。
+        查不到返回 None；无雷达腿返回 0.0。
+        """
+        orders = binance_client.get_open_orders(self.symbol)
+        if is_orders_query_failed(orders):
+            return None
+        total = 0.0
+        found = False
+        for o in orders or []:
+            order_type = str(o.get("type") or o.get("orderType") or "").upper()
+            if order_type not in ("STOP_MARKET", "STOP"):
+                continue
+            if self._order_is_close_position_stop(o):
+                continue
+            try:
+                q = float(o.get("origQty", o.get("quantity", 0)) or 0)
+            except (TypeError, ValueError):
+                q = 0.0
+            if q <= 0:
+                continue
+            found = True
+            total += q
+        return round(total, 6) if found else 0.0
+
+    def _ensure_radar_qty_matches_live(self, live_qty, reason=""):
+        """雷达激活后：盘口雷达 qty 必须贴合现仓（TP1/TP2 全成/部分成交）。"""
+        if not self._is_radar_active():
+            return False
+        live_qty = float(self._resolve_live_qty(live_qty) or 0)
+        if live_qty <= 0:
+            return False
+        book_q = self._radar_stop_book_qty()
+        if book_q is None:
+            logger.warning(
+                f"🫁 [{self.symbol}] 雷达数量对账跳过：挂单不可读 | {reason}"
+            )
+            return False
+        sized = float(getattr(self, "shield_sized_qty", 0) or 0)
+        tol = max(
+            float(getattr(self, "qty_step", 0) or 0.001) * 2,
+            float(live_qty) * 0.02,
+            self._qty_noise_floor(live_qty),
+        )
+        need = (
+            book_q <= 0
+            or abs(book_q - live_qty) > tol
+            or (sized > 0 and abs(sized - live_qty) > tol)
+        )
+        if not need:
+            self.shield_sized_qty = live_qty
+            return True
+        logger.info(
+            f"🫁 [{self.symbol}] 雷达数量对齐 book={book_q} sized={sized} "
+            f"→ live={live_qty} | {reason}"
+        )
+        return bool(
+            self._breath_resize_stop_on_tp(
+                live_qty, reason=reason or "雷达数量贴合现仓",
+            )
+        )
+
+    def _in_radar_runner_zone(self, curr_px=0.0):
+        """
+        TP2→TP3 收尾区：无 TP3 限价，余仓(~70%) 全靠雷达锁利。
+        条件：TP1+TP2 已记账，或现价已过 TP2。
+        """
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        if 1 in consumed and 2 in consumed:
+            return True
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tp2 = float(tps[1] or 0) if len(tps) > 1 else 0.0
+        px = float(curr_px or 0)
+        if tp2 <= 0 or px <= 0:
+            return False
+        if self.current_side == "LONG":
+            return px >= tp2
+        if self.current_side == "SHORT":
+            return px <= tp2
+        return False
+
+    def _ratchet_radar_profit_floor(self, live_qty=None, curr_px=0.0, source=""):
+        """
+        过 TP1/TP2 后立刻把账本止损抬到利润地板（entry±floor×ATR）。
+        无 TP3 挂单时，这是保护 TP2→TP3 浮盈的第一道锁。
+        """
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        side = str(getattr(self, "current_side", "") or "").upper()
+        atr = float(getattr(self, "open_atr", 0) or 0)
+        if atr <= 0 and hasattr(self, "_get_locked_initial_atr"):
+            try:
+                atr = float(self._get_locked_initial_atr() or 0)
+            except Exception:
+                atr = 0.0
+        if entry <= 0 or atr <= 0 or side not in ("LONG", "SHORT"):
+            return False
+        profile = getattr(self, "breath_profile", None) or {}
+        f1 = float(profile.get("tp1_floor_atr") or RADAR_TP1_FLOOR_ATR or 0.5)
+        f2 = float(profile.get("tp2_floor_atr") or RADAR_TP2_FLOOR_ATR or 1.5)
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        runner = self._in_radar_runner_zone(curr_px)
+        use_f2 = runner or (2 in consumed)
+        use_f1 = use_f2 or (1 in consumed) or self._price_reached_tp1_zone(curr_px)
+        if not use_f1:
+            return False
+        floor_atr = f2 if use_f2 else f1
+        if side == "LONG":
+            floor = round(entry + floor_atr * atr, 2)
+            cur = float(getattr(self, "current_sl", 0) or 0)
+            if cur > 0 and cur >= floor - 1e-9:
+                return False
+            self.current_sl = max(cur, floor) if cur > 0 else floor
+        else:
+            floor = round(entry - floor_atr * atr, 2)
+            cur = float(getattr(self, "current_sl", 0) or 0)
+            if cur > 0 and cur <= floor + 1e-9:
+                return False
+            self.current_sl = min(cur, floor) if cur > 0 else floor
+        self.tv_sl = float(self.current_sl)
+        logger.info(
+            f"🫁 [{self.symbol}] 利润地板抬升 → SL@{float(self.current_sl):.2f} "
+            f"(floor={floor_atr}×ATR={atr:.2f}) | {source or 'TP锁利'}"
+        )
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        if self._is_radar_active() and float(live_qty or 0) > 0:
+            self._ensure_radar_sl(
+                float(self.current_sl), live_qty=live_qty, for_handoff=True,
+            )
+        return True
 
     def _should_force_radar_after_tp_progress(self, live_qty, curr_px):
         """TP1+TP2 已成交，或现价已过 TP2 / 激活线 → 不允许继续休眠。"""
@@ -7920,6 +8163,9 @@ class PositionSupervisorBinance(RadarReentryMixin):
             live_qty, curr_px, source=source or "TP强制武装",
         )
         if ok:
+            self._ratchet_radar_profit_floor(
+                live_qty, curr_px, source=f"{source or '强制武装'}·地板",
+            )
             return True
         # 价触用 live_only 过严：用 best 再试一次（仅强制路径）
         best = float(getattr(self, "best_price", 0) or 0)
@@ -7930,6 +8176,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         if probe > 0 and abs(probe - px) > 0.01:
             ok = self._maybe_arm_radar_on_activation(
                 live_qty, probe, source=f"{source or 'TP强制'}·best",
+            )
+        if ok:
+            self._ratchet_radar_profit_floor(
+                live_qty, curr_px, source=f"{source or '强制武装'}·地板",
             )
         return bool(ok)
 
@@ -11125,6 +11375,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
             f"朝TP1={self._tp1_direction_progress(curr_px):.0%} "
             f"激活线={self._radar_activation_ratio():.0%}"
         )
+        # 无 TP3 限价：TP 成交即抬利润地板，余仓交雷达收尾
+        self._ratchet_radar_profit_floor(
+            live_qty, curr_px, source=f"TP{max_level}成交·锁利",
+        )
         self._save_state()
         return None
 
@@ -11289,8 +11543,17 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 reason=f"{levels} 成交静默对齐",
             )
             # 止损数量收缩已在 _realign_remaining_tps_after_fill → _breath_resize_stop_on_tp
+            # 无 TP3：TP 进度足够则强制武装；已激活则追随 + 数量贴合
+            if self._should_force_radar_after_tp_progress(new_qty, curr_px_safe):
+                self._force_arm_radar_after_tp(
+                    new_qty, curr_px_safe, source=f"{levels}成交·强制武装",
+                )
             if self._is_radar_active() or float(getattr(self, "current_sl", 0) or 0) > 0:
                 self._process_radar_trailing(new_qty, curr_px_safe)
+            if self._is_radar_active():
+                self._ensure_radar_qty_matches_live(
+                    new_qty, reason=f"{levels}成交·雷达数量",
+                )
             else:
                 logger.info(
                     f"📡 [{self.symbol}] {levels}已记账，止损数量已同步 | "
@@ -12510,6 +12773,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self.reentry_active = False
         self.radar_pending_arm = True
         logger.info(f"🧹 [{self.symbol}] 呼吸/防线账本已清零 | {source}")
+        try:
+            self._maybe_auto_clear_pause_when_flat(source=f"flat_reset:{source}")
+        except Exception:
+            pass
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
         """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉 + 智能再入"""
@@ -14529,10 +14796,17 @@ class PositionSupervisorBinance(RadarReentryMixin):
         phase_up = bool(tick.get("phase_entered"))
         stage = 2 if tick.get("breakeven_phase") else 1
         last_sl = float(getattr(self, "_last_applied_exchange_sl", 0) or 0)
+        runner = self._in_radar_runner_zone(curr_px)
         min_step = max(0.3, float(curr_px or self.watched_entry or 0) * 0.00025)
+        if runner:
+            min_step = max(0.15, min_step * float(RADAR_RUNNER_MIN_STEP_MULT))
+        trail_cool = (
+            float(RADAR_RUNNER_TRAIL_MIN_INTERVAL_SEC)
+            if runner else float(RADAR_TRAIL_MIN_INTERVAL_SEC)
+        )
         cooled = (
             now - float(getattr(self, "_last_radar_trail_ts", 0) or 0)
-            < RADAR_TRAIL_MIN_INTERVAL_SEC
+            < trail_cool
             and not phase_up
         )
 

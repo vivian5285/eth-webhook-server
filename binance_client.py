@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.4.6-ip-hard-block"
+BINANCE_CLIENT_VERSION = "v16.4.8-tp-budget-cap"
 # 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
 REST_MIN_INTERVAL_SEC = 0.80
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）

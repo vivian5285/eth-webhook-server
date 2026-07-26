@@ -94,6 +94,19 @@ class TestPlaceTpLevelsAndStopStable(unittest.TestCase):
         self.assertAlmostEqual(levels[0]["qty"], 0.187, places=3)
         self.assertLess(levels[0]["qty"], 0.5)
 
+    def test_normalize_never_fills_live_when_place2(self):
+        """PLACE=2：normalize 不得把 TP1+TP2 扩成整笔现仓（GEMINI 同类事故）。"""
+        s = self._make_sup()
+        s.initial_qty = 0.031
+        s.watched_qty = 0.031
+        s._leg_ratios = [0.10, 0.20, 0.70]
+        # 故意喂「已吞余仓」的错误 map
+        bad = {1: 0.011, 2: 0.020}
+        fixed = s._normalize_tp_qty_map(bad, 0.031)
+        total = sum(fixed.values())
+        self.assertLessEqual(total, 0.031 * 0.35 + 1e-9)
+        self.assertLess(total, 0.031 - 1e-9)
+
     def test_resync_baseline_never_shrinks_while_monitoring(self):
         """监控中禁止把开仓基线压成现仓（2026-07-26 事故根因）。"""
         s = self._make_sup()

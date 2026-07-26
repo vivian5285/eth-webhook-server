@@ -233,6 +233,41 @@ class TestBreathStopWithCoeff(unittest.TestCase):
         self.assertAlmostEqual(out["meta"]["trail_distance"], 28.0)
         self.assertEqual(out["stop"], 1932.0)
 
+    def test_tp_floors_lock_profit_long(self):
+        """过 TP1/TP2 后止损不得松过 entry+floor×ATR（无 TP3 限价时锁利）。"""
+        entry, atr = 1900.0, 20.0
+        init = initial_stop_price("LONG", entry, atr, profile=BREATH_ETH)
+        # 刚过 TP1：地板 = entry + 0.5×ATR = 1910
+        out1 = calculate_breath_stop(
+            "LONG", 1930.0, entry, atr, init, init, 1930.0, False,
+            breathing_coefficient=1.2,
+            profile=BREATH_ETH,
+            tp1_px=1927.0, tp2_px=1950.0, tp3_px=1970.0,
+        )
+        self.assertEqual(out1["meta"]["zone"], "tp1_tp2")
+        self.assertGreaterEqual(out1["stop"], entry + 0.5 * atr - 1e-6)
+        # 过 TP2：地板 = entry + 1.5×ATR = 1930
+        out2 = calculate_breath_stop(
+            "LONG", 1955.0, entry, atr, init, 1910.0, 1955.0, False,
+            breathing_coefficient=1.2,
+            profile=BREATH_ETH,
+            tp1_px=1927.0, tp2_px=1950.0, tp3_px=1970.0,
+        )
+        self.assertEqual(out2["meta"]["zone"], "tp2_tp3")
+        self.assertGreaterEqual(out2["stop"], entry + 1.5 * atr - 1e-6)
+
+    def test_tp_floors_lock_profit_short(self):
+        entry, atr = 1900.0, 20.0
+        init = initial_stop_price("SHORT", entry, atr, profile=BREATH_ETH)
+        out2 = calculate_breath_stop(
+            "SHORT", 1845.0, entry, atr, init, init, 1845.0, False,
+            breathing_coefficient=1.2,
+            profile=BREATH_ETH,
+            tp1_px=1873.0, tp2_px=1850.0, tp3_px=1830.0,
+        )
+        self.assertEqual(out2["meta"]["zone"], "tp2_tp3")
+        self.assertLessEqual(out2["stop"], entry - 1.5 * atr + 1e-6)
+
     def test_phase_switch_at_3atr(self):
         init = initial_stop_price("LONG", 1900.0, 20.0)
         out = calculate_breath_stop(

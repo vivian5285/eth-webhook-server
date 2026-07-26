@@ -250,6 +250,14 @@ def calculate_stop_long(
     trail_floor = new_highest - trail_dist
     candidate = max(candidate, trail_floor)
 
+    # TP1/TP2 利润地板（无 TP3 限价时，雷达必须锁住已走过的利润区）
+    f1 = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)
+    f2 = float(p.get("tp2_floor_atr") or TP2_FLOOR_ATR)
+    if zone in ("tp2_tp3", "tp3_plus"):
+        candidate = max(candidate, entry_price + f2 * initial_atr)
+    elif zone == "tp1_tp2":
+        candidate = max(candidate, entry_price + f1 * initial_atr)
+
     new_stop = candidate
     return (
         round(float(new_stop), 2),
@@ -322,6 +330,16 @@ def calculate_stop_short(
         candidate = trail_ceil
     else:
         candidate = min(candidate, trail_ceil)
+
+    # TP1/TP2 利润地板（空单对称：止损不得松过地板）
+    f1 = float(p.get("tp1_floor_atr") or TP1_FLOOR_ATR)
+    f2 = float(p.get("tp2_floor_atr") or TP2_FLOOR_ATR)
+    if zone in ("tp2_tp3", "tp3_plus"):
+        floor = entry_price - f2 * initial_atr
+        candidate = min(candidate, floor) if candidate > 0 else floor
+    elif zone == "tp1_tp2":
+        floor = entry_price - f1 * initial_atr
+        candidate = min(candidate, floor) if candidate > 0 else floor
 
     new_stop = candidate
     return (
