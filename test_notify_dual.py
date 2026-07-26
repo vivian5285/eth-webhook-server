@@ -80,7 +80,8 @@ class TestNotifyDual(unittest.TestCase):
                     immediate=True,
                 )
         self.assertEqual(len(tg_texts), 1)
-        self.assertEqual(ding_calls, ["🚨 硬止损触发"])
+        self.assertEqual(ding_calls, ["【币安单系统】🚨 硬止损触发"])
+        self.assertIn("币安单系统", tg_texts[0])
 
     def test_hard_sl_close_is_critical(self):
         levels = []
@@ -126,6 +127,14 @@ class TestNotifyDual(unittest.TestCase):
         st = self.dt.reload_notify_config()
         self.assertIn("telegram_configured", st)
         self.assertIn("dingtalk_configured", st)
+
+    def test_brand_title_prefix(self):
+        self.assertTrue(self.dt._brand_title("开仓 LONG").startswith("【币安单系统】"))
+        # idempotent
+        once = self.dt._brand_title("开仓")
+        self.assertEqual(self.dt._brand_title(once), once)
+        tg = self.dt._build_tg_text("开仓 LONG", {"方向": "LONG"})
+        self.assertIn("币安单系统", tg)
 
 
 if __name__ == "__main__":

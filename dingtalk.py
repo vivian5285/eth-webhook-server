@@ -91,6 +91,7 @@ def reload_notify_config():
     global TELEGRAM_RETRY_MAX, TELEGRAM_RETRY_SEC
     global DINGTALK_BATCH_MAX, DINGTALK_BATCH_FLUSH_SEC, DINGTALK_BATCH_DISABLE
     global DINGTALK_TITLE_DEDUP_SEC, DINGTALK_ALERT_DEDUP_SEC
+    global SYSTEM_NAME, FOOTER
     with _notify_cfg_lock:
         load_dotenv(_ENV_PATH, override=True)
         DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
@@ -108,9 +109,12 @@ def reload_notify_config():
         ).strip().lower() in ("1", "true", "yes", "on")
         DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
         DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
+        SYSTEM_NAME = os.getenv("NOTIFY_SYSTEM_NAME", "币安单系统").strip() or "币安单系统"
+        FOOTER = f"*🔶 {SYSTEM_NAME} · 币安黄金趋势大波段引擎*"
     status = notify_config_status()
     logger.info(
-        "notify config reloaded | tg=%s ding=%s",
+        "notify config reloaded | system=%s tg=%s ding=%s",
+        status.get("system_name"),
         status.get("telegram_configured"),
         status.get("dingtalk_configured"),
     )
@@ -121,6 +125,7 @@ def notify_config_status():
     tok = bool(TELEGRAM_BOT_TOKEN)
     chat = bool(TELEGRAM_CHAT_ID)
     return {
+        "system_name": SYSTEM_NAME,
         "telegram_configured": bool(tok and chat),
         "telegram_chat_id": TELEGRAM_CHAT_ID if chat else "",
         "dingtalk_configured": bool(DINGTALK_WEBHOOK or WECHAT_WEBHOOK),
@@ -129,10 +134,21 @@ def notify_config_status():
         "tg_retry_sec": TELEGRAM_RETRY_SEC,
     }
 
+# 与 VPS 上「双子星量化」等其他项目区分的系统品牌名
+SYSTEM_NAME = os.getenv("NOTIFY_SYSTEM_NAME", "币安单系统").strip() or "币安单系统"
 EXCHANGE_LABEL = "币安 Binance"
 LEVERAGE_LABEL = "TVx"  # 实盘杠杆以 TV 为准，禁止写死 25x
 DEFAULT_LEVERAGE = 0
 UNIT_LABEL = "ETH"  # 仅缺省；实盘必须传 unit_label / symbol
+
+
+def _brand_title(title):
+    """标题统一加【币安单系统】，避免与双子星量化钉钉/TG 混淆。"""
+    t = str(title or "").strip()
+    tag = f"【{SYSTEM_NAME}】"
+    if t.startswith(tag) or t.startswith(f"[{SYSTEM_NAME}]"):
+        return t
+    return f"{tag}{t}"
 
 _ctx_unit = contextvars.ContextVar("dingtalk_unit", default=None)
 _ctx_symbol = contextvars.ContextVar("dingtalk_symbol", default=None)
@@ -195,7 +211,7 @@ G_LIGHT = "#FFE566"
 G_ACCENT = "#F0B90B"
 G_MUTED = "#C9A227"
 
-FOOTER = "*🔶 Quant AI · 币安黄金趋势大波段引擎*"
+FOOTER = f"*🔶 {SYSTEM_NAME} · 币安黄金趋势大波段引擎*"
 VERIFY_TAG = "✅ 实盘核查通过"
 VERIFY_DELAY_MARK = "REST 同步略延迟"
 
@@ -391,10 +407,12 @@ def _build_alert_markdown(title, data_dict, header_color=G_TITLE):
     text_lines = [f"- **{k}** : {v}" for k, v in (data_dict or {}).items()]
     body_text = "\n".join(text_lines)
     now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    return f"""### <font color="{header_color}">{title}</font>
+    branded = _brand_title(title)
+    return f"""### <font color="{header_color}">{branded}</font>
+> **🏷️ 系统**：`{SYSTEM_NAME}`（非双子星量化）
 > **⏰ 军区时间**：`{now_time}`
-> **📍 阵地标识**：[ {EXCHANGE_LABEL} · 主力进攻阵地 ]
-> **🔶 主题色带**：`币安黄金`（与深币紫金播报区分）
+> **📍 阵地标识**：[ {SYSTEM_NAME} · {EXCHANGE_LABEL} ]
+> **🔶 主题色带**：`币安黄金`
 
 ---
 {body_text}
@@ -407,9 +425,10 @@ def _build_alert_markdown(title, data_dict, header_color=G_TITLE):
 def _build_tg_text(title, data_dict):
     """Telegram HTML 正文（与钉钉字段同源，去色）。"""
     now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    branded = _brand_title(title)
     lines = [
-        f"<b>{html.escape(_strip_rich(title))}</b>",
-        f"⏰ {html.escape(now_time)} · {html.escape(EXCHANGE_LABEL)}",
+        f"<b>{html.escape(_strip_rich(branded))}</b>",
+        f"🏷️ {html.escape(SYSTEM_NAME)} · ⏰ {html.escape(now_time)} · {html.escape(EXCHANGE_LABEL)}",
         "",
     ]
     for k, v in (data_dict or {}).items():
@@ -610,10 +629,11 @@ class _DingTalkBatcher:
                 f'### <font color="{color}">{title}</font> `{tstr}`\n{body}'
             )
         now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        merged_title = f"📦 币安播报合并 ×{len(batch)}"
+        merged_title = _brand_title(f"📦 播报合并 ×{len(batch)}")
         markdown_text = f"""### <font color="{G_TITLE}">{merged_title}</font>
+> **🏷️ 系统**：`{SYSTEM_NAME}`（非双子星量化）
 > **⏰ 军区时间**：`{now_time}`
-> **📍 阵地标识**：[ {EXCHANGE_LABEL} · 攒批摘要 ]
+> **📍 阵地标识**：[ {SYSTEM_NAME} · 攒批摘要 ]
 > **📊 条数**：`{len(batch)}`（规避钉钉限流）
 
 ---
@@ -703,14 +723,15 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False,
             raw_title[:72],
         )
         return
-    logger.info("notify route level=2 tg+dingtalk title=%s", raw_title[:72])
+    branded = _brand_title(raw_title)
+    logger.info("notify route level=2 tg+dingtalk title=%s", branded[:72])
     if immediate or DINGTALK_BATCH_DISABLE:
         md = _build_alert_markdown(title, data_dict, header_color)
-        ok = _post_with_retry(str(title), md)
+        ok = _post_with_retry(branded, md)
         if not ok:
-            logger.error("DingTalk immediate send failed: %s", raw_title[:72])
+            logger.error("DingTalk immediate send failed: %s", branded[:72])
         return
-    _batcher.enqueue(title, data_dict, header_color)
+    _batcher.enqueue(branded, data_dict, header_color)
 
 
 def get_regime_name(regime_code):
