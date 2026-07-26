@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.4.8-tp-budget-cap"
+BINANCE_CLIENT_VERSION = "v16.5.0-console"
 # 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
 REST_MIN_INTERVAL_SEC = 0.80
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -125,7 +125,39 @@ class BinanceClient:
         self._monitor_only_lock = threading.Lock()
         self._trade_retry_locks = {}
         self._trade_retry_lock_guard = threading.Lock()
+        self._cred_lock = threading.Lock()
         logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载")
+
+    def rebind_credentials(self, api_key, api_secret, force=False):
+        """热切换 API Key/Secret（Console 多档案）。有仓切换由上层门禁。"""
+        key = str(api_key or "").strip()
+        secret = str(api_secret or "").strip()
+        if not key or not secret:
+            logger.error("[rebind] 拒绝：空密钥")
+            return False
+        with getattr(self, "_cred_lock", threading.Lock()):
+            same = (key == str(self.api_key or "")) and (secret == str(self.api_secret or ""))
+            if same and not force:
+                return True
+            try:
+                self.client = Client(key, secret)
+                self.api_key = key
+                self.api_secret = secret
+                # 清缓存，避免旧账户挂单/持仓串读
+                with self._pos_lock:
+                    self._pos_cache.clear()
+                    self._pos_cache_ts.clear()
+                    self._all_pos_rows = {}
+                    self._all_pos_ts = 0.0
+                self._open_orders_cache = {}
+                self._symbol_filters = {}
+                logger.warning(
+                    f"🔁 [rebind] Binance API 已切换 key={key[:4]}…{key[-4:]}"
+                )
+                return True
+            except Exception as e:
+                logger.error(f"[rebind] 失败: {e}")
+                return False
 
     def register_rate_limit_hook(self, cb):
         """限流回调：cb(symbol, err_text)。supervisor 用其暂停品种。"""

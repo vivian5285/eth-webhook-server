@@ -14,6 +14,21 @@
 
 ---
 
+## 2026-07-27 · Console 管理页（多 API 档案 + 热改仓位）（v16.5.0）
+
+### 能力
+- `http://IP:5003/console` 苹果毛玻璃 UI；口令 `CONSOLE_PASSWORD`
+- 多套币安 API 档案（命名 / 切换 / 更换密钥）；有仓默认禁止切换
+- 每档案独立 `risk_pct` + `leverage`，改完下一笔开仓即生效
+- Webhook secret、Brain 日志、近 30 日已实现盈亏与胜率
+
+### 复查点
+- [ ] `/health` version=`v16.5.0-console`，含 `console:"/console"`
+- [ ] 浏览器可打开 Console 并登录
+- [ ] 改风险%/杠杆后，新开仓日志出现 `set_leverage=Nx(档案)`
+
+---
+
 ## 2026-07-27 · GEMINI对照：TP限价预算硬帽 + 空仓自清暂停（v16.4.8）
 
 ### 对照结论（币安单系统 vs 双子星今日清单）

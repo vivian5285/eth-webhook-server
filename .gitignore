@@ -5,3 +5,5 @@ __pycache__/
 logs/
 binance_vps_state.json
 *.jsonl
+data/account_profiles.json
+data/account_profiles.json.tmp

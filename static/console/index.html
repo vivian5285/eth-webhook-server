@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>币安单系统 · Console</title>
+  <style>
+    :root {
+      --bg0: #f5f5f7;
+      --bg1: #e8e8ed;
+      --ink: #1d1d1f;
+      --ink2: #6e6e73;
+      --line: rgba(0,0,0,.08);
+      --blue: #0071e3;
+      --blue2: #0077ed;
+      --green: #30d158;
+      --red: #ff453a;
+      --glass: rgba(255,255,255,.62);
+      --glass2: rgba(255,255,255,.78);
+      --shadow: 0 18px 50px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+      --radius: 22px;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; font-family: var(--font); color: var(--ink); background: var(--bg0); }
+    body {
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #dfe7ff 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #ffe8f1 0%, transparent 50%),
+        radial-gradient(800px 500px at 50% 100%, #e7fff4 0%, transparent 45%),
+        linear-gradient(180deg, #fbfbfd 0%, #f0f0f5 100%);
+      background-attachment: fixed;
+    }
+    .noise {
+      pointer-events: none; position: fixed; inset: 0; opacity: .035; z-index: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    .wrap { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 28px 20px 80px; }
+    .nav {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 14px 18px; margin-bottom: 28px;
+      background: var(--glass); backdrop-filter: blur(28px) saturate(1.4);
+      -webkit-backdrop-filter: blur(28px) saturate(1.4);
+      border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow);
+    }
+    .brand { font-weight: 700; letter-spacing: -.02em; font-size: 17px; }
+    .brand span { color: var(--ink2); font-weight: 500; margin-left: 8px; font-size: 13px; }
+    .nav-actions { display: flex; gap: 8px; align-items: center; }
+    .btn {
+      appearance: none; border: 0; cursor: pointer; font: inherit;
+      border-radius: 980px; padding: 10px 16px; font-weight: 590; font-size: 14px;
+      transition: transform .15s ease, background .15s ease, opacity .15s;
+    }
+    .btn:active { transform: scale(.98); }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-primary:hover { background: var(--blue2); }
+    .btn-ghost { background: rgba(0,0,0,.05); color: var(--ink); }
+    .btn-danger { background: rgba(255,69,58,.12); color: #c9342a; }
+    .hero {
+      padding: 36px 8px 10px; text-align: left;
+    }
+    .hero h1 {
+      margin: 0 0 8px; font-size: clamp(34px, 5vw, 52px); letter-spacing: -.035em;
+      font-weight: 700; line-height: 1.05;
+    }
+    .hero p { margin: 0; color: var(--ink2); font-size: 17px; max-width: 42ch; line-height: 1.45; }
+    .grid {
+      display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 28px;
+    }
+    .card {
+      grid-column: span 4;
+      background: var(--glass2); backdrop-filter: blur(34px) saturate(1.5);
+      -webkit-backdrop-filter: blur(34px) saturate(1.5);
+      border: 1px solid rgba(255,255,255,.55);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+      padding: 22px 22px 18px; min-height: 140px;
+    }
+    .card.wide { grid-column: span 8; }
+    .card.full { grid-column: span 12; }
+    .card h3 {
+      margin: 0 0 14px; font-size: 13px; font-weight: 600; color: var(--ink2);
+      text-transform: none; letter-spacing: .01em;
+    }
+    .metric { font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+    .metric small { display: block; margin-top: 6px; font-size: 13px; font-weight: 500; color: var(--ink2); }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--ink2); font-weight: 510; font-size: 12px; }
+    .mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    label { display: block; font-size: 12px; color: var(--ink2); margin-bottom: 6px; font-weight: 510; }
+    input, select, textarea {
+      width: 100%; border: 1px solid var(--line); background: rgba(255,255,255,.75);
+      border-radius: 12px; padding: 11px 12px; font: inherit; color: var(--ink);
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    input:focus, textarea:focus {
+      border-color: rgba(0,113,227,.55);
+      box-shadow: 0 0 0 4px rgba(0,113,227,.12);
+    }
+    .field { flex: 1; min-width: 140px; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(0,0,0,.05);
+    }
+    .pill.on { background: rgba(48,209,88,.16); color: #0f7a32; }
+    .pill.off { background: rgba(0,0,0,.05); color: var(--ink2); }
+    .logbox {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px; line-height: 1.45; max-height: 360px; overflow: auto;
+      white-space: pre-wrap; word-break: break-all; color: #2c2c2e;
+      background: rgba(255,255,255,.45); border-radius: 14px; padding: 14px;
+      border: 1px solid var(--line);
+    }
+    .login-screen {
+      min-height: 100vh; display: grid; place-items: center; padding: 24px; position: relative; z-index: 1;
+    }
+    .login-card {
+      width: min(420px, 100%);
+      background: var(--glass2); backdrop-filter: blur(40px) saturate(1.6);
+      -webkit-backdrop-filter: blur(40px) saturate(1.6);
+      border: 1px solid rgba(255,255,255,.6); border-radius: 28px;
+      box-shadow: var(--shadow); padding: 36px 32px 28px; text-align: center;
+    }
+    .login-card h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.03em; }
+    .login-card p { margin: 0 0 24px; color: var(--ink2); font-size: 15px; }
+    .hidden { display: none !important; }
+    .toast {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+      background: rgba(29,29,31,.92); color: #fff; padding: 12px 18px; border-radius: 14px;
+      font-size: 14px; opacity: 0; pointer-events: none; transition: .25s ease; z-index: 50;
+      backdrop-filter: blur(16px);
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .profile {
+      display: flex; justify-content: space-between; gap: 12px; align-items: center;
+      padding: 14px 0; border-bottom: 1px solid var(--line);
+    }
+    .profile:last-child { border-bottom: 0; }
+    .profile .meta { color: var(--ink2); font-size: 13px; margin-top: 4px; }
+    @media (max-width: 900px) {
+      .card, .card.wide, .card.full { grid-column: span 12; }
+      .nav { border-radius: 22px; flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <div class="noise"></div>
+
+  <div id="loginView" class="login-screen">
+    <div class="login-card">
+      <h1>币安单系统</h1>
+      <p>管理员口令登录后可查看实盘、日志，并修改金额权重与 API 档案。</p>
+      <div class="field" style="text-align:left;margin-bottom:14px">
+        <label>口令</label>
+        <input id="loginPw" type="password" autocomplete="current-password" placeholder="CONSOLE_PASSWORD" />
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="doLogin()">进入 Console</button>
+      <p style="margin-top:16px;font-size:12px;color:var(--ink2)">访问：http://服务器IP:5003/console</p>
+    </div>
+  </div>
+
+  <div id="appView" class="wrap hidden">
+    <div class="nav">
+      <div class="brand">币安单系统 <span id="verLabel">Console</span></div>
+      <div class="nav-actions">
+        <button class="btn btn-ghost" onclick="refreshAll()">刷新</button>
+        <button class="btn btn-ghost" onclick="doLogout()">退出</button>
+      </div>
+    </div>
+
+    <section class="hero">
+      <h1>实盘一目了然。</h1>
+      <p>持仓、盈亏、日志与 API 档案。风险比例与杠杆按档案随时生效，无需改代码。</p>
+    </section>
+
+    <div class="grid">
+      <div class="card">
+        <h3>账户权益</h3>
+        <div class="metric mono" id="mEquity">—</div>
+      </div>
+      <div class="card">
+        <h3>30 日已实现盈亏</h3>
+        <div class="metric mono" id="mPnl">—</div>
+      </div>
+      <div class="card">
+        <h3>胜率</h3>
+        <div class="metric mono" id="mWin">—</div>
+      </div>
+
+      <div class="card wide">
+        <h3>当前生效仓位公式</h3>
+        <div class="metric" style="font-size:26px">
+          本金 × <span id="mRisk">20</span>% × <span id="mLev">5</span>x / 价格
+        </div>
+        <small style="display:block;margin-top:10px;color:var(--ink2)" id="mProfileName">档案：—</small>
+        <div class="row" style="margin-top:18px">
+          <div class="field">
+            <label>风险比例 %（如 20 = 本金 20%）</label>
+            <input id="editRisk" type="number" min="1" max="50" step="0.5" />
+          </div>
+          <div class="field">
+            <label>杠杆</label>
+            <input id="editLev" type="number" min="1" max="125" step="1" />
+          </div>
+          <button class="btn btn-primary" onclick="saveActiveSizing()">保存到当前档案</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Webhook</h3>
+        <div class="mono" style="font-size:13px;word-break:break-all;margin-bottom:12px" id="mWebhook">—</div>
+        <div class="field">
+          <label>更新 secret</label>
+          <input id="editSecret" type="password" placeholder="新 secret" />
+        </div>
+        <button class="btn btn-ghost" style="margin-top:10px" onclick="saveSecret()">保存 secret</button>
+      </div>
+
+      <div class="card full">
+        <h3>持仓与防线</h3>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>品种</th><th>方向</th><th>数量</th><th>入场</th><th>雷达</th><th>暂停</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="posBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card full">
+        <h3>API 档案（多套切换）</h3>
+        <div id="profileList"></div>
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
+          <div style="font-weight:600;margin-bottom:12px">新增档案</div>
+          <div class="row">
+            <div class="field"><label>名称</label><input id="npName" placeholder="主账户 / 小仓演练" /></div>
+            <div class="field"><label>风险 %</label><input id="npRisk" type="number" value="20" /></div>
+            <div class="field"><label>杠杆</label><input id="npLev" type="number" value="5" /></div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div class="field"><label>API Key</label><input id="npKey" autocomplete="off" /></div>
+            <div class="field"><label>API Secret</label><input id="npSecret" type="password" autocomplete="off" /></div>
+          </div>
+          <button class="btn btn-primary" style="margin-top:12px" onclick="createProfile()">添加档案</button>
+        </div>
+      </div>
+
+      <div class="card wide">
+        <h3>近期已实现盈亏</h3>
+        <div style="overflow:auto;max-height:320px">
+          <table>
+            <thead><tr><th>时间</th><th>品种</th><th>PnL</th></tr></thead>
+            <tbody id="pnlBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>日志过滤</h3>
+        <div class="field">
+          <label>关键词</label>
+          <input id="logQ" placeholder="HARD_SL / 雷达 / ETHUSDT" />
+        </div>
+        <button class="btn btn-ghost" style="margin-top:10px;width:100%" onclick="loadLogs()">拉取日志</button>
+      </div>
+
+      <div class="card full">
+        <h3>Brain 日志</h3>
+        <div class="logbox" id="logBox">登录后自动加载…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let overview = null;
+    let activeId = "";
+
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 2400);
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+        ...opts,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        showLogin();
+        throw new Error("login_required");
+      }
+      if (!res.ok) throw new Error(data.message || ("HTTP " + res.status));
+      return data;
+    }
+
+    function showLogin() {
+      document.getElementById("loginView").classList.remove("hidden");
+      document.getElementById("appView").classList.add("hidden");
+    }
+    function showApp() {
+      document.getElementById("loginView").classList.add("hidden");
+      document.getElementById("appView").classList.remove("hidden");
+    }
+
+    async function doLogin() {
+      try {
+        await api("/api/console/login", {
+          method: "POST",
+          body: JSON.stringify({ password: document.getElementById("loginPw").value }),
+        });
+        showApp();
+        await refreshAll();
+        toast("已登录");
+      } catch (e) {
+        toast("口令错误");
+      }
+    }
+
+    async function doLogout() {
+      await api("/api/console/logout", { method: "POST", body: "{}" });
+      showLogin();
+    }
+
+    function fmtTs(ms) {
+      if (!ms) return "—";
+      const d = new Date(ms);
+      return d.toLocaleString();
+    }
+
+    function renderOverview(d) {
+      overview = d;
+      activeId = (d.profiles && d.profiles.active_id) || "";
+      document.getElementById("verLabel").textContent = d.version || "Console";
+      const eq = d.equity;
+      document.getElementById("mEquity").innerHTML =
+        (eq == null ? "—" : eq.toFixed(2) + " <small>USDT</small>");
+      const st = d.stats || {};
+      const pnl = Number(st.total_pnl || 0);
+      const pnlEl = document.getElementById("mPnl");
+      pnlEl.className = "metric mono " + (pnl >= 0 ? "pos" : "neg");
+      pnlEl.innerHTML = (st.ok === false ? "—" : pnl.toFixed(2)) +
+        " <small>" + (st.trades || 0) + " 笔 · 近 30 日</small>";
+      document.getElementById("mWin").innerHTML =
+        (st.win_rate != null ? st.win_rate.toFixed(1) + "%" : "—") +
+        " <small>" + (st.wins || 0) + "W / " + (st.losses || 0) + "L</small>";
+      const riskPct = Number(d.risk_pct || 0.2) * 100;
+      const lev = Number(d.leverage || 5);
+      document.getElementById("mRisk").textContent = riskPct.toFixed(riskPct % 1 ? 1 : 0);
+      document.getElementById("mLev").textContent = String(lev);
+      document.getElementById("editRisk").value = riskPct;
+      document.getElementById("editLev").value = lev;
+      document.getElementById("mWebhook").textContent = d.webhook_url || "—";
+      const active = ((d.profiles && d.profiles.profiles) || []).find(p => p.active);
+      document.getElementById("mProfileName").textContent =
+        "档案：" + (active ? active.name : "未选择") +
+        (active ? " · " + active.api_key_masked : "");
+
+      const tbody = document.getElementById("posBody");
+      tbody.innerHTML = "";
+      (d.positions || []).forEach(p => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><b>${p.symbol}</b></td>
+          <td>${p.side || "—"}</td>
+          <td class="mono">${Number(p.qty || 0)}</td>
+          <td class="mono">${Number(p.entry || 0).toFixed(2)}</td>
+          <td><span class="pill ${p.radar_activated ? "on" : "off"}">${p.radar_activated ? "已激活" : "休眠"}</span></td>
+          <td>${p.paused ? ("暂停·" + (p.pause_reason || "").slice(0, 28)) : "正常"}</td>
+          <td>${p.paused ? `<button class="btn btn-ghost" onclick="resumeSym('${p.symbol}')">恢复</button>` : ""}</td>`;
+        tbody.appendChild(tr);
+      });
+
+      const plist = document.getElementById("profileList");
+      plist.innerHTML = "";
+      ((d.profiles && d.profiles.profiles) || []).forEach(p => {
+        const div = document.createElement("div");
+        div.className = "profile";
+        div.innerHTML = `
+          <div>
+            <div><b>${p.name}</b> ${p.active ? '<span class="pill on">生效中</span>' : ""}</div>
+            <div class="meta mono">${p.api_key_masked} · 风险 ${(p.risk_pct * 100).toFixed(1)}% · ${p.leverage}x</div>
+          </div>
+          <div class="row" style="justify-content:flex-end">
+            ${p.active ? "" : `<button class="btn btn-primary" onclick="activateProfile('${p.id}')">启用</button>`}
+            <button class="btn btn-danger" onclick="deleteProfile('${p.id}')">删除</button>
+          </div>`;
+        plist.appendChild(div);
+      });
+
+      const pb = document.getElementById("pnlBody");
+      pb.innerHTML = "";
+      (st.recent || []).slice(0, 20).forEach(r => {
+        const tr = document.createElement("tr");
+        const cls = r.pnl >= 0 ? "pos" : "neg";
+        tr.innerHTML = `<td>${fmtTs(r.time)}</td><td>${r.symbol || "—"}</td>
+          <td class="mono ${cls}">${Number(r.pnl).toFixed(4)}</td>`;
+        pb.appendChild(tr);
+      });
+    }
+
+    async function refreshAll() {
+      const d = await api("/api/console/overview");
+      renderOverview(d);
+      await loadLogs();
+    }
+
+    async function loadLogs() {
+      const q = document.getElementById("logQ").value || "";
+      const d = await api("/api/console/logs?n=150&q=" + encodeURIComponent(q));
+      document.getElementById("logBox").textContent = (d.lines || []).join("\n") || "(无日志)";
+    }
+
+    async function saveActiveSizing() {
+      if (!activeId) return toast("没有生效档案");
+      const risk = Number(document.getElementById("editRisk").value) / 100;
+      const lev = Number(document.getElementById("editLev").value);
+      await api("/api/console/profiles/" + activeId, {
+        method: "PATCH",
+        body: JSON.stringify({ risk_pct: risk, leverage: lev }),
+      });
+      toast("仓位参数已生效");
+      await refreshAll();
+    }
+
+    async function saveSecret() {
+      const secret = document.getElementById("editSecret").value;
+      await api("/api/console/webhook_secret", {
+        method: "POST",
+        body: JSON.stringify({ secret }),
+      });
+      document.getElementById("editSecret").value = "";
+      toast("Webhook secret 已更新");
+    }
+
+    async function createProfile() {
+      await api("/api/console/profiles", {
+        method: "POST",
+        body: JSON.stringify({
+          name: document.getElementById("npName").value,
+          api_key: document.getElementById("npKey").value,
+          api_secret: document.getElementById("npSecret").value,
+          risk_pct: Number(document.getElementById("npRisk").value) / 100,
+          leverage: Number(document.getElementById("npLev").value),
+        }),
+      });
+      ["npName", "npKey", "npSecret"].forEach(id => document.getElementById(id).value = "");
+      toast("档案已添加");
+      await refreshAll();
+    }
+
+    async function activateProfile(id) {
+      try {
+        await api("/api/console/profiles/" + id + "/activate", {
+          method: "POST", body: JSON.stringify({}),
+        });
+        toast("已切换生效档案");
+        await refreshAll();
+      } catch (e) {
+        if (String(e.message).includes("position_open")) {
+          if (confirm("当前有持仓。强制切换可能串账户，仍继续？")) {
+            await api("/api/console/profiles/" + id + "/activate", {
+              method: "POST", body: JSON.stringify({ force: true }),
+            });
+            toast("已强制切换");
+            await refreshAll();
+          }
+        } else toast(e.message);
+      }
+    }
+
+    async function deleteProfile(id) {
+      if (!confirm("确认删除该档案？")) return;
+      await api("/api/console/profiles/" + id, { method: "DELETE" });
+      toast("已删除");
+      await refreshAll();
+    }
+
+    async function resumeSym(sym) {
+      await api("/api/console/resume/" + encodeURIComponent(sym), {
+        method: "POST", body: "{}",
+      });
+      toast("已恢复 " + sym);
+      await refreshAll();
+    }
+
+    document.getElementById("loginPw").addEventListener("keydown", e => {
+      if (e.key === "Enter") doLogin();
+    });
+
+    (async () => {
+      try {
+        const me = await api("/api/console/me");
+        if (me.authenticated) {
+          showApp();
+          await refreshAll();
+        } else showLogin();
+      } catch {
+        showLogin();
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -16,11 +16,19 @@ from webhook_parser import (
     TV_STRATEGY_VERSION,
 )
 from symbol_config import active_binance_symbols, resolve_binance_symbol
+from console_api import init_console
+from account_profiles import bootstrap_from_env, get_webhook_secret, get_active_sizing
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Binance: %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+init_console(app)
+# gunicorn / systemd 入口也会加载本模块：启动时灌入档案并绑 API
+try:
+    bootstrap_from_env()
+except Exception as _e:
+    logger.warning(f"account_profiles bootstrap: {_e}")
 
 
 @app.route('/webhook', methods=['POST'])
@@ -39,13 +47,11 @@ def webhook(ticker=None):
 
     if not data:
         return jsonify({"status": "error", "message": "Empty payload"}), 400
-    # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值须 = WEBHOOK_SECRET
-    # TODO(remove-token): 当全部 TradingView 警报已改为 secret 字段、且确认无旧 bot
-    # 仍投递 token 后，删除 data.get("token") 分支（预计：生产稳定 2 周且无 403 兼容命中日志）。
+    # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值来自 Console/档案或 .env
     auth = str(
         data.get("secret") or data.get("token") or ""
     ).strip()
-    expected = str(os.getenv("WEBHOOK_SECRET", "528586")).strip()
+    expected = str(get_webhook_secret() or os.getenv("WEBHOOK_SECRET", "528586")).strip()
     if auth != expected:
         return jsonify({"status": "error", "message": "Invalid secret"}), 403
     if not data.get("_parse_ok"):
@@ -294,15 +300,20 @@ def health():
         notify = dingtalk.notify_config_status()
     except Exception:
         notify = {"telegram_configured": False, "dingtalk_configured": False}
+    try:
+        risk, lev = get_active_sizing()
+    except Exception:
+        risk, lev = 0.20, 5.0
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
         "version": BINANCE_VPS_VERSION,
         "tv_strategy": TV_STRATEGY_VERSION,
-        "sizing": SIZING_MODE,  # RISK20_NOTIONAL5
-        "leverage": "fixed_5",
-        "risk_pct": 0.20,
-        "notional_mult": 5,
+        "sizing": SIZING_MODE,  # RISK20_NOTIONAL5 公式骨架；数值来自生效档案
+        "leverage": float(lev),
+        "risk_pct": float(risk),
+        "notional_mult": float(lev),
+        "console": "/console",
         "radar": "breath_dual_eth_xau",
         "notify": notify,
         "symbols": list(SUPERVISORS.keys()) or active_binance_symbols(),
@@ -327,5 +338,7 @@ def health():
 
 
 if __name__ == '__main__':
+    bootstrap_from_env()
     bootstrap_supervisors()
-    app.run(host='127.0.0.1', port=5003, debug=False, threaded=True)
+    # 对外 IP:端口访问 Console（仍建议仅自己用；设 CONSOLE_PASSWORD）
+    app.run(host='0.0.0.0', port=5003, debug=False, threaded=True)

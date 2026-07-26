@@ -18,6 +18,26 @@ FIXED_LEVERAGE = 5
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
+
+
+def get_runtime_risk_pct():
+    """Console 生效档案风险比例；失败回退常量。"""
+    try:
+        from account_profiles import get_active_sizing
+        risk, _ = get_active_sizing()
+        return float(risk)
+    except Exception:
+        return float(FIXED_RISK_PCT)
+
+
+def get_runtime_leverage():
+    """Console 生效档案杠杆；失败回退常量。"""
+    try:
+        from account_profiles import get_active_sizing
+        _, lev = get_active_sizing()
+        return float(lev)
+    except Exception:
+        return float(FIXED_LEVERAGE)
 ABSURD_TV_QTY_VS_CAPS = 50.0
 # 铁律：名义上限 = 合约本金 × 20% × 5 = 本金 × 1（≈余额1倍）。
 # 保证金不足由 supervisor 用 available×20%×5×0.92 再裁。
@@ -365,8 +385,12 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
     principal = float(principal or 0)
     price = float(price or 0)
     tv_px = float(tv_price if tv_price is not None else price or 0)
-    risk_pct = float(margin_pct if margin_pct is not None else FIXED_RISK_PCT)
-    notional_mult = float(leverage if leverage is not None else FIXED_NOTIONAL_MULT)
+    risk_pct = float(
+        margin_pct if margin_pct is not None else get_runtime_risk_pct()
+    )
+    notional_mult = float(
+        leverage if leverage is not None else get_runtime_leverage()
+    )
     min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
     max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
     vps_stop = float(stop_loss or 0)

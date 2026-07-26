@@ -172,7 +172,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.4.8-tp-budget-cap"
+BINANCE_VPS_VERSION = "v16.5.0-console"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -4541,6 +4541,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         f"← degrade ATR={float(atr or 0):.4f} (同类告警120s内去重)"
                     )
 
+        try:
+            from account_profiles import get_active_sizing
+            _rp, _lv = get_active_sizing()
+        except Exception:
+            _rp, _lv = FIXED_RISK_PCT, FIXED_LEVERAGE
         qty, meta = compute_fixed_order_qty(
             principal=principal,
             price=px,
@@ -4550,6 +4555,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
             tv_price=float(getattr(self, "tv_price", 0) or px),
             qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
             min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
+            margin_pct=float(_rp),
+            leverage=float(_lv),
         )
         meta["principal"] = principal
         meta["symbol"] = self.symbol
@@ -13171,15 +13178,20 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 self.trading_paused = False
                 self.trading_pause_reason = ""
 
-            lev = int(FIXED_LEVERAGE)
-            self.leverage = float(FIXED_LEVERAGE)
-            self.tv_sizing_leverage = float(FIXED_LEVERAGE)
+            try:
+                from account_profiles import get_active_sizing
+                _risk, _lev = get_active_sizing()
+                lev = int(float(_lev or FIXED_LEVERAGE))
+            except Exception:
+                lev = int(FIXED_LEVERAGE)
+            self.leverage = float(lev)
+            self.tv_sizing_leverage = float(lev)
             binance_client.set_leverage(self.symbol, leverage=lev)
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
             logger.info(
                 f"📐 仓位预算 [{self.symbol}]: {budget_txt} "
-                f"| set_leverage={lev}x(固定) | 名义 ~{notional:.0f}U"
+                f"| set_leverage={lev}x(档案) | 名义 ~{notional:.0f}U"
             )
 
             cap_ok, _cap_meta = self._assert_notional_cap_or_reject(
