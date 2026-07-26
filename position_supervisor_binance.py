@@ -3518,7 +3518,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
 
     def _defense_buffer_mult(self):
-        """硬止损呼吸垫：按持久化 adx_tier（缺省中趋势 1.2）。"""
+        """硬止损呼吸垫：统一 1.15（规格 3.4），与 adx_tier 无关；tier 仅保留兼容入参。"""
         tier = getattr(self, "adx_tier", None)
         if tier is None:
             adx = float(getattr(self, "last_adx", 0) or 0)
@@ -3529,7 +3529,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return float(defense_buffer_mult(self.symbol, tier=int(tier)))
 
     def _bind_adx_tier_on_open(self, adx=None):
-        """开仓时锁定 ADX 档位（影响硬止损 buffer + 雷达系数）。"""
+        """开仓时锁定 ADX 档位（仅雷达步进/呼吸；硬止损 buffer 恒 1.15）。规格 3.7：TV.tier 可选，缺省 ADX 反推。"""
         if adx is None:
             adx = float(getattr(self, "last_adx", 0) or 0)
             if adx <= 0:

@@ -90,7 +90,7 @@ class TestMutexSourcePresent(unittest.TestCase):
         self.assertIn("def _mutex_on_tp3_filled", src)
         self.assertIn("def _mutex_on_radar_filled", src)
         self.assertIn("def _force_reconcile_position_vs_local", src)
-        self.assertIn("v16.2.1-api-monitor", src)
+        self.assertIn("v16.3.0-slice-reentry", src)
         self.assertIn("def _pause_symbol_trading", src)
 
 
