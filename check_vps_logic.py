@@ -975,6 +975,13 @@ def audit_module8_dingtalk(a: Audit):
         and "report_position_qty_reconcile" in dt,
     )
     a.check(
+        "双通道 TG+钉钉路由",
+        "def send_telegram" in dt
+        and "NOTIFY_LEVEL_CRITICAL" in dt
+        and "reload_notify_config" in dt
+        and "TELEGRAM_BOT_TOKEN" in dt,
+    )
+    a.check(
         "钉钉开仓字段",
         "账户权益" in dt and "初始止损" in dt,
     )

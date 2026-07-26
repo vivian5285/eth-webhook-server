@@ -244,10 +244,56 @@ def admin_smoke_arm_radar(symbol):
     }), 200 if ok else 500
 
 
+@app.route('/admin/reload_notify', methods=['POST'])
+def admin_reload_notify():
+    """热加载 Telegram/钉钉环境变量，无需重启交易服务。"""
+    try:
+        import dingtalk
+        status = dingtalk.reload_notify_config()
+        return jsonify({"status": "ok", "notify": status}), 200
+    except Exception as e:
+        logger.error(f"[admin/reload_notify] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/admin/notify_test', methods=['POST'])
+def admin_notify_test():
+    """
+    验收双通道：
+      {"level": 1} → 仅 TG
+      {"level": 2} → TG + 钉钉
+    """
+    try:
+        import dingtalk
+        body = request.get_json(silent=True) or {}
+        lvl = int(body.get("level") or 1)
+        title = str(body.get("title") or f"双通道自检 L{lvl}")
+        detail = str(body.get("detail") or "notify_test from /admin/notify_test")
+        dingtalk.send_alert(
+            title,
+            {"📝 说明": detail, "🧪 level": str(lvl)},
+            immediate=True,
+            level=lvl,
+        )
+        return jsonify({
+            "status": "ok",
+            "level": lvl,
+            "notify": dingtalk.notify_config_status(),
+        }), 200
+    except Exception as e:
+        logger.error(f"[admin/notify_test] {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     from webhook_parser import SIZING_MODE
     from binance_client import binance_client as _bc
+    try:
+        import dingtalk
+        notify = dingtalk.notify_config_status()
+    except Exception:
+        notify = {"telegram_configured": False, "dingtalk_configured": False}
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
@@ -258,6 +304,7 @@ def health():
         "risk_pct": 0.20,
         "notional_mult": 5,
         "radar": "breath_dual_eth_xau",
+        "notify": notify,
         "symbols": list(SUPERVISORS.keys()) or active_binance_symbols(),
         "monitoring": {
             s: bool(getattr(sup, "monitoring", False))

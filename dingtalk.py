@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""币安专用钉钉 — 全金色主题，与深币紫金播报区分"""
+"""币安通知：Telegram(全量) + 钉钉(仅重要告警)。金色主题与深币紫金区分。"""
 import os
+import re
 import time
 import hmac
 import hashlib
 import base64
+import html
 import urllib.parse
 import logging
 import contextvars
@@ -41,12 +43,22 @@ from webhook_parser import (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, '.env'))
+_ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(_ENV_PATH)
 logger = logging.getLogger(__name__)
+
+# Level 1：TG 全量；Level 2：TG + 钉钉重要告警
+NOTIFY_LEVEL_ALL = 1
+NOTIFY_LEVEL_CRITICAL = 2
 
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 WECHAT_WEBHOOK = os.getenv("WECHAT_WEBHOOK", "").strip()  # 钉钉失败备用（企业微信群机器人）
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip() or "HTML"
+TELEGRAM_RETRY_MAX = max(1, int(os.getenv("TELEGRAM_RETRY_MAX", "3")))
+TELEGRAM_RETRY_SEC = float(os.getenv("TELEGRAM_RETRY_SEC", "3"))
 DINGTALK_BATCH_MAX = max(1, int(os.getenv("DINGTALK_BATCH_MAX", "8")))
 DINGTALK_BATCH_FLUSH_SEC = float(os.getenv("DINGTALK_BATCH_FLUSH_SEC", "6"))
 DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lower() in (
@@ -58,6 +70,64 @@ DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
 DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
 _title_dedup_lock = threading.Lock()
 _title_dedup_ts = {}  # key -> last_send_ts
+_notify_cfg_lock = threading.Lock()
+
+# report_system_alert 里属于常规流水（仅 TG）的标题片段
+_SYSTEM_ALERT_L1_MARKERS = (
+    "智能再入场限价已挂",
+    "智能再入已成交",
+    "再入放弃",
+    "重入尝试",
+    "重入成功",
+    "重入放弃",
+    "心跳",
+)
+
+
+def reload_notify_config():
+    """热加载 .env 通知配置（无需重启交易主流程）。"""
+    global DINGTALK_WEBHOOK, DINGTALK_SECRET, WECHAT_WEBHOOK
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_PARSE_MODE
+    global TELEGRAM_RETRY_MAX, TELEGRAM_RETRY_SEC
+    global DINGTALK_BATCH_MAX, DINGTALK_BATCH_FLUSH_SEC, DINGTALK_BATCH_DISABLE
+    global DINGTALK_TITLE_DEDUP_SEC, DINGTALK_ALERT_DEDUP_SEC
+    with _notify_cfg_lock:
+        load_dotenv(_ENV_PATH, override=True)
+        DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
+        DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
+        WECHAT_WEBHOOK = os.getenv("WECHAT_WEBHOOK", "").strip()
+        TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        TELEGRAM_PARSE_MODE = os.getenv("TELEGRAM_PARSE_MODE", "HTML").strip() or "HTML"
+        TELEGRAM_RETRY_MAX = max(1, int(os.getenv("TELEGRAM_RETRY_MAX", "3")))
+        TELEGRAM_RETRY_SEC = float(os.getenv("TELEGRAM_RETRY_SEC", "3"))
+        DINGTALK_BATCH_MAX = max(1, int(os.getenv("DINGTALK_BATCH_MAX", "8")))
+        DINGTALK_BATCH_FLUSH_SEC = float(os.getenv("DINGTALK_BATCH_FLUSH_SEC", "6"))
+        DINGTALK_BATCH_DISABLE = str(
+            os.getenv("DINGTALK_BATCH_DISABLE", "")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
+        DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
+    status = notify_config_status()
+    logger.info(
+        "notify config reloaded | tg=%s ding=%s",
+        status.get("telegram_configured"),
+        status.get("dingtalk_configured"),
+    )
+    return status
+
+
+def notify_config_status():
+    tok = bool(TELEGRAM_BOT_TOKEN)
+    chat = bool(TELEGRAM_CHAT_ID)
+    return {
+        "telegram_configured": bool(tok and chat),
+        "telegram_chat_id": TELEGRAM_CHAT_ID if chat else "",
+        "dingtalk_configured": bool(DINGTALK_WEBHOOK or WECHAT_WEBHOOK),
+        "wechat_backup": bool(WECHAT_WEBHOOK),
+        "tg_retry_max": TELEGRAM_RETRY_MAX,
+        "tg_retry_sec": TELEGRAM_RETRY_SEC,
+    }
 
 EXCHANGE_LABEL = "币安 Binance"
 LEVERAGE_LABEL = "TVx"  # 实盘杠杆以 TV 为准，禁止写死 25x
@@ -279,24 +349,42 @@ def _post_dingtalk_once(title, markdown_text):
 
 
 def _post_with_retry(title, markdown_text, max_attempts=3):
-    """指数退避 1s/2s/4s；三次失败后改用企业微信。"""
+    """指数退避 1s/2s/4s；三次失败后改用企业微信。失败不影响 TG。"""
     delays = (1.0, 2.0, 4.0)
     last_err = ""
     for i in range(max_attempts):
         ok, info = _post_dingtalk_once(title, markdown_text)
         if ok:
             _batcher.mark_success()
+            logger.info(
+                "notify ok channel=dingtalk title=%s result=%s",
+                str(title)[:72], info,
+            )
             return True
         last_err = info
-        logger.error(f"钉钉发送失败({i + 1}/{max_attempts}): {info}")
+        logger.error(
+            "notify fail channel=dingtalk attempt=%s/%s title=%s err=%s",
+            i + 1, max_attempts, str(title)[:72], info,
+        )
         if i < max_attempts - 1:
             time.sleep(delays[i])
     _batcher.mark_fail()
     if WECHAT_WEBHOOK:
         logger.warning(f"钉钉 {max_attempts} 次失败 → 企业微信备用 | 末次: {last_err}")
         if _post_wechat_markdown(title, markdown_text):
+            logger.info("notify ok channel=wechat title=%s", str(title)[:72])
             return True
     return False
+
+
+_FONT_TAG_RE = re.compile(r"</?font[^>]*>", re.I)
+
+
+def _strip_rich(text):
+    """去掉钉钉 font/粗体标记，供 TG 纯文本使用。"""
+    s = _FONT_TAG_RE.sub("", str(text or ""))
+    s = s.replace("**", "")
+    return s.strip()
 
 
 def _build_alert_markdown(title, data_dict, header_color=G_TITLE):
@@ -314,6 +402,120 @@ def _build_alert_markdown(title, data_dict, header_color=G_TITLE):
 ---
 {FOOTER}
 """
+
+
+def _build_tg_text(title, data_dict):
+    """Telegram HTML 正文（与钉钉字段同源，去色）。"""
+    now_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"<b>{html.escape(_strip_rich(title))}</b>",
+        f"⏰ {html.escape(now_time)} · {html.escape(EXCHANGE_LABEL)}",
+        "",
+    ]
+    for k, v in (data_dict or {}).items():
+        lines.append(
+            f"<b>{html.escape(_strip_rich(k))}</b>: {html.escape(_strip_rich(v))}"
+        )
+    text = "\n".join(lines)
+    if len(text) > 3900:
+        text = text[:3900] + "\n…(截断)"
+    return text
+
+
+def send_telegram(message, parse_mode=None):
+    """
+    发送 Telegram 消息。失败重试 TELEGRAM_RETRY_MAX 次、间隔 TELEGRAM_RETRY_SEC。
+    绝不抛到调用方；返回 True/False。
+    """
+    token = (TELEGRAM_BOT_TOKEN or "").strip()
+    chat_id = (TELEGRAM_CHAT_ID or "").strip()
+    if not token or not chat_id:
+        logger.warning(
+            "notify skip channel=telegram reason=not_configured msg=%s",
+            str(message)[:72],
+        )
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    mode = parse_mode if parse_mode is not None else TELEGRAM_PARSE_MODE
+    payload = {"chat_id": chat_id, "text": str(message or "")}
+    if mode:
+        payload["parse_mode"] = mode
+        payload["disable_web_page_preview"] = True
+    last_err = ""
+    attempts = max(1, int(TELEGRAM_RETRY_MAX or 3))
+    delay = float(TELEGRAM_RETRY_SEC or 3)
+    for i in range(attempts):
+        try:
+            r = requests.post(url, json=payload, timeout=8)
+            body = {}
+            try:
+                body = r.json() if r.text else {}
+            except Exception:
+                body = {}
+            if r.status_code == 200 and body.get("ok"):
+                logger.info(
+                    "notify ok channel=telegram chat=%s attempt=%s/%s preview=%s",
+                    chat_id, i + 1, attempts, str(message)[:72],
+                )
+                return True
+            last_err = f"HTTP {r.status_code} {str(body)[:160]}"
+        except Exception as e:
+            last_err = str(e)
+        logger.error(
+            "notify fail channel=telegram attempt=%s/%s err=%s preview=%s",
+            i + 1, attempts, last_err, str(message)[:72],
+        )
+        if i < attempts - 1:
+            time.sleep(delay)
+    return False
+
+
+def send_tg(message, parse_mode=None):
+    """send_telegram 别名。"""
+    return send_telegram(message, parse_mode=parse_mode)
+
+
+def _fire_telegram_async(text):
+    """后台线程发 TG，不阻塞交易主路径。"""
+    def _run():
+        try:
+            send_telegram(text)
+        except Exception as e:
+            logger.error("notify tg async exception: %s", e, exc_info=True)
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="tg-notify").start()
+    except Exception as e:
+        logger.error("notify tg thread spawn failed: %s", e)
+
+
+def send_notification(message=None, level=NOTIFY_LEVEL_ALL, *, title="", data_dict=None,
+                      header_color=None, immediate=False):
+    """
+    统一路由：
+      level=1 → 仅 TG
+      level=2 → TG + 钉钉（重要告警）
+    message 为纯文本时优先作 TG 正文；否则用 title+data_dict 构图。
+    """
+    try:
+        lvl = int(level or NOTIFY_LEVEL_ALL)
+    except (TypeError, ValueError):
+        lvl = NOTIFY_LEVEL_ALL
+    ttl = title or (str(message)[:48] if message else "通知")
+    if message is not None and data_dict is None:
+        send_alert(
+            ttl,
+            {"内容": str(message)},
+            header_color or G_TITLE,
+            immediate=immediate,
+            level=lvl,
+            _tg_text=str(message),
+        )
+        return
+    send_alert(
+        ttl, data_dict or {}, header_color or G_TITLE,
+        immediate=immediate, level=lvl,
+    )
 
 
 class _DingTalkBatcher:
@@ -437,21 +639,32 @@ def _title_dedup_window(title):
     return float(DINGTALK_TITLE_DEDUP_SEC)
 
 
-def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
-    """Unified DingTalk entry. immediate=True: send now (skip 6s batch)."""
-    if not DINGTALK_WEBHOOK and not WECHAT_WEBHOOK:
-        logger.warning(
-            "DINGTALK_WEBHOOK empty -> skip alert: %s",
-            str(title)[:72],
-        )
-        return
-    sym = str(_ctx_symbol.get() or "").upper()
+def send_alert(title, data_dict, header_color=G_TITLE, immediate=False,
+               level=NOTIFY_LEVEL_ALL, _tg_text=None):
+    """
+    统一通知入口。
+      level=1（默认）→ 仅 Telegram（全量事件）
+      level=2 → Telegram + 钉钉（重要告警；钉钉可攒批）
+    immediate=True: 钉钉立即发送（跳过 6s 攒批）。TG 始终异步不阻塞。
+    """
+    try:
+        lvl = int(level or NOTIFY_LEVEL_ALL)
+    except (TypeError, ValueError):
+        lvl = NOTIFY_LEVEL_ALL
     raw_title = str(title or "")
-    dedup_key = f"{sym}|{raw_title[:96]}"
+    tg_body = _tg_text if _tg_text is not None else _build_tg_text(title, data_dict)
+    has_tg = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    has_ding = bool(DINGTALK_WEBHOOK or WECHAT_WEBHOOK)
+    if not has_tg and not has_ding:
+        logger.warning("notify skip all channels empty title=%s", raw_title[:72])
+        return
+
+    sym = str(_ctx_symbol.get() or "").upper()
+    dedup_key = f"{sym}|L{lvl}|{raw_title[:96]}"
     if not sym:
         for token in ("ETHUSDT", "XAUUSDT", "ETH", "XAU"):
             if token in raw_title.upper():
-                dedup_key = f"{token}|{raw_title[:96]}"
+                dedup_key = f"{token}|L{lvl}|{raw_title[:96]}"
                 break
     now = time.time()
     window = 15.0 if immediate else _title_dedup_window(raw_title)
@@ -465,12 +678,32 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
         last = float(_title_dedup_ts.get(dedup_key) or 0)
         if last > 0 and now - last < window:
             logger.info(
-                "DingTalk title dedup(%.0fs): %s",
-                window,
-                raw_title[:72],
+                "notify title dedup(%.0fs) level=%s: %s",
+                window, lvl, raw_title[:72],
             )
             return
         _title_dedup_ts[dedup_key] = now
+
+    # TG：全量（L1/L2），异步发送，失败不影响主流程与钉钉
+    if has_tg:
+        _fire_telegram_async(tg_body)
+    else:
+        logger.warning("notify tg not configured; drop TG for: %s", raw_title[:72])
+
+    # 钉钉：仅重要告警
+    if lvl < NOTIFY_LEVEL_CRITICAL:
+        logger.info(
+            "notify route level=1 tg_only title=%s",
+            raw_title[:72],
+        )
+        return
+    if not has_ding:
+        logger.warning(
+            "notify level=2 but dingtalk empty; TG-only title=%s",
+            raw_title[:72],
+        )
+        return
+    logger.info("notify route level=2 tg+dingtalk title=%s", raw_title[:72])
     if immediate or DINGTALK_BATCH_DISABLE:
         md = _build_alert_markdown(title, data_dict, header_color)
         ok = _post_with_retry(str(title), md)
@@ -478,6 +711,8 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False):
             logger.error("DingTalk immediate send failed: %s", raw_title[:72])
         return
     _batcher.enqueue(title, data_dict, header_color)
+
+
 def get_regime_name(regime_code):
     """
     旧「评分档位/中势推升」文案已废除。
@@ -733,7 +968,8 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
         data["🕸️ TP123 审计"] = _g(_format_tp_audit(tp_audit), G_ACCENT)
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(title, data, G_ACCENT)
+    # 阵地异动/未登记接管 → 重要告警
+    send_alert(title, data, G_ACCENT, level=NOTIFY_LEVEL_CRITICAL)
 
 
 def report_force_align(real_side, expected_side, verify_note="", verified=True):
@@ -754,7 +990,10 @@ def report_force_align(real_side, expected_side, verify_note="", verified=True):
         data,
         G_TITLE,
         immediate=True,
+        level=NOTIFY_LEVEL_CRITICAL,
     )
+
+
 def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=False,
                             tv_pnl_pct=None, tv_side="", tv_price=None, close_action="",
                             tv_regime=None, tv_atr=None, tv_field_sources=None,
@@ -823,7 +1062,19 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
         data["📡 TV字段"] = _g(format_tv_field_sources(tv_field_sources), G_MUTED)
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(theme["title"], data, theme["header"])
+    # 硬止损触发 → L2(钉钉+TG)；其余平仓/雷达止损/TP → 仅 TG
+    src = str(exit_source or "").strip().lower()
+    is_hard = (
+        ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD)
+        or src in ("vps_hard_sl", "hard_sl", "tv_hard_sl")
+        or "硬止损" in str(theme.get("title") or "")
+        or "HARD_SL" in str(reason or "").upper()
+    )
+    send_alert(
+        theme["title"], data, theme["header"],
+        level=NOTIFY_LEVEL_CRITICAL if is_hard else NOTIFY_LEVEL_ALL,
+        immediate=bool(is_hard),
+    )
 
 
 def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels,
@@ -851,7 +1102,10 @@ def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("🎯 重启 · 部分止盈修复", data, G_TITLE)
+    send_alert(
+        "🎯 重启 · 部分止盈修复", data, G_TITLE,
+        level=NOTIFY_LEVEL_CRITICAL, immediate=True,
+    )
 
 
 def report_tv_reconcile(symbol=None, action="", leg="", reason="", tv_qty=0,
@@ -872,7 +1126,10 @@ def report_tv_reconcile(symbol=None, action="", leg="", reason="", tv_qty=0,
             G_ACCENT,
         ),
     }
-    send_alert(f"📋 [{sym}] TV对账 · {action}", data, G_TITLE)
+    send_alert(
+        f"📋 [{sym}] TV对账 · {action}", data, G_TITLE,
+        level=NOTIFY_LEVEL_CRITICAL,
+    )
 
 
 def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
@@ -958,7 +1215,10 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
     })
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert("🔄 重启恢复完成", data, immediate=True)
+    send_alert(
+        "🔄 重启恢复完成", data, immediate=True,
+        level=NOTIFY_LEVEL_CRITICAL,
+    )
 
 
 def report_recover_standby(verify_note="", version="", symbol=None):
@@ -971,7 +1231,10 @@ def report_recover_standby(verify_note="", version="", symbol=None):
     }
     if verify_note:
         data["🔍 核查明细"] = _g(verify_note, G_MUTED)
-    send_alert(f"🔄 [{sym}] 币安 VPS · 空仓待命", data, G_ACCENT, immediate=True)
+    send_alert(
+        f"🔄 [{sym}] 币安 VPS · 空仓待命", data, G_ACCENT,
+        immediate=True, level=NOTIFY_LEVEL_CRITICAL,
+    )
 
 
 def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pct, threshold_pct,
@@ -1029,8 +1292,24 @@ def report_smart_same_dir_decision(side, decision, live_entry, tv_price, diff_pc
     send_alert(title, data, color)
 
 
+def _infer_system_alert_notify_level(title, level_label="紧急", notify_level=None):
+    """系统告警默认 L2；重入流水等白名单 → L1 仅 TG。"""
+    if notify_level is not None:
+        try:
+            return int(notify_level)
+        except (TypeError, ValueError):
+            pass
+    t = str(title or "")
+    if any(m in t for m in _SYSTEM_ALERT_L1_MARKERS):
+        return NOTIFY_LEVEL_ALL
+    # 「提示」级默认仅 TG，紧急/警告走钉钉
+    if str(level_label or "").strip() in ("提示", "信息", "info", "INFO"):
+        return NOTIFY_LEVEL_ALL
+    return NOTIFY_LEVEL_CRITICAL
+
+
 def report_system_alert(title, detail, level="紧急", suggestion="", immediate=False,
-                        symbol=None, unit_label=None):
+                        symbol=None, unit_label=None, notify_level=None):
     data = {
         "⚠️ 告警级别": _g(f"【{level}】需管理员关注", G_DEEP),
         "📝 发生了什么": _g(f"**{title}**", G_MAIN),
@@ -1038,7 +1317,12 @@ def report_system_alert(title, detail, level="紧急", suggestion="", immediate=
     }
     if suggestion:
         data["💡 建议操作"] = _g(suggestion, G_LIGHT)
-    send_alert(f"⚠️ 异常告警：{title}", data, G_TITLE, immediate=immediate)
+    nl = _infer_system_alert_notify_level(title, level, notify_level)
+    send_alert(
+        f"⚠️ 异常告警：{title}", data, G_TITLE,
+        immediate=immediate or nl >= NOTIFY_LEVEL_CRITICAL,
+        level=nl,
+    )
 
 
 def report_position_qty_reconcile(side="", baseline=0, live_qty=0, curr_px=0,
@@ -1093,7 +1377,11 @@ def report_close_then_open_chain(phase="", side="", reason="", bar_index=None,
     )
     if verify_note:
         data["🔍 核实"] = _g(verify_note, G_MUTED)
-    send_alert(title, data, G_MAIN if ok else G_TITLE)
+    send_alert(
+        title, data, G_MAIN if ok else G_TITLE,
+        level=NOTIFY_LEVEL_ALL if ok else NOTIFY_LEVEL_CRITICAL,
+        immediate=not ok,
+    )
 
 
 def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
@@ -1108,7 +1396,10 @@ def report_radar_guardian_realigned(side, qty, tp_audit=None, verify_note=""):
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
-    send_alert("📡 雷达守护 · 止盈已重新对齐", data, G_MAIN)
+    send_alert(
+        "📡 雷达守护 · 止盈已重新对齐", data, G_MAIN,
+        level=NOTIFY_LEVEL_CRITICAL,
+    )
 
 
 def report_radar_regime_cap_trim(*args, **kwargs):
@@ -1128,7 +1419,10 @@ def report_hard_sl_fail_abort(side, qty, target_sl, attempts=3, reason="", detai
     }
     if detail:
         data["🔍 明细"] = _g(str(detail), G_MUTED)
-    send_alert("🚨 止损执行失败 · HARD_SL_FAIL_ABORT", data, G_TITLE)
+    send_alert(
+        "🚨 止损执行失败 · HARD_SL_FAIL_ABORT", data, G_TITLE,
+        level=NOTIFY_LEVEL_CRITICAL, immediate=True,
+    )
 
 
 def report_close_then_open_fail_abort(symbol="", attempts=3, reason="", detail=""):
@@ -1161,6 +1455,7 @@ def report_close_then_open_fail_abort(symbol="", attempts=3, reason="", detail="
         data,
         G_TITLE,
         immediate=True,
+        level=NOTIFY_LEVEL_CRITICAL,
     )
 
 
@@ -1209,6 +1504,7 @@ def report_atr_degrade_abort(
         data,
         G_TITLE,
         immediate=True,
+        level=NOTIFY_LEVEL_CRITICAL,
     )
 
 

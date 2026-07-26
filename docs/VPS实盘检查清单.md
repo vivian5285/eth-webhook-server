@@ -1,7 +1,7 @@
 # 🛡️ 万亿战神 VPS 实盘检查清单（Cursor 开发自查专用）
 
 > **币安** `eth-webhook-server` · **深币** `deepcoin-hft-server` 共用逻辑  
-> **当前**：TV **v6.5.6** · VPS **`v16.3.0-slice-reentry`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版(1)**  
+> **当前**：TV **v6.5.6** · VPS **`v16.3.1-dual-notify`** · sizing **RISK20_NOTIONAL5** · 规格 **币安单账户整合版(1)** · 通知 **TG全量+钉钉告警**  
 > 运行 `python check_vps_logic.py` 做静态对账。
 
 ## 📌 核心原则（必须刻进代码）
@@ -91,7 +91,7 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 | # | 项 | 标准 |
 |---|----|------|
 | P1 | 本地 = GitHub = VPS | `git rev-parse HEAD` 三端一致 |
-| P2 | health.version | `v16.3.0-slice-reentry` |
+| P2 | health.version | `v16.3.1-dual-notify` · `notify.telegram_configured=true` |
 | P3 | ETH/XAU 空仓无菌 | 持仓=0 · 挂单=0 · `trading_paused=false` · `api_monitor_only=false` |
 | P4 | 钉钉 | 开仓/雷达/TP/平仓/重入/异常均可达 |
 | P5 | 单元测试 | `test_radar_reentry`（含 TP1/tier 闸门）· dup_guard · risk_iron · api_monitor |
@@ -105,5 +105,8 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 python check_vps_logic.py
 python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry test_api_monitor_v1621
 curl -s http://127.0.0.1:5003/health | python -m json.tool
-# 期望 version: v16.3.0-slice-reentry · trading_paused=false
+# 期望 version: v16.3.1-dual-notify · trading_paused=false · notify.telegram_configured=true
+# 双通道自检：
+# curl -s -X POST http://127.0.0.1:5003/admin/notify_test -H 'Content-Type: application/json' -d '{"level":1}'
+# curl -s -X POST http://127.0.0.1:5003/admin/notify_test -H 'Content-Type: application/json' -d '{"level":2}'
 ```
