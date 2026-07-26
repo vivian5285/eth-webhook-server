@@ -172,20 +172,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.4.5-pending-tag-gc"
+BINANCE_VPS_VERSION = "v16.4.6-ip-hard-block"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
 
-# REST 降速（2026-07-26 -1003）：成交靠 UD-WS，哨兵低频兜底
-SENTINEL_POLL_NORMAL = 8.0
-SENTINEL_POLL_ARMING = 5.0
-SENTINEL_POLL_RADAR = 4.0
-SENTINEL_POLL_JITTER_SEC = 1.5
-IDLE_PATROL_INTERVAL_SEC = 90
-IDLE_PATROL_BACKOFF_SEC = 300
-IDLE_TAKEOVER_COOLDOWN_SEC = 30
-HELD_RECONCILE_INTERVAL_SEC = 90
+# REST 降速（v16.4.6：成交靠 UD-WS，哨兵再降频防 -1003）
+SENTINEL_POLL_NORMAL = 20.0
+SENTINEL_POLL_ARMING = 15.0
+SENTINEL_POLL_RADAR = 12.0
+SENTINEL_POLL_JITTER_SEC = 3.0
+IDLE_PATROL_INTERVAL_SEC = 180
+IDLE_PATROL_BACKOFF_SEC = 600
+IDLE_TAKEOVER_COOLDOWN_SEC = 60
+HELD_RECONCILE_INTERVAL_SEC = 180
 STATE_SNAPSHOT_INTERVAL_SEC = 60
 # 当日日亏/连亏/次数/回撤「拒开仓」闸门：暂时关闭（v15.9.2）。
 # risk_manager 仍记账与日志；真正防击穿靠挂单幂等硬上限，不靠日熔断挡 TV。
@@ -3141,13 +3141,23 @@ class PositionSupervisorBinance(RadarReentryMixin):
         }
 
     def _on_position_query_failed(self, source=""):
-        """查询失败：保留账本，禁止清场/平仓归因，钉钉限频告警。"""
+        """查询失败：保留账本，禁止清场/平仓归因；限流冷却期内禁告警轰炸。"""
         now = time.time()
         last = float(getattr(self, "_pos_query_fail_alert_ts", 0) or 0)
         logger.error(
             f"🚨 [{self.symbol}] 持仓查询失败 → 保留账本/跳过空仓判定 | {source}"
         )
-        if now - last < 60:
+        # IP 冷却中：查不到是预期 fail-closed，不发钉钉/TG
+        try:
+            if float(binance_client.ip_rate_limit_remaining() or 0) > 0:
+                return
+        except Exception:
+            pass
+        if getattr(self, "trading_paused", False):
+            reason = str(getattr(self, "trading_pause_reason", "") or "")
+            if reason.startswith("api_rate_limit"):
+                return
+        if now - last < 300:
             return
         self._pos_query_fail_alert_ts = now
         try:
@@ -14310,7 +14320,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
 
     def _sentinel_poll_sec(self, curr_px=0.0):
         """
-        REST 哨兵间隔：常态约 8s、雷达约 4s，加抖动错峰。
+        REST 哨兵间隔：常态约 20s、雷达约 12s，加抖动错峰。
         成交感知优先 User Data WS；markPrice WS 驱动呼吸改单。
         """
         if self._is_radar_active() or self._radar_legitimately_armed(self.watched_qty, curr_px):
@@ -14670,15 +14680,36 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         pause_r = str(
                             getattr(self, "trading_pause_reason", "") or ""
                         )
-                        sleep_s = float(IDLE_PATROL_BACKOFF_SEC)
-                        if pause_r.startswith("api_rate_limit"):
-                            sleep_s = max(sleep_s, 180.0)
-                        logger.warning(
-                            f"⏸️ [{self.symbol}] 哨兵休眠 {sleep_s:.0f}s "
-                            f"(trading_paused | {pause_r[:80]})"
-                        )
-                        time.sleep(sleep_s)
-                        continue
+                        try:
+                            ip_rem0 = float(
+                                binance_client.ip_rate_limit_remaining() or 0
+                            )
+                        except Exception:
+                            ip_rem0 = 0.0
+                        # 限流暂停 + 冷却已结束 → 自动恢复
+                        if pause_r.startswith("api_rate_limit") and ip_rem0 <= 0:
+                            logger.warning(
+                                f"▶️ [{self.symbol}] IP限流冷却结束 → 自动恢复交易"
+                            )
+                            self.trading_paused = False
+                            self.trading_pause_reason = ""
+                            try:
+                                self._save_state()
+                            except Exception:
+                                pass
+                        else:
+                            sleep_s = float(IDLE_PATROL_BACKOFF_SEC)
+                            if pause_r.startswith("api_rate_limit"):
+                                sleep_s = min(
+                                    max(ip_rem0 if ip_rem0 > 0 else sleep_s, 30.0),
+                                    600.0,
+                                )
+                            logger.warning(
+                                f"⏸️ [{self.symbol}] 哨兵休眠 {sleep_s:.0f}s "
+                                f"(trading_paused | {pause_r[:80]})"
+                            )
+                            time.sleep(sleep_s)
+                            continue
                     try:
                         ip_rem = float(
                             binance_client.ip_rate_limit_remaining() or 0
@@ -14686,10 +14717,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     except Exception:
                         ip_rem = 0.0
                     if ip_rem > 0:
-                        sleep_s = min(max(ip_rem, 5.0), 180.0)
+                        # 睡满冷却（上限 600s），禁止提前醒来再打 REST
+                        sleep_s = min(max(ip_rem, 15.0), 600.0)
                         logger.warning(
                             f"⏸️ [{self.symbol}] 哨兵休眠 {sleep_s:.0f}s "
-                            f"(IP限流冷却剩 {ip_rem:.0f}s)"
+                            f"(IP限流冷却剩 {ip_rem:.0f}s·禁止REST)"
                         )
                         time.sleep(sleep_s)
                         continue

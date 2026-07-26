@@ -12,13 +12,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.4.3-slow-rest"
-# 规格：单品种 REST 调用间隔（2026-07-26：0.1s 过密 → 提至 350ms）
-REST_MIN_INTERVAL_SEC = 0.35
+BINANCE_CLIENT_VERSION = "v16.4.6-ip-hard-block"
+# 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
+REST_MIN_INTERVAL_SEC = 0.80
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
-REST_GLOBAL_MIN_INTERVAL_SEC = 0.25
-# IP 级 -1003 后强制全局 REST 冷却（秒）
-IP_RATE_LIMIT_BACKOFF_SEC = 300.0
+REST_GLOBAL_MIN_INTERVAL_SEC = 0.55
+# IP 级 -1003 后强制全局 REST 冷却（秒）——冷却期内禁止再打 REST
+IP_RATE_LIMIT_BACKOFF_SEC = 600.0
+# 挂单 REST 缓存 TTL（秒）；place/cancel 主动失效
+OPEN_ORDERS_CACHE_TTL_SEC = 12.0
+
+
+class IpRateLimitedError(RuntimeError):
+    """IP 仍在 -1003 冷却窗内：禁止再打 REST，上层必须 fail-closed / 用缓存。"""
+
+    def __init__(self, remaining_sec=0.0):
+        self.remaining_sec = float(remaining_sec or 0)
+        super().__init__(f"ip_rate_limited remaining={self.remaining_sec:.1f}s")
 # 规格 12.2：首次立即重试，之后 1/2/4/8s，最多 5 次重试
 TRADE_RETRY_DELAYS_SEC = (0.0, 1.0, 2.0, 4.0, 8.0)
 API_PROBE_INTERVAL_SEC = 30.0
@@ -89,8 +99,8 @@ class BinanceClient:
         self._all_pos_rows = {}
         self._all_pos_ts = 0.0
         # 规格 10：持仓核对 REST ≈30s；WS 优先，合并缓存短窗口仅用于强制 REST
-        self._all_pos_ttl = 45.0
-        self._all_pos_force_ttl = 2.0
+        self._all_pos_ttl = 60.0
+        self._all_pos_force_ttl = 3.0
         self._last_order_event_ts = 0.0
         # 查单失败时的进程内同价锁：仅复用刚挂成功的缓存，禁止盲补首挂
         self._recent_limit_place = {}
@@ -106,6 +116,9 @@ class BinanceClient:
         self._api_unavailable_hooks = []
         self._ip_rate_limit_until = 0.0
         self._ip_rate_limit_lock = threading.Lock()
+        self._rate_limit_hook_last_fire_ts = 0.0
+        self._open_orders_cache = {}  # symbol -> (ts, orders_list)
+        self._open_orders_cache_lock = threading.Lock()
         self._recent_local_cancels = {}
         self._local_cancel_lock = threading.Lock()
         self._monitor_only_syms = set()
@@ -140,16 +153,58 @@ class BinanceClient:
         until = float(getattr(self, "_ip_rate_limit_until", 0) or 0)
         return max(0.0, until - time.time())
 
-    def _wait_ip_rate_limit(self, symbol=""):
+    def _raise_if_ip_rate_limited(self, symbol=""):
+        """
+        铁律（v16.4.6）：冷却期内禁止再打 REST。
+        旧逻辑只 sleep(5s) 后继续请求 → 冷却窗内反复 -1003 → 告警轰炸。
+        """
         rem = self.ip_rate_limit_remaining()
         if rem <= 0:
             return
-        sleep_for = min(rem, 5.0)
         logger.warning(
-            f"🧊 [IP限流] {symbol or '_'} REST 等待 {sleep_for:.1f}s "
-            f"(剩余冷却 {rem:.0f}s)"
+            f"🧊 [IP限流] {symbol or '_'} 拒绝 REST "
+            f"(冷却剩余 {rem:.0f}s，禁止打交易所)"
         )
-        time.sleep(sleep_for)
+        raise IpRateLimitedError(rem)
+
+    def invalidate_open_orders_cache(self, symbol=""):
+        """下单/撤单后失效挂单缓存。"""
+        sym = str(symbol or "").upper()
+        with getattr(self, "_open_orders_cache_lock", threading.Lock()):
+            cache = getattr(self, "_open_orders_cache", None)
+            if cache is None:
+                self._open_orders_cache = {}
+                return
+            if sym:
+                cache.pop(sym, None)
+            else:
+                cache.clear()
+
+    def _get_open_orders_cached(self, symbol, max_age=None):
+        sym = str(symbol or "").upper()
+        ttl = float(
+            max_age
+            if max_age is not None
+            else OPEN_ORDERS_CACHE_TTL_SEC
+        )
+        with getattr(self, "_open_orders_cache_lock", threading.Lock()):
+            row = (getattr(self, "_open_orders_cache", {}) or {}).get(sym)
+        if not row:
+            return None
+        ts, orders = row
+        if (time.time() - float(ts or 0)) > ttl:
+            return None
+        # 返回浅拷贝，避免调用方改坏缓存
+        return list(orders or [])
+
+    def _set_open_orders_cache(self, symbol, orders):
+        if is_orders_query_failed(orders):
+            return
+        sym = str(symbol or "").upper()
+        with getattr(self, "_open_orders_cache_lock", threading.Lock()):
+            if not hasattr(self, "_open_orders_cache"):
+                self._open_orders_cache = {}
+            self._open_orders_cache[sym] = (time.time(), list(orders or []))
 
     def register_order_reject_hook(self, cb):
         """开仓/关键挂单被拒（保证金等）回调：cb(symbol, err_text)。不自动重试。"""
@@ -316,6 +371,10 @@ class BinanceClient:
             dead = [k for k, t in self._recent_local_cancels.items() if float(t) < cut]
             for k in dead:
                 self._recent_local_cancels.pop(k, None)
+        try:
+            self.invalidate_open_orders_cache(symbol)
+        except Exception:
+            pass
 
     def was_local_cancel(self, symbol, order_id, window_sec=90.0):
         if not hasattr(self, "_recent_local_cancels"):
@@ -331,8 +390,8 @@ class BinanceClient:
         return (time.time() - float(ts)) <= float(window_sec)
 
     def _throttle_rest(self, symbol=""):
-        """单品种 + 全账户 REST 间隔硬下限；IP 限流窗口内额外等待。"""
-        self._wait_ip_rate_limit(symbol)
+        """单品种 + 全账户 REST 间隔硬下限；IP 冷却期内直接拒绝（不打交易所）。"""
+        self._raise_if_ip_rate_limited(symbol)
         if not hasattr(self, "_rest_throttle_lock"):
             self._rest_throttle_lock = threading.Lock()
             self._rest_last_by_sym = {}
@@ -342,10 +401,10 @@ class BinanceClient:
         if not hasattr(self, "_rate_limit_hooks"):
             self._rate_limit_hooks = []
         sym = str(symbol or "_GLOBAL").upper()
-        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.35)
+        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.80)
         g_gap = float(
             getattr(self, "_rest_global_min_interval", REST_GLOBAL_MIN_INTERVAL_SEC)
-            or 0.25
+            or 0.55
         )
         with self._rest_throttle_lock:
             now = time.time()
@@ -359,7 +418,7 @@ class BinanceClient:
             self._rest_last_global = now2
 
     def _note_api_error(self, err, symbol=""):
-        """检测 -1003 / TOO_MANY_REQUESTS → 通知钩子暂停品种。"""
+        """检测 -1003 / TOO_MANY_REQUESTS → 通知钩子暂停品种（全局去重）。"""
         if not hasattr(self, "_rate_limit_hooks"):
             self._rate_limit_hooks = []
         text = str(err or "")
@@ -374,6 +433,14 @@ class BinanceClient:
                 self.mark_ip_rate_limited()
             except Exception:
                 pass
+            # 钩子全局去重：同一冷却窗只广播一次，杜绝 TG/钉钉轰炸
+            now = time.time()
+            last_fire = float(
+                getattr(self, "_rate_limit_hook_last_fire_ts", 0) or 0
+            )
+            if (now - last_fire) < 120.0:
+                return True
+            self._rate_limit_hook_last_fire_ts = now
             for h in list(self._rate_limit_hooks):
                 try:
                     h(str(symbol or ""), text)
@@ -479,23 +546,44 @@ class BinanceClient:
                 if norm:
                     out.append(norm)
             return out
+        except IpRateLimitedError:
+            return ORDERS_QUERY_FAILED
         except Exception as e:
             logger.warning(f"[Algo挂单查询] {symbol}: {e}")
             return ORDERS_QUERY_FAILED
 
-    def get_open_orders(self, symbol="ETHUSDT", include_algo=True):
+    def get_open_orders(self, symbol="ETHUSDT", include_algo=True, prefer_cache=True):
         """
         成功返回 list；REST 失败返回 ORDERS_QUERY_FAILED。
         铁律：查询失败 ≠ 盘口无单；上层禁止据此补挂限价/止损。
+        v16.4.6：短缓存；IP 冷却期只用缓存 / fail-closed（禁止再打 REST）。
         """
-        self._throttle_rest(symbol)
+        symbol = str(symbol or "ETHUSDT").upper()
+        if prefer_cache:
+            cached = self._get_open_orders_cached(symbol)
+            if cached is not None:
+                return cached
+        try:
+            self._throttle_rest(symbol)
+        except IpRateLimitedError:
+            cached = self._get_open_orders_cached(symbol, max_age=120.0)
+            if cached is not None:
+                logger.warning(
+                    f"[获取挂单] {symbol}: IP限流 → 回退≤120s缓存 ({len(cached)} 笔)"
+                )
+                return cached
+            return ORDERS_QUERY_FAILED
         try:
             orders = list(self.client.futures_get_open_orders(symbol=symbol) or [])
         except Exception as e:
             self._note_api_error(e, symbol)
             logger.error(f"[获取挂单失败] {symbol}: {e}")
+            cached = self._get_open_orders_cached(symbol, max_age=120.0)
+            if cached is not None:
+                return cached
             return ORDERS_QUERY_FAILED
         if not include_algo:
+            self._set_open_orders_cache(symbol, orders)
             return orders
         algo_orders = self.get_open_algo_orders(symbol)
         if is_orders_query_failed(algo_orders):
@@ -504,8 +592,10 @@ class BinanceClient:
                 f"[挂单合并] {symbol} Algo 查询失败 → 仅用普通挂单 "
                 f"({len(orders)} 笔)；补挂前须再核实"
             )
+            self._set_open_orders_cache(symbol, orders)
             return orders
         if not algo_orders:
+            self._set_open_orders_cache(symbol, orders)
             return orders
         seen = {str(o.get("orderId")) for o in orders if o.get("orderId")}
         merged = list(orders)
@@ -519,6 +609,7 @@ class BinanceClient:
                 f"[挂单合并] {symbol} 普通 {len(orders)} + Algo {len(algo_orders)} "
                 f"→ 合计 {len(merged)}"
             )
+        self._set_open_orders_cache(symbol, merged)
         return merged
 
     def _iter_open_orders(self, symbol="ETHUSDT", include_algo=True):
@@ -875,19 +966,28 @@ class BinanceClient:
         cached = self._get_ws_price(symbol, max_age=min_gap)
         if cached:
             return cached
+        # IP 冷却期：绝不再打 ticker REST
+        if self.ip_rate_limit_remaining() > 0:
+            stale = self._get_ws_price(symbol, max_age=300)
+            return stale or 0.0
         last = float(self._last_rest_price_fetch_by_sym.get(symbol) or 0)
         if last > 0 and (now - last) < min_gap:
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
         try:
-            self._last_rest_price_fetch_by_sym[symbol] = now
-            self._last_rest_price_fetch = now
+            self._throttle_rest(symbol)
+            self._last_rest_price_fetch_by_sym[symbol] = time.time()
+            self._last_rest_price_fetch = time.time()
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             price = float(ticker["price"])
             if price > 0:
                 self._set_ws_price(symbol, price)
             return price
+        except IpRateLimitedError:
+            stale = self._get_ws_price(symbol, max_age=300)
+            return stale or 0.0
         except Exception as e:
+            self._note_api_error(e, symbol)
             logger.error(f"[查询价格失败] {symbol}: {e}")
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
@@ -1010,6 +1110,15 @@ class BinanceClient:
         try:
             self._throttle_rest("_POS_ALL")
             rows = self.client.futures_position_information() or []
+        except IpRateLimitedError:
+            with self._pos_lock:
+                if self._all_pos_rows and (now - self._all_pos_ts) < 180.0:
+                    logger.warning(
+                        "[合并持仓] IP限流 → 回退持仓缓存 "
+                        f"(age={now - self._all_pos_ts:.0f}s)"
+                    )
+                    return dict(self._all_pos_rows)
+            return None
         except Exception as e:
             logger.error(f"[合并持仓查询失败] {e}")
             try:
@@ -1304,6 +1413,10 @@ class BinanceClient:
             )
             with self._place_dedupe_lock:
                 self._recent_limit_place[key] = (time.time(), order)
+            try:
+                self.invalidate_open_orders_cache(symbol)
+            except Exception:
+                pass
             return order
 
         try:
@@ -1415,6 +1528,10 @@ class BinanceClient:
             logger.info(f"[止损单成功] {side} {tag}Stop @ {stop_price} tag={coid or '-'}")
             with self._place_dedupe_lock:
                 self._recent_stop_place[key] = (time.time(), order)
+            try:
+                self.invalidate_open_orders_cache(symbol)
+            except Exception:
+                pass
             return order
 
         try:
