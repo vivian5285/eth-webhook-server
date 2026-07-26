@@ -822,7 +822,7 @@ def audit_module4_radar(a: Audit):
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",
         '_atr_reject' in wp
         and '"tv_invalid"' in wp
-        and "RADAR_ACTIVATE_TP1_FRAC = 0.85" in wp
+        and "RADAR_ACTIVATE_TP1_FRAC" in wp
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from reentry_profiles import (
@@ -830,10 +830,16 @@ def audit_module4_radar(a: Audit):
         ACTIVATION_TP1_FRAC_REENTRY as _ACT1,
         HARD_SL_BUFFER_MULT as _BUF,
         activation_frac_for_attempt as _act_frac,
+        radar_gate_price_from_tps as _gate,
     )
-    a.check("4.5c3b 首次激活0.85/重入1.00", abs(_ACT0 - 0.85) < 1e-9 and abs(_ACT1 - 1.0) < 1e-9
-            and abs(_act_frac(0) - 0.85) < 1e-9 and abs(_act_frac(1) - 1.0) < 1e-9,
-            f"first={_ACT0} reentry={_ACT1}")
+    a.check(
+        "4.5c3b 激活门=中点/TP2绝对价",
+        abs(_ACT0 - 0.0) < 1e-9 and abs(_ACT1 - 1.0) < 1e-9
+        and abs(_act_frac(0) - 0.0) < 1e-9 and abs(_act_frac(1) - 1.0) < 1e-9
+        and abs(_gate(1925.65, 1955.00, 0) - 1940.325) < 1e-3
+        and abs(_gate(1925.65, 1955.00, 1) - 1955.00) < 1e-6,
+        f"first={_ACT0} reentry={_ACT1} mid={_gate(1925.65,1955,0)}",
+    )
     a.check("4.5c3c 硬止损呼吸垫统一1.15", abs(_BUF - 1.15) < 1e-9, str(_BUF))
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
     a.check("4.5d SIGNAL_DEDUP_SEC=60", int(_DEDUP) == 60, str(_DEDUP))

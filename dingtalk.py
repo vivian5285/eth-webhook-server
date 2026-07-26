@@ -1744,12 +1744,15 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
                            activation_frac=None, tier=None):
     """
     雷达激活通知（白皮书 §10.1）。
-    open_kind: "首次开仓" | "重入开仓"；activation_frac: 0.85 或 1.00。
+    open_kind: "首次开仓" | "重入开仓"；activation_frac: 模式标记（0=中点 / 1=TP2）。
     """
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     kind = str(open_kind or "").strip() or "首次开仓"
-    frac = float(activation_frac) if activation_frac is not None else float(radar_progress or 0)
+    attempt_reentry = ("重入" in kind) or (
+        activation_frac is not None and float(activation_frac) >= 1.0
+    )
+    gate_lab = "TP2绝对价" if attempt_reentry else "TP1-TP2中点"
     act_px = float(activation_price or 0)
     tier_txt = ""
     if tier is not None:
@@ -1762,10 +1765,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "事件": _g("雷达激活", G_ACCENT),
         "开仓类型": _g(f"**{kind}**", G_MAIN),
-        "启动阈值": _g(
-            f"**{frac:.0%}×TP1距**" if frac > 0 else "—",
-            G_LIGHT,
-        ),
+        "启动门槛": _g(f"**{gate_lab}**", G_LIGHT),
         "激活价": _g(f"**{act_px:.2f}**" if act_px > 0 else "—", G_MAIN),
         "初始止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
         "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),
@@ -1776,7 +1776,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         data["触发"] = _g(str(trigger_gate)[:120], G_MUTED)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
-    send_alert(f"📡 [{sym}] 雷达激活 · {kind}", data, G_DEEP)
+    send_alert(f"📡 [{sym}] 雷达激活 · {kind} · {gate_lab}", data, G_DEEP)
 
 
 def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,

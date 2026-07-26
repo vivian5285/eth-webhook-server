@@ -279,7 +279,7 @@ def wait_defense(sym, timeout=45):
 
 
 def assert_dormant_radar(sym, last):
-    """规格：开仓后雷达休眠至 0.85×TP1距，盘口只有硬止损(+TP123)。"""
+    """规格：开仓后雷达休眠至 TP1-TP2 中点，盘口只有硬止损(+TP123)。"""
     st = (last or {}).get("state") or load_state(sym)
     au = (last or {}).get("audit") or audit(sym)
     frac = float(st.get("radar_activation_frac") or 0)
@@ -289,12 +289,12 @@ def assert_dormant_radar(sym, last):
     if activated:
         fail("radar should be dormant after open", state=st)
         return False
-    # 白皮书 v3：首次 0.85（兼容旧 0.50 日志但不判失败为硬错误若已是 0.85）
-    if frac and abs(frac - 0.85) > 1e-6 and abs(frac - 0.50) > 1e-6:
-        fail("expected frac 0.85 on first open", frac=frac)
+    # 首次模式标记 0.0；兼容短暂残留旧 0.85
+    if abs(frac - 0.0) > 1e-6 and abs(frac - 0.85) > 1e-6:
+        fail("expected frac 0.0 (mid mode) on first open", frac=frac)
         return False
-    if frac and abs(frac - 0.50) <= 1e-6:
-        fail("stale frac 0.50 still in state (expect 0.85)", frac=frac)
+    if abs(frac - 0.50) <= 1e-6:
+        fail("stale frac 0.50 still in state", frac=frac)
         return False
     if int(au.get("stops") or 0) != 1:
         log(
@@ -305,7 +305,7 @@ def assert_dormant_radar(sym, last):
     if int(au.get("limits") or 0) != 3:
         fail("tp123 missing", audit=au)
         return False
-    log("DORMANT_OK", frac=frac or 0.85, stops=au.get("stops"), limits=3)
+    log("DORMANT_OK", frac=frac, stops=au.get("stops"), limits=3)
     return True
 
 
@@ -419,7 +419,7 @@ def run_live_arm_cycle(sym, side):
 def reentry_engine_live_smoke():
     """不挂单：实盘 K 线 + 档位/激活阈值纯函数验证（白皮书 v3）。"""
     ok_all = True
-    if list(ACTIVATION_FRACS) != [0.85, 1.00]:
+    if list(ACTIVATION_FRACS) != [0.0, 1.0]:
         fail("activation_fracs mismatch", fracs=list(ACTIVATION_FRACS))
         ok_all = False
     for sym, side in (
@@ -449,7 +449,7 @@ def reentry_engine_live_smoke():
         rp = get_reentry_profile(sym)
         t0 = tier_coeffs(0, rp)
         t1 = tier_coeffs(1, rp)
-        frac1 = next_activation_frac(0.85, 1, rp)
+        frac1 = next_activation_frac(0.0, 1, rp)
         log(
             "TIER_CHECK",
             symbol=sym,
@@ -461,9 +461,9 @@ def reentry_engine_live_smoke():
             fail("early_be must be 0", t0=t0, t1=t1)
             ok_all = False
         if abs(frac1 - 1.00) > 1e-9:
-            fail("frac bump 0.85→1.00 on reentry", frac1=frac1)
+            fail("frac bump 0→1 on reentry (TP2 mode)", frac1=frac1)
             ok_all = False
-        bumped = bump_after_reentry_fill(0, 0.85, sym)
+        bumped = bump_after_reentry_fill(0, 0.0, sym)
         if int(bumped.get("reentry_attempt") or 0) != 1:
             fail("bump attempt", bumped=bumped)
             ok_all = False
@@ -478,7 +478,7 @@ def reentry_engine_live_smoke():
             reentry_attempt=0,
             symbol=sym,
         )
-        if abs(float(init.get("radar_activation_frac") or 0) - 0.85) > 1e-9:
+        if abs(float(init.get("radar_activation_frac") or 0) - 0.0) > 1e-9:
             fail("init frac", init=init)
             ok_all = False
     return ok_all

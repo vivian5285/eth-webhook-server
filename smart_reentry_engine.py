@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 智能再入场状态机辅助（无交易所 IO；由 PositionSupervisor / mixin 驱动）。
-白皮书 v3.0：最多 1 次重入；窗口按 K 线根数；首次激活 0.85、重入激活 1.00。
+规格：最多 1 次重入；窗口按 K 线根数；激活门=TP1/TP2绝对价（首次中点/重入TP2）。
 """
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ def bump_after_reentry_fill(
     adx_tier: int = 1,
 ) -> Dict[str, Any]:
     """
-    成交后再入：attempt+1（封顶1），雷达系数放宽一档，激活线改为 1.00。
+    成交后再入：attempt+1（封顶1），雷达系数放宽一档，激活门改为 TP2 绝对价。
     """
     rp = get_reentry_profile(symbol)
     nxt = int(prev_attempt or 0) + 1

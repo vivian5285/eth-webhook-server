@@ -177,7 +177,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.3.3-hard-sl-fix"
+BINANCE_VPS_VERSION = "v16.3.7-radar-tp12-gate"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -598,12 +598,17 @@ class PositionSupervisorBinance(RadarReentryMixin):
         try:
             live = self._get_active_position(prefer_ws=False)
             if live and live != "QUERY_FAILED" and float(live.get("size") or 0) > 0:
-                self._sync_exchange_stop(
-                    float(live.get("size") or 0),
-                    radar_sl=None,
-                    reason="API恢复后重挂保护",
-                    force=True,
-                )
+                qty = float(live.get("size") or 0)
+                if self._radar_is_dormant():
+                    self._ensure_frozen_hard_sl(qty, reason="API恢复后确认永久硬止损")
+                    self._strip_radar_stop_keep_hard(reason="API恢复·休眠禁双挂")
+                else:
+                    self._sync_exchange_stop(
+                        qty,
+                        radar_sl=None,
+                        reason="API恢复后重挂保护",
+                        force=True,
+                    )
         except Exception as e:
             logger.error(f"[{self.symbol}] API恢复后重挂止损失败: {e}")
 
@@ -2252,14 +2257,29 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     if qty <= 0:
                         qty = float(self.watched_qty or 0)
                     if qty > 0:
-                        sync = self._sync_exchange_stop(
-                            qty, radar_sl=None, reason="接管强制呼吸止损", force=True,
-                        )
-                        if sync.get("ok"):
-                            notes.append(
-                                f"呼吸止损@{sync.get('target'):.2f}"
-                                f"(撤{sync.get('purged', 0)})"
+                        # 接管：休眠期只保永久硬止损，禁止 force 挂第二笔雷达 STOP
+                        if self._radar_is_dormant():
+                            if self._ensure_frozen_hard_sl(
+                                qty, reason="接管·休眠只挂永久硬止损",
+                            ):
+                                notes.append(
+                                    f"永久硬止损@{self._frozen_hard_px():.2f}·休眠禁雷达"
+                                )
+                            try:
+                                self._strip_radar_stop_keep_hard(
+                                    reason="接管·休眠禁双挂",
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            sync = self._sync_exchange_stop(
+                                qty, radar_sl=None, reason="接管强制呼吸止损", force=True,
                             )
+                            if sync.get("ok"):
+                                notes.append(
+                                    f"呼吸止损@{sync.get('target'):.2f}"
+                                    f"(撤{sync.get('purged', 0)})"
+                                )
 
         self.monitoring = True
         self._save_state()
@@ -6712,6 +6732,35 @@ class PositionSupervisorBinance(RadarReentryMixin):
             if abs(float(p) - hard) > tol and abs(float(p) - hard_ex) > tol
         ]
 
+    def _scrub_radar_pending_colliding_hard(self):
+        """仅清除 order_id==硬止损 id 的误绑 RADAR 标签（禁按近价误清合法雷达腿）。"""
+        ids = dict(getattr(self, "_defense_order_ids", {}) or {})
+        hard_oid = str(ids.get("hard_stop") or "").strip()
+        if not hard_oid:
+            return False
+        tags = dict(getattr(self, "_pending_order_tags", {}) or {})
+        changed = False
+        for tag, meta in list(tags.items()):
+            k = str((meta or {}).get("kind") or "").upper()
+            if k != "RADAR" and not k.startswith("RADAR"):
+                continue
+            oid = str((meta or {}).get("order_id") or "").strip()
+            if oid and oid == hard_oid:
+                tags.pop(tag, None)
+                changed = True
+                logger.warning(
+                    f"🧹 [{self.symbol}] 清除误绑硬止损的 RADAR 标签 "
+                    f"tag={tag} oid={oid}"
+                )
+        if changed:
+            self._pending_order_tags = tags
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            return True
+        return False
+
     def _ensure_frozen_hard_sl(self, live_qty, reason="永久硬止损"):
         """
         永久硬止损：仅按 frozen_hard_sl_px 挂出/确认存在；永不改价、永不替换。
@@ -6854,9 +6903,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0 or not self.current_side or not self.watched_entry:
             return {"ok": False, "skipped": True, "reason": "no_position"}
-        # 休眠窗禁止非强制挂雷达；激活武装路径传 force=True
-        if self._radar_is_dormant() and not force:
+        # 休眠窗禁止挂雷达；仅价触激活武装（_radar_arming）可越过
+        if self._radar_is_dormant() and not getattr(self, "_radar_arming", False):
             return {"ok": False, "skipped": True, "reason": "radar_dormant"}
+        # 粘性 DERADAR 误绑硬止损 id → 先清，避免拒挂后假裸仓告警
+        self._scrub_radar_pending_colliding_hard()
 
         self._lock_open_regime_from_sources(force=False)
         self._sanitize_vps_hard_sl_ledger(source=reason or "同步止损消毒")
@@ -7057,6 +7108,41 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 "reason": "HARD_SL_FAIL_ABORT_keep_old",
             }
         else:
+            # live_stops 故意排除永久硬止损腿；若 closePosition 硬止损仍在，绝非裸仓
+            all_stops = self._count_protective_stops()
+            hard = self._frozen_hard_px()
+            hard_ex = 0.0
+            if hard > 0:
+                hard_ex = round(float(order_stop_price(
+                    self.current_side, hard,
+                    buffer_usd=self._stop_buffer_usd(),
+                    profile=getattr(self, "breath_profile", None),
+                ) or hard), 2)
+            hard_on_book = bool(
+                hard > 0 and (
+                    self._has_stop_sl_near(
+                        hard_ex or hard, exclude_shield=False,
+                        exclude_close_position=False,
+                    )
+                    or (all_stops and any(
+                        abs(float(p) - hard) <= SHIELD_STOP_TOLERANCE
+                        or abs(float(p) - hard_ex) <= SHIELD_STOP_TOLERANCE
+                        for p in all_stops
+                    ))
+                )
+            )
+            if hard_on_book or (all_stops and len(all_stops) > 0):
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达腿挂单失败，但盘口已有保护 STOP "
+                    f"all={all_stops} hard@{hard_ex or hard:.2f} → 非裸仓，"
+                    f"抑制 HARD_SL_FAIL_ABORT | {reason}"
+                )
+                self._record_shield_maintain(success=True)
+                return {
+                    "ok": True, "skipped": True, "target": ledger_target,
+                    "exchange_target": exchange_target, "purged": 0,
+                    "reason": "protected_by_hard_or_existing_stop",
+                }
             logger.error(
                 f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 新挂失败且盘口无 STOP → 裸仓 | {reason}"
             )
@@ -7121,7 +7207,19 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"撤孤儿 {purged} 笔"
             )
         else:
-            # 二次清理后仍失败 → HARD_SL_FAIL_ABORT
+            # 二次清理后仍失败 → 若硬止损在场则非裸仓，禁止再刷 HARD_SL_FAIL
+            all_stops = self._count_protective_stops()
+            if all_stops:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达目标核实失败但盘口已有 STOP "
+                    f"{all_stops} → 抑制 HARD_SL_FAIL_ABORT | {reason}"
+                )
+                self._record_shield_maintain(success=True)
+                return {
+                    "ok": True, "skipped": True, "target": ledger_target,
+                    "exchange_target": exchange_target, "purged": purged,
+                    "reason": "verify_fail_but_protected",
+                }
             logger.error(
                 f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 核实失败 "
                 f"@{exchange_target:.2f} | {reason}"
@@ -8544,7 +8642,14 @@ class PositionSupervisorBinance(RadarReentryMixin):
         # 永久硬止损与雷达独立维护；硬止损绝不因雷达改单而撤销/改价
         hard_ok = self._ensure_frozen_hard_sl(real_amt, reason="维护永久硬止损")
         if self._radar_is_dormant():
-            # 雷达未激活：盘口只允许硬止损，禁止把 0.5×ATR 激活臂当唯一 STOP
+            # 雷达未激活：盘口只允许永久硬止损；撤掉误挂的雷达腿（禁双 STOP）
+            try:
+                self._strip_radar_stop_keep_hard(reason="维护·雷达休眠禁双挂")
+            except Exception as e:
+                logger.debug(f"休眠撤雷达跳过: {e}")
+            return bool(hard_ok or getattr(self, "shield_active", False))
+        # 即使 force=True：无合法雷达目标时不要空跑同步（会误报裸仓）
+        if radar_sl is None and not self._radar_legitimately_armed(real_amt, curr_px):
             return bool(hard_ok or getattr(self, "shield_active", False))
         if getattr(self, "tv_sl", 0) > 0 or radar_sl or self._frozen_hard_px() > 0:
             if not force and not self._can_maintain_shield_now(force=force):
@@ -12785,22 +12890,57 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 except Exception as e:
                     logger.error(f"成交后强制 REST 持仓查询失败: {e}")
             if not pos or float(pos.get("size") or 0) <= 0:
-                logger.error(
-                    "开仓失败：成交后 REST 无持仓（市价单曾成功——可能已成交但查询滞后；"
-                    "空闲巡检将接管，必须补挂 |TV−SL|×1.15 硬止损）"
+                # 指南：以市价回执为真相源，禁止因 REST 滞后跳过硬止损
+                fill_qty = float(
+                    (order or {}).get("executedQty")
+                    or (order or {}).get("cumQty")
+                    or qty
+                    or 0
                 )
-                try:
-                    dingtalk.report_system_alert(
-                        f"开仓后持仓查询失败 [{self.symbol}]",
-                        f"TV {action} 市价单已返回成功，但 REST 多次查无持仓。"
-                        f"若实盘已有仓，巡检接管时必须挂永久硬止损，禁止仅挂 0.5×ATR。",
-                        level="紧急",
-                        immediate=True,
-                        notify_level=2,
+                fill_px = float(
+                    (order or {}).get("avgPrice")
+                    or (order or {}).get("price")
+                    or curr_px
+                    or 0
+                )
+                if fill_qty > 0 and fill_px > 0:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] REST 仍报无持仓，但市价回执已成交 "
+                        f"qty={fill_qty} avg={fill_px:.2f} → 以回执为准继续挂硬止损"
                     )
-                except Exception:
-                    pass
-                return
+                    pos = {
+                        "size": fill_qty,
+                        "side": action,
+                        "entry_price": fill_px,
+                    }
+                    try:
+                        dingtalk.report_system_alert(
+                            f"开仓REST滞后·已按回执挂防 [{self.symbol}]",
+                            f"TV {action} 市价回执 qty={fill_qty} @{fill_px:.2f}；"
+                            f"REST 多次空仓，已按回执锁定 |TV−SL|×1.15 硬止损。",
+                            level="紧急",
+                            immediate=True,
+                            notify_level=2,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    logger.error(
+                        "开仓失败：成交后 REST 无持仓且回执无成交量/均价；"
+                        "空闲巡检接管时必须补挂 |TV−SL|×1.15 硬止损，禁止 0.5×ATR"
+                    )
+                    try:
+                        dingtalk.report_system_alert(
+                            f"开仓后持仓查询失败 [{self.symbol}]",
+                            f"TV {action} 市价单已返回成功，但 REST 多次查无持仓且回执缺成交字段。"
+                            f"若实盘已有仓，巡检接管时必须挂永久硬止损，禁止仅挂 0.5×ATR。",
+                            level="紧急",
+                            immediate=True,
+                            notify_level=2,
+                        )
+                    except Exception:
+                        pass
+                    return
 
             real_qty = pos["size"]
             if real_qty > qty * OPEN_OVERSIZE_RATIO:
@@ -13729,24 +13869,41 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """白皮书 v3.0：首次 0.85 / 重入 1.00 × TP1距。"""
-        frac = float(getattr(self, "radar_activation_frac", 0) or 0)
-        if frac > 0:
-            return frac
+        """
+        兼容旧进度接口：朝激活门的 0~1 进度用 _radar_activation_progress。
+        此处返回模式标记 0=首次中点 / 1=重入TP2。
+        """
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        frac = float(getattr(self, "radar_activation_frac", 0) or 0)
+        if attempt >= 1 or frac >= 1.0:
+            return 1.0
         return float(
             activation_frac_for_attempt(
                 attempt, get_reentry_profile(self.symbol),
             )
-            or ACTIVATION_TP1_FRAC
         )
 
-
     def _radar_activation_price(self):
-        """价触此价 → 激活雷达；距离按 TV.price，锚点按成交价。"""
+        """
+        规格 §5.1：激活绝对价。
+          首次 = (TP1+TP2)/2 ；重入 = TP2。
+        TP 取 webhook 绝对价，与本笔成交价无关。
+        """
+        from reentry_profiles import radar_gate_price_from_tps
+
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tp1 = float(tps[0] or 0) if len(tps) > 0 else 0.0
+        tp2 = float(tps[1] or 0) if len(tps) > 1 else 0.0
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        # radar_activation_frac>=1 也视为重入门（状态兼容）
+        if float(getattr(self, "radar_activation_frac", 0) or 0) >= 1.0:
+            attempt = max(attempt, 1)
+        gate = radar_gate_price_from_tps(tp1, tp2, reentry_attempt=attempt)
+        if gate > 0:
+            return gate
+        # 无完整 TP12 时回退旧距离公式（仅兜底）
         entry = float(self.watched_entry or 0)
-        frac = float(self._radar_activation_ratio() or ACTIVATION_TP1_FRAC)
-        tp1 = float((self.tv_tps or [0])[0] or 0) if self.tv_tps else 0.0
+        frac = 0.85 if attempt < 1 else 1.0
         tv_px = float(getattr(self, "tv_price", 0) or 0)
         if entry > 0 and tp1 > 0:
             px = activation_price_from_tp1(
@@ -13768,8 +13925,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
         px = reentry_activation_px(self.current_side, entry, atr, frac)
         if px > 0:
             return px
-        if tp1 <= 0:
-            tp1 = entry + self._tp1_distance() if self.current_side == "LONG" else entry - self._tp1_distance()
+        if tp1 <= 0 and entry > 0:
+            tp1 = (
+                entry + self._tp1_distance()
+                if self.current_side == "LONG"
+                else entry - self._tp1_distance()
+            )
         return radar_activation_price(self.current_side, entry, tp1, frac=frac)
 
 
@@ -13960,13 +14121,26 @@ class PositionSupervisorBinance(RadarReentryMixin):
         return max(stage, latched, 1)
 
     def _radar_activation_progress(self, curr_px):
-        """0~1：激活线前=朝激活线推进；交棒后=5阶段进度"""
+        """0~1：朝激活绝对价推进；已激活后走阶段进度。"""
         if self._radar_legitimately_armed(self.watched_qty, curr_px) or self._is_radar_active():
             return min(1.0, self._effective_radar_stage(curr_px) / 5.0)
-        ratio = self._radar_activation_ratio()
-        if ratio <= 0:
+        curr_px = float(curr_px or 0)
+        entry = float(self.watched_entry or 0)
+        gate = float(self._radar_activation_price() or 0)
+        if curr_px <= 0 or entry <= 0 or gate <= 0:
             return 0.0
-        return max(0.0, min(1.0, self._tp1_direction_progress(curr_px) / ratio))
+        side = str(self.current_side or "").upper()
+        if side == "LONG":
+            span = gate - entry
+            if span <= 0:
+                return 1.0 if curr_px >= gate else 0.0
+            return max(0.0, min(1.0, (curr_px - entry) / span))
+        if side == "SHORT":
+            span = entry - gate
+            if span <= 0:
+                return 1.0 if curr_px <= gate else 0.0
+            return max(0.0, min(1.0, (entry - curr_px) / span))
+        return 0.0
 
     def _should_radar_trail(self, curr_px):
         """递进雷达：激活后才追踪。"""
@@ -15130,8 +15304,8 @@ class PositionSupervisorBinance(RadarReentryMixin):
                             and self.initial_stop <= 0
                             and float(getattr(self, "current_sl", 0) or 0) > 0):
                         self.initial_stop = float(self.current_sl)
-                    if not self.radar_activated and float(getattr(self, "current_sl", 0) or 0) > 0:
-                        self.radar_activated = True
+                    # 禁止：仅因 current_sl>0 就强开 radar_activated
+                    # （曾导致休眠期误挂第二笔雷达 STOP，与永久硬止损双挂）
                     self._atr_last_update_ts = float(s.get("atr_last_update_ts", 0) or 0)
                     raw_tp_ts = s.get("tp_order_placed_ts") or {}
                     self._tp_order_placed_ts = {

@@ -169,19 +169,20 @@ class RadarReentryMixin:
         self._radar_armed_after_tp1 = False
         self._radar_activation_notified = False
         self._radar_notify_pending = False
-        frac = float(st.get("radar_activation_frac") or ACTIVATION_TP1_FRAC or 0.85)
-        self._radar_trigger_gate = "被动雷达·85%×TP1"
+        frac = float(st.get("radar_activation_frac") or 0)
+        from reentry_profiles import radar_gate_label
+        gate_lab = radar_gate_label(attempt)
+        self._radar_trigger_gate = f"被动雷达·{gate_lab}"
         self._apply_tier_breath_overlay()
         logger.info(
             f"⏳ [{self.symbol}] 雷达休眠至激活 "
-            f"frac={frac:.0%} attempt={attempt} "
-            f"gate≈{self._radar_activation_price():.2f}"
+            f"mode={gate_lab} attempt={attempt} "
+            f"gate≈{self._radar_activation_price():.4f}"
         )
 
     def _radar_is_dormant(self) -> bool:
-        if bool(getattr(self, "radar_activated", False)):
-            return False
-        return bool(getattr(self, "radar_pending_arm", True))
+        """未激活一律休眠。pending_arm=False（如 TP3 互斥）不得误开雷达改单。"""
+        return not bool(getattr(self, "radar_activated", False))
 
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
         """价触激活线：挂雷达 STOP@initialStop，开始呼吸。"""
@@ -217,7 +218,11 @@ class RadarReentryMixin:
         self.current_sl = float(init)
         self.tv_sl = float(init)
         self._apply_tier_breath_overlay()
-        ok = self._ensure_radar_sl(init, live_qty=live_qty, for_handoff=True)
+        self._radar_arming = True
+        try:
+            ok = self._ensure_radar_sl(init, live_qty=live_qty, for_handoff=True)
+        finally:
+            self._radar_arming = False
         if not ok:
             logger.warning(
                 f"⚠️ [{self.symbol}] 达激活线但雷达 STOP 未挂出 @{init:.2f} | "
@@ -231,8 +236,9 @@ class RadarReentryMixin:
         frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
+        from reentry_profiles import radar_gate_label
         self._radar_trigger_gate = (
-            f"雷达已激活·{open_kind}·{int(frac * 100)}%×TP1距 | {source or '价触'}"
+            f"雷达已激活·{open_kind}·{radar_gate_label(attempt)} | {source or '价触'}"
         )
         self._radar_stage_last = 1
         if not getattr(self, "_radar_arm_ding_sent", False):
@@ -897,18 +903,53 @@ class RadarReentryMixin:
         return True
 
     def _strip_radar_stop_keep_hard(self, reason=""):
-        """休眠窗：尽量只留硬止损。"""
+        """休眠窗：盘口只留 closePosition 永久硬止损，撤掉其余 STOP（禁双挂）。"""
         try:
             from binance_client import binance_client
             ids = dict(getattr(self, "_defense_order_ids", {}) or {})
-            rid = ids.get("radar_stop") or ids.get("stop")
-            hard_id = ids.get("hard_stop")
-            if rid and str(rid) != str(hard_id or ""):
-                binance_client.cancel_order(self.symbol, order_id=rid)
+            hard_id = str(ids.get("hard_stop") or "").strip()
+            rid = str(ids.get("radar_stop") or ids.get("stop") or "").strip()
+            cancelled = []
+            if rid and rid != hard_id:
+                try:
+                    binance_client.cancel_order(self.symbol, order_id=rid)
+                    cancelled.append(rid)
+                except Exception as e:
+                    logger.debug(f"撤雷达id失败 {rid}: {e}")
+            # 扫盘口：非 closePosition 的 STOP 一律撤（休眠期不应存在）
+            try:
+                orders = binance_client.get_open_orders(
+                    self.symbol, include_algo=True,
+                ) or []
+            except Exception:
+                orders = []
+            for o in orders:
+                t = str(o.get("type") or o.get("orderType") or "").upper()
+                if "STOP" not in t:
+                    continue
+                cp = str(o.get("closePosition") or "").lower() in ("true", "1")
+                if cp:
+                    continue
+                oid = str(o.get("orderId") or o.get("algoId") or "")
+                if not oid or oid == hard_id:
+                    continue
+                try:
+                    binance_client.cancel_order(self.symbol, order_id=oid)
+                    cancelled.append(oid)
+                except Exception as e:
+                    logger.debug(f"撤休眠STOP失败 {oid}: {e}")
+            if cancelled:
                 ids["radar_stop"] = ""
                 ids["stop"] = ""
                 self._defense_order_ids = ids
-                logger.info(f"🗑️ [{self.symbol}] 已撤休眠期雷达单 | {reason}")
+                logger.info(
+                    f"🗑️ [{self.symbol}] 已撤休眠期雷达/多余STOP "
+                    f"{cancelled} | {reason}"
+                )
+            try:
+                self._clear_pending_tags_for_kind("RADAR", save=False)
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"撤休眠雷达跳过: {e}")
         self.radar_activated = False

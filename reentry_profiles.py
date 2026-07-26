@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（白皮书 v3.0 · ADX 三档）。
+双币种雷达 + 智能再入场（规格 §5.1 绝对价锚定）。
 
 - 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）— 仅影响雷达步进/呼吸
 - 硬止损呼吸垫：统一 1.15（不分档）
-- 雷达启动：按「距离」计算；首次 0.85×TP1距，重入 1.00×TP1距
+- 雷达启动（绝对价）：首次 = (TP1+TP2)/2；重入 = TP2（共用同一套 TP 绝对价）
 - 激活臂：entry ± 0.5×ATR
 - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
 - 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量
@@ -21,8 +21,9 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── 默认（config/reentry_tiers.json 可覆盖）────────────────────────────────
-_DEFAULT_ACTIVATION_FRAC = 0.85
-_DEFAULT_ACTIVATION_FRAC_REENTRY = 1.00
+# 兼容旧字段名：0=首次中点模式标记，1=重入TP2模式标记（不再表示×TP1距）
+_DEFAULT_ACTIVATION_FRAC = 0.0  # unused; kept for schema
+_DEFAULT_ACTIVATION_FRAC_REENTRY = 1.0
 _DEFAULT_ARM_SL_ATR = 0.5
 _DEFAULT_HARD_SL_BUFFER = 1.15
 _DEFAULT_ADX_WEAK_LT = 20.0
@@ -63,18 +64,21 @@ def _load_tiers_file() -> Dict[str, Any]:
 
 
 _CFG = _load_tiers_file()
+# 旧配置 activation_tp1_frac 仍可读，但激活价已改为 TP 绝对锚定（见 radar_gate_price_from_tps）
 ACTIVATION_TP1_FRAC = float(
     _CFG.get("activation_tp1_frac")
     if _CFG.get("activation_tp1_frac") is not None
-    else _DEFAULT_ACTIVATION_FRAC
+    else 0.0
 )
 ACTIVATION_TP1_FRAC_REENTRY = float(
     _CFG.get("activation_tp1_frac_reentry")
     if _CFG.get("activation_tp1_frac_reentry") is not None
     else _DEFAULT_ACTIVATION_FRAC_REENTRY
 )
-# 兼容旧名：首次 / 重入两档
+# 兼容：索引 0=首次，1=重入（语义见 activation_mode_for_attempt）
 ACTIVATION_FRACS: List[float] = [ACTIVATION_TP1_FRAC, ACTIVATION_TP1_FRAC_REENTRY]
+ACTIVATION_MODE_FIRST = "tp12_mid"
+ACTIVATION_MODE_REENTRY = "tp2"
 ARM_SL_ATR = float(
     _CFG.get("arm_sl_atr")
     if _CFG.get("arm_sl_atr") is not None
@@ -228,32 +232,52 @@ def buffer_for_adx(adx: float = 0.0) -> float:
     return float(HARD_SL_BUFFER_MULT)
 
 
+def activation_mode_for_attempt(attempt: int = 0) -> str:
+    """首次开仓 → TP1/TP2 中点；重入 → TP2。"""
+    if int(attempt or 0) >= 1:
+        return ACTIVATION_MODE_REENTRY
+    return ACTIVATION_MODE_FIRST
+
+
 def activation_frac_for_attempt(
     attempt: int = 0, profile: Optional[Dict[str, Any]] = None,
 ) -> float:
     """
-    白皮书 v3.0：
-      首次开仓（attempt=0）→ 0.85 × TP1距
-      重入开仓（attempt≥1）→ 1.00 × TP1距
-    作用对象是距离，不是 TP1 绝对价格。
+    兼容旧调用：返回模式标记（首次 0.0 / 重入 1.0），不再表示 ×TP1 距离系数。
+    激活绝对价请用 radar_gate_price_from_tps。
     """
-    p = profile if isinstance(profile, dict) else REENTRY_ETH
-    if int(attempt or 0) >= 1:
-        return float(
-            p.get("activation_tp1_frac_reentry")
-            if p.get("activation_tp1_frac_reentry") is not None
-            else ACTIVATION_TP1_FRAC_REENTRY
-        )
-    return float(
-        p.get("activation_tp1_frac")
-        if p.get("activation_tp1_frac") is not None
-        else ACTIVATION_TP1_FRAC
-    )
+    _ = profile
+    return 1.0 if int(attempt or 0) >= 1 else 0.0
 
 
 def activation_frac_fixed(profile: Optional[Dict[str, Any]] = None) -> float:
-    """兼容旧名：返回首次开仓阈值 0.85。"""
+    """兼容旧名：首次开仓模式标记。"""
     return activation_frac_for_attempt(0, profile)
+
+
+def radar_gate_price_from_tps(
+    tp1: float,
+    tp2: float,
+    reentry_attempt: int = 0,
+) -> float:
+    """
+    规格 §5.1：雷达激活绝对价（与成交价无关）。
+      首次开仓： (TP1 + TP2) / 2
+      重入开仓： TP2
+    """
+    t1 = float(tp1 or 0)
+    t2 = float(tp2 or 0)
+    if t1 <= 0 or t2 <= 0:
+        return 0.0
+    if int(reentry_attempt or 0) >= 1:
+        return round(t2, 4)
+    return round((t1 + t2) / 2.0, 4)
+
+
+def radar_gate_label(reentry_attempt: int = 0) -> str:
+    if int(reentry_attempt or 0) >= 1:
+        return "TP2绝对价"
+    return "TP1-TP2中点"
 
 
 def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
@@ -352,17 +376,16 @@ def activation_price_from_tp1(
     tv_price: Optional[float] = None,
 ) -> float:
     """
-    白皮书 §4.1：
-      tp1_distance = |TP1 − TV.price|（优先 TV 信号价，不是成交价）
-      多：激活价 = 成交价 + tp1_distance × frac
-      空：激活价 = 成交价 − tp1_distance × frac
-    entry = VPS 实际成交价锚点；tv_price 缺省时回退用 entry 算距离。
+    【已废弃路径】旧「成交价 + |TP1−TV|×frac」公式；仅当无 TP2 时回退。
+    现行规格请用 radar_gate_price_from_tps。
     """
     side_u = str(side or "").strip().upper()
     e = float(entry or 0)
     t = float(tp1 or 0)
-    f = float(frac if frac is not None else ACTIVATION_TP1_FRAC)
-    if e <= 0 or t <= 0 or f <= 0 or side_u not in ("LONG", "SHORT"):
+    f = float(frac if frac is not None else 0.85)
+    if f <= 0:
+        f = 0.85
+    if e <= 0 or t <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
     tv = float(tv_price) if tv_price is not None and float(tv_price) > 0 else e
     dist = abs(t - tv) * f
@@ -377,7 +400,8 @@ def next_activation_frac(
     current_frac: float, attempt_after_bump: int,
     profile: Optional[Dict[str, Any]] = None,
 ) -> float:
-    """重入后按 attempt 取阈值（首次 0.85 / 重入 1.00）。"""
+    """重入后按 attempt 取模式标记（首次 0 / 重入 1）。"""
+    _ = current_frac
     return activation_frac_for_attempt(int(attempt_after_bump or 0), profile)
 
 
