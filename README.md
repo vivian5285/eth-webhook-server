@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.5.0-console`**  
+**当前版本：`v16.6.0-pipeline`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
@@ -34,6 +34,7 @@
 > **v16.4.7**：无 TP3 限价收尾增强——启用 TP1/TP2 利润地板、雷达 qty 贴合现仓、TP2→TP3 区加速追随。事故总览见 [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md)。  
 > **v16.4.8**：GEMINI 对照——TP 限价预算硬帽（禁 TP1+TP2=整仓）、挂单帽暂停去重、空仓自清可恢复 pause；深币同步绝对分片。  
 > **v16.5.0**：苹果风 Console（`/console`）——多套 API 档案热切换、每档案风险%/杠杆可改即生效、Webhook secret、日志与 30 日盈亏胜率；口令 `CONSOLE_PASSWORD`。  
+> **v16.6.0**：生产流水线编制——总账本+状态机+督察官+账号级 REST 节流阀；现有开平仓/雷达挂岗位边界（软闸默认开，不打断实盘）。`/health` 含 `pipeline` 阶段。Deepcoin 同步同套编制。  
 
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）

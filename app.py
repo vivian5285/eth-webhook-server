@@ -334,6 +334,14 @@ def health():
             s: str(getattr(sup, "trading_pause_reason", "") or "")
             for s, sup in SUPERVISORS.items()
         },
+        "pipeline": {
+            s: (
+                (getattr(sup, "_pipeline_state_blob", lambda: {})() or {}).get("phase")
+                if callable(getattr(sup, "_pipeline_state_blob", None))
+                else None
+            )
+            for s, sup in SUPERVISORS.items()
+        },
     }), 200
 
 

@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.5.0-console"
+BINANCE_CLIENT_VERSION = "v16.6.0-pipeline"
 # 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
 REST_MIN_INTERVAL_SEC = 0.80
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -175,6 +175,12 @@ class BinanceClient:
             self._ip_rate_limit_until = max(
                 float(getattr(self, "_ip_rate_limit_until", 0) or 0), until
             )
+        # 账号级节流阀同步进入强制静默（ETH/XAU 共用）
+        try:
+            from api_throttle import get_throttle
+            get_throttle("binance").enter_silence(sec, reason="ip_rate_limit")
+        except Exception:
+            pass
         logger.error(
             f"🧊 [IP限流] REST 全局冷却至 "
             f"{time.strftime('%H:%M:%S', time.localtime(self._ip_rate_limit_until))} "
@@ -421,9 +427,30 @@ class BinanceClient:
             return False
         return (time.time() - float(ts)) <= float(window_sec)
 
-    def _throttle_rest(self, symbol=""):
-        """单品种 + 全账户 REST 间隔硬下限；IP 冷却期内直接拒绝（不打交易所）。"""
+    def _throttle_rest(self, symbol="", *, kind="rest", force=False):
+        """单品种 + 全账户 REST 间隔硬下限；IP 冷却/账号节流阀拒绝时不打交易所。"""
         self._raise_if_ip_rate_limited(symbol)
+        # 账号级预算阀（ETH/XAU 共用）；静默或超预算 → 拒绝
+        try:
+            from api_throttle import get_throttle
+            ok, detail = get_throttle("binance").acquire(
+                kind or "rest", force=bool(force), symbol=str(symbol or ""),
+            )
+            if not ok:
+                rem = 0.0
+                if str(detail).startswith("silence:"):
+                    try:
+                        rem = float(str(detail).split(":", 1)[1].rstrip("s"))
+                    except Exception:
+                        rem = self.ip_rate_limit_remaining()
+                logger.warning(
+                    f"🧊 [节流阀] {symbol or '_'} 拒绝 REST ({detail})"
+                )
+                raise IpRateLimitedError(rem or 1.0)
+        except IpRateLimitedError:
+            raise
+        except Exception as e:
+            logger.debug(f"api_throttle skip: {e}")
         if not hasattr(self, "_rest_throttle_lock"):
             self._rest_throttle_lock = threading.Lock()
             self._rest_last_by_sym = {}

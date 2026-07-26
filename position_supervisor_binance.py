@@ -134,6 +134,9 @@ from reentry_profiles import (
 )
 from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import RadarReentryMixin
+from pipeline_bridge import PipelineBridgeMixin
+from pipeline_ledger import Phase, Role
+from chief_auditor import check_tp_slice_budget
 from market_engine import (
     get_market_engine,
     atr_divergence_pct,
@@ -172,7 +175,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.5.0-console"
+BINANCE_VPS_VERSION = "v16.6.0-pipeline"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -261,7 +264,7 @@ HARD_SL_SYNC_COOLDOWN_SEC = 45
 OPEN_REGIME_ENTRY_MATCH_PCT = 0.008  # 开仓日志匹配入场价容差 0.8%
 
 
-class PositionSupervisorBinance(RadarReentryMixin):
+class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def __init__(self, symbol="ETHUSDT"):
         from symbol_config import resolve_binance_symbol
         from breath_profiles import get_breath_profile
@@ -460,6 +463,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 logger.info(f"📦 已迁移旧状态 → {self.state_file}")
             except Exception as e:
                 logger.warning(f"旧状态迁移失败: {e}")
+        try:
+            self._pipeline_boot(exchange="binance")
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] pipeline boot: {e}")
         logger.info(
             f"🧠 币安 VPS [{BINANCE_VPS_VERSION}] [{self._tag()}] {self.symbol} 军师已加载："
             f"sizing={SIZING_MODE} · breath={(self.breath_profile or {}).get('name') or '?'} "
@@ -3176,6 +3183,7 @@ class PositionSupervisorBinance(RadarReentryMixin):
                         getattr(self, "_pending_order_tags", {}) or {}
                     ),
                     "mutex_leg": str(getattr(self, "_mutex_leg", "") or ""),
+                    "pipeline": self._pipeline_state_blob(),
                     **self._reentry_state_dict(),
                 }, f)
         except Exception as e:
@@ -7459,6 +7467,35 @@ class PositionSupervisorBinance(RadarReentryMixin):
         self._clear_spurious_tp_consumed_if_full_size(
             live_qty, source="place_tp_levels_only",
         )
+        # 执行官自检：开仓瞬间 PLACE=2 切片之和必须≈30%，不过则拒挂
+        try:
+            consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+            if not consumed:
+                qm = self._split_remaining_tp_quantities(live_qty)
+                init_q = float(
+                    self._tp_baseline_qty(live_qty)
+                    or self.initial_qty
+                    or live_qty
+                    or 0
+                )
+                item = check_tp_slice_budget(
+                    init_q,
+                    float((qm or {}).get(1) or 0),
+                    float((qm or {}).get(2) or 0),
+                    place_levels=int(self._effective_place_tp_levels() or 2),
+                    ratios=list(LEG_TP_RATIOS),
+                )
+                if not item.ok:
+                    logger.error(
+                        f"🚨 [{self.symbol}] 执行官TP自检失败 → 拒挂 | {item.detail}"
+                    )
+                    try:
+                        self._pipeline_fail(Role.EXECUTION, f"tp_slice:{item.detail}")
+                    except Exception:
+                        pass
+                    return 0
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] TP自检跳过: {e}")
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         placed = 0
         for lv in self._expected_tp_levels(live_qty):
@@ -8557,6 +8594,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"init={float(self.initial_stop or 0):.2f} "
                 f"open_atr={float(self.open_atr or 0):.2f} | {source}"
             )
+            try:
+                self._pipeline_load_blob(s.get("pipeline"))
+            except Exception:
+                pass
             self._stop_write_blocked = not ok
             return ok
         except Exception as e:
@@ -12179,6 +12220,13 @@ class PositionSupervisorBinance(RadarReentryMixin):
     def _process_signal(self, payload):
         raw_action = str(payload.get("action", "")).strip().upper()
         is_tp_sl_update = False  # v6.5.6 已废除 UPDATE_SL/TP
+        # 信号官：只登记账本阶段，不在此打交易所
+        try:
+            if raw_action in ("LONG", "SHORT"):
+                self._pipeline_signal_received(payload)
+                self._pipeline_stale_check()
+        except Exception as e:
+            logger.debug(f"pipeline signal: {e}")
 
         # 暂停交易闸：CLOSE_THEN_OPEN_FAIL_ABORT / restart_* 需人工恢复，空仓也不自动解除
         if (
@@ -12660,6 +12708,11 @@ class PositionSupervisorBinance(RadarReentryMixin):
         payload = payload or {}
         chain = bool(getattr(self, "_close_open_chain_active", False))
         reason = close_reason or "TV开仓·一律先平后开"
+        # 仓位稽查员接手：待清场
+        try:
+            self._pipeline_pending_clear(note=reason)
+        except Exception:
+            pass
         # 净场前快照：无菌/强平复位不得冲掉本笔 TV 的 TP123
         snap = self._snapshot_tv_open_defenses(payload, action=action)
         self._pending_open_defense_snap = snap
@@ -12669,6 +12722,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         )
         if not self._ensure_flat_before_open(reason_tag=reason):
             logger.error("❌ 先平后开中止：无菌空仓未通过，拒绝叠仓开仓")
+            try:
+                self._pipeline_fail(Role.AUDITOR_POS, "CLEAR_FAIL")
+            except Exception:
+                pass
             try:
                 self._call_dingtalk(
                     dingtalk.report_close_then_open_chain,
@@ -12684,6 +12741,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 pass
             self._close_open_chain_active = False
             return
+        try:
+            self._pipeline_cleared(note="sterile_ok")
+        except Exception:
+            pass
         # 净场后立刻绑回 TV 防线（防 close_all/复位冲掉）
         self._bind_tv_open_defenses(
             snap, entry=snap.get("price") or self.tv_price, side=action,
@@ -12718,6 +12779,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
         平仓确认后立刻清零呼吸止损/防线账本。
         禁止旧 entry/side/currentStop 残留污染下一笔或 HARD_SL 误报。
         """
+        try:
+            self._pipeline_reset_flat(note=str(source or "flat"))
+        except Exception:
+            pass
         self.monitoring = False
         self.watched_qty = 0.0
         self.watched_entry = 0.0
@@ -13240,9 +13305,17 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} {self.unit_label} "
                 f"| {self.symbol} | RISK20 | 待挂TP={self.tv_tps}"
             )
+            try:
+                self._pipeline_entry_submitted(action, qty)
+            except Exception:
+                pass
             order = binance_client.place_market_order(action, qty, symbol=self.symbol)
             if not order:
                 logger.error("开仓失败：市价单未成交")
+                try:
+                    self._pipeline_fail(Role.EXECUTION, "ENTRY_SUBMIT_FAIL")
+                except Exception:
+                    pass
                 dingtalk.report_system_alert(
                     f"开仓失败 [{self.symbol}]",
                     f"TV {action} {qty} {self.unit_label} 市价单失败",
@@ -13368,6 +13441,12 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self.breakeven_phase = False
             self._breath_ratio_history = []
             self.base_qty = float(real_qty)
+            try:
+                self._pipeline_entry_confirmed(
+                    action, float(real_qty), float(pos["entry_price"] or 0),
+                )
+            except Exception:
+                pass
             # 成交后再绑一次（防无菌/并发冲掉 TV TP）
             self._bind_tv_open_defenses(
                 snap, entry=pos["entry_price"], side=action, source="开仓成交后绑定",
@@ -13494,6 +13573,27 @@ class PositionSupervisorBinance(RadarReentryMixin):
             self._arm_temp_stop_and_tp12(
                 live_qty, entry_live, self.current_side, source="开仓共同第一步",
             )
+            try:
+                qm = self._split_remaining_tp_quantities(live_qty)
+                tps = list(self.tv_tps or [0, 0, 0])
+                self._pipeline_orders_placed(
+                    hard_sl_px=float(getattr(self, "frozen_hard_sl_px", 0) or 0),
+                    hard_sl_live=bool(
+                        float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0
+                    ),
+                    tp1={
+                        "px": float(tps[0] or 0),
+                        "qty": float((qm or {}).get(1) or 0),
+                        "filled": False,
+                    },
+                    tp2={
+                        "px": float(tps[1] or 0),
+                        "qty": float((qm or {}).get(2) or 0),
+                        "filled": False,
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"pipeline orders_placed: {e}")
             # ② 锁定 TV atr（无 VPS 拉 ATR / 无场景切换）
             self._bind_tv_atr_after_open(
                 entry_live, self.current_side, live_qty,
@@ -13692,6 +13792,16 @@ class PositionSupervisorBinance(RadarReentryMixin):
             open_verified = (
                 expected > 0 and matched >= expected and bool(hung_final)
             )
+            # 督察官：首轮复查（硬失败才暂停；默认不挡开仓播报以免实盘失联）
+            try:
+                # 用终检结果刷新 hard_sl_live
+                self._pipeline_orders_placed(
+                    hard_sl_px=float(hard_sl_px or getattr(self, "frozen_hard_sl_px", 0) or 0),
+                    hard_sl_live=bool(has_hard or hung_final),
+                )
+                self._pipeline_run_chief_audit(source="open_first")
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] chief audit wire: {e}")
             self._call_dingtalk(
                 dingtalk.report_supervisor_open,
                 side=self.current_side,
@@ -13726,6 +13836,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                 radar_act_px=act_px,
                 radar_act_ratio=self._radar_activation_ratio(),
             )
+            try:
+                self._pipeline_reported(note="supervisor_open")
+            except Exception:
+                pass
             if expected > 0 and matched < expected:
                 self._open_tp_unconfirmed = True
                 hint = (
@@ -14771,6 +14885,15 @@ class PositionSupervisorBinance(RadarReentryMixin):
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
             return False
+        # 雷达值守员：头寸以实盘为准同步总账本（禁止影子仓）
+        try:
+            self._pipeline_radar_update(
+                activated=not self._radar_is_dormant(),
+                qty=float(real_amt),
+                sl_px=float(getattr(self, "current_sl", 0) or 0),
+            )
+        except Exception:
+            pass
         if self._radar_is_dormant():
             self._maybe_arm_radar_on_activation(
                 real_amt, curr_px, source="trailing·激活闸",
@@ -15710,6 +15833,10 @@ class PositionSupervisorBinance(RadarReentryMixin):
                     self.tv_qty3 = float(s.get("tv_qty3", 0) or 0)
                     self.radar_step_count = int(s.get("radar_step_count", 0) or 0)
                     self.radar_activated = bool(s.get("radar_activated", False))
+                    try:
+                        self._pipeline_load_blob(s.get("pipeline"))
+                    except Exception:
+                        pass
                     self._load_reentry_state_from_dict(s)
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)

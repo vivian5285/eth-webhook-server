@@ -14,6 +14,29 @@
 
 ---
 
+## 2026-07-27 · 全域流水线编制（总账本/督察官/节流阀）（v16.6.0）
+
+### 现象
+今日实盘多类故障（TP 切片吞仓、限流螺旋、暂停卡死）共性：模块各凭“私房账本”判断，缺少统一阶段交接与事后复查。
+
+### 根因
+无显式状态机与岗位边界；REST 节流虽有，但账号级预算/静默未收口；开仓完成后无自动「领导复查」。
+
+### 修复
+- 新模块：`pipeline_ledger.py` / `chief_auditor.py` / `api_throttle.py` / `pipeline_bridge.py`
+- 币安 supervisor 挂岗位交接（信号→清场→开仓→挂单→督察→汇报→监控）；`initial_qty` 仅确认阶段写入
+- 执行官挂 TP 前强制 30% 自检；督察官硬项（方向/切片/硬止损）失败可暂停
+- `binance_client` 账号节流阀与 -1003 静默打通（ETH/XAU 共用）
+- 默认 `PIPELINE_SOFT_GATES=1`：非法阶段只记日志，不硬挡现有路径
+- Deepcoin（5004）同步同套编制与节流
+
+### 复查点
+- [ ] `/health` version=`v16.6.0-pipeline`，含 `pipeline` 字段
+- [ ] `python -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py`
+- [ ] 持仓中重启后哨兵/雷达仍正常；新开仓日志出现 `📋 … → ORDERS_PLACED` / `督察官通过`
+
+---
+
 ## 2026-07-27 · Console 管理页（多 API 档案 + 热改仓位）（v16.5.0）
 
 ### 能力
