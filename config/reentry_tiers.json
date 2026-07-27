@@ -1,18 +1,18 @@
 {
-  "schema": "v4.0-marathon-breakeven",
-  "note": "马拉松雷达：激活瞬间保本起步(entry±tick±fee)；ADX三档启动比例 弱85%/中80%/强70%；取消TP1/TP2强制底线；阶梯从保本位推进；数量收缩与价格移动分离",
+  "schema": "v4.1-marathon-act-fix",
+  "note": "马拉松雷达修复版：弱趋势早激活、强趋势晚激活；激活瞬间保本起步(entry±tick±fee)；取消TP1/TP2强制底线；阶梯从保本位推进；数量收缩与价格移动分离",
   "radar_act_adx_lo": 20,
   "radar_act_adx_hi": 30,
-  "radar_act_ratio_lo": 0.70,
-  "radar_act_ratio_hi": 0.85,
+  "radar_act_ratio_lo": 0.68,
+  "radar_act_ratio_hi": 0.88,
   "radar_act_mode": "discrete_tier",
   "activation_ratios": {
-    "weak": 0.85,
-    "mid": 0.80,
-    "strong": 0.70
+    "weak": 0.68,
+    "mid": 0.78,
+    "strong": 0.88
   },
-  "activation_tp1_frac": 0.80,
-  "activation_tp1_frac_reentry": 0.80,
+  "activation_tp1_frac": 0.78,
+  "activation_tp1_frac_reentry": 0.78,
   "arm_mode": "breakeven_fee",
   "arm_sl_atr": 0.0,
   "fee_cover_pct": 0.0008,

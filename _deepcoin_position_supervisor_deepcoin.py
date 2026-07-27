@@ -75,7 +75,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEEPCOIN_SUPERVISOR_VERSION = "v13.92.0-marathon-radar"
+DEEPCOIN_SUPERVISOR_VERSION = "v13.92.2-marathon-act-fix"
 
 # 开仓成交后：迟到 CLOSE 忽略窗口（对齐币安 15s 铁律）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -4597,7 +4597,18 @@ class PositionSupervisor(PipelineBridgeMixin):
         return abs(px - sl) <= max(2.5, px * 0.002)
 
     def _enforce_pre_tp1_radar_standby(self, live_qty=None, curr_px=0.0, source=""):
-        """TP1 未成交：强制雷达待命，止损仅 tv_sl 宽线"""
+        """
+        激活前：强制雷达休眠，仅硬止损（tv_sl）守护。
+        马拉松：价已达 ADX 激活线 / 已武装 → 禁止再拆雷达（与币安一致）。
+        """
+        # 已激活或已达启动线：不得因「TP1未成交」拆掉马拉松雷达
+        if bool(getattr(self, "radar_activated", False)) or self._is_radar_active():
+            return False
+        try:
+            if float(curr_px or 0) > 0 and self._should_radar_trail(curr_px):
+                return False
+        except Exception:
+            pass
         if self._tp1_filled_verified(live_qty, curr_px):
             return False
 
@@ -4611,7 +4622,7 @@ class PositionSupervisor(PipelineBridgeMixin):
             changed = True
             logger.warning(
                 f"📡 [{source or '雷达'}] 清除伪 TP{consumed} 标记 "
-                f"(TP1 未实盘成交)"
+                f"(激活前未实盘成交)"
             )
 
         if entry > 0 and self.current_sl:
@@ -4644,6 +4655,9 @@ class PositionSupervisor(PipelineBridgeMixin):
         if getattr(self, "_radar_armed_after_tp1", False):
             self._radar_armed_after_tp1 = False
             changed = True
+        if getattr(self, "radar_activated", False):
+            self.radar_activated = False
+            changed = True
         if getattr(self, "_ws_tp1_fill_hint", False):
             self._ws_tp1_fill_hint = False
             changed = True
@@ -4652,12 +4666,20 @@ class PositionSupervisor(PipelineBridgeMixin):
             self.best_price = entry if entry > 0 else self.best_price
             self._save_state()
             logger.info(
-                f"📡 [{source or '雷达'}] TP1前待命 | tv_sl={tv:.2f} | entry={entry:.2f}"
+                f"📡 [{source or '雷达'}] 激活前待命 | tv_sl={tv:.2f} | entry={entry:.2f}"
             )
         return changed
 
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
+        """仅在激活前拆掉过早雷达；马拉松已武装/已达激活线则跳过。"""
         live_qty = self._safe_qty(live_qty or self.watched_qty)
+        if bool(getattr(self, "radar_activated", False)) or self._is_radar_active():
+            return False
+        try:
+            if float(curr_px or 0) > 0 and self._should_radar_trail(curr_px):
+                return False
+        except Exception:
+            pass
         if self._tp1_filled_verified(live_qty, curr_px):
             return False
         disarmed = False
@@ -4677,21 +4699,14 @@ class PositionSupervisor(PipelineBridgeMixin):
         if not disarmed:
             return False
         self._radar_activation_notified = False
-
-
         self._shield_handoff_notified = False
         self._radar_armed_after_tp1 = False
+        self.radar_activated = False
         self._ws_tp1_fill_hint = False
         self._save_state()
         logger.warning(
             f"📡 [{source or '雷达'}] 解除过早雷达/伪TP{stale or '标记'} "
             f"→ 恢复 tv_sl={tv:.2f}"
-        )
-        dingtalk.report_system_alert(
-            "雷达解除·恢复呼吸空间",
-            f"{self.current_side} {live_qty}张 @ {entry:.2f} | "
-            f"清除伪TP{stale or '标记'} | tv_sl={tv:.2f} | "
-            f"TP1 未实盘成交前禁止移动保本止损",
         )
         if live_qty > 0 and tv > 0:
             self._maintain_hard_shield(live_qty, curr_px, force=True)
@@ -6930,7 +6945,10 @@ class PositionSupervisor(PipelineBridgeMixin):
             _ratio = radar_activation_ratio_from_adx(_adx)
             self.radar_activation_frac = float(_ratio)
             self.radar_activation_adx = float(_adx)
-            _entry = float(getattr(self, "watched_entry", 0) or getattr(self, "cycle_entry", 0) or 0)
+            # 必须用本轮 entry_price：watched_entry 此时尚未写入
+            _entry = float(entry_price or 0) or float(
+                getattr(self, "watched_entry", 0) or getattr(self, "cycle_entry", 0) or 0
+            )
             _atr = float(getattr(self, "open_atr", 0) or getattr(self, "cycle_open_atr", 0) or 0)
             if _atr <= 0:
                 try:
@@ -6947,6 +6965,7 @@ class PositionSupervisor(PipelineBridgeMixin):
             logger.debug(f"radar ADX freeze skip: {_e}")
 
         self._radar_armed_after_tp1 = False
+        self.radar_activated = False
         self._ws_tp1_fill_hint = False
         self._open_settled_qty = self._safe_qty(qty)
         self.initial_qty = self._safe_qty(qty)
@@ -6971,9 +6990,12 @@ class PositionSupervisor(PipelineBridgeMixin):
                 self._save_state()
 
             self._scorched_earth_cancel_for_recover()
+            # 开仓铁律：硬止损先挂 → TP1+TP2 → 雷达休眠待命（激活线前不介入）
             self._enforce_pre_tp1_radar_standby(
                 vqty, verified["entry_price"], source="开仓保护",
             )
+            curr_px0 = deepcoin_client.get_current_price(self.symbol) or entry_price
+            self._maintain_hard_shield(vqty, curr_px0, force=True)
             self._enforce_defense_alignment(
                 vqty, verified["entry_price"],
                 dynamic_sl=None, reason="开仓后防线对齐", rounds=4,
@@ -6992,11 +7014,25 @@ class PositionSupervisor(PipelineBridgeMixin):
                 self._maintain_hard_shield(vqty, curr_px, force=True)
                 audit = self._wait_defense_settled(vqty)
                 matched, expected = audit["matched_full"], audit["expected"]
+            # 最终再钉一次：硬止损 + 雷达待命标记
+            self._maintain_hard_shield(vqty, curr_px, force=True)
+            self.radar_activated = False
+            self._radar_armed_after_tp1 = False
+            hard_px = float(getattr(self, "tv_sl", 0) or getattr(self, "current_sl", 0) or 0)
+            act_px = float(getattr(self, "radar_activation_price", 0) or 0)
+            logger.info(
+                f"✅ [{self.symbol}] 开仓防线就绪 | "
+                f"TP限价 {matched}/{expected} | 硬止损@{hard_px:.2f} | "
+                f"雷达待命(激活线={act_px:.2f}) | "
+                f"armed={bool(self._radar_armed_after_tp1)}"
+            )
+            self._save_state()
             verify_note = (
                 f"{budget_note} | " if budget_note else ""
             ) + (
                 f"持仓 {vqty}张 @ {verified['entry_price']:.2f} | "
                 f"限价止盈 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
+                f"硬止损@{hard_px:.2f} | 雷达待命@{act_px:.2f} | "
                 f"{self._tv_field_source_note(getattr(self, '_last_tv_field_sources', {}))}"
             )
             if target_qty > 0 and vqty > target_qty * OPEN_OVERSIZE_RATIO:
@@ -7075,7 +7111,7 @@ class PositionSupervisor(PipelineBridgeMixin):
         return self.current_atr * 1.5
 
     def _radar_activation_ratio(self):
-        """返回冻结的 ADX 启动比例（马拉松：弱85%/中80%/强70%）。"""
+        """返回冻结的 ADX 启动比例（马拉松：弱68%早/中78%/强88%晚）。"""
         from reentry_profiles import normalize_activation_ratio
         frac = float(getattr(self, "radar_activation_frac", 0) or 0)
         adx = float(
@@ -7090,8 +7126,8 @@ class PositionSupervisor(PipelineBridgeMixin):
 
     def _radar_activation_price(self):
         """
-        马拉松 v13.92.0 / 对齐币安 v16.8.0：ADX 三档离散 × 1.35×initial_atr
-        （弱85% / 中80% / 强70%）。优先账本冻结价。
+        马拉松 v13.92.2 / 对齐币安 v16.8.1：ADX 三档离散 × 1.35×initial_atr
+        （弱68%早 / 中78% / 强88%晚）。优先账本冻结价。
         """
         from reentry_profiles import (
             normalize_activation_ratio,

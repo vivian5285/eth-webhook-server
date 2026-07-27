@@ -328,7 +328,7 @@ class RadarReentryMixin:
             ),
             "reentry_attempt": int(getattr(self, "reentry_attempt", 0) or 0),
             "radar_activation_frac": float(
-                getattr(self, "radar_activation_frac", 0) or 0.85
+                getattr(self, "radar_activation_frac", 0) or 0.78
             ),
             "tv_tps": list(getattr(self, "tv_tps", None) or [0, 0, 0]),
             "frozen_hard_sl_px": float(getattr(self, "frozen_hard_sl_px", 0) or 0),

@@ -834,13 +834,13 @@ def audit_module4_radar(a: Audit):
         radar_activation_ratio_from_adx as _ratio_adx,
     )
     a.check(
-        "4.5c3b 激活门=ADX70%~90%×1.35ATR",
-        abs(_RLO - 0.70) < 1e-9 and abs(_RHI - 0.90) < 1e-9
-        and abs(_ratio_adx(17) - 0.70) < 1e-9
-        and abs(_ratio_adx(35) - 0.90) < 1e-9
-        and abs(_gate_adx("LONG", 3000, 20, adx=17) - 3018.9) < 1e-2
-        and abs(_gate_adx("LONG", 3000, 20, adx=35) - 3024.3) < 1e-2,
-        f"lo={_RLO} hi={_RHI} r17={_ratio_adx(17)}",
+        "4.5c3b 激活门=ADX65%~90%×1.35ATR(弱早强晚)",
+        abs(_RLO - 0.68) < 1e-9 and abs(_RHI - 0.88) < 1e-9
+        and abs(_ratio_adx(17) - 0.68) < 1e-9
+        and abs(_ratio_adx(35) - 0.88) < 1e-9
+        and abs(_gate_adx("LONG", 3000, 20, adx=17) - 3018.36) < 1e-2
+        and abs(_gate_adx("LONG", 3000, 20, adx=35) - 3023.76) < 1e-2,
+        f"lo={_RLO} hi={_RHI} r17={_ratio_adx(17)} r35={_ratio_adx(35)}",
     )
     a.check("4.5c3c 硬止损呼吸垫统一1.15", abs(_BUF - 1.15) < 1e-9, str(_BUF))
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP

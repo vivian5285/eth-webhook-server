@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.8.0 · 马拉松保本起步）。
+双币种雷达 + 智能再入场（v16.8.1 · 马拉松激活比例修复版）。
 
 - 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）— 步进/呼吸 + 启动比例
 - 硬止损呼吸垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存
 - 雷达启动（第一层）：ADX 三档离散 × 1.35×initial_atr
-  · 弱 ADX<20 → 85%；中 20–30 → 80%；强 >30 → 70%
+  · 弱 ADX<20 → 68%（早激活保护微利）；中 20–30 → 78%；强 >30 → 88%（晚激活留呼吸）
 - 激活瞬间：保本起步 = entry ± tick ± fee_cover（禁止跳到 TP1 底线）
 - 取消 TP1/TP2 强制底线；TP 成交只缩量不改价
 - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
@@ -32,11 +32,14 @@ _DEFAULT_ADX_STRONG_GT = 30.0
 # 第一层雷达启动（与档位 20/30 对齐 · 离散三档）
 _DEFAULT_RADAR_ACT_ADX_LO = 20.0
 _DEFAULT_RADAR_ACT_ADX_HI = 30.0
-_DEFAULT_RADAR_ACT_RATIO_LO = 0.70
-_DEFAULT_RADAR_ACT_RATIO_HI = 0.85
-_DEFAULT_ACT_RATIO_WEAK = 0.85
-_DEFAULT_ACT_RATIO_MID = 0.80
-_DEFAULT_ACT_RATIO_STRONG = 0.70
+# 带宽：弱早(低比例) … 强晚(高比例)
+_DEFAULT_RADAR_ACT_RATIO_LO = 0.68
+_DEFAULT_RADAR_ACT_RATIO_HI = 0.88
+_DEFAULT_ACT_RATIO_WEAK = 0.68   # 65%–70% 中值：弱趋势早激活
+_DEFAULT_ACT_RATIO_MID = 0.78    # 75%–80% 中值
+_DEFAULT_ACT_RATIO_STRONG = 0.88  # 85%–90% 中值：强趋势晚激活
+# v4.0 写反的离散值 → normalize 时若与 ADX 档不符则重算
+_INVERTED_LEGACY_RATIOS = frozenset({0.70, 0.85})
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 0.40, "step_advance_atr": 0.25,
@@ -352,9 +355,9 @@ def is_legacy_activation_frac(frac: Optional[float]) -> bool:
 
 def radar_activation_ratio_from_adx(adx: Optional[float] = None) -> float:
     """
-    第一层：ADX → 启动比例（马拉松离散三档）。
-    ADX<20 → 85%；20≤ADX≤30 → 80%；ADX>30 → 70%。
-    （强趋势更早启动守护；弱趋势更晚，减少假突破扫损。）
+    第一层：ADX → 启动比例（马拉松离散三档 · 修复版）。
+    ADX<20 → 68%（早）；20≤ADX≤30 → 78%；ADX>30 → 88%（晚）。
+    弱趋势早激活防微利回吐；强趋势晚激活给深度回踩留呼吸空间。
     """
     try:
         a = float(adx)
@@ -375,10 +378,18 @@ def normalize_activation_ratio(
     frac: Optional[float] = None,
     adx: Optional[float] = None,
 ) -> float:
-    """账本 frac 合法则沿用；否则按 ADX 重算（迁移旧 0/1 标记）。"""
-    if not is_legacy_activation_frac(frac):
-        return round(float(frac), 6)
-    return radar_activation_ratio_from_adx(adx)
+    """账本 frac 合法则沿用；旧标记 / v4.0 翻转离散值按 ADX 重算。"""
+    expected = radar_activation_ratio_from_adx(adx)
+    if is_legacy_activation_frac(frac):
+        return expected
+    try:
+        f = round(float(frac), 6)
+    except (TypeError, ValueError):
+        return expected
+    # v4.0 写反：弱85%/强70% — 与当前 ADX 档偏差大则迁移
+    if round(f, 2) in _INVERTED_LEGACY_RATIOS and abs(f - expected) > 0.029:
+        return expected
+    return f
 
 
 def activation_frac_for_attempt(
@@ -463,7 +474,7 @@ def radar_gate_label_from_ratio(ratio: Optional[float] = None) -> str:
         r = 0.0
     if 0.65 <= r <= 0.95:
         return f"ADX启动 {r:.0%}×1.35ATR"
-    return "ADX启动 70%~90%×1.35ATR"
+    return "ADX启动 65%~90%×1.35ATR"
 
 
 def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:

@@ -175,7 +175,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.8.0-marathon-radar"
+BINANCE_VPS_VERSION = "v16.8.1-marathon-act-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -14556,8 +14556,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_activation_price(self):
         """
-        v16.8.0：ADX 三档离散启动比例 × 1.35×initial_atr
-        （弱85% / 中80% / 强70%）。优先账本冻结价。
+        v16.8.1：ADX 三档离散启动比例 × 1.35×initial_atr
+        （弱68%早 / 中78% / 强88%晚）。优先账本冻结价。
         """
         from reentry_profiles import (
             normalize_activation_ratio,

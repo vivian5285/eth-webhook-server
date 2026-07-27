@@ -66,26 +66,26 @@ class TestAdxTiers(unittest.TestCase):
 
 
 class TestActivationAdxRatio(unittest.TestCase):
-    """马拉松：弱85%/中80%/强70%；启动价=entry±ratio×1.35×ATR。"""
+    """马拉松修复版：弱68%/中78%/强88%；启动价=entry±ratio×1.35×ATR。"""
 
     ENTRY = 3000.0
     ATR = 20.0
 
     def test_ratio_bounds(self):
-        self.assertAlmostEqual(RADAR_ACT_RATIO_LO, 0.70)
-        self.assertAlmostEqual(RADAR_ACT_RATIO_HI, 0.85)
-        # 弱趋势更晚启动
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(17), 0.85)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(16), 0.85)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(19.9), 0.85)
+        self.assertAlmostEqual(RADAR_ACT_RATIO_LO, 0.68)
+        self.assertAlmostEqual(RADAR_ACT_RATIO_HI, 0.88)
+        # 弱趋势更早启动
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(17), 0.68)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(16), 0.68)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(19.9), 0.68)
         # 中趋势
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(20), 0.80)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(26), 0.80)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(30), 0.80)
-        # 强趋势更早启动
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(30.1), 0.70)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(35), 0.70)
-        self.assertAlmostEqual(radar_activation_ratio_from_adx(40), 0.70)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(20), 0.78)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(26), 0.78)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(30), 0.78)
+        # 强趋势更晚启动
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(30.1), 0.88)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(35), 0.88)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(40), 0.88)
 
     def test_modes_same_formula(self):
         self.assertEqual(activation_mode_for_attempt(0), ACTIVATION_MODE_FIRST)
@@ -93,9 +93,9 @@ class TestActivationAdxRatio(unittest.TestCase):
         self.assertEqual(MAX_REENTRIES, 1)
         r0 = activation_frac_for_attempt(0, adx=17)
         r1 = activation_frac_for_attempt(1, adx=17)
-        self.assertAlmostEqual(r0, 0.85)
-        self.assertAlmostEqual(r1, 0.85)
-        self.assertIn("70%", radar_gate_label_from_ratio(0.70))
+        self.assertAlmostEqual(r0, 0.68)
+        self.assertAlmostEqual(r1, 0.68)
+        self.assertIn("68%", radar_gate_label_from_ratio(0.68))
         self.assertEqual(tier_label(2), "强趋势")
 
     def test_long_gate_prices(self):
@@ -105,16 +105,16 @@ class TestActivationAdxRatio(unittest.TestCase):
         strong = radar_activation_price_adx(
             "LONG", self.ENTRY, self.ATR, adx=35,
         )
-        # 弱 85% → 3022.95；强 70% → 3018.9（强更早触线）
-        self.assertAlmostEqual(weak, 3022.95, places=2)
-        self.assertAlmostEqual(strong, 3018.9, places=2)
-        self.assertGreater(weak, strong)
+        # 弱 68% → 3018.36；强 88% → 3023.76（弱更早触线）
+        self.assertAlmostEqual(weak, 3018.36, places=2)
+        self.assertAlmostEqual(strong, 3023.76, places=2)
+        self.assertLess(weak, strong)
 
     def test_short_gate_prices(self):
         weak = radar_activation_price_adx(
             "SHORT", self.ENTRY, self.ATR, adx=17,
         )
-        self.assertAlmostEqual(weak, 2977.05, places=2)
+        self.assertAlmostEqual(weak, 2981.64, places=2)
 
     def test_tp1_filled_does_not_block_price_arm(self):
         """TP1 已成交仍可按价触闸武装（独立于 TP1）。"""
@@ -156,9 +156,14 @@ class TestActivationAdxRatio(unittest.TestCase):
         self.assertEqual(len(armed), 1)
 
     def test_legacy_frac_normalized(self):
-        self.assertAlmostEqual(normalize_activation_ratio(0.0, 17), 0.85)
-        self.assertAlmostEqual(normalize_activation_ratio(1.0, 35), 0.70)
-        self.assertAlmostEqual(normalize_activation_ratio(0.80, 99), 0.80)
+        self.assertAlmostEqual(normalize_activation_ratio(0.0, 17), 0.68)
+        self.assertAlmostEqual(normalize_activation_ratio(1.0, 35), 0.88)
+        # 旧中档 0.80 仍落在 75%–80% 带宽，可保留
+        self.assertAlmostEqual(normalize_activation_ratio(0.80, 26), 0.80)
+        # v4.0 写反：弱冻结 85% → 按 ADX 重算为 68%
+        self.assertAlmostEqual(normalize_activation_ratio(0.85, 17), 0.68)
+        # v4.0 写反：强冻结 70% → 按 ADX 重算为 88%
+        self.assertAlmostEqual(normalize_activation_ratio(0.70, 35), 0.88)
 
     def test_activation_price_helper(self):
         px = activation_price("LONG", self.ENTRY, self.ATR, 0.70)
@@ -304,7 +309,7 @@ class TestEngine(unittest.TestCase):
 
     def test_bump_legacy_frac_recomputes(self):
         b = bump_after_reentry_fill(0, 0.0, "ETHUSDT", adx_tier=0, adx=17)
-        self.assertAlmostEqual(b["radar_activation_frac"], 0.85)
+        self.assertAlmostEqual(b["radar_activation_frac"], 0.68)
 
     def test_init_cycle_adx(self):
         st = init_cycle_on_open(
@@ -312,7 +317,7 @@ class TestEngine(unittest.TestCase):
             symbol="ETHUSDT", adx_tier=2, adx=35,
         )
         self.assertEqual(st["adx_tier"], 2)
-        self.assertAlmostEqual(st["radar_activation_frac"], 0.70)
+        self.assertAlmostEqual(st["radar_activation_frac"], 0.88)
         self.assertGreater(st["radar_activation_price"], 3001)
         self.assertTrue(st["radar_pending_arm"])
 
