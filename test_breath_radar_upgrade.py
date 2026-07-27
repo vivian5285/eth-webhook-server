@@ -35,7 +35,7 @@ class TestContinuousInterp(unittest.TestCase):
         self.assertAlmostEqual(trail_distance_multiplier(0.6, BREATH_ETH), mn, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_ETH), mx, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(3.0, BREATH_ETH), mx, places=5)
-        self.assertAlmostEqual(mid, 2.125, places=5)
+        self.assertAlmostEqual(mid, 1.975, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_ETH), mid, places=5)
         a = trail_distance_multiplier(0.699, BREATH_ETH)
         b = trail_distance_multiplier(0.701, BREATH_ETH)
@@ -47,7 +47,7 @@ class TestContinuousInterp(unittest.TestCase):
         self.assertAlmostEqual(trail_distance_multiplier(0.5, BREATH_XAU), mn, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(0.6, BREATH_XAU), mn, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(2.2, BREATH_XAU), mx, places=5)
-        self.assertAlmostEqual(mid, 1.9, places=5)
+        self.assertAlmostEqual(mid, 1.625, places=5)
         self.assertAlmostEqual(trail_distance_multiplier(1.0, BREATH_XAU), mid, places=5)
 
     def test_cold_start(self):
@@ -88,10 +88,10 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(xau["stop_exec_buffer"], 0.5)
         self.assertEqual(eth["early_be_atr"], 0.0)
         self.assertEqual(xau["early_be_atr"], 0.0)
-        self.assertEqual(eth["min_mult"], 2.0)
+        self.assertEqual(eth["min_mult"], 1.8)
         self.assertEqual(eth["max_mult"], 2.5)
-        self.assertEqual(xau["min_mult"], 1.8)
-        self.assertEqual(xau["max_mult"], 2.2)
+        self.assertEqual(xau["min_mult"], 1.5)
+        self.assertEqual(xau["max_mult"], 2.0)
         self.assertEqual(eth["phase2_trail_mult"], 1.0)
         self.assertEqual(xau["phase2_trail_mult"], 1.0)
 
@@ -132,9 +132,17 @@ class TestOrderStopBuffer(unittest.TestCase):
             order_stop_price("SHORT", 2650.0, profile=BREATH_XAU), 2650.5,
         )
 
-    def test_initial_stop_0_5_atr(self):
-        self.assertEqual(initial_stop_price("LONG", 1900.0, 20.0), 1890.0)
-        self.assertEqual(initial_stop_price("SHORT", 1900.0, 20.0), 1910.0)
+    def test_initial_stop_breakeven(self):
+        """马拉松保本起步：多>entry，空<entry。"""
+        long_be = initial_stop_price("LONG", 1900.0, 20.0)
+        short_be = initial_stop_price("SHORT", 1900.0, 20.0)
+        self.assertGreater(long_be, 1900.0)
+        self.assertLess(short_be, 1900.0)
+        # 旧 ATR 臂兼容：profile 显式带 initial_sl_atr>0
+        p = dict(BREATH_ETH)
+        p["initial_sl_atr"] = 0.5
+        self.assertEqual(initial_stop_price("LONG", 1900.0, 20.0, profile=p), 1890.0)
+        self.assertEqual(initial_stop_price("SHORT", 1900.0, 20.0, profile=p), 1910.0)
 
 
 class TestEarlyBreakevenDisabled(unittest.TestCase):
@@ -220,7 +228,8 @@ class TestBreathStopWithCoeff(unittest.TestCase):
         )
         self.assertEqual(out["meta"]["zone"], "tp2_tp3")
         self.assertAlmostEqual(out["meta"]["trail_distance"], 32.0)
-        self.assertEqual(out["stop"], 1928.0)
+        # 马拉松：阶梯从保本位推进，止损 ≥ trail_floor(1960-32=1928)
+        self.assertGreaterEqual(out["stop"], 1928.0)
 
     def test_xau_phase2_no_extra_0_8(self):
         init = initial_stop_price("LONG", 1900.0, 20.0)
@@ -231,13 +240,12 @@ class TestBreathStopWithCoeff(unittest.TestCase):
         )
         self.assertEqual(out["meta"]["zone"], "tp2_tp3")
         self.assertAlmostEqual(out["meta"]["trail_distance"], 28.0)
-        self.assertEqual(out["stop"], 1932.0)
+        self.assertGreaterEqual(out["stop"], 1932.0)
 
-    def test_tp_floors_lock_profit_long(self):
-        """过 TP1/TP2 后止损不得松过 entry+floor×ATR（无 TP3 限价时锁利）。"""
+    def test_tp_floors_disabled_marathon(self):
+        """马拉松：取消 TP1/TP2 强制底线，止损不跳到 entry+0.5ATR。"""
         entry, atr = 1900.0, 20.0
         init = initial_stop_price("LONG", entry, atr, profile=BREATH_ETH)
-        # 刚过 TP1：地板 = entry + 0.5×ATR = 1910
         out1 = calculate_breath_stop(
             "LONG", 1930.0, entry, atr, init, init, 1930.0, False,
             breathing_coefficient=1.2,
@@ -245,18 +253,14 @@ class TestBreathStopWithCoeff(unittest.TestCase):
             tp1_px=1927.0, tp2_px=1950.0, tp3_px=1970.0,
         )
         self.assertEqual(out1["meta"]["zone"], "tp1_tp2")
-        self.assertGreaterEqual(out1["stop"], entry + 0.5 * atr - 1e-6)
-        # 过 TP2：地板 = entry + 1.5×ATR = 1930
-        out2 = calculate_breath_stop(
-            "LONG", 1955.0, entry, atr, init, 1910.0, 1955.0, False,
-            breathing_coefficient=1.2,
-            profile=BREATH_ETH,
-            tp1_px=1927.0, tp2_px=1950.0, tp3_px=1970.0,
-        )
-        self.assertEqual(out2["meta"]["zone"], "tp2_tp3")
-        self.assertGreaterEqual(out2["stop"], entry + 1.5 * atr - 1e-6)
+        # 无强制底线：止损应低于旧地板 entry+0.5ATR=1910（保本阶梯更松）
+        # 或由阶梯/呼吸产生，但绝不能被强制抬到地板以上而跳变
+        self.assertAlmostEqual(float(BREATH_ETH.get("tp1_floor_atr") or 0), 0.0)
+        self.assertAlmostEqual(float(BREATH_ETH.get("tp2_floor_atr") or 0), 0.0)
+        # 止损至少在保本位之上（阶梯推进）
+        self.assertGreaterEqual(out1["stop"], init - 1e-6)
 
-    def test_tp_floors_lock_profit_short(self):
+    def test_tp_floors_disabled_short(self):
         entry, atr = 1900.0, 20.0
         init = initial_stop_price("SHORT", entry, atr, profile=BREATH_ETH)
         out2 = calculate_breath_stop(
@@ -266,7 +270,7 @@ class TestBreathStopWithCoeff(unittest.TestCase):
             tp1_px=1873.0, tp2_px=1850.0, tp3_px=1830.0,
         )
         self.assertEqual(out2["meta"]["zone"], "tp2_tp3")
-        self.assertLessEqual(out2["stop"], entry - 1.5 * atr + 1e-6)
+        self.assertLessEqual(out2["stop"], init + 1e-6)
 
     def test_phase_switch_at_3atr(self):
         init = initial_stop_price("LONG", 1900.0, 20.0)

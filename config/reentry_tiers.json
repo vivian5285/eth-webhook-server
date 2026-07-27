@@ -1,13 +1,22 @@
 {
-  "schema": "v3.2-adx-act-70-90",
-  "note": "雷达启动=ADX连续插值70%~90%×1.35×initial_atr；ADX<=17→70%、>=35→90%；首次/重入同一公式；第二层trail不动",
-  "radar_act_adx_lo": 17,
-  "radar_act_adx_hi": 35,
+  "schema": "v4.0-marathon-breakeven",
+  "note": "马拉松雷达：激活瞬间保本起步(entry±tick±fee)；ADX三档启动比例 弱85%/中80%/强70%；取消TP1/TP2强制底线；阶梯从保本位推进；数量收缩与价格移动分离",
+  "radar_act_adx_lo": 20,
+  "radar_act_adx_hi": 30,
   "radar_act_ratio_lo": 0.70,
-  "radar_act_ratio_hi": 0.90,
-  "activation_tp1_frac": 0.70,
-  "activation_tp1_frac_reentry": 0.90,
-  "arm_sl_atr": 0.5,
+  "radar_act_ratio_hi": 0.85,
+  "radar_act_mode": "discrete_tier",
+  "activation_ratios": {
+    "weak": 0.85,
+    "mid": 0.80,
+    "strong": 0.70
+  },
+  "activation_tp1_frac": 0.80,
+  "activation_tp1_frac_reentry": 0.80,
+  "arm_mode": "breakeven_fee",
+  "arm_sl_atr": 0.0,
+  "fee_cover_pct": 0.0008,
+  "phase_switch_atr": 3.0,
   "limit_discount": 0.003,
   "limit_ttl_sec": 300,
   "max_reentries": 1,
@@ -37,7 +46,7 @@
         "step_advance_atr": 0.35,
         "breath_tp12": 1.20,
         "breath_tp23": 1.60,
-        "min_mult": 2.0,
+        "min_mult": 1.8,
         "max_mult": 2.5
       },
       {
@@ -71,8 +80,8 @@
         "step_advance_atr": 0.30,
         "breath_tp12": 1.00,
         "breath_tp23": 1.40,
-        "min_mult": 1.8,
-        "max_mult": 2.2
+        "min_mult": 1.5,
+        "max_mult": 2.0
       },
       {
         "name": "strong",
@@ -80,8 +89,8 @@
         "step_advance_atr": 0.35,
         "breath_tp12": 1.30,
         "breath_tp23": 1.80,
-        "min_mult": 2.2,
-        "max_mult": 3.0
+        "min_mult": 2.0,
+        "max_mult": 2.8
       }
     ]
   }

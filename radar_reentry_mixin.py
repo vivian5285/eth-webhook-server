@@ -62,6 +62,9 @@ class RadarReentryMixin:
             "radar_activation_adx": float(
                 getattr(self, "radar_activation_adx", 0) or 0
             ),
+            "radar_activation_sticky": bool(
+                getattr(self, "radar_activation_sticky", False)
+            ),
             "cycle_tv_price": float(getattr(self, "cycle_tv_price", 0) or 0),
             "cycle_tv_side": getattr(self, "cycle_tv_side", None),
             "cycle_open_atr": float(getattr(self, "cycle_open_atr", 0) or 0),
@@ -103,7 +106,7 @@ class RadarReentryMixin:
                 "last_exit_px",
             ):
                 setattr(self, k, float(val or 0))
-            elif k in ("reentry_active", "radar_pending_arm"):
+            elif k in ("reentry_active", "radar_pending_arm", "radar_activation_sticky"):
                 setattr(self, k, bool(val))
             elif k == "reentry_order_tag":
                 setattr(self, k, str(val) if val else None)
@@ -200,11 +203,12 @@ class RadarReentryMixin:
         return not bool(getattr(self, "radar_activated", False))
 
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
-        """价触激活线：挂雷达 STOP@initialStop，开始呼吸。"""
+        """价触激活线（或本周期 sticky）：挂雷达 STOP@保本位，开始马拉松跟随。"""
         if bool(getattr(self, "radar_activated", False)):
             return True
         force = "强制" in str(source or "") or "force" in str(source or "").lower()
-        if not force and not self._price_reached_radar_activation(curr_px, live_only=True):
+        # 主闸：现价触线 / sticky（插针回撤）——不依赖 TP 限价是否成交
+        if not force and not self._activation_reached_for_arm(curr_px):
             # TP1+TP2 已成交：视为必须启动，不再卡在价触判定
             consumed = set(getattr(self, "tp_levels_consumed", []) or [])
             if not (1 in consumed and 2 in consumed):
@@ -227,7 +231,16 @@ class RadarReentryMixin:
                 atr = float(self._get_locked_initial_atr() or 0)
             except Exception:
                 atr = 0.0
-        init = float(arm_stop_price(side, entry, atr) or 0)
+        profile = getattr(self, "breath_profile", None) or {}
+        tick = float(profile.get("tick_size") or 0.01)
+        fee_pct = profile.get("fee_cover_pct")
+        init = float(
+            arm_stop_price(
+                side, entry, atr,
+                tick_size=tick,
+                fee_cover_pct=fee_pct,
+            ) or 0
+        )
         if init <= 0:
             init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
@@ -267,7 +280,8 @@ class RadarReentryMixin:
         open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
         from reentry_profiles import radar_gate_label
         self._radar_trigger_gate = (
-            f"雷达已激活·{open_kind}·{radar_gate_label(attempt)} | {source or '价触'}"
+            f"马拉松雷达已激活·保本起步·{open_kind}·{radar_gate_label(attempt)} | "
+            f"{source or '价触'}"
         )
         self._radar_stage_last = 1
         if not getattr(self, "_radar_arm_ding_sent", False):
@@ -281,8 +295,8 @@ class RadarReentryMixin:
                 logger.debug(f"雷达激活钉钉跳过: {e}")
         self._save_state()
         logger.info(
-            f"📡 [{self.symbol}] 雷达已激活 @{init:.2f} | "
-            f"{self._radar_trigger_gate} | hung=True"
+            f"📡 [{self.symbol}] 马拉松雷达已激活·保本起步 @{init:.2f} "
+            f"(entry={entry:.2f}) | {self._radar_trigger_gate} | hung=True"
         )
         return True
 
@@ -336,7 +350,41 @@ class RadarReentryMixin:
         px = float(exit_px or 0)
         if hard <= 0 or px <= 0:
             return False
-        return abs(px - hard) <= max(2.5, px * 0.002)
+        if abs(px - hard) <= max(2.5, px * 0.002):
+            return True
+        # WS 曾捕获 STOP 成交：即使哨兵醒来时 mark 已漂离，仍认硬止损
+        hint = getattr(self, "_ws_hard_sl_fill_hint", None) or {}
+        try:
+            ts = float(hint.get("ts") or 0)
+            hpx = float(hint.get("px") or hint.get("stop") or 0)
+        except (TypeError, ValueError):
+            ts, hpx = 0.0, 0.0
+        if ts > 0 and (time.time() - ts) <= 600.0:
+            if hpx > 0 and abs(hpx - hard) <= max(3.0, hard * 0.003):
+                return True
+            if abs(px - hard) <= max(8.0, hard * 0.005):
+                return True
+        return False
+
+    def _latch_ws_hard_sl_fill(self, fill_px=0.0, stop_px=0.0, source=""):
+        """UD-WS STOP 成交闩锁（pause 期间也记，供空仓归因）。"""
+        hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+        px = float(fill_px or stop_px or 0)
+        sp = float(stop_px or 0)
+        if hard > 0 and sp > 0 and abs(sp - hard) > max(5.0, hard * 0.01):
+            # 明显不是本仓硬止损价（可能是雷达腿）→ 仍记，但标 soft
+            pass
+        self._ws_hard_sl_fill_hint = {
+            "ts": time.time(),
+            "px": px or sp or hard,
+            "stop": sp or hard,
+            "source": str(source or "ws_stop"),
+        }
+        logger.info(
+            f"📌 [{self.symbol}] WS硬止损成交闩锁 "
+            f"px={float(self._ws_hard_sl_fill_hint['px']):.2f} "
+            f"stop={float(self._ws_hard_sl_fill_hint['stop']):.2f} | {source}"
+        )
 
     def _fetch_reentry_klines(self):
         """拉取 5m / 3m K 线（≥3 根，供 parse_kline_extreme 取最近已收盘根）。"""
