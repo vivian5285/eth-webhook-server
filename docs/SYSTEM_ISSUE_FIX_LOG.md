@@ -14,6 +14,24 @@
 
 ---
 
+## 2026-07-28 · 深币主脑对齐马拉松雷达（v13.92.0-marathon-radar）
+
+### 现象
+深币激活仍用 entry±0.4×ATR「保本底线」，交棒撤硬止损；与币安 v16.8.0 马拉松不一致。
+
+### 修复
+- `_radar_breakeven_floor` → fee+tick 真保本；`TV_BOOT_SL_ATR=0`
+- 价触 ADX 启动线即可武装（不强制等 TP1）；硬止损并存不撤
+- TP 成交只缩量/续阶梯，价格不跳变
+- 共享模块 `reentry_profiles`/`breath_*`/`reentry_tiers.json` 同步 5004+5005
+
+### 复查点
+- [x] `/health` 5004+5005 = `v13.92.0-marathon-radar`
+- [ ] 实盘激活日志「马拉松雷达已激活·保本起步」
+- [ ] 激活后硬止损单仍在
+
+---
+
 ## 2026-07-28 · 马拉松雷达保本起步（v16.8.0-marathon-radar）
 
 ### 现象

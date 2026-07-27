@@ -15,6 +15,7 @@ from pipeline_ledger import Role
 from chief_auditor import check_tp_slice_budget
 import dingtalk
 from tv_seq import (
+    collapse_batch_for_execution,
     reorder_batch_close_then_open,
     extract_seq_meta,
     is_close_action,
@@ -74,10 +75,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEEPCOIN_SUPERVISOR_VERSION = "v13.91.0-radar-adx-act"
+DEEPCOIN_SUPERVISOR_VERSION = "v13.92.0-marathon-radar"
 
-# 开仓成交后：迟到 CLOSE 忽略窗口（覆盖 1–2s 网络差）
-LATE_CLOSE_SUPPRESS_SEC = 5.0
+# 开仓成交后：迟到 CLOSE 忽略窗口（对齐币安 15s 铁律）
+LATE_CLOSE_SUPPRESS_SEC = 15.0
 # v13.90.2：哨兵从 0.5s 拉到慢速，杜绝 Deepcoin API 限流
 SENTINEL_POLL_NORMAL = 25.0
 SENTINEL_POLL_ARMING = 20.0
@@ -112,19 +113,20 @@ SHIELD_FAIL_BACKOFF_MAX_SEC = 300
 SHIELD_QTY_TOLERANCE_PCT = 0.04
 SHIELD_MAX_TIER_ORDERS = 1
 RADAR_DINGTALK_COOLDOWN_SEC = 120
-# TV v6.9.86 雷达呼吸空间（对齐 trailTight / TP2·TP3 trailing，避免 TP1 前被震荡扫出）
+# 马拉松雷达：激活瞬间保本起步 = entry ± tick ± fee（禁止 0.4ATR 锁利底线）
+# 兼容旧 trail 倍数（breath tick 失败时的兜底）
 TV_TRAIL_TIGHT = 0.62
-TV_TRAIL_TP2_ATR = TV_TRAIL_TIGHT * 0.32   # ≈0.20 ATR — TP1 成交后
-TV_TRAIL_TP3_ATR = TV_TRAIL_TIGHT * 0.48   # ≈0.30 ATR — TP2 成交后
-TV_BOOT_SL_ATR = 0.40                      # strongBull 保本底线 entry ± 0.4 ATR
-RADAR_FEE_BUFFER_PCT = 0.0015
+TV_TRAIL_TP2_ATR = TV_TRAIL_TIGHT * 0.32   # ≈0.20 ATR
+TV_TRAIL_TP3_ATR = TV_TRAIL_TIGHT * 0.48   # ≈0.30 ATR
+TV_BOOT_SL_ATR = 0.0                       # 已废除：旧 strongBull 0.4ATR 强制底线
+RADAR_FEE_BUFFER_PCT = 0.0008              # 对齐币安 fee_cover_pct
 RADAR_STOP_MIN_GAP_USD = 2.5
 RADAR_STOP_MIN_GAP_PCT = 0.0012
 MIN_TP_LEG_QTY = 1
 # 同向 TV 智能筛选：① ATR 变化 → 先平后开；② 价差低于该百分比 → 不重复开仓，仅刷新 TP123
 SAME_DIR_MIN_SPREAD_PCT = 0.15
 SAME_DIR_DEDUP_SEC = 300
-OPEN_SAME_DIR_COOLDOWN_SEC = 180  # 同向重复 OPEN：开仓后冷却期内禁止先平后开
+OPEN_SAME_DIR_COOLDOWN_SEC = 0  # 对齐币安：废除冷却禁先平后开
 ATR_SIMILAR_RATIO = 0.03  # 持仓 ATR 与 TV ATR 偏差 ≤3% 视为未变
 TV_JOURNAL = "logs/deepcoin_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/deepcoin_open_journal.jsonl"
@@ -223,6 +225,7 @@ class PositionSupervisor(PipelineBridgeMixin):
         self._last_radar_report_sl = 0.0
         self._radar_activation_notified = False
         self._radar_armed_after_tp1 = False
+        self.radar_activated = False
         self._ws_tp1_fill_hint = False
         self._open_settled_qty = 0
         self.sizing_principal = 0.0
@@ -292,22 +295,48 @@ class PositionSupervisor(PipelineBridgeMixin):
         )
 
     def _live_position_qty(self):
+        """返回张数；QUERY_FAILED/节流不可读返回 None（禁与 0 混淆）。"""
         pos = self._get_active_position()
+        if pos == "QUERY_FAILED":
+            return None
         if not pos:
             return 0
+        if not isinstance(pos, dict):
+            return None
         return self._safe_qty(pos.get("size"))
 
     def _confirm_position_flat(self, retries=None, delay=None):
-        """REST 延迟/重启抖动时多次复核，避免误报空仓触发常规清场"""
+        """
+        REST 延迟/重启抖动时多次复核。
+        QUERY_FAILED/节流：继续重试，禁止首轮 None 直接判失败（2026-07-27 CLEAR_VERIFY_FAIL 事故）。
+        仅在读到实盘 qty>dust 时判定「非空」；全部轮次不可读 → False（fail-closed）。
+        """
         retries = retries if retries is not None else FLAT_CONFIRM_RETRIES
         delay = delay if delay is not None else FLAT_CONFIRM_DELAY_SEC
+        saw_readable = False
+        last = None
         for i in range(max(1, int(retries))):
             qty = self._live_position_qty()
+            if qty is None:
+                logger.warning(
+                    f"⏳ [{self.symbol}] 空仓复核持仓不可读 "
+                    f"({i + 1}/{retries}) → 重试（非「仍有仓」）"
+                )
+                if i + 1 < retries:
+                    time.sleep(max(float(delay), 1.0))
+                continue
+            saw_readable = True
+            last = qty
             if qty > DUST_ORPHAN_CONTRACTS:
                 return False
             if i + 1 < retries:
                 time.sleep(delay)
-        return self._live_position_qty() <= DUST_ORPHAN_CONTRACTS
+        if not saw_readable:
+            logger.error(
+                f"❌ [{self.symbol}] 空仓复核全程 QUERY_FAILED/节流 → fail-closed"
+            )
+            return False
+        return float(last or 0) <= DUST_ORPHAN_CONTRACTS
 
     def _reconcile_stale_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
         initial_qty = self._safe_qty(initial_qty)
@@ -630,6 +659,7 @@ class PositionSupervisor(PipelineBridgeMixin):
                     batch.append(self._signal_queue.get_nowait())
                 except queue.Empty:
                     break
+            batch = collapse_batch_for_execution(batch)
             batch = reorder_batch_close_then_open(batch)
             self._annotate_close_open_chain(batch)
             for payload in batch:
@@ -1333,14 +1363,26 @@ class PositionSupervisor(PipelineBridgeMixin):
             shield_ok = self._ensure_radar_sl(live_qty, radar_sl) or shield_ok
         audit = self._wait_defense_settled(live_qty, stop_check)
 
-        if not self._tp_audit_ok(audit) or (
-            stop_check and not self._has_trigger_sl_near(stop_check)
-        ):
+        tp_ok = self._tp_audit_ok(audit)
+        stop_ok = (not stop_check) or self._has_trigger_sl_near(stop_check)
+        # 仅 TP 不齐才核武撤限价；止损缺口只补 STOP，禁止误撤已齐 TP1/TP2
+        if not tp_ok:
             logger.warning(
-                f"⚠️ [{source}] TP/止损未齐 ({audit.get('matched_full', 0)}/"
-                f"{audit.get('expected', 0)}) → 核武重挂 TP123+tv_sl"
+                f"⚠️ [{source}] TP未齐 ({audit.get('matched_full', 0)}/"
+                f"{audit.get('expected', 0)}) → 核武重挂剩余档"
             )
             audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=radar_sl, rounds=3)
+            shield_ok = self._maintain_hard_shield(live_qty, curr_px, force=True)
+            if radar_sl and not self._has_trigger_sl_near(radar_sl):
+                shield_ok = self._ensure_radar_sl(live_qty, radar_sl) or shield_ok
+            stop_check = self._resolve_defense_stop_for_audit(radar_sl)
+            audit = self._wait_defense_settled(live_qty, stop_check)
+        elif not stop_ok:
+            logger.warning(
+                f"⚠️ [{source}] TP已齐({audit.get('matched_full', 0)}/"
+                f"{audit.get('expected', 0)}) 但止损未确认 "
+                f"@{float(stop_check or 0):.2f} → 只补STOP、不撤TP"
+            )
             shield_ok = self._maintain_hard_shield(live_qty, curr_px, force=True)
             if radar_sl and not self._has_trigger_sl_near(radar_sl):
                 shield_ok = self._ensure_radar_sl(live_qty, radar_sl) or shield_ok
@@ -1667,29 +1709,126 @@ class PositionSupervisor(PipelineBridgeMixin):
         except (TypeError, ValueError):
             return default
 
+    def _list_active_positions(self):
+        """双向持仓：列出所有 pos>0 腿。查询失败返回 None（禁当空仓）。"""
+        try:
+            res = deepcoin_client.get_position_info(self.symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.symbol}] 持仓查询异常 → None: {e}")
+            return None
+        if res is None:
+            return None
+        if isinstance(res, dict) and (
+            res.get("_query_failed") or res.get("_throttle_rejected")
+        ):
+            return None
+        if not isinstance(res, dict) or "data" not in res:
+            return None
+        out = []
+        for p in res.get("data") or []:
+            qty = self._safe_qty(p.get("pos"))
+            if qty > 0:
+                out.append({
+                    "size": qty,
+                    "entry_price": round(float(p.get("avgPx", p.get("price", 0)) or 0), 2),
+                    "posSide": str(p.get("posSide", "long") or "long").lower(),
+                })
+        return out
+
     def _get_active_position(self):
-        res = deepcoin_client.get_position_info(self.symbol)
-        if res and 'data' in res:
-            for p in res['data']:
-                if self._safe_qty(p.get("pos")) > 0:
-                    return {
-                        "size": self._safe_qty(p.get("pos")),
-                        "entry_price": round(float(p.get("avgPx", p.get("price", 0)) or 0), 2),
-                        "posSide": p.get("posSide", "long").lower(),
-                    }
-        return None
+        """实盘仓位；REST/节流失败返回 QUERY_FAILED，禁止当空仓。
+        双向双腿并存时优先 current_side，并告警。
+        """
+        rows = self._list_active_positions()
+        if rows is None:
+            return "QUERY_FAILED"
+        if not rows:
+            return None
+        if len(rows) > 1:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 双向双腿并存: "
+                f"{[(r['posSide'], r['size']) for r in rows]}"
+            )
+            prefer = (self.current_side or "").upper()
+            want = "long" if prefer == "LONG" else ("short" if prefer == "SHORT" else "")
+            if want:
+                for r in rows:
+                    if r["posSide"] == want:
+                        return r
+            return max(rows, key=lambda r: r["size"])
+        return rows[0]
 
     def _verify_flat(self):
-        pos = self._get_active_position()
-        return pos is None or self._safe_qty(pos.get("size")) == 0
+        rows = self._list_active_positions()
+        if rows is None:
+            return False
+        return len(rows) == 0
+
+    def _count_pending_book(self):
+        """返回 (limits, triggers)；不可读返回 None。"""
+        try:
+            orders = deepcoin_client.get_pending_orders(self.symbol)
+            triggers = deepcoin_client.get_trigger_orders_pending(self.symbol)
+            if not isinstance(orders, list) or not isinstance(triggers, list):
+                return None
+            return len(orders), len(triggers)
+        except Exception as e:
+            logger.warning(f"挂单计数失败: {e}")
+            return None
+
+    def _verify_sterile_flat(self):
+        """无菌：双腿皆空 + 限价/条件单皆空。查失败→False。"""
+        if not self._verify_flat():
+            return False
+        counted = self._count_pending_book()
+        if counted is None:
+            return False
+        n_lim, n_trig = counted
+        return n_lim == 0 and n_trig == 0
+
+    def _sweep_all_legs_reduce_only(self, reason=""):
+        """双向：对每一腿 reduceOnly 市价平；用于平后复核/幽灵反向。"""
+        rows = self._list_active_positions()
+        if rows is None:
+            return False
+        if not rows:
+            return True
+        logger.warning(
+            f"🧹 [{self.symbol}] 双腿扫尾 {reason}: "
+            f"{[(r['posSide'], r['size']) for r in rows]}"
+        )
+        for pos in rows:
+            close_side = "sell" if pos["posSide"] == "long" else "buy"
+            deepcoin_client.place_market_order(
+                self.symbol, close_side, pos["posSide"], pos["size"], reduce_only=True,
+            )
+            time.sleep(0.8)
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.4)
+        return self._verify_flat()
 
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
-        if self._wait_verify(self._verify_flat, retries=4, delay=0.4):
+        tag = reason_tag or "开仓前"
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.35)
+        rows = self._list_active_positions()
+        if rows is None:
+            logger.error(f"❌ {tag}：持仓不可读，拒绝开仓")
+            return False
+        if rows:
+            logger.warning(f"⚠️ {tag}：检测到残留持仓，启动强制平仓")
+            if not self._close_all(f"{tag} · 强制清场", reset_state=True):
+                return False
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.35)
+        self._sweep_all_legs_reduce_only(f"{tag}·平后复核")
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.35)
+        if self._wait_verify(self._verify_sterile_flat, retries=8, delay=0.45):
             return True
-        logger.warning(f"⚠️ {reason_tag}：检测到残留持仓，启动强制平仓")
-        if self._close_all(f"{reason_tag} · 强制清场", reset_state=True):
-            return self._wait_verify(self._verify_flat, retries=6, delay=0.5)
-        return False
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.5)
+        return self._wait_verify(self._verify_sterile_flat, retries=6, delay=0.45)
 
     def _snapshot_sizing_principal(self, reason=""):
         """全平/开仓前：锁定 USDT 合约本金余额，供本周期开仓与超标核查共用"""
@@ -2916,6 +3055,7 @@ class PositionSupervisor(PipelineBridgeMixin):
         """
         开仓成交后 LATE_CLOSE_SUPPRESS_SEC 内的迟到 CLOSE → 忽略。
         同窗先平后开链（_close_open_chain_active）不忽略。
+        铁律：抑制窗内一律忽略（不依赖查仓），防刚开又秒平。
         """
         if getattr(self, "_close_open_chain_active", False):
             return False
@@ -2924,9 +3064,6 @@ class PositionSupervisor(PipelineBridgeMixin):
             return False
         age = time.time() - last_ts
         if age < 0 or age > float(LATE_CLOSE_SUPPRESS_SEC):
-            return False
-        pos = self._get_active_position()
-        if not pos or float(pos.get("size") or 0) <= 0:
             return False
         return True
 
@@ -3427,6 +3564,7 @@ class PositionSupervisor(PipelineBridgeMixin):
         self._save_state()
 
     def _perform_radar_handoff(self, real_amt, curr_px, reason=""):
+        """马拉松激活：价触 ADX 启动线 → 保本起步；硬止损并存不撤。"""
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
             return False
@@ -3435,49 +3573,65 @@ class PositionSupervisor(PipelineBridgeMixin):
         ):
             logger.info(f"📡 雷达交棒拒绝：开仓/防线重建中 | {reason or ''}")
             return False
-        if not self._tp1_filled_verified(real_amt, curr_px):
-            logger.info(f"📡 雷达交棒拒绝：TP1 未核实成交 | {reason or ''}")
-            return False
-        if not getattr(self, "_radar_armed_after_tp1", False):
-            if not self._price_reached_tp1_zone(curr_px):
+        # 主闸：ADX 启动价（不强制等 TP1）；TP1+TP2 已成交 / 过 TP1 区可兜底
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        force_tp12 = (1 in consumed and 2 in consumed)
+        gate = float(self._radar_activation_price() or 0)
+        px = float(curr_px or 0)
+        side = str(self.current_side or "").upper()
+        reached = False
+        if gate > 0 and px > 0:
+            if side == "LONG":
+                reached = px >= gate
+            elif side == "SHORT":
+                reached = px <= gate
+        if not force_tp12 and not reached:
+            if not (
+                self._tp1_filled_verified(real_amt, curr_px)
+                and self._price_reached_tp1_zone(curr_px)
+            ):
                 logger.info(
-                    f"📡 雷达交棒拒绝：价格未达 TP1 区域 | 现价={float(curr_px or 0):.2f} | "
-                    f"{reason or ''}"
+                    f"📡 马拉松雷达待命：未达激活线 "
+                    f"gate={gate:.2f} px={px:.2f} | {reason or ''}"
                 )
                 return False
+        if not getattr(self, "_radar_armed_after_tp1", False):
             self._radar_armed_after_tp1 = True
             self._save_state()
-        if not self._should_radar_trail(curr_px):
-            return False
-
-        new_sl = self._compute_radar_sl(curr_px)
-        if new_sl is None:
-            return False
 
         boot_sl = self._radar_breakeven_floor()
+        if boot_sl <= 0:
+            return False
+        # 激活瞬间：强制保本起步（不跳 0.4ATR 锁利）
         if self.current_side == "LONG":
-            boot_sl = self._clamp_radar_to_tv_floor(max(new_sl or 0, boot_sl))
+            boot_sl = self._clamp_radar_to_tv_floor(boot_sl)
             if boot_sl > float(self.current_sl or 0):
                 self.current_sl = boot_sl
-        else:
-            boot_sl = self._clamp_radar_to_tv_floor(min(new_sl or boot_sl, boot_sl))
-            if boot_sl < float(self.current_sl or 999999) or float(self.current_sl or 0) >= self.watched_entry:
+            elif float(self.current_sl or 0) <= float(self.watched_entry or 0):
                 self.current_sl = boot_sl
+        else:
+            boot_sl = self._clamp_radar_to_tv_floor(boot_sl)
+            cur = float(self.current_sl or 0)
+            entry = float(self.watched_entry or 0)
+            if cur <= 0 or cur >= entry or boot_sl < cur:
+                self.current_sl = boot_sl
+
+        # 账本 initial_stop 锚定保本位，供后续阶梯推进
+        self.initial_stop = float(self.current_sl or boot_sl)
+        try:
+            self.radar_activated = True
+        except Exception:
+            pass
 
         safe_sl = self._clamp_radar_sl_for_market(curr_px, self.current_sl)
         if not self._can_safely_place_radar_sl(curr_px, safe_sl):
             gap = self._radar_min_stop_gap(curr_px)
             logger.info(
-                f"📡 雷达交棒延迟：保本 {safe_sl:.2f} 距现价 {curr_px:.2f} "
-                f"不足 {gap:.2f} USDT，保留 tv_sl 呼吸空间"
+                f"📡 马拉松雷达延迟：保本 {safe_sl:.2f} 距现价 {curr_px:.2f} "
+                f"不足 {gap:.2f} USDT，硬止损继续守护"
             )
             return False
 
-        had_tv_shield = (
-            getattr(self, "shield_active", False)
-            or self._shield_present_on_exchange()
-        )
-        old_tv = self._shield_stop_price()
         self.current_sl = safe_sl
         self._radar_armed_after_tp1 = True
         self._save_state()
@@ -3490,28 +3644,19 @@ class PositionSupervisor(PipelineBridgeMixin):
         )
         if not sl_verified:
             logger.warning(
-                f"📡 雷达交棒中止：保本 @ {safe_sl:.2f} 未核实，不撤 tv_sl 不交棒"
+                f"📡 马拉松雷达中止：保本 @ {safe_sl:.2f} 未核实，硬止损保留"
             )
-            if had_tv_shield and old_tv:
-                self._maintain_hard_shield(real_amt, curr_px, force=True)
+            self._maintain_hard_shield(real_amt, curr_px, force=True)
             return False
 
-        if had_tv_shield:
-            # TODO(v13.81+): 币安单系统已禁止雷达激活时撤 tv_sl/硬止损（永久硬止损并行）。
-            # Deepcoin 仍 _disarm_shield — 勿在未测双 STOP 槽位前改，避免裸仓窗口。
-            self._disarm_shield("雷达交棒 · 保本已挂", notify=False)
+        # 马拉松：硬止损始终并存，禁止撤盾
+        self._maintain_hard_shield(real_amt, curr_px, force=False)
 
         logger.info(
-            f"📡 雷达交棒成功：保本 @ {safe_sl:.2f} | best={self.best_price:.2f} | "
-            f"现价 {curr_px:.2f}"
+            f"📡 马拉松雷达已激活·保本起步 @{safe_sl:.2f} | "
+            f"entry={float(self.watched_entry or 0):.2f} | "
+            f"best={self.best_price:.2f} | 现价 {curr_px:.2f} | 硬止损并存"
         )
-        if had_tv_shield and not getattr(self, "_shield_handoff_notified", False):
-            self._notify_shield_handoff_to_radar(
-                real_amt, curr_px, safe_sl,
-                reason=reason or "雷达交棒 · 先挂保本再撤 tv_sl",
-                sl_verified=True,
-                cancelled_hint=1 if old_tv else 0,
-            )
         if not getattr(self, "_radar_activation_notified", False):
             self._report_radar_first_activation(
                 real_amt, curr_px, safe_sl, sl_placed,
@@ -3528,19 +3673,9 @@ class PositionSupervisor(PipelineBridgeMixin):
         return 1 if ok else 0
 
     def _should_disarm_shield_for_favorable(self, curr_px):
-        """TP1 成交且雷达已激活 → 才撤 tv_sl 交棒移动保本（TP1 前保留宽硬止损）
-        TODO(v13.81+): 币安 _should_disarm_shield_for_favorable 已恒 False（不撤硬止损）；
-        本函数仍 True 时会走 _perform_radar_handoff → _disarm_shield，待对齐规格再改。"""
-        if not self._tp1_filled_verified():
-            return False
-        stop_px = self._shield_stop_price()
-        has_shield = bool(
-            getattr(self, "shield_active", False)
-            or (stop_px and self._has_shield_stop_at_price(stop_px))
-        )
-        if not has_shield:
-            return False
-        return self._is_radar_active() or self._should_radar_trail(curr_px)
+        """马拉松对齐币安：硬止损始终并存，禁止交棒撤硬止损。"""
+        _ = curr_px
+        return False
 
     def _shield_needs_exchange_action(self, live_qty, audit):
         status = audit.get("status")
@@ -4178,9 +4313,14 @@ class PositionSupervisor(PipelineBridgeMixin):
         return self._maintain_hard_shield(real_amt, curr_px)
 
     def _is_radar_active(self):
+        """马拉松：已武装且止损在浮盈侧（不强制等 TP1）。"""
         if not self.watched_entry or not self.current_sl:
             return False
-        if not self._tp1_filled_verified():
+        armed = bool(
+            getattr(self, "radar_activated", False)
+            or getattr(self, "_radar_armed_after_tp1", False)
+        )
+        if not armed:
             return False
         if self.current_side == "LONG":
             return self.current_sl > self.watched_entry
@@ -4189,9 +4329,9 @@ class PositionSupervisor(PipelineBridgeMixin):
         return False
 
     def _radar_sl_to_pass(self):
-        if not self._tp1_filled_verified():
+        if not self._is_radar_active():
             return None
-        return self.current_sl if self._is_radar_active() else None
+        return self.current_sl
 
     def _audit_requires_nuclear(self, audit):
         expected = audit.get("expected", 0)
@@ -4565,16 +4705,35 @@ class PositionSupervisor(PipelineBridgeMixin):
         return TV_TRAIL_TP2_ATR
 
     def _radar_breakeven_floor(self):
+        """马拉松保本位：entry ± tick ± fee_cover（禁止 0.4×ATR 锁利跳价）。"""
         entry = float(self.watched_entry or 0)
         if entry <= 0:
             return 0.0
-        atr = float(self.current_atr or 30.0)
-        cushion = max(atr * TV_BOOT_SL_ATR, entry * RADAR_FEE_BUFFER_PCT)
-        if self.current_side == "LONG":
-            return round(entry + cushion, 2)
-        if self.current_side == "SHORT":
-            return round(entry - cushion, 2)
-        return entry
+        side = str(self.current_side or "").strip().upper()
+        if side not in ("LONG", "SHORT"):
+            return entry
+        try:
+            from reentry_profiles import breakeven_arm_price, FEE_COVER_PCT
+        except Exception:
+            fee_pct = float(RADAR_FEE_BUFFER_PCT or 0.0008)
+            tick = 0.01
+            try:
+                profile = getattr(self, "breath_profile", None) or {}
+                tick = float(profile.get("tick_size") or 0.01) or 0.01
+            except Exception:
+                tick = 0.01
+            fee = entry * fee_pct
+            if side == "LONG":
+                return round(entry + tick + fee, 2)
+            return round(entry - tick - fee, 2)
+        profile = getattr(self, "breath_profile", None) or {}
+        tick = float(profile.get("tick_size") or 0.01) or 0.01
+        fee_pct = profile.get("fee_cover_pct")
+        if fee_pct is None:
+            fee_pct = FEE_COVER_PCT
+        return breakeven_arm_price(
+            side, entry, tick_size=tick, fee_cover_pct=fee_pct,
+        )
 
     def _radar_trail_offset_price(self):
         return float(self.current_atr or 30.0) * self._radar_tv_trail_atr_mult()
@@ -4627,10 +4786,24 @@ class PositionSupervisor(PipelineBridgeMixin):
     def _nuclear_realign_tp(self, live_qty, entry, dynamic_sl=None, rounds=3):
         """
         核武级止盈对齐：只撤限价 TP → 重挂 TP1+TP2 → 始终续挂 tv_sl/雷达合并止损。
-        v13.82：每轮撤后若补挂=0 且仍有应挂档 → 立即再补挂一轮，禁止裸 TP 收工。
+        v13.91.1：TP 已齐禁止再撤限价；止损缺口单独补 STOP。
         """
         last_audit = self._audit_tp_levels(live_qty)
         for r in range(rounds):
+            # 盘口 TP 已齐：禁止再撤限价（止损缺口由 hard_shield/radar 单独补）
+            if self._tp_audit_ok(last_audit):
+                logger.info(
+                    f"☢️ 核武跳过清场：TP已齐 "
+                    f"{last_audit.get('matched_full', 0)}/"
+                    f"{last_audit.get('expected', 0)} | "
+                    f"{self._format_audit_summary(last_audit)}"
+                )
+                curr_px = deepcoin_client.get_current_price(self.symbol)
+                self._maintain_hard_shield(live_qty, curr_px, force=False)
+                if dynamic_sl and not self._has_trigger_sl_near(dynamic_sl):
+                    self._ensure_radar_sl(live_qty, dynamic_sl)
+                self._mark_defense_align_ok()
+                return last_audit
             logger.warning(
                 f"☢️ 核武级止盈清场重挂 {r + 1}/{rounds} | 持仓 {live_qty}张 | "
                 f"当前 {last_audit['matched_full']}/{last_audit['expected']} | "
@@ -4651,9 +4824,10 @@ class PositionSupervisor(PipelineBridgeMixin):
                 self._ensure_radar_sl(live_qty, dynamic_sl)
             time.sleep(1.0)
             last_audit = self._audit_tp_levels(live_qty)
-            stop_px = self._resolve_defense_stop_for_audit(dynamic_sl)
-            if self._defenses_fully_ok(live_qty, stop_px):
+            # TP 已齐即收工；止损缺口不构成「再核武撤TP」理由
+            if self._tp_audit_ok(last_audit):
                 logger.info(f"☢️ 核武重挂成功: {self._format_audit_summary(last_audit)}")
+                self._mark_defense_align_ok()
                 return last_audit
             logger.warning(
                 f"☢️ 核武轮 {r + 1} 仍未对齐: {self._format_audit_summary(last_audit)}"
@@ -5278,12 +5452,8 @@ class PositionSupervisor(PipelineBridgeMixin):
         return {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
 
     def _advance_radar_on_tp_fill(self, tp_fills, curr_px, live_qty):
+        """马拉松：TP 成交只刷新 best/缩量，止损价不强制跳变。"""
         if not tp_fills:
-            return None
-        if not getattr(self, "_radar_armed_after_tp1", False) and not self._price_reached_tp1_zone(curr_px):
-            logger.warning(
-                "📡 [雷达推进] 跳过：TP1 证据不足，保持阶段0宽硬止损"
-            )
             return None
         for f in tp_fills:
             px = f["price"]
@@ -5294,23 +5464,29 @@ class PositionSupervisor(PipelineBridgeMixin):
                 self.best_price = min(self.best_price, px, bp)
         max_level = max(f["level"] for f in tp_fills)
         tp3 = self.tv_tps[2] if len(self.tv_tps) > 2 else 0.0
-        self._radar_armed_after_tp1 = True
-        new_sl = self._compute_radar_sl(curr_px)
-        floor_px = self._radar_breakeven_floor()
-        if new_sl is not None:
-            if self.current_side == "LONG":
-                self.current_sl = max(self.current_sl or floor_px, new_sl, floor_px)
-            else:
-                self.current_sl = min(self.current_sl or floor_px, new_sl, floor_px)
-        elif max_level >= 1:
-            self.current_sl = floor_px
+        # 若尚未武装且已达激活线 → 保本起步；否则价格保持阶梯连续性
+        if not self._is_radar_active() and self._should_radar_trail(curr_px):
+            self._perform_radar_handoff(
+                live_qty, curr_px, reason=f"TP{max_level}成交·激活",
+            )
+        elif self._is_radar_active():
+            # 继续阶梯/呼吸，禁止抬强制底线跳变
+            tick = self._apply_breath_stop_tick(curr_px)
+            if tick and float(tick.get("stop") or 0) > 0:
+                new_sl = float(tick["stop"])
+                if self.current_side == "LONG":
+                    self.current_sl = max(float(self.current_sl or 0), new_sl)
+                else:
+                    cur = float(self.current_sl or 0)
+                    self.current_sl = min(cur, new_sl) if cur > 0 else new_sl
         note = f"TP{max_level}成交"
         if max_level >= 2 and tp3 > 0:
-            note += f" → 雷达止损向 TP3({tp3:.2f}) 动态收紧"
+            note += f" → 缩量续阶梯·向 TP3({tp3:.2f})（价格不跳）"
         elif max_level == 1:
-            note += " → 雷达保本启动，静默守 TP2/TP3"
+            note += " → 缩量·价格不跳变（马拉松）"
         logger.info(
-            f"📈 [雷达推进] {note} | SL={self.current_sl:.2f} | best={self.best_price:.2f}"
+            f"📈 [雷达推进] {note} | SL={float(self.current_sl or 0):.2f} | "
+            f"best={self.best_price:.2f}"
         )
         self._save_state()
         return self.current_sl if self.current_sl else None
@@ -6143,45 +6319,91 @@ class PositionSupervisor(PipelineBridgeMixin):
                 target=self._sentinel_loop, daemon=True, name="sentinel",
             ).start()
 
-    def _full_reentry(self, action, close_reason):
-        """铁律：先平现有仓 → 净挂单 → 再开仓刷新；钉钉核实。"""
+    def _full_reentry(self, action, close_reason, payload=None):
+        """铁律：先平现有仓 → 净挂单 → 再开仓刷新；钉钉核实。payload 必须下传到开仓（ATR/TP）。"""
+        payload = payload or {}
         reason = close_reason or "TV开仓·一律先平后开"
         try:
             self._pipeline_pending_clear(note=reason)
         except Exception:
             pass
-        deepcoin_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
-        if not self._close_all(reason, reset_state=True):
-            logger.error("❌ 先平后开中止：平仓未归零，拒绝叠仓开仓")
+        # 已空仓：跳过重型 _close_all，少烧节流预算（仍净挂单）
+        pre = self._get_active_position()
+        already_flat = pre is None
+        if already_flat:
+            logger.info(f"⚡ [{self.symbol}] 先平后开：现仓已空 → 跳过强平，仅净场复核")
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.4)
+        else:
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.5)
+            if not self._close_all(reason, reset_state=True):
+                logger.error("❌ 先平后开中止：平仓未归零，拒绝叠仓开仓")
+                try:
+                    self._pipeline_fail(Role.AUDITOR_POS, "CLEAR_FAIL")
+                except Exception:
+                    pass
+                dingtalk.report_system_alert(
+                    "先平后开中止 · 平仓未归零",
+                    "强平后盘口仍有持仓，已拒绝新开仓，请人工核查 Deepcoin 盘口",
+                )
+                self._close_open_chain_active = False
+                return
+        if not self._confirm_position_flat(retries=10, delay=0.8):
+            # 节流耗尽时再等窗口半程后最终确认一次
             try:
-                self._pipeline_fail(Role.AUDITOR_POS, "CLEAR_FAIL")
+                from api_throttle import get_throttle
+                time.sleep(min(25.0, float(get_throttle("deepcoin").window_sec or 60) * 0.4))
             except Exception:
-                pass
-            dingtalk.report_system_alert(
-                "先平后开中止 · 平仓未归零",
-                "强平后盘口仍有持仓，已拒绝新开仓，请人工核查 Deepcoin 盘口",
-            )
-            self._close_open_chain_active = False
-            return
-        if not self._wait_verify(self._verify_flat, retries=8, delay=0.5):
-            logger.error("❌ 先平后开中止：空仓核查未通过")
-            try:
-                self._pipeline_fail(Role.AUDITOR_POS, "CLEAR_VERIFY_FAIL")
-            except Exception:
-                pass
-            dingtalk.report_system_alert(
-                "先平后开中止 · 空仓核查失败",
-                "平仓指令已发但 REST 仍显示持仓，已拒绝叠仓开仓",
-            )
-            self._close_open_chain_active = False
-            return
+                time.sleep(12.0)
+            if not self._confirm_position_flat(retries=6, delay=1.0):
+                q = self._live_position_qty()
+                detail = (
+                    "持仓查询不可读(节流/QUERY_FAILED)"
+                    if q is None
+                    else f"REST 仍显示持仓 qty={q}"
+                )
+                logger.error(f"❌ 先平后开中止：空仓核查未通过 | {detail}")
+                try:
+                    self._pipeline_fail(Role.AUDITOR_POS, "CLEAR_VERIFY_FAIL")
+                except Exception:
+                    pass
+                dingtalk.report_system_alert(
+                    "先平后开中止 · 空仓核查失败",
+                    f"{detail}，已拒绝叠仓开仓（非必然有仓）",
+                )
+                self._close_open_chain_active = False
+                return
         try:
             self._pipeline_cleared(note="sterile_ok")
         except Exception:
             pass
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
+        # 双向持仓：平后可能因残限价/条件单成交冒出反向腿 → 再扫 + 无菌闸
+        self._sweep_all_legs_reduce_only("先平后开·平后反向复核")
+        deepcoin_client.cancel_all_open_orders(self.symbol)
+        time.sleep(0.4)
+        if not self._wait_verify(self._verify_sterile_flat, retries=8, delay=0.45):
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.5)
+            self._sweep_all_legs_reduce_only("先平后开·无菌重试扫腿")
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.4)
+            if not self._wait_verify(self._verify_sterile_flat, retries=6, delay=0.45):
+                counted = self._count_pending_book()
+                detail = f"pending={counted} flat={self._verify_flat()}"
+                logger.error(f"❌ 先平后开中止：无菌空仓失败 | {detail}")
+                try:
+                    self._pipeline_fail(Role.AUDITOR_POS, "STERILE_FAIL")
+                except Exception:
+                    pass
+                dingtalk.report_system_alert(
+                    "先平后开中止 · 无菌失败",
+                    f"仓/挂单未净场，已拒绝开仓，防反向单/幽灵仓 | {detail}",
+                )
+                self._close_open_chain_active = False
+                return
         curr_px = deepcoin_client.get_current_price(self.symbol) or self.tv_price
         if curr_px <= 0:
             logger.error("❌ 先平后开中止：无有效市价")
@@ -6198,7 +6420,7 @@ class PositionSupervisor(PipelineBridgeMixin):
             )
         except Exception:
             pass
-        self._open_position(action, curr_px)
+        self._open_position(action, curr_px, payload=payload)
         self._close_open_chain_active = False
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
@@ -6507,8 +6729,29 @@ class PositionSupervisor(PipelineBridgeMixin):
         self._full_reentry(
             action,
             "TV开仓·一律先平后开刷新仓位（有仓先平；无仓净挂单再开）",
+            payload=payload,
         )
         self._touch_entry_signal_signature(action)
+
+    def _resolve_tv_atr_for_open(self, payload=None):
+        """
+        开仓 ATR：payload → current_atr → 信号签名 → open_atr。
+        禁止只读 payload（_full_reentry 漏传时成交后裸仓，2026-07-27）。
+        """
+        payload = payload or {}
+        for cand in (
+            payload.get("atr"),
+            payload.get("ATR"),
+            getattr(self, "current_atr", 0),
+            (getattr(self, "_last_entry_signal", None) or {}).get("atr"),
+            (getattr(self, "last_tv_signal", None) or {}).get("atr"),
+            getattr(self, "open_atr", 0),
+            getattr(self, "_tv_signal_atr", 0),
+        ):
+            v = self._safe_float(cand, 0.0)
+            if v > 0:
+                return v
+        return 0.0
 
     def _open_position(self, action, curr_px, payload=None):
         payload = payload or {}
@@ -6517,6 +6760,26 @@ class PositionSupervisor(PipelineBridgeMixin):
             return
         self._open_in_progress = True
         try:
+            bind_atr = self._resolve_tv_atr_for_open(payload)
+            if bind_atr <= 0:
+                try:
+                    dingtalk.report_system_alert(
+                        f"[{getattr(self, 'tag', '?')}] 开仓拒绝·缺TV atr",
+                        f"{self.symbol} webhook/账本无 atr → 拒绝开仓",
+                        level="紧急",
+                        suggestion="检查 TV get_entry_json 是否传 atr",
+                    )
+                except Exception:
+                    pass
+                logger.error(f"拒绝开仓缺 TV atr [{self.symbol}]（下单前拦截）")
+                return
+            self.open_atr = bind_atr
+            self.current_atr = bind_atr
+            try:
+                self._tv_signal_atr = float(bind_atr)
+            except Exception:
+                pass
+
             self._snapshot_sizing_principal(
                 f"开仓前 {normalize_entry_type(payload.get('entry_type'))} R{self.regime}"
             )
@@ -6549,7 +6812,10 @@ class PositionSupervisor(PipelineBridgeMixin):
 
             open_side = "buy" if action == "LONG" else "sell"
             pos_side = "long" if action == "LONG" else "short"
-            logger.info(f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 张 | {self.symbol} | 档位 {self.regime}")
+            logger.info(
+                f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} 张 | {self.symbol} "
+                f"| 档位 {self.regime} | ATR={bind_atr:.2f}"
+            )
             try:
                 self._pipeline_entry_submitted(action, qty)
             except Exception:
@@ -6593,21 +6859,17 @@ class PositionSupervisor(PipelineBridgeMixin):
 
             self.current_side = action
             self.open_regime = self.regime
-            payload_atr = self._safe_float((payload or {}).get("atr"), 0.0)
-            if payload_atr <= 0:
-                try:
-                    dingtalk.report_system_alert(
-                        f"[{getattr(self, 'tag', '?')}] 开仓拒绝·缺TV atr",
-                        f"{self.symbol} webhook 无 atr → 拒绝开仓",
-                        level="紧急",
-                        suggestion="检查 TV get_entry_json 是否传 atr",
-                    )
-                except Exception:
-                    pass
-                logger.error(f"拒绝开仓缺 TV atr [{self.symbol}]")
-                return
-            self.open_atr = payload_atr
-            self.current_atr = payload_atr
+            # 成交后再次锁定；禁止缺 atr 直接 return 裸仓（旧 bug）
+            bind_atr = self._resolve_tv_atr_for_open(payload) or float(
+                getattr(self, "open_atr", 0) or getattr(self, "current_atr", 0) or 0
+            )
+            if bind_atr <= 0:
+                logger.error(
+                    f"🚨 [{self.symbol}] 成交后仍无 ATR → 仍挂防线(兜底 atr=30) 禁裸仓返回"
+                )
+                bind_atr = 30.0
+            self.open_atr = bind_atr
+            self.current_atr = bind_atr
             self.early_be_done = False
             self.initial_qty = real_qty
             self.base_qty = int(real_qty)
@@ -6621,7 +6883,7 @@ class PositionSupervisor(PipelineBridgeMixin):
                 pass
             self._protect_and_monitor(
                 real_qty, pos['entry_price'],
-                budget_note=f"[{self.symbol}] {budget_txt} | ",
+                budget_note=f"[{self.symbol}] {budget_txt} | ATR={bind_atr:.2f} | ",
                 target_qty=qty,
                 sizing_meta=sizing_meta,
             )
@@ -6813,7 +7075,7 @@ class PositionSupervisor(PipelineBridgeMixin):
         return self.current_atr * 1.5
 
     def _radar_activation_ratio(self):
-        """返回冻结的 ADX 启动比例（0.70~0.90）。"""
+        """返回冻结的 ADX 启动比例（马拉松：弱85%/中80%/强70%）。"""
         from reentry_profiles import normalize_activation_ratio
         frac = float(getattr(self, "radar_activation_frac", 0) or 0)
         adx = float(
@@ -6828,8 +7090,8 @@ class PositionSupervisor(PipelineBridgeMixin):
 
     def _radar_activation_price(self):
         """
-        v13.91.0 / 对齐币安 v16.7.0：ADX 70%~90% × 1.35×initial_atr。
-        优先账本冻结价；未激活仓迁移旧中点标记时按 ADX 重算并冻结。
+        马拉松 v13.92.0 / 对齐币安 v16.8.0：ADX 三档离散 × 1.35×initial_atr
+        （弱85% / 中80% / 强70%）。优先账本冻结价。
         """
         from reentry_profiles import (
             normalize_activation_ratio,
@@ -6837,7 +7099,10 @@ class PositionSupervisor(PipelineBridgeMixin):
         )
 
         frozen = float(getattr(self, "radar_activation_price", 0) or 0)
-        activated = bool(getattr(self, "radar_activated", False))
+        activated = bool(
+            getattr(self, "radar_activated", False)
+            or getattr(self, "_radar_armed_after_tp1", False)
+        )
         entry = float(self.watched_entry or getattr(self, "cycle_entry", 0) or 0)
         atr = float(
             getattr(self, "open_atr", 0)
@@ -6878,32 +7143,38 @@ class PositionSupervisor(PipelineBridgeMixin):
         return 0.0
 
     def _should_radar_trail(self, curr_px):
-        """已激活后持续追踪；TP1 未成交前不做移动保本"""
+        """已激活后持续追踪；价触 ADX 启动线即可武装（不强制等 TP1）。"""
         if getattr(self, "_radar_armed_after_tp1", False) and self._is_radar_active():
             return True
         if curr_px <= 0 or not self.watched_entry:
             return False
-        if not self._tp1_filled_verified(None, curr_px):
+        gate = float(self._radar_activation_price() or 0)
+        if gate <= 0:
             return False
         if self.current_side == "LONG":
-            return curr_px >= self._radar_activation_price()
-        return curr_px <= self._radar_activation_price()
+            return float(curr_px) >= gate
+        if self.current_side == "SHORT":
+            return float(curr_px) <= gate
+        return False
 
     def _compute_radar_sl(self, curr_px=0.0):
         if not self.watched_entry or self.best_price <= 0:
             return None
+        floor_px = self._radar_breakeven_floor()
         if self._is_radar_active():
             tick = self._apply_breath_stop_tick(curr_px)
             if tick and float(tick.get("stop") or 0) > 0:
                 sl = float(tick["stop"])
-                floor_px = self._radar_breakeven_floor()
+                # 马拉松：保本位仅作下限，不再用 0.4ATR 强制抬升
                 if self.current_side == "LONG":
-                    return max(sl, floor_px)
+                    return max(sl, floor_px) if floor_px > 0 else sl
                 if self.current_side == "SHORT":
-                    return min(sl, floor_px)
+                    return min(sl, floor_px) if floor_px > 0 else sl
                 return sl
+        # 未激活：仅返回保本位（激活起步用）
+        if floor_px > 0:
+            return floor_px
         trail_offset = self._radar_trail_offset_price()
-        floor_px = self._radar_breakeven_floor()
         if self.current_side == "LONG":
             return max(round(self.best_price - trail_offset, 2), floor_px)
         if self.current_side == "SHORT":
@@ -7243,18 +7514,26 @@ class PositionSupervisor(PipelineBridgeMixin):
         closed_successfully = False
 
         for round_i in range(6):
-            pos = self._get_active_position()
-            if not pos or self._safe_qty(pos.get("size")) == 0:
+            rows = self._list_active_positions()
+            if rows is None:
+                logger.error("🔪 强平中止：持仓查询失败（fail-closed）")
+                break
+            if not rows:
                 closed_successfully = True
                 break
 
-            close_side = "sell" if pos["posSide"] == "long" else "buy"
-            live_sz = self._safe_qty(pos["size"])
-            logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz}张 reduceOnly")
-            deepcoin_client.place_market_order(
-                self.symbol, close_side, pos["posSide"], live_sz, reduce_only=True,
-            )
-            time.sleep(1.5)
+            for pos in rows:
+                close_side = "sell" if pos["posSide"] == "long" else "buy"
+                live_sz = self._safe_qty(pos["size"])
+                logger.info(
+                    f"🔪 强平第 {round_i + 1}/6 轮: {pos['posSide']} "
+                    f"{close_side} {live_sz}张 reduceOnly"
+                )
+                deepcoin_client.place_market_order(
+                    self.symbol, close_side, pos["posSide"], live_sz, reduce_only=True,
+                )
+                time.sleep(0.6)
+            time.sleep(1.0)
 
         if not closed_successfully:
             residual = self._get_active_position()
