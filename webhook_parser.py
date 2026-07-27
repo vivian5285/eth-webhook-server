@@ -60,7 +60,7 @@ LEG_TP_RATIOS = [0.10, 0.20, 0.70]
 PLACE_TP_LEVELS = 2  # 仅挂 TP1+TP2；TP3 无上限交雷达（白皮书 §6 / §13.1#4）
 
 # ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
-RADAR_ACTIVATE_TP1_FRAC = 0.0  # 兼容旧常量；现行激活见 radar_gate_price_from_tps（中点/TP2）
+RADAR_ACTIVATE_TP1_FRAC = 0.70  # 兼容旧常量；现行=ADX插值70%~90%
 RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
 RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
 RADAR_TP1_FLOOR_ATR = 0.5
@@ -241,14 +241,15 @@ def get_leg_tp_ratios(payload=None):
 
 
 def get_radar_activation_ratio(regime=None):
-    """首次开仓默认 50% TP1 距；运行时由 reentry_attempt 覆盖。"""
+    """缺省启动比例下限 70%；运行时由开仓 ADX 冻结覆盖。"""
+    _ = regime
     return float(RADAR_ACTIVATE_TP1_FRAC)
 
 
 def format_radar_activation_ratios_label():
     return (
-        "递进雷达启动=50/65/80/95%×TP1距(1.35ATR)"
-        "|智能再入≤3次·限价优于TV0.3%"
+        "ADX启动70%~90%×1.35ATR"
+        "|智能再入≤1次·限价优于TV"
         "|硬止损不重入"
     )
 
@@ -736,6 +737,25 @@ def normalize_tv_payload(data):
     price = _to_float(src.get("price") or src.get("close") or src.get("entry"))
     atr = _to_float(src.get("atr") or src.get("ATR"))
     adx = _to_float(src.get("adx") or src.get("ADX") or src.get("adx_val"))
+    # 规格 3.7：TV 可选传 tier（0弱/1中/2强）；也接受 trend_tier / adx_tier
+    tier_raw = src.get("tier")
+    if tier_raw is None:
+        tier_raw = src.get("trend_tier")
+    if tier_raw is None:
+        tier_raw = src.get("adx_tier")
+    tier = None
+    if tier_raw is not None and str(tier_raw).strip() != "":
+        try:
+            tier = int(float(tier_raw))
+        except (TypeError, ValueError):
+            # 兼容弱/中/强中文或 weak/mid/strong
+            low = str(tier_raw).strip().lower()
+            if low in ("0", "弱", "弱趋势", "weak"):
+                tier = 0
+            elif low in ("1", "中", "中趋势", "mid", "medium"):
+                tier = 1
+            elif low in ("2", "强", "强趋势", "strong"):
+                tier = 2
 
     tp1 = _to_float(src.get("tp1") or src.get("tv_tp1") or src.get("TP1"))
     tp2 = _to_float(src.get("tp2") or src.get("tv_tp2") or src.get("TP2"))
@@ -771,6 +791,9 @@ def normalize_tv_payload(data):
         out["atr"] = atr
     if adx is not None:
         out["adx"] = adx
+    if tier is not None and tier in (0, 1, 2):
+        out["tier"] = tier
+        out["adx_tier"] = tier
     if tp1 is not None:
         out["tp1"] = tp1
         out["tv_tp1"] = tp1

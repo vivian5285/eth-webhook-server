@@ -14,6 +14,46 @@
 
 ---
 
+## 2026-07-27 · 雷达启动 ADX 70%~90%（v16.7.0-radar-adx-act）
+
+### 现象
+固定 50% 过早锁保本；等待过晚则 TV 已保本离场而 VPS 仍停在宽硬止损。
+
+### 修复
+- 第一层：`ratio=lerp(0.70,0.90,(ADX−17)/(35−17))`；`启动价=entry±ratio×1.35×initial_atr`
+- 首次/重入同一公式；开仓冻结 ratio+价；独立于 TP1 成交
+- 废除中点/TP2 绝对价主路径；第二层 trail 插值不动
+- Deepcoin 同步 `v13.91.0-radar-adx-act`
+
+### 复查点
+- [ ] `/health`=`v16.7.0-radar-adx-act`；Deepcoin=`v13.91.0-radar-adx-act`
+- [x] 单测 `test_radar_reentry` ADX 边界 + TP1 已成交仍可武装
+- [ ] 空仓待命真实 TV（禁止测试 webhook）
+
+---
+
+## 2026-07-27 · API 限流绝对封死（v16.6.2-rate-iron）
+
+### 现象
+同 VPS IP 反复 `-1003`（2400/min）；冷却窗内仍有 REST/「等待后重试」；Deepcoin 哨兵 0.5s 狂打；公网 K 线也吃币安配额；人工 resume 加剧雪崩。
+
+### 根因
+预算偏松（48/min）+ REST 间隔偏短；账户/名义/K 线绕过节流；Deepcoin 轮询过密；公开 K 线未计入节流阀。
+
+### 修复
+- `api_throttle`：默认预算 **24/min**、soft **0.60**、静默 **900s**、acquire 硬间隔 **1.8s**
+- `binance_client`：REST≥**2.0/1.5s**；挂单缓存 **45s**；冷却期零 REST；账户概览缓存；K线/名义走节流；`force_rest` 冷却降级
+- 哨兵 **45/30/25s**、空闲 **300s**、对账 **300s**（禁周期性 force_rest）
+- `/admin/resume` 冷却期默认 **429**（`force=1` 可强开）
+- Deepcoin：哨兵 **25s**、公开/私有 REST 硬间隔 + 节流；公网 Binance K 线走 `binance` 节流阀 + 90s 缓存
+
+### 复查点
+- [x] `/health`=`v16.6.2-rate-iron`；Deepcoin=`v13.90.2-rate-iron`（已上线）
+- [ ] 持续观察日志无新增 `-1003` / `REST 等待` 循环
+- [x] ETH 持仓 monitoring=true、trading_paused=false
+
+---
+
 ## 2026-07-27 · 流水线补强（开仓+补挂预算闸）（v16.6.1）
 
 ### 现象

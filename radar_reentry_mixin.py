@@ -56,6 +56,12 @@ class RadarReentryMixin:
             "radar_activation_frac": float(
                 getattr(self, "radar_activation_frac", ACTIVATION_TP1_FRAC) or ACTIVATION_TP1_FRAC
             ),
+            "radar_activation_price": float(
+                getattr(self, "radar_activation_price", 0) or 0
+            ),
+            "radar_activation_adx": float(
+                getattr(self, "radar_activation_adx", 0) or 0
+            ),
             "cycle_tv_price": float(getattr(self, "cycle_tv_price", 0) or 0),
             "cycle_tv_side": getattr(self, "cycle_tv_side", None),
             "cycle_open_atr": float(getattr(self, "cycle_open_atr", 0) or 0),
@@ -139,8 +145,9 @@ class RadarReentryMixin:
         )
 
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,
-                                  reentry_attempt=None, adx_tier=None, radar_tier=None):
-        """开仓后：硬+TP 已挂；雷达休眠至激活线。"""
+                                  reentry_attempt=None, adx_tier=None, radar_tier=None,
+                                  adx=None, activation_ratio=None):
+        """开仓后：硬+TP 已挂；雷达休眠至 ADX 启动线。"""
         attempt = int(
             reentry_attempt if reentry_attempt is not None
             else getattr(self, "reentry_attempt", 0) or 0
@@ -152,6 +159,12 @@ class RadarReentryMixin:
             radar_tier if radar_tier is not None
             else getattr(self, "radar_tier", at) or at
         )
+        adx_v = float(
+            adx if adx is not None
+            else getattr(self, "last_adx", 0)
+            or getattr(self, "radar_activation_adx", 0)
+            or 25.0
+        )
         st = init_cycle_on_open(
             side=side,
             tv_price=tv_price,
@@ -161,6 +174,8 @@ class RadarReentryMixin:
             symbol=self.symbol,
             adx_tier=at,
             radar_tier=rt,
+            adx=adx_v,
+            activation_ratio=activation_ratio,
         )
         for k, v in st.items():
             setattr(self, k, v)
@@ -170,14 +185,14 @@ class RadarReentryMixin:
         self._radar_activation_notified = False
         self._radar_notify_pending = False
         frac = float(st.get("radar_activation_frac") or 0)
-        from reentry_profiles import radar_gate_label
-        gate_lab = radar_gate_label(attempt)
+        from reentry_profiles import radar_gate_label_from_ratio
+        gate_lab = radar_gate_label_from_ratio(frac)
         self._radar_trigger_gate = f"被动雷达·{gate_lab}"
         self._apply_tier_breath_overlay()
         logger.info(
             f"⏳ [{self.symbol}] 雷达休眠至激活 "
             f"mode={gate_lab} attempt={attempt} "
-            f"gate≈{self._radar_activation_price():.4f}"
+            f"ratio={frac:.0%} gate≈{float(st.get('radar_activation_price') or self._radar_activation_price()):.4f}"
         )
 
     def _radar_is_dormant(self) -> bool:
@@ -790,6 +805,18 @@ class RadarReentryMixin:
         bumped = bump_after_reentry_fill(
             prev, prev_frac, self.symbol,
             adx_tier=int(getattr(self, "adx_tier", 1) or 1),
+            adx=float(
+                getattr(self, "radar_activation_adx", 0)
+                or getattr(self, "last_adx", 0)
+                or 25.0
+            ),
+            entry=entry,
+            open_atr=float(
+                getattr(self, "cycle_open_atr", 0)
+                or getattr(self, "open_atr", 0)
+                or 0
+            ),
+            side=side,
         )
         # 成交：释放本地标签（允许下次再入周期）
         self.reentry_limit_order_id = None

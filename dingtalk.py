@@ -862,17 +862,31 @@ def report_principal_snapshot(reason, principal, regime=None, margin_pct=None, t
     send_alert("📸 本金快照 · RISK20 预算基数已锁定", data, G_TITLE)
 
 
+def _tier_field(tier=None, adx=None, source=""):
+    """统一档位展示（弱/中/强）；无效则空串。"""
+    if tier is None:
+        return ""
+    try:
+        from reentry_profiles import format_tier_notify_line
+        return format_tier_notify_line(int(tier), adx=adx, source=source)
+    except Exception:
+        return f"T{tier}"
+
+
 def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
                            verify_note="", tp_audit=None, verified=True,
                            principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None,
                            tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None,
-                           hard_sl_px=None, radar_act_px=None, radar_act_ratio=None):
-    """妈妈版开仓通知。"""
+                           hard_sl_px=None, radar_act_px=None, radar_act_ratio=None,
+                           tier=None, adx=None, tier_source=""):
+    """妈妈版开仓通知（含 TV/ADX 弱中强档位）。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     direction = "LONG" if str(side).upper() == "LONG" else "SHORT"
     init_sl = float(hard_sl_px or 0)
     equity = float(principal_balance or (vps_sizing_meta or {}).get("principal") or 0)
+    act_px = float(radar_act_px or 0)
+    tier_line = _tier_field(tier, adx=adx, source=tier_source)
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "开仓": _g(f"**{direction}**", G_LIGHT if direction == "LONG" else G_DEEP),
@@ -880,9 +894,15 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "数量": _g(f"**{qty}** {unit}", G_ACCENT),
         "初始止损": _g(f"**{init_sl:.2f}**" if init_sl > 0 else "待挂", G_DEEP),
         "账户权益": _g(f"**{equity:.2f}** USDT" if equity > 0 else "—", G_MUTED),
-        "TP": _g("TP1+TP2 已挂（余仓阶段二）", G_LIGHT),
-        "呼吸止损": _g("阶段一 · 阶梯锁本", G_MAIN),
+        "TP": _g("TP1+TP2 已挂（余仓交雷达）", G_LIGHT),
+        "雷达待命": _g(
+            f"达 **{act_px:.2f}**（TP1–TP2中点）后激活"
+            if act_px > 0 else "达 TP1–TP2 中点后激活",
+            G_MAIN,
+        ),
     }
+    if tier_line:
+        data["📊 趋势档位"] = _g(f"**{tier_line}**", G_ACCENT)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
     send_alert(f"📈 [{sym}] 开仓 {direction}", data, G_TITLE)
@@ -1749,10 +1769,12 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     kind = str(open_kind or "").strip() or "首次开仓"
-    attempt_reentry = ("重入" in kind) or (
-        activation_frac is not None and float(activation_frac) >= 1.0
-    )
-    gate_lab = "TP2绝对价" if attempt_reentry else "TP1-TP2中点"
+    # v16.7.0：门槛为 ADX 比例，不再用中点/TP2
+    try:
+        from reentry_profiles import radar_gate_label_from_ratio
+        gate_lab = radar_gate_label_from_ratio(activation_frac)
+    except Exception:
+        gate_lab = "ADX启动 70%~90%×1.35ATR"
     act_px = float(activation_price or 0)
     tier_txt = ""
     if tier is not None:
@@ -1770,8 +1792,15 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "初始止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
         "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),
     }
-    if tier_txt:
-        data["档位"] = _g(f"**{tier_txt}**", G_ACCENT)
+    if tier is not None:
+        tier_line = _tier_field(tier, adx=adx)
+        data["📊 趋势档位"] = _g(
+            f"**{tier_line or tier_txt or f'T{tier}'}**", G_ACCENT,
+        )
+    elif tier_txt:
+        data["📊 趋势档位"] = _g(f"**{tier_txt}**", G_ACCENT)
+    if adx is not None and float(adx or 0) > 0 and tier is None:
+        data["ADX"] = _g(f"**{float(adx):.1f}**", G_MUTED)
     if trigger_gate:
         data["触发"] = _g(str(trigger_gate)[:120], G_MUTED)
     if verify_note:

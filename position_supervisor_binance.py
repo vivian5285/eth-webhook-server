@@ -175,21 +175,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.6.1-pipeline"
+BINANCE_VPS_VERSION = "v16.7.0-radar-adx-act"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
 
-# REST 降速（v16.4.6：成交靠 UD-WS，哨兵再降频防 -1003）
-SENTINEL_POLL_NORMAL = 20.0
-SENTINEL_POLL_ARMING = 15.0
-SENTINEL_POLL_RADAR = 12.0
-SENTINEL_POLL_JITTER_SEC = 3.0
-IDLE_PATROL_INTERVAL_SEC = 180
-IDLE_PATROL_BACKOFF_SEC = 600
+# REST 降速（v16.6.2：绝对封死同 IP 2400/min）
+SENTINEL_POLL_NORMAL = 45.0
+SENTINEL_POLL_ARMING = 30.0
+SENTINEL_POLL_RADAR = 25.0
+SENTINEL_POLL_JITTER_SEC = 5.0
+IDLE_PATROL_INTERVAL_SEC = 300
+IDLE_PATROL_BACKOFF_SEC = 900
 IDLE_TAKEOVER_COOLDOWN_SEC = 60
-HELD_RECONCILE_INTERVAL_SEC = 180
-STATE_SNAPSHOT_INTERVAL_SEC = 60
+HELD_RECONCILE_INTERVAL_SEC = 300
+STATE_SNAPSHOT_INTERVAL_SEC = 120
 # 当日日亏/连亏/次数/回撤「拒开仓」闸门：暂时关闭（v15.9.2）。
 # risk_manager 仍记账与日志；真正防击穿靠挂单幂等硬上限，不靠日熔断挡 TV。
 CIRCUIT_BREAKER_OPEN_GATE_ENABLED = False
@@ -3707,8 +3707,46 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 tier = 1
         return float(defense_buffer_mult(self.symbol, tier=int(tier)))
 
-    def _bind_adx_tier_on_open(self, adx=None):
-        """开仓时锁定 ADX 档位（仅雷达步进/呼吸；硬止损 buffer 恒 1.15）。规格 3.7：TV.tier 可选，缺省 ADX 反推。"""
+    @staticmethod
+    def _extract_tv_tier(payload):
+        """从 TV payload 取 0/1/2；无效则 None。"""
+        if not isinstance(payload, dict):
+            return None
+        for key in ("tier", "adx_tier", "trend_tier"):
+            raw = payload.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                t = int(float(raw))
+            except (TypeError, ValueError):
+                low = str(raw).strip().lower()
+                mapping = {
+                    "弱": 0, "弱趋势": 0, "weak": 0,
+                    "中": 1, "中趋势": 1, "mid": 1, "medium": 1,
+                    "强": 2, "强趋势": 2, "strong": 2,
+                }
+                t = mapping.get(low)
+                if t is None:
+                    continue
+            if t in (0, 1, 2):
+                return t
+        return None
+
+    def _bind_adx_tier_on_open(self, adx=None, tier=None):
+        """开仓时锁定 ADX 档位（仅雷达步进/呼吸；硬止损 buffer 恒 1.15）。
+        规格 3.7：优先 TV.tier（0/1/2），缺省用 ADX 反推。
+        """
+        tv_tier = tier
+        if tv_tier is None:
+            try:
+                snap = getattr(self, "_pending_open_defense_snap", None) or {}
+                raw = snap.get("tier")
+                if raw is None:
+                    raw = (snap.get("payload") or {}).get("tier")
+                if raw is not None and str(raw).strip() != "":
+                    tv_tier = int(float(raw))
+            except Exception:
+                tv_tier = None
         if adx is None:
             adx = float(getattr(self, "last_adx", 0) or 0)
             if adx <= 0:
@@ -3716,16 +3754,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     _, adx = self._refresh_market_metrics(force=False)
                 except Exception:
                     adx = 25.0
-        tier = int(resolve_adx_tier(adx=float(adx or 25.0)))
-        self.adx_tier = tier
-        self.radar_tier = tier
+        if tv_tier is not None:
+            tier_i = int(resolve_adx_tier(tier=int(tv_tier)))
+            src = "TV.tier"
+        else:
+            tier_i = int(resolve_adx_tier(adx=float(adx or 25.0)))
+            src = "ADX反推"
+        self.adx_tier = tier_i
+        self.radar_tier = tier_i
         self.last_adx = float(adx or 25.0)
+        self._adx_tier_source = src
         self.hard_sl_buffer = float(self._defense_buffer_mult())
         logger.info(
-            f"📊 [{self.symbol}] ADX档锁定 T{tier}({tier_label(tier)}) "
-            f"ADX={float(adx or 0):.1f} buffer={self.hard_sl_buffer:.2f}"
+            f"📊 [{self.symbol}] ADX档锁定 T{tier_i}({tier_label(tier_i)}) "
+            f"ADX={float(adx or 0):.1f} src={src} buffer={self.hard_sl_buffer:.2f}"
         )
-        return tier
+        return tier_i
 
     def _effective_place_tp_levels(self):
         """v16.4.0：仅挂 TP1+TP2；TP3(70%) 永不挂限价。"""
@@ -4189,12 +4233,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self, "api_monitor_only", False
         ):
             return False
+        try:
+            if float(binance_client.ip_rate_limit_remaining() or 0) > 0:
+                return False
+        except Exception:
+            pass
         live_qty = float(live_qty or 0)
         if live_qty <= 0:
             return True
-        # 规格 10：持仓 REST 约 30s 一次；此处强制刷新，避免仅靠 WS 漂移
+        # v16.6.2：持仓对账默认用缓存/WS；禁止周期性 force_rest 打穿配额
         try:
-            rest_pos = self._get_active_position(prefer_ws=False, force_rest=True)
+            rest_pos = self._get_active_position(prefer_ws=True, force_rest=False)
             if rest_pos == "QUERY_FAILED":
                 logger.warning(
                     f"⚠️ [{self.symbol}] 持仓对账：REST 持仓不可读 → 保守跳过"
@@ -9718,7 +9767,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 regime=int(getattr(self, "open_regime", None) or self.regime or 3),
                 shield_cleared=True,
                 verify_note=(
-                    f"{open_kind} · 启动阈值={frac:.0%}×TP1距 | "
+                    f"{open_kind} · ADX启动={frac:.0%}×1.35ATR | "
                     f"激活价={act_px:.2f} | 止损上移@{float(new_sl):.2f} | "
                     f"持仓 {real_amt} {self._unit()}"
                 ),
@@ -13058,7 +13107,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             "tv_sl_ref": tv_sl_ref,
             "atr": float(init_atr),  # 权威：仅 TV atr
             "atr_source": str(atr_meta.get("source") or "tv"),
-            "adx": float(vps_adx or getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
+            "adx": float(
+                self._safe_float(payload.get("adx"), 0)
+                or vps_adx
+                or getattr(self, "last_adx", ADX_FALLBACK)
+                or ADX_FALLBACK
+            ),
+            "tier": self._extract_tv_tier(payload),
             "regime": int(
                 self._safe_int(payload.get("regime"), 0)
                 or getattr(self, "regime", 0)
@@ -13114,6 +13169,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 logger.warning(f"[{self.symbol}] LockedInitialAtr 绑定跳过: {e}")
         if float(snap.get("adx") or 0) > 0:
             self.last_adx = float(snap["adx"])
+        try:
+            st = snap.get("tier")
+            if st is None:
+                st = (snap.get("payload") or {}).get("tier")
+            if st is not None and str(st).strip() != "":
+                self._bind_adx_tier_on_open(
+                    adx=float(snap.get("adx") or getattr(self, "last_adx", 0) or 0),
+                    tier=int(float(st)),
+                )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] TV.tier 绑定跳过: {e}")
         if int(snap.get("regime") or 0) in (1, 2, 3, 4):
             self.regime = int(snap["regime"])
             self.open_regime = int(snap["regime"])
@@ -13659,6 +13725,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     or 0
                 ),
                 reentry_attempt=int(getattr(self, "reentry_attempt", 0) or 0),
+                adx=float(getattr(self, "last_adx", 0) or 25.0),
             )
             hung = binance_client.find_protective_stop_prices(self.symbol)
             frozen = self._frozen_hard_px()
@@ -13883,6 +13950,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 hard_sl_px=hard_sl_px,
                 radar_act_px=act_px,
                 radar_act_ratio=self._radar_activation_ratio(),
+                tier=int(getattr(self, "adx_tier", 1) or 1),
+                adx=float(getattr(self, "last_adx", 0) or 0),
+                tier_source=str(getattr(self, "_adx_tier_source", "") or ""),
             )
             try:
                 self._pipeline_reported(note="supervisor_open")
@@ -14422,49 +14492,32 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
     def _radar_activation_ratio(self):
-        """
-        兼容旧进度接口：朝激活门的 0~1 进度用 _radar_activation_progress。
-        此处返回模式标记 0=首次中点 / 1=重入TP2。
-        """
-        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        """返回冻结的 ADX 启动比例（0.70~0.90）。"""
+        from reentry_profiles import normalize_activation_ratio
         frac = float(getattr(self, "radar_activation_frac", 0) or 0)
-        if attempt >= 1 or frac >= 1.0:
-            return 1.0
-        return float(
-            activation_frac_for_attempt(
-                attempt, get_reentry_profile(self.symbol),
-            )
+        adx = float(
+            getattr(self, "radar_activation_adx", 0)
+            or getattr(self, "last_adx", 0)
+            or 25.0
         )
+        ratio = normalize_activation_ratio(frac, adx)
+        if abs(ratio - frac) > 1e-9:
+            self.radar_activation_frac = ratio
+        return float(ratio)
 
     def _radar_activation_price(self):
         """
-        规格 §5.1：激活绝对价。
-          首次 = (TP1+TP2)/2 ；重入 = TP2。
-        TP 取 webhook 绝对价，与本笔成交价无关。
+        v16.7.0：ADX 70%~90% × 1.35×initial_atr。
+        优先账本冻结价；未激活仓迁移旧中点标记时按 ADX 重算并冻结。
         """
-        from reentry_profiles import radar_gate_price_from_tps
+        from reentry_profiles import (
+            normalize_activation_ratio,
+            radar_activation_price_adx,
+        )
 
-        tps = list(getattr(self, "tv_tps", None) or [])
-        tp1 = float(tps[0] or 0) if len(tps) > 0 else 0.0
-        tp2 = float(tps[1] or 0) if len(tps) > 1 else 0.0
-        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
-        # radar_activation_frac>=1 也视为重入门（状态兼容）
-        if float(getattr(self, "radar_activation_frac", 0) or 0) >= 1.0:
-            attempt = max(attempt, 1)
-        gate = radar_gate_price_from_tps(tp1, tp2, reentry_attempt=attempt)
-        if gate > 0:
-            return gate
-        # 无完整 TP12 时回退旧距离公式（仅兜底）
-        entry = float(self.watched_entry or 0)
-        frac = 0.85 if attempt < 1 else 1.0
-        tv_px = float(getattr(self, "tv_price", 0) or 0)
-        if entry > 0 and tp1 > 0:
-            px = activation_price_from_tp1(
-                self.current_side, entry, tp1, frac=frac,
-                tv_price=tv_px if tv_px > 0 else None,
-            )
-            if px > 0:
-                return px
+        frozen = float(getattr(self, "radar_activation_price", 0) or 0)
+        activated = bool(getattr(self, "radar_activated", False))
+        entry = float(self.watched_entry or getattr(self, "cycle_entry", 0) or 0)
         atr = float(
             getattr(self, "open_atr", 0)
             or getattr(self, "cycle_open_atr", 0)
@@ -14475,16 +14528,33 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 atr = float(self._get_locked_initial_atr() or 0)
             except Exception:
                 atr = 0.0
-        px = reentry_activation_px(self.current_side, entry, atr, frac)
-        if px > 0:
-            return px
-        if tp1 <= 0 and entry > 0:
-            tp1 = (
-                entry + self._tp1_distance()
-                if self.current_side == "LONG"
-                else entry - self._tp1_distance()
+        ratio = self._radar_activation_ratio()
+        adx = float(
+            getattr(self, "radar_activation_adx", 0)
+            or getattr(self, "last_adx", 0)
+            or 25.0
+        )
+        # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
+        if frozen > 0 and entry > 0:
+            # 旧中点价可能仍在账本：若与 ADX 公式偏差过大且未激活 → 重算
+            if not activated and atr > 0:
+                expect = radar_activation_price_adx(
+                    self.current_side, entry, atr, adx=adx, ratio=ratio,
+                )
+                if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.15:
+                    self.radar_activation_price = expect
+                    return expect
+            return frozen
+        if entry > 0 and atr > 0:
+            px = radar_activation_price_adx(
+                self.current_side, entry, atr, adx=adx, ratio=ratio,
             )
-        return radar_activation_price(self.current_side, entry, tp1, frac=frac)
+            if px > 0:
+                self.radar_activation_price = px
+                self.radar_activation_frac = float(ratio)
+                self.radar_activation_adx = float(adx)
+                return px
+        return 0.0
 
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):

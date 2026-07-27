@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 智能再入场状态机辅助（无交易所 IO；由 PositionSupervisor / mixin 驱动）。
-规格：最多 1 次重入；窗口按 K 线根数；激活门=TP1/TP2绝对价（首次中点/重入TP2）。
+规格：最多 1 次重入；窗口按 K 线根数；雷达启动=ADX 70%~90%×1.35ATR。
 """
 from __future__ import annotations
 
@@ -20,7 +20,10 @@ from reentry_profiles import (
     compute_reentry_limit_px,
     get_reentry_profile,
     looser_tier,
+    normalize_activation_ratio,
     parse_kline_extreme,
+    radar_activation_price_adx,
+    radar_activation_ratio_from_adx,
     reentry_window_deadline,
     tier_coeffs,
 )
@@ -81,10 +84,19 @@ def init_cycle_on_open(
     symbol: str = "ETHUSDT",
     adx_tier: int = 1,
     radar_tier: Optional[int] = None,
+    adx: Optional[float] = None,
+    activation_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
-    frac = activation_frac_for_attempt(attempt, rp)
+    adx_v = float(adx) if adx is not None else 25.0
+    if activation_ratio is not None:
+        frac = normalize_activation_ratio(activation_ratio, adx_v)
+    else:
+        frac = radar_activation_ratio_from_adx(adx_v)
+    gate = radar_activation_price_adx(
+        side, entry, open_atr, adx=adx_v, ratio=frac,
+    )
     base_tier = int(adx_tier if adx_tier is not None else 1)
     # 首次开仓：雷达档=ADX档；重入成交后由 bump 写入放宽档
     r_tier = int(radar_tier if radar_tier is not None else base_tier)
@@ -93,6 +105,8 @@ def init_cycle_on_open(
         "adx_tier": base_tier,
         "radar_tier": r_tier,
         "radar_activation_frac": frac,
+        "radar_activation_price": float(gate or 0),
+        "radar_activation_adx": float(adx_v),
         "cycle_tv_price": float(tv_price or 0),
         "cycle_tv_side": str(side or "").upper() or None,
         "cycle_open_atr": float(open_atr or 0),
@@ -176,20 +190,33 @@ def bump_after_reentry_fill(
     symbol: str,
     *,
     adx_tier: int = 1,
+    adx: Optional[float] = None,
+    entry: float = 0.0,
+    open_atr: float = 0.0,
+    side: str = "LONG",
 ) -> Dict[str, Any]:
     """
-    成交后再入：attempt+1（封顶1），雷达系数放宽一档，激活门改为 TP2 绝对价。
+    成交后再入：attempt+1（封顶1），雷达系数放宽一档；
+    启动比例沿用开仓冻结值（ADX 70%~90% 同一公式，不再改 TP2）。
     """
     rp = get_reentry_profile(symbol)
     nxt = int(prev_attempt or 0) + 1
     base = int(adx_tier if adx_tier is not None else 1)
     loose = looser_tier(base)
-    frac = activation_frac_for_attempt(nxt, rp)
+    adx_v = float(adx) if adx is not None else 25.0
+    frac = normalize_activation_ratio(prev_frac, adx_v)
+    gate = 0.0
+    if float(entry or 0) > 0 and float(open_atr or 0) > 0:
+        gate = radar_activation_price_adx(
+            side, entry, open_atr, adx=adx_v, ratio=frac,
+        )
     return {
         "reentry_attempt": nxt,
         "adx_tier": base,
         "radar_tier": loose,
         "radar_activation_frac": frac,
+        "radar_activation_price": float(gate or 0),
+        "radar_activation_adx": float(adx_v),
         "reentry_active": False,
         "reentry_limit_order_id": None,
         "reentry_limit_px": 0.0,

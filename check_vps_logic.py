@@ -827,19 +827,20 @@ def audit_module4_radar(a: Audit):
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from reentry_profiles import (
-        ACTIVATION_TP1_FRAC as _ACT0,
-        ACTIVATION_TP1_FRAC_REENTRY as _ACT1,
         HARD_SL_BUFFER_MULT as _BUF,
-        activation_frac_for_attempt as _act_frac,
-        radar_gate_price_from_tps as _gate,
+        RADAR_ACT_RATIO_LO as _RLO,
+        RADAR_ACT_RATIO_HI as _RHI,
+        radar_activation_price_adx as _gate_adx,
+        radar_activation_ratio_from_adx as _ratio_adx,
     )
     a.check(
-        "4.5c3b 激活门=中点/TP2绝对价",
-        abs(_ACT0 - 0.0) < 1e-9 and abs(_ACT1 - 1.0) < 1e-9
-        and abs(_act_frac(0) - 0.0) < 1e-9 and abs(_act_frac(1) - 1.0) < 1e-9
-        and abs(_gate(1925.65, 1955.00, 0) - 1940.325) < 1e-3
-        and abs(_gate(1925.65, 1955.00, 1) - 1955.00) < 1e-6,
-        f"first={_ACT0} reentry={_ACT1} mid={_gate(1925.65,1955,0)}",
+        "4.5c3b 激活门=ADX70%~90%×1.35ATR",
+        abs(_RLO - 0.70) < 1e-9 and abs(_RHI - 0.90) < 1e-9
+        and abs(_ratio_adx(17) - 0.70) < 1e-9
+        and abs(_ratio_adx(35) - 0.90) < 1e-9
+        and abs(_gate_adx("LONG", 3000, 20, adx=17) - 3018.9) < 1e-2
+        and abs(_gate_adx("LONG", 3000, 20, adx=35) - 3024.3) < 1e-2,
+        f"lo={_RLO} hi={_RHI} r17={_ratio_adx(17)}",
     )
     a.check("4.5c3c 硬止损呼吸垫统一1.15", abs(_BUF - 1.15) < 1e-9, str(_BUF))
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
@@ -1049,7 +1050,7 @@ def audit_readme_consistency(a: Audit):
         "README 呼吸止损参数",
         ("呼吸止损" in readme or "breath" in readme.lower() or "雷达" in readme)
         and ("1.15" in readme or "呼吸系数" in readme or "breathing" in readme.lower())
-        and ("0.85" in readme or "85%" in readme)
+        and ("70%" in readme or "ADX" in readme and "启动" in readme)
         and ("1.00" in readme or "100%" in readme),
     )
     a.check(

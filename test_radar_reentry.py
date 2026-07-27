@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""规格 §5.1：TP1/TP2 绝对价激活（首次中点 / 重入 TP2）+ 最多 1 次重入。"""
+"""v16.7.0：ADX 70%~90%×1.35ATR 雷达启动 + 最多 1 次重入。"""
 from __future__ import annotations
 
 import time
 import unittest
 
-from breath_profiles import BREATH_ETH, BREATH_XAU, get_breath_profile
+from breath_profiles import BREATH_ETH, get_breath_profile
 from reentry_profiles import (
     ACTIVATION_MODE_FIRST,
-    ACTIVATION_MODE_REENTRY,
     ARM_SL_ATR,
     HARD_SL_BUFFER_MULT,
     MAX_REENTRIES,
+    RADAR_ACT_ADX_HI,
+    RADAR_ACT_ADX_LO,
+    RADAR_ACT_RATIO_HI,
+    RADAR_ACT_RATIO_LO,
     activation_frac_for_attempt,
     activation_mode_for_attempt,
     activation_price,
@@ -28,9 +31,11 @@ from reentry_profiles import (
     looser_tier,
     make_reentry_client_order_id,
     next_activation_frac,
+    normalize_activation_ratio,
     pick_dual_insurance,
-    radar_gate_label,
-    radar_gate_price_from_tps,
+    radar_activation_price_adx,
+    radar_activation_ratio_from_adx,
+    radar_gate_label_from_ratio,
     reentry_enabled,
     reentry_window_sec,
     tier_coeffs,
@@ -40,7 +45,6 @@ from smart_reentry_engine import (
     blank_reentry_state,
     bump_after_reentry_fill,
     init_cycle_on_open,
-    plan_reentry_limit,
 )
 
 
@@ -61,105 +65,99 @@ class TestAdxTiers(unittest.TestCase):
         self.assertEqual(looser_tier(2), 2)
 
 
-class TestActivationTp12Absolute(unittest.TestCase):
-    """规格算例：tp1=1925.65 tp2=1955.00 → 首次中点 1940.325；重入=1955。"""
+class TestActivationAdxRatio(unittest.TestCase):
+    """ADX<=17→70%；ADX>=35→90%；中间线性；启动价=entry±ratio×1.35×ATR。"""
 
-    TP1 = 1925.65
-    TP2 = 1955.00
-    MID = (1925.65 + 1955.00) / 2.0  # 1940.325
+    ENTRY = 3000.0
+    ATR = 20.0
 
-    def test_modes(self):
+    def test_ratio_bounds(self):
+        self.assertAlmostEqual(RADAR_ACT_ADX_LO, 17.0)
+        self.assertAlmostEqual(RADAR_ACT_ADX_HI, 35.0)
+        self.assertAlmostEqual(RADAR_ACT_RATIO_LO, 0.70)
+        self.assertAlmostEqual(RADAR_ACT_RATIO_HI, 0.90)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(17), 0.70)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(16), 0.70)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(35), 0.90)
+        self.assertAlmostEqual(radar_activation_ratio_from_adx(40), 0.90)
+        mid = radar_activation_ratio_from_adx(26)
+        self.assertAlmostEqual(mid, 0.80, places=4)
+
+    def test_modes_same_formula(self):
         self.assertEqual(activation_mode_for_attempt(0), ACTIVATION_MODE_FIRST)
-        self.assertEqual(activation_mode_for_attempt(1), ACTIVATION_MODE_REENTRY)
+        self.assertEqual(activation_mode_for_attempt(1), ACTIVATION_MODE_FIRST)
         self.assertEqual(MAX_REENTRIES, 1)
-        self.assertAlmostEqual(activation_frac_for_attempt(0), 0.0)
-        self.assertAlmostEqual(activation_frac_for_attempt(1), 1.0)
-        self.assertEqual(radar_gate_label(0), "TP1-TP2中点")
-        self.assertEqual(radar_gate_label(1), "TP2绝对价")
+        r0 = activation_frac_for_attempt(0, adx=17)
+        r1 = activation_frac_for_attempt(1, adx=17)
+        self.assertAlmostEqual(r0, 0.70)
+        self.assertAlmostEqual(r1, 0.70)
+        self.assertIn("70%", radar_gate_label_from_ratio(0.70))
         self.assertEqual(tier_label(2), "强趋势")
 
-    def test_spec_numeric_first_mid(self):
-        gate = radar_gate_price_from_tps(self.TP1, self.TP2, reentry_attempt=0)
-        self.assertAlmostEqual(gate, 1940.325, places=3)
+    def test_long_gate_prices(self):
+        weak = radar_activation_price_adx(
+            "LONG", self.ENTRY, self.ATR, adx=17,
+        )
+        strong = radar_activation_price_adx(
+            "LONG", self.ENTRY, self.ATR, adx=35,
+        )
+        self.assertAlmostEqual(weak, 3018.9, places=2)
+        self.assertAlmostEqual(strong, 3024.3, places=2)
+        self.assertLess(weak, strong)
 
-    def test_spec_numeric_reentry_tp2(self):
-        gate = radar_gate_price_from_tps(self.TP1, self.TP2, reentry_attempt=1)
-        self.assertAlmostEqual(gate, self.TP2, places=2)
+    def test_short_gate_prices(self):
+        weak = radar_activation_price_adx(
+            "SHORT", self.ENTRY, self.ATR, adx=17,
+        )
+        self.assertAlmostEqual(weak, 2981.1, places=2)
 
-    def test_same_tps_different_gates(self):
-        first = radar_gate_price_from_tps(self.TP1, self.TP2, 0)
-        reent = radar_gate_price_from_tps(self.TP1, self.TP2, 1)
-        self.assertLess(first, reent)
-        self.assertAlmostEqual(first, self.MID, places=3)
-        self.assertAlmostEqual(reent, self.TP2, places=2)
-
-    def test_reentry_past_mid_before_tp2_must_stay_dormant(self):
-        """
-        【关键边界】重入单：价格已过中点、尚未到 TP2 → 雷达不得介入。
-        易漏写成「沿用首次中点门槛」。
-        """
-        mid = self.MID
-        tp2 = self.TP2
-        px = round((mid + tp2) / 2.0, 2)  # ~1947.66
-        self.assertGreater(px, mid)
-        self.assertLess(px, tp2)
-
-        first_gate = radar_gate_price_from_tps(self.TP1, self.TP2, 0)
-        reentry_gate = radar_gate_price_from_tps(self.TP1, self.TP2, 1)
-
-        wrongly_armed_if_first_gate = px >= first_gate
-        correctly_armed = px >= reentry_gate
-        self.assertTrue(wrongly_armed_if_first_gate)
-        self.assertFalse(correctly_armed)
+    def test_tp1_filled_does_not_block_price_arm(self):
+        """TP1 已成交仍可按价触闸武装（独立于 TP1）。"""
+        ratio = radar_activation_ratio_from_adx(26)
+        gate = radar_activation_price_adx(
+            "LONG", self.ENTRY, self.ATR, ratio=ratio,
+        )
+        armed = []
 
         class _S:
             current_side = "LONG"
-            watched_entry = 1890.0
-            best_price = 0.0
-            tv_tps = [
-                TestActivationTp12Absolute.TP1,
-                TestActivationTp12Absolute.TP2,
-                1980.0,
-            ]
-            reentry_attempt = 1
-            radar_activation_frac = 1.0
+            watched_entry = TestActivationAdxRatio.ENTRY
+            open_atr = TestActivationAdxRatio.ATR
+            radar_activation_frac = ratio
+            radar_activation_price = gate
+            radar_activated = False
+            tp_levels_consumed = [1]
 
             def _radar_activation_price(self):
-                return radar_gate_price_from_tps(
-                    self.tv_tps[0], self.tv_tps[1], self.reentry_attempt,
-                )
+                return float(self.radar_activation_price)
 
             def _price_reached_radar_activation(self, curr_px, live_only=True):
-                act = self._radar_activation_price()
-                if self.current_side == "LONG":
-                    return float(curr_px) >= act
-                return float(curr_px) <= act
+                return float(curr_px) >= self._radar_activation_price()
+
+            def _maybe_arm(self, curr_px):
+                if self.radar_activated:
+                    return True
+                if not self._price_reached_radar_activation(curr_px):
+                    return False
+                self.radar_activated = True
+                armed.append(True)
+                return True
 
         s = _S()
-        self.assertFalse(
-            s._price_reached_radar_activation(px),
-            msg="重入过中点未到TP2时不得激活",
-        )
-        self.assertTrue(s._price_reached_radar_activation(tp2))
-        s.reentry_attempt = 0
-        s.radar_activation_frac = 0.0
-        self.assertTrue(
-            s._price_reached_radar_activation(px),
-            msg="同一价位首次开仓应已过中点门槛",
-        )
+        self.assertIn(1, s.tp_levels_consumed)
+        self.assertFalse(s._price_reached_radar_activation(gate - 1))
+        self.assertTrue(s._maybe_arm(gate))
+        self.assertTrue(s.radar_activated)
+        self.assertEqual(len(armed), 1)
 
-    def test_short_gate_uses_tps(self):
-        tp1, tp2 = 1955.0, 1925.65
-        mid = (tp1 + tp2) / 2.0
-        self.assertAlmostEqual(radar_gate_price_from_tps(tp1, tp2, 0), mid, places=3)
-        self.assertAlmostEqual(radar_gate_price_from_tps(tp1, tp2, 1), tp2, places=2)
+    def test_legacy_frac_normalized(self):
+        self.assertAlmostEqual(normalize_activation_ratio(0.0, 17), 0.70)
+        self.assertAlmostEqual(normalize_activation_ratio(1.0, 35), 0.90)
+        self.assertAlmostEqual(normalize_activation_ratio(0.80, 99), 0.80)
 
-    def test_legacy_atr_fallback_still_callable(self):
-        atr, entry = 20.0, 3000.0
-        self.assertAlmostEqual(
-            activation_price("LONG", entry, atr, 0.85),
-            entry + atr * 1.1475, places=2,
-        )
+    def test_activation_price_helper(self):
+        px = activation_price("LONG", self.ENTRY, self.ATR, 0.70)
+        self.assertAlmostEqual(px, 3018.9, places=2)
 
     def test_arm_stop_half_atr(self):
         self.assertAlmostEqual(ARM_SL_ATR, 0.5)
@@ -192,6 +190,8 @@ class TestTierCoeffs(unittest.TestCase):
         eth = get_breath_profile("ETHUSDT")
         self.assertAlmostEqual(eth["initial_sl_atr"], 0.5)
         self.assertAlmostEqual(eth["early_be_atr"], 0.0)
+        self.assertAlmostEqual(eth["ratio_floor"], 0.6)
+        self.assertAlmostEqual(eth["ratio_ceiling"], 2.2)
 
 
 class TestReentryGate(unittest.TestCase):
@@ -275,43 +275,39 @@ class TestDualInsurance(unittest.TestCase):
 
 
 class TestEngine(unittest.TestCase):
-    def test_bump_loosens_tier_and_reentry_mode(self):
-        b = bump_after_reentry_fill(0, 0.0, "ETHUSDT", adx_tier=0)
+    def test_bump_keeps_frozen_ratio(self):
+        b = bump_after_reentry_fill(
+            0, 0.80, "ETHUSDT", adx_tier=0, adx=26,
+            entry=3000, open_atr=20, side="LONG",
+        )
         self.assertEqual(b["reentry_attempt"], 1)
         self.assertEqual(b["radar_tier"], 1)
-        self.assertAlmostEqual(b["radar_activation_frac"], 1.0)
+        self.assertAlmostEqual(b["radar_activation_frac"], 0.80)
 
-    def test_init_cycle_first_mode(self):
+    def test_bump_legacy_frac_recomputes(self):
+        b = bump_after_reentry_fill(0, 0.0, "ETHUSDT", adx_tier=0, adx=17)
+        self.assertAlmostEqual(b["radar_activation_frac"], 0.70)
+
+    def test_init_cycle_adx(self):
         st = init_cycle_on_open(
             side="LONG", tv_price=3000, entry=3001, open_atr=20,
-            symbol="ETHUSDT", adx_tier=2,
+            symbol="ETHUSDT", adx_tier=2, adx=35,
         )
         self.assertEqual(st["adx_tier"], 2)
-        self.assertAlmostEqual(st["radar_activation_frac"], 0.0)
+        self.assertAlmostEqual(st["radar_activation_frac"], 0.90)
+        self.assertGreater(st["radar_activation_price"], 3001)
         self.assertTrue(st["radar_pending_arm"])
 
-    def test_next_frac(self):
-        self.assertAlmostEqual(next_activation_frac(0.0, 1), 1.0)
+    def test_next_frac_keeps(self):
+        self.assertAlmostEqual(next_activation_frac(0.80, 1, adx=99), 0.80)
 
     def test_blank_and_tag(self):
         blank = blank_reentry_state()
         self.assertIn("adx_tier", blank)
         tag = make_reentry_client_order_id("ETHUSDT", "LONG", 2990.5)
         self.assertTrue(tag.startswith("RE"))
-
-    def test_plan_limit(self):
-        plan, why = plan_reentry_limit(
-            side="LONG", tv_price=3000, symbol="ETHUSDT",
-            klines_5m=[[0, 0, 3010, 2979, 0]],
-            prev_entry=3000,
-        )
-        self.assertEqual(why, "ok")
-        self.assertIsNotNone(plan)
-        self.assertLess(plan["limit_px"], 3000)
-
-    def test_enabled(self):
+        self.assertLessEqual(len(tag), 36)
         self.assertTrue(reentry_enabled("ETHUSDT"))
-        self.assertTrue(reentry_enabled("XAUUSDT"))
 
 
 if __name__ == "__main__":
