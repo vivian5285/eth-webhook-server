@@ -12,15 +12,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.6.1-pipeline"
-# 规格：单品种 REST 调用间隔（v16.4.6：再降密，防 2400/min）
-REST_MIN_INTERVAL_SEC = 0.80
+BINANCE_CLIENT_VERSION = "v16.7.3-rate-empty-failclosed"
+# v16.6.2：绝对封死同 IP 2400/min —— 单品种/全局间隔大幅拉大
+REST_MIN_INTERVAL_SEC = float(os.getenv("REST_MIN_INTERVAL_SEC", "2.0"))
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
-REST_GLOBAL_MIN_INTERVAL_SEC = 0.55
+REST_GLOBAL_MIN_INTERVAL_SEC = float(os.getenv("REST_GLOBAL_MIN_INTERVAL_SEC", "1.5"))
 # IP 级 -1003 后强制全局 REST 冷却（秒）——冷却期内禁止再打 REST
-IP_RATE_LIMIT_BACKOFF_SEC = 600.0
+IP_RATE_LIMIT_BACKOFF_SEC = float(os.getenv("IP_RATE_LIMIT_BACKOFF_SEC", "900.0"))
 # 挂单 REST 缓存 TTL（秒）；place/cancel 主动失效
-OPEN_ORDERS_CACHE_TTL_SEC = 12.0
+OPEN_ORDERS_CACHE_TTL_SEC = float(os.getenv("OPEN_ORDERS_CACHE_TTL_SEC", "45.0"))
+# 账户概览缓存（秒）
+ACCOUNT_SUMMARY_CACHE_TTL_SEC = float(os.getenv("ACCOUNT_SUMMARY_CACHE_TTL_SEC", "60.0"))
 
 
 class IpRateLimitedError(RuntimeError):
@@ -98,9 +100,11 @@ class BinanceClient:
         # 全账户持仓合并缓存：双雷达共用一次 REST，避免每 symbol 各打一次
         self._all_pos_rows = {}
         self._all_pos_ts = 0.0
-        # 规格 10：持仓核对 REST ≈30s；WS 优先，合并缓存短窗口仅用于强制 REST
-        self._all_pos_ttl = 60.0
-        self._all_pos_force_ttl = 3.0
+        # v16.6.2：持仓核对 REST 更稀；WS 优先，合并缓存拉长
+        self._all_pos_ttl = float(os.getenv("ALL_POS_TTL_SEC", "90.0"))
+        self._all_pos_force_ttl = float(os.getenv("ALL_POS_FORCE_TTL_SEC", "8.0"))
+        self._account_summary_cache = {}
+        self._account_summary_ts = 0.0
         self._last_order_event_ts = 0.0
         # 查单失败时的进程内同价锁：仅复用刚挂成功的缓存，禁止盲补首挂
         self._recent_limit_place = {}
@@ -460,10 +464,10 @@ class BinanceClient:
         if not hasattr(self, "_rate_limit_hooks"):
             self._rate_limit_hooks = []
         sym = str(symbol or "_GLOBAL").upper()
-        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 0.80)
+        gap = float(getattr(self, "_rest_min_interval", REST_MIN_INTERVAL_SEC) or 2.0)
         g_gap = float(
             getattr(self, "_rest_global_min_interval", REST_GLOBAL_MIN_INTERVAL_SEC)
-            or 0.55
+            or 1.5
         )
         with self._rest_throttle_lock:
             now = time.time()
@@ -593,6 +597,8 @@ class BinanceClient:
         """币安 2025+ 条件单（含 closePosition 硬止损）在 Algo 通道。
         失败返回 ORDERS_QUERY_FAILED（勿当空列表）。
         """
+        if self.ip_rate_limit_remaining() > 0:
+            return ORDERS_QUERY_FAILED
         try:
             rows = self._futures_signed_request(
                 "get", "openAlgoOrders", {"symbol": symbol},
@@ -615,33 +621,54 @@ class BinanceClient:
         """
         成功返回 list；REST 失败返回 ORDERS_QUERY_FAILED。
         铁律：查询失败 ≠ 盘口无单；上层禁止据此补挂限价/止损。
-        v16.4.6：短缓存；IP 冷却期只用缓存 / fail-closed（禁止再打 REST）。
+        v16.6.2：冷却期零 REST；长缓存优先；Algo 二次查询受同一冷却门禁。
         """
         symbol = str(symbol or "ETHUSDT").upper()
+        # 冷却期：绝不进入 REST（连 throttle sleep 都不走）
+        # 铁律：限流/冷却下「空缓存」≠ 盘口无单 → 必须 ORDERS_QUERY_FAILED，
+        # 禁止上层当成 0 挂单去核武撤挂 / 狂补（今日实盘：回退缓存 0 笔 → 裸奔）。
+        if self.ip_rate_limit_remaining() > 0:
+            cached = self._get_open_orders_cached(symbol, max_age=300.0)
+            if cached is not None and len(cached) > 0:
+                logger.warning(
+                    f"[获取挂单] {symbol}: IP冷却 → 仅用非空缓存 ({len(cached)} 笔)"
+                )
+                return cached
+            logger.warning(
+                f"[获取挂单] {symbol}: IP冷却且缓存空/无 → ORDERS_QUERY_FAILED"
+            )
+            return ORDERS_QUERY_FAILED
         if prefer_cache:
             cached = self._get_open_orders_cached(symbol)
             if cached is not None:
                 return cached
         try:
-            self._throttle_rest(symbol)
+            self._throttle_rest(symbol, kind="rest_probe")
         except IpRateLimitedError:
-            cached = self._get_open_orders_cached(symbol, max_age=120.0)
-            if cached is not None:
+            cached = self._get_open_orders_cached(symbol, max_age=300.0)
+            if cached is not None and len(cached) > 0:
                 logger.warning(
-                    f"[获取挂单] {symbol}: IP限流 → 回退≤120s缓存 ({len(cached)} 笔)"
+                    f"[获取挂单] {symbol}: 节流阀 → 回退非空缓存 ({len(cached)} 笔)"
                 )
                 return cached
+            logger.warning(
+                f"[获取挂单] {symbol}: 节流阀且缓存空/无 → ORDERS_QUERY_FAILED"
+            )
             return ORDERS_QUERY_FAILED
         try:
             orders = list(self.client.futures_get_open_orders(symbol=symbol) or [])
         except Exception as e:
             self._note_api_error(e, symbol)
             logger.error(f"[获取挂单失败] {symbol}: {e}")
-            cached = self._get_open_orders_cached(symbol, max_age=120.0)
-            if cached is not None:
+            cached = self._get_open_orders_cached(symbol, max_age=300.0)
+            if cached is not None and len(cached) > 0:
                 return cached
             return ORDERS_QUERY_FAILED
         if not include_algo:
+            self._set_open_orders_cache(symbol, orders)
+            return orders
+        # Algo 二次 REST：冷却/预算不足则只返回普通单
+        if self.ip_rate_limit_remaining() > 0:
             self._set_open_orders_cache(symbol, orders)
             return orders
         algo_orders = self.get_open_algo_orders(symbol)
@@ -1053,7 +1080,19 @@ class BinanceClient:
 
     def get_futures_account_summary(self, asset="USDT"):
         """合约账户概览：用于本金锚点，禁止用 depleted available 算档位额度"""
+        asset = str(asset or "USDT")
+        now = time.time()
+        ttl = float(ACCOUNT_SUMMARY_CACHE_TTL_SEC)
+        cached = getattr(self, "_account_summary_cache", {}) or {}
+        ts = float(getattr(self, "_account_summary_ts", 0) or 0)
+        if cached and (now - ts) < ttl:
+            return dict(cached)
+        if self.ip_rate_limit_remaining() > 0:
+            if cached and (now - ts) < 600.0:
+                return dict(cached)
+            return {}
         try:
+            self._throttle_rest("_ACCOUNT", kind="rest_probe")
             account = self.client.futures_account()
             out = {
                 "wallet_balance": 0.0,
@@ -1071,9 +1110,18 @@ class BinanceClient:
                 out["margin_balance"] = float(a.get("marginBalance", 0) or 0)
                 out["available_balance"] = float(a.get("availableBalance", 0) or 0)
                 break
+            self._account_summary_cache = dict(out)
+            self._account_summary_ts = time.time()
             return out
+        except IpRateLimitedError:
+            if cached and (now - ts) < 600.0:
+                return dict(cached)
+            return {}
         except Exception as e:
+            self._note_api_error(e, "")
             logger.error(f"[账户概览失败] {e}")
+            if cached and (now - ts) < 600.0:
+                return dict(cached)
             return {}
 
     def get_total_equity(self, asset="USDT"):
@@ -1101,7 +1149,10 @@ class BinanceClient:
         out = {}
         total = 0.0
         try:
-            rows = self.client.futures_position_information()
+            rows_map = self._refresh_all_positions(force=False)
+            if rows_map is None:
+                return out, 0.0
+            rows = list(rows_map.values())
         except Exception as e:
             logger.error(f"[全仓名义查询失败] {e}")
             return out, 0.0
@@ -1140,14 +1191,11 @@ class BinanceClient:
 
     def get_available_balance(self, asset="USDT"):
         try:
-            account = self.client.futures_account()
-            for a in account.get("assets", []):
-                if a.get("asset") == asset:
-                    margin_bal = float(a.get("marginBalance", 0.0))
-                    if margin_bal > 0:
-                        return margin_bal
-                    return float(a.get("availableBalance", 0.0))
-            return 0.0
+            summary = self.get_futures_account_summary(asset)
+            margin_bal = float(summary.get("margin_balance", 0) or 0)
+            if margin_bal > 0:
+                return margin_bal
+            return float(summary.get("available_balance", 0) or 0)
         except Exception as e:
             logger.error(f"[查询余额失败] {e}")
             return 0.0
@@ -1209,16 +1257,35 @@ class BinanceClient:
         """
         返回币安持仓 dict，或 None（确认无仓）。
         REST 失败且无可用缓存时返回 POSITION_QUERY_FAILED，禁止上层当空仓清账本。
-        双雷达：WS 优先；常规 REST 合并缓存约 30s；force_rest 用于平仓/恢复。
+        双雷达：WS 优先；常规 REST 合并缓存；force_rest 用于平仓/恢复。
         """
         sym = str(symbol or "").upper()
+        # 冷却期：force_rest 降级为缓存/WS，禁止再打仓位 REST
+        if force_rest and self.ip_rate_limit_remaining() > 0:
+            force_rest = False
+            prefer_ws = True
         if prefer_ws and not force_rest:
             # UD-WS 健康时允许更长缓存；否则短窗口尽快回退 REST
-            max_age = 30.0 if getattr(self, "_ud_ws_running", False) else 8.0
+            max_age = 45.0 if getattr(self, "_ud_ws_running", False) else 12.0
             cached = self._get_pos_cache(sym, max_age=max_age)
             if cached is not None:
                 return cached
-        # 合并查询：哨兵共享；force_rest 走 1s 强制窗口
+        if self.ip_rate_limit_remaining() > 0:
+            stale = self._get_pos_cache(sym, max_age=300.0)
+            if stale is not None:
+                return stale
+            with self._pos_lock:
+                if self._all_pos_rows and (time.time() - self._all_pos_ts) < 300.0:
+                    pos = self._all_pos_rows.get(sym)
+                    if not pos:
+                        return None
+                    try:
+                        amt = abs(float(pos.get("positionAmt") or 0))
+                    except (TypeError, ValueError):
+                        amt = 0.0
+                    return None if amt <= 0 else pos
+            return dict(POSITION_QUERY_FAILED)
+        # 合并查询：哨兵共享；force_rest 走短强制窗口
         all_rows = self._refresh_all_positions(force=bool(force_rest or not prefer_ws))
         if all_rows is None:
             stale = self._get_pos_cache(sym, max_age=60.0)
@@ -1740,9 +1807,18 @@ class BinanceClient:
 
     def fetch_klines(self, symbol="ETHUSDT", interval="30m", limit=220):
         """期货 K 线原始行（行情引擎拉 30m 合成 90m）。"""
-        return self.client.futures_klines(
-            symbol=symbol, interval=interval, limit=int(limit or 220),
-        )
+        try:
+            self._throttle_rest(symbol, kind="rest_probe")
+            return self.client.futures_klines(
+                symbol=symbol, interval=interval, limit=int(limit or 220),
+            )
+        except IpRateLimitedError:
+            logger.warning(f"[K线] {symbol}: 节流/冷却 → 跳过 REST")
+            return []
+        except Exception as e:
+            self._note_api_error(e, symbol)
+            logger.warning(f"[K线] {symbol}: {e}")
+            return []
 
     def fetch_atr_14(self, symbol="ETHUSDT", interval="30m", period=14):
         """
@@ -1772,4 +1848,8 @@ class BinanceClient:
         return eng.refresh(force=bool(force))
 
 
-binance_client = BinanceClient()
+# 单测可设 BINANCE_SKIP_BOOTSTRAP=1，避免本机构造 Client 卡在网络 ping
+if str(os.getenv("BINANCE_SKIP_BOOTSTRAP", "")).strip() in ("1", "true", "TRUE"):
+    binance_client = None  # type: ignore
+else:
+    binance_client = BinanceClient()

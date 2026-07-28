@@ -135,6 +135,27 @@ def admin_resume(symbol):
             "message": f"Unknown symbol: {symbol}",
             "allowed": active_binance_symbols(),
         }), 400
+    # IP 冷却期内禁止 resume（避免立刻 REST 雪崩再撞 -1003）
+    force = str(
+        (request.get_json(silent=True) or {}).get("force")
+        or request.args.get("force")
+        or ""
+    ).strip().lower() in ("1", "true", "yes")
+    try:
+        from binance_client import binance_client as _bc_rl
+        rem = float(_bc_rl.ip_rate_limit_remaining() or 0)
+        if rem > 0 and not force:
+            return jsonify({
+                "status": "blocked",
+                "message": (
+                    f"IP rate-limit cooldown remaining {rem:.0f}s; "
+                    f"resume rejected (pass force=1 to override)"
+                ),
+                "symbol": sym,
+                "ip_rate_limit_remaining": rem,
+            }), 429
+    except Exception as e:
+        logger.warning(f"[admin/resume] rate-limit gate skip: {e}")
     # resume 保持本地运维兼容（不强制 secret）；smoke_arm 才强制鉴权
     sup = get_supervisor(sym)
     prev = str(getattr(sup, "trading_pause_reason", "") or "")
@@ -170,6 +191,12 @@ def admin_resume(symbol):
         sup._save_state()
     except Exception as e:
         logger.warning(f"[admin/resume] 状态持久化跳过: {e}")
+    # sticky 曾触激活线 / 恢复后立刻脉冲武装（pause 期无法 REST 挂单）
+    try:
+        if float(getattr(sup, "watched_qty", 0) or 0) > 0:
+            sup._post_recover_radar_pulse = True
+    except Exception as e:
+        logger.warning(f"[admin/resume] radar pulse 跳过: {e}")
     logger.info(f"✅ [admin/resume] {sym} 解除暂停 | was={was} reason={prev or '—'}")
     return jsonify({
         "status": "success",

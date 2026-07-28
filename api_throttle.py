@@ -6,7 +6,7 @@
 原则：
 - 账本优先；节流阀是所有 REST 的唯一关卡
 - 触发交易所限流后进入强制静默，静默期内一律拒绝（含巡检）
-- 默认预算偏松，避免误伤实盘；可用环境变量收紧
+- v16.6.2：默认预算收紧（同 IP 双品种 + Deepcoin 公网 K 线共用配额）
 """
 from __future__ import annotations
 
@@ -47,12 +47,15 @@ class AccountThrottle:
         self._lock = threading.RLock()
         self._window: List[float] = []
         self._silence_until = 0.0
-        # 1 分钟滑动窗口预算（币安权重友好默认；可 env 覆盖）
-        self.budget_per_min = _env_int("API_BUDGET_PER_MIN", 48)
+        # 1 分钟滑动窗口：同 IP 目标远低于 2400/min（默认 24）
+        self.budget_per_min = _env_int("API_BUDGET_PER_MIN", 24)
         self.window_sec = _env_float("API_BUDGET_WINDOW_SEC", 60.0)
-        # 接近预算时开始 sleep，而不是立刻拒（保护实盘下单）
-        self.soft_ratio = _env_float("API_BUDGET_SOFT_RATIO", 0.85)
-        self.default_silence_sec = _env_float("API_SILENCE_SEC", 600.0)
+        # 接近预算时拉长间隔；探针更早拒绝，给下单留额度
+        self.soft_ratio = _env_float("API_BUDGET_SOFT_RATIO", 0.60)
+        self.default_silence_sec = _env_float("API_SILENCE_SEC", 900.0)
+        # 任意两次 acquire 的硬下限（秒），防止 sleep-gap 被并发打穿
+        self.min_gap_sec = _env_float("API_MIN_GAP_SEC", 1.8)
+        self._last_acquire_ts = 0.0
 
     def remaining_silence(self) -> float:
         with self._lock:
@@ -91,6 +94,7 @@ class AccountThrottle:
         bypass = str(os.getenv("PIPELINE_THROTTLE_FORCE_BYPASS", "0")).strip() in (
             "1", "true", "TRUE",
         )
+        gap_wait = 0.0
         with self._lock:
             rem = max(0.0, float(self._silence_until) - time.time())
             if rem > 0 and not (force and bypass):
@@ -98,24 +102,34 @@ class AccountThrottle:
             self._gc()
             n = len(self._window)
             budget = max(4, int(self.budget_per_min))
-            soft = int(budget * float(self.soft_ratio))
+            soft = max(1, int(budget * float(self.soft_ratio)))
             # 探针在接近预算时优先拒绝，给交易类请求留额度
-            if kind == "rest_probe" and n >= soft:
+            if kind in ("rest_probe", "rest_public") and n >= soft:
                 return False, f"probe_budget:{n}/{budget}"
             if n >= budget and not force:
                 return False, f"budget:{n}/{budget}"
-            # soft：短暂让路（不拒绝）
+            # soft：拉长让路；交易类 force 也不跳过 min_gap（仅紧急平仓可 force+bypass）
             wait = 0.0
             if n >= soft:
-                wait = min(1.2, 0.15 + 0.05 * (n - soft))
-        if wait > 0:
-            time.sleep(wait)
+                wait = min(3.0, 0.4 + 0.12 * (n - soft))
+            last = float(self._last_acquire_ts or 0)
+            gap_need = max(0.0, float(self.min_gap_sec) - (time.time() - last))
+            gap_wait = max(wait, gap_need)
+        if gap_wait > 0:
+            time.sleep(gap_wait)
         with self._lock:
             # 静默可能在 sleep 期间被置位
             rem = max(0.0, float(self._silence_until) - time.time())
             if rem > 0 and not (force and bypass):
                 return False, f"silence:{rem:.1f}s"
-            self._window.append(time.time())
+            self._gc()
+            n2 = len(self._window)
+            budget = max(4, int(self.budget_per_min))
+            if n2 >= budget and not force:
+                return False, f"budget:{n2}/{budget}"
+            now = time.time()
+            self._window.append(now)
+            self._last_acquire_ts = now
             return True, f"ok:{len(self._window)}/{self.budget_per_min}"
 
     def note_sent(self) -> None:

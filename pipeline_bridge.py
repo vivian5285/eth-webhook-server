@@ -187,12 +187,14 @@ class PipelineBridgeMixin:
         *,
         hard_sl_px: float = 0.0,
         hard_sl_live: bool = False,
+        hard_sl_query_failed: bool = False,
         tp1: Optional[dict] = None,
         tp2: Optional[dict] = None,
     ) -> None:
         fields: Dict[str, Any] = {
             "hard_sl_px": float(hard_sl_px or 0),
             "hard_sl_live": bool(hard_sl_live),
+            "hard_sl_query_failed": bool(hard_sl_query_failed),
         }
         if tp1:
             fields["tp1"] = tp1
@@ -284,6 +286,7 @@ class PipelineBridgeMixin:
             "hard_sl_expected": hard_px,
             # 禁止「账本有价=已挂」；必须 open 路径用盘口核实后写入 hard_sl_live
             "hard_sl_live": bool(pl.get("hard_sl_live")),
+            "hard_sl_query_failed": bool(pl.get("hard_sl_query_failed")),
             "radar_activated": bool(getattr(self, "radar_activated", False)),
             "radar_should_active": should_act,
             "api_recent": int(th.get("recent") or 0),

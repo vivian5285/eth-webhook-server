@@ -56,6 +56,7 @@ def blank_reentry_state() -> Dict[str, Any]:
         "radar_tier": 0,
         "adx_tier": 1,
         "radar_activation_frac": float(ACTIVATION_TP1_FRAC),
+        "radar_activation_sticky": False,
         "cycle_tv_price": 0.0,
         "cycle_tv_side": None,
         "cycle_open_atr": 0.0,
@@ -86,6 +87,7 @@ def init_cycle_on_open(
     radar_tier: Optional[int] = None,
     adx: Optional[float] = None,
     activation_ratio: Optional[float] = None,
+    tp1: Optional[float] = None,
 ) -> Dict[str, Any]:
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
@@ -94,8 +96,12 @@ def init_cycle_on_open(
         frac = normalize_activation_ratio(activation_ratio, adx_v)
     else:
         frac = radar_activation_ratio_from_adx(adx_v)
+    # 白皮书：启动线 = ratio × |TV.tp1 − TV.price|（无 TP1 时回退 1.35ATR）
+    tp1_v = float(tp1 or 0)
+    ref_px = float(tv_price or 0) or float(entry or 0)
+    tp1_dist = abs(tp1_v - ref_px) if tp1_v > 0 and ref_px > 0 else 0.0
     gate = radar_activation_price_adx(
-        side, entry, open_atr, adx=adx_v, ratio=frac,
+        side, entry, open_atr, adx=adx_v, ratio=frac, tp1_dist=tp1_dist,
     )
     base_tier = int(adx_tier if adx_tier is not None else 1)
     # 首次开仓：雷达档=ADX档；重入成交后由 bump 写入放宽档
@@ -194,6 +200,7 @@ def bump_after_reentry_fill(
     entry: float = 0.0,
     open_atr: float = 0.0,
     side: str = "LONG",
+    tp1: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     成交后再入：attempt+1（封顶1），雷达系数放宽一档；
@@ -206,9 +213,15 @@ def bump_after_reentry_fill(
     adx_v = float(adx) if adx is not None else 25.0
     frac = normalize_activation_ratio(prev_frac, adx_v)
     gate = 0.0
-    if float(entry or 0) > 0 and float(open_atr or 0) > 0:
+    tp1_v = float(tp1 or 0)
+    tp1_dist = (
+        abs(tp1_v - float(entry or 0))
+        if tp1_v > 0 and float(entry or 0) > 0
+        else 0.0
+    )
+    if float(entry or 0) > 0 and (float(open_atr or 0) > 0 or tp1_dist > 0):
         gate = radar_activation_price_adx(
-            side, entry, open_atr, adx=adx_v, ratio=frac,
+            side, entry, open_atr, adx=adx_v, ratio=frac, tp1_dist=tp1_dist,
         )
     return {
         "reentry_attempt": nxt,

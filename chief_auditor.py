@@ -146,21 +146,33 @@ def audit_open_bundle(facts: Dict[str, Any]) -> AuditResult:
     ))
 
     # 6) 硬止损
+    # 挂单查询失败时 live 不可知：降为软警告，禁止假暂停（2026-07-27 事故：
+    # ORDERS_QUERY_FAILED → live=False → chief 暂停 → 哨兵睡死 → 雷达未武装）。
     hard_px = _f(facts.get("hard_sl_px"))
     hard_exp = _f(facts.get("hard_sl_expected") or hard_px)
     hard_live = bool(facts.get("hard_sl_live"))
+    hard_qfail = bool(facts.get("hard_sl_query_failed"))
     if hard_px <= 0 and hard_exp > 0:
         hard_px = hard_exp
     px_ok = hard_px > 0 and (
         hard_exp <= 0 or abs(hard_px - hard_exp) / max(hard_exp, 1e-9) <= 0.02
     )
-    hard_ok = px_ok and hard_live
-    items.append(AuditItem(
-        "hard_sl",
-        hard_ok,
-        True,
-        f"px={hard_px:.4f} expected={hard_exp:.4f} live={hard_live}",
-    ))
+    if hard_qfail:
+        items.append(AuditItem(
+            "hard_sl",
+            False,
+            False,
+            f"px={hard_px:.4f} expected={hard_exp:.4f} live=unknown "
+            f"query_failed=1 (soft·禁止假暂停)",
+        ))
+    else:
+        hard_ok = px_ok and hard_live
+        items.append(AuditItem(
+            "hard_sl",
+            hard_ok,
+            True,
+            f"px={hard_px:.4f} expected={hard_exp:.4f} live={hard_live}",
+        ))
 
     # 7) 雷达候命（软）
     act = bool(facts.get("radar_activated"))

@@ -175,7 +175,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.9.0-radar-tp1-gate"
+BINANCE_VPS_VERSION = "v16.9.1-tv-ready"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -343,6 +343,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._last_regime_cap_ts = 0.0
         self._abnormal_reduce_alert_ts = 0.0
         self._abnormal_reduce_alert_sig = ""
+        self._tv_arrived_since_startup = False  # TV readiness 标志
         self._dingtalk_recent = {}
         self._dingtalk_recent_lock = threading.Lock()
         self.shield_active = False
@@ -12025,13 +12026,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.enqueue_signal(payload)
 
     def _enrich_tv_payload(self, payload):
-        """v6.9.75：TV 全量 regime/atr/tp 优先，仅缺失项本地补全。"""
+        """v6.9.76：TV 全量 regime/atr/tp 优先；规格 v1.0 §6 ATR 禁止独立拉取。"""
         action = str(payload.get("action", "")).strip().upper()
         live_px = binance_client.get_current_price(self.symbol) or self.tv_price or 0.0
         return enrich_signal_fields(
             payload,
             action,
-            fetch_atr=lambda: binance_client.fetch_atr_14(self.symbol),
+            fetch_atr=None,   # 规格 v1.0 §6：禁止 VPS 独立拉取 ATR
             fallback_regime=self.regime or 3,
             fallback_atr=self.current_atr or 30.0,
             fallback_price=live_px,

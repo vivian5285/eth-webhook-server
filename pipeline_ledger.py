@@ -114,6 +114,7 @@ def blank_pipeline(symbol: str = "", exchange: str = "binance") -> Dict[str, Any
         "hard_sl_px": 0.0,
         "hard_sl_oid": "",
         "hard_sl_live": False,
+        "hard_sl_query_failed": False,
         "tp1": {"px": 0.0, "qty": 0.0, "oid": "", "filled": False},
         "tp2": {"px": 0.0, "qty": 0.0, "oid": "", "filled": False},
         "radar": {
