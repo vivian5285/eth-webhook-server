@@ -1,12 +1,12 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.8.1-marathon-act-fix`**  
+**当前版本：`v16.9.1-tv-ready`**  
 **TV 策略 schema：`v6.5.6`**  
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
 **TP 分腿：10% / 20% / 70%**（盘口限价 **恰好 2** 笔 LIMIT=TP1+TP2；余仓无上限）  
 **硬止损：`|TV.price−TV.stop_loss|×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
-**雷达（v16.8.1）**：激活用 **TP 绝对价格锚定**（规格 §5.1）：首次开仓 = **(TP1+TP2)/2**；重入开仓 = **TP2**。激活瞬间**保本起步**（entry±tick±fee）；TP 成交只缩量不改价；阶梯从保本位被动跟随；达线前盘口**仅硬止损**  
+**雷达（v16.9.1）**：激活用 **TP 绝对价格锚定**（规格 §5.1）：首次开仓 = **(TP1+TP2)/2**；重入开仓 = **TP2**。激活瞬间**保本起步**（entry±tick±fee）；TP 成交只缩量不改价；阶梯从保本位被动跟随；达线前盘口**仅硬止损**  
 **ATR：只信 TV webhook `atr`**（已删除 VPS 独立拉 1h/合成 ATR、场景一二与降级切换）  
 **重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
 **提前保本检查点（规格 §5.0）**：TP1 距离 × 0.5 处触发（多在 TP1-TP2 中点前），只挪止损到保本位，不启动雷达跟踪  
@@ -53,7 +53,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.6.2-rate-iron · pipeline: {ETHUSDT, XAUUSDT} · trading_paused: false
+# version: v16.9.1-tv-ready · pipeline: {ETHUSDT, XAUUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 
 python3 -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py
@@ -144,21 +144,20 @@ VPS 在 **openOrders 查询失败/超时** 时，错误地认为「没有挂单�
    身份：**永久防线**。仓位归零前：**不改价、不撤销**（仅公式升级允许一次性重挂）。  
    实现：`atr_scenario.hard_stop_price` → `frozen_hard_sl_px` + `_ensure_frozen_hard_sl`。
 
-2. **挂 TP1+TP2+TP3 限价止盈**  
-   价格 = TV `tp1`/`tp2`/`tp3`；数量 = VPS 自算总仓位的 **10% / 20% / 70%**。  
-   与硬止损同时挂出。每档带防御 `clientOrderId`。TP3 与雷达对同一余仓**互斥**：谁先成交撤另一腿并写 `exit_ownership`。
+2. **挂 TP1+TP2 限价止盈**（**TP3 永不挂限价**）
+   价格 = TV `tp1`/`tp2`；数量 = VPS 自算总仓位的 **10% / 20%**。
+   与硬止损同时挂出。每档带防御 `clientOrderId`。TP3（70%余仓）**永不挂限价**，完全交雷达管理，雷达是 TP3 余仓唯一退出路径。
 
-3. **启动 VPS 原生 1h ATR 拉取**（呼吸系数 / 场景决议；≠ TV 图表周期）  
-   - **场景一**（成功）：雷达用真实 ATR  
-   - **场景二**（失败）：雷达用 TV `atr`；可持续恢复场景一  
-   - 两种场景均保留三级 TP 限价（不再因场景一撤 TP3）
+3. **启动价格监控与雷达引擎**
+   雷达休眠至激活价（首次 (TP1+TP2)/2 · 重入 TP2）。
+   雷达全程只读 TV webhook `atr`（VPS 不拉独立 ATR）。
 
 ### 硬止损 vs 雷达止损
 
 | | 永久硬止损 | 雷达止损 |
 |--|-----------|---------|
 | 挂出时机 | 开仓瞬间 | 硬止损+TP 挂好后，引擎独立计算再挂 |
-| 价格来源 | **唯一公式** `|TV−SL|×1.15` 锚定成交价 | 呼吸引擎（场景一/二 ATR） |
+| 价格来源 | **唯一公式** `|TV−SL|×1.15` 锚定成交价 | 呼引用擎（只读 TV webhook `atr`；VPS 不拉独立 ATR） |
 | 数量 | closePosition（始终覆盖剩余） | 明确 quantity=剩余仓位 |
 | 改价 | **禁止**（公式升级重挂除外） | 可随呼吸上移（只收紧） |
 | 撤销 | **仅仓位归零** | 仓位归零 / 互斥撤 / 被触发 |
@@ -177,7 +176,7 @@ VPS 在 **openOrders 查询失败/超时** 时，错误地认为「没有挂单�
 
 TV 价 1897.03，TV.SL 1912.18，成交 1900.51：  
 `dist = |1897.03−1912.18|×1.15 ≈ 17.42` → **硬止损 ≈ 成交价 + 17.42**。  
-雷达另挂独立 STOP。账户同时 **硬止损 + 雷达 + TP123**（总数 ≤5）。
+雷达另挂独立 STOP。账户同时 **硬止损 + 雷达 + TP1+TP2**（TP3 永不挂限价；总数 ≤5）。
 
 ---
 
@@ -284,7 +283,7 @@ position_supervisor_binance.py     ← 唯一生产大脑（岗位边界挂接�
 |------|------|
 | `price` | 开仓参考 / 去重键 |
 | `stop_loss` | 永久硬止损公式输入（`|price−stop_loss|×buffer`）；亦可参与 sizing 收紧 |
-| `atr` | 场景一日志；场景二雷达 ATR；缺则拒开 |
+| `atr` | TV webhook `atr`（雷达全程只用此值）；缺则拒开 |
 | `tp1`/`tp2`/`tp3` | 止盈价；**只挂 TP1+TP2 限价**（10%/20%）；`tp3` 价可传入但不挂单，70% 交雷达 |
 | `qty` | 可选 soft-cap；天文值忽略 |
 
@@ -318,15 +317,15 @@ qty = 名义上限 / entryPrice
 
 ---
 
-## 六、被动雷达 + 智能再入场（马拉松 · v16.8.1 · 独立于硬止损）
+## 六、被动雷达 + 智能再入场（马拉松 · v16.9.1 · 独立于硬止损）
 
 - ETH / XAU 参数只读 `breath_profile` + `reentry_profiles` / `config/reentry_tiers.json`
 - **设计哲学**：激活瞬间第一步永远是**保本**，再像马拉松一样跟在市价后面；弱趋势早激活防微利回吐，强趋势晚激活给深度回踩留呼吸
 - **ADX 三档**：0 弱（<20）/ 1 中（20–30）/ 2 强（>30）；开仓锁定档位 → 启动比例 + 步进/呼吸；硬止损 buffer **恒为 1.15**
-- **启动（第一层 · ADX 离散三档 · 修复版）**：
-  - 弱 ADX<20 → **68%**（早，落在 65%–70%）；中 20–30 → **78%**（75%–80%）；强 >30 → **88%**（晚，85%–90%）
-  - `启动价 = entry ± ratio × 1.35 × initial_atr`（首次/重入同一公式）
-  - 开仓冻结 ratio + 启动价；**独立于 TP1 是否已成交**；达线前仅硬止损守护
+- **启动（规格 v1.0 · §5.1 绝对价格锚定）**：
+  - 首次开仓：雷达激活价 = **(TP1 + TP2) / 2**
+  - 重入开仓：雷达激活价 = **TP2**
+  - 开仓冻结激活价；**独立于 TP1 是否已成交**；达线前仅硬止损守护
 - **激活臂（保本起步）**：止损移到 **entry ± tick ± fee_cover**（约 0.08%），**禁止**跳到 entry±0.5ATR / TP1 底线
 - **取消强制底线**：TP1/TP2 成交后**只收缩数量**（→70% / →40%），止损价格不跳变，继续阶梯推进
 - **阶梯跟随**：按档位 `step_trigger` / `step_advance` 从保本位被动跟进；浮盈≥3×ATR 切入阶段二连续追踪
@@ -342,11 +341,11 @@ qty = 名义上限 / entryPrice
 2. **开仓 → 雷达微赚扫出 → 更优价再入一次 → 再冲击 TP**  
 3. **开仓 → 硬止损触发 → 坚决离场，禁止再入**
 
-| 档位 | ADX | 启动% | buffer | ETH step/adv · breath12/23 · trail | XAU step/adv · breath12/23 · trail |
-|------|-----|-------|--------|-------------------------------------|-------------------------------------|
-| 0 弱 | <20 | **68%早** | **1.15** | 0.40/0.25 · 0.8/1.0 · 1.2~1.5 | 0.35/0.20 · 0.7/0.9 · 1.0~1.3 |
-| 1 中 | 20–30 | **78%** | **1.15** | 0.50/0.35 · 1.2/1.6 · 1.8~2.5 | 0.40/0.30 · 1.0/1.4 · 1.5~2.0 |
-| 2 强 | >30 | **88%晚** | **1.15** | 0.60/0.40 · 1.5/2.0 · 2.5~3.5 | 0.50/0.35 · 1.3/1.8 · 2.0~2.8 |
+| 档位 | ADX | 激活价锚定 | buffer | ETH step/adv · breath12/23 · trail | XAU step/adv · breath12/23 · trail |
+|------|-----|------------|--------|-------------------------------------|-------------------------------------|
+| 0 弱 | <20 | **(TP1+TP2)/2** | **1.15** | 0.40/0.25 · 0.8/1.0 · 1.2~1.5 | 0.35/0.20 · 0.7/0.9 · 1.0~1.3 |
+| 1 中 | 20–30 | **(TP1+TP2)/2** | **1.15** | 0.50/0.35 · 1.2/1.6 · 1.8~2.5 | 0.40/0.30 · 1.0/1.4 · 1.5~2.0 |
+| 2 强 | >30 | **(TP1+TP2)/2** | **1.15** | 0.60/0.40 · 1.5/2.0 · 2.5~3.5 | 0.50/0.35 · 1.3/1.8 · 2.0~2.8 |
 
 再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`config/reentry_tiers.json`（schema `v4.1-marathon-act-fix`）。  
 实现：`radar_reentry_mixin.py` + `smart_reentry_engine.py` + `reentry_profiles.py` + `breath_stop.py`。
@@ -364,7 +363,7 @@ qty = 名义上限 / entryPrice
 | `smart_reentry_engine.py` | 再入决策纯函数 | 无 IO，易单测 |
 | `reentry_profiles.py` | ETH/XAU ADX 三档、窗口、双保险、**启动比例** | 改档位/启动只动配置表 |
 | `breath_stop.py` / `breath_profiles.py` | 雷达呼吸价 / 品种呼吸表（第二层） | 与硬止损独立；本次不改 trail |
-| `atr_scenario.py` | 硬止损唯一公式 + 场景一/二 | 滑点按成交价外侧 |
+| `atr_scenario.py` | 硬止损唯一公式（呼吸垫 1.15） | 滑点按成交价外侧 |
 | `binance_client.py` | REST/WS；限价/止损 fail-closed + 去重 | 查单失败禁止挂；REST≥100ms |
 | `dingtalk.py` | 实盘核实通知 | 雷达激活须注明首次/重入 + ADX 比例 |
 | `check_vps_logic.py` | 静态逻辑审计（部署门禁） | 新铁律加断言 |
@@ -421,7 +420,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v16.3.0-slice-reentry
+# 期望: v16.9.1-tv-ready
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
@@ -431,7 +430,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 # 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.3.0-slice-reentry`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.9.1-tv-ready`；`trading_paused=false`；ETH/XAU 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
 
 ### 20U 矩阵观察点
 
@@ -491,7 +490,7 @@ python3 test_stop_idempotent_and_tp_levels.py
 | 事件 | 必含信息 |
 |------|----------|
 | 开仓 | 品种/方向/价量/硬止损/雷达待命价/**趋势档位**/TP1+TP2 |
-| 雷达激活 | 首次或重入、**ADX启动比例×1.35ATR**、激活价、初始雷达止损、**趋势档位** |
+| 雷达激活 | 首次或重入、**绝对价格锚定(首次=(TP1+TP2)/2·重入=TP2)**、激活价、初始雷达止损、**趋势档位** |
 | 止损移动 | 新止损、浮盈、极值 |
 | TP1/TP2 成交 | 成交价量、剩余仓位、当前止损 |
 | 平仓 | 来源（硬止损/雷达/TV反转等）、盈亏 |

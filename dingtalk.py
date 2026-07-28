@@ -237,11 +237,11 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
     ct = close_type or classify_tv_close(close_action, tv_reason or r)
 
     if ct == CLOSE_TYPE_TP3:
-        # TP3 限价成交（70% 余仓）
+        # TP3 永不挂限价，70%余仓完全交雷达管理
         return {
-            "title": "止盈平仓（TP3限价）",
-            "tag": _g("**止盈平仓**", G_LIGHT),
-            "status": _g("TP3限价成交离场。" + ("（含扫尾）" if is_dust_ctx else ""), G_LIGHT),
+            "title": "止盈平仓（TP3余仓雷达收网）",
+            "tag": _g("**雷达收网**", G_LIGHT),
+            "status": _g("TP3余仓（70%）由雷达追踪止盈离场。（永不挂TP3限价单）", G_LIGHT),
             "header": G_TITLE,
         }
     if ct in (CLOSE_TYPE_PROTECT, CLOSE_TYPE_QUICK, CLOSE_TYPE_RSI):
@@ -935,14 +935,14 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note="", verif
 def report_tp_fill(tp_level, tp_price, filled_qty, remain_qty, entry_px, side, regime,
                    verify_note="", verified=True, symbol=None, unit_label=None,
                    current_stop=None):
-    """TP1/TP2/TP3 成交通知（v15.9.0+ 三级限价常挂）。"""
+    """TP1/TP2 成交通知（v16.4.0+ TP3永不挂限价，70%余仓交雷达管理）。"""
     lv = int(tp_level or 0)
     if lv < 1 or lv > 3:
         return
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
-    # 开仓后剩余示意：TP1→90% · TP2→70% · TP3→0%
-    remain_pct = {1: "90%", 2: "70%", 3: "0%"}.get(lv, "—")
+    # 开仓后剩余示意：TP1→90% · TP2→70% · TP3→70%交雷达
+    remain_pct = {1: "90%", 2: "70%"}.get(lv, "—")
     stop = float(current_stop or 0)
     title = f"🎯 [{sym}] TP{lv} 止盈成交，剩余仓位 {remain_pct}"
     body = {
@@ -1125,14 +1125,14 @@ def report_recover_tp_repair(side, initial_qty, live_qty, entry, consumed_levels
     data = {
         "🎛️ 实盘方向": _g(side, G_LIGHT if side == "LONG" else G_DEEP),
         "📦 开单头寸": _g(f"**{initial_qty}** {_u()} @ `{entry:.2f}`", G_MUTED),
-        "📦 现仓剩余": _g(f"**{live_qty}** {_u()} (= TP2+TP3)", G_MAIN),
+        "📦 现仓剩余": _g(f"**{live_qty}** {_u()} (= TP2+雷达)", G_MAIN),
         "✂️ 已成交档": _g(consumed_txt, G_ACCENT),
         "🕸️ 剩余止盈审计": _g(
             _format_tp_audit(tp_audit, []) if tp_audit else "核查中",
             G_MAIN,
         ),
         "✅ 修复动作": _g(
-            "撤多余已成交档 → 按现仓重分 TP2/TP3 → 雷达保本接力",
+            "撤多余已成交档 → 按现仓重分 TP2 → 雷达保本接力",
             G_MAIN,
         ),
         "📡 实盘核查": _verify_line(

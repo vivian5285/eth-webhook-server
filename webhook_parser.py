@@ -229,7 +229,7 @@ def get_regime_tp_ratios(regime=None):
 
 
 def format_regime_tp_ratios_label(regime=None):
-    return "10/20/70(挂TP1+TP2+TP3·TP3与雷达互斥)"
+    return "10/20/70(仅挂TP1+TP2·TP3永不挂单交雷达)"
 
 
 def get_leg_tp_ratios(payload=None):

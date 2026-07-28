@@ -398,7 +398,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.tv_suggested_qty = 0.0  # TV webhook qty 上限
         self.tv_qty1 = 0.0  # TV TP1 数量意图（按实开仓缩放后挂限价）
         self.tv_qty2 = 0.0
-        self.tv_qty3 = 0.0  # TP3=70% 常挂限价；与雷达互斥
+        self.tv_qty3 = 0.0  # TP3=70% 永不挂限价；交雷达管理
         self.radar_step_count = 0
         self.radar_activated = False
         self._init_reentry_runtime()

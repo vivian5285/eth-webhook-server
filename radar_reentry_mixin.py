@@ -170,6 +170,7 @@ class RadarReentryMixin:
         )
         tps = list(getattr(self, "tv_tps", None) or [])
         tp1_v = float(tps[0] or 0) if tps else 0.0
+        tp2_v = float(tps[1] or 0) if len(tps) > 1 else 0.0
         st = init_cycle_on_open(
             side=side,
             tv_price=tv_price,
@@ -182,6 +183,7 @@ class RadarReentryMixin:
             adx=adx_v,
             activation_ratio=activation_ratio,
             tp1=tp1_v,
+            tp2=tp2_v,
         )
         for k, v in st.items():
             setattr(self, k, v)
@@ -192,14 +194,9 @@ class RadarReentryMixin:
         self._radar_notify_pending = False
         frac = float(st.get("radar_activation_frac") or 0)
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
-        # 规格 v1.0：绝对价格锚定（首次=(TP1+TP2)/2 · 重入=TP2）
-        from reentry_profiles import radar_gate_price_from_tps
-        tps = list(getattr(self, "tv_tps", None) or [])
-        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
-        tp2_px = float(tps[1] or 0) if len(tps) > 1 else 0.0
+        # v1.0 §5.1：init_cycle_on_open 已内用 radar_gate_price_from_tps(tp1, tp2, attempt)
+        # 保证 tp1/tp2 均已传入；若 gate=0（tp1/tp2 缺失）则写死标签供诊断
         gate_px = float(st.get("radar_activation_price") or 0)
-        if tp1_px > 0 and tp2_px > 0 and gate_px <= 0:
-            gate_px = radar_gate_price_from_tps(tp1_px, tp2_px, attempt)
         gate_lab = f"绝对价格锚定 {'(重入=TP2)' if attempt >= 1 else '(首次=(TP1+TP2)/2)'}"
         self._radar_trigger_gate = f"被动雷达·{gate_lab}"
         self._apply_tier_breath_overlay()
@@ -877,6 +874,7 @@ class RadarReentryMixin:
             ),
             side=side,
             tp1=float((list(getattr(self, "tv_tps", None) or [0])[0]) or 0),
+            tp2=float((list(getattr(self, "tv_tps", None) or [0, 0])[1]) or 0),
         )
         # 成交：释放本地标签（允许下次再入周期）
         self.reentry_limit_order_id = None

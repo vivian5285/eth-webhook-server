@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 智能再入场状态机辅助（无交易所 IO；由 PositionSupervisor / mixin 驱动）。
-规格：最多 1 次重入；窗口按 K 线根数；雷达启动=ADX 70%~90%×1.35ATR。
+规格 v1.0：最多 1 次重入；窗口按 K 线根数；
+雷达启动 = 绝对价格锚定（首次 (TP1+TP2)/2 · 重入 TP2）。
 """
 from __future__ import annotations
 
@@ -13,8 +14,6 @@ from reentry_profiles import (
     ACTIVATION_TP1_FRAC,
     LIMIT_TTL_SEC,
     MAX_UNFILLED_REFRESHES,
-    activation_frac_for_attempt,
-    activation_price,
     apply_tier_to_breath_profile,
     can_smart_reenter,
     compute_reentry_limit_px,
@@ -22,8 +21,8 @@ from reentry_profiles import (
     looser_tier,
     normalize_activation_ratio,
     parse_kline_extreme,
-    radar_activation_price_adx,
     radar_activation_ratio_from_adx,
+    radar_gate_price_from_tps,
     reentry_window_deadline,
     tier_coeffs,
 )
@@ -88,7 +87,14 @@ def init_cycle_on_open(
     adx: Optional[float] = None,
     activation_ratio: Optional[float] = None,
     tp1: Optional[float] = None,
+    tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """
+    【规格 v1.0 · §5.1 绝对价格锚定】
+    首次开仓 reentry_attempt=0：雷达激活价 = (TP1 + TP2) / 2
+    重入开仓 reentry_attempt>=1：雷达激活价 = TP2
+    不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
+    """
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
     adx_v = float(adx) if adx is not None else 25.0
@@ -96,13 +102,12 @@ def init_cycle_on_open(
         frac = normalize_activation_ratio(activation_ratio, adx_v)
     else:
         frac = radar_activation_ratio_from_adx(adx_v)
-    # 白皮书：启动线 = ratio × |TV.tp1 − TV.price|（无 TP1 时回退 1.35ATR）
+
+    # v1.0 规格 §5.1：雷达激活价 = 绝对价格锚定
     tp1_v = float(tp1 or 0)
-    ref_px = float(tv_price or 0) or float(entry or 0)
-    tp1_dist = abs(tp1_v - ref_px) if tp1_v > 0 and ref_px > 0 else 0.0
-    gate = radar_activation_price_adx(
-        side, entry, open_atr, adx=adx_v, ratio=frac, tp1_dist=tp1_dist,
-    )
+    tp2_v = float(tp2 or 0)
+    gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=attempt)
+
     base_tier = int(adx_tier if adx_tier is not None else 1)
     # 首次开仓：雷达档=ADX档；重入成交后由 bump 写入放宽档
     r_tier = int(radar_tier if radar_tier is not None else base_tier)
@@ -127,10 +132,6 @@ def init_cycle_on_open(
         "reentry_sterile_fail_count": 0,
         "radar_pending_arm": True,
     }
-
-
-def compute_activation_px(side: str, entry: float, atr: float, frac: float) -> float:
-    return activation_price(side, entry, atr, frac)
 
 
 def build_tier_breath(breath_profile: Dict[str, Any], tier: int, symbol: str) -> Dict[str, Any]:
@@ -201,10 +202,12 @@ def bump_after_reentry_fill(
     open_atr: float = 0.0,
     side: str = "LONG",
     tp1: Optional[float] = None,
+    tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    成交后再入：attempt+1（封顶1），雷达系数放宽一档；
-    启动比例沿用开仓冻结值（ADX 70%~90% 同一公式，不再改 TP2）。
+    【规格 v1.0 · §5.1 绝对价格锚定】
+    重入开仓 reentry_attempt>=1：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）。
+    不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
     """
     rp = get_reentry_profile(symbol)
     nxt = int(prev_attempt or 0) + 1
@@ -212,17 +215,12 @@ def bump_after_reentry_fill(
     loose = looser_tier(base)
     adx_v = float(adx) if adx is not None else 25.0
     frac = normalize_activation_ratio(prev_frac, adx_v)
-    gate = 0.0
+
+    # v1.0 规格 §5.1：重入时雷达激活价 = TP2 绝对价格
     tp1_v = float(tp1 or 0)
-    tp1_dist = (
-        abs(tp1_v - float(entry or 0))
-        if tp1_v > 0 and float(entry or 0) > 0
-        else 0.0
-    )
-    if float(entry or 0) > 0 and (float(open_atr or 0) > 0 or tp1_dist > 0):
-        gate = radar_activation_price_adx(
-            side, entry, open_atr, adx=adx_v, ratio=frac, tp1_dist=tp1_dist,
-        )
+    tp2_v = float(tp2 or 0)
+    gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=nxt)
+
     return {
         "reentry_attempt": nxt,
         "adx_tier": base,
