@@ -1142,9 +1142,13 @@ class PositionSupervisor(PipelineBridgeMixin):
                     _atr = float(self._get_locked_initial_atr() or 0)
                 except Exception:
                     _atr = 0.0
-            if _entry > 0 and _atr > 0:
+            _tps = list(getattr(self, "tv_tps", None) or [])
+            _tp1 = float(_tps[0] or 0) if _tps else 0.0
+            _dist = abs(_tp1 - _entry) if (_tp1 > 0 and _entry > 0) else 0.0
+            if _entry > 0 and (_atr > 0 or _dist > 0):
                 _px = radar_activation_price_adx(
                     getattr(self, "current_side", None), _entry, _atr, adx=_adx, ratio=_ratio,
+                    tp1_dist=_dist,
                 )
                 if _px > 0:
                     self.radar_activation_price = float(_px)
@@ -6100,6 +6104,24 @@ class PositionSupervisor(PipelineBridgeMixin):
                 except Exception:
                     pass
                 return
+            # ── 平仓 side 字段方向核对（开发指南 v1.0，对齐 Binance）──
+            # TV 平仓消息带 side 字段，核对账本方向；不一致=过期指令，安全忽略
+            if is_close:
+                payload_side = str(close_side or "").strip().upper()
+                if payload_side:
+                    if payload_side != self.current_side:
+                        logger.info(
+                            f"🛡️ [{self.symbol}] 过期平仓指令已忽略 | "
+                            f"payload.side={payload_side} ≠ 账本.current_side={self.current_side} "
+                            f"| action={raw_action}"
+                        )
+                        return  # 不执行平仓，不告警（预期内正常情况）
+                else:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 收到不含 side 字段的平仓消息 | "
+                        f"建议更新 TradingView 警报到最新脚本版本 | action={raw_action}"
+                    )
+            # ── 方向核对通过，继续分发 ──
             if is_close:
                 self.monitoring = False
             if raw_action == "CLOSE_PROTECT" or raw_action.startswith("CLOSE_PROTECT"):
@@ -6955,9 +6977,13 @@ class PositionSupervisor(PipelineBridgeMixin):
                     _atr = float(self._get_locked_initial_atr() or 0)
                 except Exception:
                     _atr = 0.0
-            if _entry > 0 and _atr > 0:
+            _tps = list(getattr(self, "tv_tps", None) or [])
+            _tp1 = float(_tps[0] or 0) if _tps else 0.0
+            _dist = abs(_tp1 - _entry) if (_tp1 > 0 and _entry > 0) else 0.0
+            if _entry > 0 and (_atr > 0 or _dist > 0):
                 _px = radar_activation_price_adx(
                     getattr(self, "current_side", None), _entry, _atr, adx=_adx, ratio=_ratio,
+                    tp1_dist=_dist,
                 )
                 if _px > 0:
                     self.radar_activation_price = float(_px)
@@ -7126,7 +7152,7 @@ class PositionSupervisor(PipelineBridgeMixin):
 
     def _radar_activation_price(self):
         """
-        马拉松 v13.92.2 / 对齐币安 v16.8.1：ADX 三档离散 × 1.35×initial_atr
+        马拉松 / 对齐币安：ADX 三档离散比例 × 真实 TP1 距离
         （弱68%早 / 中78% / 强88%晚）。优先账本冻结价。
         """
         from reentry_profiles import (
@@ -7156,20 +7182,26 @@ class PositionSupervisor(PipelineBridgeMixin):
             or getattr(self, "last_adx", 0)
             or 25.0
         )
+        try:
+            tp1_dist = float(self._tp1_distance() or 0)
+        except Exception:
+            tp1_dist = 0.0
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and entry > 0:
-            # 旧中点价可能仍在账本：若与 ADX 公式偏差过大且未激活 → 重算
-            if not activated and atr > 0:
+            # 旧中点价/旧 ATR 代理价可能仍在账本：偏差过大且未激活 → 重算
+            if not activated and (atr > 0 or tp1_dist > 0):
                 expect = radar_activation_price_adx(
                     self.current_side, entry, atr, adx=adx, ratio=ratio,
+                    tp1_dist=tp1_dist,
                 )
-                if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.15:
+                if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
                     return expect
             return frozen
-        if entry > 0 and atr > 0:
+        if entry > 0 and (atr > 0 or tp1_dist > 0):
             px = radar_activation_price_adx(
                 self.current_side, entry, atr, adx=adx, ratio=ratio,
+                tp1_dist=tp1_dist,
             )
             if px > 0:
                 self.radar_activation_price = px
