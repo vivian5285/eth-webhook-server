@@ -1800,6 +1800,11 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         data["触发"] = _g(str(trigger_gate)[:120], G_MUTED)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
+    # 规格 v1.0：绝对价格锚定标签（首次=(TP1+TP2)/2 · 重入=TP2）
+    # 使用传入参数判断，不要硬编码 attempt=0
+    gate_lab = f"首次开仓→(TP1+TP2)/2"
+    if open_kind and "重入" in str(open_kind):
+        gate_lab = f"重入开仓→TP2"
     send_alert(f"📡 [{sym}] 雷达激活 · {kind} · {gate_lab}", data, G_DEEP)
 
 
