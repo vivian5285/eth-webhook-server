@@ -175,7 +175,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.8.1-marathon-act-fix"
+BINANCE_VPS_VERSION = "v16.9.0-radar-tp1-gate"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -12496,6 +12496,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
             # ── 主动全平（反转保护）──
             if is_flatten_action(raw_action):
+                # ── 平仓 side 字段方向核对（开发指南 v1.0）──
+                # TV 平仓消息带 side 字段，核对账本方向；不一致=过期指令，安全忽略
+                payload_side = str(close_side or "").strip().upper()
+                if payload_side:
+                    # 有 side 字段：核对方向
+                    if payload_side != self.current_side:
+                        logger.info(
+                            f"🛡️ [{self.symbol}] 过期平仓指令已忽略 | "
+                            f"payload.side={payload_side} ≠ 账本.current_side={self.current_side} "
+                            f"| action={raw_action}"
+                        )
+                        return  # 不执行平仓，不告警（预期内正常情况）
+                else:
+                    # 无 side 字段：旧格式 TV 警报，建议更新
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 收到不含 side 字段的平仓消息 | "
+                        f"建议更新 TradingView 警报到最新脚本版本 | action={raw_action}"
+                    )
+                # ── 方向核对通过，继续原流程 ──
+
                 if self._should_ignore_late_close(payload):
                     age = time.time() - float(
                         getattr(self, "_last_open_exec_ts", 0) or 0
@@ -14556,7 +14576,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_activation_price(self):
         """
-        v16.8.1：ADX 三档离散启动比例 × 1.35×initial_atr
+        ADX 三档离散启动比例 × 真实 TP1 距离
         （弱68%早 / 中78% / 强88%晚）。优先账本冻结价。
         """
         from reentry_profiles import (
@@ -14583,20 +14603,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or getattr(self, "last_adx", 0)
             or 25.0
         )
+        try:
+            tp1_dist = float(self._tp1_distance() or 0)
+        except Exception:
+            tp1_dist = 0.0
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and entry > 0:
-            # 旧中点价可能仍在账本：若与 ADX 公式偏差过大且未激活 → 重算
-            if not activated and atr > 0:
+            # 旧中点价/旧 ATR 代理价可能仍在账本：偏差过大且未激活 → 重算
+            if not activated and (atr > 0 or tp1_dist > 0):
                 expect = radar_activation_price_adx(
                     self.current_side, entry, atr, adx=adx, ratio=ratio,
+                    tp1_dist=tp1_dist,
                 )
-                if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.15:
+                if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
                     return expect
             return frozen
-        if entry > 0 and atr > 0:
+        if entry > 0 and (atr > 0 or tp1_dist > 0):
             px = radar_activation_price_adx(
                 self.current_side, entry, atr, adx=adx, ratio=ratio,
+                tp1_dist=tp1_dist,
             )
             if px > 0:
                 self.radar_activation_price = px
