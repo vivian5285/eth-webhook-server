@@ -1769,12 +1769,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     kind = str(open_kind or "").strip() or "首次开仓"
-    # v16.7.0：门槛为 ADX 比例，不再用中点/TP2
-    try:
-        from reentry_profiles import radar_gate_label_from_ratio
-        gate_lab = radar_gate_label_from_ratio(activation_frac)
-    except Exception:
-        gate_lab = "ADX启动 70%~90%×1.35ATR"
+    # 规格 v1.0：绝对价格锚定（首次=(TP1+TP2)/2 · 重入=TP2）
     act_px = float(activation_price or 0)
     tier_txt = ""
     if tier is not None:
@@ -1787,7 +1782,7 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "事件": _g("雷达激活", G_ACCENT),
         "开仓类型": _g(f"**{kind}**", G_MAIN),
-        "启动门槛": _g(f"**{gate_lab}**", G_LIGHT),
+        "启动门槛": _g(f"**绝对价格锚定**", G_LIGHT),
         "激活价": _g(f"**{act_px:.2f}**" if act_px > 0 else "—", G_MAIN),
         "初始止损": _g(f"**{float(new_sl):.2f}**", G_DEEP),
         "头寸": _g(f"**{qty}** {unit} @ `{float(entry):.2f}`", G_MUTED),

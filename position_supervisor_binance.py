@@ -9746,7 +9746,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return True
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
-        frac = float(self._radar_activation_ratio() or 0)
         act_px = float(self._radar_activation_price() or 0)
         tier = int(
             getattr(self, "radar_tier", None)
@@ -9760,11 +9759,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 qty=real_amt,
                 entry=self.watched_entry,
                 new_sl=new_sl,
-                radar_progress=frac,
+                radar_progress=0.0,
                 regime=int(getattr(self, "open_regime", None) or self.regime or 3),
                 shield_cleared=True,
                 verify_note=(
-                    f"{open_kind} · ADX启动={frac:.0%}×1.35ATR | "
+                    f"{open_kind} · 绝对价格锚定 | "
                     f"激活价={act_px:.2f} | 止损上移@{float(new_sl):.2f} | "
                     f"持仓 {real_amt} {self._unit()}"
                 ),
@@ -9772,7 +9771,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 trigger_gate=str(trigger_gate or "")[:120],
                 activation_price=act_px if act_px > 0 else round(float(curr_px or 0), 2),
                 open_kind=open_kind,
-                activation_frac=frac,
+                activation_frac=0.0,
                 tier=tier,
             )
             self._radar_arm_ding_sent = True
@@ -11538,7 +11537,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"保持VPS={float(getattr(self, 'tv_sl', 0) or 0):.2f} | "
             f"best={self.best_price:.2f} | "
             f"朝TP1={self._tp1_direction_progress(curr_px):.0%} "
-            f"激活线={self._radar_activation_ratio():.0%}"
+            f"激活线={self._radar_activation_price():.2f}"
         )
         # 马拉松：TP 成交只缩量，禁止抬强制底线
         self._ratchet_radar_profit_floor(
@@ -14576,58 +14575,38 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_activation_price(self):
         """
-        ADX 三档离散启动比例 × 真实 TP1 距离
-        （弱68%早 / 中78% / 强88%晚）。优先账本冻结价。
+        【规格 v1.0 · 绝对价格锚定】
+        首次开仓：雷达激活价 = (TP1 + TP2) / 2（TP1/TP2 为 webhook 原始信号价格）
+        重入开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）
+        不再使用 ADX 比例 × TP1 距离的旧公式。
+        优先账本冻结价（已开仓持仓期不漂移）。
         """
         from reentry_profiles import (
-            normalize_activation_ratio,
-            radar_activation_price_adx,
+            radar_gate_price_from_tps,
         )
 
         frozen = float(getattr(self, "radar_activation_price", 0) or 0)
         activated = bool(getattr(self, "radar_activated", False))
-        entry = float(self.watched_entry or getattr(self, "cycle_entry", 0) or 0)
-        atr = float(
-            getattr(self, "open_atr", 0)
-            or getattr(self, "cycle_open_atr", 0)
-            or 0
-        )
-        if atr <= 0:
-            try:
-                atr = float(self._get_locked_initial_atr() or 0)
-            except Exception:
-                atr = 0.0
-        ratio = self._radar_activation_ratio()
-        adx = float(
-            getattr(self, "radar_activation_adx", 0)
-            or getattr(self, "last_adx", 0)
-            or 25.0
-        )
-        try:
-            tp1_dist = float(self._tp1_distance() or 0)
-        except Exception:
-            tp1_dist = 0.0
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
+        tp2_px = float(tps[1] or 0) if len(tps) > 1 else 0.0
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
-        if frozen > 0 and entry > 0:
-            # 旧中点价/旧 ATR 代理价可能仍在账本：偏差过大且未激活 → 重算
-            if not activated and (atr > 0 or tp1_dist > 0):
-                expect = radar_activation_price_adx(
-                    self.current_side, entry, atr, adx=adx, ratio=ratio,
-                    tp1_dist=tp1_dist,
-                )
+        if frozen > 0 and tp1_px > 0 and tp2_px > 0:
+            # 旧 ADX 比例公式残留检测：偏差 >0.2% 且未激活则重算
+            if not activated:
+                expect = radar_gate_price_from_tps(tp1_px, tp2_px, attempt)
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
                     return expect
             return frozen
-        if entry > 0 and (atr > 0 or tp1_dist > 0):
-            px = radar_activation_price_adx(
-                self.current_side, entry, atr, adx=adx, ratio=ratio,
-                tp1_dist=tp1_dist,
-            )
+
+        # 首次计算
+        if tp1_px > 0 and tp2_px > 0:
+            px = radar_gate_price_from_tps(tp1_px, tp2_px, attempt)
             if px > 0:
                 self.radar_activation_price = px
-                self.radar_activation_frac = float(ratio)
-                self.radar_activation_adx = float(adx)
                 return px
         return 0.0
 

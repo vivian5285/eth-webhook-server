@@ -416,9 +416,11 @@ def radar_activation_price_adx(
     adx: Optional[float] = None,
     ratio: Optional[float] = None,
     tp1_atr_mult: float = TP1_ATR_MULT,
+    tp1_dist: Optional[float] = None,
 ) -> float:
     """
-    启动价 = entry ± ratio × (1.35 × initial_atr)。
+    启动价 = entry ± ratio × TP1距离。
+    TP1距离优先用真实 TV TP1（tp1_dist）；缺失时回退 1.35 × initial_atr。
     ratio 优先；否则由 adx 计算。
     """
     side_u = str(side or "").strip().upper()
@@ -428,7 +430,13 @@ def radar_activation_price_adx(
         r = float(ratio)
     else:
         r = radar_activation_ratio_from_adx(adx)
-    dist = tp1_distance(atr, tp1_atr_mult) * float(r)
+    try:
+        base = abs(float(tp1_dist or 0))
+    except (TypeError, ValueError):
+        base = 0.0
+    if base <= 0:
+        base = tp1_distance(atr, tp1_atr_mult)
+    dist = base * float(r)
     if entry_f <= 0 or dist <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
     if side_u == "LONG":
@@ -443,23 +451,22 @@ def radar_gate_price_from_tps(
     **kwargs,
 ) -> float:
     """
-    【兼容壳】旧绝对中点/TP2 已废止。
-    若调用方传入 entry/atr/adx/ratio，走 ADX 公式；否则返回 0（强制上层走新路径）。
+    【规格 v1.0 · 绝对价格锚定】
+    首次开仓：雷达激活价 = (TP1 + TP2) / 2
+    重入开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）
+    不再使用 ADX 比例 × TP1 距离的旧公式。
     """
-    _ = tp1
-    _ = tp2
-    _ = reentry_attempt
-    entry = kwargs.get("entry")
-    atr = kwargs.get("initial_atr") or kwargs.get("atr")
-    if entry and atr:
-        return radar_activation_price_adx(
-            str(kwargs.get("side") or "LONG"),
-            float(entry),
-            float(atr),
-            adx=kwargs.get("adx"),
-            ratio=kwargs.get("ratio"),
-        )
-    return 0.0
+    t1 = float(tp1 or 0)
+    t2 = float(tp2 or 0)
+    attempt = int(reentry_attempt or 0)
+    if t1 <= 0 or t2 <= 0:
+        return 0.0
+    if attempt >= 1:
+        # 重入开仓：TP2 绝对价格
+        return round(t2, 4)
+    else:
+        # 首次开仓：TP1-TP2 区间中点
+        return round((t1 + t2) / 2.0, 4)
 
 
 def radar_gate_label(reentry_attempt: int = 0, ratio: Optional[float] = None) -> str:
@@ -623,17 +630,18 @@ def activation_price_from_tp1(
     adx: Optional[float] = None,
 ) -> float:
     """
-    兼容旧签名：优先走 ADX×1.35ATR；若无 atr 则用 |TP1−entry|×ratio 兜底。
+    兼容旧签名：优先走 ADX比例 × 真实TP1距离；无 TP1 时回退 1.35ATR。
     """
-    _ = tv_price
-    atr = float(initial_atr or 0)
-    if atr > 0:
-        return radar_activation_price_adx(
-            side, entry, atr, adx=adx, ratio=frac,
-        )
     side_u = str(side or "").strip().upper()
     e = float(entry or 0)
     t = float(tp1 or 0)
+    ref = float(tv_price or 0) or e
+    real_dist = abs(t - ref) if t > 0 and ref > 0 else 0.0
+    atr = float(initial_atr or 0)
+    if atr > 0 or real_dist > 0:
+        return radar_activation_price_adx(
+            side, entry, atr, adx=adx, ratio=frac, tp1_dist=real_dist,
+        )
     r = normalize_activation_ratio(frac, adx)
     if e <= 0 or t <= 0 or side_u not in ("LONG", "SHORT"):
         return 0.0
