@@ -403,6 +403,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._init_reentry_runtime()
         self.breakeven_phase = False  # 呼吸止损阶段二
         self.initial_stop = 0.0       # 雷达初始止损基准（与永久硬止损分离）
+        # 规格 v1.0 §5.0：提前保本检查点（雷达激活前，只做一次）
+        self._early_be_checkpoint_done = False
         # v15.9.1：TP3↔雷达退出路径所有权 + 防御单本地标签
         _own = blank_ownership_state()
         self.exit_ownership = str(_own["exit_ownership"])
@@ -3163,6 +3165,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "radar_activated": bool(getattr(self, "radar_activated", False)),
                     "breakeven_phase": bool(getattr(self, "breakeven_phase", False)),
                     "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
+                    # 规格 v1.0 §5.0：提前保本检查点标记持久化
+                    "_early_be_checkpoint_done": bool(getattr(self, "_early_be_checkpoint_done", False)),
                     "last_adx": float(getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
                     "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
                     "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.15) or 1.15),
@@ -8134,6 +8138,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._disarm_premature_radar(real_amt, curr_px, source="哨兵防线")
         # 铁律（2026-07-26）：休眠时 _should_radar_trail=False，若此处再要求
         # is_radar_active 才会 trailing → 永远调不到 _maybe_arm → 雷达假死。
+        # 规格 v1.0 §5.0：提前保本检查点（在雷达激活判断之前独立检查）
+        if self._radar_is_dormant() and float(curr_px or 0) > 0:
+            self._check_early_be_checkpoint(curr_px)
         # 价过激活线 / TP1+TP2 已成交 → 必须先武装，再追踪。
         if self._radar_is_dormant() and float(curr_px or 0) > 0:
             armed = self._maybe_arm_radar_on_activation(
@@ -8657,6 +8664,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 or 1.0
             )
             self.early_be_done = bool(s.get("early_be_done", False))
+            # 规格 v1.0 §5.0：提前保本检查点标记恢复
+            self._early_be_checkpoint_done = bool(s.get("_early_be_checkpoint_done", False))
             self._breath_ratio_history = list(
                 s.get("atr_1h_ratio_history", getattr(self, "_breath_ratio_history", []))
                 or []
@@ -13680,6 +13689,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._atr_scenario = 0
         self._temp_stop_active = False
         self._tp3_fallback_active = False
+        # 规格 v1.0 §5.0：开仓时重置提前保本检查点标记
+        self._early_be_checkpoint_done = False
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
@@ -14610,6 +14621,79 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return px
         return 0.0
 
+    def _check_early_be_checkpoint(self, curr_px):
+        """
+        【规格 v1.0 · §5.0 提前保本检查点】
+        当价格到达 entry + tp1_distance × 0.5 时，将止损从当前值移动到保本位。
+        仅触发一次，触发后标记_done=True，不再重复。
+        不启动雷达，不影响雷达的激活状态判断。
+        """
+        if bool(getattr(self, "_early_be_checkpoint_done", False)):
+            return None
+        if bool(getattr(self, "radar_activated", False)):
+            return None
+        entry = float(self.watched_entry or 0)
+        side = str(self.current_side or "").strip().upper()
+        curr_px_f = float(curr_px or 0)
+        if entry <= 0 or side not in ("LONG", "SHORT") or curr_px_f <= 0:
+            return None
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tv_price_ref = float(getattr(self, "_tv_price_ref", 0) or 0)
+        ref = float(getattr(self, "tv_price", 0) or tv_price_ref or 0)
+        if ref <= 0:
+            ref = entry
+        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
+        if tp1_px <= 0:
+            return None
+        tp1_dist = abs(tp1_px - ref)
+        if tp1_dist <= 0:
+            return None
+        trigger_px = entry + tp1_dist * 0.5
+        if side == "LONG" and curr_px_f >= trigger_px:
+            pass
+        elif side == "SHORT" and curr_px_f <= trigger_px:
+            pass
+        else:
+            return None
+        current_sl = float(self.current_sl or 0)
+        profile = getattr(self, "breath_profile", None) or {}
+        tick = float(profile.get("tick_size") or 0.01)
+        fee_pct = float(profile.get("fee_cover_pct") or 0.0008)
+        fee = entry * fee_pct
+        if side == "LONG":
+            new_sl = max(entry + tick + fee, current_sl)
+        else:
+            new_sl = min(entry - tick - fee, current_sl)
+        if new_sl == current_sl:
+            self._early_be_checkpoint_done = True
+            return None
+        old_sl = current_sl
+        self.current_sl = new_sl
+        self._early_be_checkpoint_done = True
+        self._save_state()
+        logger.info(
+            f"🛡️ [{self.symbol}] 规格 v1.0 §5.0 提前保本检查点触发 "
+            f"({side}) | entry={entry:.4f} trigger={trigger_px:.4f} "
+            f"old_sl={old_sl:.4f} → new_sl={new_sl:.4f}"
+        )
+        try:
+            self._call_dingtalk(
+                dingtalk.send_alert,
+                f"🛡️ {self.symbol} 提前保本检查点触发",
+                {
+                    "方向": side,
+                    "入场价": f"{entry:.4f}",
+                    "触发价": f"{trigger_px:.4f}",
+                    "旧止损": f"{old_sl:.4f}",
+                    "新止损(保本)": f"{new_sl:.4f}",
+                    "说明": "规格 v1.0 §5.0 · 雷达激活前",
+                },
+                immediate=True,
+                level=1,
+            )
+        except Exception:
+            pass
+        return new_sl
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
         """兼容旧调用：一律走呼吸止损。"""
@@ -16144,6 +16228,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         s.get("breathing_coefficient", 1.0) or 1.0
                     )
                     self.early_be_done = bool(s.get("early_be_done", False))
+                    # 规格 v1.0 §5.0：提前保本检查点标记恢复
+                    self._early_be_checkpoint_done = bool(s.get("_early_be_checkpoint_done", False))
                     self._breath_ratio_history = list(
                         s.get("atr_1h_ratio_history", []) or []
                     )

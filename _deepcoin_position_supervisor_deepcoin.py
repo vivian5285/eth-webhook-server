@@ -33,7 +33,6 @@ from webhook_parser import (
     enrich_signal_fields,
     enrich_entry_tp_prices,
     format_tv_field_sources,
-    fetch_eth_atr_14_public,
     fetch_binance_klines,
     classify_tv_close,
     compute_vps_open_qty,
@@ -227,6 +226,8 @@ class PositionSupervisor(PipelineBridgeMixin):
         self._radar_armed_after_tp1 = False
         self.radar_activated = False
         self._ws_tp1_fill_hint = False
+        # 规格 v1.0 §5.0：提前保本检查点（雷达激活前，只做一次）
+        self._early_be_checkpoint_done = False
         self._open_settled_qty = 0
         self.sizing_principal = 0.0
         self.tv_sl = 0.0
@@ -1697,6 +1698,10 @@ class PositionSupervisor(PipelineBridgeMixin):
                     ),
                     "open_settled_qty": int(
                         getattr(self, "_open_settled_qty", 0) or 0
+                    ),
+                    # 规格 v1.0 §5.0：提前保本检查点标记持久化
+                    "_early_be_checkpoint_done": bool(
+                        getattr(self, "_early_be_checkpoint_done", False)
                     ),
                     "pipeline": self._pipeline_state_blob(),
                 }, f)
@@ -3700,6 +3705,9 @@ class PositionSupervisor(PipelineBridgeMixin):
         雷达线不得低于 tv_sl；UPDATE_SL 只更新底线，雷达逻辑独立运行。
         """
         self._disarm_premature_radar(real_amt, curr_px, source="哨兵防线")
+        # 规格 v1.0 §5.0：提前保本检查点（在雷达激活判断之前独立检查）
+        if self._radar_is_dormant() and float(curr_px or 0) > 0:
+            self._check_early_be_checkpoint(curr_px)
         if self._resolve_defense_regime(curr_px) == "FAVORABLE":
             if self._should_radar_trail(curr_px) or self._is_radar_active():
                 self._process_radar_trailing(real_amt, curr_px)
@@ -5855,13 +5863,13 @@ class PositionSupervisor(PipelineBridgeMixin):
         self.enqueue_signal(payload)
 
     def _enrich_tv_payload(self, payload):
-        """v6.9.75：TV 全量 regime/atr/tp 优先，仅缺失项本地补全。"""
+        """规格 v1.0 §6：TV 全量 regime/atr/tp 优先；ATR 禁止独立拉取。"""
         action = str(payload.get("action", "")).strip().upper()
         live_px = deepcoin_client.get_current_price(self.symbol) or self.tv_price or 0.0
         return enrich_signal_fields(
             payload,
             action,
-            fetch_atr=lambda: fetch_eth_atr_14_public(symbol=self.atr_fallback_symbol),
+            fetch_atr=None,  # 规格 v1.0 §6：禁止 VPS 独立拉取 ATR
             fallback_regime=self.regime or 3,
             fallback_atr=self.current_atr or 30.0,
             fallback_price=live_px,
@@ -6993,6 +7001,8 @@ class PositionSupervisor(PipelineBridgeMixin):
         self._radar_armed_after_tp1 = False
         self.radar_activated = False
         self._ws_tp1_fill_hint = False
+        # 规格 v1.0 §5.0：提前保本检查点（雷达激活前，只做一次）
+        self._early_be_checkpoint_done = False
         self._open_settled_qty = self._safe_qty(qty)
         self.initial_qty = self._safe_qty(qty)
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -7204,6 +7214,63 @@ class PositionSupervisor(PipelineBridgeMixin):
         if self.current_side == "SHORT":
             return float(curr_px) <= gate
         return False
+
+    def _check_early_be_checkpoint(self, curr_px):
+        """
+        【规格 v1.0 · §5.0 提前保本检查点 · 对齐币安】
+        当价格到达 entry + tp1_distance × 0.5 时，将止损从当前值移动到保本位。
+        仅触发一次，触发后标记_done=True，不再重复。
+        不启动雷达，不影响雷达的激活状态判断。
+        """
+        if bool(getattr(self, "_early_be_checkpoint_done", False)):
+            return None
+        if bool(getattr(self, "radar_activated", False)):
+            return None
+        entry = float(self.watched_entry or 0)
+        side = str(self.current_side or "").strip().upper()
+        curr_px_f = float(curr_px or 0)
+        if entry <= 0 or side not in ("LONG", "SHORT") or curr_px_f <= 0:
+            return None
+        tps = list(getattr(self, "tv_tps", None) or [])
+        tv_price_ref = float(getattr(self, "_tv_price_ref", 0) or 0)
+        ref = float(getattr(self, "tv_price", 0) or tv_price_ref or 0)
+        if ref <= 0:
+            ref = entry
+        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
+        if tp1_px <= 0:
+            return None
+        tp1_dist = abs(tp1_px - ref)
+        if tp1_dist <= 0:
+            return None
+        trigger_px = entry + tp1_dist * 0.5
+        if side == "LONG" and curr_px_f >= trigger_px:
+            pass
+        elif side == "SHORT" and curr_px_f <= trigger_px:
+            pass
+        else:
+            return None
+        current_sl = float(self.current_sl or 0)
+        profile = getattr(self, "breath_profile", None) or {}
+        tick = float(profile.get("tick_size") or 0.01)
+        fee_pct = float(profile.get("fee_cover_pct") or 0.0008)
+        fee = entry * fee_pct
+        if side == "LONG":
+            new_sl = max(entry + tick + fee, current_sl)
+        else:
+            new_sl = min(entry - tick - fee, current_sl)
+        if new_sl == current_sl:
+            self._early_be_checkpoint_done = True
+            return None
+        old_sl = current_sl
+        self.current_sl = new_sl
+        self._early_be_checkpoint_done = True
+        self._save_state()
+        logger.info(
+            f"🛡️ [{self.symbol}] 规格 v1.0 §5.0 提前保本检查点触发 "
+            f"({side}) | entry={entry:.4f} trigger={trigger_px:.4f} "
+            f"old_sl={old_sl:.4f} → new_sl={new_sl:.4f}"
+        )
+        return new_sl
 
     def _compute_radar_sl(self, curr_px=0.0):
         if not self.watched_entry or self.best_price <= 0:
@@ -7708,6 +7775,10 @@ class PositionSupervisor(PipelineBridgeMixin):
                     )
                     self._open_settled_qty = int(
                         s.get("open_settled_qty", s.get("initial_qty", 0)) or 0
+                    )
+                    # 规格 v1.0 §5.0：提前保本检查点标记恢复
+                    self._early_be_checkpoint_done = bool(
+                        s.get("_early_be_checkpoint_done", False)
                     )
                     if self.sizing_principal <= 0:
                         eq = deepcoin_client.get_principal_wallet_balance()

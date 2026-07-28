@@ -33,8 +33,8 @@ DC_SVC4  = "deepcoin-hft"    # systemd service for 5004
 DC_SVC5  = "deepcoin-b"      # systemd service for 5005
 
 # 目标 commit（来自本次提交）
-BN_COMMIT = "05759a7"   # Binance side-field validation
-DC_COMMIT = "0a547a3"   # Deepcoin side-field validation
+BN_COMMIT = "fcba534"   # spec v1.0 radar activation absolute price anchor
+DC_COMMIT = "fcba534"   # same commit for deepcoin
 
 def cmd(ssh, c, timeout=30):
     print(f"\n--- $ {c}")
