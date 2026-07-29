@@ -408,42 +408,6 @@ def activation_frac_fixed(profile: Optional[Dict[str, Any]] = None) -> float:
     return activation_frac_for_attempt(0, profile, adx=25.0)
 
 
-def radar_activation_price_adx(
-    side: str,
-    entry: float,
-    initial_atr: float,
-    *,
-    adx: Optional[float] = None,
-    ratio: Optional[float] = None,
-    tp1_atr_mult: float = TP1_ATR_MULT,
-    tp1_dist: Optional[float] = None,
-) -> float:
-    """
-    启动价 = entry ± ratio × TP1距离。
-    TP1距离优先用真实 TV TP1（tp1_dist）；缺失时回退 1.35 × initial_atr。
-    ratio 优先；否则由 adx 计算。
-    """
-    side_u = str(side or "").strip().upper()
-    entry_f = float(entry or 0)
-    atr = float(initial_atr or 0)
-    if ratio is not None and not is_legacy_activation_frac(ratio):
-        r = float(ratio)
-    else:
-        r = radar_activation_ratio_from_adx(adx)
-    try:
-        base = abs(float(tp1_dist or 0))
-    except (TypeError, ValueError):
-        base = 0.0
-    if base <= 0:
-        base = tp1_distance(atr, tp1_atr_mult)
-    dist = base * float(r)
-    if entry_f <= 0 or dist <= 0 or side_u not in ("LONG", "SHORT"):
-        return 0.0
-    if side_u == "LONG":
-        return round(entry_f + dist, 4)
-    return round(entry_f - dist, 4)
-
-
 def radar_gate_price_from_tps(
     tp1: float,
     tp2: float,
@@ -601,56 +565,6 @@ def arm_stop_price(
 
 def tp1_distance(initial_atr: float, tp1_atr_mult: float = TP1_ATR_MULT) -> float:
     return abs(float(initial_atr or 0)) * float(tp1_atr_mult or TP1_ATR_MULT)
-
-
-def activation_price(
-    side: str,
-    entry: float,
-    initial_atr: float,
-    frac: float = None,
-    tp1_atr_mult: float = TP1_ATR_MULT,
-) -> float:
-    """雷达启动价：多 = entry + ratio×1.35ATR；空对称。"""
-    r = frac
-    if r is None or is_legacy_activation_frac(r):
-        r = RADAR_ACT_RATIO_LO
-    return radar_activation_price_adx(
-        side, entry, initial_atr, ratio=float(r), tp1_atr_mult=tp1_atr_mult,
-    )
-
-
-def activation_price_from_tp1(
-    side: str,
-    entry: float,
-    tp1: float,
-    frac: float = None,
-    *,
-    tv_price: Optional[float] = None,
-    initial_atr: float = 0.0,
-    adx: Optional[float] = None,
-) -> float:
-    """
-    兼容旧签名：优先走 ADX比例 × 真实TP1距离；无 TP1 时回退 1.35ATR。
-    """
-    side_u = str(side or "").strip().upper()
-    e = float(entry or 0)
-    t = float(tp1 or 0)
-    ref = float(tv_price or 0) or e
-    real_dist = abs(t - ref) if t > 0 and ref > 0 else 0.0
-    atr = float(initial_atr or 0)
-    if atr > 0 or real_dist > 0:
-        return radar_activation_price_adx(
-            side, entry, atr, adx=adx, ratio=frac, tp1_dist=real_dist,
-        )
-    r = normalize_activation_ratio(frac, adx)
-    if e <= 0 or t <= 0 or side_u not in ("LONG", "SHORT"):
-        return 0.0
-    dist = abs(t - e) * r
-    if dist <= 0:
-        return 0.0
-    if side_u == "LONG":
-        return round(e + dist, 4)
-    return round(e - dist, 4)
 
 
 def next_activation_frac(

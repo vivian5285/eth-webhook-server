@@ -17,6 +17,7 @@ from binance_client import (
     is_orders_query_failed,
     is_position_query_failed,
     ORDERS_QUERY_FAILED,
+    IpRateLimitedError,
 )
 from order_idempotency import (
     MAX_OPEN_ORDERS_HARD_CAP,
@@ -124,13 +125,10 @@ from breath_profiles import LockedInitialAtr, cold_start_multiplier
 from reentry_profiles import (
     ACTIVATION_TP1_FRAC,
     activation_frac_for_attempt,
-    activation_price as reentry_activation_px,
-    activation_price_from_tp1,
     adx_to_tier,
     arm_stop_price,
     get_reentry_profile,
     tier_label,
-    tp1_distance as reentry_tp1_distance,
 )
 from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import RadarReentryMixin
@@ -175,7 +173,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.9.1-tv-ready"
+BINANCE_VPS_VERSION = "v16.10.0-probe-trade-budget"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -723,6 +721,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or r.startswith("local_tags")
             or r.startswith("chief_auditor")
             or r.startswith("tp_slice")
+            or r.startswith("CLOSE_THEN_OPEN_FAIL")
+            or r.startswith("flat_purge_residual")   # 平仓后幽灵挂单未净（空仓时自动解除）
             or "open_orders" in r
         )
 
@@ -2570,7 +2570,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if total > live_qty + 0.001:
             out[last] = round(max(out.get(last, 0) - (total - live_qty), 0.0), 3)
         # PLACE=2 硬帽：限价合计 ≤ 开仓×(r1+r2)+一步噪声
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         if place_n <= 2 and max(levels) <= 2:
             initial = float(
                 self._tp_baseline_qty(live_qty)
@@ -3338,6 +3338,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             return "AMBIGUOUS"
         # 账本曾监控：再给一次总账户持仓扫描兜底（防 symbol 瞬时查询抖动）
+        # 修复（v16.9.2）：走 binance_client._refresh_all_positions（含节流阀/冷却）
+        # 旧路径直接调 client.futures_position_information 绕过节流阀
         if float(getattr(self, "watched_qty", 0) or 0) > 0 or getattr(
             self, "current_side", None
         ):
@@ -3345,17 +3347,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🔄 [{self.symbol}] 账本曾有仓但 REST 空+无挂单，再扫一次账户持仓"
             )
             try:
-                rows = binance_client.client.futures_position_information()
-                for p in rows or []:
-                    if str(p.get("symbol") or "").upper() != self.symbol.upper():
-                        continue
-                    amt = float(p.get("positionAmt") or 0)
-                    if abs(amt) > 0:
-                        return {
-                            "size": abs(amt),
-                            "entry_price": round(float(p.get("entryPrice", 0) or 0), 2),
-                            "side": "LONG" if amt > 0 else "SHORT",
-                        }
+                all_rows = binance_client._refresh_all_positions(force=True)
+                if all_rows is not None:
+                    p = all_rows.get(self.symbol.upper())
+                    if p:
+                        amt = float(p.get("positionAmt") or 0)
+                        if abs(amt) > 0:
+                            return {
+                                "size": abs(amt),
+                                "entry_price": round(float(p.get("entryPrice", 0) or 0), 2),
+                                "side": "LONG" if amt > 0 else "SHORT",
+                            }
             except Exception as e:
                 logger.warning(f"账户持仓兜底扫描失败: {e}")
         return None
@@ -4202,7 +4204,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         防御 TP 限价：先写本地标签再下单；失败释放标签。
         本地已有同档未完成标签 → 拒挂（宁可错过）。
-        v16.4.0：禁止挂 TP3。
+
+        修复（v16.9.2）：
+        - 节流导致 place_limit_order 返回 None 时，若本地有 pending 标签，
+          立即清标并重试一次，避免 45s stale-tag 窗口导致 TP 挂单空窗。
+        - 修复（v16.7.0→v16.9.2）：_with_trade_retry 内部抛出 IpRateLimitedError
+          时，快通道需捕获并重试，防止首次 -1003 就清标放弃 TP。
         """
         level = int(level or 0)
         kind = f"TP{level}"
@@ -4218,27 +4225,74 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"→ 拒挂 TP{level}（防查不到单狂挂）"
             )
             return None
-        if not self._orders_book_readable():
-            logger.error(
-                f"🚫 [{self.symbol}] 挂单不可读 → 拒挂 TP{level}（fail-closed）"
+        # 防御性检查：IP冷却/查单失败时走本地轻量状态，避免崩溃
+        # 修复（v16.10.x）：加 try/except 兜底，防止旧版 binance_client
+        # 缺少 defensive_orders_look_ok 方法导致 AttributeError
+        try:
+            book_was_readable = bool(self._orders_book_readable())
+        except (AttributeError, TypeError):
+            logger.warning(
+                f"🛡️ [{self.symbol}] TP{level} _orders_book_readable 异常 → "
+                f"假设可挂（幂等标签保护）"
             )
-            return None
+            book_was_readable = True
+        if not book_was_readable:
+            logger.warning(
+                f"🛡️ [{self.symbol}] TP{level} 挂单不可读 → 节流快通道启用"
+            )
         tag = make_defense_client_order_id(self.symbol, kind, float(price or 0))
         self._register_pending_defense_tag(tag, kind, price=price)
         try:
             self._save_state()
         except Exception:
             pass
-        last = None
-        for _ in range(max(1, int(retries or 0) + 1)):
-            last = binance_client.place_limit_order(
+
+        def _do_place():
+            return binance_client.place_limit_order(
                 close_side, qty, price, symbol=self.symbol, reduce_only=True,
                 client_order_id=tag,
             )
-            if last:
+
+        last = None
+        last_err = None
+        # 重试循环：捕获 IpRateLimitedError 直到冷却期结束或超时
+        for attempt in range(3):
+            try:
+                last = _do_place()
+                if last:
+                    break
+                last_err = None
+            except IpRateLimitedError as e:
+                last_err = e
+                ip_rem = float(getattr(e, "remaining_sec", 0) or 0)
+                logger.warning(
+                    f"🛡️ [{self.symbol}] TP{level} IpRateLimitedError "
+                    f"(剩余 {ip_rem:.0f}s) → 第 {attempt + 1} 次重试"
+                )
+                if attempt < 2:
+                    wait = min(max(ip_rem, 0.5), 5.0)
+                    if wait > 0:
+                        time.sleep(wait)
+                continue
+            except Exception as e:
+                last_err = e
+                logger.warning(f"🛡️ [{self.symbol}] TP{level} 下单异常: {e}")
                 break
-            time.sleep(0.2)
+
+        # 快通道：首次返回 None + 盘口本不可读 → 等一下再试（兜底）
+        if not last and last_err is None and not book_was_readable:
+            time.sleep(0.8)
+            try:
+                last = _do_place()
+            except IpRateLimitedError:
+                pass
+            except Exception:
+                pass
+
         if not last:
+            logger.warning(
+                f"🚫 [{self.symbol}] TP{level} 节流重试仍失败 → 清标放弃"
+            )
             self._complete_pending_defense_tag(tag=tag)
             try:
                 self._save_state()
@@ -5128,7 +5182,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             {"level": 3, "price": float(tps[2] or 0), "qty": o3},
         ]
         return [
-            s for s in slices[: int(self._effective_place_tp_levels() or 2)]
+            s for s in slices[: self._effective_place_tp_levels()]
             if float(s.get("price") or 0) > 0 and float(s.get("qty") or 0) > 0
         ]
 
@@ -5141,7 +5195,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _expected_tp_count(self, tp_pxs=None):
         tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-        n = min(int(self._effective_place_tp_levels() or 2), len(tp_pxs or []))
+        n = min(self._effective_place_tp_levels(), len(tp_pxs or []))
         return sum(
             1 for i in range(n)
             if float((tp_pxs or [0])[i] or 0) > 0 and (i + 1) not in consumed
@@ -5321,7 +5375,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_qty = float(
             live_qty if live_qty is not None else self.watched_qty or 0
         )
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         consumed = []
         for lv in range(1, place_n + 1):
             if not self.tv_tps or lv - 1 >= len(self.tv_tps):
@@ -5657,7 +5711,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return ""
 
     def _mark_tp_levels_consumed(self, levels):
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         for lv in levels:
             lv = int(lv)
@@ -5793,7 +5847,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_qty = float(live_qty or 0)
         notes = []
         if entry <= 0 or curr_px <= 0 or not self.current_side:
-            place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+            place_n = self._effective_place_tp_levels()
             return {
                 "consumed": list(getattr(self, "tp_levels_consumed", []) or []),
                 "hang_levels": list(range(1, place_n + 1)),
@@ -5802,7 +5856,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             }
 
         self._ensure_tp123_prices_from_tv(entry)
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         past = []
         for lv in range(1, place_n + 1):
             if not self.tv_tps or lv - 1 >= len(self.tv_tps):
@@ -6005,7 +6059,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         while len(ratios) < 3:
             ratios.append(0.0)
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         remaining = [i for i in range(place_n) if (i + 1) not in consumed]
         live_qty = float(live_qty or 0)
@@ -6064,7 +6118,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂。
         返回 PLACE_TP_LEVELS 内档位（v16.4.0 恒=2，仅 TP1+TP2）。
         """
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         qty_map = self._split_remaining_tp_quantities(live_qty)
         qty_map = self._normalize_tp_qty_map(qty_map, live_qty)
@@ -6803,19 +6857,40 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return binance_client.find_protective_stop_prices(self.symbol)
 
     def _orders_book_readable(self):
-        """盘口挂单 REST 是否可读；失败时禁止撤挂/补挂。"""
+        """
+        盘口挂单 REST 是否可读；失败时禁止撤挂/补挂。
+
+        修复（v16.7.0）：节流/冷却时优先查本地轻量状态，不直接 fail-closed。
+        仅在「既无法确认本地可信、又无 REST 能力」时才拒绝。
+        """
         try:
             if float(binance_client.ip_rate_limit_remaining() or 0) > 0:
+                # IP 冷却中：先走轻量本地检查
+                ok, reason = binance_client.defensive_orders_look_ok(self.symbol, max_age=60.0)
+                if ok:
+                    return True
                 logger.error(
-                    f"🛡️ [{self.symbol}] IP冷却中 → 盘口不可读，禁止撤/补挂"
+                    f"🛡️ [{self.symbol}] IP冷却+本地状态不可信 → 盘口不可读 "
+                    f"(reason={reason})，禁止撤/补挂"
                 )
                 return False
         except Exception:
             pass
         orders = binance_client.get_open_orders(self.symbol, include_algo=True)
         if is_orders_query_failed(orders):
+            # REST 失败：本地检查兜底
+            try:
+                ok, reason = binance_client.defensive_orders_look_ok(self.symbol, max_age=60.0)
+            except (AttributeError, TypeError):
+                ok, reason = False, "method_missing"
+            if ok:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] REST失败但本地可信 → 放行 (reason={reason})"
+                )
+                return True
             logger.error(
-                f"🛡️ [{self.symbol}] 挂单查询失败 → 盘口不可读，禁止撤/补挂"
+                f"🛡️ [{self.symbol}] 挂单查询失败且本地不可信 → 盘口不可读，"
+                f"禁止撤/补挂 (reason={reason})"
             )
             return False
         return True
@@ -7562,7 +7637,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         while len(ratios) < 3:
             ratios.append(0.0)
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         init_q = float(
             self._tp_baseline_qty(live_qty)
@@ -7600,15 +7675,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return True, f"ok sum={place_sum} cap={cap}"
 
     def _place_tp_levels_only(self, live_qty, retries=2):
-        """只挂未成交 TP 限价档，绝不触碰止损/雷达"""
+        """
+        只挂未成交 TP 限价档，绝不触碰止损/雷达。
+
+        修复（v16.7.0）：移除了 orders_book_readable 硬门。
+        节流时依赖 _place_defense_tp_limit 内部的节流快通道重试逻辑
+        （先写本地标签 → 尝试下单 → 节流等0.8s → 再试一次）。
+        """
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
-            return 0
-        if not self._orders_book_readable():
-            logger.error(
-                f"🛡️ [{self.symbol}] place_tp_levels_only 中止：挂单不可读 → 禁止盲补"
-            )
             return 0
         self._clear_spurious_tp_consumed_if_full_size(
             live_qty, source="place_tp_levels_only",
@@ -7671,15 +7747,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 )
             ok = False
             last_res = None
-            for attempt in range(max(1, retries + 1)):
-                res = self._place_defense_tp_limit(
-                    close_side, q, px, int(lv["level"]), retries=0,
-                )
-                if res:
-                    ok = True
-                    last_res = res
-                    break
-                time.sleep(0.2)
+            res = self._place_defense_tp_limit(
+                close_side, q, px, int(lv["level"]),
+            )
+            if res:
+                ok = True
+                last_res = res
             if ok:
                 placed += 1
                 logger.info(f"📈 UPDATE_TP 挂 TP{lv['level']} {q} @ {px:.2f}")
@@ -9326,10 +9399,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return 0
         live_qty = self._resolve_live_qty(live_qty)
         if not self._orders_book_readable():
-            logger.error(
-                f"🛡️ [{self.symbol}] 补挂中止：挂单不可读 → 禁止盲补 TP"
+            logger.warning(
+                f"🛡️ [{self.symbol}] 补挂：挂单不可读 → 节流快通道继续（内部重试）"
             )
-            return 0
+            # 不 return；依赖 _place_defense_tp_limit 内部节流重试
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         note = self._block_rehang_filled_tps_note(live_qty, curr_px)
         if note:
@@ -9967,7 +10040,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if audit.get("orders_unreadable"):
             return True
         expected = audit.get("expected", 0)
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         if expected <= 0:
             # 有仓且 TP 未吃完时 expected=0 = 价位缺失，禁止假「已齐」跳过挂单
             if self.current_side and float(self.watched_entry or 0) > 0:
@@ -10026,7 +10099,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 对齐前强制补全 TP 价：禁止 expected=0 假齐跳过挂单
         if entry > 0 and self.current_side and self._expected_tp_count() <= 0:
             consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-            place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+            place_n = self._effective_place_tp_levels()
             if not set(range(1, place_n + 1)).issubset(consumed):
                 self._ensure_tp123_prices_from_tv(entry)
         if reason:
@@ -11398,7 +11471,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         q1 = by_lv.get(1, 0.0)
         q2 = by_lv.get(2, 0.0)
         q3 = by_lv.get(3, 0.0)
-        place_n = max(1, min(2, int(self._effective_place_tp_levels() or 2)))
+        place_n = self._effective_place_tp_levels()
         place_sum = round(sum(float(s.get("qty") or 0) for s in slices), 3)
         ratios = list(
             getattr(self, "_leg_ratios", None)
@@ -14639,11 +14712,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if entry <= 0 or side not in ("LONG", "SHORT") or curr_px_f <= 0:
             return None
         tps = list(getattr(self, "tv_tps", None) or [])
-        tv_price_ref = float(getattr(self, "_tv_price_ref", 0) or 0)
-        ref = float(getattr(self, "tv_price", 0) or tv_price_ref or 0)
+        # 规格 v1.0 §5.0：tp1_distance = |tp1 - TV信号价|
+        # 使用 tv_price（webhook消息.price），禁止用 _tv_price_ref 兜底
+        ref = float(getattr(self, "tv_price", 0) or 0)
         if ref <= 0:
-            ref = entry
-        tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
+            return None
+        tp1_px = float(tps[0] or 0) if tps else 0.0
         if tp1_px <= 0:
             return None
         tp1_dist = abs(tp1_px - ref)
@@ -16813,6 +16887,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 )
                 self._reset_breath_ledger_on_flat(source="重启确认空仓")
                 self._open_regime_sticky = False
+                # 修复（v16.9.x）：重启确认空仓后必须清除 trading_paused，
+                # 避免 XAU 等上笔 CLOSE_THEN_OPEN_FAIL_ABORT 导致新 TV 永不开仓。
+                # 重启恢复逻辑已确认 REST 报空仓，可安全清除。
+                self.trading_paused = False
+                self.trading_pause_reason = ""
                 self._save_state()
                 flat_ok = self._wait_verify(
                     lambda: self._get_active_position(prefer_ws=False) is None,

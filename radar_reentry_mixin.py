@@ -421,6 +421,11 @@ class RadarReentryMixin:
         """
         仓位归零后挂再入限价前：必须 qty=0 且挂单列表为空。
         最多 STERILE_MAX_RETRY 轮；失败 → 钉钉 + 暂停该品种。
+
+        修复（v16.9.2）：
+        - prefer_ws=True 避免强制 REST 打 -1003
+        - get_open_orders 前检查 IP 冷却；冷却中跳过盘口扫描
+        - 连续 REST 间插入 sleep，避免堆积
         """
         max_n = int(STERILE_MAX_RETRY)
         last_detail = ""
@@ -431,9 +436,20 @@ class RadarReentryMixin:
                 )
             except Exception as e:
                 logger.warning(f"[{self.symbol}] 再入清场撤单异常: {e}")
+            time.sleep(0.4)  # 修复（v16.9.2）：撤单后等一下再查单
             # 再撤可能残留的开仓向限价（含旧再入单）
             try:
-                from binance_client import binance_client, is_orders_query_failed
+                from binance_client import binance_client, is_orders_query_failed, IpRateLimitedError
+                # IP 冷却中：跳过盘口扫描，保守认为已净
+                try:
+                    if binance_client.ip_rate_limit_remaining() > 0:
+                        logger.warning(
+                            f"🛡️ [{self.symbol}] {reason} IP冷却中 → 跳过查单，保守通过"
+                        )
+                        self.reentry_sterile_fail_count = 0
+                        return True
+                except Exception:
+                    pass
                 book = binance_client.get_open_orders(self.symbol)
                 if is_orders_query_failed(book):
                     last_detail = "挂单=QUERY_FAILED"
@@ -470,7 +486,8 @@ class RadarReentryMixin:
             elif hasattr(self, "_verify_sterile_flat"):
                 ok = bool(self._verify_sterile_flat())
             else:
-                pos = self._get_active_position(prefer_ws=False)
+                # 修复（v16.9.2）：prefer_ws=True 避免强制 REST 触发 -1003
+                pos = self._get_active_position(prefer_ws=True)
                 ok = pos != "QUERY_FAILED" and not (
                     pos and float(pos.get("size") or 0) > 0
                 )
@@ -498,14 +515,16 @@ class RadarReentryMixin:
         try:
             import dingtalk
             self._call_dingtalk(
-                dingtalk.report_system_alert,
-                title=f"再入前无菌失败·已暂停 [{self.symbol}]",
-                detail=(
-                    f"{reason} 连续{max_n}轮未净场 | {last_detail} | "
-                    f"已 trading_paused=True，禁止再挂限价（防叠单击穿）"
-                ),
-                level="紧急",
-                suggestion="币安 APP 手动全部撤单确认净场后 /admin/resume",
+                dingtalk.report_reentry_abandon,
+                side=str(getattr(self, "cycle_tv_side", "")),
+                reason=f"连续{max_n}轮未净场: {reason} | {last_detail}",
+                attempt=int(max_n),
+                max_attempts=int(max_n),
+                exit_source=str(reason),
+                exit_price=0,
+                entry_price=0,
+                symbol=self.symbol,
+                tier_label_str=str(tier_label(int(getattr(self, "adx_tier", 2) or 2))),
             )
         except Exception:
             pass
@@ -532,8 +551,8 @@ class RadarReentryMixin:
             return False
         if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
             return False
-        # 挂单前确认空仓
-        pos = self._get_active_position(prefer_ws=False)
+        # 挂单前确认空仓：prefer_ws=True 避免冷却期强制 REST 触发 -1003
+        pos = self._get_active_position(prefer_ws=True)
         if pos == "QUERY_FAILED":
             return False
         if pos and float(pos.get("size") or 0) > 0:
@@ -622,17 +641,19 @@ class RadarReentryMixin:
         try:
             import dingtalk
             self._call_dingtalk(
-                dingtalk.report_system_alert,
-                title=f"智能再入场限价已挂 [{self.symbol}]",
-                detail=(
-                    f"{side} ADX档{tier_label(int(getattr(self, 'adx_tier', 1) or 1))} "
-                    f"attempt={attempt}/{int(get_reentry_profile(self.symbol).get('max_reentries') or 1)} | "
-                    f"limit@{float(self.reentry_limit_px):.2f} | "
-                    f"tag={getattr(self, 'reentry_order_tag', None)} | "
-                    f"TV@{float(self.cycle_tv_price):.2f} | "
-                    f"exit={exit_src}@{exit_px:.2f} | 无菌已确认"
-                ),
-                level="提示",
+                dingtalk.report_reentry_attempt,
+                side=side,
+                qty=qty,
+                reentry_price=float(getattr(self, "reentry_limit_px", 0) or 0),
+                exit_price=float(exit_px),
+                exit_source=str(exit_src),
+                regime=int(getattr(self, "adx_tier", 3) or 3),
+                tier_label_str=str(tier_label(int(getattr(self, "adx_tier", 2) or 2))),
+                attempt=int(attempt),
+                max_attempts=int(get_reentry_profile(self.symbol).get("max_reentries") or 1),
+                tv_price=float(getattr(self, "cycle_tv_price", 0) or 0),
+                entry_price=float(getattr(self, "cycle_tv_price", 0) or 0),
+                symbol=self.symbol,
             )
         except Exception:
             pass
@@ -653,7 +674,18 @@ class RadarReentryMixin:
             )
             return False
 
-        from binance_client import binance_client, is_orders_query_failed
+        from binance_client import binance_client, is_orders_query_failed, IpRateLimitedError
+
+        # IP 冷却期：刷新路径最多跑一次，然后退出（避免刷新周期反复打 REST）
+        if is_refresh:
+            try:
+                if binance_client.ip_rate_limit_remaining() > 0:
+                    logger.warning(
+                        f"🛡️ [{self.symbol}] TTL刷新 IP冷却中 → 退出本次刷新"
+                    )
+                    return False
+            except Exception:
+                pass
 
         if is_refresh:
             n = int(getattr(self, "reentry_unfilled_refreshes", 0) or 0) + 1
@@ -677,8 +709,9 @@ class RadarReentryMixin:
             )
             return False
 
-        # 挂单前确认无持仓 + 无菌（刷新路径也再验一次，但不计入失败暂停计数翻倍）
-        pos = self._get_active_position(prefer_ws=False)
+        # 挂单前确认无持仓 + 无菌（刷新路径也再验一次）
+        # 修复（v16.9.2）：prefer_ws=True 避免强制 REST 在冷却期触发 -1003
+        pos = self._get_active_position(prefer_ws=True)
         if pos == "QUERY_FAILED":
             return False
         if pos and float(pos.get("size") or 0) > 0:
@@ -974,23 +1007,19 @@ class RadarReentryMixin:
         try:
             import dingtalk
             self._call_dingtalk(
-                dingtalk.report_system_alert,
-                title=f"智能再入已成交·防线核实 [{self.symbol}]",
-                detail=(
-                    f"{side} {qty} @ fill={entry:.2f} (TV@{tv_price:.2f} 滑点={slip:.2f}) | "
-                    f"档位{tier_label(int(self.reentry_attempt))} "
-                    f"attempt={self.reentry_attempt} "
-                    f"frac={float(self.radar_activation_frac):.0%} | "
-                    f"硬止损@{hard_px:.2f} hung={1 if hard_hung else 0} | "
-                    f"{tp_note} | 雷达休眠候命 | "
-                    f"标签已释放 tag=None"
-                ),
-                level="紧急" if not hard_hung else "提示",
-                suggestion=(
-                    "硬止损未确认挂出：立即币安核对 STOP；"
-                    if not hard_hung else
-                    "核对 hard+TP12 与雷达休眠状态"
-                ),
+                dingtalk.report_reentry_fill,
+                side=str(side),
+                qty=float(qty),
+                fill_price=float(entry),
+                tv_price=float(tv_price),
+                entry_price=float(entry),
+                hard_sl=float(hard_px),
+                hard_sl_hung=bool(hard_hung),
+                regime=int(getattr(self, "adx_tier", 3) or 3),
+                attempt=int(self.reentry_attempt),
+                symbol=self.symbol,
+                tp1=float(tps[0]) if len(tps) >= 1 else 0,
+                tp2=float(tps[1]) if len(tps) >= 2 else 0,
             )
         except Exception:
             pass

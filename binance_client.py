@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.7.3-rate-empty-failclosed"
+BINANCE_CLIENT_VERSION = "v16.10.0-probe-trade-budget"
 # v16.6.2：绝对封死同 IP 2400/min —— 单品种/全局间隔大幅拉大
 REST_MIN_INTERVAL_SEC = float(os.getenv("REST_MIN_INTERVAL_SEC", "2.0"))
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -239,6 +239,45 @@ class BinanceClient:
         # 返回浅拷贝，避免调用方改坏缓存
         return list(orders or [])
 
+    # ------------------------------------------------------------------ #
+    #  轻量级挂单状态检查：不花探针预算，用于防御挂单判断                  #
+    # ------------------------------------------------------------------ #
+    def defensive_orders_look_ok(self, symbol, max_age=60.0):
+        """
+        判断当前是否可以进行防御性下单（TP/止损），不耗探针预算。
+
+        返回 (ok, reason):
+          ok=True  → 可以正常下单
+          ok=False → 查过本地状态，reason 说明原因
+
+        策略：
+        1. 缓存新鲜（≤max_age）且非空 → ok=True（上次已知盘口干净）
+        2. 缓存新鲜但为空 → ok=True（已知无单，可以挂）
+        3. 缓存过期或不存在：
+           a. 有本地近期 limit_place 记录（≤120s）→ ok=True（防御单刚挂出去）
+           b. 无任何本地记录 → False，"冷启动·无缓存无记录"
+        4. 冷却/节流阀拒绝 → False，"冷却中"
+
+        注意：本方法不查 REST，永远不触发节流阀。
+        """
+        sym = str(symbol or "").upper()
+        now = time.time()
+
+        # 1) 缓存新鲜
+        cached = self._get_open_orders_cached(sym, max_age=max_age)
+        if cached is not None:
+            # 有缓存且新鲜 → 信任它（即使为空也是"已知空"）
+            return True, "cache_hit"
+
+        # 2) 缓存过期/不存在，检查本地近期防御单记录
+        recent = getattr(self, "_recent_limit_place", {}) or {}
+        for k, (ts, _) in list(recent.items()):
+            if k[0].upper() == sym and (now - float(ts)) < 120.0:
+                return True, "recent_limit"
+
+        # 3) 无缓存也无近期记录：冷启动
+        return False, "cold_start"
+
     def _set_open_orders_cache(self, symbol, orders):
         if is_orders_query_failed(orders):
             return
@@ -336,6 +375,9 @@ class BinanceClient:
         规格 12.2：交易类 REST 指数退避重试。
         首次失败后按 0/1/2/4/8s 再试最多 5 次；全失败 → 仅监控钩子。
         重试期间同品种串行，禁止并发下单/改撤。
+
+        修复（v16.9.2）：-1003 IP 限流时，先标记本地冷却再进入重试循环，
+        而非直接 raise 让冷却窗口白白空转、TP 挂单丢失。
         """
         sym = str(symbol or "").upper()
         if self.is_monitor_only(sym):
@@ -343,6 +385,8 @@ class BinanceClient:
             return None
         delays = tuple(TRADE_RETRY_DELAYS_SEC)
         lk = self._trade_lock_for(sym)
+        # -1003 冷却标志：首次命中时记录，贯穿本次重试循环
+        ip_rate_limited_flag = False
         with lk:
             if self.is_monitor_only(sym):
                 logger.error(f"[仅监控] 拒绝 {op_name} {sym}")
@@ -353,32 +397,47 @@ class BinanceClient:
                 return fn()
             except Exception as e:
                 last_err = e
+                # 标记本地冷却（确保冷却窗口已激活），但不 raise
+                # 让重试循环继续，在冷却期 sleep 中等待
                 if self._note_api_error(e, sym):
-                    raise
+                    ip_rate_limited_flag = True
                 if (not reduce_only) and self._note_order_reject(e, sym, reduce_only=False):
                     raise
                 if not self._is_transient_api_error(e):
                     raise
                 logger.warning(
                     f"[API退避] {sym} {op_name} 首次失败(transient): {e}"
+                    + (" [已激活本地冷却·进入重试循环]" if ip_rate_limited_flag else "")
                 )
             for i, delay in enumerate(delays):
                 if self.is_monitor_only(sym):
                     logger.error(f"[仅监控] 中止重试 {op_name} {sym}")
                     return None
-                if delay and delay > 0:
+                # IP 冷却中：等待冷却窗口到期后再尝试，避免冷却窗口空转
+                if ip_rate_limited_flag:
+                    ip_rem = self.ip_rate_limit_remaining()
+                    if ip_rem > 0:
+                        wait = min(ip_rem, delay if delay > 0 else 2.0)
+                        logger.warning(
+                            f"[API退避] {sym} {op_name} IP冷却中 "
+                            f"(剩余 {ip_rem:.0f}s) → 等待 {wait:.1f}s 后重试"
+                        )
+                        time.sleep(wait)
+                elif delay and delay > 0:
                     time.sleep(float(delay))
                 try:
                     out = fn()
-                    logger.info(
-                        f"[API退避] {sym} {op_name} 第{i + 1}次重试成功 "
-                        f"(delay={delay}s)"
-                    )
+                    if ip_rate_limited_flag:
+                        logger.info(
+                            f"[API退避] {sym} {op_name} 在IP冷却期重试成功 "
+                            f"(delay={delay:.1f}s)"
+                        )
                     return out
                 except Exception as e:
                     last_err = e
+                    # 再次命中 -1003：刷新本地冷却，继续循环等待
                     if self._note_api_error(e, sym):
-                        raise
+                        ip_rate_limited_flag = True
                     if (not reduce_only) and self._note_order_reject(
                         e, sym, reduce_only=False
                     ):
@@ -387,7 +446,7 @@ class BinanceClient:
                         raise
                     logger.warning(
                         f"[API退避] {sym} {op_name} 重试 {i + 1}/{len(delays)} "
-                        f"delay={delay}s 失败: {e}"
+                        f"delay={delay:.1f}s 失败: {e}"
                     )
             logger.error(
                 f"[API不可用] {sym} {op_name} 已重试{len(delays)}次仍失败 → 仅监控 | "
@@ -1258,10 +1317,18 @@ class BinanceClient:
         返回币安持仓 dict，或 None（确认无仓）。
         REST 失败且无可用缓存时返回 POSITION_QUERY_FAILED，禁止上层当空仓清账本。
         双雷达：WS 优先；常规 REST 合并缓存；force_rest 用于平仓/恢复。
+
+        修复（v16.9.2）：force_rest=True 时也必须通过 IP 冷却门禁，
+        避免强制 REST 在冷却期内触发 -1003 加剧限流。
         """
         sym = str(symbol or "").upper()
         # 冷却期：force_rest 降级为缓存/WS，禁止再打仓位 REST
-        if force_rest and self.ip_rate_limit_remaining() > 0:
+        # 修复（v16.9.2）：即使 force_rest=True，冷却期也必须拒绝
+        # 避免「平仓 force_rest → 打 REST → 命中 -1003 → 冷却窗口更久」
+        if self.ip_rate_limit_remaining() > 0:
+            logger.warning(
+                f"[查询持仓] {sym}: IP冷却中 → 拒绝 REST (force_rest={force_rest})"
+            )
             force_rest = False
             prefer_ws = True
         if prefer_ws and not force_rest:
@@ -1325,6 +1392,32 @@ class BinanceClient:
             logger.warning(f"[成交历史] {symbol}: {e}")
             return []
 
+    def fetch_income_history(self, start_time_ms=None, end_time_ms=None, limit=1000):
+        """
+        已实现盈亏历史（走 _futures_signed_request 含节流阀/冷却门禁）。
+        修复（v16.9.2）：根治 console_api 直接调 client.futures_income_history
+        绕过节流阀导致 -1003 的问题。
+        """
+        try:
+            self._throttle_rest("_INCOME", kind="rest_probe")
+        except IpRateLimitedError:
+            logger.warning("[收入历史] 节流/IP冷却 → 跳过 REST")
+            return []
+        params = {"incomeType": "REALIZED_PNL", "limit": min(int(limit or 1000), 1000)}
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        try:
+            return self._futures_signed_request("get", "income", params) or []
+        except IpRateLimitedError:
+            logger.warning("[收入历史] IP冷却拒绝")
+            return []
+        except Exception as e:
+            self._note_api_error(e, "_INCOME")
+            logger.warning(f"[收入历史] {e}")
+            return []
+
     def find_protective_stop_prices(self, symbol="ETHUSDT"):
         """
         盘口已挂 STOP / STOP_MARKET（含 Algo）的触发价列表。
@@ -1355,6 +1448,12 @@ class BinanceClient:
         """同向同价已有 reduceOnly LIMIT → 返回该单，避免重复挂。"""
         orders = self.get_open_orders(symbol, include_algo=False)
         if is_orders_query_failed(orders):
+            # 节流/REST失败：本地记录兜底，防止误报"无单"导致防御单叠挂
+            ok, reason = self.defensive_orders_look_ok(symbol, max_age=60.0)
+            if ok:
+                # 有本地近期记录，保守认为「可能已有」，禁止叠挂
+                return {}  # 空 dict（非哨兵），告诉上层"别新挂"但不触发 fail-closed
+            # 无本地记录 + REST失败 = 冷启动 fail-closed
             return ORDERS_QUERY_FAILED
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(price or 0), 2)
@@ -1459,9 +1558,34 @@ class BinanceClient:
                 f"{want_side}@{px_str} tag={coid or '-'} → 复用"
             )
             return hit
-        # 防重复：同价已有 LIMIT 则复用。
-        # 仅当返回 ORDERS_QUERY_FAILED 哨兵时 fail-closed（None=无同价，可挂）
-        exist = self._existing_same_limit(symbol, side, float(px_str), quantity=qty)
+        # 合并查询：只调一次 get_open_orders，复用结果
+        # - _existing_same_limit 用它判断是否有同价单
+        # - 硬上限检查复用同一次结果统计 LIMIT 数量和 coid 匹配
+        book = self.get_open_orders(symbol, include_algo=False)
+        # _existing_same_limit 的逻辑内联，避免再调一次 REST
+        exist = None
+        if is_orders_query_failed(book):
+            # 节流/REST失败：本地记录兜底，防止误报"无单"导致防御单叠挂
+            ok_local, _ = self.defensive_orders_look_ok(symbol, max_age=60.0)
+            if ok_local:
+                exist = {}  # 空 dict（非哨兵），告诉上层"别新挂"但不 fail-closed
+            # else: 维持 None = 冷启动 fail-closed
+        else:
+            want_side_check = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
+            want_px_check = round(float(px_str), 2)
+            for o in book or []:
+                if str(o.get("type") or "").upper() != "LIMIT":
+                    continue
+                if str(o.get("side") or "").upper() != want_side_check:
+                    continue
+                try:
+                    opx = round(float(o.get("price") or 0), 2)
+                except (TypeError, ValueError):
+                    continue
+                if abs(opx - want_px_check) <= 0.02:
+                    exist = o
+                    break
+
         if exist is not None and is_orders_query_failed(exist):
             hit = _cache_hit()
             if hit is not None:
@@ -1470,58 +1594,84 @@ class BinanceClient:
                     f"@ {px_str} → 跳过叠单"
                 )
                 return hit
-            logger.error(
-                f"[限价单] {symbol} 挂单查询失败 → fail-closed 禁止挂单 "
-                f"{side} {qty} @ {px_str}（防盲补叠单）"
+            # 节流/REST失败且无本地缓存：
+            # 有 client_order_id → 依赖幂等性直接发单（防死锁）
+            # 无 client_order_id → fail-closed
+            if not coid:
+                logger.error(
+                    f"[限价单] {symbol} 查单失败且无本地记录/标签 → fail-closed 拒挂 "
+                    f"{side} {qty} @ {px_str}（防盲补叠单）"
+                )
+                return None
+            logger.warning(
+                f"[限价单] {symbol} 查单失败但带幂等标签 {coid} → "
+                f"直接发单（依赖newClientOrderId防重）"
             )
-            return None
-        if exist:
+            # 跳过 exist 检查，直接发单（book 已拉过，不再重复）
+            try:
+                order = self.client.futures_create_order(
+                    symbol=symbol,
+                    side=want_side,
+                    type="LIMIT",
+                    timeInForce="GTC",
+                    quantity=qty,
+                    price=px_str,
+                    reduceOnly=reduce_only,
+                    newClientOrderId=coid,
+                )
+                logger.info(
+                    f"[限价单成功] {side} {qty} @ {px_str} "
+                    f"orderId={order.get('orderId', '')} tag={coid}"
+                )
+                with self._place_dedupe_lock:
+                    self._recent_limit_place[key] = (time.time(), order)
+                try:
+                    self.invalidate_open_orders_cache(symbol)
+                except Exception:
+                    pass
+                return order
+            except Exception as e:
+                logger.error(f"[限价单失败] {side} {qty} @ {px_str} tag={coid}: {e}")
+                return None
+
+        if exist and exist.get("orderId"):
             logger.warning(
                 f"[限价单去重] {symbol} 已有同价 LIMIT "
                 f"id={exist.get('orderId')} @ {px_str} → 跳过重复挂单"
             )
             return exist
-        # 硬上限：同 symbol 可读盘口 LIMIT 过多时禁止再挂（防击穿）
-        try:
-            book = self.get_open_orders(symbol, include_algo=False)
-            if not is_orders_query_failed(book):
-                # 同 clientOrderId 直接复用
-                if coid:
-                    for o in (book or []):
-                        if not isinstance(o, dict):
-                            continue
-                        if str(o.get("clientOrderId") or "") == coid:
-                            logger.warning(
-                                f"[限价单去重] {symbol} 同标签已存在 "
-                                f"clientOrderId={coid} id={o.get('orderId')} → 复用"
-                            )
-                            with self._place_dedupe_lock:
-                                self._recent_limit_place[key] = (time.time(), o)
-                            return o
-                lim_n = sum(
-                    1 for o in (book or [])
-                    if str(o.get("type") or o.get("orderType") or "").upper() == "LIMIT"
-                )
-                all_n = len(book or [])
-                # v15.9.1：硬上限 5（规格：未成交挂单总数不得超过 5）
-                if all_n >= 5 or lim_n >= 5:
-                    logger.error(
-                        f"[限价单熔断] {symbol} 挂单总数={all_n} LIMIT={lim_n}≥5 "
-                        f"→ 禁止再挂（防击穿；请先净场）"
-                    )
-                    return None
-            elif coid:
-                # 查单失败且带标签：绝不新挂（上层本地标签应已拦住）
-                logger.error(
-                    f"[限价单] {symbol} 查单失败且带标签 {coid} → fail-closed 拒挂"
-                )
-                return None
-        except Exception:
+
+        # 硬上限：复用已拉取的 book，不再单独调 REST
+        if not is_orders_query_failed(book):
             if coid:
+                for o in (book or []):
+                    if not isinstance(o, dict):
+                        continue
+                    if str(o.get("clientOrderId") or "") == coid:
+                        logger.warning(
+                            f"[限价单去重] {symbol} 同标签已存在 "
+                            f"clientOrderId={coid} id={o.get('orderId')} → 复用"
+                        )
+                        with self._place_dedupe_lock:
+                            self._recent_limit_place[key] = (time.time(), o)
+                        return o
+            lim_n = sum(
+                1 for o in (book or [])
+                if str(o.get("type") or o.get("orderType") or "").upper() == "LIMIT"
+            )
+            all_n = len(book or [])
+            # v15.9.1：硬上限 5（规格：未成交挂单总数不得超过 5）
+            if all_n >= 5 or lim_n >= 5:
                 logger.error(
-                    f"[限价单] {symbol} 查单异常且带标签 {coid} → fail-closed 拒挂"
+                    f"[限价单熔断] {symbol} 挂单总数={all_n} LIMIT={lim_n}≥5 "
+                    f"→ 禁止再挂（防击穿；请先净场）"
                 )
                 return None
+        elif coid:
+            logger.error(
+                f"[限价单] {symbol} 查单失败且带标签 {coid} → fail-closed 拒挂"
+            )
+            return None
         if self.is_monitor_only(symbol):
             logger.error(f"[仅监控] 拒绝 limit {symbol}")
             return None

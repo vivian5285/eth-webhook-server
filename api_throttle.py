@@ -40,18 +40,28 @@ def _env_float(name: str, default: float) -> float:
 
 
 class AccountThrottle:
-    """账号级请求预算 + 强制静默。"""
+    """账号级请求预算 + 强制静默。
+
+    v16.10.x 修复（root-cause）：探针预算与交易预算彻底分离。
+    旧版本：单预算，探针耗尽24次后所有REST被挡（含开仓/平仓/挂单）。
+    新版本：探针独立60次/分钟窗口；交易300次/分钟窗口。
+    两者共用同一冷却逻辑，但预算闸独立检查。
+    """
 
     def __init__(self, account_id: str = "binance"):
         self.account_id = str(account_id or "binance")
         self._lock = threading.RLock()
         self._window: List[float] = []
         self._silence_until = 0.0
-        # 1 分钟滑动窗口：同 IP 目标远低于 2400/min（默认 24）
-        self.budget_per_min = _env_int("API_BUDGET_PER_MIN", 24)
+        # 探针独立预算：哨兵轮询仅耗此窗口，60次/分钟足够（ETH+XAU 各30次）
+        self.probe_budget_per_min = _env_int("API_PROBE_BUDGET_PER_MIN", 60)
+        # 交易预算：开仓/平仓/挂TP/撤单等关键操作走此窗口，300次/分钟
+        self.trade_budget_per_min = _env_int("API_TRADE_BUDGET_PER_MIN", 300)
+        # 向后兼容：旧环境变量仍有效（v16.9.x 的 API_BUDGET_PER_MIN 覆盖 trade 预算）
+        legacy_budget = _env_int("API_BUDGET_PER_MIN", 0)
+        if legacy_budget > 0:
+            self.trade_budget_per_min = legacy_budget
         self.window_sec = _env_float("API_BUDGET_WINDOW_SEC", 60.0)
-        # 接近预算时拉长间隔；探针更早拒绝，给下单留额度
-        self.soft_ratio = _env_float("API_BUDGET_SOFT_RATIO", 0.60)
         self.default_silence_sec = _env_float("API_SILENCE_SEC", 900.0)
         # 任意两次 acquire 的硬下限（秒），防止 sleep-gap 被并发打穿
         self.min_gap_sec = _env_float("API_MIN_GAP_SEC", 1.8)
@@ -86,14 +96,24 @@ class AccountThrottle:
         symbol: str = "",
     ) -> Tuple[bool, str]:
         """
-        请求放行检查。
-        kind: rest | rest_probe | rest_trade
+        请求放行检查。v16.10.x 双预算：
+        - rest_probe/rest_public：仅耗探针预算（默认60次/分钟）
+        - rest/rest_trade：耗交易预算（默认300次/分钟）
+        两者共享冷却静默期，但预算闸独立——探针无法饿死交易。
+
         force: 仅紧急平仓等可绕过预算（仍不能绕过静默，除非 PIPELINE_THROTTLE_FORCE_BYPASS=1）
         返回 (ok, detail)。ok=False 时调用方不得打交易所。
         """
         bypass = str(os.getenv("PIPELINE_THROTTLE_FORCE_BYPASS", "0")).strip() in (
             "1", "true", "TRUE",
         )
+        is_probe = kind in ("rest_probe", "rest_public")
+        budget = (
+            self.probe_budget_per_min
+            if is_probe
+            else self.trade_budget_per_min
+        )
+        budget = max(4, int(budget))
         gap_wait = 0.0
         with self._lock:
             rem = max(0.0, float(self._silence_until) - time.time())
@@ -101,17 +121,14 @@ class AccountThrottle:
                 return False, f"silence:{rem:.1f}s"
             self._gc()
             n = len(self._window)
-            budget = max(4, int(self.budget_per_min))
-            soft = max(1, int(budget * float(self.soft_ratio)))
-            # 探针在接近预算时优先拒绝，给交易类请求留额度
-            if kind in ("rest_probe", "rest_public") and n >= soft:
+            # 探针超限：拒探针，不挡交易
+            if is_probe and n >= budget:
                 return False, f"probe_budget:{n}/{budget}"
+            # 交易超限：拒交易
             if n >= budget and not force:
                 return False, f"budget:{n}/{budget}"
-            # soft：拉长让路；交易类 force 也不跳过 min_gap（仅紧急平仓可 force+bypass）
-            wait = 0.0
-            if n >= soft:
-                wait = min(3.0, 0.4 + 0.12 * (n - soft))
+            # 预算将满时拉长间隔（两类请求均受 min_gap 约束）
+            wait = min(3.0, 0.4 + 0.12 * max(0, n - int(budget * 0.7))) if n >= int(budget * 0.7) else 0.0
             last = float(self._last_acquire_ts or 0)
             gap_need = max(0.0, float(self.min_gap_sec) - (time.time() - last))
             gap_wait = max(wait, gap_need)
@@ -124,13 +141,15 @@ class AccountThrottle:
                 return False, f"silence:{rem:.1f}s"
             self._gc()
             n2 = len(self._window)
-            budget = max(4, int(self.budget_per_min))
-            if n2 >= budget and not force:
-                return False, f"budget:{n2}/{budget}"
+            budget2 = max(4, int(
+                self.probe_budget_per_min if is_probe else self.trade_budget_per_min
+            ))
+            if n2 >= budget2 and not force:
+                return False, f"budget:{n2}/{budget2}"
             now = time.time()
             self._window.append(now)
             self._last_acquire_ts = now
-            return True, f"ok:{len(self._window)}/{self.budget_per_min}"
+            return True, f"ok:{len(self._window)}/{budget2}"
 
     def note_sent(self) -> None:
         """若调用方在 acquire 外发了请求，可补记（一般 acquire 已记）。"""
@@ -144,7 +163,8 @@ class AccountThrottle:
             return {
                 "account": self.account_id,
                 "recent": float(len(self._window)),
-                "budget": float(self.budget_per_min),
+                "probe_budget": float(self.probe_budget_per_min),
+                "trade_budget": float(self.trade_budget_per_min),
                 "silence_rem": max(0.0, float(self._silence_until) - time.time()),
             }
 
