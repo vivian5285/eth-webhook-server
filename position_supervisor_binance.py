@@ -86,7 +86,6 @@ from webhook_parser import (
     EXIT_SOURCE_LABELS,
     RADAR_STAGE_COST_BUFFER_PCT,
     RADAR_STAGE_LABELS,
-    RADAR_ACTIVATE_TP1_FRAC,
     RADAR_STEP_ATR,
     RADAR_LOCK_ATR,
     RADAR_TP1_FLOOR_ATR,
@@ -2319,11 +2318,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         if float(getattr(self, "tv_sl", 0) or 0) <= 0:
             for src in sources:
-                sl = float(src.get("tv_sl", 0) or 0)
-                if sl > 0:
-                    self.tv_sl_ref = sl
-                    notes.append(f"TV参考止损tv_sl_ref={sl:.2f}（非必然本仓）")
+                # 逐层深入：顶层 → payload 子层 → 多别名兜底
+                for _sl_field in ("tv_sl", "stop_loss", "sl"):
+                    sl = float(src.get(_sl_field, 0) or 0)
+                    if sl > 0:
+                        self.tv_sl_ref = sl
+                        notes.append(f"TV参考止损tv_sl_ref={sl:.2f}（{src.get('action','?')}·{src.get('_source','journal')}）")
+                        break
+                if self.tv_sl_ref > 0:
                     break
+                # payload 子层兜底
+                pl = src.get("payload") if isinstance(src, dict) else None
+                if isinstance(pl, dict):
+                    for _sl_field in ("tv_sl", "stop_loss", "sl"):
+                        sl = float(pl.get(_sl_field, 0) or 0)
+                        if sl > 0:
+                            self.tv_sl_ref = sl
+                            notes.append(f"TV参考止损tv_sl_ref={sl:.2f}（payload子层）")
+                            break
+                    if self.tv_sl_ref > 0:
+                        break
 
         # 呼吸止损按 ATR 武装；TV tv_sl 仅参考
         if entry > 0 and side in ("LONG", "SHORT"):
@@ -4302,9 +4316,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return cur
         hard = float(self._temp_hard_stop_from_tv(entry=entry, side=side) or 0)
         if hard <= 0:
-            logger.error(
-                f"🚨 [{self.symbol}] 无法锁定永久硬止损（缺 TV.stop_loss）| {source}"
+            # 区分「TV从未来过」与「TV来过但日志恢复失败」两种情况
+            last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
+            pl = last.get("payload") if isinstance(last.get("payload"), dict) else {}
+            tv_sl_in_journal = (
+                float(pl.get("tv_sl") or pl.get("stop_loss") or 0) > 0
+                or float(last.get("tv_sl") or 0) > 0
             )
+            if tv_sl_in_journal:
+                logger.error(
+                    f"🚨 [{self.symbol}] 无法锁定永久硬止损（日志恢复失败，tv_sl_ref=0）| {source}"
+                )
+            else:
+                logger.error(
+                    f"🚨 [{self.symbol}] 无法锁定永久硬止损（缺 TV.stop_loss）| {source}"
+                )
             return 0.0
         self.frozen_hard_sl_px = float(hard)
         try:

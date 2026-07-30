@@ -27,7 +27,6 @@ from webhook_parser import (
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
     get_radar_activation_ratio,
-    RADAR_ACTIVATE_TP1_FRAC,
     SIZING_MODE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
@@ -1807,7 +1806,9 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
     gate_lab = f"首次开仓→(TP1+TP2)/2"
     if open_kind and "重入" in str(open_kind):
         gate_lab = f"重入开仓→TP2"
-    send_alert(f"📡 [{sym}] 雷达激活 · {kind} · {gate_lab}", data, G_DEEP)
+    # 雷达激活属于重要事件，钉钉同步通知（level=2：TG+钉钉）
+    send_alert(f"📡 [{sym}] 雷达激活 · {kind} · {gate_lab}", data, G_DEEP,
+               level=NOTIFY_LEVEL_CRITICAL)
 
 
 def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,

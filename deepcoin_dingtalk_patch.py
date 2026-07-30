@@ -29,7 +29,6 @@ from webhook_parser import (
     format_regime_tp_ratios_label,
     RADAR_STAGE_LABELS,
     get_radar_activation_ratio,
-    RADAR_ACTIVATE_TP1_FRAC,
     SIZING_MODE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,

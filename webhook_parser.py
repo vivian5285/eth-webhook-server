@@ -606,13 +606,11 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
     )
 
 
-# ── 递进雷达启动价（v15.8.0）──────────────────────────────────────────────
-
-def radar_activation_price(side, entry, tp1, frac=None, tv_price=None):
-    """
-    白皮书 §4.1：距离 = |tp1 − TV.price|；锚点 = 成交价 entry。
-    frac 默认 RADAR_ACTIVATE_TP1_FRAC(0.85)。
-    """
+# ── 递进雷达启动价（v15.8.0；已废弃，热路径不再使用）─────────────────────
+# 规格 v1.0：雷达激活价 = 绝对价格锚定，首仓=(TP1+TP2)/2，重入=TP2。
+# 本函数已废弃，仅保留防旧调用崩溃。
+def radar_activation_price(side, entry, tp1, frac=None, tv_price=None):  # noqa: D103
+    """【已废弃】雷达激活价。热路径统一用 radar_gate_price_from_tps() 绝对价格锚定。"""
     side_u = str(side or "").strip().upper()
     entry_f = float(entry or 0)
     if entry_f <= 0 or side_u not in ("LONG", "SHORT"):
