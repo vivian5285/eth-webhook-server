@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.10.0-probe-trade-budget"
+BINANCE_CLIENT_VERSION = "v16.14.0-cancel-unknown-fix"
 # v16.6.2：绝对封死同 IP 2400/min —— 单品种/全局间隔大幅拉大
 REST_MIN_INTERVAL_SEC = float(os.getenv("REST_MIN_INTERVAL_SEC", "2.0"))
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -336,6 +336,8 @@ class BinanceClient:
             or "-4164" in text
             or "insufficient" in low
             or "margin is insufficient" in low
+            # -2022: ReduceOnly Order is rejected（持仓数据同步延迟时触发，重试通常可解决）
+            or "-2022" in text
         ):
             return False
         markers = (
@@ -1872,6 +1874,7 @@ class BinanceClient:
                 "delete", "algoOrder", {"symbol": symbol, "algoId": int(algo_id)},
             )
             self._mark_local_cancel(symbol, algo_id)
+            self.invalidate_open_orders_cache(symbol)
             logger.info(f"[Algo撤单成功] {symbol} algoId={algo_id}")
             return res
 
@@ -1897,6 +1900,7 @@ class BinanceClient:
             self._throttle_rest(symbol)
             res = self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
             self._mark_local_cancel(symbol, order_id)
+            self.invalidate_open_orders_cache(symbol)
             logger.info(f"[撤单成功] {symbol} orderId={order_id}")
             return res
 
@@ -1907,7 +1911,14 @@ class BinanceClient:
         except Exception as e:
             err = str(e)
             if "-2011" in err or "Unknown order" in err or "Order does not exist" in err:
-                return self.cancel_algo_order(symbol, order_id)
+                # 订单已不存在（已成交/已撤销/从未下单）→ 当作已撤销处理
+                self._mark_local_cancel(symbol, order_id)
+                self.invalidate_open_orders_cache(symbol)
+                logger.warning(
+                    f"[撤单] {symbol} orderId={order_id} 不存在(-2011) → "
+                    f"已从本地缓存清除（可能已成交或已撤销）"
+                )
+                return "already_gone"
             logger.error(f"[撤单失败] {symbol} orderId={order_id}: {e}")
             return None
 
@@ -1937,6 +1948,8 @@ class BinanceClient:
             self._with_trade_retry(symbol, "cancel_all_algo", _do_algo, reduce_only=True)
         except Exception as e:
             logger.warning(f"[撤单] {symbol} Algo 条件单: {e}")
+        # 撤单后失效缓存，下次查询强制拉取真实盘口
+        self.invalidate_open_orders_cache(symbol)
 
     def close_all_positions(self, symbol="ETHUSDT"):
         try:
@@ -1946,11 +1959,25 @@ class BinanceClient:
             if pos_amt == 0: return None
 
             side = "SELL" if pos_amt > 0 else "BUY"
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=abs(pos_amt), reduceOnly=True
-            )
-            logger.info(f"[市价平仓成功] {symbol}")
-            return order
+            qty = abs(pos_amt)
+            try:
+                order = self.client.futures_create_order(
+                    symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
+                )
+                logger.info(f"[市价平仓成功] {symbol}")
+                return order
+            except Exception as first_err:
+                # 【修复】reduceOnly 被拒绝时降级为普通市价单
+                logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败，降级为普通市价单: {first_err}")
+                try:
+                    order = self.client.futures_create_order(
+                        symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=False
+                    )
+                    logger.info(f"[市价平仓成功-降级] {symbol}")
+                    return order
+                except Exception as second_err:
+                    logger.error(f"[市价平仓失败-降级也失败] {symbol}: {second_err}")
+                    return None
         except Exception as e:
             logger.error(f"[市价平仓失败] {symbol}: {e}")
             return None

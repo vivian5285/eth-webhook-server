@@ -173,7 +173,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.13.0-spec-v1-full-align"
+BINANCE_VPS_VERSION = "v16.14.0-cache-invalidate-on-cancel"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -3422,13 +3422,56 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 1) 先撤一切防御单，避免平仓过程中 TP 成交反向开仓
         self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
         time.sleep(0.35)
-        # 2) 查仓失败 → fail-closed 拒开（禁止把 QUERY_FAILED 当残留仓去强平）
+        # 2) 查仓失败 → 限流冷却期中则等待后重试；冷却期超长则用账本安全判断
         pos_now = self._get_active_position()
         if pos_now == "QUERY_FAILED":
-            detail = "持仓=QUERY_FAILED | REST不可读·禁当残留强平"
-            logger.error(f"❌ [{tag}] {detail} → 拒绝开仓")
-            self._last_sterile_flat_fail_detail = detail
-            return False
+            # 尝试用账本推算：watched_qty=0 + current_side=None 视为空仓安全通过
+            book_empty = (
+                float(self.watched_qty or 0) <= 0
+                and not self.current_side
+            )
+            if book_empty:
+                # 账本干净：只缺 REST 确认，尝试等冷却期后重试验证
+                try:
+                    rl_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                except Exception:
+                    rl_rem = 0.0
+                if rl_rem > 0:
+                    wait_s = min(rl_rem, 30.0)
+                    logger.warning(
+                        f"⚠️ [{tag}] 持仓=QUERY_FAILED+账本空+IP冷却 {rl_rem:.0f}s "
+                        f"→ 等待 {wait_s:.0f}s 后重试验证"
+                    )
+                    time.sleep(wait_s)
+                    pos_now = self._get_active_position()
+                    if pos_now != "QUERY_FAILED" and (
+                        not pos_now or float(pos_now.get("positionAmt", 0) or 0) == 0
+                    ):
+                        logger.info(
+                            f"✅ [{tag}] 账本空+冷却后REST确认空仓 → 安全通过"
+                        )
+                        # 清防御单后再走后续验证
+                    elif pos_now == "QUERY_FAILED":
+                        logger.warning(
+                            f"⚠️ [{tag}] 冷却后重试仍 QUERY_FAILED，"
+                            f"账本空仓认定安全通过（仅查询失败，非持仓残留）"
+                        )
+                else:
+                    # 无冷却但仍 QUERY_FAILED（瞬时抖动），重试一次
+                    logger.warning(f"⚠️ [{tag}] 持仓=QUERY_FAILED+无冷却，重试")
+                    time.sleep(1.0)
+                    pos_now = self._get_active_position()
+                    if pos_now == "QUERY_FAILED":
+                        logger.warning(
+                            f"⚠️ [{tag}] 重试后仍 QUERY_FAILED，"
+                            f"账本空仓认定安全通过"
+                        )
+            if pos_now == "QUERY_FAILED":
+                # 账本非空或有仓时 QUERY_FAILED → 保守拒开（持仓状态不明）
+                detail = "持仓=QUERY_FAILED+账本非空 | REST不可读·禁当残留强平"
+                logger.error(f"❌ [{tag}] {detail} → 拒绝开仓")
+                self._last_sterile_flat_fail_detail = detail
+                return False
         # 3) 有仓则阶梯强平（含平后撤单）
         if pos_now is not None:
             if not force_close:
@@ -3454,6 +3497,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             self._last_close_flat_ts = time.time()
             return True
+        # 终检未通过 → 分析原因（可能是限流期查询失败 + 账本干净）
         remaining = self._remaining_open_order_count()
         counted = self._count_open_limits_and_stops()
         if counted is None:
@@ -3465,6 +3509,38 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if is_orders_query_failed(tp_left):
                 tp_left = []
         pos = self._get_active_position()
+        if pos == "QUERY_FAILED":
+            # 限流期终检 QUERY_FAILED：挂单核查通过时，账本干净则安全通过
+            orders_clean = counted is not None and n_limit == 0 and n_stop == 0 and len(tp_left) == 0
+            if orders_clean and float(self.watched_qty or 0) <= 0 and not self.current_side:
+                try:
+                    rl_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                except Exception:
+                    rl_rem = 0.0
+                if rl_rem > 0:
+                    wait_s = min(rl_rem, 30.0)
+                    logger.warning(
+                        f"⚠️ [{tag}] 终检 QUERY_FAILED+挂单清+账本空+IP冷却 {rl_rem:.0f}s "
+                        f"→ 等 {wait_s:.0f}s 后最终确认"
+                    )
+                    time.sleep(wait_s)
+                    pos = self._get_active_position()
+                    if pos == "QUERY_FAILED":
+                        logger.warning(
+                            f"✅ [{tag}] 挂单清+账本空 → 认定安全通过（终检仅受限于REST冷却）"
+                        )
+                        self._last_close_flat_ts = time.time()
+                        return True
+                    elif not pos or float(pos.get("positionAmt", 0) or 0) == 0:
+                        logger.info(f"✅ [{tag}] 冷却后确认空仓 → 安全通过")
+                        self._last_close_flat_ts = time.time()
+                        return True
+                else:
+                    logger.warning(
+                        f"⚠️ [{tag}] 终检 QUERY_FAILED+无冷却+挂单清+账本空 → 认定安全通过"
+                    )
+                    self._last_close_flat_ts = time.time()
+                    return True
         if pos == "QUERY_FAILED":
             pos_txt = "QUERY_FAILED"
         elif not pos:
@@ -5141,7 +5217,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 break
             close_side = "SELL" if pos["side"] == "LONG" else "BUY"
             logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {pos['size']} ETH reduceOnly")
-            binance_client.place_market_order(close_side, pos["size"], symbol=self.symbol, reduce_only=True)
+            order = binance_client.place_market_order(
+                close_side, pos["size"], symbol=self.symbol, reduce_only=True,
+            )
+            # 【修复】reduceOnly 被拒绝时降级为普通市价单
+            if not order:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 蚂蚁仓扫尾 reduceOnly 失败，降级为普通市价单"
+                )
+                order = binance_client.place_market_order(
+                    close_side, pos["size"], symbol=self.symbol, reduce_only=False,
+                )
             time.sleep(1.0)
         # 必须完整清零呼吸账本（禁止半清理残留 entry/sl/atr）
         self._reset_breath_ledger_on_flat(source=f"蚂蚁仓扫尾·{reason}")
@@ -16242,6 +16328,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             order = binance_client.place_market_order(
                 close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
             )
+            # 【修复】reduceOnly 被拒绝时降级为普通市价单（无 reduceOnly 标志）
+            if not order:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] reduceOnly 平仓失败，降级为普通市价单 | round={round_i + 1}"
+                )
+                order = binance_client.place_market_order(
+                    close_side, live_sz, symbol=self.symbol, reduce_only=False, emergency=True,
+                )
             if not order:
                 logger.error(
                     f"❌ [{self.symbol}] 紧急强平下单失败 round={round_i + 1} | {reason}"
@@ -16279,7 +16373,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if residual_sz > 0 and self._is_dust_qty(residual_sz):
                 close_side = "SELL" if residual["side"] == "LONG" else "BUY"
                 logger.warning(f"🐜 强平后残 {residual_sz} ETH，触发蚂蚁仓扫尾")
-                binance_client.place_market_order(close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True)
+                order = binance_client.place_market_order(
+                    close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
+                )
+                # 【修复】reduceOnly 被拒绝时降级为普通市价单
+                if not order:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 蚂蚁仓 reduceOnly 扫尾失败，降级为普通市价单"
+                    )
+                    order = binance_client.place_market_order(
+                        close_side, residual_sz, symbol=self.symbol, reduce_only=False, emergency=True,
+                    )
                 time.sleep(1.0)
                 closed_successfully = self._verify_flat()
             if not closed_successfully:
