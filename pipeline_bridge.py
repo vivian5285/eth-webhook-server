@@ -27,6 +27,8 @@ class PipelineBridgeMixin:
         self._pipeline_exchange = ex
         self._pipeline = get_pipeline(getattr(self, "symbol", ""), ex)
         self._pipeline_throttle = get_throttle(ex)
+        self._pipeline_stale_notified = False  # 去重：卡阶段告警仅发一次
+        self._pipeline_stale_last_msg = ""
         # 若 state 已 hydrate 过 pipeline，外层会 load_dict
 
     def _pipeline_align_monitoring_if_held(self) -> None:
@@ -91,6 +93,10 @@ class PipelineBridgeMixin:
     def _pipeline_advance(self, phase: Phase, role: Role, note: str = "", **fields):
         try:
             ok, msg = self._pipeline_obj().advance(phase, role, note=note, **fields)
+            # 阶段正常前进 → 清除卡阶段去重标记，下次再卡重新通知
+            if ok:
+                self._pipeline_stale_notified = False
+                self._pipeline_stale_last_msg = ""
             if not ok:
                 logger.warning(
                     f"📋 [{getattr(self, 'symbol', '')}] pipeline "
@@ -110,6 +116,8 @@ class PipelineBridgeMixin:
     def _pipeline_fail(self, role: Role, reason: str) -> None:
         try:
             self._pipeline_obj().mark_failed(role, reason)
+            self._pipeline_stale_notified = False
+            self._pipeline_stale_last_msg = ""
             logger.error(
                 f"📋 [{getattr(self, 'symbol', '')}] FAILED by {role.value}: {reason}"
             )
@@ -119,6 +127,8 @@ class PipelineBridgeMixin:
     def _pipeline_reset_flat(self, note: str = "flat") -> None:
         try:
             self._pipeline_obj().reset_idle(note=note)
+            self._pipeline_stale_notified = False
+            self._pipeline_stale_last_msg = ""
         except Exception:
             pass
 
@@ -402,11 +412,41 @@ class PipelineBridgeMixin:
             logger.debug(f"radar pipeline update: {e}")
 
     def _pipeline_stale_check(self) -> None:
+        """
+        阶段超时检查 + 首次卡住钉钉通知（去重：同一 phase 告警仅一次）。
+        阶段前进或状态重置时由 _pipeline_advance / _pipeline_*_cleared / reset 清除 _pipeline_stale_notified。
+        """
         try:
-            msg = self._pipeline_obj().stale()
-            if msg:
-                logger.error(
-                    f"⏰ [{getattr(self, 'symbol', '')}] {msg}"
+            pl = self._pipeline_obj()
+            msg = pl.stale()
+            if not msg:
+                # 阶段已解卡：清除去重标记，下次再卡重新通知
+                if self._pipeline_stale_notified:
+                    self._pipeline_stale_notified = False
+                    self._pipeline_stale_last_msg = ""
+                    logger.info(
+                        f"✅ [{getattr(self, 'symbol', '')}] 阶段已解卡，恢复正常"
+                    )
+                return
+            # 同 phase 同 msg 不重复通知
+            if self._pipeline_stale_notified and msg == self._pipeline_stale_last_msg:
+                return
+            self._pipeline_stale_last_msg = msg
+            self._pipeline_stale_notified = True
+            logger.error(f"⏰ [{getattr(self, 'symbol', '')}] {msg}")
+            try:
+                from dingtalk import report_system_alert
+                report_system_alert(
+                    title=f"流水线卡住 [{getattr(self, 'symbol', '')}]",
+                    detail=msg,
+                    level="警告",
+                    suggestion=(
+                        "检查 REST API / 成交延迟 / 异常持仓 / 雷达死锁。"
+                        "阶段正常前进或仓位全平后自动解除告警。"
+                    ),
+                    immediate=False,
                 )
+            except Exception:
+                pass
         except Exception:
             pass

@@ -3,13 +3,15 @@
 """
 呼吸止损引擎（马拉松雷达 · 被动跟随）
 
-边界：
+规格 v1.0 边界：
   · 雷达激活前不调用本引擎推进止损
   · 激活臂 = 保本起步 entry ± tick ± fee_cover（禁止跳到 TP1 底线）
   · 阶梯：step_trigger / step_advance × initial_atr（按 ADX 档）
   · 分区呼吸：TP1–TP2 / TP2–TP3 / TP3+ 使用 breath_tp12 / breath_tp23 / trail(min~max)
   · 取消 TP1/TP2 强制底线；浮盈≥phase_switch_atr(默认3) 切入阶段二
   · 禁用早保本抢跑（early_be_atr=0）
+  · 规格 §5.0 提前保本检查点：见 supervisor._check_early_be_checkpoint
+  · 规格 §5.1 雷达激活 = 绝对价格锚定，不走旧 ATR 比例公式
 """
 from __future__ import annotations
 

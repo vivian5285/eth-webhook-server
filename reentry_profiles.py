@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.8.1 · 马拉松激活比例修复版）。
+双币种雷达 + 智能再入场（v16.13.0 · 规格 v1.0 全面对齐版）。
 
-- 档位 0/1/2：ADX <20 / 20–30 / >30（弱/中/强趋势）— 步进/呼吸 + 启动比例
-- 硬止损呼吸垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存
-- 雷达启动（第一层）：ADX 三档离散 × 1.35×initial_atr
-  · 弱 ADX<20 → 68%（早激活保护微利）；中 20–30 → 78%；强 >30 → 88%（晚激活留呼吸）
-- 激活瞬间：保本起步 = entry ± tick ± fee_cover（禁止跳到 TP1 底线）
-- 取消 TP1/TP2 强制底线；TP 成交只缩量不改价
-- 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
-- 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量
-- 第二层 trail（ATR 比插值）见 breath_profiles，本文件不改
-- 双保险限价：多 min(5m低+tick, TV×0.997)；空 max(5m高−tick, TV×1.003)
-- 硬止损 / 亏损出局禁止重入；本地订单标签防狂挂
+核心规格（v1.0）：
+  - 雷达激活价 = 绝对价格锚定：首次开仓 (TP1+TP2)/2，重入开仓 TP2。
+    旧 ADX 比例 × TP1距 公式已废除（见 radar_gate_price_from_tps）。
+  - 硬止损呼吸垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存。
+  - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）。
+  - 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量。
+  - 双保险限价：多 min(5m低+tick, TV×0.997)；空 max(5m高−tick, TV×1.003)。
+  - 硬止损 / 亏损 / TP1已成交 / 非强趋势(tier≠2) 出局禁止重入。
+  - 规格 §5.0 提前保本检查点：价格到 tp1距离×0.5 时移动止损到保本位。
+  - 规格 §9.1 订单标签含方向+随机数，防碰撞。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,17 +29,16 @@ _DEFAULT_FEE_COVER_PCT = 0.0008  # 双边约 0.08% 手续费覆盖
 _DEFAULT_HARD_SL_BUFFER = 1.15
 _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
-# 第一层雷达启动（与档位 20/30 对齐 · 离散三档）
+# ── 以下常量已废除（规格 v1.0 不再使用 ATR 比例公式激活雷达）：
+# 雷达激活价 = 绝对价格锚定：首次 (TP1+TP2)/2，重入 TP2。
+# 保留常量仅防旧代码引用崩溃，不参与任何计算。
 _DEFAULT_RADAR_ACT_ADX_LO = 20.0
 _DEFAULT_RADAR_ACT_ADX_HI = 30.0
-# 带宽：弱早(低比例) … 强晚(高比例)
 _DEFAULT_RADAR_ACT_RATIO_LO = 0.68
 _DEFAULT_RADAR_ACT_RATIO_HI = 0.88
-_DEFAULT_ACT_RATIO_WEAK = 0.68   # 65%–70% 中值：弱趋势早激活
-_DEFAULT_ACT_RATIO_MID = 0.78    # 75%–80% 中值
-_DEFAULT_ACT_RATIO_STRONG = 0.88  # 85%–90% 中值：强趋势晚激活
-# v4.0 写反的离散值 → normalize 时若与 ADX 档不符则重算
-_INVERTED_LEGACY_RATIOS = frozenset({0.70, 0.85})
+_DEFAULT_ACT_RATIO_WEAK = 0.68
+_DEFAULT_ACT_RATIO_MID = 0.78
+_DEFAULT_ACT_RATIO_STRONG = 0.88
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 0.40, "step_advance_atr": 0.25,
@@ -191,13 +190,17 @@ _XAU_TF_SEC = int((_CFG.get("XAU") or {}).get("tv_tf_sec") or 2700)
 def make_reentry_client_order_id(
     symbol: str, side: str, price: float, ts: Optional[float] = None,
 ) -> str:
-    """交易所 newClientOrderId（≤36）：SHA-256 订单标签，幂等防狂挂。"""
+    """
+    交易所 newClientOrderId（≤36）：SHA-256 订单标签，幂等防狂挂。
+    规格 §9.1：标签必须含品种+方向+价格+时间戳+随机数。
+    """
     sym_u = str(symbol or "").upper()
     sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
     sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
     px = abs(int(round(float(price or 0) * 100))) % 1_000_000
     t = abs(int(float(ts if ts is not None else time.time()))) % 100_000
-    raw = f"{sym_u}|RE|{sd}|{px}|{t}"
+    rnd = random.getrandbits(32)
+    raw = f"{sym_u}|RE|{sd}|{px}|{t}|{rnd}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
     return f"RE{sym}{sd}{digest}{t % 10000}"[:36]
 
@@ -355,9 +358,9 @@ def is_legacy_activation_frac(frac: Optional[float]) -> bool:
 
 def radar_activation_ratio_from_adx(adx: Optional[float] = None) -> float:
     """
-    第一层：ADX → 启动比例（马拉松离散三档 · 修复版）。
-    ADX<20 → 68%（早）；20≤ADX≤30 → 78%；ADX>30 → 88%（晚）。
-    弱趋势早激活防微利回吐；强趋势晚激活给深度回踩留呼吸空间。
+    已废除：规格 v1.0 不再使用 ADX 比例公式激活雷达。
+    雷达激活价统一用 radar_gate_price_from_tps(TP1, TP2, attempt) 绝对价格锚定。
+    本函数保留仅防旧调用崩溃，返回值不再参与任何激活判断。
     """
     try:
         a = float(adx)

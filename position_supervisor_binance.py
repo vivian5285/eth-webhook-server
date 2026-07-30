@@ -173,7 +173,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.11.0-hard-sl-direction-emergency-channel"
+BINANCE_VPS_VERSION = "v16.13.0-spec-v1-full-align"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -4372,7 +4372,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.warning(
                 f"🛡️ [{self.symbol}] TP{level} 挂单不可读 → 节流快通道启用"
             )
-        tag = make_defense_client_order_id(self.symbol, kind, float(price or 0))
+        # 规格 §9.1：方向纳入标签防碰撞；close_side 是平仓方向（反手），正向用 current_side
+        open_side = self.current_side or ""
+        tag = make_defense_client_order_id(
+            self.symbol, kind, float(price or 0), side=open_side,
+        )
         self._register_pending_defense_tag(tag, kind, price=price)
         try:
             self._save_state()
@@ -7090,7 +7094,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🚫 [{self.symbol}] 挂单不可读 → 拒挂雷达止损（fail-closed）"
             )
             return None
-        tag = make_defense_client_order_id(self.symbol, kind, float(trigger_px or 0))
+        # 规格 §9.1：方向纳入标签防碰撞
+        tag = make_defense_client_order_id(
+            self.symbol, kind, float(trigger_px or 0), side=self.current_side or "",
+        )
         self._register_pending_defense_tag(tag, kind, price=trigger_px)
         try:
             self._save_state()
@@ -7213,7 +7220,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             return False
         # closePosition：仓位归零前数量自动匹配剩余头寸，禁止为改量而撤硬止损
-        tag = make_defense_client_order_id(self.symbol, kind, float(exchange_target or 0))
+        # 规格 §9.1：方向纳入标签防碰撞
+        tag = make_defense_client_order_id(
+            self.symbol, kind, float(exchange_target or 0), side=self.current_side or "",
+        )
         self._register_pending_defense_tag(tag, kind, price=exchange_target)
         try:
             self._save_state()
@@ -13222,6 +13232,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         except Exception:
             pass
         self.reentry_active = False
+        self.reentry_attempt = 0  # 规格 §4：反转保护退出后归零
         self.radar_pending_arm = True
         logger.info(f"🧹 [{self.symbol}] 呼吸/防线账本已清零 | {source}")
         try:
