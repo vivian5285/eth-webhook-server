@@ -955,6 +955,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if not self.last_tv_side:
             self.last_tv_side = tv_side or side
 
+        _saved_tv_sl_ref = float(getattr(self, "tv_sl_ref", 0) or 0)
         if manual_open or float(getattr(self, "watched_qty", 0) or 0) <= 0:
             self._reset_fresh_takeover_state()
 
@@ -982,6 +983,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         reconcile_notes = self._hydrate_tv_defense_context(
             pos, link_historical_tv=bool(link_historical_tv),
         )
+        # 保护重启接管时从 TV journal 恢复的 tv_sl_ref（不受 _reset_fresh_takeover_state 影响）
+        if _saved_tv_sl_ref > 0 and float(getattr(self, "tv_sl_ref", 0) or 0) <= 0:
+            self.tv_sl_ref = _saved_tv_sl_ref
         if provenance.get("note"):
             reconcile_notes.insert(0, provenance["note"])
         curr_px = binance_client.get_current_price(self.symbol)
@@ -2917,6 +2921,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.current_atr = float(last_tv["atr"])
             if self.tv_price <= 0 and float(last_tv.get("price", 0) or 0) > 0:
                 self.tv_price = float(last_tv["price"])
+            tv_sl_from_journal = float(last_tv.get("tv_sl", 0) or 0)
+            if tv_sl_from_journal > 0 and tv_action in ("LONG", "SHORT"):
+                self.tv_sl_ref = tv_sl_from_journal
 
             if tv_action in ("LONG", "SHORT"):
                 self.last_tv_side = tv_action
