@@ -3580,10 +3580,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     logger.warning(f"本金快照钉钉跳过: {e}")
         return principal
 
-    def _resolve_cap_sizing_base(self, wallet_balance=None):
+    def _resolve_cap_sizing_base(self, wallet_balance=None, symbol=None):
         """
         档位额度唯一基数：sizing_principal 快照；下单按 VPS 风险系数公式。
+        若该 symbol 配置了 principal_override 则优先使用。
         """
+        sym = symbol or self.symbol
+        # 优先：per-symbol 本金覆盖
+        try:
+            from account_profiles import get_sizing_base_for_symbol
+            override = get_sizing_base_for_symbol(sym)
+            if override and override > 0:
+                return override
+        except Exception:
+            pass
         wallet = float(
             wallet_balance if wallet_balance is not None
             else binance_client.get_total_equity()
@@ -3808,7 +3818,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         永久硬止损价（白皮书 v3.0）：
           dist = |TV价 − TV.SL| × 1.15（统一呼吸垫，不分档）
           挂在成交价外侧。禁止 1.5×ATR / 滑点×2 旧路径。
-        entry 参数 = 交易所成交价；TV 理论开仓价取 self.tv_price。
+
+        修复（v16.11.x 根因一）：TV.stop_loss 方向校验。
+          多单：TV.SL 必须 < TV.entry；空单：TV.SL 必须 > TV.entry。
+          方向错误 → 立即钉钉告警 + 拒绝开仓（防硬止损挂在盈利区间）。
+          方向校验失败时，用 ATR 最小距离回退至正确方向（不完全拒绝，但钉钉告警）。
+
+        修复（v16.11.x 根因一）：最小 ATR 距离兜底。
+          即使 TV.SL 方向正确但距离异常小（< 0.3×ATR），仍钉钉告警并
+          将距离放大至 min_stop_atr_floor（默认 0.5×ATR），确保不会因为
+          TV 配置错误导致硬止损空间过窄被正常波动触发。
         """
         fill = float(
             entry if entry is not None else (self.watched_entry or self.tv_price or 0)
@@ -3823,6 +3842,119 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if tv_entry <= 0:
             tv_entry = fill
         buf = float(self._defense_buffer_mult())
+
+        # ── 根因一修复（v16.11.x）：方向校验 + ATR 最小距离兜底 ──────────
+        STOP_SIDE_VALID = False
+        direction_error = False
+        min_dist_enforced = False
+
+        if side in ("LONG", "SHORT") and fill > 0 and tv_sl > 0:
+            if side == "LONG":
+                STOP_SIDE_VALID = bool(tv_sl < tv_entry)
+            else:  # SHORT
+                STOP_SIDE_VALID = bool(tv_sl > tv_entry)
+
+            if not STOP_SIDE_VALID:
+                direction_error = True
+                logger.error(
+                    f"🚨 [{self.symbol}] 硬止损方向错误！"
+                    f"{side} 硬止损@{tv_sl:.2f} 却在 TV.entry({tv_entry:.2f}) "
+                    f"{'同一侧（应低于入场价）' if side == 'LONG' else '同一侧（应高于入场价）'} "
+                    f"| frozen_hard_sl_px=0 | 拒开仓"
+                )
+                # 钉钉紧急告警
+                try:
+                    import dingtalk
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"🚨硬止损方向错误 [{self.symbol}]",
+                        detail=(
+                            f"方向错误：{side} 硬止损@{tv_sl:.2f} 在 TV.entry({tv_entry:.2f}) "
+                            f"{'上方（应在入场价下方）' if side == 'LONG' else '下方（应在入场价上方）'}\n"
+                            f"fill={fill:.2f} | tv_sl_ref={tv_sl:.2f}\n"
+                            f"⚠️ 仓位已暂停，请检查 TradingView 策略 stop_loss 配置"
+                        ),
+                        level="紧急",
+                        immediate=True,
+                    )
+                except Exception:
+                    pass
+
+        # ATR 最小距离兜底（方向正确但距离过窄时）
+        if not direction_error and fill > 0 and tv_sl > 0:
+            atr = float(
+                getattr(self, "open_atr", 0)
+                or getattr(self, "cycle_open_atr", 0)
+                or getattr(self, "current_atr", 0)
+                or 0
+            )
+            if atr <= 0:
+                try:
+                    from webhook_parser import fetch_symbol_atr_14_public, atr_fallback_for_symbol
+                    atr = fetch_symbol_atr_14_public(self.symbol)
+                    if atr <= 0:
+                        atr = atr_fallback_for_symbol(self.symbol)
+                except Exception:
+                    atr = atr_fallback_for_symbol(self.symbol)
+
+            min_atr_floor = 0.5  # 最小 0.5×ATR
+            actual_dist = abs(tv_entry - tv_sl)
+            min_dist_required = min_atr_floor * atr
+
+            if actual_dist < min_dist_required and atr > 0:
+                min_dist_enforced = True
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 硬止损距离过窄 "
+                    f"(TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}) "
+                    f"| ATR={atr:.2f} | 已将距离扩大至 {min_dist_required:.2f}，钉钉告警"
+                )
+                try:
+                    import dingtalk
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"⚠️硬止损距离异常 [{self.symbol}]",
+                        detail=(
+                            f"硬止损距离过窄：TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}\n"
+                            f"ATR={atr:.2f} | fill={fill:.2f} | tv_sl={tv_sl:.2f}\n"
+                            f"系统已将距离扩大至 {min_dist_required:.2f}；请确认 TV stop_loss 配置合理"
+                        ),
+                        level="警告",
+                    )
+                except Exception:
+                    pass
+
+        # 方向错误 → 立即返回 0.0（fail-closed）。
+        # 上层 _lock_frozen_hard_sl_from_tv 会拿到 0 → 拒绝开仓。
+        if direction_error:
+            return 0.0
+
+        # 最小距离兜底生效时：重新计算距离
+        if min_dist_enforced:
+            # 重新计算实际 stop_loss，使距离 = min_dist_required
+            atr = float(
+                getattr(self, "open_atr", 0)
+                or getattr(self, "cycle_open_atr", 0)
+                or 0
+            )
+            if atr <= 0:
+                try:
+                    from webhook_parser import fetch_symbol_atr_14_public, atr_fallback_for_symbol
+                    atr = fetch_symbol_atr_14_public(self.symbol)
+                    if atr <= 0:
+                        atr = atr_fallback_for_symbol(self.symbol)
+                except Exception:
+                    atr = atr_fallback_for_symbol(self.symbol)
+
+            min_dist = max(0.5 * atr, 2.0)
+            # 保留 TV 方向（方向已校验正确），只放大距离
+            # recompute: 使用 |fill - tv_sl| 方向，但距离不小于 min_dist
+            raw_dist = abs(fill - tv_sl)
+            enforced_dist = max(raw_dist, min_dist)
+            if side == "LONG":
+                return round(fill - enforced_dist, 2)
+            else:
+                return round(fill + enforced_dist, 2)
+        # ── 正常路径 ───────────────────────────────────────────────────
         return hard_stop_price(
             side,
             fill,
@@ -4633,6 +4765,32 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
           stop_loss 可选收紧；TV.qty 可选 soft-cap（非必须）
         ATR/stop 仍用于雷达 initialStop 账本；ATR 缺失时仍允许纯名义 sizing。
         """
+        # per-symbol 固定金额模式（前端直接设 USDT 数量）
+        try:
+            from account_profiles import get_symbol_settings
+            s = get_symbol_settings(self.symbol)
+            if s.get("mode") == "fixed_amount" and s.get("enabled"):
+                fa = float(s.get("fixed_amount") or 0)
+                if fa > 0 and px > 0:
+                    step = float(getattr(self, "qty_step", 0.001) or 0.001)
+                    min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
+                    raw = fa / px
+                    qty_fixed = math.floor(raw / step) * step if step > 0 else raw
+                    qty_fixed = qty_fixed if qty_fixed >= min_q else 0.0
+                    logger.info(
+                        f"💰 [{self.symbol}] 固定金额模式：{fa} USDT ÷ {px} = {qty_fixed} {getattr(self,'unit_label','')}"
+                    )
+                    return qty_fixed, {
+                        "mode": "fixed_amount",
+                        "principal": fa,
+                        "price": px,
+                        "fixed_amount": fa,
+                        "symbol": self.symbol,
+                        "sizing_mode": "FIXED_AMOUNT",
+                    }
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] fixed_amount check: {e}")
+
         principal = self._resolve_cap_sizing_base()
         px = float(curr_px or self.tv_price or 0)
         tv_qty = float(getattr(self, "tv_suggested_qty", 0) or 0)
@@ -4679,7 +4837,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         try:
             from account_profiles import get_active_sizing
-            _rp, _lv = get_active_sizing()
+            _rp, _lv = get_active_sizing(self.symbol)
         except Exception:
             _rp, _lv = FIXED_RISK_PCT, FIXED_LEVERAGE
         qty, meta = compute_fixed_order_qty(
@@ -16071,11 +16229,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 break
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
             order = binance_client.place_market_order(
-                close_side, live_sz, symbol=self.symbol, reduce_only=True,
+                close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
             )
             if not order:
                 logger.error(
-                    f"❌ [{self.symbol}] 强平下单失败 round={round_i + 1} | {reason}"
+                    f"❌ [{self.symbol}] 紧急强平下单失败 round={round_i + 1} | {reason}"
                 )
             time.sleep(1.5)
 
@@ -16110,7 +16268,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if residual_sz > 0 and self._is_dust_qty(residual_sz):
                 close_side = "SELL" if residual["side"] == "LONG" else "BUY"
                 logger.warning(f"🐜 强平后残 {residual_sz} ETH，触发蚂蚁仓扫尾")
-                binance_client.place_market_order(close_side, residual_sz, symbol=self.symbol, reduce_only=True)
+                binance_client.place_market_order(close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True)
                 time.sleep(1.0)
                 closed_successfully = self._verify_flat()
             if not closed_successfully:

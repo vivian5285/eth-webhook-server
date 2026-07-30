@@ -10,116 +10,262 @@
       --bg1: #e8e8ed;
       --ink: #1d1d1f;
       --ink2: #6e6e73;
+      --ink3: #a1a1a6;
       --line: rgba(0,0,0,.08);
       --blue: #0071e3;
       --blue2: #0077ed;
+      --blue-bg: rgba(0,113,227,.08);
       --green: #30d158;
+      --green-bg: rgba(48,209,88,.12);
       --red: #ff453a;
+      --red-bg: rgba(255,69,58,.10);
+      --orange: #ff9f0a;
+      --orange-bg: rgba(255,159,10,.12);
       --glass: rgba(255,255,255,.62);
       --glass2: rgba(255,255,255,.78);
+      --glass3: rgba(255,255,255,.45);
       --shadow: 0 18px 50px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+      --shadow-sm: 0 4px 20px rgba(0,0,0,.06), 0 1px 4px rgba(0,0,0,.03);
       --radius: 22px;
+      --radius-sm: 14px;
       --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+      --ease: cubic-bezier(.4,0,.2,1);
     }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; min-height: 100%; font-family: var(--font); color: var(--ink); background: var(--bg0); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100%; font-family: var(--font); color: var(--ink); background: var(--bg0); }
     body {
       background:
-        radial-gradient(1200px 600px at 10% -10%, #dfe7ff 0%, transparent 55%),
-        radial-gradient(900px 500px at 100% 0%, #ffe8f1 0%, transparent 50%),
-        radial-gradient(800px 500px at 50% 100%, #e7fff4 0%, transparent 45%),
-        linear-gradient(180deg, #fbfbfd 0%, #f0f0f5 100%);
+        radial-gradient(1400px 700px at 5% -5%, #dfe7ff 0%, transparent 50%),
+        radial-gradient(1000px 600px at 105% -5%, #ffe8f1 0%, transparent 50%),
+        radial-gradient(900px 600px at 55% 105%, #e7fff4 0%, transparent 45%),
+        linear-gradient(175deg, #fbfbfd 0%, #f0f0f6 60%, #ececf2 100%);
       background-attachment: fixed;
     }
     .noise {
-      pointer-events: none; position: fixed; inset: 0; opacity: .035; z-index: 0;
+      pointer-events: none; position: fixed; inset: 0; opacity: .03; z-index: 0;
       background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
     }
-    .wrap { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 28px 20px 80px; }
+    .wrap { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 28px 20px 100px; }
+
+    /* ── Nav ── */
     .nav {
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
-      padding: 14px 18px; margin-bottom: 28px;
-      background: var(--glass); backdrop-filter: blur(28px) saturate(1.4);
-      -webkit-backdrop-filter: blur(28px) saturate(1.4);
-      border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow);
+      padding: 14px 18px; margin-bottom: 32px;
+      background: var(--glass); backdrop-filter: blur(32px) saturate(1.4);
+      -webkit-backdrop-filter: blur(32px) saturate(1.4);
+      border: 1px solid rgba(255,255,255,.55); border-radius: 999px; box-shadow: var(--shadow);
     }
     .brand { font-weight: 700; letter-spacing: -.02em; font-size: 17px; }
     .brand span { color: var(--ink2); font-weight: 500; margin-left: 8px; font-size: 13px; }
-    .nav-actions { display: flex; gap: 8px; align-items: center; }
+    .nav-actions { display: flex; gap: 8px; }
     .btn {
-      appearance: none; border: 0; cursor: pointer; font: inherit;
-      border-radius: 980px; padding: 10px 16px; font-weight: 590; font-size: 14px;
-      transition: transform .15s ease, background .15s ease, opacity .15s;
+      appearance: none; border: 0; cursor: pointer; font: var(--font);
+      border-radius: 980px; padding: 10px 18px; font-weight: 590; font-size: 14px;
+      transition: transform .15s var(--ease), background .15s var(--ease), box-shadow .15s var(--ease), opacity .15s;
     }
-    .btn:active { transform: scale(.98); }
-    .btn-primary { background: var(--blue); color: #fff; }
-    .btn-primary:hover { background: var(--blue2); }
+    .btn:active { transform: scale(.97); }
+    .btn-primary { background: var(--blue); color: #fff; box-shadow: 0 2px 8px rgba(0,113,227,.3); }
+    .btn-primary:hover { background: var(--blue2); box-shadow: 0 4px 12px rgba(0,113,227,.35); }
     .btn-ghost { background: rgba(0,0,0,.05); color: var(--ink); }
-    .btn-danger { background: rgba(255,69,58,.12); color: #c9342a; }
-    .hero {
-      padding: 36px 8px 10px; text-align: left;
+    .btn-ghost:hover { background: rgba(0,0,0,.09); }
+    .btn-danger { background: rgba(255,69,58,.10); color: #c9342a; }
+    .btn-danger:hover { background: rgba(255,69,58,.16); }
+    .btn-sm { padding: 7px 14px; font-size: 13px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    /* ── Hero ── */
+    .hero { padding: 8px 8px 24px; }
+    .hero h1 { margin: 0 0 6px; font-size: clamp(30px,4.5vw,48px); letter-spacing: -.035em; font-weight: 700; line-height: 1.05; }
+    .hero p { color: var(--ink2); font-size: 16px; max-width: 44ch; line-height: 1.5; }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex; gap: 4px; margin-bottom: 24px; padding: 4px;
+      background: rgba(0,0,0,.04); border-radius: 16px; width: fit-content;
     }
-    .hero h1 {
-      margin: 0 0 8px; font-size: clamp(34px, 5vw, 52px); letter-spacing: -.035em;
-      font-weight: 700; line-height: 1.05;
+    .tab {
+      appearance: none; border: 0; background: transparent; cursor: pointer;
+      font: var(--font); font-size: 14px; font-weight: 500; color: var(--ink2);
+      padding: 9px 18px; border-radius: 12px; transition: all .2s var(--ease);
     }
-    .hero p { margin: 0; color: var(--ink2); font-size: 17px; max-width: 42ch; line-height: 1.45; }
-    .grid {
-      display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; margin-top: 28px;
-    }
+    .tab.active { background: #fff; color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.08); font-weight: 600; }
+
+    /* ── Grid ── */
+    .grid { display: grid; grid-template-columns: repeat(12,1fr); gap: 16px; }
     .card {
-      grid-column: span 4;
-      background: var(--glass2); backdrop-filter: blur(34px) saturate(1.5);
-      -webkit-backdrop-filter: blur(34px) saturate(1.5);
-      border: 1px solid rgba(255,255,255,.55);
-      border-radius: var(--radius); box-shadow: var(--shadow);
-      padding: 22px 22px 18px; min-height: 140px;
+      grid-column: span 12;
+      background: var(--glass2); backdrop-filter: blur(36px) saturate(1.5);
+      -webkit-backdrop-filter: blur(36px) saturate(1.5);
+      border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 24px; transition: box-shadow .2s;
     }
-    .card.wide { grid-column: span 8; }
-    .card.full { grid-column: span 12; }
-    .card h3 {
-      margin: 0 0 14px; font-size: 13px; font-weight: 600; color: var(--ink2);
-      text-transform: none; letter-spacing: .01em;
+    .card:hover { box-shadow: 0 22px 60px rgba(0,0,0,.10), 0 3px 10px rgba(0,0,0,.05); }
+    .card h3 { margin: 0 0 18px; font-size: 13px; font-weight: 600; color: var(--ink2); letter-spacing: .01em; }
+
+    /* ── Metric cards ── */
+    .metrics { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; margin-bottom: 24px; }
+    .metric-card {
+      background: var(--glass2); backdrop-filter: blur(30px) saturate(1.5);
+      -webkit-backdrop-filter: blur(30px) saturate(1.5);
+      border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius);
+      box-shadow: var(--shadow-sm); padding: 20px 18px 16px;
     }
-    .metric { font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
-    .metric small { display: block; margin-top: 6px; font-size: 13px; font-weight: 500; color: var(--ink2); }
-    .pos { color: var(--green); }
-    .neg { color: var(--red); }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); }
-    th { color: var(--ink2); font-weight: 510; font-size: 12px; }
+    .metric-card h4 { font-size: 11px; font-weight: 600; color: var(--ink3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+    .metric-card .val { font-size: 30px; font-weight: 700; letter-spacing: -.03em; line-height: 1; }
+    .metric-card .sub { font-size: 12px; color: var(--ink3); margin-top: 6px; font-weight: 500; }
+    .pos { color: #0f7a32; }
+    .neg { color: #c9342a; }
     .mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
-    label { display: block; font-size: 12px; color: var(--ink2); margin-bottom: 6px; font-weight: 510; }
-    input, select, textarea {
-      width: 100%; border: 1px solid var(--line); background: rgba(255,255,255,.75);
-      border-radius: 12px; padding: 11px 12px; font: inherit; color: var(--ink);
-      outline: none; transition: border-color .15s, box-shadow .15s;
+
+    /* ── Symbol sizing cards ── */
+    .symbol-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+    .sym-card {
+      background: var(--glass2); backdrop-filter: blur(36px) saturate(1.5);
+      -webkit-backdrop-filter: blur(36px) saturate(1.5);
+      border: 1px solid rgba(255,255,255,.55); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 22px; transition: all .25s var(--ease);
+      position: relative; overflow: hidden;
     }
-    input:focus, textarea:focus {
-      border-color: rgba(0,113,227,.55);
-      box-shadow: 0 0 0 4px rgba(0,113,227,.12);
+    .sym-card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg, var(--blue), #5ac8fa);
+      opacity: 0; transition: opacity .2s; border-radius: var(--radius) var(--radius) 0 0;
     }
-    .field { flex: 1; min-width: 140px; }
+    .sym-card.enabled::before { opacity: 1; }
+    .sym-card.eth::before { background: linear-gradient(90deg, #6e6ef7, #9b59b6); }
+    .sym-card.xau::before { background: linear-gradient(90deg, #f39c12, #e74c3c); }
+
+    .sym-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+    .sym-title { display: flex; align-items: center; gap: 10px; }
+    .sym-icon {
+      width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center;
+      font-size: 15px; font-weight: 800; color: #fff;
+    }
+    .sym-icon.eth { background: linear-gradient(135deg, #6e6ef7, #9b59b6); }
+    .sym-icon.xau { background: linear-gradient(135deg, #f39c12, #e74c3c); }
+    .sym-info h4 { font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
+    .sym-info p { font-size: 12px; color: var(--ink3); font-weight: 500; margin-top: 1px; }
+    .sym-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      transition: all .2s;
+    }
+    .sym-badge.off { background: rgba(0,0,0,.06); color: var(--ink3); }
+    .sym-badge.on { background: var(--green-bg); color: #0f7a32; }
+    .sym-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* ── Toggle ── */
+    .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .toggle-label { font-size: 12px; font-weight: 600; color: var(--ink2); min-width: 90px; }
+    .toggle-switch {
+      position: relative; width: 44px; height: 26px; flex-shrink: 0; cursor: pointer;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      position: absolute; inset: 0; background: rgba(0,0,0,.12); border-radius: 999px;
+      transition: background .2s;
+    }
+    .toggle-thumb {
+      position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+      background: #fff; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.2);
+      transition: transform .2s var(--ease);
+    }
+    .toggle-switch input:checked + .toggle-track { background: var(--green); }
+    .toggle-switch input:checked ~ .toggle-thumb { transform: translateX(18px); }
+
+    /* ── Mode selector ── */
+    .mode-tabs {
+      display: flex; background: rgba(0,0,0,.04); border-radius: 12px; padding: 3px;
+      margin-bottom: 16px; gap: 2px;
+    }
+    .mode-tab {
+      flex: 1; appearance: none; border: 0; background: transparent; cursor: pointer;
+      font: var(--font); font-size: 13px; font-weight: 500; color: var(--ink2);
+      padding: 8px 6px; border-radius: 10px; transition: all .2s; text-align: center;
+    }
+    .mode-tab.active { background: #fff; color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.08); font-weight: 600; }
+
+    /* ── Fields ── */
+    .field { margin-bottom: 14px; }
+    .field:last-child { margin-bottom: 0; }
+    label { display: block; font-size: 12px; color: var(--ink2); margin-bottom: 7px; font-weight: 600; letter-spacing: .01em; }
+    input[type="number"], input[type="text"], input[type="password"] {
+      width: 100%; border: 1.5px solid rgba(0,0,0,.10); background: rgba(255,255,255,.70);
+      border-radius: 12px; padding: 11px 14px; font: var(--font); font-size: 15px;
+      color: var(--ink); outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    input:focus { border-color: rgba(0,113,227,.50); box-shadow: 0 0 0 4px rgba(0,113,227,.10); }
+    input::placeholder { color: var(--ink3); }
+    .row { display: flex; gap: 10px; }
+    .row .field { flex: 1; }
+    .input-group { position: relative; }
+    .input-suffix {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      font-size: 13px; color: var(--ink3); font-weight: 500; pointer-events: none;
+    }
+    input.has-suffix { padding-right: 48px; }
+
+    /* ── Preview ── */
+    .preview-box {
+      background: var(--blue-bg); border: 1px solid rgba(0,113,227,.15);
+      border-radius: 12px; padding: 12px 14px; margin-top: 14px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .preview-box .icon { width: 28px; height: 28px; background: var(--blue); border-radius: 8px; display: grid; place-items: center; color: #fff; font-size: 13px; flex-shrink: 0; }
+    .preview-text { font-size: 13px; color: var(--ink2); line-height: 1.45; }
+    .preview-text strong { color: var(--blue); font-weight: 700; }
+    .preview-text .calc { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--ink3); display: block; margin-top: 3px; }
+
+    /* ── Save btn ── */
+    .save-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line);
+    }
+    .save-hint { font-size: 12px; color: var(--ink3); }
+    .save-hint strong { color: var(--ink2); }
+
+    /* ── Formula card ── */
+    .formula-display {
+      background: rgba(0,0,0,.03); border-radius: 14px; padding: 16px;
+      text-align: center; margin-bottom: 18px;
+    }
+    .formula-display .big { font-size: 22px; font-weight: 700; letter-spacing: -.02em; color: var(--ink); }
+    .formula-display .sub { font-size: 13px; color: var(--ink2); margin-top: 6px; font-weight: 500; }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--ink2); font-weight: 510; font-size: 12px; }
+    tbody tr:last-child td { border-bottom: 0; }
     .pill {
-      display: inline-flex; align-items: center; gap: 6px;
+      display: inline-flex; align-items: center; gap: 5px;
       padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-      background: rgba(0,0,0,.05);
     }
-    .pill.on { background: rgba(48,209,88,.16); color: #0f7a32; }
+    .pill.on { background: var(--green-bg); color: #0f7a32; }
     .pill.off { background: rgba(0,0,0,.05); color: var(--ink2); }
+
+    /* ── Profile list ── */
+    .profile-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 0; border-bottom: 1px solid var(--line);
+    }
+    .profile-item:last-child { border-bottom: 0; }
+    .profile-item .pname { font-weight: 600; font-size: 15px; }
+    .profile-item .pmeta { font-size: 12px; color: var(--ink2); margin-top: 3px; font-family: ui-monospace, SFMono-Regular, monospace; }
+
+    /* ── Log ── */
     .logbox {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11.5px; line-height: 1.45; max-height: 360px; overflow: auto;
+      font-size: 11.5px; line-height: 1.45; max-height: 380px; overflow: auto;
       white-space: pre-wrap; word-break: break-all; color: #2c2c2e;
       background: rgba(255,255,255,.45); border-radius: 14px; padding: 14px;
       border: 1px solid var(--line);
     }
-    .login-screen {
-      min-height: 100vh; display: grid; place-items: center; padding: 24px; position: relative; z-index: 1;
-    }
+
+    /* ── Login ── */
+    .login-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; position: relative; z-index: 1; }
     .login-card {
-      width: min(420px, 100%);
+      width: min(420px,100%);
       background: var(--glass2); backdrop-filter: blur(40px) saturate(1.6);
       -webkit-backdrop-filter: blur(40px) saturate(1.6);
       border: 1px solid rgba(255,255,255,.6); border-radius: 28px;
@@ -127,22 +273,31 @@
     }
     .login-card h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.03em; }
     .login-card p { margin: 0 0 24px; color: var(--ink2); font-size: 15px; }
-    .hidden { display: none !important; }
+
+    /* ── Toast ── */
     .toast {
       position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
       background: rgba(29,29,31,.92); color: #fff; padding: 12px 18px; border-radius: 14px;
-      font-size: 14px; opacity: 0; pointer-events: none; transition: .25s ease; z-index: 50;
-      backdrop-filter: blur(16px);
+      font-size: 14px; opacity: 0; pointer-events: none; transition: .25s var(--ease); z-index: 100;
+      backdrop-filter: blur(16px); white-space: nowrap;
     }
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    .profile {
-      display: flex; justify-content: space-between; gap: 12px; align-items: center;
-      padding: 14px 0; border-bottom: 1px solid var(--line);
-    }
-    .profile:last-child { border-bottom: 0; }
-    .profile .meta { color: var(--ink2); font-size: 13px; margin-top: 4px; }
-    @media (max-width: 900px) {
-      .card, .card.wide, .card.full { grid-column: span 12; }
+    .toast.ok { background: rgba(48,209,88,.92); }
+    .toast.err { background: rgba(255,69,58,.92); }
+
+    /* ── Utility ── */
+    .hidden { display: none !important; }
+    .sep { height: 1px; background: var(--line); margin: 16px 0; }
+
+    /* ── Spinner ── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+    .spinner.dark { border-color: rgba(0,0,0,.15); border-top-color: var(--ink); }
+
+    /* ── Responsive ── */
+    @media (max-width: 700px) {
+      .metrics { grid-template-columns: 1fr 1fr; }
+      .sym-grid { grid-template-columns: 1fr; }
       .nav { border-radius: 22px; flex-wrap: wrap; }
     }
   </style>
@@ -150,10 +305,11 @@
 <body>
   <div class="noise"></div>
 
+  <!-- ── Login ── -->
   <div id="loginView" class="login-screen">
     <div class="login-card">
       <h1>币安单系统</h1>
-      <p>管理员口令登录后可查看实盘、日志，并修改金额权重与 API 档案。</p>
+      <p>管理员口令登录后设置各币种仓位参数。</p>
       <div class="field" style="text-align:left;margin-bottom:14px">
         <label>口令</label>
         <input id="loginPw" type="password" autocomplete="current-password" placeholder="CONSOLE_PASSWORD" />
@@ -163,6 +319,7 @@
     </div>
   </div>
 
+  <!-- ── App ── -->
   <div id="appView" class="wrap hidden">
     <div class="nav">
       <div class="brand">币安单系统 <span id="verLabel">Console</span></div>
@@ -173,40 +330,86 @@
     </div>
 
     <section class="hero">
-      <h1>实盘一目了然。</h1>
-      <p>持仓、盈亏、日志与 API 档案。风险比例与杠杆按档案随时生效，无需改代码。</p>
+      <h1>仓位控制 · 精准到位。</h1>
+      <p>每个币种独立设置金额与杠杆，前端保存后下一笔 TV 信号直接按此下单，无需改代码。</p>
     </section>
 
-    <div class="grid">
-      <div class="card">
-        <h3>账户权益</h3>
-        <div class="metric mono" id="mEquity">—</div>
+    <!-- Metric row -->
+    <div class="metrics">
+      <div class="metric-card">
+        <h4>账户权益</h4>
+        <div class="val mono" id="mEquity">—</div>
       </div>
-      <div class="card">
-        <h3>30 日已实现盈亏</h3>
-        <div class="metric mono" id="mPnl">—</div>
+      <div class="metric-card">
+        <h4>30日已实现盈亏</h4>
+        <div class="val mono" id="mPnl">—</div>
       </div>
-      <div class="card">
-        <h3>胜率</h3>
-        <div class="metric mono" id="mWin">—</div>
+      <div class="metric-card">
+        <h4>胜率</h4>
+        <div class="val mono" id="mWin">—</div>
+      </div>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="tab-bar">
+      <button class="tab active" onclick="switchTab('sizing')" id="tab-sizing">仓位设置</button>
+      <button class="tab" onclick="switchTab('profiles')" id="tab-profiles">API 档案</button>
+      <button class="tab" onclick="switchTab('positions')" id="tab-positions">持仓</button>
+      <button class="tab" onclick="switchTab('logs')" id="tab-logs">日志</button>
+    </div>
+
+    <!-- ── Sizing tab ── -->
+    <div id="page-sizing">
+      <div class="card" style="margin-bottom:18px">
+        <h3>全局仓位公式（所有币种默认）</h3>
+        <div class="formula-display">
+          <div class="big">本金 × <span id="fRisk">20</span>% × <span id="fLev">5</span>x ÷ 价格</div>
+          <div class="sub" id="fProfile">档案：—</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>全局风险比例 %</label>
+            <input id="editRisk" type="number" min="1" max="50" step="0.5" placeholder="20" />
+          </div>
+          <div class="field">
+            <label>全局杠杆</label>
+            <input id="editLev" type="number" min="1" max="125" step="1" placeholder="5" />
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn btn-primary" onclick="saveGlobalSizing()">保存全局</button>
+          </div>
+        </div>
       </div>
 
-      <div class="card wide">
-        <h3>当前生效仓位公式</h3>
-        <div class="metric" style="font-size:26px">
-          本金 × <span id="mRisk">20</span>% × <span id="mLev">5</span>x / 价格
+      <div class="card">
+        <h3>各币种独立仓位设置</h3>
+        <p style="font-size:13px;color:var(--ink2);margin-bottom:20px">
+          开启后该币种使用独立设置；关闭则使用上方全局参数。
+          <strong>固定金额模式</strong>：直接指定 USDT 数量 ÷ 当前价格 = 开仓数量。
+        </p>
+        <div class="symbol-grid" id="symGrid">
+          <!-- 动态生成 -->
         </div>
-        <small style="display:block;margin-top:10px;color:var(--ink2)" id="mProfileName">档案：—</small>
-        <div class="row" style="margin-top:18px">
-          <div class="field">
-            <label>风险比例 %（如 20 = 本金 20%）</label>
-            <input id="editRisk" type="number" min="1" max="50" step="0.5" />
+      </div>
+    </div>
+
+    <!-- ── Profiles tab ── -->
+    <div id="page-profiles" class="hidden">
+      <div class="card" style="margin-bottom:18px">
+        <h3>API 档案（多套切换）</h3>
+        <div id="profileList"></div>
+        <div style="margin-top:20px;padding-top:18px;border-top:1px solid var(--line)">
+          <div style="font-weight:600;margin-bottom:14px;font-size:15px">新增档案</div>
+          <div class="row">
+            <div class="field"><label>名称</label><input id="npName" placeholder="主账户 / 演练" /></div>
+            <div class="field"><label>风险 %</label><input id="npRisk" type="number" value="20" /></div>
+            <div class="field"><label>杠杆</label><input id="npLev" type="number" value="5" /></div>
           </div>
-          <div class="field">
-            <label>杠杆</label>
-            <input id="editLev" type="number" min="1" max="125" step="1" />
+          <div class="row" style="margin-top:10px">
+            <div class="field"><label>API Key</label><input id="npKey" autocomplete="off" /></div>
+            <div class="field"><label>API Secret</label><input id="npSecret" type="password" autocomplete="off" /></div>
           </div>
-          <button class="btn btn-primary" onclick="saveActiveSizing()">保存到当前档案</button>
+          <button class="btn btn-primary" style="margin-top:14px" onclick="createProfile()">添加档案</button>
         </div>
       </div>
 
@@ -217,61 +420,58 @@
           <label>更新 secret</label>
           <input id="editSecret" type="password" placeholder="新 secret" />
         </div>
-        <button class="btn btn-ghost" style="margin-top:10px" onclick="saveSecret()">保存 secret</button>
+        <button class="btn btn-ghost" style="margin-top:10px" onclick="saveSecret()">保存</button>
       </div>
+    </div>
 
-      <div class="card full">
+    <!-- ── Positions tab ── -->
+    <div id="page-positions" class="hidden">
+      <div class="card" style="margin-bottom:18px">
+        <h3>当前生效仓位公式</h3>
+        <div class="formula-display" style="margin-bottom:0">
+          <div class="big">本金 × <span id="posRisk">20</span>% × <span id="posLev">5</span>x ÷ 价格</div>
+          <div class="sub" id="posProfile">档案：—</div>
+        </div>
+      </div>
+      <div class="card">
         <h3>持仓与防线</h3>
         <div style="overflow:auto">
           <table>
             <thead>
               <tr>
-                <th>品种</th><th>方向</th><th>数量</th><th>入场</th><th>雷达</th><th>暂停</th><th></th>
+                <th>品种</th><th>方向</th><th>数量</th><th>入场价</th><th>雷达</th><th>状态</th><th></th>
               </tr>
             </thead>
             <tbody id="posBody"></tbody>
           </table>
         </div>
       </div>
-
-      <div class="card full">
-        <h3>API 档案（多套切换）</h3>
-        <div id="profileList"></div>
-        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
-          <div style="font-weight:600;margin-bottom:12px">新增档案</div>
-          <div class="row">
-            <div class="field"><label>名称</label><input id="npName" placeholder="主账户 / 小仓演练" /></div>
-            <div class="field"><label>风险 %</label><input id="npRisk" type="number" value="20" /></div>
-            <div class="field"><label>杠杆</label><input id="npLev" type="number" value="5" /></div>
-          </div>
-          <div class="row" style="margin-top:10px">
-            <div class="field"><label>API Key</label><input id="npKey" autocomplete="off" /></div>
-            <div class="field"><label>API Secret</label><input id="npSecret" type="password" autocomplete="off" /></div>
-          </div>
-          <button class="btn btn-primary" style="margin-top:12px" onclick="createProfile()">添加档案</button>
-        </div>
-      </div>
-
-      <div class="card wide">
-        <h3>近期已实现盈亏</h3>
+      <div class="card" style="margin-top:18px">
+        <h3>近期已实现盈亏（近40笔）</h3>
         <div style="overflow:auto;max-height:320px">
           <table>
-            <thead><tr><th>时间</th><th>品种</th><th>PnL</th></tr></thead>
+            <thead><tr><th>时间</th><th>品种</th><th>PnL (USDT)</th></tr></thead>
             <tbody id="pnlBody"></tbody>
           </table>
         </div>
       </div>
+    </div>
 
-      <div class="card">
+    <!-- ── Logs tab ── -->
+    <div id="page-logs" class="hidden">
+      <div class="card" style="margin-bottom:18px">
         <h3>日志过滤</h3>
-        <div class="field">
-          <label>关键词</label>
-          <input id="logQ" placeholder="HARD_SL / 雷达 / ETHUSDT" />
+        <div class="row">
+          <div class="field" style="flex:1">
+            <label>关键词</label>
+            <input id="logQ" placeholder="HARD_SL / 雷达 / ETHUSDT / 开仓" />
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn btn-primary" onclick="loadLogs()">拉取日志</button>
+          </div>
         </div>
-        <button class="btn btn-ghost" style="margin-top:10px;width:100%" onclick="loadLogs()">拉取日志</button>
       </div>
-
-      <div class="card full">
+      <div class="card">
         <h3>Brain 日志</h3>
         <div class="logbox" id="logBox">登录后自动加载…</div>
       </div>
@@ -280,237 +480,511 @@
 
   <div class="toast" id="toast"></div>
 
-  <script>
-    let overview = null;
-    let activeId = "";
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let overview = null;
+let activeId = "";
+let currentEquity = 0;
+let symSettings = {};   // symbol -> {enabled, mode, risk_pct, leverage, fixed_amount, ...}
 
-    function toast(msg) {
-      const el = document.getElementById("toast");
-      el.textContent = msg;
-      el.classList.add("show");
-      setTimeout(() => el.classList.remove("show"), 2400);
-    }
+// ── Toast ─────────────────────────────────────────────────────────────────
+function toast(msg, type="") {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "toast show" + (type ? " " + type : "");
+  setTimeout(() => el.classList.remove("show"), 2500);
+}
 
-    async function api(path, opts = {}) {
-      const res = await fetch(path, {
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-        ...opts,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.status === 401) {
-        showLogin();
-        throw new Error("login_required");
-      }
-      if (!res.ok) throw new Error(data.message || ("HTTP " + res.status));
-      return data;
-    }
+// ── API helper ─────────────────────────────────────────────────────────────
+async function api(path, opts={}) {
+  const res = await fetch(path, {
+    credentials:"same-origin",
+    headers:{"Content-Type":"application/json",...(opts.headers||{})},
+    ...opts,
+  });
+  const data = await res.json().catch(()=>({}));
+  if (res.status===401) { showLogin(); throw new Error("login_required"); }
+  if (!res.ok) throw new Error(data.message || "HTTP "+res.status);
+  return data;
+}
 
-    function showLogin() {
-      document.getElementById("loginView").classList.remove("hidden");
-      document.getElementById("appView").classList.add("hidden");
-    }
-    function showApp() {
-      document.getElementById("loginView").classList.add("hidden");
-      document.getElementById("appView").classList.remove("hidden");
-    }
+// ── Auth ───────────────────────────────────────────────────────────────────
+function showLogin() {
+  document.getElementById("loginView").classList.remove("hidden");
+  document.getElementById("appView").classList.add("hidden");
+}
+function showApp() {
+  document.getElementById("loginView").classList.add("hidden");
+  document.getElementById("appView").classList.remove("hidden");
+}
+async function doLogin() {
+  try {
+    await api("/api/console/login", {
+      method:"POST", body:JSON.stringify({password:document.getElementById("loginPw").value}),
+    });
+    showApp();
+    await refreshAll();
+    toast("已登录", "ok");
+  } catch(e) { toast("口令错误", "err"); }
+}
+async function doLogout() {
+  await api("/api/console/logout",{method:"POST"});
+  showLogin();
+}
+document.getElementById("loginPw").addEventListener("keydown", e => { if(e.key==="Enter") doLogin(); });
 
-    async function doLogin() {
-      try {
-        await api("/api/console/login", {
-          method: "POST",
-          body: JSON.stringify({ password: document.getElementById("loginPw").value }),
-        });
-        showApp();
-        await refreshAll();
-        toast("已登录");
-      } catch (e) {
-        toast("口令错误");
-      }
-    }
+// ── Tabs ───────────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.getElementById("tab-"+name).classList.add("active");
+  ["sizing","profiles","positions","logs"].forEach(p => {
+    document.getElementById("page-"+p).classList.toggle("hidden", p !== name);
+  });
+}
 
-    async function doLogout() {
-      await api("/api/console/logout", { method: "POST", body: "{}" });
-      showLogin();
-    }
+// ── Overview ───────────────────────────────────────────────────────────────
+function renderOverview(d) {
+  overview = d;
+  activeId = (d.profiles && d.profiles.active_id) || "";
+  symSettings = (d.symbol_settings || {});
+  currentEquity = Number(d.equity || 0);
 
-    function fmtTs(ms) {
-      if (!ms) return "—";
-      const d = new Date(ms);
-      return d.toLocaleString();
-    }
+  document.getElementById("verLabel").textContent = d.version || "Console";
 
-    function renderOverview(d) {
-      overview = d;
-      activeId = (d.profiles && d.profiles.active_id) || "";
-      document.getElementById("verLabel").textContent = d.version || "Console";
-      const eq = d.equity;
-      document.getElementById("mEquity").innerHTML =
-        (eq == null ? "—" : eq.toFixed(2) + " <small>USDT</small>");
-      const st = d.stats || {};
-      const pnl = Number(st.total_pnl || 0);
-      const pnlEl = document.getElementById("mPnl");
-      pnlEl.className = "metric mono " + (pnl >= 0 ? "pos" : "neg");
-      pnlEl.innerHTML = (st.ok === false ? "—" : pnl.toFixed(2)) +
-        " <small>" + (st.trades || 0) + " 笔 · 近 30 日</small>";
-      document.getElementById("mWin").innerHTML =
-        (st.win_rate != null ? st.win_rate.toFixed(1) + "%" : "—") +
-        " <small>" + (st.wins || 0) + "W / " + (st.losses || 0) + "L</small>";
-      const riskPct = Number(d.risk_pct || 0.2) * 100;
-      const lev = Number(d.leverage || 5);
-      document.getElementById("mRisk").textContent = riskPct.toFixed(riskPct % 1 ? 1 : 0);
-      document.getElementById("mLev").textContent = String(lev);
-      document.getElementById("editRisk").value = riskPct;
-      document.getElementById("editLev").value = lev;
-      document.getElementById("mWebhook").textContent = d.webhook_url || "—";
-      const active = ((d.profiles && d.profiles.profiles) || []).find(p => p.active);
-      document.getElementById("mProfileName").textContent =
-        "档案：" + (active ? active.name : "未选择") +
-        (active ? " · " + active.api_key_masked : "");
+  // Metrics
+  const eq = d.equity;
+  document.getElementById("mEquity").innerHTML = eq == null ? "—" : eq.toFixed(2) + " <small style='font-size:14px;color:var(--ink2)'> USDT</small>";
 
-      const tbody = document.getElementById("posBody");
-      tbody.innerHTML = "";
-      (d.positions || []).forEach(p => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td><b>${p.symbol}</b></td>
-          <td>${p.side || "—"}</td>
-          <td class="mono">${Number(p.qty || 0)}</td>
-          <td class="mono">${Number(p.entry || 0).toFixed(2)}</td>
-          <td><span class="pill ${p.radar_activated ? "on" : "off"}">${p.radar_activated ? "已激活" : "休眠"}</span></td>
-          <td>${p.paused ? ("暂停·" + (p.pause_reason || "").slice(0, 28)) : "正常"}</td>
-          <td>${p.paused ? `<button class="btn btn-ghost" onclick="resumeSym('${p.symbol}')">恢复</button>` : ""}</td>`;
-        tbody.appendChild(tr);
-      });
+  const st = d.stats || {};
+  const pnl = Number(st.total_pnl || 0);
+  const pnlEl = document.getElementById("mPnl");
+  pnlEl.className = "val mono " + (pnl>=0?"pos":"neg");
+  pnlEl.innerHTML = (st.ok===false?"—":pnl.toFixed(2)) + " <small style='font-size:13px;color:var(--ink3)'>"+ (st.trades||0)+"笔</small>";
 
-      const plist = document.getElementById("profileList");
-      plist.innerHTML = "";
-      ((d.profiles && d.profiles.profiles) || []).forEach(p => {
-        const div = document.createElement("div");
-        div.className = "profile";
-        div.innerHTML = `
-          <div>
-            <div><b>${p.name}</b> ${p.active ? '<span class="pill on">生效中</span>' : ""}</div>
-            <div class="meta mono">${p.api_key_masked} · 风险 ${(p.risk_pct * 100).toFixed(1)}% · ${p.leverage}x</div>
+  const wr = st.win_rate != null ? st.win_rate.toFixed(1)+"%" : "—";
+  document.getElementById("mWin").innerHTML = wr + " <small style='font-size:12px;color:var(--ink3)'>"+(st.wins||0)+"W/"+(st.losses||0)+"L</small>";
+
+  // Global sizing
+  const rp = Number(d.risk_pct||0.20)*100;
+  const lv = Number(d.leverage||5);
+  document.getElementById("fRisk").textContent = rp%1?rp.toFixed(1):rp;
+  document.getElementById("fLev").textContent = lv;
+  document.getElementById("editRisk").value = rp;
+  document.getElementById("editLev").value = lv;
+
+  const active = ((d.profiles&&d.profiles.profiles)||[]).find(p=>p.active);
+  const pname = active ? active.name : "未选择";
+  const pmask = active ? active.api_key_masked : "";
+  document.getElementById("fProfile").textContent = "档案：" + pname + (pmask?" · "+pmask:"");
+  document.getElementById("posRisk").textContent = document.getElementById("fRisk").textContent;
+  document.getElementById("posLev").textContent = document.getElementById("fLev").textContent;
+  document.getElementById("posProfile").textContent = "档案：" + pname + (pmask?" · "+pmask:"");
+
+  // Webhook
+  const host = (d.webhook_url||"").replace("/webhook","");
+  document.getElementById("mWebhook").textContent = d.webhook_url || "—";
+
+  // Symbol grid
+  renderSymbolGrid();
+
+  // Profiles
+  renderProfiles(d);
+
+  // Positions
+  renderPositions(d);
+
+  // PnL
+  renderPnL(d);
+}
+
+function renderSymbolGrid() {
+  const grid = document.getElementById("symGrid");
+  grid.innerHTML = "";
+  const SYM_DEFS = {
+    ETHUSDT: {label:"ETH", unit:"ETH", cls:"eth", icon:"Ξ"},
+    XAUUSDT: {label:"XAU", unit:"XAU", cls:"xau", icon:"Au"},
+  };
+  const defaultGlobal = {
+    risk_pct: Number(overview&&overview.risk_pct||0.20)*100,
+    leverage: Number(overview&&overview.leverage||5),
+  };
+  for (const [sym, s] of Object.entries(symSettings)) {
+    const def = SYM_DEFS[sym] || {label:sym, unit:sym, cls:"", icon:"?"};
+    const card = document.createElement("div");
+    card.className = "sym-card " + (s.enabled?"enabled ":"") + def.cls;
+    card.id = "sym-card-"+sym;
+
+    const enabled = s.enabled;
+    const mode = s.mode || "risk";
+    const rp = Number(s.risk_pct||defaultGlobal.risk_pct)*100;
+    const lv = Number(s.leverage||defaultGlobal.leverage);
+    const fa = Number(s.fixed_amount||0);
+    const po = s.principal_override;
+
+    const preview = buildPreview(sym, mode, rp, lv, fa, currentEquity);
+
+    card.innerHTML = `
+      <div class="sym-header">
+        <div class="sym-title">
+          <div class="sym-icon ${def.cls}">${def.icon}</div>
+          <div class="sym-info">
+            <h4>${def.label}</h4>
+            <p>${s.unit} · ${sym}</p>
           </div>
-          <div class="row" style="justify-content:flex-end">
-            ${p.active ? "" : `<button class="btn btn-primary" onclick="activateProfile('${p.id}')">启用</button>`}
-            <button class="btn btn-danger" onclick="deleteProfile('${p.id}')">删除</button>
-          </div>`;
-        plist.appendChild(div);
-      });
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="sym-badge ${enabled?'on':'off'}">
+            <span class="dot"></span>${enabled?"独立设置":"默认"}
+          </span>
+        </div>
+      </div>
 
-      const pb = document.getElementById("pnlBody");
-      pb.innerHTML = "";
-      (st.recent || []).slice(0, 20).forEach(r => {
-        const tr = document.createElement("tr");
-        const cls = r.pnl >= 0 ? "pos" : "neg";
-        tr.innerHTML = `<td>${fmtTs(r.time)}</td><td>${r.symbol || "—"}</td>
-          <td class="mono ${cls}">${Number(r.pnl).toFixed(4)}</td>`;
-        pb.appendChild(tr);
-      });
-    }
+      <!-- Enable toggle -->
+      <div class="toggle-row">
+        <span class="toggle-label">独立启用</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="sw-${sym}" ${enabled?'checked':''}
+            onchange="onToggleSym('${sym}', this.checked)" />
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
 
-    async function refreshAll() {
-      const d = await api("/api/console/overview");
-      renderOverview(d);
-      await loadLogs();
-    }
+      <!-- Mode tabs (only shown when enabled) -->
+      <div id="mode-tabs-${sym}" style="${enabled?'':'display:none'}">
+        <div class="mode-tabs">
+          <button class="mode-tab ${mode==='risk'?'active':''}" onclick="setMode('${sym}','risk')" id="mt-risk-${sym}">风险%模式</button>
+          <button class="mode-tab ${mode==='fixed_amount'?'active':''}" onclick="setMode('${sym}','fixed_amount')" id="mt-fixed-${sym}">固定金额模式</button>
+        </div>
 
-    async function loadLogs() {
-      const q = document.getElementById("logQ").value || "";
-      const d = await api("/api/console/logs?n=150&q=" + encodeURIComponent(q));
-      document.getElementById("logBox").textContent = (d.lines || []).join("\n") || "(无日志)";
-    }
+        <!-- Risk mode fields -->
+        <div id="fields-risk-${sym}" style="${mode==='risk'?'':'display:none'}">
+          <div class="row">
+            <div class="field">
+              <label>风险 %（本金比例）</label>
+              <input type="number" id="inp-rp-${sym}" min="1" max="50" step="0.5"
+                value="${rp%1?rp.toFixed(1):rp}"
+                oninput="updatePreview('${sym}')" />
+            </div>
+            <div class="field">
+              <label>杠杆</label>
+              <input type="number" id="inp-lv-${sym}" min="1" max="125" step="1"
+                value="${lv}" oninput="updatePreview('${sym}')" />
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label>本金基数（可选，留空则用账户权益）</label>
+            <input type="number" id="inp-po-${sym}" min="0" step="10"
+              placeholder="留空 = 自动权益"
+              value="${po||''}" oninput="updatePreview('${sym}')" />
+          </div>
+        </div>
 
-    async function saveActiveSizing() {
-      if (!activeId) return toast("没有生效档案");
-      const risk = Number(document.getElementById("editRisk").value) / 100;
-      const lev = Number(document.getElementById("editLev").value);
-      await api("/api/console/profiles/" + activeId, {
-        method: "PATCH",
-        body: JSON.stringify({ risk_pct: risk, leverage: lev }),
-      });
-      toast("仓位参数已生效");
-      await refreshAll();
-    }
+        <!-- Fixed amount mode fields -->
+        <div id="fields-fixed-${sym}" style="${mode==='fixed_amount'?'':'display:none'}">
+          <div class="field">
+            <label>固定开仓金额（USDT）</label>
+            <div class="input-group">
+              <input type="number" id="inp-fa-${sym}" min="1" step="1"
+                value="${fa||''}" placeholder="例如 1000"
+                class="has-suffix" oninput="updatePreview('${sym}')" />
+              <span class="input-suffix">USDT</span>
+            </div>
+          </div>
+        </div>
 
-    async function saveSecret() {
-      const secret = document.getElementById("editSecret").value;
-      await api("/api/console/webhook_secret", {
-        method: "POST",
-        body: JSON.stringify({ secret }),
-      });
-      document.getElementById("editSecret").value = "";
-      toast("Webhook secret 已更新");
-    }
+        <!-- Preview -->
+        <div class="preview-box" id="preview-${sym}">
+          ${preview}
+        </div>
 
-    async function createProfile() {
-      await api("/api/console/profiles", {
-        method: "POST",
-        body: JSON.stringify({
-          name: document.getElementById("npName").value,
-          api_key: document.getElementById("npKey").value,
-          api_secret: document.getElementById("npSecret").value,
-          risk_pct: Number(document.getElementById("npRisk").value) / 100,
-          leverage: Number(document.getElementById("npLev").value),
-        }),
-      });
-      ["npName", "npKey", "npSecret"].forEach(id => document.getElementById(id).value = "");
-      toast("档案已添加");
-      await refreshAll();
-    }
+        <div class="save-bar">
+          <span class="save-hint" id="save-ts-${sym}">已保存 · 点击保存生效</span>
+          <button class="btn btn-primary btn-sm" id="btn-save-${sym}" onclick="saveSymSettings('${sym}')">保存设置</button>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+}
 
-    async function activateProfile(id) {
-      try {
-        await api("/api/console/profiles/" + id + "/activate", {
-          method: "POST", body: JSON.stringify({}),
-        });
-        toast("已切换生效档案");
-        await refreshAll();
-      } catch (e) {
-        if (String(e.message).includes("position_open")) {
-          if (confirm("当前有持仓。强制切换可能串账户，仍继续？")) {
-            await api("/api/console/profiles/" + id + "/activate", {
-              method: "POST", body: JSON.stringify({ force: true }),
-            });
-            toast("已强制切换");
-            await refreshAll();
-          }
-        } else toast(e.message);
+function buildPreview(sym, mode, rp, lv, fa, equity) {
+  const def = {ETHUSDT:{unit:"ETH",price:3500},XAUUSDT:{unit:"XAU",price:2400}};
+  const d = def[sym] || {unit:sym,price:1000};
+  const px = d.price;
+  const po = parseFloat(document.getElementById("inp-po-"+sym)?.value) || 0;
+  const base = po > 0 ? po : (equity > 0 ? equity : 10000);
+
+  let icon = '<div class="icon">📐</div>';
+  if (mode === "fixed_amount") {
+    const qty = fa > 0 ? (fa / px).toFixed(4) : "—";
+    const notional = fa > 0 ? fa.toFixed(0) : "—";
+    return `${icon}
+      <div class="preview-text">
+        每笔开仓约 <strong>${qty} ${d.unit}</strong>
+        <span class="calc">${fa.toFixed(0)} USDT ÷ ${px} = ${qty} ${d.unit} · 名义 ≈ ${notional} USDT</span>
+      </div>`;
+  } else {
+    const notional = (base * (rp/100) * lv).toFixed(0);
+    const qty = (base * (rp/100) * lv / px).toFixed(4);
+    const notionalMode = `<strong>${notional} USDT</strong>`;
+    return `${icon}
+      <div class="preview-text">
+        本金 <strong>${base.toFixed(0)} × ${rp}% × ${lv}x</strong> = ${notionalMode} ÷ ${px}
+        <span class="calc">≈ ${qty} ${d.unit} / 笔</span>
+      </div>`;
+  }
+}
+
+function onToggleSym(sym, enabled) {
+  const badge = document.querySelector("#sym-card-"+sym+" .sym-badge");
+  if (badge) {
+    badge.className = "sym-badge " + (enabled?"on":"off");
+    badge.innerHTML = '<span class="dot"></span>'+(enabled?"独立设置":"默认");
+  }
+  const card = document.getElementById("sym-card-"+sym);
+  if (card) card.className = "sym-card "+(enabled?"enabled ":"")+ (sym==="ETHUSDT"?"eth":sym==="XAUUSDT"?"xau":"");
+
+  const tabs = document.getElementById("mode-tabs-"+sym);
+  if (tabs) tabs.style.display = enabled ? "" : "none";
+
+  // Ensure mode tabs visible when enabling
+  if (enabled) {
+    const mode = symSettings[sym]?.mode || "risk";
+    setMode(sym, mode);
+  }
+  updatePreview(sym);
+}
+
+function setMode(sym, mode) {
+  document.getElementById("mt-risk-"+sym)?.classList.toggle("active", mode==="risk");
+  document.getElementById("mt-fixed-"+sym)?.classList.toggle("active", mode==="fixed_amount");
+  document.getElementById("fields-risk-"+sym).style.display = mode==="risk"?"":"none";
+  document.getElementById("fields-fixed-"+sym).style.display = mode==="fixed_amount"?"":"none";
+  updatePreview(sym);
+}
+
+function updatePreview(sym) {
+  const container = document.getElementById("preview-"+sym);
+  if (!container) return;
+  const s = symSettings[sym] || {};
+  const mode = s.mode || "risk";
+  const rp = parseFloat(document.getElementById("inp-rp-"+sym)?.value) || (Number(overview?.risk_pct||0.20)*100);
+  const lv = parseFloat(document.getElementById("inp-lv-"+sym)?.value) || Number(overview?.leverage||5);
+  const fa = parseFloat(document.getElementById("inp-fa-"+sym)?.value) || 0;
+  container.innerHTML = buildPreview(sym, mode, rp, lv, fa, currentEquity);
+}
+
+async function saveSymSettings(sym) {
+  const btn = document.getElementById("btn-save-"+sym);
+  const orig = btn.textContent;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+
+  try {
+    const enabled = document.getElementById("sw-"+sym)?.checked || false;
+    const mode = symSettings[sym]?.mode || "risk";
+    const rp = parseFloat(document.getElementById("inp-rp-"+sym)?.value);
+    const lv = parseFloat(document.getElementById("inp-lv-"+sym)?.value);
+    const po = parseFloat(document.getElementById("inp-po-"+sym)?.value) || null;
+    const fa = parseFloat(document.getElementById("inp-fa-"+sym)?.value) || 0;
+
+    const body = { enabled, mode };
+    if (enabled) {
+      if (mode === "risk") {
+        body.risk_pct = rp / 100;
+        body.leverage = lv;
+        body.principal_override = po;
+      } else {
+        body.fixed_amount = fa;
       }
     }
 
-    async function deleteProfile(id) {
-      if (!confirm("确认删除该档案？")) return;
-      await api("/api/console/profiles/" + id, { method: "DELETE" });
-      toast("已删除");
-      await refreshAll();
-    }
-
-    async function resumeSym(sym) {
-      await api("/api/console/resume/" + encodeURIComponent(sym), {
-        method: "POST", body: "{}",
-      });
-      toast("已恢复 " + sym);
-      await refreshAll();
-    }
-
-    document.getElementById("loginPw").addEventListener("keydown", e => {
-      if (e.key === "Enter") doLogin();
+    await api("/api/console/symbol_settings/"+sym, {
+      method:"PUT", body:JSON.stringify(body),
     });
 
-    (async () => {
-      try {
-        const me = await api("/api/console/me");
-        if (me.authenticated) {
-          showApp();
-          await refreshAll();
-        } else showLogin();
-      } catch {
-        showLogin();
+    // Update local state
+    symSettings[sym] = {
+      ...(symSettings[sym]||{}),
+      ...body,
+      risk_pct: body.risk_pct ?? symSettings[sym]?.risk_pct,
+      leverage: body.leverage ?? symSettings[sym]?.leverage,
+      principal_override: po,
+      fixed_amount: fa,
+    };
+
+    const ts = document.getElementById("save-ts-"+sym);
+    if (ts) {
+      const d = new Date();
+      ts.textContent = "已保存 · "+d.getHours().toString().padStart(2,"0")+":"+d.getMinutes().toString().padStart(2,"0")+":"+d.getSeconds().toString().padStart(2,"0");
+    }
+
+    toast(sym+" 设置已生效", "ok");
+    updatePreview(sym);
+  } catch(e) {
+    toast("保存失败："+e.message, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function saveGlobalSizing() {
+  if (!activeId) return toast("没有生效档案，请先添加/激活档案", "err");
+  const btn = event.target;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+
+  try {
+    const risk = parseFloat(document.getElementById("editRisk").value) / 100;
+    const lev = parseFloat(document.getElementById("editLev").value);
+    await api("/api/console/profiles/"+activeId, {
+      method:"PATCH", body:JSON.stringify({risk_pct:risk, leverage:lev}),
+    });
+    toast("全局仓位参数已保存", "ok");
+    await refreshAll();
+  } catch(e) {
+    toast("保存失败："+e.message, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+}
+
+function renderProfiles(d) {
+  const plist = document.getElementById("profileList");
+  plist.innerHTML = "";
+  ((d.profiles&&d.profiles.profiles)||[]).forEach(p => {
+    const div = document.createElement("div");
+    div.className = "profile-item";
+    div.innerHTML = `
+      <div>
+        <div class="pname">${p.name} ${p.active?'<span style="color:var(--green);font-size:12px;font-weight:600">✓ 生效</span>':''}</div>
+        <div class="pmeta">${p.api_key_masked} · 风险 ${(p.risk_pct*100).toFixed(1)}% · ${p.leverage}x</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        ${p.active?"":`<button class="btn btn-primary btn-sm" onclick="activateProfile('${p.id}')">启用</button>`}
+        <button class="btn btn-danger btn-sm" onclick="deleteProfile('${p.id}')">删除</button>
+      </div>`;
+    plist.appendChild(div);
+  });
+}
+
+function renderPositions(d) {
+  const tbody = document.getElementById("posBody");
+  tbody.innerHTML = "";
+  (d.positions||[]).forEach(p => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><b>${p.symbol}</b></td>
+      <td>${p.side||"—"}</td>
+      <td class="mono">${Number(p.qty||0)}</td>
+      <td class="mono">${Number(p.entry||0).toFixed(2)}</td>
+      <td><span class="pill ${p.radar_activated?"on":"off"}">${p.radar_activated?"已激活":"休眠"}</span></td>
+      <td>${p.paused?"暂停·"+(p.pause_reason||"").slice(0,20):"正常"}</td>
+      <td>${p.paused?`<button class="btn btn-ghost btn-sm" onclick="resumeSym('${p.symbol}')">恢复</button>`:""}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPnL(d) {
+  const pb = document.getElementById("pnlBody");
+  pb.innerHTML = "";
+  const recent = ((d.stats||{}).recent||[]).slice(0,40);
+  if (!recent.length) { pb.innerHTML = '<tr><td colspan="3" style="color:var(--ink3);text-align:center;padding:20px">暂无数据</td></tr>'; return; }
+  recent.forEach(r => {
+    const tr = document.createElement("tr");
+    const cls = Number(r.pnl)>=0?"pos":"neg";
+    const d2 = new Date(Number(r.time||0));
+    const ts = d2.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+    tr.innerHTML = `<td class="mono" style="font-size:12px">${ts}</td><td>${r.symbol||"—"}</td><td class="mono ${cls}">${Number(r.pnl).toFixed(4)}</td>`;
+    pb.appendChild(tr);
+  });
+}
+
+// ── Profile actions ─────────────────────────────────────────────────────────
+async function createProfile() {
+  try {
+    await api("/api/console/profiles", {
+      method:"POST", body:JSON.stringify({
+        name: document.getElementById("npName").value,
+        api_key: document.getElementById("npKey").value,
+        api_secret: document.getElementById("npSecret").value,
+        risk_pct: Number(document.getElementById("npRisk").value)/100,
+        leverage: Number(document.getElementById("npLev").value),
+      }),
+    });
+    ["npName","npKey","npSecret"].forEach(id=>document.getElementById(id).value="");
+    toast("档案已添加", "ok");
+    await refreshAll();
+  } catch(e) { toast("添加失败："+e.message, "err"); }
+}
+
+async function activateProfile(id) {
+  try {
+    await api("/api/console/profiles/"+id+"/activate",{method:"POST",body:"{}"});
+    toast("已切换生效档案", "ok");
+    await refreshAll();
+  } catch(e) {
+    if (String(e.message).includes("position_open")) {
+      if (confirm("当前有持仓。强制切换可能串账户，仍继续？")) {
+        await api("/api/console/profiles/"+id+"/activate",{method:"POST",body:JSON.stringify({force:true})});
+        toast("已强制切换", "ok");
+        await refreshAll();
       }
-    })();
-  </script>
+    } else toast(e.message, "err");
+  }
+}
+
+async function deleteProfile(id) {
+  if (!confirm("确认删除该档案？")) return;
+  try {
+    await api("/api/console/profiles/"+id,{method:"DELETE"});
+    toast("已删除", "ok");
+    await refreshAll();
+  } catch(e) { toast(e.message, "err"); }
+}
+
+async function saveSecret() {
+  try {
+    await api("/api/console/webhook_secret",{
+      method:"POST", body:JSON.stringify({secret:document.getElementById("editSecret").value}),
+    });
+    document.getElementById("editSecret").value = "";
+    toast("Webhook secret 已更新", "ok");
+  } catch(e) { toast(e.message, "err"); }
+}
+
+async function resumeSym(sym) {
+  await api("/api/console/resume/"+encodeURIComponent(sym),{method:"POST",body:"{}"});
+  toast("已恢复 "+sym, "ok");
+  await refreshAll();
+}
+
+// ── Refresh ────────────────────────────────────────────────────────────────
+async function refreshAll() {
+  const d = await api("/api/console/overview");
+  renderOverview(d);
+  await loadLogs();
+}
+
+async function loadLogs() {
+  const q = document.getElementById("logQ")?.value || "";
+  try {
+    const d = await api("/api/console/logs?n=150&q="+encodeURIComponent(q));
+    document.getElementById("logBox").textContent = (d.lines||[]).join("\n")||"(无日志)";
+  } catch(e) {
+    document.getElementById("logBox").textContent = "加载失败："+e.message;
+  }
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    const me = await api("/api/console/me");
+    if (me.authenticated) { showApp(); await refreshAll(); }
+    else showLogin();
+  } catch { showLogin(); }
+})();
+</script>
 </body>
 </html>

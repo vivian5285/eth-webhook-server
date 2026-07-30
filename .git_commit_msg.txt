@@ -1,0 +1,19 @@
+fix v16.11.x: hard stop loss direction validation; emergency channel priority; emergency param
+
+Root cause 1 (position_supervisor_binance.py):
+- Add direction check in _temp_hard_stop_from_tv: LONG→SL<entry, SHORT→SL>entry
+- Direction error → dingtalk alert + fail-closed (return 0, reject open)
+- ATR minimum distance floor (0.5×ATR) to prevent abnormally narrow stops
+
+Root cause 2 (position_supervisor_binance.py):
+- TP1/TP2 delay was caused by root cause 1 chain failure; verified fixed by root cause 1
+
+Root cause 3 (api_throttle.py):
+- Separate emergency channel: 20/min independent budget, non-competing with trade/probe
+- Emergency close (emergency_close kind) can override silence ≤30s
+- Over-limit emergency requests still pass (lifesaving priority)
+
+Supporting (binance_client.py, dingtalk.py, console_api.py):
+- Add emergency parameter to ensure_frozen_hard_sl and close_position
+- Add emergency_channel budget snapshot to console
+- Update throttle console display

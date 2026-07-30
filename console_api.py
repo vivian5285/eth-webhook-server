@@ -92,13 +92,14 @@ def api_me():
 @console_bp.route("/api/console/overview", methods=["GET"])
 @require_login
 def api_overview():
-    from account_profiles import get_active_sizing, list_profiles
+    from account_profiles import get_active_sizing, list_profiles, get_all_symbol_settings
     from position_supervisor_binance import (
         SUPERVISORS,
         BINANCE_VPS_VERSION,
     )
     from binance_client import binance_client
     from webhook_parser import TV_STRATEGY_VERSION
+    from symbol_config import active_binance_symbols, BINANCE_SYMBOL_META
     import risk_manager
 
     risk, lev = get_active_sizing()
@@ -118,6 +119,25 @@ def api_overview():
             "hard_sl": float(getattr(sup, "frozen_hard_sl_px", 0) or 0),
             "current_sl": float(getattr(sup, "current_sl", 0) or 0),
         })
+
+    # per-symbol 仓位设置（随 overview 一起下发，前端直接用）
+    all_sym_settings = get_all_symbol_settings()
+    sym_settings = {}
+    for sym in active_binance_symbols():
+        meta = BINANCE_SYMBOL_META.get(sym, {})
+        entry = all_sym_settings.get(sym, {})
+        sym_settings[sym] = {
+            "symbol": sym,
+            "unit": meta.get("unit", sym),
+            "tag": meta.get("tag", sym),
+            "enabled": bool(entry.get("enabled", False)),
+            "mode": str(entry.get("mode", "risk")),
+            "risk_pct": float(entry.get("risk_pct", 0.20)),
+            "leverage": float(entry.get("leverage", 5)),
+            "principal_override": float(entry.get("principal_override") or 0) or None,
+            "fixed_amount": float(entry.get("fixed_amount") or 0) or None,
+        }
+
     equity = None
     try:
         equity = float(binance_client.get_total_equity() or 0)
@@ -145,11 +165,15 @@ def api_overview():
         "positions": positions,
         "risk": rm_status,
         "stats": _pnl_stats(),
+        "symbol_settings": sym_settings,
     })
 
 
 def _pnl_stats():
-    """从交易所 REALIZED_PNL 收入拉取近 30 天统计。"""
+    """从交易所 REALIZED_PNL 收入拉取近 30 天统计。
+    修复（v16.9.2）：走 binance_client.fetch_income_history（含节流阀/冷却门禁），
+    根治直接调 client.futures_income_history 绕过节流阀导致 -1003 的问题。
+    """
     from binance_client import binance_client
     wins = 0
     losses = 0
@@ -158,12 +182,11 @@ def _pnl_stats():
     try:
         end = int(time.time() * 1000)
         start = end - 30 * 24 * 3600 * 1000
-        hist = binance_client.client.futures_income_history(
-            incomeType="REALIZED_PNL",
-            startTime=start,
-            endTime=end,
+        hist = binance_client.fetch_income_history(
+            start_time_ms=start,
+            end_time_ms=end,
             limit=1000,
-        ) or []
+        )
         for h in hist:
             try:
                 pnl = float(h.get("income") or 0)
@@ -324,6 +347,62 @@ def api_webhook_secret():
         "webhook_secret_set": bool(get_webhook_secret()),
         "hint": "TradingView 警报里的 secret 字段请同步为新值",
     })
+
+
+# ── per-symbol 仓位设置 API ─────────────────────────────────────────────────
+
+@console_bp.route("/api/console/symbol_settings", methods=["GET"])
+@require_login
+def api_symbol_settings_list():
+    from account_profiles import get_all_symbol_settings
+    from symbol_config import active_binance_symbols, BINANCE_SYMBOL_META
+    all_settings = get_all_symbol_settings()
+    active = active_binance_symbols()
+    result = {}
+    for sym in active:
+        meta = BINANCE_SYMBOL_META.get(sym, {})
+        entry = all_settings.get(sym, {})
+        result[sym] = {
+            "symbol": sym,
+            "unit": meta.get("unit", sym),
+            "tag": meta.get("tag", sym),
+            "enabled": bool(entry.get("enabled", False)),
+            "mode": str(entry.get("mode", "risk")),
+            "risk_pct": float(entry.get("risk_pct", 0.20)),
+            "leverage": float(entry.get("leverage", 5)),
+            "principal_override": float(entry.get("principal_override") or 0) or None,
+            "fixed_amount": float(entry.get("fixed_amount") or 0) or None,
+        }
+    return jsonify({"status": "ok", "symbols": result})
+
+
+@console_bp.route("/api/console/symbol_settings/<symbol>", methods=["GET"])
+@require_login
+def api_symbol_settings_get(symbol):
+    from account_profiles import get_symbol_settings
+    sym = str(symbol or "").upper()
+    return jsonify({"status": "ok", **get_symbol_settings(sym)})
+
+
+@console_bp.route("/api/console/symbol_settings/<symbol>", methods=["PUT", "PATCH"])
+@require_login
+def api_symbol_settings_update(symbol):
+    from account_profiles import set_symbol_settings, get_symbol_settings
+    from symbol_config import active_binance_symbols
+    sym = str(symbol or "").upper()
+    if sym not in set(active_binance_symbols()):
+        return jsonify({"status": "error", "message": "unknown_symbol"}), 400
+    body = request.get_json(silent=True) or {}
+    updated = set_symbol_settings(
+        sym,
+        enabled=body.get("enabled"),
+        risk_pct=body.get("risk_pct"),
+        leverage=body.get("leverage"),
+        principal_override=body.get("principal_override"),
+        mode=body.get("mode"),
+        fixed_amount=body.get("fixed_amount"),
+    )
+    return jsonify({"status": "ok", "symbol": sym, **updated})
 
 
 @console_bp.route("/api/console/resume/<path:symbol>", methods=["POST"])

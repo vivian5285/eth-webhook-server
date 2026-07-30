@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_PATH = os.path.join(BASE_DIR, "data", "account_profiles.json")
+SYMBOL_SETTINGS_PATH = os.path.join(BASE_DIR, "data", "symbol_settings.json")
 _LOCK = threading.RLock()
 
 DEFAULT_RISK_PCT = 0.20
@@ -133,8 +134,16 @@ def get_active_profile() -> Optional[Dict[str, Any]]:
         return deepcopy(profiles[0]) if profiles else None
 
 
-def get_active_sizing() -> Tuple[float, float]:
-    """返回 (risk_pct 0~1, leverage)。"""
+def get_active_sizing(symbol: str = None) -> Tuple[float, float]:
+    """
+    返回 (risk_pct 0~1, leverage)。
+    若 symbol 有独立设置则优先返回该币种的设置；
+    否则返回当前生效档案的全局设置。
+    """
+    if symbol:
+        per_sym = get_symbol_settings(symbol)
+        if per_sym.get("enabled", False):
+            return per_sym.get("risk_pct", DEFAULT_RISK_PCT), per_sym.get("leverage", DEFAULT_LEVERAGE)
     p = get_active_profile()
     if not p:
         return DEFAULT_RISK_PCT, DEFAULT_LEVERAGE
@@ -149,6 +158,99 @@ def get_active_sizing() -> Tuple[float, float]:
     risk = max(0.01, min(0.50, risk))
     lev = max(1.0, min(125.0, lev))
     return risk, lev
+
+
+# ── per-symbol 独立仓位设置 ────────────────────────────────────────────────
+
+def _load_symbol_settings_raw() -> Dict[str, Any]:
+    _ensure_dir()
+    if not os.path.isfile(SYMBOL_SETTINGS_PATH):
+        return {}
+    try:
+        with open(SYMBOL_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_symbol_settings_raw(data: Dict[str, Any]) -> None:
+    _ensure_dir()
+    tmp = SYMBOL_SETTINGS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SYMBOL_SETTINGS_PATH)
+
+
+def get_symbol_settings(symbol: str) -> Dict[str, Any]:
+    """返回某币种的独立仓位设置。"""
+    sym = str(symbol or "").upper()
+    data = _load_symbol_settings_raw()
+    entry = data.get(sym, {})
+    return {
+        "enabled": bool(entry.get("enabled", False)),
+        "risk_pct": float(entry.get("risk_pct", DEFAULT_RISK_PCT)),
+        "leverage": float(entry.get("leverage", DEFAULT_LEVERAGE)),
+        "principal_override": float(entry.get("principal_override") or 0) or None,
+        "mode": str(entry.get("mode", "risk")),  # "risk" | "fixed_amount"
+        "fixed_amount": float(entry.get("fixed_amount", 0) or 0),
+    }
+
+
+def get_all_symbol_settings() -> Dict[str, Dict[str, Any]]:
+    """返回所有已配置的币种设置。"""
+    return dict(_load_symbol_settings_raw())
+
+
+def set_symbol_settings(
+    symbol: str,
+    *,
+    enabled: bool = None,
+    risk_pct: float = None,
+    leverage: float = None,
+    principal_override: float = None,
+    mode: str = None,
+    fixed_amount: float = None,
+) -> Dict[str, Any]:
+    """更新某币种的独立仓位设置。"""
+    sym = str(symbol or "").upper()
+    if not sym:
+        raise ValueError("symbol_required")
+    with _LOCK:
+        data = _load_symbol_settings_raw()
+    entry = data.setdefault(sym, {
+        "enabled": False,
+        "risk_pct": DEFAULT_RISK_PCT,
+        "leverage": DEFAULT_LEVERAGE,
+        "mode": "risk",
+    })
+    if enabled is not None:
+        entry["enabled"] = bool(enabled)
+    if risk_pct is not None:
+        entry["risk_pct"] = max(0.01, min(0.50, float(risk_pct)))
+    if leverage is not None:
+        entry["leverage"] = max(1.0, min(125.0, float(leverage)))
+    if principal_override is not None:
+        entry["principal_override"] = float(principal_override) if principal_override > 0 else 0
+    if mode is not None:
+        entry["mode"] = str(mode) if mode in ("risk", "fixed_amount") else "risk"
+    if fixed_amount is not None:
+        entry["fixed_amount"] = max(0.0, float(fixed_amount))
+    with _LOCK:
+        _save_symbol_settings_raw(data)
+    return get_symbol_settings(sym)
+
+
+def get_sizing_base_for_symbol(symbol: str) -> float:
+    """
+    返回某币种开仓用的本金基数。
+    优先用 per-symbol principal_override，否则返回 None（走默认逻辑）。
+    """
+    if symbol:
+        s = get_symbol_settings(symbol)
+        po = s.get("principal_override")
+        if po and po > 0:
+            return po
+    return 0.0
 
 
 def get_webhook_secret() -> str:

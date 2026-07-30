@@ -1497,14 +1497,14 @@ class BinanceClient:
                 return o
         return None
 
-    def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False):
+    def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False, emergency=False):
         qty = self.format_quantity(quantity, symbol)
         if qty <= 0:
             logger.error(f"[市价单跳过] 数量无效 {quantity}")
             return None
 
         def _do():
-            self._throttle_rest(symbol)
+            self._throttle_rest(symbol, kind="emergency_close" if emergency else "rest")
             binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "MARKET", "quantity": qty,
@@ -1752,7 +1752,7 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
-                                quantity=None, client_order_id=None):
+                                quantity=None, client_order_id=None, emergency=False):
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(stop_price or 0), 2)
         coid = str(client_order_id or "").strip()[:36] or None
@@ -1788,7 +1788,7 @@ class BinanceClient:
             return None
 
         def _do_stop():
-            self._throttle_rest(symbol)
+            self._throttle_rest(symbol, kind="emergency_close" if emergency else "rest")
             params = {
                 "symbol": symbol, "side": want_side, "type": "STOP_MARKET",
                 "stopPrice": self.format_price(stop_price, symbol),

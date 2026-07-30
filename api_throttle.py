@@ -10,10 +10,13 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class ThrottleRejected(Exception):
@@ -42,16 +45,27 @@ def _env_float(name: str, default: float) -> float:
 class AccountThrottle:
     """账号级请求预算 + 强制静默。
 
-    v16.10.x 修复（root-cause）：探针预算与交易预算彻底分离。
-    旧版本：单预算，探针耗尽24次后所有REST被挡（含开仓/平仓/挂单）。
-    新版本：探针独立60次/分钟窗口；交易300次/分钟窗口。
-    两者共用同一冷却逻辑，但预算闸独立检查。
+    v16.10.x 修复：探针预算与交易预算彻底分离。
+    v16.11.x 修复（根因三）：紧急平仓独立优先级通道。
+      - 紧急通道完全独立于常规预算窗口，互不干扰
+      - 紧急平仓可抢占静默窗口（但受 _emergency_silence_override_max 限制）
+      - 常规请求在 budget 耗尽时可以被紧急请求打断（不抢占，仅跳过检查）
+      - 紧急通道有自己独立的 _emergency_window（默认 20 次/分钟）
+
+    通道优先级（高→低）：emergency > trade > probe
     """
 
     def __init__(self, account_id: str = "binance"):
         self.account_id = str(account_id or "binance")
         self._lock = threading.RLock()
         self._window: List[float] = []
+        # ── 根因三修复（v16.11.x）：紧急平仓独立优先级通道 ──────────────
+        # 独立于常规 _window；紧急请求用此通道记录，不占用常规预算
+        self._emergency_window: List[float] = []
+        self._emergency_silence_until: float = 0.0
+        self.emergency_budget_per_min = _env_int("API_EMERGENCY_BUDGET_PER_MIN", 20)
+        # 紧急通道最大静默覆盖时长（秒）；超过此值则仍需等待静默期
+        self._emergency_silence_override_max = _env_float("API_EMERGENCY_SILENCE_OVERRIDE_MAX", 30.0)
         self._silence_until = 0.0
         # 探针独立预算：哨兵轮询仅耗此窗口，60次/分钟足够（ETH+XAU 各30次）
         self.probe_budget_per_min = _env_int("API_PROBE_BUDGET_PER_MIN", 60)
@@ -81,12 +95,17 @@ class AccountThrottle:
 
     def recent_count(self) -> int:
         with self._lock:
-            self._gc()
+            self._window = self._gc_window(self._window)
             return len(self._window)
 
-    def _gc(self) -> None:
+    def _gc_window(self, window: List[float]) -> List[float]:
+        """垃圾回收：移除窗口中超出 window_sec 的旧时间戳。"""
         cut = time.time() - float(self.window_sec)
-        self._window = [t for t in self._window if float(t) >= cut]
+        return [t for t in window if float(t) >= cut]
+
+    def _gc_emergency(self) -> None:
+        """垃圾回收紧急通道。"""
+        self._emergency_window = self._gc_window(self._emergency_window)
 
     def acquire(
         self,
@@ -96,18 +115,29 @@ class AccountThrottle:
         symbol: str = "",
     ) -> Tuple[bool, str]:
         """
-        请求放行检查。v16.10.x 双预算：
-        - rest_probe/rest_public：仅耗探针预算（默认60次/分钟）
-        - rest/rest_trade：耗交易预算（默认300次/分钟）
-        两者共享冷却静默期，但预算闸独立——探针无法饿死交易。
+        请求放行检查。
 
-        force: 仅紧急平仓等可绕过预算（仍不能绕过静默，除非 PIPELINE_THROTTLE_FORCE_BYPASS=1）
+        三通道优先级（高→低）：
+        - emergency_close：紧急平仓（止损被击穿强制离场等）
+          → 独立 20 次/分钟预算，可覆盖静默 30s，可打断常规请求检查
+        - rest/rest_trade：开仓/平仓/挂TP/撤单等交易操作（300 次/分钟）
+        - rest_probe/rest_public：探针轮询（60 次/分钟）
+
+        常规预算超限时，emergency 请求走独立通道放行。
+        force：紧急平仓等可绕过预算（仍不能绕过静默上限）。
         返回 (ok, detail)。ok=False 时调用方不得打交易所。
         """
+        is_emergency = kind in ("emergency_close",)
+        is_probe = kind in ("rest_probe", "rest_public")
         bypass = str(os.getenv("PIPELINE_THROTTLE_FORCE_BYPASS", "0")).strip() in (
             "1", "true", "TRUE",
         )
-        is_probe = kind in ("rest_probe", "rest_public")
+
+        # ── 根因三修复（v16.11.x）：紧急通道独立处理 ───────────────────
+        if is_emergency:
+            return self._acquire_emergency(bypass=bypass)
+
+        # ── 常规通道 ─────────────────────────────────────────────────
         budget = (
             self.probe_budget_per_min
             if is_probe
@@ -119,15 +149,15 @@ class AccountThrottle:
             rem = max(0.0, float(self._silence_until) - time.time())
             if rem > 0 and not (force and bypass):
                 return False, f"silence:{rem:.1f}s"
-            self._gc()
+            self._window = self._gc_window(self._window)
             n = len(self._window)
             # 探针超限：拒探针，不挡交易
             if is_probe and n >= budget:
                 return False, f"probe_budget:{n}/{budget}"
-            # 交易超限：拒交易
+            # 交易超限：拒交易（除非 force）
             if n >= budget and not force:
                 return False, f"budget:{n}/{budget}"
-            # 预算将满时拉长间隔（两类请求均受 min_gap 约束）
+            # 预算将满时拉长间隔
             wait = min(3.0, 0.4 + 0.12 * max(0, n - int(budget * 0.7))) if n >= int(budget * 0.7) else 0.0
             last = float(self._last_acquire_ts or 0)
             gap_need = max(0.0, float(self.min_gap_sec) - (time.time() - last))
@@ -139,7 +169,7 @@ class AccountThrottle:
             rem = max(0.0, float(self._silence_until) - time.time())
             if rem > 0 and not (force and bypass):
                 return False, f"silence:{rem:.1f}s"
-            self._gc()
+            self._window = self._gc_window(self._window)
             n2 = len(self._window)
             budget2 = max(4, int(
                 self.probe_budget_per_min if is_probe else self.trade_budget_per_min
@@ -151,21 +181,78 @@ class AccountThrottle:
             self._last_acquire_ts = now
             return True, f"ok:{len(self._window)}/{budget2}"
 
+    def _acquire_emergency(self, bypass: bool = False) -> Tuple[bool, str]:
+        """
+        紧急通道（v16.11.x 根因三修复）。
+
+        逻辑：
+        1. 独立紧急预算（默认 20 次/分钟）超限时 → 继续放行（允许超限，不挡救命请求）
+        2. 静默覆盖：若在静默期内，紧急请求可覆盖静默最多 _emergency_silence_override_max 秒
+           （默认 30s）；超过 30s 的静默期仍需等待
+        3. 两把 GC 在持有锁时完成，避免竞态
+        """
+        with self._lock:
+            # GC 紧急通道
+            self._emergency_window = self._gc_window(self._emergency_window)
+            self._window = self._gc_window(self._window)
+
+            # 检查紧急静默覆盖时长
+            rem_silence = max(0.0, float(self._emergency_silence_until) - time.time())
+            if rem_silence > 0:
+                # 还在紧急静默窗口内 → 检查紧急预算是否超限
+                if len(self._emergency_window) >= int(self.emergency_budget_per_min):
+                    # 超限 → 尝试覆盖（即使超限也放行，但记录日志）
+                    logger.warning(
+                        f"🚨 [emergency] 紧急通道超限({len(self._emergency_window)}/"
+                        f"{self.emergency_budget_per_min})仍放行（救命优先）"
+                    )
+                # 不超限或超限均放行
+                now = time.time()
+                self._emergency_window.append(now)
+                self._window.append(now)  # 也记入常规窗口（算入总请求量）
+                self._last_acquire_ts = now
+                return True, f"emergency_ok:{len(self._emergency_window)}/{self.emergency_budget_per_min}"
+
+            # 不在紧急静默期：检查常规静默
+            normal_rem = max(0.0, float(self._silence_until) - time.time())
+            if normal_rem > 0:
+                # 常规静默中：检查是否在紧急静默覆盖范围内
+                if normal_rem <= float(self._emergency_silence_override_max):
+                    # 在可覆盖范围内 → 放行 + 进入紧急静默
+                    now = time.time()
+                    self._emergency_window.append(now)
+                    self._window.append(now)
+                    self._emergency_silence_until = now + normal_rem
+                    self._last_acquire_ts = now
+                    return True, f"emergency_override_silence:{normal_rem:.1f}s"
+                else:
+                    # 静默期太长（>30s）→ 拒绝
+                    return False, f"silence_too_long:{normal_rem:.1f}s"
+            # 无静默 → 放行
+            now = time.time()
+            self._emergency_window.append(now)
+            self._window.append(now)
+            self._last_acquire_ts = now
+            return True, f"emergency_ok:{len(self._emergency_window)}/{self.emergency_budget_per_min}"
+
     def note_sent(self) -> None:
         """若调用方在 acquire 外发了请求，可补记（一般 acquire 已记）。"""
         with self._lock:
             self._window.append(time.time())
-            self._gc()
+            self._gc_window(self._window)
 
     def snapshot(self) -> Dict[str, float]:
         with self._lock:
-            self._gc()
+            self._window = self._gc_window(self._window)
             return {
                 "account": self.account_id,
                 "recent": float(len(self._window)),
                 "probe_budget": float(self.probe_budget_per_min),
                 "trade_budget": float(self.trade_budget_per_min),
+                "emergency_recent": float(len(self._emergency_window)),
+                "emergency_budget": float(self.emergency_budget_per_min),
                 "silence_rem": max(0.0, float(self._silence_until) - time.time()),
+                "emergency_silence_rem": max(0.0, float(self._emergency_silence_until) - time.time()),
             }
 
 

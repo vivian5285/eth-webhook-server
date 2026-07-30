@@ -210,6 +210,8 @@ G_DEEP = "#B8860B"
 G_LIGHT = "#FFE566"
 G_ACCENT = "#F0B90B"
 G_MUTED = "#C9A227"
+G_WARN = "#E74C3C"   # 警告红（重入尝试/放弃）
+G_SUCCESS = "#27AE60"  # 成功绿（重入成交）
 
 FOOTER = f"*🔶 {SYSTEM_NAME} · 币安黄金趋势大波段引擎*"
 VERIFY_TAG = "✅ 实盘核查通过"
@@ -1834,3 +1836,81 @@ def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
     send_alert(f"📡 [{sym}] 阶段切换：止损已进入阶段二", data, G_DEEP)
+
+
+# -------------------------------------------------------------------------- #
+#  重入通知（规格 v1.0 §11.1）
+# -------------------------------------------------------------------------- #
+def report_reentry_attempt(
+    side, qty, reentry_price, exit_price, exit_source,
+    regime=3, tier_label_str="?", attempt=0, max_attempts=1,
+    tv_price=0, entry_price=0, symbol=None, unit_label=None,
+):
+    """
+    重入尝试通知。触发时机：_place_reentry_limit 成功挂出限价单。
+    """
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    slip = abs(entry_price - tv_price) if tv_price > 0 else 0.0
+    data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
+        "事件": _g("🔄 重入尝试", G_WARN),
+        "方向": _g(f"**{side}**", G_DEEP),
+        "数量": _g(f"**{qty}** {unit}", G_MAIN),
+        "重入价": _g(f"**{float(reentry_price):.2f}**", G_DEEP),
+        "触发止损": _g(f"{exit_source} @ {float(exit_price):.2f}", G_MUTED),
+        "TV信号": _g(f"TV@{float(tv_price):.2f} 滑点={slip:.2f}", G_LIGHT),
+        "档位": _g(f"强趋势({tier_label_str})", G_MAIN),
+        "attempt": _g(f"{int(attempt)}/{int(max_attempts)}", G_MUTED),
+    }
+    send_alert(f"🔄 [{sym}] 重入尝试 {side} @ {float(reentry_price):.2f}", data, G_WARN)
+
+
+def report_reentry_fill(
+    side, qty, fill_price, tv_price,
+    entry_price=0, hard_sl=0, hard_sl_hung=False,
+    regime=3, attempt=0, symbol=None, unit_label=None,
+    tp1=0, tp2=0,
+):
+    """
+    重入成交通知。触发时机：WS 收到重入限价单成交回报。
+    """
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    slip = abs(entry_price - tv_price) if tv_price > 0 else 0.0
+    tp_note = f"TP1={float(tp1 or 0):.2f} TP2={float(tp2 or 0):.2f}" if tp1 > 0 else "TP=?"
+    level = "紧急" if not hard_sl_hung else "提示"
+    data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
+        "事件": _g("✅ 重入成交", G_SUCCESS),
+        "方向": _g(f"**{side}**", G_DEEP),
+        "数量": _g(f"**{qty}** {unit}", G_MAIN),
+        "成交价": _g(f"**{float(fill_price):.2f}** (TV@{float(tv_price):.2f} 滑点={slip:.2f})", G_DEEP),
+        "硬止损": _g(f"@{float(hard_sl):.2f} {'⚠️未挂' if not hard_sl_hung else '✅'}", G_MUTED),
+        "attempt": _g(f"{int(attempt)}", G_MUTED),
+        "TP": _g(tp_note, G_LIGHT),
+    }
+    send_alert(f"✅ [{sym}] 重入成交 {side} {qty}@{float(fill_price):.2f}", data, G_SUCCESS if hard_sl_hung else G_WARN)
+
+
+def report_reentry_abandon(
+    side, reason, attempt=0, max_attempts=1,
+    exit_source="", exit_price=0, entry_price=0,
+    symbol=None, tier_label_str="?", unit_label=None,
+):
+    """
+    重入放弃通知。触发时机：窗口期过期 / 价格不优 / 方向失效。
+    """
+    unit = _resolve_unit(unit_label, symbol)
+    sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
+    exit_note = f"({exit_source}@{float(exit_price):.2f})" if exit_source else ""
+    data = {
+        "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
+        "事件": _g("🚫 重入放弃", G_MUTED),
+        "方向": _g(f"**{side}**", G_DEEP),
+        "放弃原因": _g(str(reason), G_WARN),
+        "出局来源": _g(exit_note, G_LIGHT),
+        "档位": _g(f"强趋势({tier_label_str})", G_MAIN),
+        "attempt": _g(f"{int(attempt)}/{int(max_attempts)}（已达上限）", G_MUTED),
+    }
+    send_alert(f"🚫 [{sym}] 重入放弃 {side}: {reason}", data, G_MUTED)
