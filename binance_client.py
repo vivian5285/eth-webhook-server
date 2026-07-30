@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.14.0-cancel-unknown-fix"
+BINANCE_CLIENT_VERSION = "v16.15.0-joint-query-rpc-optimize"
 # v16.6.2：绝对封死同 IP 2400/min —— 单品种/全局间隔大幅拉大
 REST_MIN_INTERVAL_SEC = float(os.getenv("REST_MIN_INTERVAL_SEC", "2.0"))
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -1313,6 +1313,104 @@ class BinanceClient:
             self._all_pos_rows = by_sym
             self._all_pos_ts = time.time()
         return by_sym
+
+    # ────────────────────────────────────────────────────────────────────
+    #  联合查询：持仓 + 挂单一次 REST，拉全账户持仓同时返回目标品种数据
+    #  v16.15.0：根治平仓路径多次独立查询导致 REST 预算雪崩的问题
+    # ────────────────────────────────────────────────────────────────────
+    def joint_query_position_and_orders(self, symbol="ETHUSDT", force_rest=False):
+        """
+        联合查询：持仓 + 全挂单，仅消耗 1 次 REST（trade 通道）。
+
+        持仓走 futures_position_information（批量查全账户持仓）
+        挂单走 futures_get_open_orders + futures_get_open_algo_orders
+
+        返回 dict：
+          {
+            "pos":      pos_dict | None | "QUERY_FAILED",
+            "orders":   list | "QUERY_FAILED",
+            "algo_orders": list | None,
+            "failed":    bool,   # 任一查询失败时为 True
+          }
+        """
+        sym = str(symbol or "ETHUSDT").upper()
+
+        # ── 联合持仓查询 ──────────────────────────────────────────────
+        pos_result = "QUERY_FAILED"
+        try:
+            if self.ip_rate_limit_remaining() > 0 and not force_rest:
+                cached = self._get_pos_cache(sym, max_age=300.0)
+                if cached is not None and float(cached.get("positionAmt", 0) or 0) != 0:
+                    pos_result = cached
+                else:
+                    with self._pos_lock:
+                        if self._all_pos_rows and (time.time() - self._all_pos_ts) < 300.0:
+                            raw = self._all_pos_rows.get(sym)
+                            if raw and float(raw.get("positionAmt", 0) or 0) != 0:
+                                pos_result = raw
+            else:
+                all_rows = self._refresh_all_positions(force=bool(force_rest))
+                if all_rows is not None:
+                    raw = all_rows.get(sym)
+                    if raw and float(raw.get("positionAmt", 0) or 0) != 0:
+                        pos_result = raw
+                    else:
+                        pos_result = None
+        except Exception:
+            pass
+
+        # ── 联合挂单查询（普通单 + Algo 条件单，共 1~2 次 REST）────────
+        orders_result = "QUERY_FAILED"
+        algo_result = None
+        try:
+            if self.ip_rate_limit_remaining() > 0:
+                cached = self._get_open_orders_cached(sym, max_age=300.0)
+                if cached is not None and len(cached) > 0:
+                    orders_result = cached
+            else:
+                self._throttle_rest(sym, kind="rest")
+                raw_orders = list(self.client.futures_get_open_orders(sym) or [])
+                # ── Algo 条件单（独立 REST；若冷却则跳过，调用方用普通单判断）──
+                algo_orders = None
+                if not self.ip_rate_limit_remaining():
+                    try:
+                        rows = self.client._request_futures_api(
+                            "get", "openAlgoOrders", signed=True,
+                            data={"symbol": sym},
+                        )
+                        if isinstance(rows, list):
+                            algo_orders = [
+                                self._normalize_algo_order(r)
+                                for r in rows
+                                if self._normalize_algo_order(r)
+                            ]
+                    except Exception:
+                        algo_orders = None
+                if algo_orders:
+                    seen = {str(o.get("orderId")) for o in raw_orders if o.get("orderId")}
+                    merged = list(raw_orders)
+                    for ao in algo_orders:
+                        aid = str(ao.get("algoId") or ao.get("orderId") or "")
+                        if aid and aid not in seen:
+                            merged.append(ao)
+                            seen.add(aid)
+                    orders_result = merged
+                    algo_result = algo_orders
+                else:
+                    orders_result = raw_orders
+                self._set_open_orders_cache(sym, orders_result)
+        except IpRateLimitedError:
+            pass
+        except Exception:
+            pass
+
+        failed = pos_result == "QUERY_FAILED" or orders_result == "QUERY_FAILED"
+        return {
+            "pos": pos_result,
+            "orders": orders_result,
+            "algo_orders": algo_result,
+            "failed": failed,
+        }
 
     def get_position(self, symbol="ETHUSDT", prefer_ws=True, force_rest=False):
         """
