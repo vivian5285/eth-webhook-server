@@ -1,8 +1,9 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.9.1-tv-ready`**  
-**TV 策略 schema：`v6.5.6`**  
-**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）  
+**当前版本：`v16.15.0-joint-query-rpc-optimize`**
+**TV 策略 schema：`v6.5.6`**
+**Webhook地址：`http://187.77.130.144/binance/webhook`**
+**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
 **TP 分腿：10% / 20% / 70%**（盘口限价 **恰好 2** 笔 LIMIT=TP1+TP2；余仓无上限）  
 **硬止损：`|TV.price−TV.stop_loss|×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
@@ -53,8 +54,9 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.9.1-tv-ready · pipeline: {ETHUSDT, XAUUSDT} · trading_paused: false
+# version: v16.15.0-joint-query-rpc-optimize · pipeline: {ETHUSDT, XAUUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
+# TV Webhook: http://187.77.130.144/binance/webhook
 
 python3 -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py
 python3 test_defense_v1590.py
