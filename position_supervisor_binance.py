@@ -178,10 +178,11 @@ BINANCE_VPS_VERSION = "v16.15.0-joint-query-rpc-optimize"
 LATE_CLOSE_SUPPRESS_SEC = 15.0
 
 # REST 降速（v16.6.2：绝对封死同 IP 2400/min）
-SENTINEL_POLL_NORMAL = 45.0
-SENTINEL_POLL_ARMING = 30.0
-SENTINEL_POLL_RADAR = 25.0
-SENTINEL_POLL_JITTER_SEC = 5.0
+# v16.16: 间隔加大防哨兵轮询耗尽预算 (原: 45/30/25)
+SENTINEL_POLL_NORMAL = 60.0
+SENTINEL_POLL_ARMING = 45.0
+SENTINEL_POLL_RADAR = 35.0
+SENTINEL_POLL_JITTER_SEC = 8.0
 IDLE_PATROL_INTERVAL_SEC = 300
 IDLE_PATROL_BACKOFF_SEC = 900
 IDLE_TAKEOVER_COOLDOWN_SEC = 60
@@ -656,57 +657,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         ).start()
 
     def _pause_symbol_trading(self, reason, *, title=None, detail=None, ding=True):
-        """规格：异常/竞态/限流 → 暂停该品种，等待人工。"""
+        """内测模式：仅记录日志/告警，永不实际暂停交易。"""
         reason_s = str(reason or "paused")[:240]
-        already = bool(getattr(self, "trading_paused", False))
-        prev = str(getattr(self, "trading_pause_reason", "") or "")
-        # 限流期间每次 REST 失败都会回调钩子：已暂停则禁重复钉钉/TG 轰炸
-        same_family = (
-            already
-            and (
-                (prev.startswith("api_rate_limit") and reason_s.startswith("api_rate_limit"))
-                or prev == reason_s
-            )
+        logger.warning(
+            f"[内测-仅告警] [{self.symbol}] 触发暂停条件 | {reason_s} | title={title} | detail={detail}"
         )
-        self.trading_paused = True
-        self.trading_pause_reason = reason_s
-        try:
-            self._save_state()
-        except Exception:
-            pass
-        if not same_family:
-            ops_log.alert(
-                f"[{self.symbol}] trading_paused reason={self.trading_pause_reason}"
-            )
-            logger.error(
-                f"🛑 [{self.symbol}] trading_paused | {self.trading_pause_reason}"
-            )
-        else:
-            logger.warning(
-                f"🛑 [{self.symbol}] trading_paused(已暂停·抑制告警) | "
-                f"{self.trading_pause_reason}"
-            )
-        if ding and not same_family:
+        if ding:
             try:
                 self._call_dingtalk(
                     dingtalk.report_system_alert,
-                    title=title or f"品种交易已暂停 [{self.symbol}]",
+                    title=title or f"[内测] 暂停触发 [{self.symbol}]",
                     detail=detail or str(reason or ""),
-                    level="紧急",
-                    suggestion="人工核对持仓与挂单后手动恢复 trading_paused",
-                )
-            except Exception:
-                pass
-        # 限流：强制本品种 REST 退避，打断哨兵补挂雪崩
-        if reason_s.startswith("api_rate_limit"):
-            try:
-                self._mark_idle_patrol_backoff("api_rate_limit")
-            except Exception:
-                pass
-            try:
-                self._last_nuclear_realign_ts = time.time()
-                self._nuclear_fail_streak = max(
-                    int(getattr(self, "_nuclear_fail_streak", 0) or 0), 8
+                    level="警告",
+                    suggestion="内测模式：交易继续，不暂停",
                 )
             except Exception:
                 pass
@@ -3577,7 +3540,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # ── 阶段 3：平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价）──
         purge = self._purge_all_defense_orders_on_flat(
             f"{tag}·平后净挂单", max_rounds=8,
-            init_orders=orders_now,
+            joint_snapshot=orders_now,
         )
         # ── 阶段 4：扫孤儿反向（残留 TP 在空仓成交）───────────────────────
         self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
@@ -3647,7 +3610,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         self._purge_all_defense_orders_on_flat(
             f"{tag}·补清残余挂单", max_rounds=4,
-            init_orders=orders_final,
+            joint_snapshot=orders_final,
         )
         # 再次联合终检（仅 1~2 次 REST）
         snapshot2 = binance_client.joint_query_position_and_orders(self.symbol)
@@ -3858,16 +3821,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"({attempt}/{n}) | {last_detail}"
             )
             time.sleep(wait)
-        # 3 次仍失败：放弃开仓 + 暂停自动开仓（平仓结果不明时严禁继续开新仓）
-        self.trading_paused = True
-        self.trading_pause_reason = f"CLOSE_THEN_OPEN_FAIL_ABORT|{tag}"
-        try:
-            self._save_state()
-        except Exception:
-            pass
-        logger.error(
-            f"🚨 [{self.symbol}] CLOSE_THEN_OPEN_FAIL_ABORT | {tag} | "
-            f"重试{n}次仍未净场 → 已暂停自动开仓 | {last_detail}"
+        # 3 次仍失败：内测模式仅记录，不暂停交易
+        logger.warning(
+            f"[内测-仅告警] [{self.symbol}] CLOSE_THEN_OPEN_FAIL_ABORT | {tag} | "
+            f"重试{n}次仍未净场 | 交易继续 | {last_detail}"
         )
         try:
             self._call_dingtalk(
@@ -3878,28 +3835,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 detail=last_detail or "qty/挂单未净，平仓结果不明",
             )
         except Exception:
-            try:
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"清仓失败·需人工介入 [{self.symbol}]",
-                    detail=(
-                        f"CLOSE_THEN_OPEN_FAIL_ABORT | {tag} | 重试{n}次"
-                        f"(间隔 1s/3s/6s) 仍失败 | {last_detail}\n"
-                        f"本笔开仓已放弃，该品种自动开仓已暂停"
-                    ),
-                    level="紧急",
-                    suggestion=(
-                        "1) 币安 APP 核对真实持仓与挂单并手动清净；"
-                        "2) POST /admin/resume/" + str(self.symbol) + " 恢复自动开仓"
-                    ),
-                    immediate=True,
-                )
-            except Exception:
-                pass
+            pass
         return False
 
     def _snapshot_sizing_principal(self, reason="", notify=True):
         """全平/开仓前：锁定账户总权益（marginBalance），供本周期开仓与 13x 硬顶共用"""
+        # 模拟模式：SIM_BALANCE 环境变量优先（手动测试用）
+        sim_balance = os.environ.get("SIM_BALANCE", "")
+        if sim_balance:
+            try:
+                principal = float(sim_balance)
+                self.sizing_principal = principal
+                self._save_state()
+                logger.info(f"📸 [SIM] 本金快照 {principal:.2f} USDT ({reason})")
+                return principal
+            except (ValueError, TypeError):
+                pass
         principal = binance_client.get_total_equity()
         if principal > 0:
             self.sizing_principal = principal
@@ -4222,48 +4173,38 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 except Exception:
                     pass
 
-        # ATR 最小距离兜底（方向正确但距离过窄时）
-        if not direction_error and fill > 0 and tv_sl > 0:
-            atr = float(
-                getattr(self, "open_atr", 0)
-                or getattr(self, "cycle_open_atr", 0)
-                or getattr(self, "current_atr", 0)
-                or 0
+        # ATR 必须来自 TV webhook（规格 3.6）；VPS 禁止自行拉取
+        atr = float(
+            getattr(self, "open_atr", 0)
+            or getattr(self, "cycle_open_atr", 0)
+            or getattr(self, "current_atr", 0)
+            or 0
+        )
+        min_atr_floor = 0.5  # 最小 0.5×ATR（兜底用固定值）
+        actual_dist = abs(tv_entry - tv_sl)
+        min_dist_required = min_atr_floor * atr if atr > 0 else 0.0
+
+        if actual_dist < min_dist_required and atr > 0:
+            min_dist_enforced = True
+            logger.warning(
+                f"⚠️ [{self.symbol}] 硬止损距离过窄 "
+                f"(TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}) "
+                f"| ATR={atr:.2f} | 已将距离扩大至 {min_dist_required:.2f}，钉钉告警"
             )
-            if atr <= 0:
-                try:
-                    from webhook_parser import fetch_symbol_atr_14_public, atr_fallback_for_symbol
-                    atr = fetch_symbol_atr_14_public(self.symbol)
-                    if atr <= 0:
-                        atr = atr_fallback_for_symbol(self.symbol)
-                except Exception:
-                    atr = atr_fallback_for_symbol(self.symbol)
-
-            min_atr_floor = 0.5  # 最小 0.5×ATR
-            actual_dist = abs(tv_entry - tv_sl)
-            min_dist_required = min_atr_floor * atr
-
-            if actual_dist < min_dist_required and atr > 0:
-                min_dist_enforced = True
-                logger.warning(
-                    f"⚠️ [{self.symbol}] 硬止损距离过窄 "
-                    f"(TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}) "
-                    f"| ATR={atr:.2f} | 已将距离扩大至 {min_dist_required:.2f}，钉钉告警"
+            try:
+                import dingtalk
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"⚠️硬止损距离异常 [{self.symbol}]",
+                    detail=(
+                        f"硬止损距离过窄：TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}\n"
+                        f"ATR={atr:.2f} | fill={fill:.2f} | tv_sl={tv_sl:.2f}\n"
+                        f"系统已将距离扩大至 {min_dist_required:.2f}；请确认 TV stop_loss 配置合理"
+                    ),
+                    level="警告",
                 )
-                try:
-                    import dingtalk
-                    self._call_dingtalk(
-                        dingtalk.report_system_alert,
-                        title=f"⚠️硬止损距离异常 [{self.symbol}]",
-                        detail=(
-                            f"硬止损距离过窄：TV距={actual_dist:.2f} < {min_atr_floor}×ATR={min_dist_required:.2f}\n"
-                            f"ATR={atr:.2f} | fill={fill:.2f} | tv_sl={tv_sl:.2f}\n"
-                            f"系统已将距离扩大至 {min_dist_required:.2f}；请确认 TV stop_loss 配置合理"
-                        ),
-                        level="警告",
-                    )
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         # 方向错误 → 立即返回 0.0（fail-closed）。
         # 上层 _lock_frozen_hard_sl_from_tv 会拿到 0 → 拒绝开仓。
@@ -4278,16 +4219,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 or getattr(self, "cycle_open_atr", 0)
                 or 0
             )
-            if atr <= 0:
-                try:
-                    from webhook_parser import fetch_symbol_atr_14_public, atr_fallback_for_symbol
-                    atr = fetch_symbol_atr_14_public(self.symbol)
-                    if atr <= 0:
-                        atr = atr_fallback_for_symbol(self.symbol)
-                except Exception:
-                    atr = atr_fallback_for_symbol(self.symbol)
-
-            min_dist = max(0.5 * atr, 2.0)
+            min_dist = max(0.5 * atr if atr > 0 else 0.0, 2.0)
             # 保留 TV 方向（方向已校验正确），只放大距离
             # recompute: 使用 |fill - tv_sl| 方向，但距离不小于 min_dist
             raw_dist = abs(fill - tv_sl)
@@ -17047,33 +16979,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 and float(pos.get("size") or 0) > 0
                 and (not had_state_file or breath_incomplete or old_schema)
             ):
-                self.trading_paused = True
-                if old_schema:
-                    self.trading_pause_reason = "restart_old_schema_no_auto_migrate"
-                elif not had_state_file:
-                    self.trading_pause_reason = "restart_no_persistence_with_position"
-                else:
-                    self.trading_pause_reason = "restart_breath_state_incomplete"
-                self._save_state()
-                logger.error(
-                    f"⛔ [{self.symbol}] 持久化缺失/旧schema/呼吸态不全但实盘有仓 → 暂停交易 "
-                    f"(old_schema={old_schema} incomplete={breath_incomplete})"
+                logger.warning(
+                    f"[内测-仅告警] [{self.symbol}] 持久化/呼吸态不完整但实盘有仓 "
+                    f"(old_schema={old_schema} incomplete={breath_incomplete}) | 交易继续"
                 )
                 try:
                     dingtalk.report_system_alert(
-                        f"重启无有效呼吸态·已暂停 [{self.symbol}]",
+                        f"[内测] 重启状态不完整 [{self.symbol}]",
                         (
                             f"had_state={had_state_file} old_schema={old_schema} "
                             f"initial_stop={float(getattr(self, 'initial_stop', 0) or 0):.2f} "
                             f"open_atr={float(getattr(self, 'open_atr', 0) or 0):.2f} | "
-                            f"实盘 {pos.get('side')} {pos.get('size')} → 暂停自动交易；"
-                            f"旧schema禁止自动转换；人工核对后解除 trading_paused"
+                            f"实盘 {pos.get('side')} {pos.get('size')} | 内测模式：交易不暂停"
                         ),
-                        level="紧急",
-                        suggestion="确认状态文件含 initial_stop/open_atr/breakeven_phase 后恢复；FORCE_ALIGN仅用于方向不一致",
+                        level="警告",
                     )
                 except Exception as e:
-                    logger.warning(f"无持久化暂停钉钉失败: {e}")
+                    logger.warning(f"内测-钉钉告警失败: {e}")
                 # 旧 schema：禁止用 tv_sl/行情自动灌入伪装成新态
                 if old_schema:
                     self.monitoring = True

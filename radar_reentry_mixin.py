@@ -508,10 +508,9 @@ class RadarReentryMixin:
         self.reentry_sterile_fail_count = int(
             getattr(self, "reentry_sterile_fail_count", 0) or 0
         ) + 1
-        try:
-            self.trading_paused = True
-        except Exception:
-            pass
+        logger.warning(
+            f"[内测-仅告警] [{self.symbol}] {reason} 失败超限({max_n}轮) → 内测模式不暂停 | {last_detail}"
+        )
         try:
             import dingtalk
             self._call_dingtalk(
@@ -528,9 +527,6 @@ class RadarReentryMixin:
             )
         except Exception:
             pass
-        logger.error(
-            f"🚨 [{self.symbol}] {reason} 失败超限 → 暂停交易 | {last_detail}"
-        )
         return False
 
     def _maybe_start_smart_limit_reentry(self, snap: Dict[str, Any], meta: Dict[str, Any]):

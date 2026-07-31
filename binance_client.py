@@ -1956,6 +1956,7 @@ class BinanceClient:
             }
             if reduce_only:
                 params["reduceOnly"] = True
+            self._throttle_rest(symbol, kind="rest")
             order = self.client.futures_create_order(**params)
             logger.info(f"[限价止损成功] {side} {qty} stop@{stop_str} limit@{px_str}")
             return order
@@ -2058,24 +2059,21 @@ class BinanceClient:
 
             side = "SELL" if pos_amt > 0 else "BUY"
             qty = abs(pos_amt)
-            try:
-                order = self.client.futures_create_order(
-                    symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
-                )
-                logger.info(f"[市价平仓成功] {symbol}")
-                return order
-            except Exception as first_err:
-                # 【修复】reduceOnly 被拒绝时降级为普通市价单
-                logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败，降级为普通市价单: {first_err}")
-                try:
-                    order = self.client.futures_create_order(
-                        symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=False
-                    )
-                    logger.info(f"[市价平仓成功-降级] {symbol}")
-                    return order
-                except Exception as second_err:
-                    logger.error(f"[市价平仓失败-降级也失败] {symbol}: {second_err}")
-                    return None
+            self._throttle_rest(symbol, kind="rest")
+            order = self.client.futures_create_order(
+                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
+            )
+            logger.info(f"[市价平仓成功] {symbol}")
+            return order
+        except Exception as first_err:
+            # 【修复】reduceOnly 被拒绝时降级为普通市价单
+            logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败，降级为普通市价单: {first_err}")
+            self._throttle_rest(symbol, kind="rest")
+            order = self.client.futures_create_order(
+                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=False
+            )
+            logger.info(f"[市价平仓成功-降级] {symbol}")
+            return order
         except Exception as e:
             logger.error(f"[市价平仓失败] {symbol}: {e}")
             return None

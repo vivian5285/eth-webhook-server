@@ -68,6 +68,12 @@ class OrderExecutor:
 
                 # 【终极修复】强制开启 reduce_only=True，单向持仓绝对不会被双开！
                 order = self.client.place_market_order(side=action_side, quantity=close_qty, reduce_only=True)
+                # 【修复】reduceOnly 被拒绝时降级为普通市价单
+                if not order:
+                    logger.warning(
+                        f"⚠️ [OrderExecutor] 部分平仓 reduceOnly 失败，降级为普通市价单"
+                    )
+                    order = self.client.place_market_order(side=action_side, quantity=close_qty, reduce_only=False)
                 if order:
                     time.sleep(1.5)
                     real_pnl = self.client.get_recent_realized_pnl(minutes=5)
