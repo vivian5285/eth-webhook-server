@@ -343,6 +343,10 @@ def activation_mode_for_attempt(attempt: int = 0) -> str:
     return ACTIVATION_MODE_FIRST
 
 
+# ── v4.0 写反：弱85%/强70% — 与当前 ADX 档偏差大则迁移
+_INVERTED_LEGACY_RATIOS = {0.85, 0.70}
+
+
 def is_legacy_activation_frac(frac: Optional[float]) -> bool:
     """旧中点/TP2 模式标记 0.0/1.0，或越界值 → 需按 ADX 重算。
     合法区间放宽到 0.65~0.95，兼容旧连续插值冻结的 0.70~0.90。
