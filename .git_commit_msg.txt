@@ -1,21 +1,7 @@
-v16.13.0: spec v1.0 full align + old code cleanup
+v16.0: 取消钉钉通知，仅保留 TG
 
-Core spec alignment:
-- spec 9.1: defense order tags include direction+random to prevent LONG/SHORT same-price collision
-- spec 9.1: reentry order tags add random to prevent timestamp collision
-- spec 4: reentry_attempt counter resets to 0 on CLOSE_QUICK/RSI exit
-- spec 5.0: early breakeven checkpoint confirmed integrated via sentinel loop (maintain_hard_shield)
-- spec 3.3/3.4: hard stop breath coeff confirmed unified 1.15 (defense_profiles.buffer_multiplier)
-- spec 5.1: radar activation absolute price anchor (TP1+TP2)/2 and TP2 correctly implemented
-- spec 5.2/5.3: ETH/XAU radar trail step and breath space by tier correctly implemented
-- spec 8.1: reentry conditions TP1 not filled + strong tier correctly implemented
-- spec 6.1: VPS does not independently fetch ATR, TV atr field is sole source
-
-Old code cleanup:
-- reentry_profiles.py: docstring updated to v1.0 spec; radar_activation_ratio_from_adx() marked obsolete
-- breath_profiles.py: docstring updated
-- breath_stop.py: docstring updated
-- obsolete constants (_DEFAULT_RADAR_ACT_RATIO_*, _ACT_RATIO_WEAK/MID/STRONG, _INVERTED_LEGACY_RATIOS) marked as obsolete
-
-Pipeline enhancement:
-- pipeline_bridge.py: PIPELINE_STALL notification deduplication, same phase alerts only once
+- 删除错误的 deepcoin_dingtalk_patch.py（币安单系统不需要）
+- dingtalk.py: 添加 DINGTALK_DISABLE=True，禁用钉钉通道
+- dingtalk.py: send_alert() 中钉钉路径直接 return
+- deploy_binance.sh: 添加 DINGTALK_DISABLE 版本检查
+- deploy_binance.sh: 版本更新至 v16.0-dingtalk-disabled

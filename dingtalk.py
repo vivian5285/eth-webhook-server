@@ -67,6 +67,8 @@ DINGTALK_BATCH_DISABLE = str(os.getenv("DINGTALK_BATCH_DISABLE", "")).strip().lo
 DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
 # 系统告警 / 异常减仓类更长去重
 DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
+# 禁用钉钉：已取消钉钉，所有通知仅通过 TG 发送
+DINGTALK_DISABLE = True  # 钉钉已停用，所有通知走 TG
 _title_dedup_lock = threading.Lock()
 _title_dedup_ts = {}  # key -> last_send_ts
 _notify_cfg_lock = threading.Lock()
@@ -90,7 +92,7 @@ def reload_notify_config():
     global TELEGRAM_RETRY_MAX, TELEGRAM_RETRY_SEC
     global DINGTALK_BATCH_MAX, DINGTALK_BATCH_FLUSH_SEC, DINGTALK_BATCH_DISABLE
     global DINGTALK_TITLE_DEDUP_SEC, DINGTALK_ALERT_DEDUP_SEC
-    global SYSTEM_NAME, FOOTER
+    global DINGTALK_DISABLE, SYSTEM_NAME, FOOTER
     with _notify_cfg_lock:
         load_dotenv(_ENV_PATH, override=True)
         DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
@@ -108,6 +110,8 @@ def reload_notify_config():
         ).strip().lower() in ("1", "true", "yes", "on")
         DINGTALK_TITLE_DEDUP_SEC = float(os.getenv("DINGTALK_TITLE_DEDUP_SEC", "300"))
         DINGTALK_ALERT_DEDUP_SEC = float(os.getenv("DINGTALK_ALERT_DEDUP_SEC", "600"))
+        # 钉钉已禁用（2026-07-31 取消钉钉，所有通知仅走 TG）
+        DINGTALK_DISABLE = True
         SYSTEM_NAME = os.getenv("NOTIFY_SYSTEM_NAME", "币安单系统").strip() or "币安单系统"
         FOOTER = f"*🔶 {SYSTEM_NAME} · 币安黄金趋势大波段引擎*"
     status = notify_config_status()
@@ -705,11 +709,15 @@ def send_alert(title, data_dict, header_color=G_TITLE, immediate=False,
             return
         _title_dedup_ts[dedup_key] = now
 
-    # TG：全量（L1/L2），异步发送，失败不影响主流程与钉钉
+    # TG：全量（L1/L2），异步发送，失败不影响主流程
     if has_tg:
         _fire_telegram_async(tg_body)
     else:
         logger.warning("notify tg not configured; drop TG for: %s", raw_title[:72])
+
+    # 钉钉已禁用（2026-07-31 取消钉钉，所有通知仅走 TG）
+    if DINGTALK_DISABLE:
+        return
 
     # 钉钉：仅重要告警
     if lvl < NOTIFY_LEVEL_CRITICAL:

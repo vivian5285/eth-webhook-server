@@ -17,7 +17,7 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v15.0.1-tv-direction-force-flat"
+DEPLOY_SCRIPT_VERSION="v16.0-dingtalk-disabled"
 # 接受 v13.4.6+ 以及 v14/v15+（含 risk20-ladder / tv-direction 等后缀）
 MIN_SUPERVISOR_VERSION_RE='v(13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)|1[4-9]\.|[2-9][0-9]+\.)'
 
@@ -194,6 +194,13 @@ install_deps() {
         log_ok "dingtalk.py 金色主题已就绪"
     else
         log_warn "dingtalk.py 可能不是最新版"
+    fi
+
+    # 检查钉钉禁用配置（2026-07-31 取消钉钉，仅保留 TG）
+    if grep -q "DINGTALK_DISABLE.*=.*True" "$DIR/dingtalk.py" 2>/dev/null; then
+        log_ok "dingtalk.py 钉钉已禁用（仅 TG 通知）"
+    else
+        log_warn "dingtalk.py 钉钉未禁用，建议确认 DINGTALK_DISABLE=True"
     fi
 
     if grep -qE 'BINANCE_CLIENT_VERSION|v13\.(4[0-9]|[5-9][0-9]?)\.|Binance Client v13' "$DIR/binance_client.py" 2>/dev/null; then
