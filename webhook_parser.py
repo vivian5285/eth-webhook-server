@@ -606,34 +606,6 @@ def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principa
     )
 
 
-# ── 递进雷达启动价（v15.8.0；已废弃，热路径不再使用）─────────────────────
-# 规格 v1.0：雷达激活价 = 绝对价格锚定，首仓=(TP1+TP2)/2，重入=TP2。
-# 本函数已废弃，仅保留防旧调用崩溃。
-def radar_activation_price(side, entry, tp1, frac=None, tv_price=None):  # noqa: D103
-    """【已废弃】雷达激活价。热路径统一用 radar_gate_price_from_tps() 绝对价格锚定。"""
-    side_u = str(side or "").strip().upper()
-    entry_f = float(entry or 0)
-    if entry_f <= 0 or side_u not in ("LONG", "SHORT"):
-        return 0.0
-    f = float(frac if frac is not None else RADAR_ACTIVATE_TP1_FRAC)
-    if f <= 0:
-        return 0.0
-    tp1_f = float(tp1 or 0)
-    if tp1_f <= 0:
-        return 0.0
-    tv_f = float(tv_price) if tv_price is not None and float(tv_price) > 0 else entry_f
-    # tp1 当作价格；若给的是距离（远小于 entry 的小数）则当距离
-    if tp1_f < tv_f * 0.2:
-        dist = abs(tp1_f)
-    else:
-        dist = abs(tp1_f - tv_f)
-    if dist <= 0:
-        return 0.0
-    if side_u == "LONG":
-        return round(entry_f + dist * f, 2)
-    return round(entry_f - dist * f, 2)
-
-
 def compute_ladder_radar_sl(*_args, **_kwargs):
     """
     【已物理删除】旧阶梯雷达 0.85/0.5/0.3/2.0×ATR。

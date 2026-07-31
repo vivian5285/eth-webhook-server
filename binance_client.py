@@ -2093,33 +2093,6 @@ class BinanceClient:
             logger.warning(f"[K线] {symbol}: {e}")
             return []
 
-    def fetch_atr_14(self, symbol="ETHUSDT", interval="30m", period=14):
-        """
-        兼容旧调用 → 走行情引擎（30m 合成 90m + Wilder ATR）。
-        interval 参数忽略（固定 90m 合成）。
-        """
-        try:
-            from market_engine import get_market_engine
-            eng = get_market_engine(
-                symbol,
-                fetch_klines=lambda s, iv, lim: self.fetch_klines(s, iv, lim),
-            )
-            atr, _adx = eng.refresh(force=False)
-            if atr > 0:
-                return atr
-        except Exception as e:
-            logger.warning(f"[ATR] {symbol} 行情引擎失败: {e}")
-        return 0.0
-
-    def fetch_atr_adx(self, symbol="ETHUSDT", force=False):
-        """返回 (atr, adx)，VPS 自主计算。"""
-        from market_engine import get_market_engine
-        eng = get_market_engine(
-            symbol,
-            fetch_klines=lambda s, iv, lim: self.fetch_klines(s, iv, lim),
-        )
-        return eng.refresh(force=bool(force))
-
 
 # 单测可设 BINANCE_SKIP_BOOTSTRAP=1，避免本机构造 Client 卡在网络 ping
 if str(os.getenv("BINANCE_SKIP_BOOTSTRAP", "")).strip() in ("1", "true", "TRUE"):

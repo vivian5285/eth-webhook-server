@@ -76,11 +76,6 @@ class PositionManager:
         """是否有挂单"""
         return len(self.get_open_orders(symbol)) > 0
 
-    def has_tp3_limit_order(self, symbol: str = "ETHUSDT") -> bool:
-        """是否有 TP3 限价单（简单判断是否有挂单，后续可按价格/类型细化）"""
-        orders = self.get_open_orders(symbol)
-        return len(orders) > 0
-
     # ==================== 综合状态 ====================
 
     def get_position_status(self, symbol: str = "ETHUSDT") -> Dict[str, Any]:

@@ -93,7 +93,6 @@ from webhook_parser import (
     get_radar_activation_ratio,
     get_radar_trail_step,
     get_radar_breath_atr,
-    radar_activation_price,
 )
 from breath_stop import (
     INITIAL_SL_ATR,
