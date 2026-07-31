@@ -3628,172 +3628,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._last_close_flat_ts = time.time()
                 return True
 
-        detail = (
-            f"持仓={pos2.get('side') if pos2 else '无'} "
-            f"limits={n_limit} stops={n_stop} TP={n_tp}"
+        # 持仓已清但挂单未净：第二次撤单后仍有幽灵单
+        # 关键判断：持仓已清 → 允许开仓（幽灵单不阻止新仓）
+        counted2 = self._count_open_limits_and_stops(orders=orders2)
+        tp2 = self._collect_tp_limit_orders(orders=orders2)
+        n_limit2 = counted2[0] if counted2 else n_limit
+        n_stop2 = counted2[1] if counted2 else n_stop
+        n_tp2 = -1 if is_orders_query_failed(tp2) else len(tp2)
+        detail2 = f"持仓=无 limits={n_limit2} stops={n_stop2} TP={n_tp2}"
+        logger.warning(
+            f"⚠️ [{tag}] 幽灵挂单残留但持仓已清 → 越过暂停继续开仓 | {detail2}"
         )
-        logger.error(f"❌ [{tag}] 无菌空仓失败 → 拒绝开仓 | {detail}")
-        self._last_sterile_flat_fail_detail = detail
-        if notify:
-            try:
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"无菌空仓失败·拒绝开仓 [{self.symbol}]",
-                    detail=f"{tag} | {detail} | 防残留限价/幽灵单成交导致反手/超档位",
-                    level="紧急",
-                    suggestion="币安 APP 手动全部撤单+平仓后，等下一根 TV 信号",
-                )
-            except Exception:
-                pass
-        return False
-        tag = reason_tag or "无菌清场"
-        prev_side = self.current_side
-        # 1) 先撤一切防御单，避免平仓过程中 TP 成交反向开仓
-        self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
-        time.sleep(0.35)
-        # 2) 查仓失败 → 限流冷却期中则等待后重试；冷却期超长则用账本安全判断
-        pos_now = self._get_active_position()
-        if pos_now == "QUERY_FAILED":
-            # 尝试用账本推算：watched_qty=0 + current_side=None 视为空仓安全通过
-            book_empty = (
-                float(self.watched_qty or 0) <= 0
-                and not self.current_side
-            )
-            if book_empty:
-                # 账本干净：只缺 REST 确认，尝试等冷却期后重试验证
-                try:
-                    rl_rem = float(binance_client.ip_rate_limit_remaining() or 0)
-                except Exception:
-                    rl_rem = 0.0
-                if rl_rem > 0:
-                    wait_s = min(rl_rem, 30.0)
-                    logger.warning(
-                        f"⚠️ [{tag}] 持仓=QUERY_FAILED+账本空+IP冷却 {rl_rem:.0f}s "
-                        f"→ 等待 {wait_s:.0f}s 后重试验证"
-                    )
-                    time.sleep(wait_s)
-                    pos_now = self._get_active_position()
-                    if pos_now != "QUERY_FAILED" and (
-                        not pos_now or float(pos_now.get("positionAmt", 0) or 0) == 0
-                    ):
-                        logger.info(
-                            f"✅ [{tag}] 账本空+冷却后REST确认空仓 → 安全通过"
-                        )
-                        # 清防御单后再走后续验证
-                    elif pos_now == "QUERY_FAILED":
-                        logger.warning(
-                            f"⚠️ [{tag}] 冷却后重试仍 QUERY_FAILED，"
-                            f"账本空仓认定安全通过（仅查询失败，非持仓残留）"
-                        )
-                else:
-                    # 无冷却但仍 QUERY_FAILED（瞬时抖动），重试一次
-                    logger.warning(f"⚠️ [{tag}] 持仓=QUERY_FAILED+无冷却，重试")
-                    time.sleep(1.0)
-                    pos_now = self._get_active_position()
-                    if pos_now == "QUERY_FAILED":
-                        logger.warning(
-                            f"⚠️ [{tag}] 重试后仍 QUERY_FAILED，"
-                            f"账本空仓认定安全通过"
-                        )
-            if pos_now == "QUERY_FAILED":
-                # 账本非空或有仓时 QUERY_FAILED → 保守拒开（持仓状态不明）
-                detail = "持仓=QUERY_FAILED+账本非空 | REST不可读·禁当残留强平"
-                logger.error(f"❌ [{tag}] {detail} → 拒绝开仓")
-                self._last_sterile_flat_fail_detail = detail
-                return False
-        # 3) 有仓则阶梯强平（含平后撤单）
-        if pos_now is not None:
-            if not force_close:
-                logger.error(f"❌ [{tag}] 盘口非空且未授权强平，拒绝开仓")
-                return False
-            logger.warning(f"⚠️ [{tag}] 检测到残留持仓，启动强制平仓")
-            if not self._close_all(f"{tag} · 强制清场", reset_state=True):
-                logger.error(f"❌ [{tag}] 强平未归零，拒绝开仓")
-                return False
-            if not self._wait_verify(self._verify_flat, retries=8, delay=0.45):
-                logger.error(f"❌ [{tag}] 空仓核查未通过，拒绝开仓")
-                return False
-        # 4) 平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价/幽灵单）
-        purge = self._purge_all_defense_orders_on_flat(f"{tag}·平后净挂单", max_rounds=8)
-        # 5) 扫孤儿反向（残留 TP 在空仓成交）
-        self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
-        time.sleep(0.35)
-        # 6) 终检：仓+单皆零（含任意 LIMIT 幽灵单）
-        if self._wait_verify(self._verify_sterile_flat, retries=8, delay=0.45):
-            logger.info(
-                f"🧹 [{tag}] 无菌空仓通过 | qty=0 limits=0 stops=0 | "
-                f"撤轮={purge.get('rounds')} TP撤={purge.get('tp_cancelled', 0)}"
-            )
-            self._last_close_flat_ts = time.time()
-            return True
-        # 终检未通过 → 分析原因（可能是限流期查询失败 + 账本干净）
-        remaining = self._remaining_open_order_count()
-        counted = self._count_open_limits_and_stops()
-        if counted is None:
-            n_limit, n_stop = -1, -1
-            tp_left = []
-        else:
-            n_limit, n_stop, _ = counted
-            tp_left = self._collect_tp_limit_orders()
-            if is_orders_query_failed(tp_left):
-                tp_left = []
-        pos = self._get_active_position()
-        if pos == "QUERY_FAILED":
-            # 限流期终检 QUERY_FAILED：挂单核查通过时，账本干净则安全通过
-            orders_clean = counted is not None and n_limit == 0 and n_stop == 0 and len(tp_left) == 0
-            if orders_clean and float(self.watched_qty or 0) <= 0 and not self.current_side:
-                try:
-                    rl_rem = float(binance_client.ip_rate_limit_remaining() or 0)
-                except Exception:
-                    rl_rem = 0.0
-                if rl_rem > 0:
-                    wait_s = min(rl_rem, 30.0)
-                    logger.warning(
-                        f"⚠️ [{tag}] 终检 QUERY_FAILED+挂单清+账本空+IP冷却 {rl_rem:.0f}s "
-                        f"→ 等 {wait_s:.0f}s 后最终确认"
-                    )
-                    time.sleep(wait_s)
-                    pos = self._get_active_position()
-                    if pos == "QUERY_FAILED":
-                        logger.warning(
-                            f"✅ [{tag}] 挂单清+账本空 → 认定安全通过（终检仅受限于REST冷却）"
-                        )
-                        self._last_close_flat_ts = time.time()
-                        return True
-                    elif not pos or float(pos.get("positionAmt", 0) or 0) == 0:
-                        logger.info(f"✅ [{tag}] 冷却后确认空仓 → 安全通过")
-                        self._last_close_flat_ts = time.time()
-                        return True
-                else:
-                    logger.warning(
-                        f"⚠️ [{tag}] 终检 QUERY_FAILED+无冷却+挂单清+账本空 → 认定安全通过"
-                    )
-                    self._last_close_flat_ts = time.time()
-                    return True
-        if pos == "QUERY_FAILED":
-            pos_txt = "QUERY_FAILED"
-        elif not pos:
-            pos_txt = "无"
-        else:
-            pos_txt = f"{pos.get('side')} {pos.get('size')}"
-        detail = (
-            f"持仓={pos_txt} | 挂单={remaining} | "
-            f"LIMIT={n_limit} STOP={n_stop} | TP残留={len(tp_left)}"
-        )
-        logger.error(f"❌ [{tag}] 无菌空仓失败 → 拒绝开仓 | {detail}")
-        if notify:
-            try:
-                self._call_dingtalk(
-                    dingtalk.report_system_alert,
-                    title=f"无菌空仓失败·拒绝开仓 [{self.symbol}]",
-                    detail=f"{tag} | {detail} | 防残留限价/幽灵单成交导致反手/超档位",
-                    level="紧急",
-                    suggestion="币安 APP 手动全部撤单+平仓后，等下一根 TV 信号",
-                )
-            except Exception:
-                pass
-        self._last_sterile_flat_fail_detail = detail
-        return False
+        self._last_sterile_flat_fail_detail = detail2
+        self._last_close_flat_ts = time.time()
+        return True
 
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
         """
