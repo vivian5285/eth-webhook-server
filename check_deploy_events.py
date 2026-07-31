@@ -315,9 +315,15 @@ def audit_breath_and_sizing_smoke(a: Audit):
     a.check("RISK20/NOTIONAL5", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 5.0)
 
     entry, atr = 3000.0, 40.0
-    # 马拉松模式：initial_stop 返回 0（保本起步，不用 ATR 臂）
+    # 马拉松模式：initial_stop 返回 entry+tick+fee（保本起步，不用 ATR 臂）
     init_sl = initial_stop_price("LONG", entry, atr)
-    a.check("initial_stop LONG (马拉松=0)", abs(init_sl) < 1e-6, f"{init_sl} vs 0.0 (保本起步)")
+    # 期望值：entry + tick(≈0.1) + fee(≈3000*0.0008=2.4) ≈ 3002.5
+    # 关键：不用 ATR 臂（INITIAL_SL_ATR=0），且返回值 > entry
+    a.check(
+        "initial_stop LONG (马拉松保本起步)",
+        init_sl > entry and abs(INITIAL_SL_ATR) < 1e-9,
+        f"{init_sl} vs {entry} (应>entry，INITIAL_SL_ATR=0)",
+    )
 
     # 阶段一：推进约 1 步 (0.50 ATR trigger, 0.35 ATR advance)
     px = entry + 0.50 * atr + 0.01
@@ -327,8 +333,8 @@ def audit_breath_and_sizing_smoke(a: Audit):
     step_expect = round(init_sl + 1 * 0.35 * atr, 2)
     a.check(
         "阶段一阶梯上移",
-        abs(init_sl) < 1e-6 or float(out["stop"]) >= step_expect - 0.01,
-        f"stop={out['stop']} expect≥{step_expect} (马拉松模式init_sl=0跳过此检查)",
+        float(out["stop"]) >= step_expect - 0.01,
+        f"stop={out['stop']} expect≥{step_expect}",
     )
     a.check("阶段一未进保本", out["breakeven_phase"] is False)
 
