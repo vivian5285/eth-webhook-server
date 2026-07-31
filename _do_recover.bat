@@ -1,0 +1,3 @@
+@echo off
+echo Triggering state recovery...
+cmd /c "ssh -o ConnectTimeout=20 root@187.77.130.144 ""cd /home/trading/binance-engine && /home/trading/binance-engine/venv/bin/python3 /tmp/_do_recover.py"""

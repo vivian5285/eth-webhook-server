@@ -1,0 +1,2 @@
+@echo off
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes root@187.77.130.144 "cd /home/trading/binance-engine && echo CLEANUP && rm -f webhook_parser_orig.py reentry_profiles_orig.py && echo FINAL_VER && grep -m1 'BINANCE_VPS_VERSION' position_supervisor_binance.py && grep -m1 'BINANCE_CLIENT_VERSION' binance_client.py && echo FINAL_HEALTH && curl -s http://127.0.0.1:5003/health | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[\"version\"], d[\"status\"], d[\"sizing\"])'"

@@ -1,0 +1,1082 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""TradingView webhook parser — Trillion_God v6.5.6 最终版."""
+import json
+import logging
+import math
+import re
+
+logger = logging.getLogger(__name__)
+
+TV_STRATEGY_VERSION = "v6.5.6"
+
+# ── RISK20：名义=(本金×20%×5)/价；stop/TV.qty 可选收紧，无状态纯函数 ─────
+FIXED_RISK_PCT = 0.20
+FIXED_NOTIONAL_MULT = 5.0  # 杠杆倍数：作用在「本金×20%」上，不是全本金
+FIXED_MARGIN_PCT = FIXED_RISK_PCT
+FIXED_LEVERAGE = 5
+EXCHANGE_LEVERAGE = FIXED_LEVERAGE
+VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
+SIZING_MODE = "RISK20_NOTIONAL5"
+
+
+def get_runtime_risk_pct():
+    """Console 生效档案风险比例；失败回退常量。"""
+    try:
+        from account_profiles import get_active_sizing
+        risk, _ = get_active_sizing()
+        return float(risk)
+    except Exception:
+        return float(FIXED_RISK_PCT)
+
+
+def get_runtime_leverage():
+    """Console 生效档案杠杆；失败回退常量。"""
+    try:
+        from account_profiles import get_active_sizing
+        _, lev = get_active_sizing()
+        return float(lev)
+    except Exception:
+        return float(FIXED_LEVERAGE)
+ABSURD_TV_QTY_VS_CAPS = 50.0
+# 铁律：名义上限 = 合约本金 × 20% × 5 = 本金 × 1（≈余额1倍）。
+# 保证金不足由 supervisor 用 available×20%×5×0.92 再裁。
+NOTIONAL_MARGIN_HAIRCUT = 1.0
+VPS_RISK_PCT = 0.0
+VPS_GLOBAL_SCALE = 1.0
+VPS_REGIME_SCALE = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+VPS_MARGIN_PCT_BY_REGIME = {}
+HARD_NOTIONAL_CAP = 0.0
+MAX_RISK_PCT = 50.0
+MIN_RISK_PCT = 0.01
+MAX_POSITION_SIZE = 9999.0
+MIN_QTY_DEFAULT = 0.001
+MAX_TOTAL_NOTIONAL_MULT = 13.0
+MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
+VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
+
+# 分腿：仓位概念仍 10%/20%/70%；限价只挂 TP1+TP2，TP3(70%) 永不挂限价交雷达
+LEG_TP_RATIOS = [0.10, 0.20, 0.70]
+PLACE_TP_LEVELS = 2  # 仅挂 TP1+TP2；TP3 无上限交雷达（白皮书 §6 / §13.1#4）
+
+# ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
+RADAR_ACTIVATE_TP1_FRAC = 0.70  # 兼容旧常量；现行=ADX插值70%~90%
+RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
+RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
+RADAR_TP1_FLOOR_ATR = 0.5
+RADAR_TP2_FLOOR_ATR = 1.5
+RADAR_TP3_TRAIL_ATR = 0.0
+RADAR_STAGE_COST_BUFFER_PCT = 0.0
+ATR_UPDATE_SEC = 300
+ORDER_TIMEOUT_SEC = 300
+SIGNAL_DEDUP_SEC = 60
+ATR_FALLBACK_ETH = 12.0
+ATR_FALLBACK_DEFAULT = 30.0
+
+# 已废除：档位相关空壳（防旧 import 崩）
+ADD_QTY_RATIO_BY_REGIME = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+MAX_ADD_TIMES_BY_REGIME = {1: 0, 2: 0, 3: 0, 4: 0}
+TV_REGIME_TP_RATIOS = {1: list(LEG_TP_RATIOS), 2: list(LEG_TP_RATIOS),
+                       3: list(LEG_TP_RATIOS), 4: list(LEG_TP_RATIOS)}
+TV_REGIME_TP_MULT = {1: (0.75, 1.4, 2.0), 2: (1.10, 2.0, 2.8),
+                     3: (1.30, 2.6, 3.8), 4: (1.55, 3.0, 4.8)}
+RADAR_ACTIVATION_RATIO_BY_REGIME = {1: 0.50, 2: 0.50, 3: 0.50, 4: 0.50}
+RADAR_TRAIL_STEP_BY_REGIME = {1: RADAR_STEP_ATR, 2: RADAR_STEP_ATR,
+                             3: RADAR_STEP_ATR, 4: RADAR_STEP_ATR}
+RADAR_BREATH_ATR_BY_REGIME = {1: RADAR_LOCK_ATR, 2: RADAR_LOCK_ATR,
+                             3: RADAR_LOCK_ATR, 4: RADAR_LOCK_ATR}
+RADAR_ACTIVATION_RATIO = 0.50
+RADAR_TP1_REMAINING_PCT = 1.0
+RADAR_STAGE1_TP1_RATIO = 0.0
+RADAR_STAGE2_TP1_RATIO = 0.0
+RADAR_STAGE_ATR_MULT = {}
+VPS_HARD_SL_PCT = {}
+VPS_HARD_SL_EXTRA_RELAX = 0.0
+VPS_HARD_SL_LIMIT_PCT = 0.0
+VPS_HARD_SL_M = VPS_HARD_SL_PCT
+VPS_REGIME_BREATH_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+VPS_HARD_SL_LIMIT_OFFSET = 0.0
+
+ENTRY_TYPE_OPEN = "OPEN"
+ENTRY_TYPE_PYRAMID = "PYRAMID"
+ENTRY_TYPE_PROFIT_ADD = "PROFIT_ADD"
+VALID_ENTRY_TYPES = frozenset({ENTRY_TYPE_OPEN})
+
+# 最终架构：只认 4 个交易 action + PING 探活
+RECONCILE_ACTIONS = frozenset()  # 已废除，保留空集防旧 import
+FLATTEN_ACTIONS = frozenset({
+    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
+})
+VALID_ACTIONS = frozenset({
+    "LONG", "SHORT", "PING",
+    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
+})
+
+ACTION_ALIASES = {
+    "BUY": "LONG",
+    "SELL": "SHORT",
+    "CLOSE_LONG": "CLOSE_QUICK_EXIT",
+    "CLOSE_SHORT": "CLOSE_QUICK_EXIT",
+    "CLOSE": "CLOSE_QUICK_EXIT",
+    "QUICK_EXIT": "CLOSE_QUICK_EXIT",
+    "RSI_EXIT": "CLOSE_RSI_EXIT",
+    "CLOSE_PROTECT": "CLOSE_QUICK_EXIT",
+}
+
+CLOSE_TYPE_TP3 = "tp3"
+CLOSE_TYPE_PROTECT = "protect"
+CLOSE_TYPE_BREAKEVEN = "breakeven"
+CLOSE_TYPE_HARD_SL = "hard_sl"
+CLOSE_TYPE_VPS_SHIELD = "vps_shield"
+CLOSE_TYPE_GENERIC = "generic"
+CLOSE_TYPE_QUICK = "quick_exit"
+CLOSE_TYPE_RSI = "rsi_exit"
+CLOSE_TYPE_RECONCILE = "reconcile"
+
+CLOSE_TYPE_LABELS = {
+    CLOSE_TYPE_TP3: "TP3/追踪止盈",
+    CLOSE_TYPE_PROTECT: "反转保护",
+    CLOSE_TYPE_BREAKEVEN: "保本/移动止损",
+    CLOSE_TYPE_HARD_SL: "硬止损",
+    CLOSE_TYPE_VPS_SHIELD: "VPS硬止损",
+    CLOSE_TYPE_GENERIC: "常规清场",
+    CLOSE_TYPE_QUICK: "反转保护",
+    CLOSE_TYPE_RSI: "反转保护(RSI)",
+    CLOSE_TYPE_RECONCILE: "TV对账(不下单)",
+}
+
+EXIT_SOURCE_RADAR_BE = "radar_be"
+EXIT_SOURCE_VPS_HARD_SL = "vps_hard_sl"
+EXIT_SOURCE_SL_INITIAL = "sl_initial"
+EXIT_SOURCE_SL_BREAKEVEN = "sl_breakeven"
+EXIT_SOURCE_TP3 = "tp3"
+EXIT_SOURCE_TV_CLOSE = "tv_close"
+EXIT_SOURCE_TV_PROTECT = "tv_protect"
+EXIT_SOURCE_MANUAL = "manual"
+EXIT_SOURCE_UNKNOWN = "unknown"
+EXIT_SOURCE_QUICK = "quick_exit"
+EXIT_SOURCE_RSI = "rsi_exit"
+
+EXIT_SOURCE_LABELS = {
+    EXIT_SOURCE_RADAR_BE: "止损平仓(呼吸止损)",
+    EXIT_SOURCE_VPS_HARD_SL: "止损平仓(呼吸止损)",
+    EXIT_SOURCE_SL_INITIAL: "止损平仓（阶段一）",
+    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（阶段二/趋势追踪）",
+    EXIT_SOURCE_TP3: "TP余仓追踪收网",
+    EXIT_SOURCE_TV_CLOSE: "TV主动全平",
+    EXIT_SOURCE_TV_PROTECT: "TV反转保护",
+    EXIT_SOURCE_MANUAL: "人工/异动清仓",
+    EXIT_SOURCE_UNKNOWN: "来源未明",
+    EXIT_SOURCE_QUICK: "CLOSE_QUICK_EXIT",
+    EXIT_SOURCE_RSI: "CLOSE_RSI_EXIT",
+}
+
+RADAR_STAGE_LABELS = {
+    0: "呼吸止损·开仓即挂",
+    1: "阶段一·阶梯锁本",
+    2: "阶段二·ADX追踪",
+    3: "TP1底线(0.5ATR)",
+    4: "阶梯推进",
+    5: "TP2底线(1.5ATR)",
+    6: "阶梯推进",
+    7: "ADX连续追踪",
+}
+
+
+def is_reconcile_action(action):
+    return str(action or "").strip().upper() in RECONCILE_ACTIONS
+
+
+def is_flatten_action(action):
+    a = str(action or "").strip().upper()
+    return a in FLATTEN_ACTIONS
+
+
+def classify_tv_close(action="", reason="", pnl_pct=None):
+    action = str(action or "").strip().upper()
+    reason = str(reason or "").strip()
+    if action in RECONCILE_ACTIONS:
+        if action == "CLOSE_TRAIL":
+            return CLOSE_TYPE_TP3
+        if action == "CLOSE_SL_BREAKEVEN":
+            return CLOSE_TYPE_BREAKEVEN
+        if action == "CLOSE_SL_INITIAL":
+            return CLOSE_TYPE_HARD_SL
+        if action == "CLOSE_TP":
+            return CLOSE_TYPE_RECONCILE
+        return CLOSE_TYPE_RECONCILE
+    if action == "CLOSE_QUICK_EXIT":
+        return CLOSE_TYPE_QUICK
+    if action == "CLOSE_RSI_EXIT":
+        return CLOSE_TYPE_RSI
+    if "防回吐" in reason or "保本" in reason:
+        return CLOSE_TYPE_BREAKEVEN
+    if "硬止损" in reason:
+        return CLOSE_TYPE_HARD_SL
+    return CLOSE_TYPE_GENERIC
+
+
+def close_type_display_label(close_type, fallback_reason=""):
+    label = CLOSE_TYPE_LABELS.get(close_type or CLOSE_TYPE_GENERIC, "常规清场")
+    if close_type == CLOSE_TYPE_GENERIC and fallback_reason:
+        return fallback_reason[:48]
+    return label
+
+
+def get_regime_tp_ratios(regime=None):
+    """固定 10/20/70（v15.9.0+；不再按档位）。"""
+    return list(LEG_TP_RATIOS)
+
+
+def format_regime_tp_ratios_label(regime=None):
+    return "10/20/70(仅挂TP1+TP2·TP3永不挂单交雷达)"
+
+
+def get_leg_tp_ratios(payload=None):
+    """
+    默认 10/20/70。
+    有 TV qty1/qty2 时，supervisor._tp_slices_for_initial 按 qty 缩放挂单，不走本比例。
+    """
+    return list(LEG_TP_RATIOS)
+
+
+def get_radar_activation_ratio(regime=None):
+    """缺省启动比例下限 70%；运行时由开仓 ADX 冻结覆盖。"""
+    _ = regime
+    return float(RADAR_ACTIVATE_TP1_FRAC)
+
+
+def format_radar_activation_ratios_label():
+    return (
+        "ADX启动70%~90%×1.35ATR"
+        "|智能再入≤1次·限价优于TV"
+        "|硬止损不重入"
+    )
+
+
+def get_radar_trail_step(regime=None):
+    """兼容：breath 阶梯步长 0.75。"""
+    return float(RADAR_STEP_ATR)
+
+
+def get_radar_breath_atr(regime=None):
+    """兼容：breath 跟进 0.4。"""
+    return float(RADAR_LOCK_ATR)
+
+
+def get_vps_hard_sl_params(regime=None):
+    return {
+        "regime": 0,
+        "pct": 0.0,
+        "pct_label": "stop_loss",
+        "sl_m": 0.0,
+        "breath_mult": 1.0,
+        "final_mult": 0.0,
+        "deprecated": True,
+    }
+
+
+def compute_vps_hard_sl_distance(entry, regime=None, extra_relax=None, atr=None):
+    return 0.0
+
+
+def compute_vps_hard_sl(side, entry, atr=None, regime=None, extra_relax=None):
+    return 0.0
+
+
+def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
+    trigger_px = float(trigger_px or 0)
+    return round(trigger_px, 2) if trigger_px > 0 else 0.0
+
+
+def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
+    """呼吸止损说明（TV stop_loss 仅参考）。"""
+    try:
+        from breath_stop import INITIAL_SL_ATR, initial_stop_price
+        atr_f = float(atr or 0)
+        if atr_f > 0 and entry:
+            px = initial_stop_price(side, entry, atr_f)
+            return (
+                f"呼吸止损 `{px:.2f}` | entry±{INITIAL_SL_ATR}×ATR={atr_f:.2f} "
+                f"| closePosition 开仓即追踪"
+            )
+    except Exception:
+        pass
+    ref = float(tv_sl_ref or 0)
+    if ref > 0:
+        return f"呼吸止损待ATR绑定 | TV参考 `{ref:.2f}`(不挂盘)"
+    return "呼吸止损待绑定 | 须 webhook atr"
+
+
+def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
+    ref = float(tv_sl_ref or 0)
+    entry = float(entry or 0)
+    if ref <= 0:
+        return format_vps_hard_sl_note(side, entry, atr, regime)
+    dist = abs(entry - ref) if entry > 0 else 0
+    return f"硬止损 `{ref:.2f}` 距入场 {dist:.2f}U · 原值挂单(禁止推宽)"
+
+
+def _strip_bom(text):
+    if not text:
+        return ""
+    if text.startswith("\ufeff"):
+        return text[1:]
+    return text
+
+
+def _to_float(val, default=None):
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(val, default=None):
+    f = _to_float(val, None)
+    if f is None:
+        return default
+    try:
+        return int(f)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_regime_add_qty_ratio(regime=None):
+    return 0.0
+
+
+def get_regime_max_add_times(regime=None):
+    return 0
+
+
+def resolve_tv_add_qty_ratio(regime=None, tv_qty_ratio=None):
+    return 0.0
+
+
+def normalize_entry_type(val, default=ENTRY_TYPE_OPEN):
+    return ENTRY_TYPE_OPEN
+
+
+def _floor_qty_3dp(qty, min_qty=None):
+    min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
+    qty = float(qty or 0)
+    if qty <= 0:
+        return 0.0
+    qty = math.floor(qty * 1000.0) / 1000.0
+    if qty < min_qty:
+        return 0.0
+    return qty
+
+
+def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
+                            face_value=None, max_position=None,
+                            margin_pct=None, leverage=None,
+                            stop_loss=None, tv_qty=None, tv_sl=None,
+                            tv_price=None, **_kw):
+    """
+    无状态纯函数（仅开仓时算一次；不读历史仓位）——白皮书定稿：
+      主公式：qty = (principal × 0.20 × 5 × NOTIONAL_MARGIN_HAIRCUT) / price
+      stop_loss 可选：若给出则用 risk/|price−stop| 作额外 min 收紧
+      TV.qty 可选：非天文则 soft-cap；天文则忽略
+    TV.stop_loss 不参与挂止损价，仅历史兼容字段。
+    """
+    principal = float(principal or 0)
+    price = float(price or 0)
+    tv_px = float(tv_price if tv_price is not None else price or 0)
+    risk_pct = float(
+        margin_pct if margin_pct is not None else get_runtime_risk_pct()
+    )
+    notional_mult = float(
+        leverage if leverage is not None else get_runtime_leverage()
+    )
+    min_qty = float(min_qty if min_qty is not None else MIN_QTY_DEFAULT)
+    max_position = float(max_position if max_position is not None else MAX_POSITION_SIZE)
+    vps_stop = float(stop_loss or 0)
+    tv_stop = float(tv_sl or 0)
+    tv_ref = float(tv_qty) if tv_qty is not None and float(tv_qty or 0) > 0 else None
+
+    meta = {
+        "principal": principal,
+        "price": price,
+        "tv_price": tv_px,
+        "margin_pct": risk_pct,
+        "risk_pct": risk_pct * 100.0,
+        "leverage": notional_mult,
+        "notional_mult": notional_mult,
+        "sizing_mode": SIZING_MODE,
+        "hard_notional_cap": 0.0,
+        "qty_ratio": 1.0,
+        "stop_loss": vps_stop,
+        "initial_stop": vps_stop,
+        "tv_sl": tv_stop,
+        "tv_qty": tv_ref,
+        "tv_qty_ref_only": False,
+        "regime": 0,
+        "bind": "notional_primary",
+        "formula": (
+            "(principal×0.20×5×NOTIONAL_MARGIN_HAIRCUT)/price"
+            " · optional min(risk/dist, TV.qty soft-cap)"
+        ),
+        "sl_adj": 1.0,
+        "tv_sl_adj_skipped": True,
+    }
+    if principal <= 0 or price <= 0 or risk_pct <= 0 or notional_mult <= 0:
+        meta["error"] = "invalid_inputs"
+        return 0.0, meta
+
+    risk_capital = principal * risk_pct
+    notional_cap = risk_capital * notional_mult * NOTIONAL_MARGIN_HAIRCUT
+    qty_by_notional = notional_cap / price
+    raw_qty = qty_by_notional
+    binding = "notional"
+    qty_by_risk = None
+    vps_stop_dist = 0.0
+
+    if vps_stop > 0:
+        vps_stop_dist = abs(price - vps_stop)
+        if vps_stop_dist > 1e-12:
+            qty_by_risk = risk_capital / vps_stop_dist
+            if qty_by_risk < raw_qty:
+                raw_qty = qty_by_risk
+                binding = "risk"
+        else:
+            meta["zero_stop_dist"] = True
+
+    tv_qty_ignored_absurd = False
+    adjusted_tv_qty = tv_ref
+    if tv_ref is not None and tv_ref > 0:
+        cap_ref = max(qty_by_notional, qty_by_risk or 0.0)
+        if cap_ref > 0 and tv_ref > cap_ref * ABSURD_TV_QTY_VS_CAPS:
+            tv_qty_ignored_absurd = True
+        elif tv_ref < raw_qty:
+            raw_qty = tv_ref
+            binding = "tv_qty"
+
+    meta["risk_capital"] = round(risk_capital, 4)
+    meta["notional_cap"] = round(notional_cap, 2)
+    meta["nominal_value"] = round(notional_cap, 2)
+    meta["notional_margin_haircut"] = NOTIONAL_MARGIN_HAIRCUT
+    meta["stop_dist"] = round(vps_stop_dist, 4) if vps_stop_dist else 0.0
+    meta["vps_stop_dist"] = meta["stop_dist"]
+    meta["tv_qty_ignored_absurd"] = tv_qty_ignored_absurd
+    meta["qty_by_risk"] = round(qty_by_risk, 6) if qty_by_risk is not None else 0.0
+    meta["qty_by_notional"] = round(qty_by_notional, 6)
+    meta["adjusted_tv_qty"] = round(adjusted_tv_qty, 6) if adjusted_tv_qty else 0.0
+    meta["binding"] = binding
+    meta["margin"] = round(risk_capital, 4)
+    meta["notional"] = round(min(raw_qty * price, notional_cap), 2)
+    meta["order_amount"] = meta["notional"]
+    meta["position_value"] = meta["notional"]
+    meta["raw_qty"] = round(raw_qty, 6)
+
+    if face_value and float(face_value) > 0:
+        fv = float(face_value)
+        qty = max(1, int(math.floor(raw_qty / fv)))
+        if adjusted_tv_qty and adjusted_tv_qty > 0 and not tv_qty_ignored_absurd:
+            adj_cap = int(math.floor(adjusted_tv_qty / fv))
+            qty = min(qty, adj_cap)
+        qty = min(qty, int(max_position))
+        meta["base_qty"] = float(qty)
+        meta["qty"] = float(qty)
+        return float(qty), meta
+
+    qty = _floor_qty_3dp(raw_qty, min_qty=min_qty)
+    step = float(qty_step or 0.001)
+    if step > 0.001 + 1e-12 and qty > 0:
+        qty = math.floor(qty / step) * step
+        if qty < min_qty:
+            qty = 0.0
+    if qty > max_position:
+        qty = float(max_position)
+    if (
+        adjusted_tv_qty
+        and adjusted_tv_qty > 0
+        and not tv_qty_ignored_absurd
+        and qty > adjusted_tv_qty
+    ):
+        qty = _floor_qty_3dp(adjusted_tv_qty, min_qty=min_qty)
+    meta["base_qty"] = float(qty)
+    meta["qty"] = float(qty)
+    return float(qty), meta
+
+
+def compute_tv_order_qty(principal, risk_pct=None, leverage=None, qty_ratio=None,
+                         price=None, tv_sl=None, qty_step=0.001, min_qty=None,
+                         face_value=None, regime=None, max_position=None,
+                         stop_loss=None, tv_qty=None, tv_price=None, **_kw):
+    """兼容旧名 → RISK20_NOTIONAL5（含 TV 止损距调整系数）。"""
+    return compute_fixed_order_qty(
+        principal=principal, price=price, qty_step=qty_step, min_qty=min_qty,
+        face_value=face_value, max_position=max_position,
+        stop_loss=stop_loss,
+        tv_sl=tv_sl, tv_qty=tv_qty, tv_price=tv_price,
+    )
+
+
+def compute_vps_open_qty(principal, price, tv_sl=None, regime=None, leverage=None,
+                         risk_pct=None, qty_ratio=1.0, qty_step=0.001, min_qty=None,
+                         face_value=None, max_position=None, global_scale=None,
+                         stop_loss=None, tv_qty=None, tv_price=None, **_kw):
+    return compute_fixed_order_qty(
+        principal=principal, price=price, qty_step=qty_step, min_qty=min_qty,
+        face_value=face_value, max_position=max_position,
+        stop_loss=stop_loss if stop_loss is not None else None,
+        tv_sl=tv_sl, tv_qty=tv_qty, tv_price=tv_price if tv_price is not None else price,
+    )
+
+
+def check_total_notional_cap(equity, existing_notional, new_notional, mult=None):
+    equity = float(equity or 0)
+    existing = max(0.0, float(existing_notional or 0))
+    new_n = max(0.0, float(new_notional or 0))
+    mult = float(mult if mult is not None else MAX_TOTAL_NOTIONAL_MULT)
+    cap = equity * mult if equity > 0 else 0.0
+    total = existing + new_n
+    ok = equity > 0 and total <= cap + 1e-6
+    return ok, {
+        "equity": round(equity, 2),
+        "existing_notional": round(existing, 2),
+        "new_notional": round(new_n, 2),
+        "total_notional": round(total, 2),
+        "cap": round(cap, 2),
+        "mult": mult,
+        "ok": ok,
+    }
+
+
+def compute_vps_add_qty(**_kw):
+    """已废除加仓：恒返回 0。"""
+    return 0.0, {"error": "add_disabled", "sizing_mode": SIZING_MODE}
+
+
+def get_vps_margin_pct(regime=None):
+    return FIXED_RISK_PCT * 100.0
+
+
+def compute_vps_effective_risk(regime=None, global_scale=None):
+    return 0.0, {"sizing_mode": SIZING_MODE, "deprecated": True}
+
+
+def apply_vps_regime_risk(risk_pct, regime=None):
+    return 0.0, {"sizing_mode": SIZING_MODE}
+
+
+def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
+    meta = meta or {}
+    principal = float(meta.get("principal") or 0)
+    risk_pct = float(meta.get("margin_pct") or FIXED_RISK_PCT)
+    mult = float(meta.get("notional_mult") or meta.get("leverage") or FIXED_NOTIONAL_MULT)
+    parts = [
+        f"风险{risk_pct * 100:.0f}%/止损距",
+        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.0f}(=本金×{risk_pct * mult:.0f})",
+        f"sizing={SIZING_MODE}",
+    ]
+    if principal > 0:
+        parts.append(f"权益={principal:.0f}U")
+    if meta.get("stop_dist"):
+        parts.append(f"VPS止损距={float(meta['stop_dist']):.2f}")
+    if meta.get("sl_adj") is not None and float(meta.get("sl_adj") or 1) != 1.0:
+        parts.append(f"sl_adj={float(meta['sl_adj']):.4f}")
+    if meta.get("adjusted_tv_qty"):
+        parts.append(f"TV.qty′≤{float(meta['adjusted_tv_qty']):.4f}")
+    elif meta.get("tv_qty"):
+        parts.append(f"TV.qty≤{float(meta['tv_qty'])}")
+    if meta.get("binding"):
+        parts.append(f"bind={meta['binding']}")
+    if meta.get("notional") or meta.get("order_amount"):
+        parts.append(f"名义={float(meta.get('notional') or meta.get('order_amount') or 0):.0f}U")
+    if qty is not None and float(qty) > 0:
+        parts.append(f"qty={float(qty)}")
+    elif meta.get("base_qty"):
+        parts.append(f"qty={float(meta['base_qty'])}")
+    return " · ".join(parts)
+
+
+def format_tv_sizing_note(risk_pct=None, leverage=None, qty_ratio=None, principal=None,
+                          qty=None, regime=None, final_risk_pct=None, meta=None,
+                          entry_type="OPEN"):
+    if meta:
+        return format_vps_sizing_note(meta, qty=qty, entry_type=entry_type)
+    return format_vps_sizing_note(
+        {"principal": principal, "leverage": FIXED_NOTIONAL_MULT, "margin_pct": FIXED_RISK_PCT},
+        qty=qty,
+    )
+
+
+# ── 递进雷达启动价（v15.8.0）──────────────────────────────────────────────
+
+def radar_activation_price(side, entry, tp1, frac=None, tv_price=None):
+    """
+    白皮书 §4.1：距离 = |tp1 − TV.price|；锚点 = 成交价 entry。
+    frac 默认 RADAR_ACTIVATE_TP1_FRAC(0.85)。
+    """
+    side_u = str(side or "").strip().upper()
+    entry_f = float(entry or 0)
+    if entry_f <= 0 or side_u not in ("LONG", "SHORT"):
+        return 0.0
+    f = float(frac if frac is not None else RADAR_ACTIVATE_TP1_FRAC)
+    if f <= 0:
+        return 0.0
+    tp1_f = float(tp1 or 0)
+    if tp1_f <= 0:
+        return 0.0
+    tv_f = float(tv_price) if tv_price is not None and float(tv_price) > 0 else entry_f
+    # tp1 当作价格；若给的是距离（远小于 entry 的小数）则当距离
+    if tp1_f < tv_f * 0.2:
+        dist = abs(tp1_f)
+    else:
+        dist = abs(tp1_f - tv_f)
+    if dist <= 0:
+        return 0.0
+    if side_u == "LONG":
+        return round(entry_f + dist * f, 2)
+    return round(entry_f - dist * f, 2)
+
+
+def compute_ladder_radar_sl(*_args, **_kwargs):
+    """
+    【已物理删除】旧阶梯雷达 0.85/0.5/0.3/2.0×ATR。
+    生产唯一止损：breath_stop.calculate_breath_stop。
+    """
+    raise RuntimeError(
+        "compute_ladder_radar_sl deleted; use breath_stop.calculate_breath_stop"
+    )
+
+
+def _unwrap_payload(obj):
+    if not isinstance(obj, dict):
+        return obj
+    for key in ("message", "alert", "payload", "data", "body"):
+        inner = obj.get(key)
+        if isinstance(inner, dict):
+            merged = dict(obj)
+            merged.update(inner)
+            return merged
+        if isinstance(inner, str):
+            nested = _extract_json_object(inner)
+            if isinstance(nested, dict):
+                merged = dict(obj)
+                merged.update(nested)
+                return merged
+    return obj
+
+
+def _extract_json_object(text):
+    text = _strip_bom(str(text or "").strip())
+    if not text:
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        obj = None
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, str):
+        try:
+            inner = json.loads(obj)
+            if isinstance(inner, dict):
+                return inner
+        except json.JSONDecodeError:
+            pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def parse_webhook_request(raw_bytes, content_type="", as_json=None):
+    raw_text = ""
+    if raw_bytes:
+        try:
+            raw_text = raw_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            raw_text = str(raw_bytes)
+    data = None
+    if isinstance(as_json, dict):
+        data = as_json
+    elif raw_text:
+        data = _extract_json_object(raw_text)
+    if data is None:
+        raise ValueError("Invalid JSON payload")
+    data = _unwrap_payload(data)
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object")
+    return raw_text, data
+
+
+def normalize_tv_payload(data):
+    """Normalize Trillion_God v6.5.6 webhook fields."""
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object")
+
+    src = _unwrap_payload(data)
+    out = dict(src)
+
+    action_raw = str(
+        src.get("action") or src.get("side_action") or src.get("signal")
+        or src.get("order") or ""
+    ).strip().upper()
+    action = ACTION_ALIASES.get(action_raw, action_raw)
+
+    side_raw = str(src.get("side") or src.get("position_side") or "").strip().upper()
+    if side_raw in ("BUY", "LONG"):
+        side = "LONG"
+    elif side_raw in ("SELL", "SHORT"):
+        side = "SHORT"
+    else:
+        side = side_raw if side_raw in ("LONG", "SHORT") else ""
+    if action in ("LONG", "SHORT") and not side:
+        side = action
+
+    price = _to_float(src.get("price") or src.get("close") or src.get("entry"))
+    atr = _to_float(src.get("atr") or src.get("ATR"))
+    adx = _to_float(src.get("adx") or src.get("ADX") or src.get("adx_val"))
+    # 规格 3.7：TV 可选传 tier（0弱/1中/2强）；也接受 trend_tier / adx_tier
+    tier_raw = src.get("tier")
+    if tier_raw is None:
+        tier_raw = src.get("trend_tier")
+    if tier_raw is None:
+        tier_raw = src.get("adx_tier")
+    tier = None
+    if tier_raw is not None and str(tier_raw).strip() != "":
+        try:
+            tier = int(float(tier_raw))
+        except (TypeError, ValueError):
+            # 兼容弱/中/强中文或 weak/mid/strong
+            low = str(tier_raw).strip().lower()
+            if low in ("0", "弱", "弱趋势", "weak"):
+                tier = 0
+            elif low in ("1", "中", "中趋势", "mid", "medium"):
+                tier = 1
+            elif low in ("2", "强", "强趋势", "strong"):
+                tier = 2
+
+    tp1 = _to_float(src.get("tp1") or src.get("tv_tp1") or src.get("TP1"))
+    tp2 = _to_float(src.get("tp2") or src.get("tv_tp2") or src.get("TP2"))
+    tp3 = _to_float(src.get("tp3") or src.get("tv_tp3") or src.get("TP3"))
+    stop_loss = _to_float(
+        src.get("stop_loss") or src.get("tv_sl") or src.get("stop") or src.get("sl")
+    )
+
+    qty = _to_float(src.get("qty"))
+    qty1 = _to_float(src.get("qty1"))
+    qty2 = _to_float(src.get("qty2"))
+    qty3 = _to_float(src.get("qty3"))
+    bar_time = src.get("bar_time") or src.get("bar_time_ms") or src.get("barTime") or src.get("time")
+    leg = str(src.get("leg") or "").strip()
+    bot_id = str(src.get("bot_id") or src.get("botId") or "").strip()
+    reason = str(src.get("reason") or src.get("exit_reason") or src.get("comment") or "").strip()
+    secret = str(src.get("secret") or src.get("token") or src.get("key") or "").strip()
+
+    try:
+        from symbol_config import extract_symbol_from_payload
+        ticker_raw = extract_symbol_from_payload(src)
+    except Exception:
+        ticker_raw = str(src.get("symbol") or src.get("ticker") or src.get("sym") or "").strip()
+    if ticker_raw:
+        out["ticker"] = ticker_raw
+        out["symbol"] = ticker_raw
+
+    out["action"] = action
+    out["side"] = side
+    if price is not None:
+        out["price"] = price
+    if atr is not None:
+        out["atr"] = atr
+    if adx is not None:
+        out["adx"] = adx
+    if tier is not None and tier in (0, 1, 2):
+        out["tier"] = tier
+        out["adx_tier"] = tier
+    if tp1 is not None:
+        out["tp1"] = tp1
+        out["tv_tp1"] = tp1
+    if tp2 is not None:
+        out["tp2"] = tp2
+        out["tv_tp2"] = tp2
+    if tp3 is not None:
+        out["tp3"] = tp3
+        out["tv_tp3"] = tp3
+    if stop_loss is not None and stop_loss > 0:
+        out["stop_loss"] = round(stop_loss, 2)
+        out["tv_sl"] = round(stop_loss, 2)
+    if qty is not None:
+        out["qty"] = qty
+    if qty1 is not None:
+        out["qty1"] = qty1
+    if qty2 is not None:
+        out["qty2"] = qty2
+    if qty3 is not None:
+        out["qty3"] = qty3
+    if bar_time is not None and bar_time != "":
+        try:
+            bt = int(float(bar_time))
+            if 0 < bt < 10_000_000_000:
+                bt *= 1000
+            if bt > 0:
+                out["bar_time"] = bt
+        except (TypeError, ValueError):
+            pass
+    if leg:
+        out["leg"] = leg
+    if bot_id:
+        out["bot_id"] = bot_id
+    if reason:
+        out["reason"] = reason
+    if secret:
+        out["secret"] = secret
+        out["token"] = secret
+
+    if action in ("LONG", "SHORT"):
+        out["entry_type"] = ENTRY_TYPE_OPEN
+        out["leverage"] = float(FIXED_LEVERAGE)
+        out["qty_ratio"] = 1.0
+        ratios = get_leg_tp_ratios(out)
+        out["_leg_ratios"] = ratios
+
+    out["_normalized"] = True
+    out["_schema"] = TV_STRATEGY_VERSION
+    # 仅白名单：LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT/PING
+    # 禁止 CLOSE_TP/CLOSE_TRAIL/CLOSE_SL_* 等旧 action 借 startswith("CLOSE") 混入
+    out["_parse_ok"] = bool(action) and action in VALID_ACTIONS
+    out["_is_reconcile"] = is_reconcile_action(action)
+    out["_is_flatten"] = is_flatten_action(action)
+    return out
+
+
+def compute_atr_from_klines(klines, period=14):
+    if not klines or len(klines) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, len(klines)):
+        try:
+            high = float(klines[i][2])
+            low = float(klines[i][3])
+            prev_close = float(klines[i - 1][4])
+        except (IndexError, TypeError, ValueError):
+            continue
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    if len(trs) < period:
+        return 0.0
+    return sum(trs[-period:]) / period
+
+
+def fetch_eth_atr_14_public(period=14, symbol="ETHUSDT"):
+    return fetch_symbol_atr_14_public(symbol or "ETHUSDT", period=period)
+
+
+def fetch_symbol_atr_14_public(symbol="ETHUSDT", period=14):
+    sym = str(symbol or "ETHUSDT").upper().replace(".P", "")
+    if ":" in sym:
+        sym = sym.split(":")[-1]
+    try:
+        import requests
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/klines",
+            params={"symbol": sym, "interval": "15m", "limit": period + 20},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        return compute_atr_from_klines(resp.json(), period)
+    except Exception as e:
+        logger.warning(f"Public {sym} ATR fetch failed: {e}")
+        return 0.0
+
+
+def atr_fallback_for_symbol(symbol="ETHUSDT"):
+    sym = str(symbol or "").upper()
+    if "ETH" in sym:
+        return ATR_FALLBACK_ETH
+    return ATR_FALLBACK_DEFAULT
+
+
+def _field_present(val):
+    return val is not None and val != ""
+
+
+def _has_positive_float(val):
+    f = _to_float(val)
+    return f is not None and f > 0
+
+
+def validate_tp_prices_for_side(side, entry, tp_list, min_gap=0.01):
+    """校验至少 TP1+TP2 与方向一致；TP3 可选。"""
+    side = str(side or "").strip().upper()
+    entry = float(entry or 0)
+    if side not in ("LONG", "SHORT") or entry <= 0:
+        return False
+    prices = []
+    for t in tp_list or []:
+        try:
+            p = round(float(t), 2)
+        except (TypeError, ValueError):
+            p = 0.0
+        if p > 0:
+            prices.append(p)
+    if len(prices) < 2:
+        return False
+    gap = max(min_gap, entry * 0.0001)
+    if side == "LONG":
+        ok = all(p > entry + gap for p in prices[:2]) and prices[0] < prices[1]
+        if len(prices) >= 3:
+            ok = ok and prices[1] < prices[2]
+        return ok
+    ok = all(p < entry - gap for p in prices[:2]) and prices[0] > prices[1]
+    if len(prices) >= 3:
+        ok = ok and prices[1] > prices[2]
+    return ok
+
+
+def enrich_entry_tp_prices(action, price, atr, regime=None, payload=None):
+    """开仓：已有 tp1/2/3 原样；缺档用 ATR 倍数补全（仅兜底）。"""
+    payload = dict(payload or {})
+    for i in (1, 2, 3):
+        v = _to_float(payload.get(f"tp{i}")) or _to_float(payload.get(f"tv_tp{i}"))
+        if v and v > 0:
+            payload[f"tp{i}"] = v
+            payload[f"tv_tp{i}"] = v
+    tps = {i: _to_float(payload.get(f"tv_tp{i}")) for i in (1, 2, 3)}
+    if all(tps[i] and tps[i] > 0 for i in (1, 2, 3)):
+        payload["_tp_source"] = "tv"
+        return payload
+
+    mults = TV_REGIME_TP_MULT[3]
+    sign = 1.0 if action == "LONG" else -1.0
+    px = float(price or 0)
+    a = float(atr or 0) or ATR_FALLBACK_DEFAULT
+    if px <= 0:
+        return payload
+    filled = 0
+    for i, mult in enumerate(mults, start=1):
+        key = f"tv_tp{i}"
+        if not _has_positive_float(payload.get(key)):
+            val = round(px + sign * a * mult, 2)
+            payload[key] = val
+            payload[f"tp{i}"] = val
+            filled += 1
+    if filled == 3:
+        payload["_tp_source"] = "local"
+    elif filled > 0:
+        payload["_tp_source"] = "tv+local"
+    else:
+        payload["_tp_source"] = "tv"
+    return payload
+
+
+def enrich_signal_fields(payload, action, fetch_atr=None, fallback_regime=3,
+                         fallback_atr=30.0, fallback_price=0.0):
+    out = dict(payload or {})
+    action = str(action or "").strip().upper()
+
+    if not _has_positive_float(out.get("price")) and fallback_price > 0:
+        out["price"] = fallback_price
+        out["_price_source"] = "local"
+    elif _has_positive_float(out.get("price")):
+        out["_price_source"] = "tv"
+
+    is_entry = action in ("LONG", "SHORT")
+    is_close = action.startswith("CLOSE")
+
+    if is_entry:
+        # 开仓 initial_atr 只认 TV webhook.atr>0；禁止本地/1h/90m 回填冒充
+        has_key = ("atr" in out) or ("ATR" in out)
+        raw = _to_float(out.get("atr") if "atr" in out else out.get("ATR"))
+        if raw is not None and raw > 0:
+            out["atr"] = float(raw)
+            out["_atr_source"] = "tv"
+        else:
+            out["atr"] = float(raw or 0.0)  # 0 / 负 / 缺失→0，下游拒开
+            out["_atr_source"] = "tv_invalid" if has_key else "missing"
+            out["_atr_reject"] = True
+        out = enrich_entry_tp_prices(
+            action, out.get("price"), out.get("atr") if _has_positive_float(out.get("atr")) else None, None, out,
+        )
+        sl = _to_float(out.get("stop_loss")) or _to_float(out.get("tv_sl"))
+        if sl and sl > 0:
+            out["stop_loss"] = round(sl, 2)
+            out["tv_sl"] = round(sl, 2)
+        out["leverage"] = float(FIXED_LEVERAGE)
+    elif is_close:
+        # 平仓仅日志用 ATR，允许本地补全
+        if not _has_positive_float(out.get("atr")):
+            atr = 0.0
+            if callable(fetch_atr):
+                atr = float(fetch_atr() or 0)
+            out["atr"] = atr or float(fallback_atr or ATR_FALLBACK_DEFAULT)
+            out["_atr_source"] = "local"
+        else:
+            out["_atr_source"] = "tv"
+    return out
+
+
+def format_tv_field_sources(data):
+    if not data:
+        return "TV透传"
+    label_map = {"atr": "ATR", "tp": "TP", "price": "价格"}
+    source_vals = {"tv", "local", "tv+local"}
+
+    def _tag(src):
+        if src == "tv":
+            return "TV透传"
+        if src == "local":
+            return "本地补全"
+        if src == "tv+local":
+            return "TV+补全"
+        return str(src)
+
+    if any(k in data for k in label_map) and all(
+        (not data.get(k)) or str(data.get(k)) in source_vals for k in label_map
+    ):
+        parts = []
+        for key, label in label_map.items():
+            src = data.get(key)
+            if src:
+                parts.append(f"{label}={_tag(src)}")
+        return " · ".join(parts) if parts else "TV透传"
+
+    parts = []
+    for key, label in (("atr", "ATR"), ("price", "价格")):
+        src = data.get(f"_{key}_source")
+        if src:
+            parts.append(f"{label}={_tag(src)}")
+    tp_src = data.get("_tp_source")
+    if tp_src:
+        parts.append(f"TP={_tag(tp_src)}")
+    return " · ".join(parts) if parts else "TV透传"
+
+
+def format_webhook_log(data):
+    action = data.get("action", "?")
+    parts = [f"TV {TV_STRATEGY_VERSION} → 【{action}】"]
+    if data.get("bot_id"):
+        parts.append(f"bot={data['bot_id']}")
+    if data.get("side"):
+        parts.append(f"side={data['side']}")
+    if data.get("price"):
+        parts.append(f"price={float(data['price']):.2f}")
+    if data.get("stop_loss") or data.get("tv_sl"):
+        parts.append(f"sl={float(data.get('stop_loss') or data.get('tv_sl')):.2f}")
+    if data.get("leg"):
+        parts.append(f"leg={data['leg']}")
+    if data.get("reason"):
+        parts.append(f"reason={str(data['reason'])[:48]}")
+    if data.get("atr"):
+        parts.append(f"ATR={float(data['atr']):.2f}")
+    tps = [data.get(f"tp{i}") or data.get(f"tv_tp{i}") for i in (1, 2, 3)]
+    if any(_has_positive_float(t) for t in tps):
+        tp_txt = "/".join(
+            f"{float(t):.0f}" if _has_positive_float(t) else "-" for t in tps
+        )
+        parts.append(f"TP={tp_txt}")
+    if data.get("_is_reconcile"):
+        parts.append("对账(不下单)")
+    if data.get("_is_flatten"):
+        parts.append("主动全平")
+    return " | ".join(parts)

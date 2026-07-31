@@ -1,19 +1,21 @@
-fix v16.11.x: hard stop loss direction validation; emergency channel priority; emergency param
+v16.13.0: spec v1.0 full align + old code cleanup
 
-Root cause 1 (position_supervisor_binance.py):
-- Add direction check in _temp_hard_stop_from_tv: LONG→SL<entry, SHORT→SL>entry
-- Direction error → dingtalk alert + fail-closed (return 0, reject open)
-- ATR minimum distance floor (0.5×ATR) to prevent abnormally narrow stops
+Core spec alignment:
+- spec 9.1: defense order tags include direction+random to prevent LONG/SHORT same-price collision
+- spec 9.1: reentry order tags add random to prevent timestamp collision
+- spec 4: reentry_attempt counter resets to 0 on CLOSE_QUICK/RSI exit
+- spec 5.0: early breakeven checkpoint confirmed integrated via sentinel loop (maintain_hard_shield)
+- spec 3.3/3.4: hard stop breath coeff confirmed unified 1.15 (defense_profiles.buffer_multiplier)
+- spec 5.1: radar activation absolute price anchor (TP1+TP2)/2 and TP2 correctly implemented
+- spec 5.2/5.3: ETH/XAU radar trail step and breath space by tier correctly implemented
+- spec 8.1: reentry conditions TP1 not filled + strong tier correctly implemented
+- spec 6.1: VPS does not independently fetch ATR, TV atr field is sole source
 
-Root cause 2 (position_supervisor_binance.py):
-- TP1/TP2 delay was caused by root cause 1 chain failure; verified fixed by root cause 1
+Old code cleanup:
+- reentry_profiles.py: docstring updated to v1.0 spec; radar_activation_ratio_from_adx() marked obsolete
+- breath_profiles.py: docstring updated
+- breath_stop.py: docstring updated
+- obsolete constants (_DEFAULT_RADAR_ACT_RATIO_*, _ACT_RATIO_WEAK/MID/STRONG, _INVERTED_LEGACY_RATIOS) marked as obsolete
 
-Root cause 3 (api_throttle.py):
-- Separate emergency channel: 20/min independent budget, non-competing with trade/probe
-- Emergency close (emergency_close kind) can override silence ≤30s
-- Over-limit emergency requests still pass (lifesaving priority)
-
-Supporting (binance_client.py, dingtalk.py, console_api.py):
-- Add emergency parameter to ensure_frozen_hard_sl and close_position
-- Add emergency_channel budget snapshot to console
-- Update throttle console display
+Pipeline enhancement:
+- pipeline_bridge.py: PIPELINE_STALL notification deduplication, same phase alerts only once

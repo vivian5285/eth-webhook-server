@@ -1,0 +1,2 @@
+@echo off
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes root@187.77.130.144 "cd /home/trading/binance-engine && echo RESTORE_WP && cp webhook_parser_orig.py webhook_parser.py && echo RESTORE_RP && cp reentry_profiles_orig.py reentry_profiles.py && echo TEST && python3 -c 'from webhook_parser import radar_activation_price; from reentry_profiles import activation_price; print(\"OK\")'"

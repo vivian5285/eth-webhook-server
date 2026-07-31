@@ -1,0 +1,2 @@
+@echo off
+ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes root@187.77.130.144 "cd /home/trading/binance-engine && source venv/bin/activate && nohup gunicorn -b 0.0.0.0:5003 --workers 1 --threads 10 --timeout 120 --graceful-timeout 30 --access-logfile logs/gunicorn_access.log --error-logfile logs/gunicorn_error.log app:app > /dev/null 2>&1 & sleep 8; ps aux | grep gunicorn | grep -v grep; curl -s --max-time 5 http://127.0.0.1:5003/health"
