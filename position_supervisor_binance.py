@@ -9117,7 +9117,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         shield_ok = self._shield_orders_adequate(shield_audit)
 
         if should_radar or radar_active:
-            pnl_label = f"浮盈·雷达区 (进度 {radar_progress:.0%}·5阶段)"
+            pnl_label = f"浮盈·雷达区 (进度 {radar_progress:.0%}·呼吸追踪)"
             defense_plan = "雷达移动保本(优先级高于硬止损)"
         elif adverse > 0.001:
             pnl_label = f"浮亏 {adverse:.1%}"
@@ -9252,7 +9252,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     and not getattr(self, "_radar_activation_notified", False)
                 ):
                     self._flush_pending_radar_notify(real_amt, curr_px)
-                actions.append(f"阶段二·进度{health.get('radar_progress', 0):.0%}")
+                actions.append(f"呼吸追踪·进度{health.get('radar_progress', 0):.0%}")
 
             self._radar_guardian_audit(real_amt, curr_px)
         except Exception as e:

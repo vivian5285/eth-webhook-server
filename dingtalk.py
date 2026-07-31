@@ -281,14 +281,14 @@ def _classify_close(reason, verify_note="", swept_dust=False, close_type="", clo
         }
     if ct == CLOSE_TYPE_BREAKEVEN:
         return {
-            "title": "止损平仓（阶段二/趋势追踪）",
+            "title": "止损平仓（呼吸止损追踪）",
             "tag": _g("**止损平仓**", G_LIGHT),
-            "status": _g("阶段二追踪止损触及，全平离场。", G_MAIN),
+            "status": _g("呼吸止损追踪触及，全平离场。", G_MAIN),
             "header": G_LIGHT,
         }
     if ct in (CLOSE_TYPE_HARD_SL, CLOSE_TYPE_VPS_SHIELD):
         return {
-            "title": "止损平仓（阶段一）",
+            "title": "止损平仓（硬止损触发）",
             "tag": _g("**止损平仓**", G_DEEP),
             "status": _g("价格触及呼吸止损，市价全平。", G_DEEP),
             "header": G_DEEP,
@@ -1079,7 +1079,7 @@ def report_supervisor_close(reason, verify_note="", verified=True, swept_dust=Fa
         # 一眼区分：呼吸止损 / TP3
         if exit_source == "radar_be":
             data["📡 说明"] = _g(
-                "由呼吸止损 closePosition 触发（阶段一阶梯/阶段二ADX）", G_LIGHT,
+                "由呼吸止损追踪 closePosition 触发", G_LIGHT,
             )
         elif exit_source == "tp3":
             data["📡 说明"] = _g(
@@ -1206,7 +1206,7 @@ def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_p
 
     if radar_active:
         sl_state = "止损已挂/已确认" if radar_sl_ok else "止损待哨兵补挂"
-        phase = "阶段二·ADX" if radar_progress >= 1.0 else "阶段一·阶梯"
+        phase = "呼吸止损·动态追踪" if radar_progress >= 1.0 else "呼吸止损·阶梯锁本"
         radar_txt = _g(
             f"呼吸止损已运行 · {phase} | 止损 `{sl_price:.2f}` | "
             f"轮询 0.5s | {sl_state}",
@@ -1729,7 +1729,7 @@ def report_shield_tier_fill(side, tier_pct, tier_price, filled_qty, remain_qty, 
         "🫁 触发止损": _g(f"**呼吸止损** @ `{tier_price:.2f}` USDT", G_ACCENT),
         "✂️ 本次平仓": _g(f"`{filled_qty}` {_u()}", G_MAIN),
         "📊 剩余头寸": _g(f"`{remain_qty}` {_u()}", G_MAIN),
-        "✅ 风控动作": _g("呼吸止损成交 → 余仓交阶段二", G_MAIN),
+        "✅ 风控动作": _g("呼吸止损成交 → 余仓交呼吸止损动态追踪", G_MAIN),
     }
     if verify_note:
         data["🔍 核实明细"] = _g(verify_note, G_MUTED)
@@ -1832,9 +1832,9 @@ def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
     data = {
         "🎛️ 品种": _g(f"**{sym}**", G_ACCENT),
         "阶段切换": _g(
-            f"止损已进入阶段二（呼吸追踪），呼吸系数={coeff:.2f}，追踪距离={trail_v:.2f}"
+            f"止损已进入呼吸止损动态追踪，呼吸系数={coeff:.2f}，追踪距离={trail_v:.2f}"
             if coeff > 0 or trail_v > 0
-            else "止损已进入阶段二（呼吸追踪）",
+            else "止损已进入呼吸止损动态追踪",
             G_ACCENT,
         ),
         "呼吸系数": _g(f"**{coeff:.2f}**" if coeff > 0 else "—", G_MAIN),
@@ -1844,7 +1844,7 @@ def report_breath_phase2(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
     }
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
-    send_alert(f"📡 [{sym}] 阶段切换：止损已进入阶段二", data, G_DEEP)
+    send_alert(f"📡 [{sym}] 阶段切换：止损已进入呼吸止损动态追踪", data, G_DEEP)
 
 
 # -------------------------------------------------------------------------- #

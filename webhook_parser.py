@@ -160,8 +160,8 @@ EXIT_SOURCE_RSI = "rsi_exit"
 EXIT_SOURCE_LABELS = {
     EXIT_SOURCE_RADAR_BE: "止损平仓(呼吸止损)",
     EXIT_SOURCE_VPS_HARD_SL: "止损平仓(呼吸止损)",
-    EXIT_SOURCE_SL_INITIAL: "止损平仓（阶段一）",
-    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓（阶段二/趋势追踪）",
+    EXIT_SOURCE_SL_INITIAL: "止损平仓(呼吸止损·保本位)",
+    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓(呼吸止损追踪)",
     EXIT_SOURCE_TP3: "TP余仓追踪收网",
     EXIT_SOURCE_TV_CLOSE: "TV主动全平",
     EXIT_SOURCE_TV_PROTECT: "TV反转保护",
@@ -173,13 +173,8 @@ EXIT_SOURCE_LABELS = {
 
 RADAR_STAGE_LABELS = {
     0: "呼吸止损·开仓即挂",
-    1: "阶段一·阶梯锁本",
-    2: "阶段二·ADX追踪",
-    3: "TP1底线(0.5ATR)",
-    4: "阶梯推进",
-    5: "TP2底线(1.5ATR)",
-    6: "阶梯推进",
-    7: "ADX连续追踪",
+    1: "呼吸止损·阶梯锁本",
+    2: "呼吸止损·动态追踪",
 }
 
 
