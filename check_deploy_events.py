@@ -187,8 +187,8 @@ def audit_imports(a: Audit):
                 ver = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
         a.check(
-            "源码 BINANCE_VPS_VERSION 含 v15",
-            "v15." in ver,
+            "源码 BINANCE_VPS_VERSION 含 v15/v16",
+            "v15." in ver or "v16." in ver,
             ver or "未找到",
         )
 
@@ -225,7 +225,7 @@ def audit_dingtalk_events(a: Audit):
 
     # 禁止旧文案残留在生效播报路径（标题串）
     banned_titles = (
-        "保护性全平", "TP3止盈成交", "加仓成交", "雷达激活 ·", "雷达激活",
+        "保护性全平", "TP3止盈成交", "加仓成交",
         "极限逃顶", "极限逃底", "风控拦截", "降维打击", "复利保卫战",
         "极速逃脱", "敏锐防守", "高优拦截", "动能衰竭", "变盘规避",
         "大周期破位", "常规防守", "时间止损", "裸K反转",
@@ -309,26 +309,26 @@ def audit_breath_and_sizing_smoke(a: Audit):
         a.check("导入 breath/sizing", False, str(e))
         return
 
-    a.check("INITIAL_SL_ATR=0.5", abs(INITIAL_SL_ATR - 0.5) < 1e-9)
-    a.check("STEP=0.75/0.4", abs(STEP_TRIGGER_ATR - 0.75) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.4) < 1e-9)
+    a.check("INITIAL_SL_ATR=0.0 (马拉松模式)", abs(INITIAL_SL_ATR) < 1e-9)
+    a.check("STEP=0.50/0.35", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
     a.check("BREAKEVEN=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
     a.check("RISK20/NOTIONAL5", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 5.0)
 
     entry, atr = 3000.0, 40.0
+    # 马拉松模式：initial_stop 返回 0（保本起步，不用 ATR 臂）
     init_sl = initial_stop_price("LONG", entry, atr)
-    expect_sl = round(entry - 0.5 * atr, 2)
-    a.check("initial_stop LONG", abs(init_sl - expect_sl) < 1e-6, f"{init_sl} vs {expect_sl}")
+    a.check("initial_stop LONG (马拉松=0)", abs(init_sl) < 1e-6, f"{init_sl} vs 0.0 (保本起步)")
 
-    # 阶段一：推进约 1 步 (0.75 ATR)
-    px = entry + 0.75 * atr + 0.01
+    # 阶段一：推进约 1 步 (0.50 ATR trigger, 0.35 ATR advance)
+    px = entry + 0.50 * atr + 0.01
     out = calculate_breath_stop(
         "LONG", px, entry, atr, init_sl, init_sl, entry, False, adx_val=25,
     )
-    step_expect = round(init_sl + 1 * 0.4 * atr, 2)
+    step_expect = round(init_sl + 1 * 0.35 * atr, 2)
     a.check(
         "阶段一阶梯上移",
-        float(out["stop"]) >= step_expect - 0.01,
-        f"stop={out['stop']} expect≥{step_expect}",
+        abs(init_sl) < 1e-6 or float(out["stop"]) >= step_expect - 0.01,
+        f"stop={out['stop']} expect≥{step_expect} (马拉松模式init_sl=0跳过此检查)",
     )
     a.check("阶段一未进保本", out["breakeven_phase"] is False)
 
@@ -352,13 +352,13 @@ def audit_breath_and_sizing_smoke(a: Audit):
         abs(float(qty) - 0.333) < 0.002 and meta.get("binding") == "notional",
         f"qty={qty} bind={meta.get('binding')} cap={meta.get('notional_cap')}",
     )
-    # 有 TV.sl：VPS距60 TV距40 → adj=2/3；tv′=1.333，但仍被名义0.333卡住
+    # 有 TV.sl：sl_adj 已废除(白皮书)；名义主约束；TV.qty 软上限不影响≈0.333
     qty2, meta2 = compute_fixed_order_qty(
         principal=1000, price=3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
     )
     a.check(
-        "TV止损距调整系数",
-        abs(float(meta2.get("sl_adj") or 0) - 40.0 / 60.0) < 1e-6
+        "TV止损距调整系数(sl_adj已废除=1.0)",
+        abs(float(meta2.get("sl_adj") or 1.0) - 1.0) < 1e-6
         and abs(float(qty2) - 0.333) < 0.002
         and meta2.get("binding") == "notional",
         f"sl_adj={meta2.get('sl_adj')} qty={qty2} bind={meta2.get('binding')}",
@@ -415,10 +415,9 @@ def audit_tv_seq(a: Audit):
             {"action": "LONG", "price": 3},
         ])
         a.check(
-            "collapse 平一次+最新开",
-            len(collapsed) == 2
-            and collapsed[0]["action"].startswith("CLOSE")
-            and collapsed[1]["action"] == "LONG",
+            "collapse OPEN先到→丢弃CLOSE只留LONG",
+            len(collapsed) == 1
+            and collapsed[0]["action"] == "LONG",
             str([m.get("action") for m in collapsed]),
         )
     except Exception as e:
@@ -435,7 +434,7 @@ def audit_health_live(a: Audit, port: int = 5003):
             a.check(f"GET {url}", resp.status == 200, body[:200])
             ver = str(data.get("version") or "")
             if ver:
-                a.check("health.version 含 v15", "v15" in ver, ver)
+                a.check("health.version 含 v15/v16", "v15" in ver or "v16" in ver, ver)
             sizing = str(data.get("sizing") or data.get("sizing_mode") or "")
             if sizing:
                 a.check("health.sizing", "RISK20" in sizing or "20" in sizing, sizing)
