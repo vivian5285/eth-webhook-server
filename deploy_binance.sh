@@ -17,7 +17,7 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v16.1-force-cleanup"
+DEPLOY_SCRIPT_VERSION="v16.3-sudo-fix"
 # 接受 v13.4.6+ 以及 v14/v15+（含 risk20-ladder / tv-direction 等后缀）
 MIN_SUPERVISOR_VERSION_RE='v(13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)|1[4-9]\.|[2-9][0-9]+\.)'
 
@@ -68,8 +68,8 @@ load_env() {
 DEPLOY_SCRIPT_VERSION="v16.2-sudo-kill"
 
 check_sudo_capability() {
-    # 检查是否有 sudo 权限杀进程
-    if sudo -n true 2>/dev/null; then
+    # 检查是否有 sudo 权限杀进程（用 kill 命令测试，因为它在 NOPASSWD 列表里）
+    if sudo -n kill -0 $$ 2>/dev/null; then
         SUDO_CMD="sudo"
         log_ok "检测到 sudo 权限，将使用 sudo 强制杀进程"
     else
@@ -265,10 +265,15 @@ install_deps() {
         return 1
     fi
 
-    python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
-        "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" "$DIR/tv_seq.py" 2>/dev/null \
-        && log_ok "核心 Python 文件语法检查通过" \
-        || { log_fail "Python 语法检查失败（请检查 dingtalk.py / supervisor / tv_seq）"; return 1; }
+    # py_compile 出错时输出具体错误信息
+    SYNTAX_ERR=$(python3 -m py_compile "$DIR/app.py" "$DIR/binance_client.py" \
+        "$DIR/dingtalk.py" "$DIR/position_supervisor_binance.py" "$DIR/tv_seq.py" 2>&1)
+    if [ $? -eq 0 ]; then
+        log_ok "核心 Python 文件语法检查通过"
+    else
+        log_fail "Python 语法检查失败: $SYNTAX_ERR"
+        return 1
+    fi
 }
 
 get_gunicorn_master_pid() {
