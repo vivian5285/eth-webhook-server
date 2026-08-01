@@ -168,7 +168,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.15.0-joint-query-rpc-optimize"
+BINANCE_VPS_VERSION = "v16.16-open-speed"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -3566,7 +3566,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         # ── 阶段 0：开仓前抢先撤单（防御单全清）────────────────────────────
         self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
-        time.sleep(0.35)
+        time.sleep(0.20)  # v16.16: 0.35→0.20 撤单传播等待
 
         # ── 阶段 1：联合查询持仓 + 挂单（仅 1~2 次 REST）────────────────
         snapshot = binance_client.joint_query_position_and_orders(self.symbol)
@@ -3651,7 +3651,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         # ── 阶段 4：扫孤儿反向（残留 TP 在空仓成交）───────────────────────
         self._sweep_orphan_reverse_after_flat(prev_side=prev_side, reason=tag)
-        time.sleep(0.35)
+        time.sleep(0.20)  # v16.16: 0.35→0.20 孤儿扫尾传播
 
         # ── 阶段 5：终检无菌空仓（联合查询，不重复查持仓）────────────────
         # snapshot 仅含 orders 时，重新联合查询持仓 + 挂单（1~2 次 REST）
@@ -13958,7 +13958,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 lev = int(FIXED_LEVERAGE)
             self.leverage = float(lev)
             self.tv_sizing_leverage = float(lev)
-            binance_client.set_leverage(self.symbol, leverage=lev)
+            # v16.16 温和优化：杠杆恒为 5x，跳过重复 REST 设置调用
+            if float(getattr(self, '_last_set_leverage', 0) or 0) != lev:
+                binance_client.set_leverage(self.symbol, leverage=lev)
+                self._last_set_leverage = float(lev)
+            else:
+                logger.debug(f"[{self.symbol}] 杠杆已是 {lev}x，跳过 set_leverage REST 调用")
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
             logger.info(
@@ -14029,8 +14034,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 )
                 return
             # 成交后持仓查询可能短暂滞后；多轮重试，禁止误判空仓而跳过硬止损挂单
+            # v16.16 温和压缩：13s → 8s（0.5+0.8+1.2+2.0+3.5）
             pos = None
-            for i, delay in enumerate((1.0, 1.5, 2.0, 3.0, 5.0)):
+            for i, delay in enumerate((0.5, 0.8, 1.2, 2.0, 3.5)):
                 time.sleep(delay)
                 try:
                     pos = self._get_active_position()
