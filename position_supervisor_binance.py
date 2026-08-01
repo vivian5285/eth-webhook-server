@@ -128,6 +128,7 @@ from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import RadarReentryMixin
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
+from smart_tp_reconciliation import SmartTPReconciliation, format_tp_health_report
 from chief_auditor import check_tp_slice_budget
 from market_engine import (
     get_market_engine,
@@ -324,6 +325,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._pending_open_defense_snap = None
         self._open_in_progress = False
         self._open_tp_unconfirmed = False
+        # 智能TP对账器（防止重启后重复挂单）
+        self._tp_reconciler = SmartTPReconciliation(symbol=self.symbol)
         self._last_signal_fp = None
         self._last_signal_fp_ts = 0.0
         self._defense_align_in_progress = False
@@ -2992,6 +2995,117 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         for n in notes:
             logger.warning(f"🔎 重启对账: {n}")
         return reconcile
+
+    def _smart_tp_reconcile_on_recover(self, pos, live_qty):
+        """
+        【增强 v2.0】重启后智能TP对账
+        核心职责：
+        1. 检测TV信号与实盘TP单的匹配度
+        2. 判断TP是否已被交易所成交
+        3. 智能决定是否需要补挂TP（防止重复挂单）
+        4. 发送钉钉通知
+        """
+        reconciler = getattr(self, '_tp_reconciler', None)
+        if reconciler is None:
+            reconciler = SmartTPReconciliation(symbol=self.symbol)
+            self._tp_reconciler = reconciler
+
+        # 检查冷却
+        can_reconcile, reason = reconciler.can_reconcile()
+        if not can_reconcile:
+            logger.info(f"🛡️ [{self.symbol}] TP对账冷却中: {reason}")
+            return {"skipped": True, "reason": reason}
+
+        # 获取TV信号的TP价格和比例
+        tv_tps = list(self.tv_tps or [0, 0, 0])
+        tv_ratios = [0.10, 0.20, 0.70]  # 固定比例
+
+        # 获取已消耗的TP档位
+        tp_levels_consumed = list(getattr(self, 'tp_levels_consumed', []) or [])
+
+        # 获取当前价格
+        current_price = 0.0
+        try:
+            current_price = float(binance_client.get_current_price(self.symbol) or 0)
+        except Exception:
+            pass
+
+        # 获取交易所TP订单
+        exchange_orders = []
+        try:
+            exchange_orders = list(self._collect_tp_limit_orders() or [])
+            if is_orders_query_failed(exchange_orders):
+                exchange_orders = []
+        except Exception:
+            pass
+
+        # 获取开仓数量
+        initial_qty = float(getattr(self, 'initial_qty', 0) or live_qty or 0)
+
+        # 执行健康评估
+        health = reconciler.assess_tp_health(
+            tv_tps=tv_tps,
+            tv_ratios=tv_ratios,
+            live_qty=live_qty,
+            initial_qty=initial_qty,
+            exchange_orders=exchange_orders,
+            current_price=current_price,
+            tp_levels_consumed=tp_levels_consumed,
+        )
+
+        # 记录日志
+        logger.info(f"🛡️ [{self.symbol}] TP健康评估: {format_tp_health_report(health, self.symbol)}")
+
+        # 判断是否需要修复
+        should_repair, repair_reason = reconciler.should_repair(health)
+        if should_repair:
+            # 检查修复冷却
+            can_repair, repair_cooldown = reconciler.can_repair()
+            if not can_repair:
+                logger.warning(f"🛡️ [{self.symbol}] TP修复冷却中: {repair_cooldown}")
+                reconciler.mark_reconcile_done(actions_taken=0)
+                return {"skipped": True, "reason": repair_cooldown}
+
+            # 生成修复计划
+            plan = reconciler.get_repair_plan(
+                health=health,
+                live_qty=live_qty,
+                current_side=str(getattr(self, 'current_side', '') or ''),
+            )
+
+            logger.warning(f"🛡️ [{self.symbol}] TP需要修复: {plan['reason']}")
+
+            # 钉钉通知
+            try:
+                import dingtalk
+                self._call_dingtalk(
+                    dingtalk.send_alert,
+                    f"🛡️ [{self.symbol}] TP对账异常",
+                    {
+                        "severity": f"等级{health.get('severity', 0)}",
+                        "issues": "; ".join(health.get('issues', [])),
+                        "plan": plan.get('reason', '待定'),
+                        "missing_tps": str([f"TP{t['level']}@{t['price']:.2f}" for t in health.get('missing_tps', [])]),
+                        "live_qty": f"{live_qty:.4f}",
+                        "exchange_orders": f"{len(exchange_orders)}个",
+                    },
+                    immediate=True,
+                    level=2,
+                )
+            except Exception:
+                pass
+
+            reconciler.mark_reconcile_done(actions_taken=1)
+        else:
+            reconciler.mark_reconcile_done(actions_taken=0)
+            logger.info(f"🛡️ [{self.symbol}] TP状态正常，无需修复: {repair_reason}")
+
+        return {
+            "skipped": False,
+            "health": health,
+            "should_repair": should_repair,
+            "reason": repair_reason,
+        }
 
     def _trusted_initial_qty(self, live_qty, entry=None):
         """
@@ -16932,6 +17046,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     reconcile = self._reconcile_context_on_recover(pos)
                     reconcile_notes = reconcile["notes"]
                     side = pos["side"]
+
+                    # 【增强 v2.0】智能TP对账
+                    live_qty = float(pos.get("size") or 0)
+                    tp_result = self._smart_tp_reconcile_on_recover(pos, live_qty)
+                    if not tp_result.get("skipped"):
+                        notes_str = tp_result.get("reason", "")
+                        reconcile_notes.append(f"TP对账:{notes_str}")
 
                     if self._live_aligns_with_credible_tv(side):
                         if reconcile.get("direction_mismatch"):
