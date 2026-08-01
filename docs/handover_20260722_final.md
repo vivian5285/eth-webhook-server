@@ -72,12 +72,12 @@
 | secret 主 / token 兼容 | **符合** | `app.py`；`TODO(remove-token)` 已写 |
 | 60s 去重 | **产品维持** | 指纹含 price（≠纯 action+symbol）→ 已知 #2 |
 
-### C. 呼吸止损
+### C. 雷达止损
 
 | 项 | 判定 | 证据 |
 |----|------|------|
 | 状态持久化 | **符合** | entry/atr/initial_stop/current_sl/best/phase/remaining → `_save_state` |
-| 阶段一 / TP 底线 / 阶段二 ADX | **符合** | `breath_stop.py` |
+| 雷达阶梯推进阶段 / TP 底线 / 雷达动态追踪阶段 ADX | **符合** | `breath_stop.py` |
 | TP 成交后止损 qty 收缩 | **代码符合 / 实盘未取证** | `_breath_resize_stop_on_tp` → 已知 #3 |
 
 ### D. 状态清理

@@ -134,13 +134,13 @@ SUPERVISOR_METHODS = [
     ("开仓保护挂防", "_protect_and_monitor"),
     ("市价全平", "_close_all"),
     ("仓位计算", "_calc_vps_open_qty"),
-    ("呼吸tick", "_apply_breath_stop_tick"),
+    ("雷达tick", "_apply_breath_stop_tick"),
     ("止损唯一写入", "_sync_exchange_stop"),
     ("TP后收缩止损", "_breath_resize_stop_on_tp"),
     ("重启恢复", "recover_state_on_startup"),
     ("信号入口", "handle_signal"),
     ("哨兵循环", "_sentinel_loop"),
-    ("阶段二通知", "_report_breath_phase2"),
+    ("阶段切换通知", "_report_breath_phase2"),
     ("FORCE_ALIGN入口", "_enforce_tv_direction_or_flat"),
 ]
 
@@ -262,7 +262,7 @@ def audit_supervisor_methods(a: Audit):
     a.check("HARD_SL_FAIL_ABORT 接线", "HARD_SL_FAIL_ABORT" in src)
     a.check("旧 schema 暂停", "_state_old_schema" in src or "restart_old_schema" in src)
     a.check("FORCE_ALIGN 保留", "force_align" in src and "report_force_align" in src)
-    a.check("呼吸唯一写止损", "_sync_exchange_stop" in src and "calculate_breath_stop" in src)
+    a.check("雷达唯一写止损", "_sync_exchange_stop" in src and "calculate_breath_stop" in src)
     a.check("TP后暂停 tick", "_breath_tick_paused" in src)
     a.check("PLACE_TP_LEVELS=2 接线", "PLACE_TP_LEVELS" in src)
 
@@ -293,7 +293,7 @@ def audit_webhook_actions(a: Audit):
 
 
 def audit_breath_and_sizing_smoke(a: Audit):
-    a.section("五 · 呼吸止损 / 仓位公式 Smoke")
+    a.section("五 · 雷达止损 / 仓位公式 Smoke")
     try:
         from breath_stop import (
             initial_stop_price,
@@ -309,41 +309,41 @@ def audit_breath_and_sizing_smoke(a: Audit):
         a.check("导入 breath/sizing", False, str(e))
         return
 
-    a.check("INITIAL_SL_ATR=0.0 (马拉松模式)", abs(INITIAL_SL_ATR) < 1e-9)
+    a.check("INITIAL_SL_ATR=0.0 (规格 v1.0模式)", abs(INITIAL_SL_ATR) < 1e-9)
     a.check("STEP=0.50/0.35", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
     a.check("BREAKEVEN=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
     a.check("RISK20/NOTIONAL5", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 5.0)
 
     entry, atr = 3000.0, 40.0
-    # 马拉松模式：initial_stop 返回 entry+tick+fee（保本起步，不用 ATR 臂）
+    # 规格 v1.0模式：initial_stop 返回 entry+tick+fee（保本起步，不用 ATR 臂）
     init_sl = initial_stop_price("LONG", entry, atr)
     # 期望值：entry + tick(≈0.1) + fee(≈3000*0.0008=2.4) ≈ 3002.5
     # 关键：不用 ATR 臂（INITIAL_SL_ATR=0），且返回值 > entry
     a.check(
-        "initial_stop LONG (马拉松保本起步)",
+        "initial_stop LONG (规格 v1.0保本起步)",
         init_sl > entry and abs(INITIAL_SL_ATR) < 1e-9,
         f"{init_sl} vs {entry} (应>entry，INITIAL_SL_ATR=0)",
     )
 
-    # 阶段一：推进约 1 步 (0.50 ATR trigger, 0.35 ATR advance)
+    # 雷达阶梯推进：推进约 1 步 (0.50 ATR trigger, 0.35 ATR advance)
     px = entry + 0.50 * atr + 0.01
     out = calculate_breath_stop(
         "LONG", px, entry, atr, init_sl, init_sl, entry, False, adx_val=25,
     )
     step_expect = round(init_sl + 1 * 0.35 * atr, 2)
     a.check(
-        "阶段一阶梯上移",
+        "雷达阶梯推进阶梯上移",
         float(out["stop"]) >= step_expect - 0.01,
         f"stop={out['stop']} expect≥{step_expect}",
     )
-    a.check("阶段一未进保本", out["breakeven_phase"] is False)
+    a.check("雷达阶梯推进未进保本", out["breakeven_phase"] is False)
 
-    # 阶段二触发
+    # 雷达动态追踪触发
     px2 = entry + 3.0 * atr + 1.0
     out2 = calculate_breath_stop(
         "LONG", px2, entry, atr, init_sl, float(out["stop"]), px2, False, adx_val=25,
     )
-    a.check("触及3.0ATR → 阶段二", out2["breakeven_phase"] is True)
+    a.check("触及3.0ATR → 雷达动态追踪", out2["breakeven_phase"] is True)
     td = trail_distance_by_adx(25)
     a.check("ADX25 追踪距在 1.2~2.5", 1.2 < td < 2.5, f"td={td:.3f}")
 

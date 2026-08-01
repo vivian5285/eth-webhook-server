@@ -452,7 +452,7 @@ def section_pipeline(lines: list, atr_meta: dict, wh: dict):
     div = atr_divergence_pct(vps_atr, ref)
     atr_alert = div >= ATR_COMPARE_ALERT_PCT
 
-    # 呼吸止损 tick 模拟
+    # 雷达止损 tick 模拟
     ticks = []
     cur_sl = init_stop
     best = entry
@@ -486,7 +486,7 @@ def section_pipeline(lines: list, atr_meta: dict, wh: dict):
     lines.append(f"| **最终 qty** | **{float(qty):.6f}**（binding=`{meta.get('binding')}`） |")
     lines.append(f"| sl_adj | {float(meta.get('sl_adj') or 1):.6f} |")
     lines.append("")
-    lines.append("### 4.2 呼吸止损 tick 抽样")
+    lines.append("### 4.2 雷达止损 tick 抽样")
     lines.append("")
     lines.append("| markPrice | currentStop | 阶段信息 |")
     lines.append("|---:|---:|:---|")

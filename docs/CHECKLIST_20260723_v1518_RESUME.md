@@ -11,7 +11,7 @@
 | 3 | **已确认** | `tv_seq` 1.0s 同窗：先全部平仓，再开仓 |
 | 4 | **已确认** | 无先开后平 / 开平并行路径 |
 | 5 | **已确认** | 加仓生效路径删除；`compute_vps_add_qty` 恒 0 |
-| 6 | **已确认** | 无旧「保护性全平」；保留呼吸止损触发 / FORCE_ALIGN / 裸仓中止 |
+| 6 | **已确认** | 无旧「保护性全平」；保留雷达止损触发 / FORCE_ALIGN / 裸仓中止 |
 | 7 | **已确认** | `compute_fixed_order_qty` 无状态纯函数；天文 TV.qty 忽略 |
 | 8 | **已确认** | 止损唯一写入 = `_sync_exchange_stop` / breath 引擎 |
 | 9 | **已确认** | TP 成交只 `_breath_resize_stop_on_tp` 缩量；旧 entry±1tick 对账已清空壳 |

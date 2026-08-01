@@ -232,7 +232,7 @@ def _ensure_flat_before_open(self, reason_tag="开仓前"):
 | **最终 qty** | **0.035000**（binding=`adjusted_tv_qty`） |
 | sl_adj | 0.716353 |
 
-### 4.2 呼吸止损 tick 抽样
+### 4.2 雷达止损 tick 抽样
 
 | markPrice | currentStop | 阶段信息 |
 |---:|---:|:---|

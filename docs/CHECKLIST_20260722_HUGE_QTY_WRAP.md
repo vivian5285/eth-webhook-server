@@ -68,7 +68,7 @@
 | 3.4 | 去重 | **仍然符合** | 既有幂等签名逻辑未改 |
 | 4.1 | 先平后开失败中止 | **仍然符合** | `CLOSE_THEN_OPEN_FAIL_ABORT` sticky |
 | 4.2 | 裁剪与三选一组合 | **仍然符合** | 先三选一（含 absurd），再 margin_cap；binding 追加 `+margin_cap` |
-| 5.* | 呼吸止损四项 | **要求复跑既有单测** | `test_stop_*` / `test_restart_*` / `test_copy_and_tp_timeout` |
+| 5.* | 雷达止损四项 | **要求复跑既有单测** | `test_stop_*` / `test_restart_*` / `test_copy_and_tp_timeout` |
 | 6.* | 全平清零 / get_position fail-closed | **仍然符合** | 既有逻辑 + `test_position_query_fail_safe` |
 | 7.* | 钉钉 R3/超时归因 + 时序 | **已加固** | 见第一节第 5 条 |
 | 8.* | 极端输入 | **已扩测** | 见 `test_huge_tv_qty_sizing.py` 新增用例清单 |

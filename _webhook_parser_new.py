@@ -59,10 +59,9 @@ VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 LEG_TP_RATIOS = [0.10, 0.20, 0.70]
 PLACE_TP_LEVELS = 2  # 仅挂 TP1+TP2；TP3 无上限交雷达（白皮书 §6 / §13.1#4）
 
-# ── 递进雷达启动（v15.8.0；默认首次 50% TP1 距）────────────────────────────
-RADAR_ACTIVATE_TP1_FRAC = 0.70  # 兼容旧常量；现行=ADX插值70%~90%
-RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐 breath STEP_TRIGGER
-RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐 breath STEP_ADVANCE
+# ── 雷达跟踪参数（兼容旧常量名；实际数值由 config/reentry_tiers.json 决定）─────────
+RADAR_STEP_ATR = 0.75          # 兼容名 → 对齐雷达 STEP_TRIGGER
+RADAR_LOCK_ATR = 0.4           # 兼容名 → 对齐雷达 STEP_ADVANCE
 RADAR_TP1_FLOOR_ATR = 0.5
 RADAR_TP2_FLOOR_ATR = 1.5
 RADAR_TP3_TRAIL_ATR = 0.0
@@ -80,15 +79,10 @@ TV_REGIME_TP_RATIOS = {1: list(LEG_TP_RATIOS), 2: list(LEG_TP_RATIOS),
                        3: list(LEG_TP_RATIOS), 4: list(LEG_TP_RATIOS)}
 TV_REGIME_TP_MULT = {1: (0.75, 1.4, 2.0), 2: (1.10, 2.0, 2.8),
                      3: (1.30, 2.6, 3.8), 4: (1.55, 3.0, 4.8)}
-RADAR_ACTIVATION_RATIO_BY_REGIME = {1: 0.50, 2: 0.50, 3: 0.50, 4: 0.50}
 RADAR_TRAIL_STEP_BY_REGIME = {1: RADAR_STEP_ATR, 2: RADAR_STEP_ATR,
                              3: RADAR_STEP_ATR, 4: RADAR_STEP_ATR}
 RADAR_BREATH_ATR_BY_REGIME = {1: RADAR_LOCK_ATR, 2: RADAR_LOCK_ATR,
                              3: RADAR_LOCK_ATR, 4: RADAR_LOCK_ATR}
-RADAR_ACTIVATION_RATIO = 0.50
-RADAR_TP1_REMAINING_PCT = 1.0
-RADAR_STAGE1_TP1_RATIO = 0.0
-RADAR_STAGE2_TP1_RATIO = 0.0
 RADAR_STAGE_ATR_MULT = {}
 VPS_HARD_SL_PCT = {}
 VPS_HARD_SL_EXTRA_RELAX = 0.0
@@ -158,10 +152,10 @@ EXIT_SOURCE_QUICK = "quick_exit"
 EXIT_SOURCE_RSI = "rsi_exit"
 
 EXIT_SOURCE_LABELS = {
-    EXIT_SOURCE_RADAR_BE: "止损平仓(呼吸止损)",
-    EXIT_SOURCE_VPS_HARD_SL: "止损平仓(呼吸止损)",
-    EXIT_SOURCE_SL_INITIAL: "止损平仓(呼吸止损·保本位)",
-    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓(呼吸止损追踪)",
+    EXIT_SOURCE_RADAR_BE: "止损平仓(雷达止损)",
+    EXIT_SOURCE_VPS_HARD_SL: "止损平仓(雷达止损)",
+    EXIT_SOURCE_SL_INITIAL: "止损平仓(雷达止损·保本位)",
+    EXIT_SOURCE_SL_BREAKEVEN: "止损平仓(雷达止损追踪)",
     EXIT_SOURCE_TP3: "TP余仓追踪收网",
     EXIT_SOURCE_TV_CLOSE: "TV主动全平",
     EXIT_SOURCE_TV_PROTECT: "TV反转保护",
@@ -172,9 +166,9 @@ EXIT_SOURCE_LABELS = {
 }
 
 RADAR_STAGE_LABELS = {
-    0: "呼吸止损·开仓即挂",
-    1: "呼吸止损·阶梯锁本",
-    2: "呼吸止损·动态追踪",
+    0: "硬止损保护（雷达未激活）",
+    1: "雷达已激活·保本/阶梯推进",
+    2: "雷达已激活·动态追踪",
 }
 
 
@@ -235,20 +229,6 @@ def get_leg_tp_ratios(payload=None):
     return list(LEG_TP_RATIOS)
 
 
-def get_radar_activation_ratio(regime=None):
-    """缺省启动比例下限 70%；运行时由开仓 ADX 冻结覆盖。"""
-    _ = regime
-    return float(RADAR_ACTIVATE_TP1_FRAC)
-
-
-def format_radar_activation_ratios_label():
-    return (
-        "ADX启动70%~90%×1.35ATR"
-        "|智能再入≤1次·限价优于TV"
-        "|硬止损不重入"
-    )
-
-
 def get_radar_trail_step(regime=None):
     """兼容：breath 阶梯步长 0.75。"""
     return float(RADAR_STEP_ATR)
@@ -285,22 +265,22 @@ def compute_vps_hard_sl_limit_price(side, trigger_px, offset=None):
 
 
 def format_vps_hard_sl_note(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):
-    """呼吸止损说明（TV stop_loss 仅参考）。"""
+    """雷达止损说明（TV stop_loss 仅参考）。"""
     try:
         from breath_stop import INITIAL_SL_ATR, initial_stop_price
         atr_f = float(atr or 0)
         if atr_f > 0 and entry:
             px = initial_stop_price(side, entry, atr_f)
             return (
-                f"呼吸止损 `{px:.2f}` | entry±{INITIAL_SL_ATR}×ATR={atr_f:.2f} "
+                f"雷达止损 `{px:.2f}` | entry±{INITIAL_SL_ATR}×ATR={atr_f:.2f} "
                 f"| closePosition 开仓即追踪"
             )
     except Exception:
         pass
     ref = float(tv_sl_ref or 0)
     if ref > 0:
-        return f"呼吸止损待ATR绑定 | TV参考 `{ref:.2f}`(不挂盘)"
-    return "呼吸止损待绑定 | 须 webhook atr"
+        return f"雷达止损待ATR绑定 | TV参考 `{ref:.2f}`(不挂盘)"
+    return "雷达止损待绑定 | 须 webhook atr"
 
 
 def format_tv_vps_sl_compare(side, entry, atr=None, regime=3, tv_sl_ref=0, extra_relax=None):

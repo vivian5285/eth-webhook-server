@@ -1,7 +1,7 @@
 # 已删除 / 已废除旧逻辑清单（v15.5.13-prod-gate）
 
 交付日期: 2026-07-22  
-范围: binance-engine 生产主路径（webhook → 开仓 → TP → 呼吸止损 → 平仓 → 钉钉）
+范围: binance-engine 生产主路径（webhook → 开仓 → TP → 雷达止损 → 平仓 → 钉钉）
 
 ## 1. 已从实盘决策路径清除 / 禁止
 
@@ -12,9 +12,9 @@
 | 加仓 / pyramiding>1 | 废除 | `_max_add_times_*=0`；`_handle_add_entry` 等为 no-op；收到 PYRAMID/PROFIT_ADD 忽略 |
 | `opentrades` 驱动加仓 | 废除 | 单仓位 pyramiding=1 |
 | CAP_ALIGN 主动减仓 | 废除 | `_trim_*` 仅告警，禁止 reduceOnly 自主减仓 |
-| TP3 限价挂单主路径 | 废除 | `_tp_slices_for_initial` 仅返回 TP1+TP2；余仓不挂限价，交呼吸止损 |
+| TP3 限价挂单主路径 | 废除 | `_tp_slices_for_initial` 仅返回 TP1+TP2；余仓不挂限价，交雷达止损 |
 | webhook `CLOSE_TP` / `CLOSE_TRAIL` / `CLOSE_SL_*` / `CLOSE_TP3` | 不进 VALID_ACTIONS | 仅 5 action：LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT/PING |
-| `UPDATE_SL` / `UPDATE_TP` | 废除改挂 | 兼容入口仅记 TV 参考，盘口维持呼吸止损单槽 |
+| `UPDATE_SL` / `UPDATE_TP` | 废除改挂 | 兼容入口仅记 TV 参考，盘口维持雷达止损单槽 |
 | `leg` 字段驱动分腿 webhook | 废除主路径 | 平仓只认 QUICK/RSI；分腿由交易所 TP 成交 + 哨兵驱动 |
 | 同向开仓「跳过平仓」特例 | 废除 | `_same_direction_entry_mode` 一律先平后开 FULL_REENTRY |
 

@@ -415,7 +415,7 @@ def audit_module2_sizing(a: Audit):
 
     a.check("2.9 禁止 TV_RISK_FORMULA", "TV_RISK_FORMULA" not in wp)
     a.check(
-        "2.10 supervisor 呼吸止损/风险/暂停/ATR/超时",
+        "2.10 supervisor 雷达止损/风险/暂停/ATR/超时",
         ("from breath_stop import" in sup or "calculate_breath_stop" in sup)
         and ("compute_ladder_radar_sl" not in sup)
         and ("RISK20" in sup or "FIXED_LEVERAGE" in sup or "risk20" in wp)
@@ -441,7 +441,7 @@ def audit_module2_sizing(a: Audit):
 
 
 def audit_module3_hard_sl(a: Audit):
-    a.section("模块三 · 呼吸止损（永久硬止损+独立雷达双 STOP）")
+    a.section("模块三 · 雷达止损（永久硬止损+独立雷达双 STOP）")
     from webhook_parser import VPS_HARD_SL_PCT, compute_vps_hard_sl
     from breath_stop import (
         INITIAL_SL_ATR,
@@ -469,7 +469,7 @@ def audit_module3_hard_sl(a: Audit):
         breathing_coefficient=1.0,
     )
     a.check(
-        "3.1f 阶段一阶梯推进",
+        "3.1f 雷达阶梯推进阶梯推进",
         float(out["stop"]) > _init_sl and out.get("meta", {}).get("phase") == "ladder",
         f"stop={out['stop']} meta={out.get('meta')}",
     )
@@ -487,7 +487,7 @@ def audit_module3_hard_sl(a: Audit):
     _eth_mid = trail_distance_multiplier(1.0, BREATH_ETH)
     coeff, smooth, _ = get_breathing_coefficient(20.0, 20.0, [], profile=BREATH_ETH)
     a.check(
-        "3.1h 呼吸系数 ratio=1 → 插值中间值",
+        "3.1h 雷达系数 ratio=1 → 插值中间值",
         abs(coeff - _eth_mid) < 1e-6 and abs(smooth - 1.0) < 1e-9,
         f"coeff={coeff} smooth={smooth} expect={_eth_mid}",
     )
@@ -559,7 +559,7 @@ def audit_module3_hard_sl(a: Audit):
         and "TV方向为准·强制平仓" in sup,
     )
     a.check(
-        "3.12 呼吸止损允许低于入场",
+        "3.12 雷达止损允许低于入场",
         "_is_valid_radar_sl" in sup
         and "只要正价即可" in sup,
     )
@@ -595,7 +595,7 @@ def audit_module3_hard_sl(a: Audit):
 
 
 def audit_module4_radar(a: Audit):
-    a.section("模块四 · 呼吸止损雷达（TV atr + 1h 呼吸系数）")
+    a.section("模块四 · 雷达止损雷达（TV atr + 1h 雷达系数）")
     sup = _read(os.path.join(ROOT, "position_supervisor_binance.py"))
     dt = _read(os.path.join(ROOT, "dingtalk.py"))
     wp = _read(os.path.join(ROOT, "webhook_parser.py"))
@@ -619,7 +619,7 @@ def audit_module4_radar(a: Audit):
             or "step_advance_atr" in bs
         ),
     )
-    a.check("4.1d 呼吸系数连续插值", "get_breathing_coefficient" in bs and "trail_distance_multiplier" in open(os.path.join(ROOT, "breath_profiles.py"), encoding="utf-8").read())
+    a.check("4.1d 雷达系数连续插值", "get_breathing_coefficient" in bs and "trail_distance_multiplier" in open(os.path.join(ROOT, "breath_profiles.py"), encoding="utf-8").read())
     a.check("4.1e atr_1h 已删除(ATR只信TV)", not os.path.isfile(a1h_path) and "from atr_1h import" not in sup)
     from breath_stop import STEP_TRIGGER_ATR, STEP_ADVANCE_ATR
     a.check("4.1f ETH默认阶梯数值", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
@@ -644,7 +644,7 @@ def audit_module4_radar(a: Audit):
         and "breath_profile" in sup,
     )
     a.check(
-        "4.2c tick 用呼吸系数关键字传参",
+        "4.2c tick 用雷达系数关键字传参",
         "breathing_coefficient=coeff" in sup or "breathing_coefficient=" in sup,
     )
     a.check(
@@ -697,12 +697,12 @@ def audit_module4_radar(a: Audit):
         "early_be_done" in sup,
     )
     a.check(
-        "4.3 钉钉阶段二文案",
-        "阶段二" in dt and ("呼吸追踪" in dt or "呼吸系数" in dt),
+        "4.3 钉钉雷达动态追踪文案",
+        "雷达动态追踪" in dt and ("呼吸追踪" in dt or "雷达系数" in dt),
     )
     a.check(
         "4.3b 阶段切换钉钉",
-        "阶段切换" in dt and "阶段二" in dt,
+        "阶段切换" in dt and "雷达动态追踪" in dt,
     )
     a.check(
         "4.3c 止损数量收缩",
@@ -823,24 +823,18 @@ def audit_module4_radar(a: Audit):
         "4.5c3 开仓 atr 只认 TV（禁止本地回填）",
         '_atr_reject' in wp
         and '"tv_invalid"' in wp
-        and "RADAR_ACTIVATE_TP1_FRAC" in wp
+        and "radar_gate_price_from_tps" in wp
         and "RADAR_TP3_TRAIL_ATR = 0.0" in wp,
     )
     from reentry_profiles import (
         HARD_SL_BUFFER_MULT as _BUF,
-        RADAR_ACT_RATIO_LO as _RLO,
-        RADAR_ACT_RATIO_HI as _RHI,
-        radar_activation_price_adx as _gate_adx,
-        radar_activation_ratio_from_adx as _ratio_adx,
+        radar_gate_price_from_tps as _gate_fn,
     )
     a.check(
-        "4.5c3b 激活门=ADX65%~90%×1.35ATR(弱早强晚)",
-        abs(_RLO - 0.68) < 1e-9 and abs(_RHI - 0.88) < 1e-9
-        and abs(_ratio_adx(17) - 0.68) < 1e-9
-        and abs(_ratio_adx(35) - 0.88) < 1e-9
-        and abs(_gate_adx("LONG", 3000, 20, adx=17) - 3018.36) < 1e-2
-        and abs(_gate_adx("LONG", 3000, 20, adx=35) - 3023.76) < 1e-2,
-        f"lo={_RLO} hi={_RHI} r17={_ratio_adx(17)} r35={_ratio_adx(35)}",
+        "4.5c3b 雷达激活价=绝对价格锚定（首次(TP1+TP2)/2，重入=TP2）",
+        abs(_gate_fn(3000.0, 3100.0, 0) - 3050.0) < 1e-2
+        and abs(_gate_fn(3000.0, 3100.0, 1) - 3100.0) < 1e-2,
+        f"first={_gate_fn(3000.0, 3100.0, 0)} reentry={_gate_fn(3000.0, 3100.0, 1)}",
     )
     a.check("4.5c3c 硬止损呼吸垫统一1.15", abs(_BUF - 1.15) < 1e-9, str(_BUF))
     from webhook_parser import SIGNAL_DEDUP_SEC as _DEDUP
@@ -869,14 +863,14 @@ def audit_module4_radar(a: Audit):
         and "exit_source" in dt,
     )
     a.check(
-        "4.14 阶段二钉钉+哨兵补发",
+        "4.14 雷达动态追踪钉钉+哨兵补发",
         "_flush_pending_radar_notify" in sup
         and "_radar_notify_pending" in sup
         and "radar_activation_notified" in sup,
     )
     a.check(
         "4.15 开单钉钉含止损价",
-        "hard_sl_px" in dt and "呼吸止损" in dt,
+        "hard_sl_px" in dt and "雷达止损" in dt,
     )
     a.check(
         "4.16 TP成交记账",
@@ -999,7 +993,7 @@ def audit_module8_dingtalk(a: Audit):
     )
     a.check(
         "钉钉止损平仓文案",
-        "止损平仓（阶段一）" in dt or "止损平仓" in dt,
+        "止损平仓（雷达阶梯推进）" in dt or "止损平仓" in dt,
     )
     a.check(
         "钉钉档位对账字段",
@@ -1034,7 +1028,7 @@ def audit_readme_consistency(a: Audit):
     )
     a.check(
         "README 硬止损描述",
-        ("呼吸止损" in readme or "1.5×ATR" in readme or "1.5xATR" in readme)
+        ("雷达止损" in readme or "1.5×ATR" in readme or "1.5xATR" in readme)
         and ("VPS 自主硬止损（开仓价" not in readme),
     )
     a.check("README 检查清单链接", "check_vps_logic" in readme or "VPS实盘检查清单" in readme)
@@ -1047,10 +1041,11 @@ def audit_readme_consistency(a: Audit):
         and "仓位三件套" not in readme,
     )
     a.check(
-        "README 呼吸止损参数",
-        ("呼吸止损" in readme or "breath" in readme.lower() or "雷达" in readme)
-        and ("1.15" in readme or "呼吸系数" in readme or "breathing" in readme.lower())
-        and ("70%" in readme or "ADX" in readme and "启动" in readme)
+        "README 雷达止损参数",
+        ("雷达止损" in readme or "breath" in readme.lower() or "雷达" in readme)
+        and ("1.15" in readme or "雷达系数" in readme or "breathing" in readme.lower())
+        and "(TP1 + TP2) / 2" in readme
+        and "TP2" in readme
         and ("1.00" in readme or "100%" in readme),
     )
     a.check(
@@ -1062,7 +1057,7 @@ def audit_readme_consistency(a: Audit):
         "README 核心铁律保留",
         "先平后开" in readme
         and ("reduceOnly" in readme or "TP1+TP2" in readme or "双 STOP" in readme or "三层防线" in readme)
-        and ("呼吸止损" in readme or "双轨" in readme or "雷达止损" in readme),
+        and ("雷达止损" in readme or "双轨" in readme or "雷达止损" in readme),
     )
     a.check(
         "README 废弃对账已说明",
