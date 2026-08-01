@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-呼吸止损引擎（马拉松雷达 · 被动跟随）
+雷达止损引擎（被动跟随）
 
 规格 v1.0 边界：
   · 雷达激活前不调用本引擎推进止损
   · 激活臂 = 保本起步 entry ± tick ± fee_cover（禁止跳到 TP1 底线）
   · 阶梯：step_trigger / step_advance × initial_atr（按 ADX 档）
   · 分区呼吸：TP1–TP2 / TP2–TP3 / TP3+ 使用 breath_tp12 / breath_tp23 / trail(min~max)
-  · 取消 TP1/TP2 强制底线；浮盈≥phase_switch_atr(默认3) 切入阶段二
+  · 取消 TP1/TP2 强制底线；浮盈≥phase_switch_atr(默认3) 切入动态追踪阶段
   · 禁用早保本抢跑（early_be_atr=0）
   · 规格 §5.0 提前保本检查点：见 supervisor._check_early_be_checkpoint
   · 规格 §5.1 雷达激活 = 绝对价格锚定，不走旧 ATR 比例公式
@@ -102,7 +102,7 @@ def initial_stop_price(
     profile: Optional[Dict[str, Any]] = None,
 ) -> float:
     """
-    雷达激活臂（马拉松保本起步）：
+    雷达激活臂（保本起步）：
       多 = entry + tick + fee_cover
       空 = entry − tick − fee_cover
     initial_atr 保留签名兼容；不再用于跳到 ±0.5ATR。
@@ -261,7 +261,7 @@ def calculate_stop_long(
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
     )
     trail_dist = trail_mult * initial_atr
-    # 浮盈≥phase_switch → 阶段二；或已过 TP3
+    # 浮盈≥phase_switch → 动态追踪阶段；或已过 TP3
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
     mfe_atr = (new_highest - entry_price) / initial_atr if initial_atr > 0 else 0.0
     new_phase = zone == "tp3_plus" or (phase_sw > 0 and mfe_atr >= phase_sw)
@@ -275,12 +275,12 @@ def calculate_stop_long(
     # 分区呼吸：止损不得远落后于最高价超过 trail_dist
     trail_floor = new_highest - trail_dist
     if new_phase:
-        # 阶段二：连续追踪为主，阶梯不打断
+        # 动态追踪阶段：连续追踪为主，阶梯不打断
         candidate = max(candidate, trail_floor)
     else:
         candidate = max(candidate, trail_floor)
 
-    # 马拉松：禁止 TP1/TP2 强制底线抬升（floor_atr<=0 跳过）
+    # 规格 v1.0：禁止 TP1/TP2 强制底线抬升（floor_atr<=0 跳过）
     f1 = float(p.get("tp1_floor_atr") or 0.0)
     f2 = float(p.get("tp2_floor_atr") or 0.0)
     if f2 > 0 and zone in ("tp2_tp3", "tp3_plus"):
@@ -363,7 +363,7 @@ def calculate_stop_short(
     else:
         candidate = min(candidate, trail_ceil)
 
-    # 马拉松：禁止 TP1/TP2 强制底线（floor_atr<=0 跳过）
+    # 规格 v1.0：禁止 TP1/TP2 强制底线（floor_atr<=0 跳过）
     f1 = float(p.get("tp1_floor_atr") or 0.0)
     f2 = float(p.get("tp2_floor_atr") or 0.0)
     if f2 > 0 and zone in ("tp2_tp3", "tp3_plus"):

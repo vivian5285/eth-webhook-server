@@ -11,9 +11,7 @@ import time
 from typing import Any, Dict, Optional
 
 from reentry_profiles import (
-    ACTIVATION_TP1_FRAC,
     STERILE_MAX_RETRY,
-    activation_frac_for_attempt,
     apply_tier_to_breath_profile,
     arm_stop_price,
     get_reentry_profile,
@@ -54,7 +52,7 @@ class RadarReentryMixin:
                 getattr(self, "reentry_window_deadline_ts", 0) or 0
             ),
             "radar_activation_frac": float(
-                getattr(self, "radar_activation_frac", ACTIVATION_TP1_FRAC) or ACTIVATION_TP1_FRAC
+                getattr(self, "radar_activation_frac", 0.0) or 0.0
             ),
             "radar_activation_price": float(
                 getattr(self, "radar_activation_price", 0) or 0
@@ -150,7 +148,7 @@ class RadarReentryMixin:
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,
                                   reentry_attempt=None, adx_tier=None, radar_tier=None,
                                   adx=None, activation_ratio=None):
-        """开仓后：硬+TP 已挂；雷达休眠至 ADX 启动线。"""
+        """开仓后：硬+TP 已挂；雷达休眠至雷达激活线。"""
         attempt = int(
             reentry_attempt if reentry_attempt is not None
             else getattr(self, "reentry_attempt", 0) or 0
@@ -211,7 +209,7 @@ class RadarReentryMixin:
         return not bool(getattr(self, "radar_activated", False))
 
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
-        """价触激活线（或本周期 sticky）：挂雷达 STOP@保本位，开始马拉松跟随。"""
+        """价触激活线（或本周期 sticky）：挂雷达 STOP@保本位，开始雷达动态跟随。"""
         if bool(getattr(self, "radar_activated", False)):
             return True
         force = "强制" in str(source or "") or "force" in str(source or "").lower()
@@ -283,12 +281,12 @@ class RadarReentryMixin:
         self.radar_pending_arm = False
         self._radar_handoff_done = True
         self._radar_armed_after_tp1 = True
-        frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
+        frac = float(getattr(self, "radar_activation_frac", 0.0) or 0.0)
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         open_kind = "重入开仓" if attempt >= 1 else "首次开仓"
         # 规格 v1.0：绝对价格锚定
         self._radar_trigger_gate = (
-            f"马拉松雷达已激活·保本起步·{open_kind}·绝对价格锚定 | "
+            f"雷达已激活·保本起步·{open_kind}·绝对价格锚定 | "
             f"{source or '价触'}"
         )
         self._radar_stage_last = 1
@@ -303,7 +301,7 @@ class RadarReentryMixin:
                 logger.debug(f"雷达激活钉钉跳过: {e}")
         self._save_state()
         logger.info(
-            f"📡 [{self.symbol}] 马拉松雷达已激活·保本起步 @{init:.2f} "
+            f"📡 [{self.symbol}] 雷达已激活·保本起步 @{init:.2f} "
             f"(entry={entry:.2f}) | {self._radar_trigger_gate} | hung=True"
         )
         return True
@@ -336,7 +334,7 @@ class RadarReentryMixin:
             ),
             "reentry_attempt": int(getattr(self, "reentry_attempt", 0) or 0),
             "radar_activation_frac": float(
-                getattr(self, "radar_activation_frac", 0) or 0.78
+                getattr(self, "radar_activation_frac", 0) or 0.0
             ),
             "tv_tps": list(getattr(self, "tv_tps", None) or [0, 0, 0]),
             "frozen_hard_sl_px": float(getattr(self, "frozen_hard_sl_px", 0) or 0),
@@ -609,10 +607,8 @@ class RadarReentryMixin:
         self.cycle_entry = entry
         self.reentry_attempt = attempt
         self.radar_tier = attempt
-        self.radar_activation_frac = float(
-            snap.get("radar_activation_frac")
-            or activation_frac_for_attempt(attempt, get_reentry_profile(self.symbol))
-        )
+        # 规格 v1.0：雷达激活采用绝对价格锚定，不再保存 ADX/TP1 距离百分比。
+        self.radar_activation_frac = float(snap.get("radar_activation_frac") or 0.0)
         self.last_exit_source = exit_src
         self.last_exit_px = exit_px
         self.reentry_unfilled_refreshes = 0
@@ -886,7 +882,7 @@ class RadarReentryMixin:
         if side not in ("LONG", "SHORT") or entry <= 0 or qty <= 0:
             return False
         prev = int(getattr(self, "reentry_attempt", 0) or 0)
-        prev_frac = float(getattr(self, "radar_activation_frac", 0.5) or 0.5)
+        prev_frac = float(getattr(self, "radar_activation_frac", 0.0) or 0.0)
         bumped = bump_after_reentry_fill(
             prev, prev_frac, self.symbol,
             adx_tier=int(getattr(self, "adx_tier", 1) or 1),

@@ -6,7 +6,7 @@
 规格 v1.0：
   - 雷达激活臂 = 保本起步（entry±tick±fee），不再用 initial_sl_atr=0.5 跳价
   - 取消 TP1/TP2 强制底线（tp1_floor_atr=tp2_floor_atr=0）
-  - 浮盈≥3×ATR 切入阶段二连续追踪（phase_switch_atr=3）
+  - 浮盈≥3×ATR 切入动态追踪阶段连续追踪（phase_switch_atr=3）
   - 禁用早保本抢跑（early_be_atr=0）
   - 硬止损呼吸垫已迁至 defense_profiles 统一 1.15（本文件不管 buffer）
   - 本文件存基线；运行时 apply_tier_to_breath_profile 覆盖 step/breath/trail
@@ -25,13 +25,13 @@ RATIO_CEILING = 2.2
 # ETH 基线（中趋势档会 overlay）
 BREATH_ETH: Dict[str, Any] = {
     "name": "ETH",
-    "initial_sl_atr": 0.0,  # 马拉松：激活用保本位，不用 ATR 臂
+    "initial_sl_atr": 0.0,  # 规格 v1.0：激活用保本位，不用 ATR 臂
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
     "step_trigger_atr": 0.50,
     "step_advance_atr": 0.35,
-    "phase_switch_atr": 3.0,  # 浮盈≥3×ATR → 阶段二连续追踪
+    "phase_switch_atr": 3.0,  # 浮盈≥3×ATR → 动态追踪阶段连续追踪
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,  # 取消强制底线
     "tp2_atr": 2.5,

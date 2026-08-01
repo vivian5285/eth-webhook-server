@@ -11,7 +11,6 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 from reentry_profiles import (
-    ACTIVATION_TP1_FRAC,
     LIMIT_TTL_SEC,
     MAX_UNFILLED_REFRESHES,
     apply_tier_to_breath_profile,
@@ -19,9 +18,7 @@ from reentry_profiles import (
     compute_reentry_limit_px,
     get_reentry_profile,
     looser_tier,
-    normalize_activation_ratio,
     parse_kline_extreme,
-    radar_activation_ratio_from_adx,
     radar_gate_price_from_tps,
     reentry_window_deadline,
     tier_coeffs,
@@ -54,7 +51,7 @@ def blank_reentry_state() -> Dict[str, Any]:
         "reentry_attempt": 0,
         "radar_tier": 0,
         "adx_tier": 1,
-        "radar_activation_frac": float(ACTIVATION_TP1_FRAC),
+        "radar_activation_frac": 0.0,
         "radar_activation_sticky": False,
         "cycle_tv_price": 0.0,
         "cycle_tv_side": None,
@@ -98,10 +95,8 @@ def init_cycle_on_open(
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
     adx_v = float(adx) if adx is not None else 25.0
-    if activation_ratio is not None:
-        frac = normalize_activation_ratio(activation_ratio, adx_v)
-    else:
-        frac = radar_activation_ratio_from_adx(adx_v)
+    # 规格 v1.0：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
+    frac = 0.0
 
     # v1.0 规格 §5.1：雷达激活价 = 绝对价格锚定
     tp1_v = float(tp1 or 0)
@@ -213,8 +208,8 @@ def bump_after_reentry_fill(
     nxt = int(prev_attempt or 0) + 1
     base = int(adx_tier if adx_tier is not None else 1)
     loose = looser_tier(base)
-    adx_v = float(adx) if adx is not None else 25.0
-    frac = normalize_activation_ratio(prev_frac, adx_v)
+    # 规格 v1.0：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
+    frac = 0.0
 
     # v1.0 规格 §5.1：重入时雷达激活价 = TP2 绝对价格
     tp1_v = float(tp1 or 0)
