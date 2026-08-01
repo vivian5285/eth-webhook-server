@@ -2066,17 +2066,28 @@ class BinanceClient:
             logger.info(f"[市价平仓成功] {symbol}")
             return order
         except Exception as first_err:
-            # 【修复】reduceOnly 被拒绝时降级为普通市价单
-            logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败，降级为普通市价单: {first_err}")
+            # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
+            logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败: {first_err}")
+            logger.info(f"[市价平仓] {symbol} reduceOnly 失败，重新查询持仓状态...")
+            pos = self.get_position(symbol)
+            if not pos:
+                pos_amt = 0.0
+            else:
+                pos_amt = float(pos.get("positionAmt", 0))
+            
+            if abs(pos_amt) < 0.001:
+                # 确认无仓，拒绝执行降级（防止空仓变开仓）
+                logger.error(f"❌ [市价平仓] {symbol} reduceOnly 失败且已无仓，拒绝降级为开仓单")
+                return None
+            
+            # 有持仓，降级为普通市价单
+            logger.warning(f"⚠️ [市价平仓] {symbol} 确认有仓 {abs(pos_amt)} ETH，降级为普通市价单")
             self._throttle_rest(symbol, kind="rest")
             order = self.client.futures_create_order(
                 symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=False
             )
             logger.info(f"[市价平仓成功-降级] {symbol}")
             return order
-        except Exception as e:
-            logger.error(f"[市价平仓失败] {symbol}: {e}")
-            return None
 
     def fetch_klines(self, symbol="ETHUSDT", interval="30m", limit=220):
         """期货 K 线原始行（行情引擎拉 30m 合成 90m）。"""

@@ -68,11 +68,18 @@ class OrderExecutor:
 
                 # 【终极修复】强制开启 reduce_only=True，单向持仓绝对不会被双开！
                 order = self.client.place_market_order(side=action_side, quantity=close_qty, reduce_only=True)
-                # 【修复】reduceOnly 被拒绝时降级为普通市价单
+                # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
                 if not order:
                     logger.warning(
-                        f"⚠️ [OrderExecutor] 部分平仓 reduceOnly 失败，降级为普通市价单"
+                        f"⚠️ [OrderExecutor] 部分平仓 reduceOnly 失败，重新查询持仓状态"
                     )
+                    pos_check = self.client.get_position()
+                    if pos_check:
+                        remaining = float(pos_check.get("positionAmt", 0))
+                        logger.info(f"[OrderExecutor] 持仓复核: {remaining} ETH")
+                        if abs(remaining) < 0.001:
+                            logger.error(f"❌ [OrderExecutor] reduceOnly 失败且已无仓，拒绝降级为开仓单")
+                            return True, 0.0
                     order = self.client.place_market_order(side=action_side, quantity=close_qty, reduce_only=False)
                 if order:
                     time.sleep(1.5)

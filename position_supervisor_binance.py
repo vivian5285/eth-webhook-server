@@ -57,7 +57,6 @@ from webhook_parser import (
     get_regime_tp_ratios,
     get_leg_tp_ratios,
     format_regime_tp_ratios_label,
-    format_radar_activation_ratios_label,
     validate_tp_prices_for_side,
     normalize_entry_type,
     is_reconcile_action,
@@ -90,7 +89,6 @@ from webhook_parser import (
     RADAR_LOCK_ATR,
     RADAR_TP1_FLOOR_ATR,
     RADAR_TP2_FLOOR_ATR,
-    get_radar_activation_ratio,
     get_radar_trail_step,
     get_radar_breath_atr,
 )
@@ -121,8 +119,6 @@ from defense_profiles import (
 )
 from breath_profiles import LockedInitialAtr, cold_start_multiplier
 from reentry_profiles import (
-    ACTIVATION_TP1_FRAC,
-    activation_frac_for_attempt,
     adx_to_tier,
     arm_stop_price,
     get_reentry_profile,
@@ -198,7 +194,7 @@ SIGNAL_DEDUP_SEC = int(WP_SIGNAL_DEDUP_SEC or 60)
 DEFENSE_ALIGN_COOLDOWN_SEC = 60
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 SENTINEL_GRACE_AFTER_OPEN_SEC = 90
-# 递进雷达：开仓后休眠至 activation_frac×TP1距；无固定秒级禁窗
+# 递进雷达：开仓后休眠至 TP 绝对价格激活线；无固定秒级禁窗
 POST_OPEN_RADAR_BLOCK_SEC = 0
 RADAR_TRAIL_MIN_INTERVAL_SEC = 8
 # TP2→TP3 余仓（无 TP3 限价）：收紧追随步进/冷却，更快锁利收尾
@@ -399,7 +395,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.radar_step_count = 0
         self.radar_activated = False
         self._init_reentry_runtime()
-        self.breakeven_phase = False  # 呼吸止损阶段二
+        self.breakeven_phase = False  # 雷达动态追踪阶段
         self.initial_stop = 0.0       # 雷达初始止损基准（与永久硬止损分离）
         # 规格 v1.0 §5.0：提前保本检查点（雷达激活前，只做一次）
         self._early_be_checkpoint_done = False
@@ -415,7 +411,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._defense_ops_locked = False
         self._partial_resize_pending = False
         self._last_partial_resize_ts = 0.0
-        self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；阶段二已不依赖 ADX
+        self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；雷达动态追踪阶段不依赖 ADX
         self.adx_tier = 1
         self.hard_sl_buffer = 1.15
         self.breathing_coefficient = cold_start_multiplier(
@@ -988,7 +984,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"开单 {saved_initial} ETH | "
             f"来源={provenance.get('label') or ('历史TV关联' if link_historical_tv else '待核实')} | "
             f"止盈 {matched}/{expected} 档 | "
-            f"呼吸止损@{float(self._tv_hard_sl_target(entry_px) or 0):.2f} | "
+            f"雷达止损@{float(self._tv_hard_sl_target(entry_px) or 0):.2f} | "
             f"TV参考tv_sl="
             f"{(float(getattr(self, 'tv_sl_ref', 0) or 0) if link_historical_tv else 0) or '不适用'} | "
             f"雷达={'已激活' if radar_active else '待命'} | "
@@ -1050,7 +1046,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 tp_consumed_levels=getattr(self, "tp_levels_consumed", []) or [],
                 tv_regime=tv_r,
                 hard_sl_pct=get_vps_hard_sl_params(open_r).get("pct"),
-                radar_act_pct=get_radar_activation_ratio(open_r),
+                radar_act_pct=0.0,
             )
 
         if expected > 0 and matched < expected:
@@ -2146,7 +2142,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         接管补全防线上下文。
         link_historical_tv=False：未登记来源仓位 —— 禁止把缓存/日志里无关的旧 TV
-        tv_sl、regime、TP 当成「这笔仓」的来源；仅用行情 ATR 计算呼吸止损与TP。
+        tv_sl、regime、TP 当成「这笔仓」的来源；仅用行情 ATR 计算雷达止损与TP。
         """
         notes = []
         side = pos.get("side") or self.current_side
@@ -2193,7 +2189,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     source="接管补全·无TV关联",
                 ):
                     notes.append(
-                        f"呼吸止损@{float(getattr(self, 'tv_sl', 0) or 0):.2f}"
+                        f"雷达止损@{float(getattr(self, 'tv_sl', 0) or 0):.2f}"
                         f"(ATR={atr_lock:.2f}·无历史TV)"
                     )
                 else:
@@ -2301,7 +2297,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if self.tv_sl_ref > 0:
                         break
 
-        # 呼吸止损按 ATR 武装；TV tv_sl 仅参考
+        # 雷达止损按 ATR 武装；TV tv_sl 仅参考
         if entry > 0 and side in ("LONG", "SHORT"):
             atr_lock = float(
                 getattr(self, "open_atr", 0)
@@ -2315,7 +2311,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 source="接管补全",
             ):
                 notes.append(
-                    f"呼吸止损@{float(getattr(self, 'tv_sl', 0) or 0):.2f}"
+                    f"雷达止损@{float(getattr(self, 'tv_sl', 0) or 0):.2f}"
                 )
             else:
                 adopted = self._adopt_exchange_hard_sl(source="接管盘口采纳")
@@ -2358,11 +2354,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                                 pass
                         else:
                             sync = self._sync_exchange_stop(
-                                qty, radar_sl=None, reason="接管强制呼吸止损", force=True,
+                                qty, radar_sl=None, reason="接管强制雷达止损", force=True,
                             )
                             if sync.get("ok"):
                                 notes.append(
-                                    f"呼吸止损@{sync.get('target'):.2f}"
+                                    f"雷达止损@{sync.get('target'):.2f}"
                                     f"(撤{sync.get('purged', 0)})"
                                 )
 
@@ -2583,7 +2579,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
         """
-        全链防线：TP1+TP2 限价 + 呼吸止损单槽（唯一止损写入）。
+        全链防线：TP1+TP2 限价 + 雷达止损单槽（唯一止损写入）。
         开仓即跑 breath_stop；TP1/TP2 成交只通知引擎缩量，不独立强制改价。
         重启禁止用历史 best 误触保本。
         """
@@ -2649,7 +2645,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 notes.append(f"永久硬止损@{hard_locked:.2f}")
             else:
                 notes.append(f"永久硬止损@{hard_locked:.2f}·挂单失败")
-        # 无论账本是否有价，一律消毒对齐呼吸账本（雷达臂，≠永久硬止损）
+        # 无论账本是否有价，一律消毒对齐雷达账本（雷达臂，≠永久硬止损）
         self._sanitize_vps_hard_sl_ledger(source=f"{source} boot")
         if float(getattr(self, "tv_sl", 0) or 0) <= 0 and entry > 0:
             self._refresh_vps_hard_sl(
@@ -2794,10 +2790,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._maintain_hard_shield(live_qty, curr_px, force=True, radar_sl=sl)
         else:
             act_prog = self._radar_activation_progress(curr_px) if curr_px > 0 else 0.0
-            tp1_prog = self._tp1_direction_progress(curr_px) if curr_px > 0 else 0.0
             logger.info(
-                f"📡 [{source}] 雷达待命 激活进度{act_prog:.0%} "
-                f"朝TP1{tp1_prog:.0%} | "
+                f"📡 [{source}] 雷达待命 激活进度{act_prog:.0%} | "
                 f"VPS@{float(self._vps_hard_sl_target() or 0):.2f}"
                 f"(R{self._resolve_hard_sl_regime()}) | "
                 f"TP {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
@@ -3823,7 +3817,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _resolve_open_atr_with_degrade(self, px, tv_sl_ref=None):
         """
         开仓 ATR：必须用 TV webhook.atr 作为 initial_atr（缺则拒绝）。
-        1h ATR 只喂呼吸系数，不覆盖已锁定 initial_atr。
+        1h ATR 只喂雷达系数，不覆盖已锁定 initial_atr。
         """
         locked = float(getattr(self, "open_atr", 0) or 0)
         if float(getattr(self, "watched_qty", 0) or 0) > 0:
@@ -3875,7 +3869,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return None
 
     def _defense_buffer_mult(self):
-        """硬止损呼吸垫：统一 1.15（规格 3.4），与 adx_tier 无关；tier 仅保留兼容入参。"""
+        """硬止损缓冲垫：统一 1.15（规格 3.4），与 adx_tier 无关；tier 仅保留兼容入参。"""
         tier = getattr(self, "adx_tier", None)
         if tier is None:
             adx = float(getattr(self, "last_adx", 0) or 0)
@@ -3911,7 +3905,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return None
 
     def _bind_adx_tier_on_open(self, adx=None, tier=None):
-        """开仓时锁定 ADX 档位（仅雷达步进/呼吸；硬止损 buffer 恒 1.15）。
+        """开仓时锁定 ADX 档位（仅雷达步进/追踪；硬止损 buffer 恒 1.15）。
         规格 3.7：优先 TV.tier（0/1/2），缺省用 ADX 反推。
         """
         tv_tier = tier
@@ -3956,7 +3950,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _temp_hard_stop_from_tv(self, entry=None, side=None, tv_sl=None):
         """
         永久硬止损价（白皮书 v3.0）：
-          dist = |TV价 − TV.SL| × 1.15（统一呼吸垫，不分档）
+          dist = |TV价 − TV.SL| × 1.15（统一缓冲垫，不分档）
           挂在成交价外侧。禁止 1.5×ATR / 滑点×2 旧路径。
 
         修复（v16.11.x 根因一）：TV.stop_loss 方向校验。
@@ -4794,7 +4788,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _refresh_breathing_coefficient(self, force=False):
-        """呼吸系数固定 1.0（ATR 只用 TV 锁值，不再拉 1h 比值）。"""
+        """雷达系数固定 1.0（ATR 只用 TV 锁值，不再拉 1h 比值）。"""
         init = float(getattr(self, "open_atr", 0) or 0)
         self.breathing_coefficient = 1.0
         self._breath_coeff_meta = {
@@ -5168,7 +5162,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_enforce_regime_cap(self, live_qty, curr_px, force=False):
         """
-        已废除 CAP_ALIGN：新架构禁止 VPS 自主减仓（非 TV / 非呼吸止损）。
+        已废除 CAP_ALIGN：新架构禁止 VPS 自主减仓（非 TV / 非雷达止损）。
 
         哨兵/雷达守护路径必须纯 no-op：禁止再调用 _is_oversize_for_regime /
         _calc_vps_open_qty。持仓中用 mark−sl 反推「TV隐含ATR」会假偏差刷屏，
@@ -5286,7 +5280,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     close_side, pos["size"], symbol=self.symbol, reduce_only=False,
                 )
             time.sleep(1.0)
-        # 必须完整清零呼吸账本（禁止半清理残留 entry/sl/atr）
+        # 必须完整清零雷达账本（禁止半清理残留 entry/sl/atr）
         self._reset_breath_ledger_on_flat(source=f"蚂蚁仓扫尾·{reason}")
         self._open_regime_sticky = False
         self._save_state()
@@ -6140,7 +6134,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         重启/接管铁律（开仓价 + 实时价两头对账）：
         - 现价已达/越过 TPn → 记账跳过，禁止再挂该档（防 TP1 反复补挂秒成）
         - 只挂尚未达价的剩余档（TP1过→只挂23；TP2过→只挂3）
-        - 达阶段二激活条件或 TP1 已过 → 呼吸止损进入动态追随
+        - 达提前保本检查点或 TP1 已过 → 雷达止损进入动态追踪
         不要求减仓证据（接管时限价可能已成交或从未挂上）。
         """
         entry = float(entry or self.watched_entry or 0)
@@ -6187,12 +6181,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if self.tv_tps and lv - 1 < len(self.tv_tps) and float(self.tv_tps[lv - 1] or 0) > 0:
                 hang.append(lv)
 
-        act_ratio = float(self._radar_activation_ratio() or 0)
-        prog = float(self._tp1_direction_progress(curr_px) or 0)
+        act_prog = float(self._radar_activation_progress(curr_px) or 0)
         should_radar = bool(
             self._activation_reached_for_arm(curr_px)
             or (1 in merged)
-            or (act_ratio > 0 and prog >= act_ratio)
         )
         default_hang = list(range(1, place_n + 1))
         if past:
@@ -6205,7 +6197,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🧭 [{source}] [{self.symbol}] 开仓价/现价对账: "
                 f"已过 TP{past} → 禁止补挂这些档 | 只挂 {hang or '无'} | "
                 f"雷达={'应激活' if should_radar else '待命'} "
-                f"(朝TP1 {prog:.0%}/{act_ratio:.0%})"
+                f"(激活进度 {act_prog:.0%})"
             )
         else:
             notes.append(
@@ -6217,15 +6209,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🧭 [{source}] [{self.symbol}] 开仓价/现价对账: "
                 f"未过TP1 → 可挂 {hang or default_hang} | "
                 f"雷达={'应激活' if should_radar else '待命'} "
-                f"(朝TP1 {prog:.0%}/{act_ratio:.0%})"
+                f"(激活进度 {act_prog:.0%})"
             )
         return {
             "consumed": merged,
             "hang_levels": hang,
             "should_radar": should_radar,
             "notes": notes,
-            "progress": prog,
-            "act_ratio": act_ratio,
+            "progress": act_prog,
+            "act_ratio": 0.0,
             "entry": entry,
             "mark": curr_px,
         }
@@ -6706,7 +6698,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return None
 
     def _shield_stop_price(self, entry=None):
-        """实盘保护止损 = 呼吸止损 currentStop。"""
+        """实盘保护止损 = 雷达止损 currentStop。"""
         return self._tv_hard_sl_target(entry) or None
 
     def _resolve_hard_sl_regime(self):
@@ -6798,7 +6790,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _tv_hard_sl_target(self, entry=None, side=None, regime=None, allow_atr_invent=False):
         """
-        盘口保护止损唯一来源：呼吸 currentStop → initialStop →（可选）entry±1.5×ATR。
+        盘口保护止损唯一来源：雷达 currentStop → initialStop →（可选）entry±1.5×ATR。
         持仓维护默认禁止用 ATR/默认30 发明止损（重启窗口曾因此把 1910 改成 1886）。
         """
         cs = round(float(getattr(self, "current_sl", 0) or 0), 2)
@@ -6821,7 +6813,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
 
     def _vps_hard_sl_target(self, entry=None, side=None, regime=None):
-        """兼容旧名 → 呼吸止损。"""
+        """兼容旧名 → 雷达止损。"""
         return self._tv_hard_sl_target(entry, side, regime)
 
     def _matches_any_vps_regime_stop(self, stop_px, entry=None, side=None):
@@ -6837,14 +6829,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _is_valid_radar_sl(self, sl, entry=None, side=None):
         """
-        呼吸止损合法：只要正价即可（阶段一可低于入场价）。
+        雷达止损合法：只要正价即可（雷达未激活时可低于入场价）。
         贴市安全由 _can_safely_place_radar_sl / clamp 另行保证。
         """
         sl = round(float(sl or 0), 2)
         return sl > 0
 
     def _is_exchange_stop_acceptable_as_vps_floor(self, stop_px, entry=None, side=None):
-        """盘口 STOP 贴近呼吸止损目标即可写回。"""
+        """盘口 STOP 贴近雷达止损目标即可写回。"""
         stop_px = round(float(stop_px or 0), 2)
         if stop_px <= 0:
             return False
@@ -6875,7 +6867,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 ) or 0), 2)
             if target <= 0:
                 logger.error(
-                    f"🚨 [{self.symbol}] 呼吸止损账本消毒失败：无账本/盘口/锁定ATR "
+                    f"🚨 [{self.symbol}] 雷达止损账本消毒失败：无账本/盘口/锁定ATR "
                     f"| {source}（拒绝默认ATR=30发明）"
                 )
                 return False
@@ -6889,7 +6881,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._last_applied_exchange_sl = 0.0
             self._save_state()
             logger.info(
-                f"🫁 呼吸止损账本对齐 @{target:.2f} "
+                f"🫁 雷达止损账本对齐 @{target:.2f} "
                 f"(原 {old or 0:.2f}) | {source or '消毒'}"
             )
         return True
@@ -6897,7 +6889,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _refresh_vps_hard_sl(self, entry=None, side=None, regime=None, atr=None,
                              tv_sl_ref=None, source=""):
         """
-        呼吸止损刷新：entry±1.5×initialAtr 写入 initial_stop / current_sl。
+        雷达止损刷新：entry±1.5×initialAtr 写入 initial_stop / current_sl。
         TV stop_loss 仅记入 tv_sl_ref 作日志参考，不挂盘。
         """
         entry = float(entry or self.watched_entry or self.tv_price or 0)
@@ -6930,7 +6922,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.open_atr = locked
             else:
                 logger.error(
-                    f"🚨 [{self.symbol}] 呼吸止损无法计算：缺锁定 open_atr | {source} "
+                    f"🚨 [{self.symbol}] 雷达止损无法计算：缺锁定 open_atr | {source} "
                     f"entry={entry} side={side}（拒绝默认ATR=30）"
                 )
                 return False
@@ -6940,7 +6932,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         if init <= 0 or entry <= 0 or side not in ("LONG", "SHORT"):
             logger.error(
-                f"🚨 [{self.symbol}] 呼吸止损无法计算 | {source} "
+                f"🚨 [{self.symbol}] 雷达止损无法计算 | {source} "
                 f"entry={entry} side={side} atr={locked}"
             )
             return False
@@ -6980,7 +6972,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._last_applied_exchange_sl = 0.0
         self._save_state()
         logger.info(
-            f"🫁 呼吸止损 @{float(self.current_sl):.2f} "
+            f"🫁 雷达止损 @{float(self.current_sl):.2f} "
             f"(initial={init:.2f}·{INITIAL_SL_ATR}×ATR={locked:.2f}) | "
             f"{side or '?'} entry={entry:.2f}"
             + (f" ({source})" if source else "")
@@ -6993,7 +6985,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _apply_tv_sl_from_payload(self, payload, source=""):
         """
-        开仓/更新：用 ATR 武装呼吸止损；TV tv_sl 仅作参考字段。
+        开仓/更新：用 ATR 武装雷达止损；TV tv_sl 仅作参考字段。
         """
         entry = float(
             payload.get("price")
@@ -7020,18 +7012,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             atr, _meta = self._resolve_open_atr_with_degrade(entry, tv_sl_ref=None)
         tv_ref = payload.get("tv_sl") or payload.get("stop_loss")
         ref_px = round(self._safe_float(tv_ref, 0), 2) if tv_ref not in (None, "") else 0.0
-        # ADX 仅日志；呼吸系数用 1h ATR
+        # ADX 仅日志；雷达系数用 1h ATR
         self._refresh_market_metrics(force=False)
         self._refresh_breathing_coefficient(force=False)
         ok = self._refresh_vps_hard_sl(
             entry=entry, side=side,
             regime=self._resolve_hard_sl_regime(), atr=atr,
             tv_sl_ref=ref_px if ref_px > 0 else None,
-            source=source or "呼吸止损",
+            source=source or "雷达止损",
         )
         if not ok:
             dingtalk.report_system_alert(
-                f"呼吸止损失败 [{self.symbol}]",
+                f"雷达止损失败 [{self.symbol}]",
                 f"{source or '信号'} 无法计算 entry±{INITIAL_SL_ATR}×ATR 止损",
             )
         return ok
@@ -7047,7 +7039,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return round(init, 2) if init > 0 else None
 
     def _clamp_radar_to_vps_floor(self, radar_sl):
-        """兼容：非法 → 回退呼吸止损目标。"""
+        """兼容：非法 → 回退雷达止损目标。"""
         if not radar_sl:
             return self._tv_hard_sl_target() or radar_sl
         if self._is_valid_radar_sl(radar_sl):
@@ -7202,7 +7194,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _place_vps_hard_sl_order(self, live_qty, trigger_px, use_stop_limit=False):
         """
-        呼吸止损写入：STOP_MARKET + reduceOnly + 明确 quantity（跟随剩余仓位）。
+        雷达止损写入：STOP_MARKET + reduceOnly + 明确 quantity（跟随剩余仓位）。
         若贴市导致交易所拒单 → 返回 None，由上层紧急平仓（禁止改价保活）。
         """
         live_qty = self._resolve_live_qty(live_qty)
@@ -7487,12 +7479,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         target = self._effective_exchange_stop(radar_sl)
         if not target or target <= 0:
             logger.error(
-                f"🚨 [{self.symbol}] 同步呼吸止损失败：无有效 currentStop | {reason}"
+                f"🚨 [{self.symbol}] 同步雷达止损失败：无有效 currentStop | {reason}"
             )
             try:
                 self._call_dingtalk(
                     dingtalk.report_system_alert,
-                    title=f"呼吸止损缺失·无法挂单 [{self.symbol}]",
+                    title=f"雷达止损缺失·无法挂单 [{self.symbol}]",
                     detail=(
                         f"{self.current_side} qty={live_qty} | {reason or '同步'} | "
                         f"请核对 open_atr/initial_stop/current_sl"
@@ -7520,7 +7512,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_stops = self._radar_live_stops()
         if live_stops is None:
             logger.error(
-                f"🛡️ [{self.symbol}] 挂单查询失败 → 禁止补/改呼吸止损 | {reason}"
+                f"🛡️ [{self.symbol}] 挂单查询失败 → 禁止补/改雷达止损 | {reason}"
             )
             return {
                 "ok": False, "skipped": True, "reason": "orders_query_failed",
@@ -7654,7 +7646,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 ok = True
                 break
             logger.warning(
-                f"🛡️ [{self.symbol}] 呼吸止损挂单未核实 "
+                f"🛡️ [{self.symbol}] 雷达止损挂单未核实 "
                 f"@{exchange_target:.2f}(账本{ledger_target:.2f}) "
                 f"重试 {attempt + 1}/3 | {reason}"
             )
@@ -7663,7 +7655,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             purged = self._purge_all_protective_stops(keep_near=exchange_target)
             if purged or orphans:
                 logger.warning(
-                    f"🛡️ 统一呼吸止损：新挂已核实 @{exchange_target:.2f}，清孤儿 {purged} 笔 "
+                    f"🛡️ 统一雷达止损：新挂已核实 @{exchange_target:.2f}，清孤儿 {purged} 笔 "
                     f"(原盘口{live_stops})"
                 )
                 time.sleep(0.35)
@@ -7692,7 +7684,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     qty=live_qty,
                     target_sl=exchange_target,
                     attempts=3,
-                    reason=reason or "呼吸止损改单",
+                    reason=reason or "雷达止损改单",
                     detail=f"原盘口 STOP={live_stops} 已保留，禁止撤净裸仓",
                 )
             except Exception:
@@ -7749,7 +7741,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     qty=live_qty,
                     target_sl=exchange_target,
                     attempts=3,
-                    reason=reason or "呼吸止损挂单",
+                    reason=reason or "雷达止损挂单",
                     detail="盘口无 STOP → 裸仓风险；请人工按 currentStop 挂止损",
                 )
             except Exception:
@@ -7797,7 +7789,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._save_state()
             self._record_shield_maintain(success=True)
             logger.info(
-                f"✅ [{self.symbol}] 呼吸止损已挂 @{exchange_target:.2f}"
+                f"✅ [{self.symbol}] 雷达止损已挂 @{exchange_target:.2f}"
                 f"(账本{ledger_target:.2f}±{self._stop_buffer_usd()}) | {reason} | "
                 f"current_sl={float(getattr(self, 'current_sl', 0) or 0):.2f} | "
                 f"撤孤儿 {purged} 笔"
@@ -7827,7 +7819,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     qty=live_qty,
                     target_sl=exchange_target,
                     attempts=3,
-                    reason=reason or "呼吸止损核实",
+                    reason=reason or "雷达止损核实",
                     detail="重试后仍未核实到目标止损，保持现状",
                 )
             except Exception:
@@ -8297,8 +8289,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _clamp_radar_sl_for_market(self, curr_px, sl):
         """
         雷达 STOP 市价安全夹取：
-        - 阶段一（initialStop）：多 SL<entry、空 SL>entry — 保护向，只要距 mark 够远即可挂
-        - 阶段二（保本/追踪）：多 SL>entry、空 SL<entry — 浮盈侧锁定
+        - 未激活/initialStop：多 SL<entry、空 SL>entry — 保护向，只要距 mark 够远即可挂
+        - 已激活/保本追踪：多 SL>entry、空 SL<entry — 浮盈侧锁定
         禁止挂出会被立刻触发的贴市单。
         """
         if not sl or curr_px <= 0:
@@ -8314,12 +8306,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 sl = safe_cap
             if sl >= curr_px or sl > safe_cap:
                 return None
-            # 阶段一：成本下方保护止损（激活线后挂 initialStop）
+            # 未激活阶段：成本下方保护止损（激活线后挂 initialStop）
             if entry > 0 and sl <= entry + 0.01:
-                if sl >= entry:  # 贴成本不算阶段一
+                if sl >= entry:  # 贴成本不算未激活阶段
                     return None
                 return round(float(sl), 2)
-            # 阶段二：成本上方保本/追踪
+            # 已激活/保本追踪：成本上方保本/追踪
             floor = round(entry + 0.01, 2) if entry > 0 else 0.0
             if floor > 0 and sl < floor:
                 return None
@@ -8334,12 +8326,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 sl = safe_floor
             if sl <= curr_px or sl < safe_floor:
                 return None
-            # 阶段一：成本上方保护止损
+            # 未激活阶段：成本上方保护止损
             if entry > 0 and sl >= entry - 0.01:
                 if sl <= entry:
                     return None
                 return round(float(sl), 2)
-            # 阶段二：成本下方保本/追踪
+            # 已激活/保本追踪：成本下方保本/追踪
             ceiling = round(entry - 0.01, 2) if entry > 0 else sl
             if sl >= ceiling:
                 return None
@@ -8363,21 +8355,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _radar_placement_blocked(self, live_qty=None, curr_px=0.0, reason="", silent=False):
-        """开仓进行中禁止改单；呼吸止损无冷却窗。"""
+        """开仓进行中禁止改单；雷达止损无冷却窗。"""
         if getattr(self, "_open_in_progress", False):
             return True
         return False
 
     def _tp1_fill_allows_radar(self, live_qty=None, curr_px=0.0):
-        """兼容旧调用：TP1 成交不再作为交棒门槛（呼吸止损开仓即跑）。"""
+        """兼容旧调用：TP1 成交不再作为交棒门槛（雷达止损开仓即跑）。"""
         return True
 
     def _radar_ready_to_handoff(self, curr_px, live_qty=None):
-        """兼容旧调用：呼吸止损无需交棒门槛。"""
+        """兼容旧调用：雷达止损无需交棒门槛。"""
         return True
 
     def _resolve_armed_radar_sl(self, live_qty, curr_px, dynamic_sl=None):
-        """返回当前呼吸止损价。"""
+        """返回当前雷达止损价。"""
         if self._radar_placement_blocked(
             live_qty, curr_px, reason="resolve_radar", silent=True,
         ):
@@ -8391,7 +8383,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _notify_shield_handoff_to_radar(self, real_amt, curr_px, new_sl, reason="",
                                         sl_verified=False, cancelled_hint=0):
-        """旧「交棒撤硬止损」钉钉已废除；呼吸止损开仓即单槽，不再发本条。"""
+        """旧「交棒撤硬止损」钉钉已废除；雷达止损开仓即单槽，不再发本条。"""
         self._shield_handoff_notified = True
         return
 
@@ -8407,7 +8399,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _perform_radar_handoff(self, real_amt, curr_px, reason=""):
         """
-        兼容旧交棒入口 → 呼吸止损同步（开仓即运行，无激活线门槛）。
+        兼容旧交棒入口 → 雷达止损同步（开仓即运行，无激活线门槛）。
         禁止发旧「转雷达/撤硬止损」钉钉。
         """
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
@@ -8429,7 +8421,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         safe_sl = self._clamp_radar_sl_for_market(curr_px, new_sl) or new_sl
         if not self._can_safely_place_radar_sl(curr_px, safe_sl):
             logger.info(
-                f"🫁 [{self.symbol}] 呼吸止损暂缓挂单：@{safe_sl:.2f} 距市不足 | "
+                f"🫁 [{self.symbol}] 雷达止损暂缓挂单：@{safe_sl:.2f} 距市不足 | "
                 f"{reason or ''}"
             )
             return False
@@ -8449,7 +8441,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if ok and bool((tick or {}).get("phase_entered")):
             self._report_breath_phase2(real_amt, curr_px, safe_sl, sl_placed=True)
         logger.info(
-            f"🫁 [{self.symbol}] 呼吸止损同步 @{safe_sl:.2f} | {reason or '兼容交棒入口'}"
+            f"🫁 [{self.symbol}] 雷达止损同步 @{safe_sl:.2f} | {reason or '兼容交棒入口'}"
         )
         return bool(ok)
 
@@ -8462,7 +8454,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _ideal_radar_sl_is_safe(self, curr_px, sl):
         """
-        呼吸止损距市价缓冲：允许阶段一低于入场价（initial_stop）。
+        雷达止损距市价缓冲：允许未激活阶段低于入场价（initial_stop）。
         仅检查相对现价的安全间距，禁止贴市毛刺。
         """
         curr_px = float(curr_px or 0)
@@ -8477,17 +8469,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
-        """兼容旧调用 → 呼吸止损同步（禁止先撤 STOP 裸仓）。"""
+        """兼容旧调用 → 雷达止损同步（禁止先撤 STOP 裸仓）。"""
         real_amt = self._resolve_live_qty(self.watched_qty or 0)
         if real_amt <= 0:
             return {"cancelled": 0, "cleared": True, "verified": True}
         ok = self._perform_radar_handoff(
-            real_amt, curr_px, reason=reason or "呼吸止损同步",
+            real_amt, curr_px, reason=reason or "雷达止损同步",
         )
         return {"cancelled": 1 if ok else 0, "cleared": ok, "verified": ok}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
-        """呼吸止损已单槽合并，无需再「撤硬止损交棒」。"""
+        """雷达止损已单槽合并，无需再「撤硬止损交棒」。"""
         return False
 
     def _shield_needs_exchange_action(self, live_qty, audit):
@@ -8508,7 +8500,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         双轨并行（互不抢份额）：
         ① TP123 = reduceOnly 限价止盈
-        ② 呼吸止损 = 硬止损+雷达合并 closePosition 单槽（阶段一阶梯 / 阶段二ADX）
+        ② 雷达止损 = 硬止损+雷达合并 closePosition 单槽（未激活阶梯 / 已激活追踪）
         """
         if getattr(self, "trading_paused", False) or getattr(
             self, "api_monitor_only", False
@@ -8644,7 +8636,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _ratchet_radar_profit_floor(self, live_qty=None, curr_px=0.0, source=""):
         """
-        【已废除 · 马拉松 v16.8.0】旧 TP1/TP2 强制底线（entry±0.5/1.5×ATR）。
+        【已废除 · 雷达 v16.8.0】旧 TP1/TP2 强制底线（entry±0.5/1.5×ATR）。
         数量收缩与价格移动分离：TP 成交只缩量，止损价继续阶梯推进，不跳变。
         """
         _ = live_qty
@@ -8683,7 +8675,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _force_arm_radar_after_tp(self, live_qty, curr_px, source=""):
         """
-        TP 进度已证明该启动呼吸止损，但常规价触武装失败时的兜底。
+        TP 进度已证明该启动雷达止损，但常规价触武装失败时的兜底。
         仍走 _maybe_arm（挂 STOP）；仅在价触判定偏严时，临时用 best/mark 放宽一次。
         """
         if not self._radar_is_dormant():
@@ -9117,14 +9109,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         shield_ok = self._shield_orders_adequate(shield_audit)
 
         if should_radar or radar_active:
-            pnl_label = f"浮盈·雷达区 (进度 {radar_progress:.0%}·呼吸追踪)"
+            pnl_label = f"浮盈·雷达区 (进度 {radar_progress:.0%}·雷达追踪)"
             defense_plan = "雷达移动保本(优先级高于硬止损)"
         elif adverse > 0.001:
             pnl_label = f"浮亏 {adverse:.1%}"
             defense_plan = "持有 TP123 + TV硬止损"
         elif favorable > 0.001:
-            tp1_prog = self._tp1_direction_progress(curr_px)
-            pnl_label = f"浮盈 {favorable:.1%}·朝TP1 {tp1_prog:.0%}(雷达待命)"
+            act_prog = self._radar_activation_progress(curr_px)
+            pnl_label = f"浮盈 {favorable:.1%}·激活进度 {act_prog:.0%}(雷达待命)"
             defense_plan = "持有 TP123 + TV硬止损 (现价达激活线后才激活雷达)"
         else:
             pnl_label = "保本附近"
@@ -9252,7 +9244,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     and not getattr(self, "_radar_activation_notified", False)
                 ):
                     self._flush_pending_radar_notify(real_amt, curr_px)
-                actions.append(f"呼吸追踪·进度{health.get('radar_progress', 0):.0%}")
+                actions.append(f"雷达追踪·进度{health.get('radar_progress', 0):.0%}")
 
             self._radar_guardian_audit(real_amt, curr_px)
         except Exception as e:
@@ -10100,7 +10092,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None, for_handoff=False):
         """
-        挂呼吸止损 STOP（closePosition 单槽，不占 TP reduceOnly）。
+        挂雷达止损 STOP（closePosition 单槽，不占 TP reduceOnly）。
         开仓即允许；无旧激活线/交棒门槛。
         """
         if not dynamic_sl:
@@ -10111,13 +10103,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         if not self._is_valid_radar_sl(dynamic_sl):
             logger.warning(
-                f"🫁 [{self.symbol}] 拒绝呼吸止损 @{float(dynamic_sl):.2f}：无效价"
+                f"🫁 [{self.symbol}] 拒绝雷达止损 @{float(dynamic_sl):.2f}：无效价"
             )
             return False
         clamped = self._clamp_radar_sl_for_market(curr_px, dynamic_sl)
         if not clamped or not self._can_safely_place_radar_sl(curr_px, clamped):
             logger.warning(
-                f"🫁 [{self.symbol}] 拒绝呼吸止损：市价不安全 "
+                f"🫁 [{self.symbol}] 拒绝雷达止损：市价不安全 "
                 f"ideal={float(dynamic_sl):.2f} mark={curr_px:.2f}"
             )
             return False
@@ -10133,7 +10125,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         result = self._sync_exchange_stop(
             live_qty,
             radar_sl=clamped,
-            reason=f"呼吸止损 @ {clamped:.2f}",
+            reason=f"雷达止损 @ {clamped:.2f}",
             force=True if for_handoff else False,
         )
         return result.get("ok", False)
@@ -10148,7 +10140,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         if self._has_stop_sl_near(new_sl, exclude_shield=False):
             self._last_applied_exchange_sl = new_sl
-            logger.info(f"📡 呼吸止损已在 @{new_sl:.2f}，跳过撤挂")
+            logger.info(f"📡 雷达止损已在 @{new_sl:.2f}，跳过撤挂")
             return True
         last = round(float(getattr(self, "_last_applied_exchange_sl", 0) or 0), 2)
         if last > 0 and abs(last - new_sl) <= SHIELD_STOP_TOLERANCE:
@@ -10218,7 +10210,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
 
     def _flush_pending_radar_notify(self, real_amt, curr_px):
-        """哨兵补发：雷达激活钉钉 或 阶段二切入钉钉。"""
+        """哨兵补发：雷达激活钉钉 或 雷达追踪钉钉。"""
         real_amt = float(self._resolve_live_qty(real_amt) or 0)
         if real_amt <= 0:
             return False
@@ -10248,7 +10240,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if not bool(getattr(self, "breakeven_phase", False)):
             return False
         logger.warning(
-            f"🫁 [{self.symbol}] 补发阶段二钉钉 | SL={sl:.2f} | "
+            f"🫁 [{self.symbol}] 补发雷达追踪钉钉 | SL={sl:.2f} | "
             f"ADX={float(getattr(self, 'last_adx', 0) or 0):.1f}"
         )
         self._report_breath_phase2(
@@ -11326,7 +11318,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _cancel_stale_tp_beyond_radar(self, radar_sl, live_qty=None, tolerance=1.5):
         """
-        呼吸止损已越过 TP1/TP2 → 撤销无意义的限价止盈（防孤儿单干扰）。
+        雷达止损已越过 TP1/TP2 → 撤销无意义的限价止盈（防孤儿单干扰）。
         多头：雷达价 ≥ TP 价；空头：雷达价 ≤ TP 价。
         """
         radar_sl = float(radar_sl or 0)
@@ -11965,15 +11957,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if max_level >= 2 and tp3 > 0:
             note += f" → 缩量续阶梯·向 TP3({tp3:.2f})（价格不跳）"
         elif max_level == 1:
-            note += " → 缩量至70%·价格不跳变（马拉松）"
+            note += " → 缩量至70%·价格不跳变（雷达）"
         logger.info(
             f"📈 [{self.symbol}] 雷达推进预备 {note} | "
             f"保持VPS={float(getattr(self, 'tv_sl', 0) or 0):.2f} | "
             f"best={self.best_price:.2f} | "
-            f"朝TP1={self._tp1_direction_progress(curr_px):.0%} "
+            f"激活进度={self._radar_activation_progress(curr_px):.0%} "
             f"激活线={self._radar_activation_price():.2f}"
         )
-        # 马拉松：TP 成交只缩量，禁止抬强制底线
+        # 雷达：TP 成交只缩量，禁止抬强制底线
         self._ratchet_radar_profit_floor(
             live_qty, curr_px, source=f"TP{max_level}成交·no_floor",
         )
@@ -12135,7 +12127,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
             self._advance_radar_on_tp_fill(credible, curr_px_safe, new_qty)
             self._reconcile_open_qty_vs_tp123(new_qty, source=f"{levels}成交")
-            # 只撤/重挂剩余 TP1+TP2；止损数量由呼吸引擎原子收缩
+            # 只撤/重挂剩余 TP1+TP2；止损数量由雷达引擎原子收缩
             result = self._realign_remaining_tps_after_fill(
                 new_qty, dynamic_sl=None,
                 reason=f"{levels} 成交静默对齐",
@@ -12517,8 +12509,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if saved:
             return saved
         if bool(getattr(self, "breakeven_phase", False)):
-            return f"保本触发{BREAKEVEN_TRIGGER_ATR}×ATR→ADX追踪"
-        return "递进雷达·阶段一阶梯"
+            return f"保本触发{BREAKEVEN_TRIGGER_ATR}×ATR→雷达追踪"
+        return "递进雷达·阶梯锁本"
 
     def _signal_ts_epoch(self, signal_or_ts):
         """兼容 float epoch / 日期字符串，解析失败返回 0。"""
@@ -12619,9 +12611,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 or 0
             )
             phase = (
-                "阶段二/趋势追踪"
+                "雷达已激活（动态追踪）"
                 if getattr(self, "breakeven_phase", False)
-                else "阶段一"
+                else "雷达未激活（硬止损保护）"
             )
             note = (
                 f"止损平仓({phase}) @ {sl:.2f} | 现价贴止损线"
@@ -13126,9 +13118,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._mark_tp_radar_handoff([level], source=f"取消TP{level}移交")
             try:
                 dingtalk.report_system_alert(
-                    f"TP超时已撤单·改由呼吸止损 [{self.symbol}]",
+                    f"TP超时已撤单·改由雷达止损 [{self.symbol}]",
                     f"TP{level} 限价已确认从盘口撤销；该档禁止重挂；"
-                    f"剩余仓位止盈改由呼吸止损管理。",
+                    f"剩余仓位止盈改由雷达止损管理。",
                     level="提示",
                 )
             except Exception:
@@ -13136,7 +13128,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return True
 
     def _reset_after_flat(self, source=""):
-        """持仓清零后重置雷达/挂单状态（统一走完整呼吸账本清零）。"""
+        """持仓清零后重置雷达/挂单状态（统一走完整雷达账本清零）。"""
         try:
             self._purge_all_defense_orders_on_flat(source or "flat_reset")
         except Exception as e:
@@ -13346,7 +13338,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _reset_breath_ledger_on_flat(self, source="平仓清零"):
         """
-        平仓确认后立刻清零呼吸止损/防线账本。
+        平仓确认后立刻清零雷达止损/防线账本。
         禁止旧 entry/side/currentStop 残留污染下一笔或 HARD_SL 误报。
         """
         try:
@@ -13417,7 +13409,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.reentry_active = False
         self.reentry_attempt = 0  # 规格 §4：反转保护退出后归零
         self.radar_pending_arm = True
-        logger.info(f"🧹 [{self.symbol}] 呼吸/防线账本已清零 | {source}")
+        logger.info(f"🧹 [{self.symbol}] 雷达/防线账本已清零 | {source}")
         try:
             self._maybe_auto_clear_pause_when_flat(source=f"flat_reset:{source}")
         except Exception:
@@ -14010,7 +14002,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"持仓偏离目标·不减仓 [{self.symbol}]",
                     f"目标 {qty} {self.unit_label} (保证金 {margin_usdt:.0f}U)，"
                     f"实盘 {real_qty} @ {pos['entry_price']:.2f} | "
-                    f"CAP_ALIGN已废除，以实盘为准挂TP+呼吸止损",
+                    f"CAP_ALIGN已废除，以实盘为准挂TP+雷达止损",
                     level="紧急",
                 )
 
@@ -14024,7 +14016,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._open_regime_sticky = True
             self.initial_qty = real_qty
             self._last_open_exec_ts = time.time()
-            # 新仓重置呼吸系数采样 / 早保本（场景决议后再 force refresh）
+            # 新仓重置雷达系数采样 / 早保本（场景决议后再 force refresh）
             self._breath_ratio_history = []
             self.breathing_coefficient = 1.0
             self.early_be_done = False
@@ -14061,7 +14053,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         1) 核实持仓 → 绑回本笔 TV TP1/TP2/TP3 价
         2) 共同第一步：永久硬止损(|TV−SL|×buffer 锚定成交价) + TP1+TP2(10%/20%)
         3) 同步拉原生1h ATR：场景一/二仅决定雷达 ATR 源；TP3 常挂不撤
-        4) 递进雷达休眠至激活线后接管呼吸（与 TP3 互斥）
+        4) 递进雷达休眠至激活线后接管雷达（与 TP3 互斥）
         5) 实盘核实后钉钉一条
         """
         entry_price = float(entry_price or 0)
@@ -14351,10 +14343,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if hard_sl_px > 0:
                 verify_note += f" | TV硬止损@{hard_sl_px:.2f}"
             if act_px > 0:
-                ratio = self._radar_activation_ratio()
                 verify_note += (
-                    f" | 雷达待命激活线@{act_px:.2f}"
-                    f"(距TP1剩{(1 - ratio) * 100:.0f}%)"
+                    f" | 雷达激活线@{act_px:.2f}"
                 )
             if hung_final:
                 verify_note += f" | 盘口保护STOP@{[round(float(p), 2) for p in hung_final]}"
@@ -14430,7 +14420,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 unit_label=self.unit_label,
                 hard_sl_px=hard_sl_px,
                 radar_act_px=act_px,
-                radar_act_ratio=self._radar_activation_ratio(),
                 tier=int(getattr(self, "adx_tier", 1) or 1),
                 adx=float(getattr(self, "last_adx", 0) or 0),
                 tier_source=str(getattr(self, "_adx_tier_source", "") or ""),
@@ -14574,12 +14563,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return abs(px - sl) <= max(2.5, px * 0.002)
 
     def _enforce_pre_tp1_radar_standby(self, live_qty=None, curr_px=0.0, source=""):
-        """已废弃：呼吸止损开仓即运行，禁止再把止损拉回旧 TV 价。"""
+        """已废弃：雷达止损开仓即运行，禁止再把止损拉回旧 TV 价。"""
         return False
 
     def _disarm_premature_radar(self, live_qty=None, curr_px=0.0, source=""):
         """
-        已废弃回撤逻辑：呼吸止损只前进不回撤。
+        已废弃回撤逻辑：雷达止损只前进不回撤。
         仅清理伪 TP 记账，绝不把 SL 拉回旧价。
         """
         live_qty = float(live_qty or self.watched_qty or 0)
@@ -14595,7 +14584,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.tp_levels_consumed = [lv for lv in stale if lv not in fake]
             self._save_state()
             logger.info(
-                f"🫁 [{self.symbol}] [{source or '呼吸'}] 清除伪TP标记 {fake}"
+                f"🫁 [{self.symbol}] [{source or '雷达'}] 清除伪TP标记 {fake}"
             )
         return False
 
@@ -14624,7 +14613,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_stage(self, curr_px):
         """
-        进度展示用：1=阶段一阶梯，2=阶段二呼吸追踪。
+        进度展示用：1=阶梯锁本，2=雷达动态追踪。
         （旧 5 阶段 TP 梯子已废除，不再驱动挂单。）
         """
         if bool(getattr(self, "breakeven_phase", False)):
@@ -14636,7 +14625,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return 0
 
     def _radar_stage_label(self, stage):
-        return RADAR_STAGE_LABELS.get(int(stage or 0), f"阶段{stage}")
+        return RADAR_STAGE_LABELS.get(int(stage or 0), f"雷达状态{stage}")
 
     def _radar_segment_progress_probe(self, curr_px):
         """当前所处 TP 段内进度 0~1（供步进门限，防每 tick 撤挂）。"""
@@ -14662,12 +14651,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return 0.0
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
-        """已废除旧阶段呼吸表 → 连续阶梯追踪。"""
+        """已废除旧阶段雷达表 → 连续阶梯追踪。"""
         return self._compute_ladder_sl(curr_px)
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
         """
-        重启/接管：呼吸止损开仓即运行。
+        重启/接管：雷达止损开仓即运行。
         用 breath tick 对齐 current_sl；禁止拉回旧 TV 价；禁止回撤。
         """
         if curr_px <= 0 or not entry:
@@ -14729,7 +14718,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             1 if self.radar_activated else 0
         )
         logger.info(
-            f"🫁 [{self.symbol}] 重启呼吸止损对齐: "
+            f"🫁 [{self.symbol}] 重启雷达止损对齐: "
             f"阶段{'二·ADX' if getattr(self, 'breakeven_phase', False) else '一·阶梯'} | "
             f"SL={float(self.current_sl or 0):.2f} best={float(self.best_price or 0):.2f} | "
             f"initial={float(getattr(self, 'initial_stop', 0) or 0):.2f} | "
@@ -14768,12 +14757,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             getattr(self, "_ws_tp1_fill_hint", False)
             or self._tp_level_consumed(1)
         )
-        # 接近激活线（走过档位比例的 90%）就加速盯，护本金必须快
-        ratio = float(self._radar_activation_ratio() or 0)
-        prog = float(self._tp1_direction_progress(px) or 0)
+        # 接近雷达激活线（进度 ≥ 90%）就加速盯，护本金必须快
+        act_prog = float(self._radar_activation_progress(px) or 0)
         approaching = (
-            ratio > 0
-            and prog >= ratio * float(RADAR_WS_APPROACH_RATIO)
+            act_prog >= 0.9
             and not near_act
         )
         if armed or near_act or tp1_hint or approaching:
@@ -14996,20 +14983,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 禁止 dist=0（激活线=成本）→ 开仓即误触雷达交棒
         return max(atr * 1.5, entry * 0.005 if entry > 0 else atr * 1.5)
 
-    def _radar_activation_ratio(self):
-        """返回冻结的 ADX 启动比例（0.70~0.90）。"""
-        from reentry_profiles import normalize_activation_ratio
-        frac = float(getattr(self, "radar_activation_frac", 0) or 0)
-        adx = float(
-            getattr(self, "radar_activation_adx", 0)
-            or getattr(self, "last_adx", 0)
-            or 25.0
-        )
-        ratio = normalize_activation_ratio(frac, adx)
-        if abs(ratio - frac) > 1e-9:
-            self.radar_activation_frac = ratio
-        return float(ratio)
-
     def _radar_activation_price(self):
         """
         【规格 v1.0 · 绝对价格锚定】
@@ -15123,12 +15096,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return new_sl
 
     def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
-        """兼容旧调用：一律走呼吸止损。"""
+        """兼容旧调用：一律走雷达止损。"""
         return self._compute_ladder_sl(curr_px)
 
     def _apply_breath_stop_tick(self, curr_px=0.0):
         """
-        每个 tick 更新呼吸止损状态（按品种 breath_profile + tier overlay）。
+        每个 tick 更新雷达止损状态（按品种 breath_profile + tier overlay）。
         雷达休眠窗：只更新 best，不推进止损/不激活。
         """
         entry = float(self.watched_entry or 0)
@@ -15211,12 +15184,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._radar_stage_last = 2 if new_phase else 1
         self._ladder_meta_last = meta
         self._ladder_label_last = (
-            f"呼吸追踪·coeff={coeff:.2f}·{meta.get('trail_distance', 0):.2f}"
+            f"雷达追踪·coeff={coeff:.2f}·{meta.get('trail_distance', 0):.2f}"
             if new_phase else f"阶梯锁本·step{steps}·coeff={coeff:.2f}"
         )
         if new_phase and not was_phase:
             logger.info(
-                f"🫁 [{self._tag()}] 呼吸止损切入阶段二 | "
+                f"🫁 [{self._tag()}] 雷达止损切入动态追踪 | "
                 f"SL={self.current_sl:.2f} best={self.best_price:.2f} "
                 f"coeff={coeff:.2f} trail={meta.get('trail_distance', 0):.2f} "
                 f"profile={meta.get('profile')}"
@@ -15231,7 +15204,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         }
 
     def _compute_ladder_sl(self, curr_px=0.0):
-        """呼吸止损（替代旧阶梯雷达）。未就绪返回 None。"""
+        """雷达止损（替代旧阶梯雷达）。未就绪返回 None。"""
         out = self._apply_breath_stop_tick(curr_px)
         if not out:
             return None
@@ -15245,11 +15218,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         raw = self._compute_ladder_sl(curr_px)
         if raw is None:
             return None
-        label = getattr(self, "_ladder_label_last", "") or "呼吸止损"
+        label = getattr(self, "_ladder_label_last", "") or "雷达止损"
         phase = bool(getattr(self, "breakeven_phase", False))
         logger.debug(
-            f"🫁 呼吸止损 {label} | SL→{raw:.2f} | best={self.best_price:.2f} | "
-            f"阶段二={phase}"
+            f"🫁 雷达止损 {label} | SL→{raw:.2f} | best={self.best_price:.2f} | "
+            f"追踪={phase}"
         )
         return round(float(raw), 2)
 
@@ -15473,7 +15446,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return self.current_sl
         if self.current_side == "LONG" and new_sl > float(self.current_sl or 0):
             logger.info(
-                f"📈 呼吸止损刷新: {float(self.current_sl or 0):.2f} → {new_sl:.2f} "
+                f"📈 雷达止损刷新: {float(self.current_sl or 0):.2f} → {new_sl:.2f} "
                 f"(best={self.best_price:.2f})"
             )
             self.current_sl = new_sl
@@ -15483,7 +15456,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             cur = float(self.current_sl or 0)
             if cur <= 0 or new_sl < cur:
                 logger.info(
-                    f"📉 呼吸止损刷新: {cur:.2f} → {new_sl:.2f} "
+                    f"📉 雷达止损刷新: {cur:.2f} → {new_sl:.2f} "
                     f"(best={self.best_price:.2f})"
                 )
                 self.current_sl = new_sl
@@ -15522,7 +15495,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _sentinel_poll_sec(self, curr_px=0.0):
         """
         REST 哨兵间隔：常态约 20s、雷达约 12s，加抖动错峰。
-        成交感知优先 User Data WS；markPrice WS 驱动呼吸改单。
+        成交感知优先 User Data WS；markPrice WS 驱动雷达改单。
         """
         if self._is_radar_active() or self._radar_legitimately_armed(self.watched_qty, curr_px):
             base = float(SENTINEL_POLL_RADAR)
@@ -15536,7 +15509,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _maybe_refresh_atr(self):
         """
         刷新 current_atr + last_adx（90m 合成）；open_atr(initialAtr) 锁定不变。
-        止损距离全程用 initialAtr；ADX 仅影响阶段二追踪倍数。
+        止损距离全程用 initialAtr；ADX 仅影响雷达动态追踪倍数。
         """
         now = time.time()
         last = float(getattr(self, "_atr_last_update_ts", 0) or 0)
@@ -15631,7 +15604,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         TP 限价超时策略（防误伤正常等待）：
         - 现价从未进入该档触及区 → 正常等待，不撤不告警（即使已挂满 timeout 秒）
-        - 现价已进入触及区但仍未成交且超时 → 撤单并移交呼吸止损；仅确认盘口已无该档后才标记
+        - 现价已进入触及区但仍未成交且超时 → 撤单并移交雷达止损；仅确认盘口已无该档后才标记
         """
         placed = dict(getattr(self, "_tp_order_placed_ts", {}) or {})
         if not placed:
@@ -15664,7 +15637,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 continue
             logger.warning(
                 f"⏰ [{self.symbol}] TP{level} 价已触及却超时 {timeout:.0f}s 未成交 "
-                f"→ 撤单移交呼吸止损"
+                f"→ 撤单移交雷达止损"
             )
             ok = self._cancel_tp_level_if_still_open(level, handoff_radar=True)
             if ok:
@@ -15683,7 +15656,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _process_radar_trailing(self, real_amt, curr_px):
         """
-        呼吸止损追踪：达激活线后运行；休眠窗仅尝试武装。
+        雷达止损追踪：达激活线后运行；休眠窗仅尝试武装。
         同价已挂 / 未达最小步进 / 冷却中 → 禁止撤挂死循环。
         """
         if getattr(self, "_breath_tick_paused", False):
@@ -15704,7 +15677,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             pass
         if self._radar_is_dormant():
             self._maybe_arm_radar_on_activation(
-                real_amt, curr_px, source="trailing·激活闸",
+                real_amt, curr_px, source="雷达激活线",
             )
             if self._radar_is_dormant():
                 return False
@@ -15713,7 +15686,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         try:
             self._reconcile_tp_consumed_from_live_qty(
-                real_amt, curr_px, source="呼吸止损前对账", notify=True,
+                real_amt, curr_px, source="雷达止损前对账", notify=True,
             )
             pos = self._get_active_position()
             if pos and float(pos.get("size") or 0) > 0:
@@ -15723,7 +15696,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if init_q > 0:
                 self.remaining_qty_pct = max(0.0, min(1.0, real_amt / init_q))
         except Exception as e:
-            logger.debug(f"呼吸止损前TP对账跳过: {e}")
+            logger.debug(f"雷达止损前TP对账跳过: {e}")
 
         tick = self._apply_breath_stop_tick(curr_px)
         if not tick:
@@ -15814,7 +15787,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         sl_placed = self._realign_radar_defenses(
             real_amt, self.watched_entry, new_sl,
         )
-        label = getattr(self, "_ladder_label_last", "") or "呼吸止损"
+        label = getattr(self, "_ladder_label_last", "") or "雷达止损"
         self._log_radar_update(stage, old_sl, new_sl, label, curr_px)
         self._cancel_stale_tp_beyond_radar(new_sl, real_amt)
         meta = tick.get("meta") or {}
@@ -15844,7 +15817,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return True
 
     def _report_breath_phase2(self, real_amt, curr_px, new_sl, sl_placed=True):
-        """阶段二切入钉钉（呼吸系数追踪）。"""
+        """雷达追踪钉钉（雷达追踪系数追踪）。"""
         if getattr(self, "_radar_activation_notified", False):
             return
         coeff = float(getattr(self, "breathing_coefficient", 1.0) or 1.0)
@@ -15862,7 +15835,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 regime=int(getattr(self, "open_regime", None) or self.regime or 3),
                 shield_cleared=True,
                 verify_note=(
-                    f"浮盈≥{BREAKEVEN_TRIGGER_ATR}×ATR → 阶段二呼吸追踪 | "
+                    f"浮盈≥{BREAKEVEN_TRIGGER_ATR}×ATR → 雷达动态追踪 | "
                     f"止损@{new_sl:.2f} | coeff={coeff:.2f} | "
                     f"trail={trail_dist:.2f} | "
                     f"1hATR={float(breath_meta.get('atr_1h') or 0):.2f} | "
@@ -15880,11 +15853,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._shield_handoff_notified = True
             self._save_state()
         except Exception as e:
-            logger.warning(f"🫁 阶段二钉钉失败: {e}")
+            logger.warning(f"🫁 雷达追踪钉钉失败: {e}")
             self._radar_notify_pending = True
 
     def _sentinel_loop(self):
-        """哨兵：持仓/TP 防线 + 呼吸止损追踪（WS推送优先，轮询兜底）。
+        """哨兵：持仓/TP 防线 + 雷达止损追踪（WS推送优先，轮询兜底）。
         启动前调用方已置 _sentinel_active=True（占位防双启）。
         """
         self._ensure_price_ws()
@@ -16340,7 +16313,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _emergency_flatten_naked_open(self, reason="硬止损失败·撤销开仓防裸奔"):
         """
         【保留·安全网】开仓后硬止损挂不上 → 立即市价平掉，禁止裸仓持有。
-        非旧版「保护性全平」；属呼吸止损武装失败的硬中止（自查清单允许的安全路径）。
+        非旧版「保护性全平」；属雷达止损武装失败的硬中止（自查清单允许的安全路径）。
         （自查清单 7.6：硬止损挂单失败，开仓单自动撤销）
         """
         logger.error(f"🚨 [{self.symbol}] {reason} → 强制市价撤仓")
@@ -16425,11 +16398,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             order = binance_client.place_market_order(
                 close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
             )
-            # 【修复】reduceOnly 被拒绝时降级为普通市价单（无 reduceOnly 标志）
+            # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
             if not order:
                 logger.warning(
-                    f"⚠️ [{self.symbol}] reduceOnly 平仓失败，降级为普通市价单 | round={round_i + 1}"
+                    f"⚠️ [{self.symbol}] reduceOnly 平仓失败，重新查询持仓状态 | round={round_i + 1}"
                 )
+                pos = binance_client.get_position(self.symbol)
+                if pos:
+                    pos_amt = float(pos.get("positionAmt", 0))
+                    live_pos = round(abs(pos_amt), 3)
+                    logger.info(f"[持仓复核] {self.symbol}: {live_pos} ETH")
+                    if live_pos <= 0.001:
+                        closed_successfully = True
+                        logger.info(f"[持仓复核] {self.symbol} 已无仓，拒绝降级为开仓单")
+                        break
+                    if live_pos < live_sz:
+                        live_sz = live_pos
                 order = binance_client.place_market_order(
                     close_side, live_sz, symbol=self.symbol, reduce_only=False, emergency=True,
                 )
@@ -16473,8 +16457,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 order = binance_client.place_market_order(
                     close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
                 )
-                # 【修复】reduceOnly 被拒绝时降级为普通市价单
+                # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
                 if not order:
+                    residual = binance_client.get_position(self.symbol)
+                    if residual:
+                        residual_amt = float(residual.get("positionAmt", 0))
+                        residual_sz = round(abs(residual_amt), 3)
+                        logger.info(f"[蚂蚁仓复核] {self.symbol}: {residual_sz} ETH")
+                        if residual_sz <= 0.001:
+                            logger.info(f"[蚂蚁仓复核] {self.symbol} 已无仓，拒绝降级为开仓单")
+                            time.sleep(1.0)
+                            closed_successfully = self._verify_flat()
+                            break
                     logger.warning(
                         f"⚠️ [{self.symbol}] 蚂蚁仓 reduceOnly 扫尾失败，降级为普通市价单"
                     )
@@ -16813,7 +16807,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._last_idle_takeover_ts = 0.0
                 return
 
-            # 权威规格 §六：旧 schema / 呼吸态缺失 + 有持仓 → 告警暂停，禁止自动转换
+            # 权威规格 §六：旧 schema / 雷达态缺失 + 有持仓 → 告警暂停，禁止自动转换
             breath_incomplete = (
                 float(getattr(self, "initial_stop", 0) or 0) <= 0
                 or float(getattr(self, "open_atr", 0) or 0) <= 0
@@ -16827,7 +16821,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 and (not had_state_file or breath_incomplete or old_schema)
             ):
                 logger.warning(
-                    f"[内测-仅告警] [{self.symbol}] 持久化/呼吸态不完整但实盘有仓 "
+                    f"[内测-仅告警] [{self.symbol}] 持久化/雷达态不完整但实盘有仓 "
                     f"(old_schema={old_schema} incomplete={breath_incomplete}) | 交易继续"
                 )
                 try:
@@ -16902,7 +16896,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                                 ),
                             )
                 except Exception as e:
-                    logger.warning(f"重启补算呼吸态失败: {e}")
+                    logger.warning(f"重启补算雷达态失败: {e}")
 
             if pos:
                 self._recover_in_progress = True
@@ -16921,7 +16915,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 try:
                     # 主接管进程：允许止损写入
                     self._stop_write_blocked = False
-                    # 持仓存在：锁定档位 → 按恢复的 currentStop 重挂呼吸止损
+                    # 持仓存在：锁定档位 → 按恢复的 currentStop 重挂雷达止损
                     self.watched_entry = float(
                         pos.get("entry_price") or self.watched_entry or 0
                     )
@@ -16931,7 +16925,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self._sync_exchange_stop(
                         float(pos.get("size") or 0),
                         radar_sl=None,
-                        reason="重启强制呼吸止损",
+                        reason="重启强制雷达止损",
                         force=True,
                     )
 
@@ -17154,19 +17148,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                                 or self._resolve_hard_sl_regime()
                             )
                         ).get("pct"),
-                        radar_act_pct=get_radar_activation_ratio(
-                            int(
-                                getattr(self, "open_regime", None)
-                                or self._resolve_hard_sl_regime()
-                            )
-                        ),
+                        radar_act_pct=0.0,
                     )
                     policy_actions = stack.get("notes") or []
                     logger.info(
                         f"  -> 🎉 实盘阵地接管完毕 | {health.get('pnl_label', '')} | "
                         f"防线 {' · '.join(policy_actions) if policy_actions else '已核实'}"
                     )
-                    # 接管成功且呼吸态齐全：清掉粘性 restart_* 暂停 + 持仓期假ATR污染
+                    # 接管成功且雷达态齐全：清掉粘性 restart_* 暂停 + 持仓期假ATR污染
                     breath_ok = (
                         float(getattr(self, "initial_stop", 0) or 0) > 0
                         and float(getattr(self, "open_atr", 0) or 0) > 0
@@ -17241,7 +17230,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 elif recover_err:
                     self._post_recover_radar_pulse = True
             else:
-                # 确认空仓：禁止误平仓；完整清零呼吸账本（禁止半清理残留 entry/sl/atr）
+                # 确认空仓：禁止误平仓；完整清零雷达账本（禁止半清理残留 entry/sl/atr）
                 logger.info(
                     f"🔄 [{self.symbol}] 系统重启点火：REST确认无持仓，账本复位为空仓待命。"
                 )
