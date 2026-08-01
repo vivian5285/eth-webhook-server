@@ -255,7 +255,8 @@ class SmartTPReconciliation:
         # MODERATE级别
         missing = health.get("missing_tps", [])
         if len(missing) > 0:
-            return True, f"TP缺失需要修复: {[f'TP{t[\"level\"]}@{t[\"price\"]}' for t in missing]}"
+            missing_str = ", ".join([f"TP{t['level']}@{t['price']:.2f}" for t in missing])
+            return True, f"TP缺失需要修复: {missing_str}"
         
         orphans = health.get("orphan_orders", [])
         if len(orphans) > 0:
