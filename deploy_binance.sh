@@ -17,7 +17,7 @@ if ! grep -q 'DEPLOY_BINANCE_SHELL_MARKER' "$0"; then
     exit 1
 fi
 
-DEPLOY_SCRIPT_VERSION="v16.0-dingtalk-disabled"
+DEPLOY_SCRIPT_VERSION="v16.1-force-cleanup"
 # 接受 v13.4.6+ 以及 v14/v15+（含 risk20-ladder / tv-direction 等后缀）
 MIN_SUPERVISOR_VERSION_RE='v(13\.(4\.[6-9]|([5-9]|[1-9][0-9]+)\.)|1[4-9]\.|[2-9][0-9]+\.)'
 
@@ -25,7 +25,7 @@ PORT=5003
 WORKERS=1
 THREADS=10
 BIND_HOST="0.0.0.0"
-MAX_CLEANUP_ROUNDS=5
+MAX_CLEANUP_ROUNDS=10
 HEALTH_WAIT_SEC=5
 HEALTH_RETRIES=6
 # 启动后轮询 PID/端口（daemon 写 pid 与 fork 有延迟，勿只 sleep 2 就判失败）
@@ -67,25 +67,46 @@ load_env() {
 
 kill_by_port() {
     local port=$1
+    echo "    -> fuser 强制杀端口 ${port}..."
     if command -v fuser >/dev/null 2>&1; then
         fuser -k -9 "${port}/tcp" 2>/dev/null || true
+        sleep 1
+        fuser -k -9 "${port}/tcp" 2>/dev/null || true
     fi
+    echo "    -> lsof 杀端口 ${port}..."
     if command -v lsof >/dev/null 2>&1; then
         lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+        sleep 1
+        lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
     fi
+    echo "    -> ss 杀端口 ${port}..."
     if command -v ss >/dev/null 2>&1; then
         ss -lptn "sport = :${port}" 2>/dev/null \
             | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
             | sort -u | xargs -r kill -9 2>/dev/null || true
     fi
+    echo "    -> netstat 杀端口 ${port}..."
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -tulnp 2>/dev/null | grep ":${port} " \
+            | awk '{print $7}' | cut -d'/' -f1 | sort -u \
+            | xargs -r kill -9 2>/dev/null || true
+    fi
 }
 
 kill_residual_processes() {
+    echo "    -> pkill gunicorn..."
     pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
     pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
     pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
+    pkill -9 -f "gunicorn.*app:app"             2>/dev/null || true
+    echo "    -> pkill supervisor..."
     pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
     pkill -9 -f "position_supervisor.py"        2>/dev/null || true
+    pkill -9 -f "supervisor"                    2>/dev/null || true
+    echo "    -> pkill python..."
+    pkill -9 -f "python.*binance"              2>/dev/null || true
+    pkill -9 -f "python.*webhook"              2>/dev/null || true
+    echo "    -> 清理 PID 文件..."
     if [ -f "$PID_FILE" ]; then
         OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -93,6 +114,8 @@ kill_residual_processes() {
         fi
         rm -f "$PID_FILE"
     fi
+    echo "    -> pkill -9 -f \"${PORT}\"..."
+    pkill -9 -f "${PORT}" 2>/dev/null || true
 }
 
 port_in_use() {
@@ -396,8 +419,30 @@ health_check() {
     fi
 }
 
+# 6. 外部连通性测试
+test_external_connectivity() {
+    log_step "[6b] 内外连通性测试..."
+    echo -e "  ${CYAN}-> 内部测试 (127.0.0.1:${PORT}):${NC}"
+    INTERNAL=$(curl -sf --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null || echo "")
+    if [ -n "$INTERNAL" ]; then
+        log_ok "内部连通正常: $INTERNAL"
+    else
+        log_fail "内部连通失败"
+    fi
+    
+    echo -e "  ${CYAN}-> 外部测试 (187.77.130.144:${PORT}):${NC}"
+    EXTERNAL=$(curl -sf --max-time 5 "http://187.77.130.144:${PORT}/health" 2>/dev/null || echo "")
+    if [ -n "$EXTERNAL" ]; then
+        log_ok "外部连通正常: $EXTERNAL"
+        log_ok "TradingView webhook 可达: http://187.77.130.144:${PORT}/binance/webhook"
+    else
+        log_warn "外部连通失败 (请检查防火墙/端口开放): curl -v http://187.77.130.144:${PORT}/health"
+    fi
+}
+
 print_summary() {
     log_step "[6/6] 部署结果汇总"
+    test_external_connectivity
     echo ""
     if [ "$DEPLOY_OK" -eq 1 ]; then
         echo -e "${GREEN}=== 🔶 币安(Binance) 干净重部署成功 ===${NC}"
