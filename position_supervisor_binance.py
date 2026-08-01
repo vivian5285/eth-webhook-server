@@ -3564,9 +3564,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tag = reason_tag or "无菌清场"
         prev_side = self.current_side
 
-        # ── 阶段 0：开仓前抢先撤单（防御单全清）────────────────────────────
-        self._purge_all_defense_orders_on_flat(f"{tag}·开仓前抢先撤单")
-        time.sleep(0.20)  # v16.16: 0.35→0.20 撤单传播等待
+        # ── 阶段 0：开仓前抢先撤单（仅做 cancel_all，不走完整 6 轮循环）────
+        # 空仓时最多只有残留 TP/STOP，最多 2 轮足够；完整循环耗时 ~60s 拖慢开仓
+        try:
+            binance_client.cancel_all_open_orders(self.symbol)
+        except Exception as e:
+            logger.debug(f"[{tag}] 抢先撤单跳过: {e}")
+        time.sleep(0.20)  # 撤单传播等待
 
         # ── 阶段 1：联合查询持仓 + 挂单（仅 1~2 次 REST）────────────────
         snapshot = binance_client.joint_query_position_and_orders(self.symbol)
@@ -3683,7 +3687,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         # ── 阶段 3：平后再撤一轮（CLOSE→OPEN 间隔极短时残留 Algo/限价）──
         purge = self._purge_all_defense_orders_on_flat(
-            f"{tag}·平后净挂单", max_rounds=8,
+            f"{tag}·平后净挂单", max_rounds=5,
             joint_snapshot=orders_now,
         )
         # ── 阶段 4：扫孤儿反向（残留 TP 在空仓成交）───────────────────────
@@ -10158,7 +10162,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # ── 步骤 1：全量撤单（普通单 + Algo 条件单）────────────────────
             binance_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.35)
-            tp_cancelled += self._cancel_all_tp_limit_orders(max_rounds=3)
+            tp_cancelled += self._cancel_all_tp_limit_orders(max_rounds=1)
             purged_stops = self._purge_all_close_position_stops()
             time.sleep(0.45)
 
