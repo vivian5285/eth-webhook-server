@@ -137,7 +137,7 @@ kill_residual_processes() {
     # 额外：用 ss 找到所有监听端口的 PID 并杀掉（需要 sudo）
     echo "    -> ss 扫描杀所有占端口 ${PORT} 的进程..."
     if command -v ss >/dev/null 2>&1; then
-        ss -lptn "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read pid; do
+        ss -lptn "sport = :${PORT}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read pid; do
             [ -n "$pid" ] && ${sudo_kill} kill -9 "$pid" 2>/dev/null && echo "      -> kill -9 $pid" || true
         done
     fi
