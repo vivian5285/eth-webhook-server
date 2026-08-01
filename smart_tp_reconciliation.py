@@ -365,7 +365,8 @@ def format_tp_health_report(health: Dict[str, Any], symbol: str = "ETH") -> str:
     
     missing = health.get("missing_tps", [])
     if missing:
-        lines.append(f"❌ 缺失TP: {', '.join([f'TP{t[\"level\"]}@{t[\"price\"]:.2f}' for t in missing])}")
+        missing_str = ", ".join([f"TP{t['level']}@{t['price']:.2f}" for t in missing])
+        lines.append(f"❌ 缺失TP: {missing_str}")
     
     orphans = health.get("orphan_orders", [])
     if orphans:
