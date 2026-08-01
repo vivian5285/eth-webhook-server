@@ -65,57 +65,82 @@ load_env() {
     WEBHOOK_SECRET="${WEBHOOK_SECRET:-528586}"
 }
 
+DEPLOY_SCRIPT_VERSION="v16.2-sudo-kill"
+
+check_sudo_capability() {
+    # 检查是否有 sudo 权限杀进程
+    if sudo -n true 2>/dev/null; then
+        SUDO_CMD="sudo"
+        log_ok "检测到 sudo 权限，将使用 sudo 强制杀进程"
+    else
+        SUDO_CMD=""
+        log_warn "无 sudo 权限，仅能杀本用户进程"
+    fi
+}
+
 kill_by_port() {
     local port=$1
+    local sudo_kill="${SUDO_CMD}"
+    
     echo "    -> fuser 强制杀端口 ${port}..."
     if command -v fuser >/dev/null 2>&1; then
-        fuser -k -9 "${port}/tcp" 2>/dev/null || true
+        ${sudo_kill} fuser -k -9 "${port}/tcp" 2>/dev/null || true
         sleep 1
-        fuser -k -9 "${port}/tcp" 2>/dev/null || true
+        ${sudo_kill} fuser -k -9 "${port}/tcp" 2>/dev/null || true
     fi
     echo "    -> lsof 杀端口 ${port}..."
     if command -v lsof >/dev/null 2>&1; then
-        lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+        ${sudo_kill} lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
         sleep 1
-        lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+        ${sudo_kill} lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null || true
     fi
     echo "    -> ss 杀端口 ${port}..."
     if command -v ss >/dev/null 2>&1; then
-        ss -lptn "sport = :${port}" 2>/dev/null \
+        ${sudo_kill} ss -lptn "sport = :${port}" 2>/dev/null \
             | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
             | sort -u | xargs -r kill -9 2>/dev/null || true
     fi
     echo "    -> netstat 杀端口 ${port}..."
     if command -v netstat >/dev/null 2>&1; then
-        netstat -tulnp 2>/dev/null | grep ":${port} " \
+        ${sudo_kill} netstat -tulnp 2>/dev/null | grep ":${port} " \
             | awk '{print $7}' | cut -d'/' -f1 | sort -u \
             | xargs -r kill -9 2>/dev/null || true
     fi
 }
 
 kill_residual_processes() {
+    local sudo_kill="${SUDO_CMD}"
+    
     echo "    -> pkill gunicorn..."
-    pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
-    pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
-    pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
-    pkill -9 -f "gunicorn.*app:app"             2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*app:app"             2>/dev/null || true
     echo "    -> pkill supervisor..."
-    pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
-    pkill -9 -f "position_supervisor.py"        2>/dev/null || true
-    pkill -9 -f "supervisor"                    2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "position_supervisor.py"        2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "supervisor"                    2>/dev/null || true
     echo "    -> pkill python..."
-    pkill -9 -f "python.*binance"              2>/dev/null || true
-    pkill -9 -f "python.*webhook"              2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "python.*binance"              2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "python.*webhook"              2>/dev/null || true
     echo "    -> 清理 PID 文件..."
     if [ -f "$PID_FILE" ]; then
         OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
         if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-            kill -9 "$OLD_PID" 2>/dev/null || true
+            ${sudo_kill} kill -9 "$OLD_PID" 2>/dev/null || true
         fi
         rm -f "$PID_FILE"
     fi
     echo "    -> pkill -9 -f \"${PORT}\"..."
-    pkill -9 -f "${PORT}" 2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "${PORT}" 2>/dev/null || true
+    
+    # 额外：用 ss 找到所有监听端口的 PID 并杀掉（需要 sudo）
+    echo "    -> ss 扫描杀所有占端口 ${PORT} 的进程..."
+    if command -v ss >/dev/null 2>&1; then
+        ss -lptn "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read pid; do
+            [ -n "$pid" ] && ${sudo_kill} kill -9 "$pid" 2>/dev/null && echo "      -> kill -9 $pid" || true
+        done
+    fi
 }
 
 port_in_use() {
@@ -467,6 +492,7 @@ echo -e "  目标端口: ${PORT}"
 echo ""
 
 load_env
+check_sudo_capability
 force_cleanup || exit 1
 install_deps || exit 1
 start_service || exit 1
