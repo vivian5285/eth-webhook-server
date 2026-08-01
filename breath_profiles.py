@@ -77,6 +77,7 @@ BREATH_XAU: Dict[str, Any] = {
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,
+    "BNBUSDT": BREATH_ETH,
 }
 
 _BY_DEEPCOIN = {

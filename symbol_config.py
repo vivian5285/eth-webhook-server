@@ -28,6 +28,17 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "XAUUSDT",
         "breath": "XAU",
     },
+    "BNBUSDT": {
+        "symbol": "BNBUSDT",
+        "unit": "BNB",
+        "tag": "BNB",
+        "qty_step": 0.01,
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,
+        "atr_fallback_symbol": "BNBUSDT",
+        "breath": "BNB",
+    },
 }
 
 # 深币 SWAP
@@ -74,6 +85,12 @@ _BINANCE_ALIASES = {
     "GOLD": "XAUUSDT",
     "BINANCE:XAUUSDT": "XAUUSDT",
     "BINANCE:XAUUSDT.P": "XAUUSDT",
+    "BNB": "BNBUSDT",
+    "BNBUSDT": "BNBUSDT",
+    "BNBUSD": "BNBUSDT",
+    "BNBUSDT.P": "BNBUSDT",
+    "BINANCE:BNBUSDT": "BNBUSDT",
+    "BINANCE:BNBUSDT.P": "BNBUSDT",
 }
 
 _DEEPCOIN_ALIASES = {
@@ -192,6 +209,7 @@ def extract_symbol_from_payload(data):
     for token in (
         "XAUUSDT.P", "BINANCE:XAUUSDT", "XAUUSDT", "XAU-USDT-SWAP", "XAUUSD",
         "ETHUSDT.P", "BINANCE:ETHUSDT", "ETHUSDT", "ETH-USDT-SWAP",
+        "BNBUSDT.P", "BINANCE:BNBUSDT", "BNBUSDT",
     ):
         if token in blob:
             return token
