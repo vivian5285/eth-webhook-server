@@ -2051,43 +2051,76 @@ class BinanceClient:
         self.invalidate_open_orders_cache(symbol)
 
     def close_all_positions(self, symbol="ETHUSDT"):
-        try:
-            pos = self.get_position(symbol)
-            if not pos: return None
+        """
+        市价全平仓 — 参考 Panda 平台 _flat_close 架构。
+
+        核心改进（根治超卖反开）：
+          1. 用 for 循环重试，最多重试5次，每次都强制 REST 查询实时持仓
+          2. 每次都从交易所拿最新 qty，禁止用 WS 缓存的 stale 数据
+          3. 循环内发现 qty 归零立即退出（防止已平仓后再发单）
+          4. 永不降级为 reduceOnly=False，从根本上杜绝超卖反开
+        """
+        sym = str(symbol or "ETHUSDT").upper()
+        MAX_RETRIES = 5
+
+        for attempt in range(MAX_RETRIES):
+            # ── 每次都强制 REST，拿到此时此刻真实持仓 ──────────────────
+            pos = self.get_position(sym, prefer_ws=False, force_rest=True)
+
+            if not pos:
+                # 交易所确认无仓 → 安全退出
+                logger.info(f"[市价平仓] {sym} 已无持仓（第{attempt + 1}次查询）")
+                return None
+
             pos_amt = float(pos.get("positionAmt", 0))
-            if pos_amt == 0: return None
+            if abs(pos_amt) < 0.001:
+                # 持仓归零 → 安全退出
+                logger.info(f"[市价平仓] {sym} 持仓已清零（第{attempt + 1}次查询）")
+                return None
 
             side = "SELL" if pos_amt > 0 else "BUY"
             qty = abs(pos_amt)
-            self._throttle_rest(symbol, kind="rest")
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=True
-            )
-            logger.info(f"[市价平仓成功] {symbol}")
-            return order
-        except Exception as first_err:
-            # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
-            logger.warning(f"⚠️ [市价平仓] {symbol} reduceOnly 失败: {first_err}")
-            logger.info(f"[市价平仓] {symbol} reduceOnly 失败，重新查询持仓状态...")
-            pos = self.get_position(symbol)
-            if not pos:
-                pos_amt = 0.0
-            else:
-                pos_amt = float(pos.get("positionAmt", 0))
-            
-            if abs(pos_amt) < 0.001:
-                # 确认无仓，拒绝执行降级（防止空仓变开仓）
-                logger.error(f"❌ [市价平仓] {symbol} reduceOnly 失败且已无仓，拒绝降级为开仓单")
+
+            try:
+                self._throttle_rest(sym, kind="rest")
+                order = self.client.futures_create_order(
+                    symbol=sym,
+                    side=side,
+                    type="MARKET",
+                    quantity=qty,
+                    reduceOnly=True,
+                )
+                logger.info(
+                    f"[市价平仓成功] {sym} {side} {qty} ETH "
+                    f"(第{attempt + 1}次，posAmt={pos_amt})"
+                )
+                return order
+            except Exception as e:
+                err_text = str(e)
+                # reduceOnly 被拒（持仓数据同步延迟）：重试前再查一次
+                if "-2022" in err_text or "reduceOnly" in err_text.lower():
+                    logger.warning(
+                        f"[市价平仓] {sym} reduceOnly被拒({e})，"
+                        f"重新查询持仓后重试（第{attempt + 1}/{MAX_RETRIES}次）"
+                    )
+                    # 再查一次（用长缓存兜底，避免冷却期空转）
+                    pos_recheck = self.get_position(sym, prefer_ws=True, force_rest=False)
+                    if not pos_recheck or abs(float(pos_recheck.get("positionAmt", 0))) < 0.001:
+                        logger.info(f"[市价平仓] {sym} 持仓已清零，退出")
+                        return None
+                    time.sleep(1.0)
+                    continue
+                # 非 reduceOnly 错误：记录日志但不降级
+                logger.error(
+                    f"[市价平仓] {sym} 下单失败: {e}（第{attempt + 1}/{MAX_RETRIES}次）"
+                )
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
                 return None
-            
-            # 有持仓，降级为普通市价单
-            logger.warning(f"⚠️ [市价平仓] {symbol} 确认有仓 {abs(pos_amt)} ETH，降级为普通市价单")
-            self._throttle_rest(symbol, kind="rest")
-            order = self.client.futures_create_order(
-                symbol=symbol, side=side, type="MARKET", quantity=qty, reduceOnly=False
-            )
-            logger.info(f"[市价平仓成功-降级] {symbol}")
-            return order
+
+        logger.error(f"[市价平仓] {sym} 重试{MAX_RETRIES}次仍失败")
+        return None
 
     def fetch_klines(self, symbol="ETHUSDT", interval="30m", limit=220):
         """期货 K 线原始行（行情引擎拉 30m 合成 90m）。"""
