@@ -65,7 +65,7 @@ load_env() {
     WEBHOOK_SECRET="${WEBHOOK_SECRET:-528586}"
 }
 
-DEPLOY_SCRIPT_VERSION="v16.2-sudo-kill"
+DEPLOY_SCRIPT_VERSION="v16.4-clean-output"
 
 check_sudo_capability() {
     # 检查是否有 sudo 权限杀进程（用 kill 命令测试，因为它在 NOPASSWD 列表里）
@@ -112,17 +112,17 @@ kill_residual_processes() {
     local sudo_kill="${SUDO_CMD}"
     
     echo "    -> pkill gunicorn..."
-    ${sudo_kill} pkill -9 -f "gunicorn.*:${PORT}"            2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "gunicorn.*${PORT}"             2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "gunicorn.*${DIR}.*app:app"     2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "gunicorn.*app:app"             2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*:${PORT}"            >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*${PORT}"             >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*${DIR}.*app:app"     >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "gunicorn.*app:app"             >/dev/null 2>&1 || true
     echo "    -> pkill supervisor..."
-    ${sudo_kill} pkill -9 -f "position_supervisor_binance"   2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "position_supervisor.py"        2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "supervisor"                    2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "position_supervisor_binance"   >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "position_supervisor.py"       >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "supervisor"                   >/dev/null 2>&1 || true
     echo "    -> pkill python..."
-    ${sudo_kill} pkill -9 -f "python.*binance"              2>/dev/null || true
-    ${sudo_kill} pkill -9 -f "python.*webhook"              2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "python.*binance"              >/dev/null 2>&1 || true
+    ${sudo_kill} pkill -9 -f "python.*webhook"              >/dev/null 2>&1 || true
     echo "    -> 清理 PID 文件..."
     if [ -f "$PID_FILE" ]; then
         OLD_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -132,13 +132,13 @@ kill_residual_processes() {
         rm -f "$PID_FILE"
     fi
     echo "    -> pkill -9 -f \"${PORT}\"..."
-    ${sudo_kill} pkill -9 -f "${PORT}" 2>/dev/null || true
+    ${sudo_kill} pkill -9 -f "${PORT}" >/dev/null 2>&1 || true
     
     # 额外：用 ss 找到所有监听端口的 PID 并杀掉（需要 sudo）
     echo "    -> ss 扫描杀所有占端口 ${PORT} 的进程..."
     if command -v ss >/dev/null 2>&1; then
         ss -lptn "sport = :${PORT}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read pid; do
-            [ -n "$pid" ] && ${sudo_kill} kill -9 "$pid" 2>/dev/null && echo "      -> kill -9 $pid" || true
+            [ -n "$pid" ] && ${sudo_kill} kill -9 "$pid" >/dev/null 2>&1 && echo "      -> kill -9 $pid" || true
         done
     fi
 }
