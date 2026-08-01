@@ -16468,7 +16468,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             logger.info(f"[蚂蚁仓复核] {self.symbol} 已无仓，拒绝降级为开仓单")
                             time.sleep(1.0)
                             closed_successfully = self._verify_flat()
-                            break
+                            return closed_successfully
                     logger.warning(
                         f"⚠️ [{self.symbol}] 蚂蚁仓 reduceOnly 扫尾失败，降级为普通市价单"
                     )
