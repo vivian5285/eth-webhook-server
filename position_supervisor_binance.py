@@ -5377,22 +5377,33 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._purge_all_defense_orders_on_flat(f"蚂蚁仓扫尾·{reason}")
         time.sleep(0.4)
         for round_i in range(4):
-            pos = self._get_active_position()
-            if not pos or pos["size"] <= 0:
+            # 每次都用 REST 实时持仓，防止 TP 部分成交导致 stale 数据
+            pos = self._get_active_position(prefer_ws=False, force_rest=True)
+            if not pos or pos.get("size", 0) <= 0:
                 break
             close_side = "SELL" if pos["side"] == "LONG" else "BUY"
-            logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {pos['size']} ETH reduceOnly")
+            qty = round(float(pos["size"]), 3)
+            logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {qty} ETH reduceOnly")
             order = binance_client.place_market_order(
-                close_side, pos["size"], symbol=self.symbol, reduce_only=True,
+                close_side, qty, symbol=self.symbol, reduce_only=True,
             )
-            # 【修复】reduceOnly 被拒绝时降级为普通市价单
+            # 【修复 v16.15.1】reduceOnly 被拒 → 强制 REST 重查 + 循环重试 + 永不降级
             if not order:
                 logger.warning(
-                    f"⚠️ [{self.symbol}] 蚂蚁仓扫尾 reduceOnly 失败，降级为普通市价单"
+                    f"⚠️ [{self.symbol}] 蚂蚁仓扫尾 reduceOnly 失败，强制REST重查 | round={round_i + 1}"
                 )
+                pos2 = self._get_active_position(prefer_ws=False, force_rest=True)
+                if not pos2 or pos2.get("size", 0) <= 0:
+                    logger.info(f"🐜 [{self.symbol}] 蚂蚁仓已清零，安全退出")
+                    break
+                qty2 = round(float(pos2["size"]), 3)
+                time.sleep(0.5)
                 order = binance_client.place_market_order(
-                    close_side, pos["size"], symbol=self.symbol, reduce_only=False,
+                    close_side, qty2, symbol=self.symbol, reduce_only=True,
                 )
+                if not order:
+                    logger.error(f"⚠️ [{self.symbol}] 蚂蚁仓扫尾重试仍失败，拒降级 | round={round_i + 1}")
+                    # 永不降级为普通单，防止超卖反开
             time.sleep(1.0)
         # 必须完整清零雷达账本（禁止半清理残留 entry/sl/atr）
         self._reset_breath_ledger_on_flat(source=f"蚂蚁仓扫尾·{reason}")
@@ -16512,25 +16523,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             order = binance_client.place_market_order(
                 close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
             )
-            # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
+            # 【修复 v16.15.1】reduceOnly 被拒 → 强制 REST 重查 + 循环重试 + 永不降级
             if not order:
                 logger.warning(
                     f"⚠️ [{self.symbol}] reduceOnly 平仓失败，重新查询持仓状态 | round={round_i + 1}"
                 )
-                pos = binance_client.get_position(self.symbol)
-                if pos:
-                    pos_amt = float(pos.get("positionAmt", 0))
-                    live_pos = round(abs(pos_amt), 3)
-                    logger.info(f"[持仓复核] {self.symbol}: {live_pos} ETH")
-                    if live_pos <= 0.001:
-                        closed_successfully = True
-                        logger.info(f"[持仓复核] {self.symbol} 已无仓，拒绝降级为开仓单")
-                        break
-                    if live_pos < live_sz:
-                        live_sz = live_pos
-                order = binance_client.place_market_order(
-                    close_side, live_sz, symbol=self.symbol, reduce_only=False, emergency=True,
+                # 用 force_rest 强制走 REST，避免 WS 缓存 stale 数据
+                pos = binance_client.get_position(
+                    self.symbol, prefer_ws=False, force_rest=True,
                 )
+                if not pos or abs(float(pos.get("positionAmt", 0) or 0)) < 0.001:
+                    logger.info(f"[持仓复核] {self.symbol} 已无仓，安全退出")
+                    closed_successfully = True
+                    break
+                pos_amt = float(pos.get("positionAmt", 0))
+                live_pos = round(abs(pos_amt), 3)
+                logger.info(f"[持仓复核] {self.symbol}: {live_pos} ETH")
+                time.sleep(0.8)
+                order = binance_client.place_market_order(
+                    close_side, live_pos, symbol=self.symbol, reduce_only=True, emergency=True,
+                )
+                if not order:
+                    logger.error(
+                        f"⚠️ [{self.symbol}] reduceOnly 重试仍失败，不降级 | round={round_i + 1}"
+                    )
+                    # 永不降级为普通单，防止超卖反开
             if not order:
                 logger.error(
                     f"❌ [{self.symbol}] 紧急强平下单失败 round={round_i + 1} | {reason}"
@@ -16571,24 +16588,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 order = binance_client.place_market_order(
                     close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
                 )
-                # 【重要修复】reduceOnly 被拒绝时，先查实际持仓再决定是否降级
+                # 【修复 v16.15.1】蚂蚁仓 reduceOnly 被拒 → 强制 REST 重查 + 永不降级
                 if not order:
-                    residual = binance_client.get_position(self.symbol)
-                    if residual:
-                        residual_amt = float(residual.get("positionAmt", 0))
-                        residual_sz = round(abs(residual_amt), 3)
-                        logger.info(f"[蚂蚁仓复核] {self.symbol}: {residual_sz} ETH")
-                        if residual_sz <= 0.001:
-                            logger.info(f"[蚂蚁仓复核] {self.symbol} 已无仓，拒绝降级为开仓单")
-                            time.sleep(1.0)
-                            closed_successfully = self._verify_flat()
-                            return closed_successfully
-                    logger.warning(
-                        f"⚠️ [{self.symbol}] 蚂蚁仓 reduceOnly 扫尾失败，降级为普通市价单"
+                    residual = binance_client.get_position(
+                        self.symbol, prefer_ws=False, force_rest=True,
                     )
+                    if not residual or abs(float(residual.get("positionAmt", 0) or 0)) < 0.001:
+                        logger.info(f"[蚂蚁仓复核] {self.symbol} 已无仓，安全退出")
+                        closed_successfully = True
+                        time.sleep(1.0)
+                        return self._verify_flat()
+                    residual_amt = float(residual.get("positionAmt", 0))
+                    residual_sz = round(abs(residual_amt), 3)
+                    logger.info(f"[蚂蚁仓复核] {self.symbol}: {residual_sz} ETH")
+                    time.sleep(0.5)
                     order = binance_client.place_market_order(
-                        close_side, residual_sz, symbol=self.symbol, reduce_only=False, emergency=True,
+                        close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
                     )
+                    if not order:
+                        logger.error(
+                            f"⚠️ [{self.symbol}] 蚂蚁仓 reduceOnly 重试仍失败，拒降级"
+                        )
+                        # 永不降级，防止超卖反开
                 time.sleep(1.0)
                 closed_successfully = self._verify_flat()
             if not closed_successfully:
