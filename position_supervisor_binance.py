@@ -3616,9 +3616,46 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return False
             logger.warning(f"⚠️ [{tag}] 检测到残留持仓，启动强制平仓")
             # 平仓过程中可能产生新挂单，先清一次
-            binance_client.cancel_all_open_orders(self.symbol)
+            # IP 冷却等待：撤单撞限流 → 等冷却结束再重试
+            for cancel_try in range(1, 4):
+                try:
+                    binance_client.cancel_all_open_orders(self.symbol)
+                    break
+                except Exception as e:
+                    err = str(e)
+                    if "ip_rate_limited" in err.lower() or "IpRateLimitedError" in type(e).__name__:
+                        ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                        if ip_rem > 0 and cancel_try < 3:
+                            wait_s = min(ip_rem, 20.0)
+                            logger.warning(
+                                f"⚠️ [{tag}] 撤单撞IP冷却，等 {wait_s:.1f}s 后重试 "
+                                f"({cancel_try}/3)"
+                            )
+                            time.sleep(wait_s)
+                            continue
+                    raise
             time.sleep(0.35)
-            if not self._close_all(f"{tag} · 强制清场", reset_state=True):
+
+            # IP 冷却等待：_close_all 撞限流 → 等冷却结束再重试
+            close_ok = False
+            for close_try in range(1, 4):
+                try:
+                    close_ok = self._close_all(f"{tag} · 强制清场", reset_state=True)
+                    break
+                except Exception as e:
+                    err = str(e)
+                    if "ip_rate_limited" in err.lower() or "IpRateLimitedError" in type(e).__name__:
+                        ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                        if ip_rem > 0 and close_try < 3:
+                            wait_s = min(ip_rem, 20.0)
+                            logger.warning(
+                                f"⚠️ [{tag}] 强平撞IP冷却，等 {wait_s:.1f}s 后重试 "
+                                f"({close_try}/3)"
+                            )
+                            time.sleep(wait_s)
+                            continue
+                    raise
+            if not close_ok:
                 logger.error(f"❌ [{tag}] 强平未归零，拒绝开仓")
                 return False
             # 平仓后用联合查询确认（仅 1 次 REST）
@@ -3753,33 +3790,45 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
         """
         开仓前一律无菌净场（有仓强平+撤单；空仓也清残留挂单）。
-        平仓/净场失败：重试 3 次，间隔 1s/3s/6s；仍失败 → CLOSE_THEN_OPEN_FAIL_ABORT
+        平仓/净场失败：重试 3 次；IP 冷却期内等待冷却结束再重试，避免限流拦截。
+        仍失败 → CLOSE_THEN_OPEN_FAIL_ABORT
         （放弃本笔开仓 + 高优钉钉 + 暂停该 symbol 自动开仓，需人工 /admin/resume）。
         """
         tag = reason_tag or "开仓前"
-        delays = (1.0, 3.0, 6.0)
-        n = len(delays)
+        max_attempts = 3
         last_detail = ""
-        for attempt in range(1, n + 1):
+        for attempt in range(1, max_attempts + 1):
+            # ── 重试前：若 IP 仍在冷却，等冷却结束再打 REST ──────────────
+            ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                wait_s = min(ip_rem, 20.0)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 先平后开·IP冷却中等候 {wait_s:.1f}s "
+                    f"(remaining {ip_rem:.0f}s) | 尝试 {attempt}/{max_attempts}"
+                )
+                time.sleep(wait_s)
+
             ok = self._sterile_flat_gate(
-                reason_tag=f"{tag}·尝试{attempt}/{n}",
+                reason_tag=f"{tag}·尝试{attempt}/{max_attempts}",
                 force_close=True,
                 notify=False,
             )
             if ok:
                 return True
             last_detail = str(getattr(self, "_last_sterile_flat_fail_detail", "") or "")
-            wait = float(delays[attempt - 1])
+
+            # 非 IP 冷却失败：线性退避（不再打 REST）
+            delay = float(1.0 + (attempt - 1) * 2.0)
             logger.warning(
-                f"⚠️ [{self.symbol}] 先平后开净场失败，间隔 {wait:.0f}s 后"
-                f"{'继续重试' if attempt < n else '宣告中止'} "
-                f"({attempt}/{n}) | {last_detail}"
+                f"⚠️ [{self.symbol}] 先平后开净场失败 {attempt}/{max_attempts}，"
+                f"间隔 {delay:.0f}s 后{'继续重试' if attempt < max_attempts else '宣告中止'} "
+                f"| {last_detail}"
             )
-            time.sleep(wait)
+            time.sleep(delay)
         # 3 次仍失败：内测模式仅记录，不暂停交易
         logger.warning(
             f"[内测-仅告警] [{self.symbol}] CLOSE_THEN_OPEN_FAIL_ABORT | {tag} | "
-            f"重试{n}次仍未净场 | 交易继续 | {last_detail}"
+            f"重试{max_attempts}次仍未净场 | 交易继续 | {last_detail}"
         )
         try:
             self._call_dingtalk(
