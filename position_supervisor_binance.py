@@ -168,7 +168,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.16-console-bnb-aesthetic"
+BINANCE_VPS_VERSION = "v16.17-open-retry-iron"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -3848,7 +3848,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._call_dingtalk(
                 dingtalk.report_close_then_open_fail_abort,
                 symbol=self.symbol,
-                attempts=n,
+                attempts=max_attempts,
                 reason=tag,
                 detail=last_detail or "qty/挂单未净，平仓结果不明",
             )
@@ -14085,17 +14085,72 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             except Exception:
                 pass
             order = binance_client.place_market_order(action, qty, symbol=self.symbol)
+
+            # ── 开仓重试层（v16.17）：市价失败 → 等退避再重试 → 挂 TV 限价单 ─────
+            OPEN_RETRY_DELAYS = (1.5, 3.0)   # 市价重试间隔（秒）
+            last_err_text = ""
+
             if not order:
-                logger.error("开仓失败：市价单未成交")
-                try:
-                    self._pipeline_fail(Role.EXECUTION, "ENTRY_SUBMIT_FAIL")
-                except Exception:
-                    pass
-                dingtalk.report_system_alert(
-                    f"开仓失败 [{self.symbol}]",
-                    f"TV {action} {qty} {self.unit_label} 市价单失败",
+                for _retry_idx, _delay in enumerate(OPEN_RETRY_DELAYS, start=1):
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 市价开仓失败，重试 {_retry_idx}/{len(OPEN_RETRY_DELAYS)+1} "
+                        f"| 等 {_delay}s 后再试 | qty={qty}"
+                    )
+                    time.sleep(_delay)
+                    # 市价前检查 IP 冷却
+                    _ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                    if _ip_rem > 0:
+                        _wait = min(_ip_rem, 20.0)
+                        logger.warning(f"[{self.symbol}] 重试前 IP 冷却中，等 {_wait:.1f}s")
+                        time.sleep(_wait)
+                    order = binance_client.place_market_order(action, qty, symbol=self.symbol)
+                    if order:
+                        logger.info(f"✅ [{self.symbol}] 市价重试第 {_retry_idx} 次成功")
+                        break
+
+            if not order:
+                # 市价全失败 → 按 TV 指导价挂限价开仓单（最后兜底）
+                _limit_px = curr_px
+                _direction = "做多" if action == "LONG" else "做空"
+                _limit_side = "BUY" if action == "LONG" else "SELL"
+                _limit_label = "LONG_LIMIT_OPEN" if action == "LONG" else "SHORT_LIMIT_OPEN"
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 市价开仓重试全部失败 → "
+                    f"按 TV 指导价挂限价单兜底: {_direction} {qty} {self.unit_label} @ {_limit_px:.2f}"
                 )
-                return
+                dingtalk.report_system_alert(
+                    f"开仓降级限价兜底 [{self.symbol}]",
+                    f"TV {action} {qty} {self.unit_label} 市价重试失败，"
+                    f"按 TV 指导价 {_limit_px:.2f} 挂限价单（{_direction}），"
+                    f"请关注是否成交",
+                    level="紧急",
+                )
+                order = binance_client.place_limit_order(
+                    _limit_side, qty, _limit_px,
+                    symbol=self.symbol,
+                    reduce_only=False,
+                    client_order_id=_limit_label,
+                )
+                if not order:
+                    # 限价单也挂失败 → 宣告开仓失败，钉钉高优告警
+                    logger.error(
+                        f"❌ [{self.symbol}] 开仓彻底失败：市价+限价兜底均未成功 | "
+                        f"TV {action} {qty} @ {_limit_px:.2f}"
+                    )
+                    try:
+                        self._pipeline_fail(Role.EXECUTION, "ENTRY_SUBMIT_FAIL")
+                    except Exception:
+                        pass
+                    dingtalk.report_system_alert(
+                        f"开仓彻底失败 [{self.symbol}]",
+                        f"TV {action} {qty} {self.unit_label} | "
+                        f"市价重试 {len(OPEN_RETRY_DELAYS)} 次 + 限价兜底均失败 | "
+                        f"当前已空仓，请检查网络/限流后重发 TV 信号",
+                        level="紧急",
+                    )
+                    return
+
+            if not order:
             # 成交后持仓查询可能短暂滞后；多轮重试，禁止误判空仓而跳过硬止损挂单
             # v16.16 温和压缩：13s → 8s（0.5+0.8+1.2+2.0+3.5）
             pos = None

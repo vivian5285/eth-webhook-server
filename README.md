@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.16-console-bnb-aesthetic`**
+**当前版本：`v16.17-open-retry-iron`**
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
@@ -56,7 +56,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.16-console-bnb-aesthetic · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT} · trading_paused: false
+# version: v16.17-open-retry-iron · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
 
@@ -424,7 +424,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v16.16-console-bnb-aesthetic
+# 期望: v16.17-open-retry-iron
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 # 重要：VPS 部署后等待真实 TV 信号，现有持仓由雷达守护，不干预
@@ -435,7 +435,7 @@ sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 # 或仅 ETH: LIVE20U_ONLY=ETH sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.16-console-bnb-aesthetic`；`trading_paused=false`；ETH/XAU/BNB 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
+**验收**：本地 HEAD = `origin/main` = VPS `git rev-parse HEAD`；health.version=`v16.17-open-retry-iron`；`trading_paused=false`；ETH/XAU/BNB 空仓待命；矩阵 PASS 且全程无同价重复、挂单总数≤5。
 
 ### 20U 矩阵观察点
 
