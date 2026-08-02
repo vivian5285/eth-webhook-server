@@ -168,6 +168,7 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 
 
 def active_binance_symbols():
+    # ⚠️ BNB 需要在此显式加入，例如 os.getenv("BINANCE_SYMBOLS","ETHUSDT,XAUUSDT,BNBUSDT")
     raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT")
     out = []
     for part in str(raw).split(","):

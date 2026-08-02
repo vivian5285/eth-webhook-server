@@ -58,13 +58,13 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 | # | 检查项 | 值 |
 |---|--------|-----|
 | 4.1 | 永久硬止损 | `\|TV−SL\|×1.15` @ 成交价外侧（不分档） |
-| 4.2 | 雷达激活臂 | entry ± **0.5** ×ATR（达启动线后上移） |
+| 4.2 | 雷达激活臂（规格 v1.0 §5.1） | 首次 **(TP1+TP2)/2** · 重入 **TP2**（绝对价格锚定）；激活后**保本起步**（entry±tick±fee） |
 | 4.3 | 雷达步进 / 跟进 | 档位表 `config/reentry_tiers.json`（ETH/XAU ADX 三档） |
-| 4.4 | TP 比例 / 档数 | **10/20/70** · `PLACE_TP_LEVELS=3` |
-| 4.5 | 互斥 | `exit_ownership`：NONE / TP3_LIMIT / RADAR_STOP |
-| 4.6 | 启动阈值 | 首次 **0.85×TP1距** · 重入 **1.00×TP1距**（按距离，非绝对价） |
+| 4.4 | TP 比例 / 档数 | **10/20/70** · `PLACE_TP_LEVELS=2`（仅 TP1+TP2 挂限价；TP3 永不挂） |
+| 4.5 | TP3 退出路径 | TP3(70%) 永不挂限价，**全靠雷达止损**（无 `TP3_LIMIT`）；TP1/TP2 用 `exit_ownership=NONE` |
+| 4.6 | 雷达激活阈值（规格 v1.0 §5.1） | 首次 **(TP1+TP2)/2** · 重入 **TP2**（绝对价格锚定，不再按距离） |
 | 4.7 | 切片成交 | 任意 `PARTIALLY_FILLED` → 按**当时实时总头寸**缩硬/雷达/剩余TP |
-| 4.8 | 旧 85%/0.5/0.3/2.0 阶梯雷达 | **已删除生效路径** |
+| 4.8 | 旧 85%/0.5/0.3 激活公式 | **已删除**；现用 (TP1+TP2)/2 / TP2 绝对价格锚定 |
 
 ---
 
@@ -91,9 +91,9 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 | # | 项 | 标准 |
 |---|----|------|
 | P1 | 本地 = GitHub = VPS | `git rev-parse HEAD` 三端一致 |
-| P2 | health.version | `v16.3.1-dual-notify` · `notify.telegram_configured=true` |
-| P3 | ETH/XAU 空仓无菌 | 持仓=0 · 挂单=0 · `trading_paused=false` · `api_monitor_only=false` |
-| P4 | 钉钉 | 开仓/雷达/TP/平仓/重入/异常均可达 |
+| P2 | health.version | `v16.3.2-bnb-enabled` · `notify.telegram_configured=true` |
+| P3 | ETH/XAU/BNB 空仓无菌 | 持仓=0 · 挂单=0 · `trading_paused=false` · `api_monitor_only=false` |
+| P4 | TG 通知 | 开仓/雷达/TP/平仓/重入/异常均可达 |
 | P5 | 单元测试 | `test_radar_reentry`（含 TP1/tier 闸门）· dup_guard · risk_iron · api_monitor |
 | P6 | 等真 TV | **禁止**再发测试 webhook 开仓；双品种待命收真实信号 |
 
@@ -105,8 +105,8 @@ TV.stop_loss **只**作硬止损距离输入（×buffer）及 sizing 收紧，**
 python check_vps_logic.py
 python -m unittest test_risk_iron_v1591 test_orders_dup_guard test_defense_v1590 test_radar_reentry test_api_monitor_v1621
 curl -s http://127.0.0.1:5003/health | python -m json.tool
-# 期望 version: v16.3.1-dual-notify · trading_paused=false · notify.telegram_configured=true
-# 双通道自检：
+# 期望 version: v16.3.2-bnb-enabled · trading_paused=false · notify.telegram_configured=true
+# TG 自检：
 # curl -s -X POST http://127.0.0.1:5003/admin/notify_test -H 'Content-Type: application/json' -d '{"level":1}'
 # curl -s -X POST http://127.0.0.1:5003/admin/notify_test -H 'Content-Type: application/json' -d '{"level":2}'
 ```

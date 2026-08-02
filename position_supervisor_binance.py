@@ -800,14 +800,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             qty = self._live_position_qty()
             if qty is None:
                 return False
-            if qty > DUST_QTY_ETH:
+            if qty > self.dust_qty:
                 return False
             if i + 1 < retries:
                 time.sleep(delay)
         final = self._live_position_qty()
         if final is None:
             return False
-        return final <= DUST_QTY_ETH
+        return final <= self.dust_qty
 
     def _reconcile_stale_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
         """
@@ -5348,12 +5348,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return None
 
     def _is_dust_qty(self, qty):
-        """币安 ETH 最小步长 0.001；≤0.004 视为蚂蚁仓"""
+        """蚂蚁仓判定：≤品种配置的 dust_qty 视为灰尘仓。"""
         try:
             q = float(qty)
         except (TypeError, ValueError):
             return False
-        return 0 < q <= DUST_QTY_ETH
+        return 0 < q <= self.dust_qty
 
     def _should_finalize_tp_victory(self, real_amt):
         """止盈网格已吃完、盘口无 TP 限价单，但可能残留蚂蚁仓 → 扫尾收网"""

@@ -166,7 +166,7 @@ def _resolve_unit(unit_label=None, symbol=None):
         sym = sym.split(":")[-1]
     if "XAU" in sym or "GOLD" in sym:
         return "XAU"
-    if "ETH" in sym:
+    if "ETH" in sym or "BNB" in sym:
         return "ETH"
     # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
     ctx_u = _ctx_unit.get()
@@ -177,7 +177,7 @@ def _resolve_unit(unit_label=None, symbol=None):
         ctx_s = ctx_s.split(":")[-1]
     if "XAU" in ctx_s or "GOLD" in ctx_s:
         return "XAU"
-    if "ETH" in ctx_s:
+    if "ETH" in ctx_s or "BNB" in ctx_s:
         return "ETH"
     return UNIT_LABEL
 
@@ -1008,7 +1008,7 @@ def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price
             G_MUTED,
         )
         data["🫁 雷达止损"] = _g(
-            "硬止损 |TV−SL|×1.15 @成交价 · 雷达达TP1距阈值后 entry±0.5×ATR 接管",
+            "硬止损 |TV−SL|×1.15 @成交价 · 雷达激活后保本起步(entry±tick±fee)再阶梯跟随",
             G_MUTED,
         )
         data["📐 算仓模式"] = _sizing_mode_label()
