@@ -369,6 +369,12 @@ def health():
             )
             for s, sup in SUPERVISORS.items()
         },
+        # v16.16.0：权重配额健康（主动预判数据）
+        "weight_stats": (
+            getattr(_bc, "_weighted_session", None)
+            and _bc._weighted_session.get_weight_stats()
+        ) or None,
+        "ip_rate_limit_remaining": float(_bc.ip_rate_limit_remaining()),
     }), 200
 
 

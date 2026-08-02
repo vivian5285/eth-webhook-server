@@ -6,37 +6,30 @@ import sys
 
 FILES = [
     "api_throttle.py",
+    "adapters.py",          # v16.16.0: BinanceWeightedSession - X-MBX-USED-WEIGHT-1M proactive
     "binance_client.py",
     "position_supervisor_binance.py",
     "radar_reentry_mixin.py",
     "smart_reentry_engine.py",
     "reentry_profiles.py",
     "webhook_parser.py",
+    "app.py",               # health endpoint: weight_stats + ip_rate_limit_remaining
 ]
 
-# Commit message
-MSG = """v16.10.0: fix probe/trade budget starvation + TP crash guard + auto-clear
+MSG = """v16.16.0: BinanceWeightedSession - X-MBX-USED-WEIGHT-1M proactive rate-limit
 
-Root causes fixed:
-1. api_throttle: dual budget - probes(60/min) vs trades(300/min) now independent
-   - Old: probes exhausted shared 24 budget, blocking ALL REST including trades
-   - New: probe budget=60, trade budget=300 (legacy API_BUDGET_PER_MIN still respected)
-2. position_supervisor: graceful try/except around _orders_book_readable crash guard
-   - Prevents AttributeError when binance_client lacks defensive_orders_look_ok
-3. position_supervisor: flat_purge_residual now auto-clearable when flat
-   - Prevents trading_paused from permanently blocking TV signals
-4. smart_reentry_engine + reentry_profiles: sync with VPS (was missing tp1/tp2 params)
-5. binance_client: version v16.10.0-probe-trade-budget
-
-Real-time fixes verified:
-- XAU LONG 0.39 @ 4080.55: TP1@4103.37 + TP2@4123.15 now live
-- Radar: activated (current price already past activation line)
-- Hard SL: @4054.38, breath SL: @4083.82
-- No more budget:24/24 starvation (new 60/300 dual budget active)
+Changes:
+1. adapters.py (new): BinanceWeightedSession parses X-MBX-USED-WEIGHT-1M response
+   header; triggers early cooldown (60s) when weight exceeds 80% threshold,
+   or 120s cooldown at 100% - replaces reactive -1003 approach.
+2. binance_client.py: injects BinanceWeightedSession, _on_preemptive_weight callback,
+   version -> v16.16.0-weight-proactive.
+3. api_throttle.py: snapshot() includes weight stats field.
+4. app.py: /health adds weight_stats + ip_rate_limit_remaining fields.
+5. git_sync.py: FILES list includes adapters.py, app.py.
 """
 
 def run():
-    # Stage files
     print("Staging files...")
     for f in FILES:
         result = subprocess.run(["git", "add", f], capture_output=True, text=True)
@@ -45,7 +38,6 @@ def run():
         else:
             print(f"  OK: {f}")
 
-    # Commit
     print("\nCommitting...")
     result = subprocess.run(
         ["git", "commit", "-m", MSG],
@@ -56,7 +48,6 @@ def run():
         print("COMMIT FAILED:", result.stderr)
         return False
 
-    # Push
     print("\nPushing to remote...")
     result = subprocess.run(
         ["git", "push", "origin", "main"],

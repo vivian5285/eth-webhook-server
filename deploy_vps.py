@@ -19,12 +19,14 @@ VPS_PASSWORD = "w'tFzgg2vPZ0D,Z"  # Already provided by user
 LOCAL_DIR = r"C:\Users\Administrator\Desktop\eth-webhook-server-main"
 FILES_TO_UPLOAD = [
     "api_throttle.py",
+    "adapters.py",          # v16.16.0: BinanceWeightedSession
     "binance_client.py",
     "position_supervisor_binance.py",
     "radar_reentry_mixin.py",
     "smart_reentry_engine.py",
     "reentry_profiles.py",
     "webhook_parser.py",
+    "app.py",              # v16.16.0: health weight_stats
     "dingtalk.py",
     "console_api.py",
     "deploy_v16.10.sh",
@@ -44,13 +46,13 @@ pkill -9 -f 'gunicorn.*binance' 2>/dev/null || true
 sleep 2
 
 echo "[2/6] Copying fixed files..."
-for f in api_throttle.py binance_client.py position_supervisor_binance.py radar_reentry_mixin.py smart_reentry_engine.py reentry_profiles.py webhook_parser.py dingtalk.py console_api.py; do
+for f in api_throttle.py adapters.py binance_client.py position_supervisor_binance.py radar_reentry_mixin.py smart_reentry_engine.py reentry_profiles.py webhook_parser.py app.py dingtalk.py console_api.py; do
     cp "/tmp/$f" "$APP/$f" && echo "  OK: $f"
 done
 
 echo "[3/6] Verifying Python syntax..."
 source "$VENV"
-for f in api_throttle.py binance_client.py position_supervisor_binance.py radar_reentry_mixin.py smart_reentry_engine.py reentry_profiles.py webhook_parser.py dingtalk.py console_api.py; do
+for f in api_throttle.py adapters.py binance_client.py position_supervisor_binance.py radar_reentry_mixin.py smart_reentry_engine.py reentry_profiles.py webhook_parser.py app.py dingtalk.py console_api.py; do
     python3 -m py_compile "$APP/$f" && echo "  OK: $f" || echo "  FAIL: $f"
 done
 

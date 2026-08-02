@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 logger = logging.getLogger(__name__)
-BINANCE_CLIENT_VERSION = "v16.15.0-joint-query-rpc-optimize"
+BINANCE_CLIENT_VERSION = "v16.16.0-weight-proactive"
 # v16.6.2：绝对封死同 IP 2400/min —— 单品种/全局间隔大幅拉大
 REST_MIN_INTERVAL_SEC = float(os.getenv("REST_MIN_INTERVAL_SEC", "2.0"))
 # 全账户/全品种合计 REST 硬下限（ETH+XAU 共享同一 IP 配额）
@@ -73,7 +73,18 @@ class BinanceClient:
     def __init__(self):
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
-        self.client = Client(self.api_key, self.api_secret)
+        # v16.16.0：注入 BinanceWeightedSession，实时解析 X-MBX-USED-WEIGHT-1M 主动预判降速
+        try:
+            from adapters import BinanceWeightedSession
+            _wsession = BinanceWeightedSession()
+            _wsession.set_preemptive_callback(self._on_preemptive_weight)
+            self.client = Client(self.api_key, self.api_secret, session=_wsession)
+            self._weighted_session = _wsession
+            logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载 (权重感知 Session)")
+        except Exception as _e:
+            logger.warning(f"[权重Session] 初始化失败，回退到普通Client: {_e}")
+            self.client = Client(self.api_key, self.api_secret)
+            self._weighted_session = None
         self._symbol_filters = {}
         self._price_cache = {}
         self._price_cache_ts = {}
@@ -139,12 +150,15 @@ class BinanceClient:
         if not key or not secret:
             logger.error("[rebind] 拒绝：空密钥")
             return False
-        with getattr(self, "_cred_lock", threading.Lock()):
-            same = (key == str(self.api_key or "")) and (secret == str(self.api_secret or ""))
-            if same and not force:
-                return True
-            try:
-                self.client = Client(key, secret)
+            with getattr(self, "_cred_lock", threading.Lock()):
+                same = (key == str(self.api_key or "")) and (secret == str(self.api_secret or ""))
+                if same and not force:
+                    return True
+                try:
+                    if getattr(self, "_weighted_session", None) is not None:
+                        self.client = Client(key, secret, session=self._weighted_session)
+                    else:
+                        self.client = Client(key, secret)
                 self.api_key = key
                 self.api_secret = secret
                 # 清缓存，避免旧账户挂单/持仓串读
@@ -194,6 +208,23 @@ class BinanceClient:
     def ip_rate_limit_remaining(self):
         until = float(getattr(self, "_ip_rate_limit_until", 0) or 0)
         return max(0.0, until - time.time())
+
+    def _on_preemptive_weight(self, used, limit, ratio, forced_sec=60.0):
+        """
+        BinanceWeightedSession 预判降速回调（v16.16.0）。
+        权重使用率超过阈值时，提前进入静默，避免触发 -1003。
+        forced_sec >= 120 时等同于 -1003 冷却；< 120 时是主动降速（静默期可稍短）。
+        """
+        if ratio >= 1.0:
+            # 完全耗尽 → 等同 -1003，强制完整冷却
+            self.mark_ip_rate_limited(seconds=120.0)
+        else:
+            # 主动降速 → 进入预判静默，上层 REST 请求会被 _raise_if_ip_rate_limited 拦截
+            self.mark_ip_rate_limited(seconds=forced_sec)
+        logger.warning(
+            f"🧊 [权重预判] used={used} limit={limit} ratio={ratio:.0%} "
+            f"→ 静默 {forced_sec:.0f}s (forced_sec={forced_sec})"
+        )
 
     def _raise_if_ip_rate_limited(self, symbol=""):
         """

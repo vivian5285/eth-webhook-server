@@ -244,7 +244,7 @@ class AccountThrottle:
     def snapshot(self) -> Dict[str, float]:
         with self._lock:
             self._window = self._gc_window(self._window)
-            return {
+            snap = {
                 "account": self.account_id,
                 "recent": float(len(self._window)),
                 "probe_budget": float(self.probe_budget_per_min),
@@ -254,6 +254,15 @@ class AccountThrottle:
                 "silence_rem": max(0.0, float(self._silence_until) - time.time()),
                 "emergency_silence_rem": max(0.0, float(self._emergency_silence_until) - time.time()),
             }
+            # v16.16.0：附上权重感知 Session 的配额快照（若存在）
+            try:
+                from binance_client import binance_client
+                ws = getattr(binance_client, "_weighted_session", None)
+                if ws is not None:
+                    snap["weight"] = ws.get_weight_stats()
+            except Exception:
+                pass
+            return snap
 
 
 _THROTTLES: Dict[str, AccountThrottle] = {}
