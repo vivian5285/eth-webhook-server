@@ -150,15 +150,15 @@ class BinanceClient:
         if not key or not secret:
             logger.error("[rebind] 拒绝：空密钥")
             return False
-            with getattr(self, "_cred_lock", threading.Lock()):
-                same = (key == str(self.api_key or "")) and (secret == str(self.api_secret or ""))
-                if same and not force:
-                    return True
-                try:
-                    if getattr(self, "_weighted_session", None) is not None:
-                        self.client = Client(key, secret, session=self._weighted_session)
-                    else:
-                        self.client = Client(key, secret)
+        with getattr(self, "_cred_lock", threading.Lock()):
+            same = (key == str(self.api_key or "")) and (secret == str(self.api_secret or ""))
+            if same and not force:
+                return True
+            try:
+                if getattr(self, "_weighted_session", None) is not None:
+                    self.client = Client(key, secret, session=self._weighted_session)
+                else:
+                    self.client = Client(key, secret)
                 self.api_key = key
                 self.api_secret = secret
                 # 清缓存，避免旧账户挂单/持仓串读
