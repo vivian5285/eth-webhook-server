@@ -35,7 +35,7 @@ class TestRadarStickySpike(unittest.TestCase):
     TP1 = 1977.05
     ATR = 14.345
 
-    def _stub(self):
+    def _stub(self, act_price=None):
         with patch.object(
             psb.PositionSupervisorBinance, "__init__", lambda self, *a, **k: None
         ):
@@ -45,7 +45,9 @@ class TestRadarStickySpike(unittest.TestCase):
         s.watched_entry = self.ENTRY
         s.watched_qty = 0.868
         s.best_price = self.ENTRY
-        s.radar_activation_price = self.ACT
+        # _radar_activation_price 是方法，必须 patch，否则 s.radar_activation_price=act_price
+        # 会把方法覆盖为属性，调用时 TypeError: 'float' object is not callable
+        s._radar_activation_price = lambda: float(act_price or self.ACT)
         s.radar_activation_frac = 0.9
         s.radar_activation_sticky = False
         s.radar_activated = False
@@ -78,7 +80,7 @@ class TestRadarStickySpike(unittest.TestCase):
         self.assertTrue(s._activation_reached_for_arm(drop))
 
     def test_arm_gate_ignores_tp1_fill_status(self):
-        s = self._stub()
+        s = self._stub(act_price=self.ACT)
         s._note_mark_extremum(self.ACT)
         s.tp_levels_consumed = []
         self.assertTrue(s._activation_reached_for_arm(1940.0))
@@ -129,9 +131,9 @@ class TestRadarStickySpike(unittest.TestCase):
 
     def test_version_bump(self):
         self.assertIn("false-pause-iron", psb.BINANCE_VPS_VERSION)
-        self.assertIn("sticky", open(
-            os.path.join(ROOT, "position_supervisor_binance.py"), encoding="utf-8"
-        ).read())
+        with open(os.path.join(ROOT, "position_supervisor_binance.py"), encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("sticky", content)
 
 
 if __name__ == "__main__":
