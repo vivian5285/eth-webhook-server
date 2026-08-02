@@ -2549,6 +2549,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if total > live_qty + 0.001:
             out[last] = round(max(out.get(last, 0) - (total - live_qty), 0.0), 3)
         # PLACE=2 硬帽：限价合计 ≤ 开仓×(r1+r2)+一步噪声
+        # Bug修复：先除后乘的原始逻辑存在「四舍五入后值不变」的死循环。
+        # 正确做法：用未舍入的原始比例计算 cap，缩放后统一舍入。
         place_n = self._effective_place_tp_levels()
         if place_n <= 2 and max(levels) <= 2:
             initial = float(
@@ -2565,19 +2567,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             while len(ratios) < 2:
                 ratios.append(0.0)
             cap = round(initial * (float(ratios[0]) + float(ratios[1])) + 1e-6, 3)
-            # 允许一步精度；禁止接近整笔现仓
             hard = min(cap, round(live_qty * 0.40, 3)) if live_qty > 0 else cap
-            tot2 = round(sum(float(out.get(l, 0) or 0) for l in levels if l <= 2), 3)
-            if tot2 > hard + 1e-9:
+            # 用原始（未舍入）值计算 tot 以防四舍五入造成死循环
+            tot2_raw = sum(float(out.get(l, 0) or 0) for l in levels if l <= 2)
+            if tot2_raw > hard + 1e-9:
                 logger.error(
-                    f"🚨 [{self.symbol}] TP限价预算超帽 tot={tot2} hard={hard} "
+                    f"🚨 [{self.symbol}] TP限价预算超帽 tot={round(tot2_raw, 4)} hard={hard} "
                     f"initial={initial} live={live_qty} → 按比例压回"
                 )
-                if tot2 > 0:
-                    scale = hard / tot2
-                    for l in list(out.keys()):
-                        if int(l) <= 2:
-                            out[l] = round(float(out.get(l) or 0) * scale, 3)
+                scale = hard / tot2_raw
+                total_scaled = 0.0
+                for l in list(out.keys()):
+                    if int(l) <= 2:
+                        raw_val = float(out.get(l) or 0) * scale
+                        rounded_val = round(raw_val, 3)
+                        out[l] = rounded_val
+                        total_scaled += rounded_val
+                # 安全钳：确保总和严格不超过 hard
+                if total_scaled > hard + 1e-9 and levels:
+                    smallest_level = min(l for l in levels if l <= 2)
+                    excess = round(total_scaled - hard, 4)
+                    out[smallest_level] = round(max(out.get(smallest_level, 0) - excess, 0), 3)
         return out
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
