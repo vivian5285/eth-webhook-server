@@ -14127,6 +14127,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # ── 开仓重试层（v16.17）：市价失败 → 等退避再重试 → 挂 TV 限价单 ─────
             OPEN_RETRY_DELAYS = (1.5, 3.0)   # 市价重试间隔（秒）
             last_err_text = ""
+            _order_placed = bool(order)
 
             if not order:
                 for _retry_idx, _delay in enumerate(OPEN_RETRY_DELAYS, start=1):
@@ -14144,7 +14145,36 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     order = binance_client.place_market_order(action, qty, symbol=self.symbol)
                     if order:
                         logger.info(f"✅ [{self.symbol}] 市价重试第 {_retry_idx} 次成功")
+                        _order_placed = True
                         break
+
+            # ── 开仓确认（v16.18）：市价成功后查持仓，防止 IP 冷却导致双重下单 ─────
+            if _order_placed and order:
+                time.sleep(0.5)  # 等待 Binance 成交确认
+                _ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                if _ip_rem > 0:
+                    _wait = min(_ip_rem, 20.0)
+                    logger.warning(f"[{self.symbol}] 开仓确认前 IP 冷却中，等 {_wait:.1f}s")
+                    time.sleep(_wait)
+                confirmed = self._get_active_position(force_rest=True)
+                if confirmed and confirmed != "QUERY_FAILED":
+                    self.watched_qty = float(confirmed.get("size") or 0)
+                    self.watched_entry = float(confirmed.get("entry_price") or 0)
+                    self.current_side = confirmed.get("side")
+                    logger.info(
+                        f"✅ 开仓确认: {self.current_side} {self.watched_qty} ETH @ {self.watched_entry}"
+                    )
+                elif confirmed == "QUERY_FAILED":
+                    # 订单可能成功但查不到 → 钉钉预警，账本留空（fail-open，雷达守护兜底）
+                    dingtalk.report_system_alert(
+                        f"开仓疑似成功但无法确认 [{self.symbol}]",
+                        f"TV {action} {qty} {self.unit_label} 已下单但持仓查询失败（IP限流），"
+                        f"请人工确认是否已有持仓",
+                        level="紧急",
+                    )
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 开仓疑似成功但无法确认持仓（QUERY_FAILED）"
+                    )
 
             if not order:
                 # 市价全失败 → 按 TV 指导价挂限价开仓单（最后兜底）
