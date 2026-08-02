@@ -3505,7 +3505,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 {
                     "orderId": o.get("orderId"),
                     "price": round(float(o.get("price", 0) or 0), 2),
-                    "qty": round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3),
+                    "qty": round(float(o.get("origQty") or o.get("quantity") or 0), 3),
                 }
                 for o in (orders or [])
                 if self._is_tp_limit_order(o)
@@ -5876,10 +5876,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 consumed.append(lv)
                 continue
             if self._price_reached_tp_zone(lv, curr_px, px):
-                logger.info(
-                    f"🧮 [{self.symbol}] TP{lv}@{px:.2f} 价到但拒认成交 "
-                    f"(自撤窗口或无减仓证据) → 不记账"
-                )
+                # 容错：开仓对齐/自撤窗口内价到不算成交
+                if self._in_self_tp_purge_window():
+                    logger.info(
+                        f"🧮 [{self.symbol}] TP{lv}@{px:.2f} 价到但自撤窗口中 → 不记账"
+                    )
+                elif not self._qty_evidence_tp_consumed(lv, live_qty):
+                    logger.warning(
+                        f"🧩 [{self.symbol}] 拒认 TP{lv} 假成交：价到+限价无，但头寸无减仓证据 "
+                        f"(live={live_qty:.4f} base={float(self._tp_baseline_qty(live_qty) or 0):.4f}) "
+                        f"→ 视为漏挂，允许补挂/推离"
+                    )
+                else:
+                    logger.info(
+                        f"🧮 [{self.symbol}] TP{lv}@{px:.2f} 价到但拒认成交 "
+                        f"(自撤窗口或无减仓证据) → 不记账"
+                    )
             else:
                 logger.info(
                     f"🧮 [{self.symbol}] TP{lv}@{px:.2f} 限价已消失但现价/best未达 "
@@ -6637,7 +6649,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             levels.append({"level": level, "qty": qty, "price": price})
         return levels
 
-    def _audit_tp_levels(self, live_qty, tolerance=1.0, qty_tol=0.005):
+    def _audit_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005):
         """严格审计：每档价位唯一 + 数量符合 regime 比例 + 无孤儿单"""
         live_qty = self._resolve_live_qty(live_qty)
         orders = self._collect_tp_limit_orders()
@@ -6716,7 +6728,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             parts.append("问题:" + "; ".join(audit["issues"][:3]))
         return " | ".join(parts) if parts else "无有效 TP"
 
-    def _count_matched_tp_orders(self, tp_pxs, tolerance=1.0, live_qty=None):
+    def _count_matched_tp_orders(self, tp_pxs, tolerance=2.0, live_qty=None):
         if live_qty is not None and live_qty > 0:
             audit = self._audit_tp_levels(live_qty, tolerance)
             return audit["matched_full"], audit["pending_prices"]
@@ -6729,7 +6741,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 matched += 1
         return matched, pending_prices
 
-    def _cancel_orphan_tp_orders(self, live_qty, tolerance=1.0):
+    def _cancel_orphan_tp_orders(self, live_qty, tolerance=2.0):
         # 无期望价时禁止清场：否则 TP 成交后账本空会把仍有效的 TP2/TP3 当孤儿撤掉
         if self._expected_tp_count() <= 0:
             if self._adopt_tp_prices_from_open_orders(self.watched_entry):
@@ -6758,7 +6770,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return None
         return min(orders, key=lambda o: abs(o["qty"] - target_qty))
 
-    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=1.0, qty_tol=0.005):
+    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=2.0, qty_tol=0.005):
         """
         重启智能修复：先读实盘 → 撤重复留最佳 → 补缺档/纠偏数量。
         不动已正确的单，避免核武撤挂把正确盘口毁掉。
@@ -8209,11 +8221,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             q, px = float(lv["qty"] or 0), float(lv["price"] or 0)
             if q <= 0 or px <= 0:
                 continue
-            if self._may_mark_tp_filled_missing_limit(
-                int(lv["level"]), live_qty, curr_px, tp_px=px,
-            ):
-                self._mark_tp_levels_consumed([int(lv["level"])])
+            if self._has_tp_limit_at_price(px):
                 continue
+            # 限价消失 → 先记账再补挂（不论价是否已到、无仓减证据）
+            # 避免「价到+无减仓」误判为成交 → 跳过挂单 → 死循环
+            if not self._has_tp_limit_at_price(px):
+                reason_skip = ""
+                if self._may_mark_tp_filled_missing_limit(
+                    int(lv["level"]), live_qty, curr_px, tp_px=px,
+                ):
+                    self._mark_tp_levels_consumed([int(lv["level"])])
+                    reason_skip = "（价到无减仓→记账不挂）"
+                if reason_skip:
+                    logger.warning(
+                        f"🧩 [{self.symbol}] TP{lv['level']}@{px:.2f} "
+                        f"限价消失但未核实成交 {reason_skip}，仍尝试补挂"
+                    )
+                # 继续执行 _place_defense_tp_limit
             if self._tp_is_marketable(self.current_side, px, curr_px):
                 self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
                 tps = list(self.tv_tps or [])
@@ -8696,6 +8720,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
         # 每轮先清陈旧防御标签，杜绝「本地未完成」永久拒挂雷达/TP
         self._gc_stale_pending_defense_tags(save=False)
+        # 每轮检查重复挂单：2.0U容差（对齐 _has_tp_limit_at_price），及时去重
+        if self._has_duplicate_tp_orders(tolerance=2.0):
+            pruned = self._prune_duplicate_tp_limits(tolerance=2.0)
+            if pruned:
+                logger.warning(
+                    f"🧹 [{self.symbol}] 哨兵发现重复TP单并去重 {pruned} 张"
+                )
         # 每轮先按「价到+限价消失」对账，微漂不干扰
         self._reconcile_tp_consumed_from_live_qty(
             real_amt, curr_px, source="哨兵双轨对账", notify=True,
@@ -8757,7 +8788,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if self._order_is_close_position_stop(o):
                 continue
             try:
-                q = float(o.get("origQty", o.get("quantity", 0)) or 0)
+                q = float(o.get("origQty") or o.get("quantity") or 0)
             except (TypeError, ValueError):
                 q = 0.0
             if q <= 0:
@@ -8946,7 +8977,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if binance_client._truthy_close_position(o.get("closePosition")):
                 oqty = live_qty
             else:
-                oqty = round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3)
+                oqty = round(float(o.get("origQty") or o.get("quantity") or 0), 3)
             for i, tp in enumerate(tier_prices):
                 if tp and abs(px - tp) <= SHIELD_STOP_TOLERANCE:
                     buckets[i].append({"order": o, "qty": oqty})
@@ -9772,11 +9803,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             orders.append({
                 "orderId": o.get("orderId"),
                 "price": round(px, 2),
-                "qty": round(float(o.get("origQty", o.get("quantity", 0)) or 0), 3),
+                # 优先 origQty；其次 quantity；兜底 0（防 key 存在但值为 None 的情况）
+                "qty": round(float(o.get("origQty") or o.get("quantity") or 0), 3),
             })
         return orders
 
-    def _has_duplicate_tp_orders(self, tolerance=1.0):
+    def _has_duplicate_tp_orders(self, tolerance=2.0):
         """同一 TP 价位出现多张单，或总张数超过应有档数"""
         orders = self._collect_tp_limit_orders()
         if is_orders_query_failed(orders):
@@ -9786,6 +9818,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         if len(orders) > expected:
             return True
+        # 用 2.0U 容差（与 _has_tp_limit_at_price 一致），避免不同精度误判为不同档
         for tp in self.tv_tps:
             if tp <= 0:
                 continue
@@ -9794,7 +9827,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return True
         return False
 
-    def _prune_duplicate_tp_limits(self, tolerance=1.0):
+    def _prune_duplicate_tp_limits(self, tolerance=2.0):
         """
         同价多张 LIMIT：每价只留 1 张（最早 orderId），其余撤销。
         挂单不可读 → 0（禁止盲撤）。用于巡检轻量去重，避免核武连环撤挂。
@@ -9838,7 +9871,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 time.sleep(0.12)
         return cancelled
 
-    def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=1.0, qty_tol=0.005):
+    def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=2.0, qty_tol=0.005):
         """头寸对应的 TP123 价位+数量均已正确挂好，且雷达/VPS 止损（若需要）也在"""
         tp_pxs = self.tv_tps
         expected = self._expected_tp_count(tp_pxs)
@@ -9884,7 +9917,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         return True
 
-    def _patch_missing_tp_levels(self, live_qty, tolerance=1.0, qty_tol=0.005):
+    def _patch_missing_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005):
         """
         只补「真正漏挂」的剩余档。
         价到+限价消失 = 已成交 → 记账后绝不补挂，耐心等 TP23。
@@ -11646,7 +11679,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return True
         return False
 
-    def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=1.0, qty_tol=0.005):
+    def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=2.0, qty_tol=0.005):
         """撤掉剩余档数量与当前仓位比例不符的旧单（部分止盈后常见）"""
         cancelled = 0
         for lv in self._expected_tp_levels(live_qty):
@@ -16541,7 +16574,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             q, px = lv["qty"], lv["price"]
             if q > 0 and px > 0:
                 # 已存在则跳过，避免重复叠单
-                if self._has_tp_limit_at_price(px, tolerance=1.0):
+                if self._has_tp_limit_at_price(px, tolerance=2.0):
                     logger.info(f"  ✓ TP{lv['level']} @ {px:.2f} 已在盘口，跳过")
                     placed += 1
                     continue
