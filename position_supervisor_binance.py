@@ -14150,7 +14150,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     )
                     return
 
-            if not order:
             # 成交后持仓查询可能短暂滞后；多轮重试，禁止误判空仓而跳过硬止损挂单
             # v16.16 温和压缩：13s → 8s（0.5+0.8+1.2+2.0+3.5）
             pos = None
