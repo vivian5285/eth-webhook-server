@@ -14165,11 +14165,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         f"✅ 开仓确认: {self.current_side} {self.watched_qty} ETH @ {self.watched_entry}"
                     )
                 elif confirmed == "QUERY_FAILED":
-                    # 订单可能成功但查不到 → 钉钉预警，账本留空（fail-open，雷达守护兜底）
-                    dingtalk.report_system_alert(
-                        f"开仓疑似成功但无法确认 [{self.symbol}]",
-                        f"TV {action} {qty} {self.unit_label} 已下单但持仓查询失败（IP限流），"
-                        f"请人工确认是否已有持仓",
+                    # 订单可能成功但查不到 → TG紧急告警，账本留空（雷达守护兜底）
+                    self._call_dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"开仓疑似成功但无法确认 [{self.symbol}]",
+                        detail=(
+                            f"TV {action} {qty} {self.unit_label} 已下单但持仓查询失败（IP限流），"
+                            f"请人工确认是否已有持仓"
+                        ),
                         level="紧急",
                     )
                     logger.warning(
