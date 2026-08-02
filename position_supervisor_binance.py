@@ -10168,6 +10168,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tp_cancelled = 0
         init_orders = None
 
+        # 【重要修复】撤单前先检查持仓：已空仓时无需撤单，减少无意义 REST
+        try:
+            pre_pos = binance_client.get_position(self.symbol, prefer_ws=False, force_rest=False)
+            if not pre_pos or float(pre_pos.get("positionAmt", 0) or 0) == 0:
+                logger.info(f"🧹 [{tag}] 持仓已清零，跳过撤单循环")
+                return {
+                    "ok": True,
+                    "rounds": 0,
+                    "tp_cancelled": 0,
+                    "remaining": 0,
+                }
+        except Exception:
+            pass  # 查询失败时继续正常撤单流程
+
         for attempt in range(max_rounds):
             # ── 步骤 1：全量撤单（普通单 + Algo 条件单）────────────────────
             binance_client.cancel_all_open_orders(self.symbol)
@@ -16671,7 +16685,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
             )
             # 【修复 v16.15.1】reduceOnly 被拒 → 强制 REST 重查 + 循环重试 + 永不降级
-            if not order:
+            # 【修复 v16.17.x】reduceOnly 成功后：立即检查是否已清仓，避免继续重试
+            if order:
+                # 平仓成功！立刻验证是否已清仓（用 force_rest 查最新数据）
+                time.sleep(0.5)  # 等待交易所成交确认
+                verify_pos = binance_client.get_position(
+                    self.symbol, prefer_ws=False, force_rest=True,
+                )
+                if not verify_pos or abs(float(verify_pos.get("positionAmt", 0) or 0)) < 0.001:
+                    logger.info(f"✅ [{self.symbol}] reduceOnly 平仓成功，已确认无仓")
+                    closed_successfully = True
+                    break
+                logger.info(f"⚠️ [{self.symbol}] 平仓成功但仍有持仓: {verify_pos.get('positionAmt')} ETH")
+            elif not order:
                 logger.warning(
                     f"⚠️ [{self.symbol}] reduceOnly 平仓失败，重新查询持仓状态 | round={round_i + 1}"
                 )

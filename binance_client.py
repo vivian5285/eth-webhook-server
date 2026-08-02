@@ -1016,6 +1016,28 @@ class BinanceClient:
             return dict(row)
         return None
 
+    def _invalidate_pos_cache(self, symbol):
+        """平仓成功后立即失效持仓缓存，防止后续查询返回 stale 数据导致重复平仓"""
+        sym = str(symbol or "").upper()
+        with self._pos_lock:
+            # 将缓存设为 0，强制下次查询走 REST
+            self._pos_cache[sym] = {
+                "symbol": sym,
+                "positionAmt": 0.0,
+                "entryPrice": 0.0,
+            }
+            self._pos_cache_ts[sym] = time.time()
+        # 同时清 _all_pos_rows（批量持仓缓存）
+        if hasattr(self, "_all_pos_rows") and self._all_pos_rows:
+            with self._pos_lock:
+                if sym in self._all_pos_rows:
+                    self._all_pos_rows[sym] = {
+                        "symbol": sym,
+                        "positionAmt": 0.0,
+                        "entryPrice": 0.0,
+                    }
+        logger.info(f"[缓存失效] {sym} 持仓缓存已清零")
+
     def start_user_data_ws(self, symbol="ETHUSDT", on_event=None):
         """合约 User Data Stream：多品种回调注册，持仓/订单推送对齐实盘。"""
         symbol = str(symbol or "ETHUSDT").upper()
@@ -1645,6 +1667,9 @@ class BinanceClient:
             order = self.client.futures_create_order(**params)
             tag = "平仓" if reduce_only else "开仓"
             logger.info(f"[市价{tag}成功] {side} {qty} {symbol}")
+            # 【重要修复】平仓成功后立即失效持仓缓存，避免后续查询返回 stale 数据
+            if reduce_only and order:
+                self._invalidate_pos_cache(symbol)
             return order
 
         try:
