@@ -443,8 +443,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._state_old_schema = False
         self._last_bar_time_ms = 0  # 最近处理过的 bar_time（乱序/过期兜底）
         self._atr_div_streak = 0
-        self.atr_source = "tv"  # 场景二=tv；场景一接管后=vps
-        self.atr_degraded = False  # 兼容旧 state；两场景定稿不再因 ATR 暂停
+        self.atr_source = "tv"  # 规格 v1.0：ATR 全程只用 TV webhook.atr
+        self.atr_degraded = False  # 兼容旧 state；v1.0 不再因 ATR 异常暂停
         self._pending_atr_degrade = None
         # 两场景：0=未决 · 1=VPS真实ATR · 2=TV理论ATR(+TP3兜底)
         self._atr_scenario = 0
@@ -5056,8 +5056,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _finalize_atr_degrade_after_open(self, entry, qty, side):
         """
-        旧逻辑：ATR 降级后暂停 symbol —— 已废除（两场景定稿）。
-        现仅清 pending；场景二由 _enter_atr_scenario_2 处理（不暂停、挂TP3）。
+        ATR 降级暂停已废除（规格 v1.0 §6）。
+        ATR 全程只用 TV webhook.atr；禁止 VPS 独立拉取。
         """
         self._pending_atr_degrade = None
         self.atr_degraded = False
@@ -14243,12 +14243,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0, sizing_meta=None):
         """
-        开仓后防线（v15.9.0）：
-        1) 核实持仓 → 绑回本笔 TV TP1/TP2/TP3 价
+        开仓后防线（规格 v1.0）：
+        1) 核实持仓 → 绑回本笔 TV TP1/TP2 价
         2) 共同第一步：永久硬止损(|TV−SL|×buffer 锚定成交价) + TP1+TP2(10%/20%)
-        3) 同步拉原生1h ATR：场景一/二仅决定雷达 ATR 源；TP3 常挂不撤
-        4) 递进雷达休眠至激活线后接管雷达（与 TP3 互斥）
-        5) 实盘核实后钉钉一条
+        3) ATR 全程只用 TV webhook.atr（VPS 不拉独立 ATR）
+        4) 递进雷达休眠至激活线(TP1+TP2中点)后接管（TP3永不挂限价)
+        5) 实盘核实后 TG 一条
         """
         entry_price = float(entry_price or 0)
         # 开仓路径：禁止接管「现价已过跳过TP」污染；强制绑回本笔 TV TP

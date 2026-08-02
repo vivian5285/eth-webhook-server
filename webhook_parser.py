@@ -814,25 +814,17 @@ def compute_atr_from_klines(klines, period=14):
 
 
 def fetch_eth_atr_14_public(period=14, symbol="ETHUSDT"):
-    return fetch_symbol_atr_14_public(symbol or "ETHUSDT", period=period)
+    """【已禁用】VPS 不再独立拉 ATR，全程只用 TV webhook.atr"""
+    return 0.0
 
 
 def fetch_symbol_atr_14_public(symbol="ETHUSDT", period=14):
-    sym = str(symbol or "ETHUSDT").upper().replace(".P", "")
-    if ":" in sym:
-        sym = sym.split(":")[-1]
-    try:
-        import requests
-        resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/klines",
-            params={"symbol": sym, "interval": "15m", "limit": period + 20},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        return compute_atr_from_klines(resp.json(), period)
-    except Exception as e:
-        logger.warning(f"Public {sym} ATR fetch failed: {e}")
-        return 0.0
+    """
+    【已禁用函数 - 规格 v1.0 §6 已删除 VPS 独立拉 ATR】
+    ATR 全程只用 TV webhook.atr，VPS 不再拉取交易所真实 ATR。
+    本函数已无调用路径，保留作迁移兼容。
+    """
+    return 0.0
 
 
 def atr_fallback_for_symbol(symbol="ETHUSDT"):

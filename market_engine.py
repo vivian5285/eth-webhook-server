@@ -252,8 +252,9 @@ def evaluate_atr_emergency_degrade(
     streak_n: int = ATR_DEGRADE_STREAK_N,
 ) -> Tuple[bool, dict]:
     """
-    判断是否触发 ATR 应急降级（临时用 TV 隐含 ATR，非静默容错）。
-    返回 (should_degrade, meta)。
+    【已禁用函数 - 规格 v1.0 §6 已删除 ATR 降级机制】
+    ATR 全程只用 TV webhook.atr，VPS 不再独立拉取。
+    本函数已无调用路径，保留作迁移兼容。
     """
     vps = _f(vps_atr)
     tv_imp = tv_implied_atr_for_degrade(entry, stop_loss)

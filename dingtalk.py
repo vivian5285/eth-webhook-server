@@ -886,7 +886,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
                            tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None,
                            hard_sl_px=None, radar_act_px=None,
                            tier=None, adx=None, tier_source=""):
-    """妈妈版开仓通知（含 TV/ADX 弱中强档位）。"""
+    """开仓通知（含趋势档位）。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     direction = "LONG" if str(side).upper() == "LONG" else "SHORT"
@@ -1518,39 +1518,25 @@ def report_atr_degrade_abort(
     detail="",
 ):
     """
-    ATR 应急降级：本笔已用 TV 隐含 ATR 开仓；暂停后续自动开仓，需人工确认后 resume。
-    禁止静默切换——必须高优告警。
+    【已禁用机制】ATR 应急降级（规格 v1.0 §6 已删除）。
+    ATR 全程只用 TV webhook.atr，VPS 不再独立拉取。
+    本函数保留作占位兼容，旧路径仍可能调用但不影响生产。
     """
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
     data = {
-        "⚠️ 机制": _g("ATR_DEGRADE_MANUAL_RESUME", G_DEEP),
+        "⚠️ 机制": _g("【已禁用】ATR_DEGRADE（规格v1.0已删除）", G_DEEP),
         "🏷️ 品种": _g(sym, G_MAIN),
         "📌 触发原因": _g(reason or "—", G_ACCENT),
-        "📉 VPS原始ATR": _g(f"`{float(vps_atr or 0):.4f}`", G_MUTED),
-        "📐 TV隐含ATR": _g(
-            f"`{float(tv_implied_atr or 0):.4f}` (=|price−sl|/1.0)",
-            G_MAIN,
-        ),
-        "🚀 本笔执行": _g(
-            f"{str(side or '').upper() or '—'} qty={qty} @ {float(entry or 0):.2f} · "
-            f"**已用降级ATR** · 标签 `atr_source=tv_implied_degrade`",
-            G_LIGHT,
-        ),
-        "🛑 状态": _g(
-            "后续自动开仓已暂停 · **需要人工介入排查行情引擎**",
-            G_DEEP,
-        ),
-        "💡 恢复": _g(
-            f"复验 ATR/ADX 误差<5% 后：`POST /admin/resume/{sym}`",
-            G_LIGHT,
-        ),
+        "📉 当前配置": _g("ATR全程只用TV webhook.atr，VPS不拉独立ATR", G_MUTED),
+        "📐 说明": _g("如见此告警请排查是否有旧路径残留调用", G_MUTED),
+        "💡 恢复": _g("无需人工介入；ATR来源已统一为TV webhook.atr", G_LIGHT),
     }
     if detail:
         data["📋 明细"] = _g(str(detail), G_MUTED)
     send_alert(
-        f"🚨 ATR应急降级·需人工介入 [{sym}]",
+        f"⚠️ 【已禁用机制】ATR降级 [{sym}]",
         data,
-        G_TITLE,
+        G_MUTED,
         immediate=True,
         level=NOTIFY_LEVEL_CRITICAL,
     )

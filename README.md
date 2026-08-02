@@ -16,7 +16,7 @@
 **日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
 **TV 图表周期：ETH 90m · XAU 45m**（VPS **不再**另拉 ATR）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
-**通知：Telegram 全量 + 钉钉仅重要告警（`dingtalk.py` · 品牌前缀【币安单系统】· `TELEGRAM_*`）**
+**通知：仅 Telegram 全量事件（2026-07-31 取消钉钉，`DINGTALK_DISABLE=True`）**
 
 > **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：雷达未激活时盘口**只应有硬止损**；激活后才硬+雷达双挂。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
@@ -299,9 +299,9 @@ position_supervisor_binance.py     ← 唯一生产大脑（岗位边界挂接�
 4. **共同第一步**：永久硬止损 + **仅 TP1+TP2**（10%/20%，预算闸自检）→ `ORDERS_PLACED`  
 5. 雷达休眠待命（激活线前盘口仅硬止损）  
 6. **督察官** 8 项复查 → `VERIFIED`（硬失败可暂停）  
-7. **通讯官** 钉钉/TG 开仓播报 → `REPORTED`→`MONITORING`  
+7. **通讯官** TG 开仓播报 → `REPORTED`→`MONITORING`  
 
-**已废除**：TP3 限价；硬止损被 ATR「替换」；硬+雷达单槽合并；必须带 TV.qty；VPS 自拉 ATR 做止损权威。
+**已废除**：TP3 限价；硬止损被 ATR「替换」；硬+雷达单槽合并；必须带 TV.qty；VPS 自拉 ATR 做止损权威；钉钉通知（已 2026-07-31 停用）。
 
 ---
 
@@ -473,9 +473,9 @@ python3 test_stop_idempotent_and_tp_levels.py
 
 ---
 
-## 十一、钉钉 / Telegram 要点（含 TV 趋势档位）
+## 十一、Telegram 通知（含 TV 趋势档位）
 
-**通道**：Telegram = 全量事件；钉钉 = 仅重要告警（开仓/雷达激活/止损移动/TP/平仓/硬失败等）。品牌前缀【币安单系统】。
+**通道**：仅 Telegram 全量事件（钉钉已于 2026-07-31 停用，`DINGTALK_DISABLE=True`）。品牌前缀【币安单系统】。
 
 ### TV 趋势档位（弱 / 中 / 强）
 | 档位 | 含义 | ADX（缺 `tier` 时反推） | 影响 |
