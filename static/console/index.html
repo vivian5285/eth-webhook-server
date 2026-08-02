@@ -21,6 +21,8 @@
       --red-bg: rgba(255,69,58,.10);
       --orange: #ff9f0a;
       --orange-bg: rgba(255,159,10,.12);
+      --bnb: #f0b90b;
+      --bnb-bg: rgba(240,185,11,.12);
       --glass: rgba(255,255,255,.62);
       --glass2: rgba(255,255,255,.78);
       --glass3: rgba(255,255,255,.45);
@@ -77,6 +79,7 @@
     .hero { padding: 8px 8px 24px; }
     .hero h1 { margin: 0 0 6px; font-size: clamp(30px,4.5vw,48px); letter-spacing: -.035em; font-weight: 700; line-height: 1.05; }
     .hero p { color: var(--ink2); font-size: 16px; max-width: 44ch; line-height: 1.5; }
+    .hero h1 span { background: linear-gradient(135deg, var(--blue), #9b59b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 
     /* ── Tabs ── */
     .tab-bar {
@@ -117,6 +120,17 @@
     .neg { color: #c9342a; }
     .mono { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
 
+    /* ── Active glow pulse ── */
+    @keyframes cardGlow {
+      0%, 100% { opacity: .6; }
+      50% { opacity: 1; }
+    }
+    .sym-card.enabled::before { animation: cardGlow 3s ease-in-out infinite; }
+
+    /* ── Metric hover ── */
+    .metric-card { transition: transform .2s var(--ease), box-shadow .2s; }
+    .metric-card:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,0,0,.10), 0 2px 8px rgba(0,0,0,.05); }
+
     /* ── Symbol sizing cards ── */
     .symbol-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
     .sym-card {
@@ -134,6 +148,14 @@
     .sym-card.enabled::before { opacity: 1; }
     .sym-card.eth::before { background: linear-gradient(90deg, #6e6ef7, #9b59b6); }
     .sym-card.xau::before { background: linear-gradient(90deg, #f39c12, #e74c3c); }
+    .sym-card.bnb::before { background: linear-gradient(90deg, #f0b90b, #f5d250); }
+
+    .sym-card.eth { --glow: rgba(110,110,247,.12); }
+    .sym-card.xau { --glow: rgba(243,156,18,.12); }
+    .sym-card.bnb { --glow: rgba(240,185,11,.12); }
+    .sym-card.enabled { box-shadow: 0 22px 60px var(--glow, rgba(0,113,227,.12)), var(--shadow); }
+    .sym-card:hover { transform: translateY(-2px); box-shadow: 0 26px 70px var(--glow, rgba(0,0,0,.10)), 0 4px 12px rgba(0,0,0,.06); }
+    .sym-card.enabled:hover { transform: translateY(-3px); }
 
     .sym-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
     .sym-title { display: flex; align-items: center; gap: 10px; }
@@ -143,6 +165,7 @@
     }
     .sym-icon.eth { background: linear-gradient(135deg, #6e6ef7, #9b59b6); }
     .sym-icon.xau { background: linear-gradient(135deg, #f39c12, #e74c3c); }
+    .sym-icon.bnb { background: linear-gradient(135deg, #f0b90b, #f5d250); }
     .sym-info h4 { font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
     .sym-info p { font-size: 12px; color: var(--ink3); font-weight: 500; margin-top: 1px; }
     .sym-badge {
@@ -170,8 +193,9 @@
       background: #fff; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.2);
       transition: transform .2s var(--ease);
     }
-    .toggle-switch input:checked + .toggle-track { background: var(--green); }
+    .toggle-switch input:checked + .toggle-track { background: var(--green); box-shadow: 0 0 0 3px rgba(48,209,88,.20); }
     .toggle-switch input:checked ~ .toggle-thumb { transform: translateX(18px); }
+    .toggle-switch { transition: transform .15s; }
 
     /* ── Mode selector ── */
     .mode-tabs {
@@ -269,10 +293,28 @@
       background: var(--glass2); backdrop-filter: blur(40px) saturate(1.6);
       -webkit-backdrop-filter: blur(40px) saturate(1.6);
       border: 1px solid rgba(255,255,255,.6); border-radius: 28px;
-      box-shadow: var(--shadow); padding: 36px 32px 28px; text-align: center;
+      box-shadow: 0 30px 80px rgba(0,0,0,.12), 0 4px 16px rgba(0,0,0,.06);
+      padding: 36px 32px 28px; text-align: center;
+      position: relative;
     }
-    .login-card h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.03em; }
-    .login-card p { margin: 0 0 24px; color: var(--ink2); font-size: 15px; }
+    .login-card::before {
+      content: ''; position: absolute; inset: -1px; border-radius: 29px;
+      background: linear-gradient(135deg, rgba(0,113,227,.30), rgba(155,89,182,.30), rgba(0,113,227,.30));
+      z-index: -1; opacity: .5;
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% center; }
+      100% { background-position: 200% center; }
+    }
+    .login-card::after {
+      content: ''; position: absolute; inset: -1px; border-radius: 29px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.35), transparent);
+      background-size: 200% 100%;
+      animation: shimmer 3s linear infinite;
+      z-index: 0; pointer-events: none;
+    }
+    .login-card h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.03em; position: relative; z-index: 1; }
+    .login-card p { margin: 0 0 24px; color: var(--ink2); font-size: 15px; position: relative; z-index: 1; }
 
     /* ── Toast ── */
     .toast {
@@ -330,7 +372,7 @@
     </div>
 
     <section class="hero">
-      <h1>仓位控制 · 精准到位。</h1>
+      <h1>仓位控制 · <span>精准到位。</span></h1>
       <p>每个币种独立设置金额与杠杆，前端保存后下一笔 TV 信号直接按此下单，无需改代码。</p>
     </section>
 
@@ -603,6 +645,7 @@ function renderSymbolGrid() {
   const SYM_DEFS = {
     ETHUSDT: {label:"ETH", unit:"ETH", cls:"eth", icon:"Ξ"},
     XAUUSDT: {label:"XAU", unit:"XAU", cls:"xau", icon:"Au"},
+    BNBUSDT: {label:"BNB", unit:"BNB", cls:"bnb", icon:"B"},
   };
   const defaultGlobal = {
     risk_pct: Number(overview&&overview.risk_pct||0.20)*100,
@@ -709,7 +752,7 @@ function renderSymbolGrid() {
 }
 
 function buildPreview(sym, mode, rp, lv, fa, equity) {
-  const def = {ETHUSDT:{unit:"ETH",price:3500},XAUUSDT:{unit:"XAU",price:2400}};
+  const def = {ETHUSDT:{unit:"ETH",price:3500},XAUUSDT:{unit:"XAU",price:2400},BNBUSDT:{unit:"BNB",price:580}};
   const d = def[sym] || {unit:sym,price:1000};
   const px = d.price;
   const po = parseFloat(document.getElementById("inp-po-"+sym)?.value) || 0;
@@ -743,7 +786,10 @@ function onToggleSym(sym, enabled) {
     badge.innerHTML = '<span class="dot"></span>'+(enabled?"独立设置":"默认");
   }
   const card = document.getElementById("sym-card-"+sym);
-  if (card) card.className = "sym-card "+(enabled?"enabled ":"")+ (sym==="ETHUSDT"?"eth":sym==="XAUUSDT"?"xau":"");
+  if (card) {
+    const clsMap = {ETHUSDT:"eth",XAUUSDT:"xau",BNBUSDT:"bnb"};
+    card.className = "sym-card "+(enabled?"enabled ":"")+(clsMap[sym]||"");
+  }
 
   const tabs = document.getElementById("mode-tabs-"+sym);
   if (tabs) tabs.style.display = enabled ? "" : "none";
