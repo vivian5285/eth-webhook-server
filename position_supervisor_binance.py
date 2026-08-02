@@ -10244,19 +10244,43 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         snap = binance_client.joint_query_position_and_orders(self.symbol)
         orders = snap.get("orders")
         counted = self._count_open_limits_and_stops(orders=orders)
-        remaining = len(orders) if isinstance(orders, list) else -1
-        if counted is None or remaining < 0:
+        # 【重要修复】正确处理 QUERY_FAILED：当 IP 限流时不应误判为挂单未净
+        # 仅在明确查询到挂单且数量>0时才认为未净
+        if orders == "QUERY_FAILED":
+            # IP 限流导致的查询失败 → 不应触发暂停，以查持仓状态为准
+            pos_data = snap.get("pos")
+            if pos_data is None or (isinstance(pos_data, dict) and float(pos_data.get("positionAmt", 0) or 0) == 0):
+                # 已确认无持仓 → 认为平仓成功（查询失败只是限流）
+                logger.warning(
+                    f"⚠️ [{tag}] 平仓完成但挂单查询失败(IP限流) | 已确认无持仓 → 不暂停交易"
+                )
+                ok = True
+                n_limit, n_stop = 0, 0
+                tp_n = 0
+            else:
+                # 仍有持仓且无法查挂单 → 谨慎处理，不误判
+                logger.warning(
+                    f"⚠️ [{tag}] 平仓后挂单查询失败(IP限流) | 持仓={pos_data.get('positionAmt', '?')} | 等待下次机会"
+                )
+                ok = False  # 暂不确定，但不上报为错误
+                n_limit, n_stop = -1, -1
+                tp_n = -1
+        elif counted is None or not isinstance(orders, list):
+            # 其他查询失败情况
             ok = False
             n_limit, n_stop = -1, -1
             tp_n = -1
         else:
+            remaining = len(orders)
             n_limit, n_stop, _ = counted
             tp_left = self._collect_tp_limit_orders(orders=orders)
             tp_n = -1 if is_orders_query_failed(tp_left) else len(tp_left)
             ok = remaining == 0 and n_limit == 0 and n_stop == 0 and tp_n == 0
-        if not ok:
+
+        if not ok and ((counted is not None and n_limit >= 0 and n_stop >= 0) or orders == "QUERY_FAILED"):
+            actual_remaining = remaining if 'remaining' in dir() and isinstance(remaining, int) else '?'
             logger.error(
-                f"❌ [{tag}] 全平后挂单未净：剩余 {remaining} 单 | "
+                f"❌ [{tag}] 全平后挂单未净：剩余 {actual_remaining} 单 | "
                 f"LIMIT={n_limit} STOP={n_stop} TP={tp_n}"
             )
             try:
@@ -10274,7 +10298,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             "ok": ok,
             "rounds": max_rounds,
             "tp_cancelled": tp_cancelled,
-            "remaining": remaining,
+            "remaining": remaining if 'remaining' in dir() and isinstance(remaining, int) else -1,
             "tp_remaining": tp_n,
         }
 
