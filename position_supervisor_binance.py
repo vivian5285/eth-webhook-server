@@ -15442,8 +15442,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _check_early_be_checkpoint(self, curr_px):
         """
-        【规格 v1.0 · §5.0 提前保本检查点】
-        当价格到达 entry + tp1_distance × 0.5 时，将止损从当前值移动到保本位。
+        【v16.21 · §5.0 提前保本检查点 · ADX档位自适应】
+        - T0弱趋势：TP1距离的80%触发（保守，早保本）
+        - T1中趋势：TP1距离的85%触发
+        - T2强趋势：TP1距离的90%触发（激进，晚保本，给更多呼吸空间）
+        触发后保本止损距离现价至少1倍ATR，防止刚保本就再被扫。
         仅触发一次，触发后标记_done=True，不再重复。
         不启动雷达，不影响雷达的激活状态判断。
         """
@@ -15468,22 +15471,41 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tp1_dist = abs(tp1_px - ref)
         if tp1_dist <= 0:
             return None
-        trigger_px = entry + tp1_dist * 0.5
+
+        # v16.21：根据ADX档位动态计算触发比例
+        adx_tier = int(getattr(self, "adx_tier", 1) or 1)
+        if adx_tier == 0:
+            trigger_pct = 0.80  # T0弱趋势：保守
+        elif adx_tier == 1:
+            trigger_pct = 0.85  # T1中趋势：平衡
+        else:
+            trigger_pct = 0.90  # T2强趋势：激进
+
+        trigger_px = entry + tp1_dist * trigger_pct
         if side == "LONG" and curr_px_f >= trigger_px:
             pass
         elif side == "SHORT" and curr_px_f <= trigger_px:
             pass
         else:
             return None
+
         current_sl = float(self.current_sl or 0)
         profile = getattr(self, "breath_profile", None) or {}
         tick = float(profile.get("tick_size") or 0.01)
         fee_pct = float(profile.get("fee_cover_pct") or 0.0008)
         fee = entry * fee_pct
+        # v16.21：保本止损距离现价至少1倍ATR，防止刚保本就再被扫
+        atr = float(getattr(self, "open_atr", 0) or getattr(self, "current_atr", 0) or 0)
+        min_distance = max(atr, entry * 0.005)  # 取ATR和0.5%入场价较大者
+
         if side == "LONG":
-            new_sl = max(entry + tick + fee, current_sl)
+            # 保本止损 = max(entry+tick+fee, 现价 - min_distance)
+            new_sl = max(entry + tick + fee, curr_px_f - min_distance)
+            new_sl = max(new_sl, current_sl)  # 不回退
         else:
-            new_sl = min(entry - tick - fee, current_sl)
+            # 保本止损 = min(entry - tick - fee, 现价 + min_distance)
+            new_sl = min(entry - tick - fee, curr_px_f + min_distance)
+            new_sl = min(new_sl, current_sl)  # 不回退（SHORT止损越低越好）
         if new_sl == current_sl:
             self._early_be_checkpoint_done = True
             return None
@@ -15492,9 +15514,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._early_be_checkpoint_done = True
         self._save_state()
         logger.info(
-            f"🛡️ [{self.symbol}] 规格 v1.0 §5.0 提前保本检查点触发 "
-            f"({side}) | entry={entry:.4f} trigger={trigger_px:.4f} "
-            f"old_sl={old_sl:.4f} → new_sl={new_sl:.4f}"
+            f"🛡️ [{self.symbol}] v16.21 提前保本检查点触发 "
+            f"({side}|T{adx_tier}) | entry={entry:.4f} trigger={trigger_px:.4f}({trigger_pct*100:.0f}%) "
+            f"old_sl={old_sl:.4f} → new_sl={new_sl:.4f}(atr={atr:.2f})"
         )
         try:
             self._call_dingtalk(
@@ -15506,7 +15528,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "触发价": f"{trigger_px:.4f}",
                     "旧止损": f"{old_sl:.4f}",
                     "新止损(保本)": f"{new_sl:.4f}",
-                    "说明": "规格 v1.0 §5.0 · 雷达激活前",
+                    "说明": f"v16.21 §5.0 · T{adx_tier}档位 · ATR={atr:.2f} · {trigger_pct*100:.0f}%触发",
                 },
                 immediate=True,
                 level=1,
