@@ -7425,20 +7425,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if live_qty <= 0 or trigger_px <= 0 or not self.current_side:
             return None
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        market_blocked = False
         if curr_px > 0:
             if self.current_side == "LONG" and trigger_px >= curr_px:
-                logger.error(
-                    f"🚨 [{self.symbol}] LONG 止损 @{trigger_px:.2f} 已穿/贴市 "
-                    f"{curr_px:.2f} → 禁止推宽，交紧急平仓"
-                )
-                return None
+                market_blocked = True
             if self.current_side == "SHORT" and trigger_px <= curr_px:
-                logger.error(
-                    f"🚨 [{self.symbol}] SHORT 止损 @{trigger_px:.2f} 已穿/贴市 "
-                    f"{curr_px:.2f} → 禁止推宽，交紧急平仓"
+                market_blocked = True
+        # 贴市时先检查是否已有止损单，避免误判已挂单为失败
+        if market_blocked:
+            if self._has_stop_sl_near(
+                trigger_px, tolerance=2.0, exclude_shield=False,
+                exclude_close_position=True,
+            ):
+                logger.info(
+                    f"✅ [{self.symbol}] 雷达止损 @{trigger_px:.2f} 贴市但盘口已有 → 视为已挂"
                 )
-                return None
-        close_side = "SHORT" if self.current_side == "LONG" else "LONG"
+                return trigger_px
+            logger.warning(
+                f"🚨 [{self.symbol}] {self.current_side} 止损 @{trigger_px:.2f} "
+                f"已穿/贴市 {curr_px:.2f} → 禁止推宽，交紧急平仓"
+            )
+            return None
+        close_side = "SHORT" if self.current_side == "LONG" else "BUY"
         kind = "RADAR"
         blocked, tag0, _ = self._has_open_pending_defense_tag(kind)
         if blocked:
