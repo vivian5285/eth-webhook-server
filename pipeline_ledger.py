@@ -47,6 +47,7 @@ ROLE_PHASES = {
         Phase.CLEARED,
         Phase.ENTRY_SUBMITTED,
         Phase.ENTRY_CONFIRMED,
+        Phase.ORDERS_PLACED,  # 开仓后挂完硬止损+TP1+TP2 才能到 ORDERS_PLACED
     },
     Role.RADAR: {
         Phase.ORDERS_PLACED,
