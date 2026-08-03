@@ -4870,7 +4870,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             time.sleep(0.25)
             self._cancel_mismatched_remaining_tps(live_qty)
             time.sleep(0.25)
-            placed = self._patch_missing_tp_levels(live_qty)
+            placed = self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
             audit = self._audit_tp_levels(live_qty)
             self._save_state()
             if not ok_sl or not self._tp_audit_ok(audit):
@@ -9917,11 +9917,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         return True
 
-    def _patch_missing_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005):
+    def _patch_missing_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005,
+                                  force_takeover_recheck=False):
         """
         只补「真正漏挂」的剩余档。
         价到+限价消失 = 已成交 → 记账后绝不补挂，耐心等 TP23。
         TP=reduceOnly；雷达/TV硬止损=closePosition 单槽，互不抢份额。
+
+        force_takeover_recheck: 接管场景强制重新检查TP1是否真正成交
+        （若头寸未减仓+限价已消失=真漏挂，允许补挂）
         """
         if getattr(self, "trading_paused", False) or getattr(
             self, "api_monitor_only", False
@@ -9932,7 +9936,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.warning(
                 f"🛡️ [{self.symbol}] 补挂：挂单不可读 → 节流快通道继续（内部重试）"
             )
-            # 不 return；依赖 _place_defense_tp_limit 内部节流重试
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         note = self._block_rehang_filled_tps_note(live_qty, curr_px)
         if note:
@@ -9950,6 +9953,34 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return 0
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
         placed = 0
+
+        # 接管强检：若 force_takeover_recheck 且 TP1 已标记消费但头寸未减
+        # → 说明是漏挂而非真成交，撤销 TP1 消费标记允许补挂
+        if force_takeover_recheck:
+            init_qty = float(getattr(self, "initial_qty", 0) or 0)
+            open_settled = float(getattr(self, "_open_settled_qty", 0) or 0)
+            ref_qty = max(init_qty, open_settled)
+            if ref_qty > 0 and abs(live_qty - ref_qty) < 0.001:
+                # 头寸未减！检查 TP1 是否被错误标记为已成交
+                if self._tp_level_consumed(1) and not self._has_tp_limit_at_price(
+                    float(self.tv_tps[0]) if self.tv_tps and len(self.tv_tps) > 0 else 0
+                ):
+                    logger.warning(
+                        f"🧩 [{self.symbol}] 接管强检：TP1标记消费但头寸未减+限价消失 "
+                        f"→ 判定为漏挂，撤销TP1消费标记"
+                    )
+                    consumed = list(getattr(self, "tp_levels_consumed", []) or [])
+                    if 1 in consumed:
+                        consumed.remove(1)
+                        self.tp_levels_consumed = consumed
+                        self._save_state()
+                    # 重新审计
+                    audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
+                    if audit.get("expected", 0) <= 0:
+                        logger.info(
+                            f"🧩 [{self.symbol}] 接管强检后无剩余应挂 TP → 耐心等收网"
+                        )
+                        return 0
 
         for lv in self._expected_tp_levels(live_qty):
             q, px = lv["qty"], lv["price"]
@@ -10810,8 +10841,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     }
 
             # 非严重（纯缺失）：优先增量补挂，禁止先撤再挂
+            # 接管强检：始终检查 TP1 是否真正成交，防止漏挂雪崩
             if not recover_mode and not self._defense_anomaly_is_severe(audit):
-                placed = self._patch_missing_tp_levels(live_qty)
+                placed = self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
                 time.sleep(0.6)
                 audit = self._audit_tp_levels(live_qty)
                 if self._tp_audit_ok(audit):
@@ -11009,9 +11041,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"📡 [雷达守护] 挂单查询失败 → 禁止裸仓强制补止损 | {self.symbol}"
                 )
             return result
+        # 接管强检：雷达守护/防线对齐均强制检查 TP1 是否真正成交
+        take_check = True  # 始终启用接管强检，防止漏挂雪崩
         if (in_grace or in_cooldown) and not severe:
             if self._guardian_bad_streak <= 3:
-                placed = self._patch_missing_tp_levels(real_amt)
+                placed = self._patch_missing_tp_levels(real_amt, force_takeover_recheck=take_check)
                 if placed:
                     logger.info(
                         f"📡 [雷达守护] 冷却/宽限期内轻量补挂 {placed} 档 | "
@@ -11026,7 +11060,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return None
 
         if not severe and self._nuclear_backoff_remaining() > 0:
-            placed = self._patch_missing_tp_levels(real_amt)
+            placed = self._patch_missing_tp_levels(real_amt, force_takeover_recheck=True)
             logger.warning(
                 f"📡 [雷达守护] 核武刹车中 → 仅补挂 {placed} 档 | "
                 f"{self._format_audit_summary(audit)}"
@@ -11145,7 +11179,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         self._cancel_orphan_tp_orders(live_qty)
         logger.info(f"📋 止盈未齐 ({matched}/{expected})，增量补挂缺失档（保留已有正确单）")
-        self._patch_missing_tp_levels(live_qty)
+        self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
         time.sleep(0.8)
         matched, pending_prices = self._wait_tp_hung(
             self.tv_tps, live_qty=live_qty, retries=5, delay=1.0,
@@ -14589,7 +14623,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"⚠️ 开仓首轮 TP 仅 {matched}/{expected} → 追加补挂/核武"
                 )
                 # 先补挂；核武受刹车约束（全缺时无视刹车）
-                self._patch_missing_tp_levels(live_qty)
+                # 接管强检：始终检查 TP1 是否真正成交
+                self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
                 time.sleep(0.8)
                 audit = self._audit_tp_levels(live_qty)
                 matched, expected = audit["matched_full"], audit["expected"]
