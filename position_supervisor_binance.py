@@ -6770,10 +6770,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return None
         return min(orders, key=lambda o: abs(o["qty"] - target_qty))
 
-    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=2.0, qty_tol=0.005):
+    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=2.0, qty_tol=0.005,
+                                     force_takeover_recheck=False):
         """
         重启智能修复：先读实盘 → 撤重复留最佳 → 补缺档/纠偏数量。
         不动已正确的单，避免核武撤挂把正确盘口毁掉。
+
+        force_takeover_recheck: 接管场景强制检查TP1是否真正成交（头寸未减+限价消失=真漏挂）
         """
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
@@ -6791,6 +6794,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
         if audit.get("orders_unreadable"):
             return audit, 0
+
+        # 接管强检：若 TP1 标记消费但头寸未减+限价消失，撤销消费标记允许补挂
+        if force_takeover_recheck:
+            init_qty = float(getattr(self, "initial_qty", 0) or 0)
+            open_settled = float(getattr(self, "_open_settled_qty", 0) or 0)
+            ref_qty = max(init_qty, open_settled)
+            if ref_qty > 0 and abs(live_qty - ref_qty) < 0.001:
+                if self._tp_level_consumed(1) and not self._has_tp_limit_at_price(
+                    float(self.tv_tps[0]) if self.tv_tps and len(self.tv_tps) > 0 else 0
+                ):
+                    logger.warning(
+                        f"🧩 [{self.symbol}] 接管强检：TP1标记消费但头寸未减+限价消失 "
+                        f"→ 判定为漏挂，撤销TP1消费标记"
+                    )
+                    consumed = list(getattr(self, "tp_levels_consumed", []) or [])
+                    if 1 in consumed:
+                        consumed.remove(1)
+                        self.tp_levels_consumed = consumed
+                        self._save_state()
+                    audit = self._audit_tp_levels(live_qty, tolerance, qty_tol)
 
         actions += self._cancel_orphan_tp_orders(live_qty, tolerance)
         if actions:
@@ -10770,7 +10793,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 }
 
             if recover_mode and self._defense_needs_immediate_fix(audit):
-                repaired, n_actions = self._surgical_repair_tp_defenses(live_qty, entry)
+                repaired, n_actions = self._surgical_repair_tp_defenses(
+                    live_qty, entry, force_takeover_recheck=True,
+                )
                 audit = repaired
                 if self._tp_audit_ok(audit):
                     logger.info(

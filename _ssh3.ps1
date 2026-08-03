@@ -1,2 +1,1 @@
-$env:Path = "C:\Windows\System32\OpenSSH\;$env:Path"
-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes root@187.77.130.144 "date"
+ssh -o StrictHostKeyChecking=no root@45.76.246.232 "tail -n 400 /root/logs/eth-webhook-server.log | grep -i bnb" 2>&1

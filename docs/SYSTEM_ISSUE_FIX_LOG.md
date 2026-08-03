@@ -14,24 +14,25 @@
 
 ---
 
-## 2026-08-03 · 接管时TP1漏挂强检修复（v16.18）
+## 2026-08-03 · 接管时TP1漏挂强检修复（v16.19）
 
 ### 现象
 重启/接管后，XAU/ETH/BNB实盘持仓在，但TP1挂单消失。系统检测到价格曾触及TP1价格，错误标记为"已成交"并跳过补挂，导致TP1永远无法补回。
 
 ### 根因
-`_patch_missing_tp_levels` 在接管/重启场景下，当检测到"现价已达TP1档位"时，直接标记 consumed=1 并跳过补挂。但实际上 TP1 可能只是"价格触及"而并未真正成交（限价单被撤销或从未挂上）。
+`_surgical_repair_tp_defenses`（重启智能修复）和 `_patch_missing_tp_levels` 均依赖 `_expected_tp_levels`，该函数会跳过 consumed 标记的档。当 TP1 被错误标记为已消费时，这些函数都不会尝试补挂。
 
 ### 修复
-- 新增 `force_takeover_recheck` 参数到 `_patch_missing_tp_levels`
-- 在接管/雷达守护/防线对齐等关键路径强制启用 TP1 漏挂检测
+- `_surgical_repair_tp_defenses` 新增 `force_takeover_recheck` 参数，接管时强制检查 TP1 是否真正成交
+- `_patch_missing_tp_levels` 新增 `force_takeover_recheck` 参数，接管时强制检查 TP1
 - 若头寸未减仓 + TP1 限价已消失 + TP1 标记消费 → 判定为漏挂，撤销消费标记并补挂
 - 影响范围：ETH / XAU / BNB 三个品种
 
 ### 代码变更
 - `position_supervisor_binance.py`：
+  - `_surgical_repair_tp_defenses` 新增接管强检逻辑
   - `_patch_missing_tp_levels` 新增 `force_takeover_recheck` 参数和接管强检逻辑
-  - 6处调用点全部传入 `force_takeover_recheck=True`
+  - `_enforce_defense_alignment` 调用两函数时传入 `force_takeover_recheck=True`
 
 ### 复查点
 - [ ] VPS 重启后 TP1 是否正确补挂
