@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.22-tp2-activation-highway`（雷达TP2成交后激活·高速公路模式）**
+**当前版本：`v16.22.1-tp2-activation-highway`（雷达TP2成交后激活·TP补挂修复）**
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
@@ -42,6 +42,7 @@
 > **v16.6.1**：补强——TP **开仓+补挂**双预算闸；`chief_auditor`/`tp_slice` 空仓自清；成交历史走节流阀；督察官硬止损以盘口核实为准；Deepcoin PLACE=2 硬帽+自检。  
 > **v16.6.2**：API 限流绝对封死——预算/间隔/哨兵全面收紧；账户/K线/名义敞口全部走节流；冷却期零 REST + resume 门禁；Deepcoin `v13.90.2-rate-iron`。
 > **v16.22 v2.0**：废除提前保本检查点；雷达改为TP2成交后激活；呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）。
+> **v16.22.1**：修复TP1漏挂无法补挂问题——移除"价到就跳过"铁律，真正漏挂的TP1允许补挂。
 
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）
