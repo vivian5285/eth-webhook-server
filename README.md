@@ -425,7 +425,7 @@ git push origin main
 cd /home/trading/binance-engine
 git fetch origin && git reset --hard origin/main
 grep BINANCE_VPS_VERSION position_supervisor_binance.py
-# 期望: v16.17-open-retry-iron
+# 期望: v16.22-tp2-activation-highway
 chown -R trading:trading /home/trading/binance-engine
 systemctl restart binance-engine.service
 # 重要：VPS 部署后等待真实 TV 信号，现有持仓由雷达守护，不干预
