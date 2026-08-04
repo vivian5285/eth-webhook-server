@@ -1,22 +1,23 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.22.2-tp2-activation-highway`（雷达TP2成交后激活·TP补挂修复）**
+**当前版本：`v16.22.2-tp2-activation-highway-zec`**（雷达TP2成交后激活·TP补挂修复·ZEC支持）
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
-**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
+**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
 **TP 分腿：10% / 20% / 70%**（盘口限价 **恰好 2** 笔 LIMIT=TP1+TP2；余仓无上限）  
-**硬止损：`|TV.price−TV.stop_loss|×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
+**硬止损：`｜TV.price−TV.stop_loss｜×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
 **雷达（v16.22 v2.0）**：激活用 **TP2成交后激活**（必须同时满足：1) TP2已成交 2) 现价达到TP2水平）。激活瞬间**保本起步**（entry±tick±fee）；呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）  
 **ATR：只信 TV webhook `atr`**（已删除 VPS 独立拉 1h/合成 ATR、场景一二与降级切换）  
-**重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
-**提前保本检查点（v16.21）**：**已废除（v16.22）**——XAU波动大，雷达太早启动易出局  
+**重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h · ZEC 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
+**提前保本检查点（v16.21）**：**已废除（v16.22）**——XAU/ZEC波动大，雷达太早启动易出局  
 **幂等铁律（v15.9.1+）**：本地订单标签未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**  
 **生产闸门（v15.9.3）**：竞态/部分成交失败/限流/`本地标签vs空盘` → **`trading_paused`**；REST 单品种 ≥100ms；档位 `config/reentry_tiers.json`；30s 状态快照；日志 `[OPS|STATE|ALERT|AUDIT]`  
 **日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
-**TV 图表周期：ETH 90m · XAU 45m**（VPS **不再**另拉 ATR）  
+**TV 图表周期：ETH 90m · XAU/ZEC 45m**（VPS **不再**另拉 ATR）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：仅 Telegram 全量事件（2026-07-31 取消钉钉，`DINGTALK_DISABLE=True`）**
+**ZEC支持**：2026-08-04 新增 ZECUSDT 合约支持，使用 ETH 相同的呼吸参数和雷达配置
 
 > **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：雷达未激活时盘口**只应有硬止损**；激活后才硬+雷达双挂。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
@@ -48,7 +49,7 @@
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）
 - 默认口令：环境变量 `CONSOLE_PASSWORD`（务必修改）
-- 支持 ETHUSDT、XAUUSDT、BNBUSDT 三合约独立仓位设置（苹果毛玻璃风格）
+- 支持 ETHUSDT、XAUUSDT、BNBUSDT、ZECUSDT 四合约独立仓位设置（苹果毛玻璃风格）
 - 档案存 `data/account_profiles.json`；切换 API 默认要求无持仓
 - 前端保存后下一笔 TV 信号直接按新设置下单，无需重启服务
 
@@ -59,7 +60,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.22-tp2-activation-highway · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT} · trading_paused: false
+# version: v16.22-tp2-activation-highway-zec · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
 
@@ -76,7 +77,7 @@ python3 test_stop_idempotent_and_tp_levels.py
 
 | 工厂 | VPS 目录 | 端口 | 品种 |
 |------|----------|------|------|
-| **币安**（本仓库） | `~/binance-engine` | **5003** | ETHUSDT + XAUUSDT + BNBUSDT |
+| **币安**（本仓库） | `~/binance-engine` | **5003** | ETHUSDT + XAUUSDT + BNBUSDT + ZECUSDT |
 | **深币**（对照） | `~/deepcoin-hft-server` | **5004** | ETH + XAU |
 
 ---

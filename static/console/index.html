@@ -149,10 +149,12 @@
     .sym-card.eth::before { background: linear-gradient(90deg, #6e6ef7, #9b59b6); }
     .sym-card.xau::before { background: linear-gradient(90deg, #f39c12, #e74c3c); }
     .sym-card.bnb::before { background: linear-gradient(90deg, #f0b90b, #f5d250); }
+    .sym-card.zec::before { background: linear-gradient(90deg, #3cb371, #2e8b57); }
 
     .sym-card.eth { --glow: rgba(110,110,247,.12); }
     .sym-card.xau { --glow: rgba(243,156,18,.12); }
     .sym-card.bnb { --glow: rgba(240,185,11,.12); }
+    .sym-card.zec { --glow: rgba(60,179,113,.12); }
     .sym-card.enabled { box-shadow: 0 22px 60px var(--glow, rgba(0,113,227,.12)), var(--shadow); }
     .sym-card:hover { transform: translateY(-2px); box-shadow: 0 26px 70px var(--glow, rgba(0,0,0,.10)), 0 4px 12px rgba(0,0,0,.06); }
     .sym-card.enabled:hover { transform: translateY(-3px); }
@@ -166,6 +168,7 @@
     .sym-icon.eth { background: linear-gradient(135deg, #6e6ef7, #9b59b6); }
     .sym-icon.xau { background: linear-gradient(135deg, #f39c12, #e74c3c); }
     .sym-icon.bnb { background: linear-gradient(135deg, #f0b90b, #f5d250); }
+    .sym-icon.zec { background: linear-gradient(135deg, #3cb371, #2e8b57); }
     .sym-info h4 { font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
     .sym-info p { font-size: 12px; color: var(--ink3); font-weight: 500; margin-top: 1px; }
     .sym-badge {
@@ -646,6 +649,7 @@ function renderSymbolGrid() {
     ETHUSDT: {label:"ETH", unit:"ETH", cls:"eth", icon:"Ξ"},
     XAUUSDT: {label:"XAU", unit:"XAU", cls:"xau", icon:"Au"},
     BNBUSDT: {label:"BNB", unit:"BNB", cls:"bnb", icon:"B"},
+    ZECUSDT: {label:"ZEC", unit:"ZEC", cls:"zec", icon:"Zc"},
   };
   const defaultGlobal = {
     risk_pct: Number(overview&&overview.risk_pct||0.20)*100,
@@ -752,7 +756,7 @@ function renderSymbolGrid() {
 }
 
 function buildPreview(sym, mode, rp, lv, fa, equity) {
-  const def = {ETHUSDT:{unit:"ETH",price:3500},XAUUSDT:{unit:"XAU",price:2400},BNBUSDT:{unit:"BNB",price:580}};
+  const def = {ETHUSDT:{unit:"ETH",price:3500},XAUUSDT:{unit:"XAU",price:2400},BNBUSDT:{unit:"BNB",price:580},ZECUSDT:{unit:"ZEC",price:120}};
   const d = def[sym] || {unit:sym,price:1000};
   const px = d.price;
   const po = parseFloat(document.getElementById("inp-po-"+sym)?.value) || 0;
@@ -787,7 +791,7 @@ function onToggleSym(sym, enabled) {
   }
   const card = document.getElementById("sym-card-"+sym);
   if (card) {
-    const clsMap = {ETHUSDT:"eth",XAUUSDT:"xau",BNBUSDT:"bnb"};
+    const clsMap = {ETHUSDT:"eth",XAUUSDT:"xau",BNBUSDT:"bnb",ZECUSDT:"zec"};
     card.className = "sym-card "+(enabled?"enabled ":"")+(clsMap[sym]||"");
   }
 

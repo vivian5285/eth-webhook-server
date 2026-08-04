@@ -39,6 +39,17 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "BNBUSDT",
         "breath": "BNB",
     },
+    "ZECUSDT": {
+        "symbol": "ZECUSDT",
+        "unit": "ZEC",
+        "tag": "ZEC",
+        "qty_step": 0.001,
+        "min_qty": 0.001,
+        "dust_qty": 0.005,
+        "price_precision": 2,
+        "atr_fallback_symbol": "ZECUSDT",
+        "breath": "ZEC",
+    },
 }
 
 # 深币 SWAP
@@ -91,6 +102,12 @@ _BINANCE_ALIASES = {
     "BNBUSDT.P": "BNBUSDT",
     "BINANCE:BNBUSDT": "BNBUSDT",
     "BINANCE:BNBUSDT.P": "BNBUSDT",
+    "ZEC": "ZECUSDT",
+    "ZECUSDT": "ZECUSDT",
+    "ZECUSD": "ZECUSDT",
+    "ZECUSDT.P": "ZECUSDT",
+    "BINANCE:ZECUSDT": "ZECUSDT",
+    "BINANCE:ZECUSDT.P": "ZECUSDT",
 }
 
 _DEEPCOIN_ALIASES = {
@@ -211,6 +228,7 @@ def extract_symbol_from_payload(data):
         "XAUUSDT.P", "BINANCE:XAUUSDT", "XAUUSDT", "XAU-USDT-SWAP", "XAUUSD",
         "ETHUSDT.P", "BINANCE:ETHUSDT", "ETHUSDT", "ETH-USDT-SWAP",
         "BNBUSDT.P", "BINANCE:BNBUSDT", "BNBUSDT",
+        "ZECUSDT.P", "BINANCE:ZECUSDT", "ZECUSDT",
     ):
         if token in blob:
             return token
