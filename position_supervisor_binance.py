@@ -16849,117 +16849,109 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         return bool(ok)
 
+    def _flat_close_parallel(self, reason=""):
+        """
+        并行双发：市价全平 + 撤全部挂单。
+        不再串行先撤后平，预计从 ~90s → ~3s 完成全平。
+        返回 dict: {"closed": bool, "purged": dict, "pos": dict or None}
+        """
+        tag = reason or "并行平仓"
+
+        # 1. 并行：查持仓 + 查挂单（为下单做准备）
+        snap = binance_client.joint_query_position_and_orders(self.symbol)
+        pos_data = snap.get("pos")
+        orders_data = snap.get("orders")
+
+        # 判断空仓
+        if is_position_query_failed(pos_data):
+            logger.error(f"❌ [{tag}] 并行平仓前持仓查询失败 → fail-closed")
+            return {"closed": False, "purged": None, "pos": None}
+        amt_raw = pos_data.get("positionAmt") if pos_data else None
+        if not amt_raw or float(amt_raw or 0) == 0:
+            logger.info(f"✅ [{tag}] 并行平仓前已空仓，跳过市价单")
+            live_sz = 0.0
+            close_side = None
+        else:
+            amt = float(amt_raw)
+            live_sz = round(abs(amt), 3)
+            close_side = "SELL" if amt > 0 else "BUY"
+
+        # 2. 并行发：市价全平 + 撤全部单
+        def _fire_market():
+            if live_sz <= 0:
+                return None
+            logger.info(f"🚀 [{tag}] 并行平仓: {close_side} {live_sz} reduceOnly")
+            return binance_client.place_market_order(
+                close_side, live_sz,
+                symbol=self.symbol, reduce_only=True, emergency=True,
+            )
+
+        def _fire_cancel():
+            logger.info(f"🚀 [{tag}] 并行撤单: 全部挂单")
+            return binance_client.cancel_all_open_orders(self.symbol)
+
+        # 同时发两路请求
+        results = {}
+        threads = []
+        for name, fn in [("market", _fire_market), ("cancel", _fire_cancel)]:
+            t = threading.Thread(target=lambda n, f: results.update({n: f()}), args=(name, fn))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        market_result = results.get("market")
+        cancel_result = results.get("cancel")
+
+        # 3. 等 2.5s 让交易所成交确认
+        time.sleep(2.5)
+
+        # 4. 联合查询验证结果
+        verify = binance_client.joint_query_position_and_orders(self.symbol)
+        verify_pos = verify.get("pos")
+        verify_orders = verify.get("orders")
+
+        if is_position_query_failed(verify_pos):
+            logger.warning(f"⚠️ [{tag}] 验证持仓查询失败，保守返回未完成")
+            return {"closed": False, "purged": None, "pos": verify_pos}
+
+        verify_amt = float(verify_pos.get("positionAmt", 0) or 0) if verify_pos else 0.0
+        closed_ok = abs(verify_amt) < 0.001
+
+        if closed_ok:
+            logger.info(f"✅ [{tag}] 并行平仓成功，已确认无仓")
+        else:
+            logger.warning(f"⚠️ [{tag}] 并行平仓后仍有持仓: {verify_amt} ETH")
+
+        # 5. 快速撤单清理残余（仅 1 轮，不再多轮循环）
+        purge_result = self._purge_all_defense_orders_on_flat(
+            reason=tag, max_rounds=1,
+        )
+
+        return {
+            "closed": closed_ok,
+            "purged": purge_result,
+            "pos": verify_pos,
+            "market_order": market_result,
+            "cancel_result": cancel_result,
+        }
+
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):
-        """先撤全部挂单再阶梯强平；返回是否已空仓。
-        持仓 QUERY_FAILED → fail-closed 返回 False（禁止 float(None) 崩溃 / 禁止当空仓）。
-        """
+        """并行双发市价全平+撤单；持仓 QUERY_FAILED → fail-closed 返回 False。"""
         prev_side = self.current_side
-        self._purge_all_defense_orders_on_flat(reason or "强平前撤单")
-        closed_successfully = False
-        query_failed = False
 
-        for round_i in range(6):
-            # 规格 6.4：平仓前强制 REST 真实持仓，禁止用偏大本地值超卖变反向
-            pos = position_manager.get_position(
-                self.symbol, prefer_ws=False, force_rest=True,
-            )
-            if is_position_query_failed(pos):
-                query_failed = True
-                logger.error(
-                    f"❌ [{self.symbol}] 强平中持仓查询失败 → fail-closed 中止"
-                    f"（禁当空仓/禁 float(None)）| {reason}"
-                )
-                closed_successfully = False
-                break
-            amt_raw = None if not pos else pos.get("positionAmt")
-            if amt_raw is None and pos:
-                # 非哨兵但缺字段：同样 fail-closed，勿 float(None)
-                query_failed = True
-                logger.error(
-                    f"❌ [{self.symbol}] 强平中 positionAmt 缺失 → fail-closed | {reason}"
-                )
-                closed_successfully = False
-                break
-            if not pos or float(amt_raw or 0) == 0:
-                closed_successfully = True
-                break
-
-            amt = float(amt_raw)
-            # 规格 9.5：若相对 prev_side 已翻转，立刻停手+暂停（禁止继续市价加深反向）
-            cur_side = "LONG" if amt > 0 else "SHORT"
-            if prev_side and cur_side != str(prev_side).upper():
-                logger.error(
-                    f"🚨 [{self.symbol}] 强平中检测到方向翻转 "
-                    f"{prev_side}→{cur_side} | {reason}"
-                )
-                closed_successfully = False
-                try:
-                    self._sweep_orphan_reverse_after_flat(
-                        prev_side=prev_side, reason=f"close_mid_flip|{reason}",
-                    )
-                except Exception as e:
-                    logger.error(f"翻转扫尾异常: {e}")
-                break
-            close_side = "SELL" if amt > 0 else "BUY"
-            live_sz = round(abs(amt), 3)
-            # 规格 6.4 / 9.5：平仓数量硬上限 = 交易所真实持仓，禁止超卖变反向
-            if live_sz <= 0:
-                closed_successfully = True
-                break
-            logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz} ETH reduceOnly")
-            order = binance_client.place_market_order(
-                close_side, live_sz, symbol=self.symbol, reduce_only=True, emergency=True,
-            )
-            # 【修复 v16.15.1】reduceOnly 被拒 → 强制 REST 重查 + 循环重试 + 永不降级
-            # 【修复 v16.17.x】reduceOnly 成功后：立即检查是否已清仓，避免继续重试
-            if order:
-                # 平仓成功！立刻验证是否已清仓（用 force_rest 查最新数据）
-                time.sleep(0.5)  # 等待交易所成交确认
-                verify_pos = binance_client.get_position(
-                    self.symbol, prefer_ws=False, force_rest=True,
-                )
-                if not verify_pos or abs(float(verify_pos.get("positionAmt", 0) or 0)) < 0.001:
-                    logger.info(f"✅ [{self.symbol}] reduceOnly 平仓成功，已确认无仓")
-                    closed_successfully = True
-                    break
-                logger.info(f"⚠️ [{self.symbol}] 平仓成功但仍有持仓: {verify_pos.get('positionAmt')} ETH")
-            elif not order:
-                logger.warning(
-                    f"⚠️ [{self.symbol}] reduceOnly 平仓失败，重新查询持仓状态 | round={round_i + 1}"
-                )
-                # 用 force_rest 强制走 REST，避免 WS 缓存 stale 数据
-                pos = binance_client.get_position(
-                    self.symbol, prefer_ws=False, force_rest=True,
-                )
-                if not pos or abs(float(pos.get("positionAmt", 0) or 0)) < 0.001:
-                    logger.info(f"[持仓复核] {self.symbol} 已无仓，安全退出")
-                    closed_successfully = True
-                    break
-                pos_amt = float(pos.get("positionAmt", 0))
-                live_pos = round(abs(pos_amt), 3)
-                logger.info(f"[持仓复核] {self.symbol}: {live_pos} ETH")
-                time.sleep(0.8)
-                order = binance_client.place_market_order(
-                    close_side, live_pos, symbol=self.symbol, reduce_only=True, emergency=True,
-                )
-                if not order:
-                    logger.error(
-                        f"⚠️ [{self.symbol}] reduceOnly 重试仍失败，不降级 | round={round_i + 1}"
-                    )
-                    # 永不降级为普通单，防止超卖反开
-            if not order:
-                logger.error(
-                    f"❌ [{self.symbol}] 紧急强平下单失败 round={round_i + 1} | {reason}"
-                )
-            time.sleep(1.5)
+        # ── 并行平仓 + 撤单 ──
+        parallel = self._flat_close_parallel(reason or "强平")
+        closed_successfully = parallel.get("closed", False)
+        query_failed = parallel.get("pos") is None and not closed_successfully
 
         if query_failed:
-            self._last_sterile_flat_fail_detail = (
-                f"持仓=QUERY_FAILED | 强平中止 | {reason}"
+            logger.error(
+                f"❌ [{self.symbol}] 并行平仓持仓查询失败 → fail-closed | {reason}"
             )
             if reset_state:
-                # 不明仓位：保留账本，禁止假装归零
                 try:
                     self._save_state()
                 except Exception:
