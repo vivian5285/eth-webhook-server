@@ -6649,8 +6649,33 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             levels.append({"level": level, "qty": qty, "price": price})
         return levels
 
-    def _audit_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005):
-        """严格审计：每档价位唯一 + 数量符合 regime 比例 + 无孤儿单"""
+    def _tolerance_for_price(self, fallback=None):
+        """v16.22：品种感知价格容忍度。XAU用0.5，BNB用1.0（price_step=0.1×5=0.5）"""
+        price_step = float(getattr(self, "price_step", 0) or 0.01)
+        return max(price_step * 5, 0.5)
+
+    def _tolerance_for_qty(self, live_qty=None, fallback=None):
+        """v16.22：品种感知数量容忍度。BNB用0.02，XAU用0.002"""
+        step_qty = float(getattr(self, "qty_step", 0) or 0.001)
+        baseline = float(self._tp_baseline_qty(live_qty) or self.initial_qty or live_qty or 0)
+        return max(step_qty * 2, baseline * 0.01) if baseline > 0 else max(step_qty * 2, 0.005)
+
+    def _audit_tp_levels(self, live_qty, tolerance=None, qty_tol=None):
+        """严格审计：每档价位唯一 + 数量符合 regime 比例 + 无孤儿单
+        
+        v16.22：qty_tol 和 tolerance 均改为品种感知：
+        - qty_tol: max(qty_step×2, 1%基线)，防止 BNB 等步长较大的品种误报 qty_mismatch
+        - tolerance: 品种价格容忍度，防止孤儿单因容忍度过大被误判为某档匹配
+        """
+        # v16.22：品种感知容忍度
+        step_qty = float(getattr(self, "qty_step", 0) or 0.001)
+        baseline = float(self._tp_baseline_qty(live_qty) or self.initial_qty or live_qty or 0)
+        qty_tol = max(step_qty * 2, baseline * 0.01) if qty_tol is None else qty_tol
+        # 价格容忍度：品种感知，最小0.5，最大2.0（防止孤儿单被误判为某档）
+        if tolerance is None:
+            price_step = float(getattr(self, "price_step", 0) or 0.01)
+            tolerance = max(price_step * 5, 0.5)
+        
         live_qty = self._resolve_live_qty(live_qty)
         orders = self._collect_tp_limit_orders()
         expected = self._expected_tp_count()
@@ -6728,7 +6753,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             parts.append("问题:" + "; ".join(audit["issues"][:3]))
         return " | ".join(parts) if parts else "无有效 TP"
 
-    def _count_matched_tp_orders(self, tp_pxs, tolerance=2.0, live_qty=None):
+    def _count_matched_tp_orders(self, tp_pxs, tolerance=None, live_qty=None):
         if live_qty is not None and live_qty > 0:
             audit = self._audit_tp_levels(live_qty, tolerance)
             return audit["matched_full"], audit["pending_prices"]
@@ -6741,7 +6766,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 matched += 1
         return matched, pending_prices
 
-    def _cancel_orphan_tp_orders(self, live_qty, tolerance=2.0):
+    def _cancel_orphan_tp_orders(self, live_qty, tolerance=None):
+        """v16.22：tolerance 品种感知"""
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
         # 无期望价时禁止清场：否则 TP 成交后账本空会把仍有效的 TP2/TP3 当孤儿撤掉
         if self._expected_tp_count() <= 0:
             if self._adopt_tp_prices_from_open_orders(self.watched_entry):
@@ -6770,7 +6798,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return None
         return min(orders, key=lambda o: abs(o["qty"] - target_qty))
 
-    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=2.0, qty_tol=0.005,
+    def _surgical_repair_tp_defenses(self, live_qty, entry, tolerance=None, qty_tol=None,
                                      force_takeover_recheck=False):
         """
         重启智能修复：先读实盘 → 撤重复留最佳 → 补缺档/纠偏数量。
@@ -6778,6 +6806,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         force_takeover_recheck: 接管场景强制检查TP1是否真正成交（头寸未减+限价消失=真漏挂）
         """
+        # v16.22：品种感知容忍度
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
+        if qty_tol is None:
+            qty_tol = self._tolerance_for_qty(live_qty)
+        
         live_qty = self._resolve_live_qty(live_qty)
         if live_qty <= 0:
             return self._audit_tp_levels(live_qty), 0
@@ -8751,9 +8785,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
         # 每轮先清陈旧防御标签，杜绝「本地未完成」永久拒挂雷达/TP
         self._gc_stale_pending_defense_tags(save=False)
-        # 每轮检查重复挂单：2.0U容差（对齐 _has_tp_limit_at_price），及时去重
-        if self._has_duplicate_tp_orders(tolerance=2.0):
-            pruned = self._prune_duplicate_tp_limits(tolerance=2.0)
+        # v16.22：品种感知价格容忍度
+        if self._has_duplicate_tp_orders():
+            pruned = self._prune_duplicate_tp_limits()
             if pruned:
                 logger.warning(
                     f"🧹 [{self.symbol}] 哨兵发现重复TP单并去重 {pruned} 张"
@@ -9839,8 +9873,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             })
         return orders
 
-    def _has_duplicate_tp_orders(self, tolerance=2.0):
+    def _has_duplicate_tp_orders(self, tolerance=None):
         """同一 TP 价位出现多张单，或总张数超过应有档数"""
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
         orders = self._collect_tp_limit_orders()
         if is_orders_query_failed(orders):
             return False
@@ -9862,7 +9898,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         同价多张 LIMIT：每价只留 1 张（最早 orderId），其余撤销。
         挂单不可读 → 0（禁止盲撤）。用于巡检轻量去重，避免核武连环撤挂。
+        v16.22：tolerance 品种感知。
         """
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
         orders = self._collect_tp_limit_orders()
         if is_orders_query_failed(orders) or not orders:
             return 0
@@ -9902,8 +9941,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 time.sleep(0.12)
         return cancelled
 
-    def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=2.0, qty_tol=0.005):
-        """头寸对应的 TP123 价位+数量均已正确挂好，且雷达/VPS 止损（若需要）也在"""
+    def _defenses_fully_ok(self, live_qty, dynamic_sl=None, tolerance=None, qty_tol=None):
+        """头寸对应的 TP123 价位+数量均已正确挂好，且雷达/VPS 止损（若需要）也在
+        
+        v16.22：tolerance 和 qty_tol 改为品种感知（从硬编码改为从 _audit_tp_levels 复用逻辑）
+        """
+        # v16.22：品种感知容忍度（与 _audit_tp_levels 保持一致）
+        step_qty = float(getattr(self, "qty_step", 0) or 0.001)
+        baseline = float(self._tp_baseline_qty(live_qty) or self.initial_qty or live_qty or 0)
+        if qty_tol is None:
+            qty_tol = max(step_qty * 2, baseline * 0.01) if baseline > 0 else max(step_qty * 2, 0.005)
+        if tolerance is None:
+            price_step = float(getattr(self, "price_step", 0) or 0.01)
+            tolerance = max(price_step * 5, 0.5)
+        
         tp_pxs = self.tv_tps
         expected = self._expected_tp_count(tp_pxs)
         if expected == 0:
@@ -9948,16 +9999,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         return True
 
-    def _patch_missing_tp_levels(self, live_qty, tolerance=2.0, qty_tol=0.005,
+    def _patch_missing_tp_levels(self, live_qty, tolerance=None, qty_tol=None,
                                   force_takeover_recheck=False):
         """
         只补「真正漏挂」的剩余档。
         价到+限价消失 = 已成交 → 记账后绝不补挂，耐心等 TP23。
         TP=reduceOnly；雷达/TV硬止损=closePosition 单槽，互不抢份额。
 
+        v16.22：tolerance 和 qty_tol 品种感知。
+
         force_takeover_recheck: 接管场景强制重新检查TP1是否真正成交
         （若头寸未减仓+限价已消失=真漏挂，允许补挂）
         """
+        # v16.22：品种感知容忍度
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
+        if qty_tol is None:
+            qty_tol = self._tolerance_for_qty(live_qty)
+        
         if getattr(self, "trading_paused", False) or getattr(
             self, "api_monitor_only", False
         ):
@@ -11315,7 +11374,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     continue
         return False
 
-    def _has_tp_limit_at_price(self, price, tolerance=2.0):
+    def _has_tp_limit_at_price(self, price, tolerance=None):
+        """v16.22：tolerance 品种感知"""
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
         if price <= 0:
             return False
         orders = self._collect_tp_limit_orders()
@@ -11746,8 +11808,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return True
         return False
 
-    def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=2.0, qty_tol=0.005):
+    def _cancel_mismatched_remaining_tps(self, live_qty, tolerance=None, qty_tol=None):
         """撤掉剩余档数量与当前仓位比例不符的旧单（部分止盈后常见）"""
+        # v16.22：品种感知容忍度
+        if tolerance is None:
+            tolerance = self._tolerance_for_price()
+        if qty_tol is None:
+            qty_tol = self._tolerance_for_qty(live_qty)
+        
         cancelled = 0
         for lv in self._expected_tp_levels(live_qty):
             px, target_q = lv["price"], lv["qty"]
@@ -16664,7 +16732,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             q, px = lv["qty"], lv["price"]
             if q > 0 and px > 0:
                 # 已存在则跳过，避免重复叠单
-                if self._has_tp_limit_at_price(px, tolerance=2.0):
+                if self._has_tp_limit_at_price(px):
                     logger.info(f"  ✓ TP{lv['level']} @ {px:.2f} 已在盘口，跳过")
                     placed += 1
                     continue
