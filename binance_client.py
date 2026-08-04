@@ -1623,8 +1623,8 @@ class BinanceClient:
                 return o
         return None
 
-    def _existing_same_stop(self, symbol, side, stop_price, tol=0.05):
-        """同向同触发价已有 STOP → 返回该单。"""
+    def _existing_same_stop(self, symbol, side, stop_price, tol=1.0):
+        """同向同触发价已有 STOP → 返回该单。容差 1.0 覆盖 closePosition 止损小幅跟随（防止 1857.64 vs 1858.29 死循环）。"""
         orders = self.get_open_orders(symbol, include_algo=True)
         if is_orders_query_failed(orders):
             return ORDERS_QUERY_FAILED
@@ -1990,6 +1990,11 @@ class BinanceClient:
                         self._recent_stop_place[key] = (time.time(), order)
                 return order
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
+            # -4130：已有同向 closePosition 止损单 → 写入本地缓存防止死循环重试
+            if "code=-4130" in str(e):
+                with self._place_dedupe_lock:
+                    self._recent_stop_place[key] = (time.time(), {"orderId": "EXISTING", "note": "4130-deduped"})
+                logger.warning(f"[止损单去重] -4130 已加入本地缓存 {side} @ {stop_price}")
             return None
 
     def place_stop_limit_order(self, side, quantity, stop_price, limit_price=None,
