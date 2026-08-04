@@ -168,7 +168,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.22.1-tp2-activation-highway"
+BINANCE_VPS_VERSION = "v16.22.2-tp2-activation-highway"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -6627,20 +6627,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if level in consumed:
                 continue
             price = self.tv_tps[level - 1] if self.tv_tps and level - 1 < len(self.tv_tps) else 0
-            # 持仓期：现价已达该档 → 记账并跳过，禁止再出现在应挂列表
-            if (
-                not open_busy
-                and curr_px > 0
-                and float(price or 0) > 0
-                and self._price_reached_tp_zone(level, curr_px, price, live_only=True)
-            ):
-                self._mark_tp_levels_consumed([level])
-                consumed.add(level)
-                logger.warning(
-                    f"📌 [{self.symbol}] 现价已达 TP{level}@{float(price):.2f} "
-                    f"(mark={curr_px:.2f}) → 记账跳过，禁止补挂"
-                )
-                continue
+            # v16.22.1：移除"价到就跳过"的限制（与"拒认假成交"逻辑冲突）
+            # 真正漏挂的TP1应该允许补挂，由"价到+限价无+有减仓证据"判断是否成交
+            # 持仓期：即使价到TP1区域，只要无减仓证据就仍应在应挂列表中
+            # if (
+            #     not open_busy
+            #     and curr_px > 0
+            #     and float(price or 0) > 0
+            #     and self._price_reached_tp_zone(level, curr_px, price, live_only=True)
+            # ):
+            #     self._mark_tp_levels_consumed([level])
+            #     consumed.add(level)
+            #     logger.warning(
+            #         f"📌 [{self.symbol}] 现价已达 TP{level}@{float(price):.2f} "
+            #         f"(mark={curr_px:.2f}) → 记账跳过，禁止补挂"
+            #     )
+            #     continue
             qty = qty_map.get(level, 0.0)
             levels.append({"level": level, "qty": qty, "price": price})
         return levels
