@@ -168,7 +168,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.18-open-retry-iron"
+BINANCE_VPS_VERSION = "v16.22-tp2-activation-highway"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -400,8 +400,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._init_reentry_runtime()
         self.breakeven_phase = False  # 雷达动态追踪阶段
         self.initial_stop = 0.0       # 雷达初始止损基准（与永久硬止损分离）
-        # 规格 v1.0 §5.0：提前保本检查点（雷达激活前，只做一次）
-        self._early_be_checkpoint_done = False
+        # 规格 v2.0：提前保本检查点已废除
+        self._early_be_checkpoint_done = True  # 直接标记为完成，等效禁用
         # v15.9.1：TP3↔雷达退出路径所有权 + 防御单本地标签
         _own = blank_ownership_state()
         self.exit_ownership = str(_own["exit_ownership"])
@@ -3263,8 +3263,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "radar_activated": bool(getattr(self, "radar_activated", False)),
                     "breakeven_phase": bool(getattr(self, "breakeven_phase", False)),
                     "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
-                    # 规格 v1.0 §5.0：提前保本检查点标记持久化
-                    "_early_be_checkpoint_done": bool(getattr(self, "_early_be_checkpoint_done", False)),
+        # 规格 v2.0：提前保本检查点已废除，标记持久化字段保留（向后兼容）
+                    "_early_be_checkpoint_done": True,  # 直接写True等效禁用
                     "last_adx": float(getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
                     "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
                     "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.15) or 1.15),
@@ -8793,12 +8793,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             real_amt, curr_px, source="哨兵双轨对账", notify=True,
         )
         self._disarm_premature_radar(real_amt, curr_px, source="哨兵防线")
-        # 铁律（2026-07-26）：休眠时 _should_radar_trail=False，若此处再要求
-        # is_radar_active 才会 trailing → 永远调不到 _maybe_arm → 雷达假死。
-        # 规格 v1.0 §5.0：提前保本检查点（在雷达激活判断之前独立检查）
-        if self._radar_is_dormant() and float(curr_px or 0) > 0:
-            self._check_early_be_checkpoint(curr_px)
-        # 价过激活线 / TP1+TP2 已成交 → 必须先武装，再追踪。
+        # 规格 v2.0：提前保本检查点已废除（_check_early_be_checkpoint 已禁用）
+        # 雷达激活 = TP2成交 + 价格达到TP2水平
+        # 价过TP2已成交 → 必须先武装，再追踪。
         if self._radar_is_dormant() and float(curr_px or 0) > 0:
             armed = self._maybe_arm_radar_on_activation(
                 real_amt, curr_px, source="哨兵防线·激活闸",
@@ -9321,8 +9318,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 or 1.0
             )
             self.early_be_done = bool(s.get("early_be_done", False))
-            # 规格 v1.0 §5.0：提前保本检查点标记恢复
-            self._early_be_checkpoint_done = bool(s.get("_early_be_checkpoint_done", False))
+            # 规格 v2.0：提前保本检查点已废除，直接禁用
+            self._early_be_checkpoint_done = True
             self._breath_ratio_history = list(
                 s.get("atr_1h_ratio_history", getattr(self, "_breath_ratio_history", []))
                 or []
@@ -14590,8 +14587,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._atr_scenario = 0
         self._temp_stop_active = False
         self._tp3_fallback_active = False
-        # 规格 v1.0 §5.0：开仓时重置提前保本检查点标记
-        self._early_be_checkpoint_done = False
+        # 规格 v2.0：提前保本检查点已废除
+        self._early_be_checkpoint_done = True  # 直接禁用
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
@@ -15810,12 +15807,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _activation_reached_for_arm(self, curr_px):
         """
-        雷达武装闸：现价触线，或本周期 sticky（插针触及后回撤仍武装）。
-        与 TP1/TP2/TP3 限价是否成交无关。
+        规格 v2.0：雷达武装闸
+        激活条件（必须同时满足）：
+        1) TP2 已成交（tp_levels_consumed 包含 2）
+        2) 现价达到 TP2 水平（价格触线或 sticky）
+        与 TP1 限价是否成交无关。
         """
         self._note_mark_extremum(curr_px)
         if bool(getattr(self, "radar_activation_sticky", False)):
             return True
+        # v2.0：必须 TP2 已成交
+        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+        if 2 not in consumed:
+            return False
         return self._price_reached_radar_activation(float(curr_px or 0), live_only=True)
 
     def _sleep_with_extremum_tracking(
@@ -17195,8 +17199,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         s.get("breathing_coefficient", 1.0) or 1.0
                     )
                     self.early_be_done = bool(s.get("early_be_done", False))
-                    # 规格 v1.0 §5.0：提前保本检查点标记恢复
-                    self._early_be_checkpoint_done = bool(s.get("_early_be_checkpoint_done", False))
+                    # 规格 v2.0：提前保本检查点已废除，直接禁用
+                    self._early_be_checkpoint_done = True
                     self._breath_ratio_history = list(
                         s.get("atr_1h_ratio_history", []) or []
                     )

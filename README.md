@@ -1,16 +1,16 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.21-open-retry-iron`（提前保本检查点·ADX档位自适应）**
+**当前版本：`v16.22-tp2-activation-highway`（雷达TP2成交后激活·高速公路模式）**
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
 **TP 分腿：10% / 20% / 70%**（盘口限价 **恰好 2** 笔 LIMIT=TP1+TP2；余仓无上限）  
 **硬止损：`|TV.price−TV.stop_loss|×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
-**雷达（v16.9.1）**：激活用 **TP 绝对价格锚定**（规格 §5.1）：首次开仓 = **(TP1+TP2)/2**；重入开仓 = **TP2**。激活瞬间**保本起步**（entry±tick±fee）；TP 成交只缩量不改价；阶梯从保本位被动跟随；达线前盘口**仅硬止损**  
+**雷达（v16.22 v2.0）**：激活用 **TP2成交后激活**（必须同时满足：1) TP2已成交 2) 现价达到TP2水平）。激活瞬间**保本起步**（entry±tick±fee）；呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）  
 **ATR：只信 TV webhook `atr`**（已删除 VPS 独立拉 1h/合成 ATR、场景一二与降级切换）  
 **重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
-**提前保本检查点（规格 §5.0）**：TP1 距离 × 0.5 处触发（多在 TP1-TP2 中点前），只挪止损到保本位，不启动雷达跟踪  
+**提前保本检查点（v16.21）**：**已废除（v16.22）**——XAU波动大，雷达太早启动易出局  
 **幂等铁律（v15.9.1+）**：本地订单标签未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**  
 **生产闸门（v15.9.3）**：竞态/部分成交失败/限流/`本地标签vs空盘` → **`trading_paused`**；REST 单品种 ≥100ms；档位 `config/reentry_tiers.json`；30s 状态快照；日志 `[OPS|STATE|ALERT|AUDIT]`  
 **日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
@@ -23,7 +23,7 @@
 > **硬止损（唯一公式）**：`|TV价 − TV.stop_loss| × 1.15`，挂在**成交价**外侧。缺/异常 `stop_loss` → **拒开**。巡检/接管禁止用 0.5×ATR 顶替。  
 > **TP（v16.4.0）**：只挂 TP1+TP2（10%/20%）；**TP3 永远不挂限价**，70% 完全交雷达（无价格天花板）。  
 > **ATR（v16.4.0）**：全程只用 webhook `atr`；删除场景一/二与 `atr_1h` 拉取。  
-> **雷达（v16.8.1）**：激活用 **TP 绝对价格锚定**（规格 §5.1）：首次开仓 = (TP1+TP2)/2；重入开仓 = TP2。激活第一步永远是保本（entry±tick±fee），再从保本位阶梯跟随市价；取消 TP1 强制底线。  
+> **雷达（v16.22 v2.0）**：激活用 **TP2成交后激活**（规格 v2.0）：必须同时满足 1) TP2已成交 2) 现价达到TP2水平。激活第一步永远是保本（entry±tick±fee），再从保本位阶梯跟随市价。呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）。取消提前保本检查点。  
 > **v16.8.1**：雷达激活改为 TP 绝对价格锚定：首次开仓=(TP1+TP2)/2，重入开仓=TP2；移除旧的 ADX/TP1 距离百分比激活逻辑。  
 > **v16.8.0**：规格 v1.0雷达——保本起步 + 取消强制底线（激活比例已被 v16.8.1 纠正）。  
 > **叠单铁律**：挂单查询失败 → **fail-closed 禁止挂**；本地标签未清拒挂；未成交挂单总数 **≥5 熔断**。  
@@ -40,7 +40,8 @@
 > **v16.5.0**：苹果风 Console（`/console`）——多套 API 档案热切换、每档案风险%/杠杆可改即生效、Webhook secret、日志与 30 日盈亏胜率；口令 `CONSOLE_PASSWORD`。  
 > **v16.6.0**：生产流水线编制——总账本+状态机+督察官+账号级 REST 节流阀；现有开平仓/雷达挂岗位边界（软闸默认开，不打断实盘）。`/health` 含 `pipeline` 阶段。Deepcoin 同步同套编制。  
 > **v16.6.1**：补强——TP **开仓+补挂**双预算闸；`chief_auditor`/`tp_slice` 空仓自清；成交历史走节流阀；督察官硬止损以盘口核实为准；Deepcoin PLACE=2 硬帽+自检。  
-> **v16.6.2**：API 限流绝对封死——预算/间隔/哨兵全面收紧；账户/K线/名义敞口全部走节流；冷却期零 REST + resume 门禁；Deepcoin `v13.90.2-rate-iron`。  
+> **v16.6.2**：API 限流绝对封死——预算/间隔/哨兵全面收紧；账户/K线/名义敞口全部走节流；冷却期零 REST + resume 门禁；Deepcoin `v13.90.2-rate-iron`。
+> **v16.22 v2.0**：废除提前保本检查点；雷达改为TP2成交后激活；呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）。
 
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）
@@ -56,7 +57,7 @@
 
 ```bash
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.17-open-retry-iron · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT} · trading_paused: false
+# version: v16.22-tp2-activation-highway · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
 
@@ -351,10 +352,10 @@ qty = 名义上限 / entryPrice
 | 1 中 | 20–30 | **(TP1+TP2)/2** | **1.15** | 0.50/0.35 · 1.2/1.6 · 1.8~2.5 | 0.40/0.30 · 1.0/1.4 · 1.5~2.0 |
 | 2 强 | >30 | **(TP1+TP2)/2** | **1.15** | 0.60/0.40 · 1.5/2.0 · 2.5~3.5 | 0.50/0.35 · 1.3/1.8 · 2.0~2.8 |
 
-再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`config/reentry_tiers.json`（schema `v4.1-marathon-act-fix`）。  
+再入微赚区：ETH ±0.5×ATR · XAU ±0.3×ATR。配置源：`config/reentry_tiers.json`（schema `v2.0-tp2-activation-highway`）。  
 实现：`radar_reentry_mixin.py` + `smart_reentry_engine.py` + `reentry_profiles.py` + `breath_stop.py`。
 
-**一句话**：弱趋势早激活防微利回吐，强趋势晚激活留呼吸空间；激活瞬间永远保本起步，再从保本位阶梯跟随；取消 TP1 强制底线。硬止损始终独立并存。
+**一句话**：TP2成交后雷达才激活（市价在前面跑，雷达保持安全距离跟在后面）；取消提前保本检查点；激活瞬间永远保本起步，再从保本位阶梯跟随。硬止损始终独立并存。
 
 ### 模块地图（后期优化入口）
 

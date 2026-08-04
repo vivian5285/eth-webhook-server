@@ -1,6 +1,6 @@
 {
-  "schema": "v1.0-absolute-price-anchor",
-  "note": "规格 v1.0：雷达激活价 = 绝对价格锚定，首次开仓 (TP1+TP2)/2，重入开仓 TP2。不再使用按 TP1 距离百分比的旧 ADX 比例逻辑。",
+  "schema": "v2.0-tp2-activation-highway",
+  "note": "规格 v2.0：雷达激活 = TP2成交 + 价格达到TP2水平。取消提前保本检查点。呼吸空间大幅增加（市价在前面跑，雷达保持安全距离跟在后面）。",
   "arm_mode": "breakeven_fee",
   "arm_sl_atr": 0.0,
   "fee_cover_pct": 0.0008,
@@ -21,30 +21,33 @@
     "tiers": [
       {
         "name": "weak",
-        "step_trigger_atr": 0.40,
-        "step_advance_atr": 0.25,
-        "breath_tp12": 0.80,
-        "breath_tp23": 1.00,
-        "min_mult": 1.2,
-        "max_mult": 1.5
-      },
-      {
-        "name": "mid",
+        "note": "弱趋势：呼吸宽松，允许行情充分跑动",
         "step_trigger_atr": 0.50,
-        "step_advance_atr": 0.35,
-        "breath_tp12": 1.20,
-        "breath_tp23": 1.60,
-        "min_mult": 1.8,
-        "max_mult": 2.5
-      },
-      {
-        "name": "strong",
-        "step_trigger_atr": 0.60,
-        "step_advance_atr": 0.40,
+        "step_advance_atr": 0.30,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
         "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：平衡配置",
+        "step_trigger_atr": 0.60,
+        "step_advance_atr": 0.40,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：呼吸最宽松，雷达跟市价保持足够安全距离",
+        "step_trigger_atr": 0.70,
+        "step_advance_atr": 0.50,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
       }
     ]
   },
@@ -55,30 +58,33 @@
     "tiers": [
       {
         "name": "weak",
-        "step_trigger_atr": 0.35,
-        "step_advance_atr": 0.20,
-        "breath_tp12": 0.70,
-        "breath_tp23": 0.90,
-        "min_mult": 1.0,
-        "max_mult": 1.3
+        "note": "弱趋势XAU：波动大，呼吸空间必须足够大",
+        "step_trigger_atr": 0.50,
+        "step_advance_atr": 0.35,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
       },
       {
         "name": "mid",
-        "step_trigger_atr": 0.40,
-        "step_advance_atr": 0.30,
-        "breath_tp12": 1.00,
-        "breath_tp23": 1.40,
-        "min_mult": 1.5,
-        "max_mult": 2.0
+        "note": "中趋势XAU：标准宽松配置",
+        "step_trigger_atr": 0.60,
+        "step_advance_atr": 0.40,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 3.5,
+        "max_mult": 5.5
       },
       {
         "name": "strong",
-        "step_trigger_atr": 0.50,
-        "step_advance_atr": 0.35,
-        "breath_tp12": 1.30,
-        "breath_tp23": 1.80,
-        "min_mult": 2.0,
-        "max_mult": 2.8
+        "note": "强趋势XAU：呼吸空间最大，市价在前面跑，雷达保持安全距离",
+        "step_trigger_atr": 0.70,
+        "step_advance_atr": 0.50,
+        "breath_tp12": 3.00,
+        "breath_tp23": 4.00,
+        "min_mult": 5.0,
+        "max_mult": 7.0
       }
     ]
   },
@@ -89,30 +95,33 @@
     "tiers": [
       {
         "name": "weak",
-        "step_trigger_atr": 0.40,
-        "step_advance_atr": 0.25,
-        "breath_tp12": 0.80,
-        "breath_tp23": 1.00,
-        "min_mult": 1.2,
-        "max_mult": 1.5
-      },
-      {
-        "name": "mid",
+        "note": "弱趋势：呼吸宽松",
         "step_trigger_atr": 0.50,
-        "step_advance_atr": 0.35,
-        "breath_tp12": 1.20,
-        "breath_tp23": 1.60,
-        "min_mult": 1.8,
-        "max_mult": 2.5
-      },
-      {
-        "name": "strong",
-        "step_trigger_atr": 0.60,
-        "step_advance_atr": 0.40,
+        "step_advance_atr": 0.30,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
         "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：平衡配置",
+        "step_trigger_atr": 0.60,
+        "step_advance_atr": 0.40,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：呼吸最宽松",
+        "step_trigger_atr": 0.70,
+        "step_advance_atr": 0.50,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
       }
     ]
   }

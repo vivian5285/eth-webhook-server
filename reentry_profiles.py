@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.13.0 · 规格 v1.0 全面对齐版）。
+双币种雷达 + 智能再入场（v16.22 · 规格 v2.0 TP2成交后激活 · 高速公路模式）。
 
-核心规格（v1.0）：
-  - 雷达激活价 = 绝对价格锚定：首次开仓 (TP1+TP2)/2，重入开仓 TP2。
-    旧 ADX 比例 × TP1距 公式已废除（见 radar_gate_price_from_tps）。
-  - 硬止损缓冲垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存。
-  - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）。
-  - 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量。
-  - 双保险限价：多 min(5m低+tick, TV×0.997)；空 max(5m高−tick, TV×1.003)。
-  - 硬止损 / 亏损 / TP1已成交 / 非强趋势(tier≠2) 出局禁止重入。
-  - 规格 §5.0 提前保本检查点：价格到 tp1距离×0.5 时移动止损到保本位。
-  - 规格 §9.1 订单标签含方向+随机数，防碰撞。
+核心规格（v2.0）：
+  - 雷达激活 = TP2成交 + 价格达到TP2水平（首次和重入都相同）
+  - 取消提前保本检查点（_check_early_be_checkpoint 已废除）
+  - 雷达激活前完全休眠，仅硬止损守护
+  - 硬止损缓冲垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存
+  - 重入最多 1 次；窗口 = K线根数（ETH 2×90m · XAU 3×45m）
+  - 重入成功后雷达系数放宽一档（looser_tier）；不影响 TP 价量
+  - 双保险限价：多 min(5m低+tick, TV×0.997)；空 max(5m高−tick, TV×1.003)
+  - 硬止损 / 亏损 / TP1已成交 / 非强趋势(tier≠2) 出局禁止重入
+  - 规格 §9.1 订单标签含方向+随机数，防碰撞
 """
 from __future__ import annotations
 
@@ -262,22 +262,19 @@ def radar_gate_price_from_tps(
     **kwargs,
 ) -> float:
     """
-    【规格 v1.0 · 绝对价格锚定】
-    首次开仓：雷达激活价 = (TP1 + TP2) / 2
-    重入开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）
-    不再使用 ADX 比例 × TP1 距离的旧公式。
+    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
+    - 首次开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才激活）
+    - 重入开仓：雷达激活价 = TP2（同样必须到达 TP2）
+    - 雷达激活必须满足两个条件：1) TP2已成交  2) 现价达到TP2水平
+    - 不再使用 (TP1+TP2)/2 中点激活（旧设计对XAU波动太大）
     """
     t1 = float(tp1 or 0)
     t2 = float(tp2 or 0)
     attempt = int(reentry_attempt or 0)
-    if t1 <= 0 or t2 <= 0:
+    if t2 <= 0:
         return 0.0
-    if attempt >= 1:
-        # 重入开仓：TP2 绝对价格
-        return round(t2, 4)
-    else:
-        # 首次开仓：TP1-TP2 区间中点
-        return round((t1 + t2) / 2.0, 4)
+    # v2.0: 统一使用TP2作为激活锚点
+    return round(t2, 4)
 
 
 def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:

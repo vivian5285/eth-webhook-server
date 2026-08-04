@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 智能再入场状态机辅助（无交易所 IO；由 PositionSupervisor / mixin 驱动）。
-规格 v1.0：最多 1 次重入；窗口按 K 线根数；
-雷达启动 = 绝对价格锚定（首次 (TP1+TP2)/2 · 重入 TP2）。
+规格 v2.0：最多 1 次重入；窗口按 K 线根数；
+雷达启动 = TP2成交后激活（首次和重入都使用TP2作为激活锚点）。
 """
 from __future__ import annotations
 
@@ -87,10 +87,11 @@ def init_cycle_on_open(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v1.0 · §5.1 绝对价格锚定】
-    首次开仓 reentry_attempt=0：雷达激活价 = (TP1 + TP2) / 2
+    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
+    首次开仓 reentry_attempt=0：雷达激活价 = TP2
     重入开仓 reentry_attempt>=1：雷达激活价 = TP2
-    不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
+    激活必须满足：1) TP2已成交  2) 现价达到TP2水平
+    雷达在TP2成交前完全休眠，仅硬止损守护。
     """
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
@@ -98,7 +99,7 @@ def init_cycle_on_open(
     # 规格 v1.0：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
     frac = 0.0
 
-    # v1.0 规格 §5.1：雷达激活价 = 绝对价格锚定
+    # 规格 v2.0：雷达激活价 = TP2（首次和重入都使用TP2）
     tp1_v = float(tp1 or 0)
     tp2_v = float(tp2 or 0)
     gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=attempt)
@@ -200,8 +201,9 @@ def bump_after_reentry_fill(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v1.0 · §5.1 绝对价格锚定】
-    重入开仓 reentry_attempt>=1：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）。
+    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
+    重入开仓 reentry_attempt>=1：雷达激活价 = TP2（价格必须真正到达 TP2 才激活）
+    激活必须满足：1) TP2已成交  2) 现价达到TP2水平
     不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
     """
     rp = get_reentry_profile(symbol)
