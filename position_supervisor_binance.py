@@ -8282,7 +8282,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
 
         # 预计算：只取 TP1/TP2，跳过已挂或价到无减仓需记账的档
-        prepared = []
+        prepared_by_level = {}  # {level_num: (q, adj_px)}
         for lv in self._expected_tp_levels(live_qty):
             level_num = int(lv["level"])
             if level_num not in (1, 2):
@@ -8336,9 +8336,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return 0
 
         # ── 并行挂单：TP1 + TP2 同时提交 ────────────────────
-        # 用 dict 方便日志回查 qty/price
-        prepared_by_level = {}  # {level_num: (q, adj_px)}
-
         def _place_single(level_num):
             q, px = prepared_by_level[level_num]
             res = self._place_defense_tp_limit(
