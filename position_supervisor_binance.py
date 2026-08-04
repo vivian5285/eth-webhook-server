@@ -2571,7 +2571,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             hard_raw = cap_raw if live_qty <= 0 else min(cap_raw, live_qty * 0.40)
             tot_raw = sum(float(out.get(l, 0) or 0) for l in levels if l <= 2)
             # v16.23：直接计算需要减少的量，而不是用很小的 scale 因子
-            if tot_raw > hard_raw + 1e-9:
+            # 允许舍入误差：excess < 0.001（小于最小下单量）时忽略
+            if tot_raw > hard_raw + 0.001:
                 excess = tot_raw - hard_raw
                 logger.warning(
                     f"🚨 [{self.symbol}] TP限价超帽 tot={tot_raw:.4f} hard={hard_raw:.4f} "
