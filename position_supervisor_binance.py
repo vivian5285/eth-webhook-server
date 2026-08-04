@@ -2527,13 +2527,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         不足最小下单量的小档合并到最后一档。
         铁律（PLACE=2）：禁止把合并/余数扩成「填满现仓」——TP3 份额永不并进限价。
+
+        v16.23 修复：
+        1. cap 比较时用未舍入的精确值
+        2. 缩放时直接计算需要减少的量，而不是用很小的 scale 因子（会导致舍入后无效）
         """
         if not qty_map:
             return qty_map
         live_qty = float(live_qty or 0)
         levels = sorted(int(k) for k in qty_map.keys())
         if len(levels) <= 1:
-            # 单档剩余：保持绝对比例切片，禁止静默改成 live 全量
             return qty_map
         out = {int(k): float(v or 0) for k, v in qty_map.items()}
         carry = 0.0
@@ -2549,8 +2552,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if total > live_qty + 0.001:
             out[last] = round(max(out.get(last, 0) - (total - live_qty), 0.0), 3)
         # PLACE=2 硬帽：限价合计 ≤ 开仓×(r1+r2)+一步噪声
-        # Bug修复：先除后乘的原始逻辑存在「四舍五入后值不变」的死循环。
-        # 正确做法：用未舍入的原始比例计算 cap，缩放后统一舍入。
         place_n = self._effective_place_tp_levels()
         if place_n <= 2 and max(levels) <= 2:
             initial = float(
@@ -2566,28 +2567,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             while len(ratios) < 2:
                 ratios.append(0.0)
-            cap = round(initial * (float(ratios[0]) + float(ratios[1])) + 1e-6, 3)
-            hard = min(cap, round(live_qty * 0.40, 3)) if live_qty > 0 else cap
-            # 用原始（未舍入）值计算 tot 以防四舍五入造成死循环
-            tot2_raw = sum(float(out.get(l, 0) or 0) for l in levels if l <= 2)
-            if tot2_raw > hard + 1e-9:
-                logger.error(
-                    f"🚨 [{self.symbol}] TP限价预算超帽 tot={round(tot2_raw, 4)} hard={hard} "
-                    f"initial={initial} live={live_qty} → 按比例压回"
+            cap_raw = initial * (float(ratios[0]) + float(ratios[1]))
+            hard_raw = cap_raw if live_qty <= 0 else min(cap_raw, live_qty * 0.40)
+            tot_raw = sum(float(out.get(l, 0) or 0) for l in levels if l <= 2)
+            # v16.23：直接计算需要减少的量，而不是用很小的 scale 因子
+            if tot_raw > hard_raw + 1e-9:
+                excess = tot_raw - hard_raw
+                logger.warning(
+                    f"🚨 [{self.symbol}] TP限价超帽 tot={tot_raw:.4f} hard={hard_raw:.4f} "
+                    f"excess={excess:.4f} → 压回"
                 )
-                scale = hard / tot2_raw
-                total_scaled = 0.0
+                # 按档比例分配减少量
                 for l in list(out.keys()):
                     if int(l) <= 2:
-                        raw_val = float(out.get(l) or 0) * scale
-                        rounded_val = round(raw_val, 3)
-                        out[l] = rounded_val
-                        total_scaled += rounded_val
-                # 安全钳：确保总和严格不超过 hard
-                if total_scaled > hard + 1e-9 and levels:
-                    smallest_level = min(l for l in levels if l <= 2)
-                    excess = round(total_scaled - hard, 4)
-                    out[smallest_level] = round(max(out.get(smallest_level, 0) - excess, 0), 3)
+                        portion = float(out.get(l, 0) or 0) / tot_raw if tot_raw > 0 else 0
+                        reduction = excess * portion
+                        out[l] = round(max(out[l] - reduction, MIN_TP_LEG_QTY), 3)
         return out
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
