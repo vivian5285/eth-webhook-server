@@ -40,7 +40,7 @@ class PipelineBridgeMixin:
                 float(getattr(self, "watched_qty", 0) or 0) > 0
                 and str(getattr(self, "current_side", "") or "").upper() in ("LONG", "SHORT")
             )
-            if held and pl.phase in (Phase.IDLE, Phase.FAILED, Phase.REPORTED):
+            if held and pl.phase in (Phase.IDLE, Phase.FAILED, Phase.REPORTED, Phase.SIGNAL_RECEIVED):
                 pl.advance(
                     Phase.MONITORING,
                     Role.SYSTEM,
