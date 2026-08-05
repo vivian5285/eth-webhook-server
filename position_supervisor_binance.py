@@ -11068,6 +11068,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         雷达守护：仅 TP 异常才撤单重挂；止损缺失单独补挂，禁止动已齐 TP。
         纯缺失不绕过冷却；叠单才算 severe。核武有 thrash 刹车。
+        v16.24.5 修复：增加 _last_defense_align_ok_ts 冷却守卫，
+        防止「挂单传播延迟导致审计误判→撤单重挂→又误判」死循环。
         """
         if real_amt <= 0 or not self.monitoring:
             return None
@@ -11077,6 +11079,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return None
         if getattr(self, "_defense_align_in_progress", False):
             return None
+        # 冷却期内只允许「有仓却 0 档 TP」的极端裸仓情况强制对齐；
+        # 纯缺失/数量偏差等普通情况一律跳过，等待传播稳定
+        now = time.time()
+        since_ok = now - getattr(self, "_last_defense_align_ok_ts", 0)
+        if since_ok < DEFENSE_ALIGN_COOLDOWN_SEC:
+            audit = self._audit_tp_levels(real_amt)
+            naked_tp = (
+                int(audit.get("matched_full") or 0) <= 0
+                and int(audit.get("expected") or 0) > 0
+            )
+            if not naked_tp:
+                return None
+            # 裸仓：冷却期也必须对齐，但用 rounds=1 限制激进程度
+            logger.warning(
+                f"📡 [雷达守护] 冷却期内裸仓强制对齐({since_ok:.0f}s/{DEFENSE_ALIGN_COOLDOWN_SEC}s) "
+                f"| {self._format_audit_summary(audit)}"
+            )
 
         cap = self._radar_enforce_regime_cap(real_amt, curr_px)
         if cap:
@@ -11120,10 +11139,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"{self._format_audit_summary(audit)}"
             )
             self._nuclear_fail_streak = 0
+            # 冷却期内用 rounds=1 限制激进；API传播延迟可能导致误判，
+            # 多次 rounds=3 核武会形成「撤→挂→撤」死循环
+            rounds = 3 if since_ok >= DEFENSE_ALIGN_COOLDOWN_SEC else 1
             result = self._enforce_defense_alignment(
                 real_amt, self.watched_entry,
                 dynamic_sl=(sl if self._is_radar_active() else None),
-                reason="雷达守护·裸仓强制补TP", rounds=3,
+                reason="雷达守护·裸仓强制补TP", rounds=rounds,
             )
             _stops = binance_client.find_protective_stop_prices(self.symbol)
             if _stops is not None and not _stops:
