@@ -872,7 +872,11 @@ def validate_tp_prices_for_side(side, entry, tp_list, min_gap=0.01):
 
 
 def enrich_entry_tp_prices(action, price, atr, regime=None, payload=None):
-    """开仓：已有 tp1/2/3 原样；缺档用 ATR 倍数补全（仅兜底）。"""
+    """开仓：统一 tp1/2/3 与 tv_tp1/2/3 字段，TV 价格为权威来源。
+
+    注：v2.1 起已删除 entry+ATR 本地重算 TP 的兜底逻辑；若 TV 信号未携带
+    tp1/tp2，则保留缺失状态由下游明确处理，禁止静默 fabricate 价格。
+    """
     payload = dict(payload or {})
     for i in (1, 2, 3):
         v = _to_float(payload.get(f"tp{i}")) or _to_float(payload.get(f"tv_tp{i}"))
@@ -882,28 +886,8 @@ def enrich_entry_tp_prices(action, price, atr, regime=None, payload=None):
     tps = {i: _to_float(payload.get(f"tv_tp{i}")) for i in (1, 2, 3)}
     if all(tps[i] and tps[i] > 0 for i in (1, 2, 3)):
         payload["_tp_source"] = "tv"
-        return payload
-
-    mults = TV_REGIME_TP_MULT[3]
-    sign = 1.0 if action == "LONG" else -1.0
-    px = float(price or 0)
-    a = float(atr or 0) or ATR_FALLBACK_DEFAULT
-    if px <= 0:
-        return payload
-    filled = 0
-    for i, mult in enumerate(mults, start=1):
-        key = f"tv_tp{i}"
-        if not _has_positive_float(payload.get(key)):
-            val = round(px + sign * a * mult, 2)
-            payload[key] = val
-            payload[f"tp{i}"] = val
-            filled += 1
-    if filled == 3:
-        payload["_tp_source"] = "local"
-    elif filled > 0:
-        payload["_tp_source"] = "tv+local"
     else:
-        payload["_tp_source"] = "tv"
+        payload["_tp_source"] = "tv_incomplete"
     return payload
 
 

@@ -54,10 +54,7 @@ from webhook_parser import (
     format_tv_vps_sl_compare,
     get_vps_hard_sl_params,
     format_vps_sizing_note,
-    enrich_entry_tp_prices,
-    get_regime_tp_ratios,
     get_leg_tp_ratios,
-    format_regime_tp_ratios_label,
     validate_tp_prices_for_side,
     normalize_entry_type,
     is_reconcile_action,
@@ -2147,7 +2144,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         接管补全防线上下文。
         link_historical_tv=False：未登记来源仓位 —— 禁止把缓存/日志里无关的旧 TV
-        tv_sl、regime、TP 当成「这笔仓」的来源；仅用行情 ATR 计算雷达止损与TP。
+        tv_sl、regime、TP 当成「这笔仓」的来源；TP 必须来自 TV 字段/账本/盘口，
+        禁止用 entry+ATR 本地重算。ATR 仅用于雷达止损与仓位管理。
         """
         notes = []
         side = pos.get("side") or self.current_side
@@ -2168,18 +2166,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 不锁「TV开仓档」叙事；保留内部默认仅用于 TP 比例兼容
             if float(getattr(self, "open_atr", 0) or 0) <= 0:
                 self.open_atr = float(getattr(self, "current_atr", 0) or 0)
-            if sum(1 for t in (self.tv_tps or []) if t > 0) < 2 and entry > 0:
-                atr = float(getattr(self, "open_atr", 0) or self.current_atr or 0)
-                if atr > 0:
-                    payload = enrich_entry_tp_prices(
-                        side, entry, atr, 3, {},
-                    )
-                    tps = self._sanitize_tp_prices([
-                        payload.get("tv_tp1"), payload.get("tv_tp2"), payload.get("tv_tp3"),
-                    ])
-                    if self._tp_prices_valid_for_side(side, entry, tps):
-                        self.tv_tps = tps
-                        notes.append(f"ATR本地补全TP(无TV关联) {tps}")
+            # v2.1: TP 必须来自 TV 字段，禁止无 TV 关联时用 ATR 本地重算 TP。
+            if sum(1 for t in (self.tv_tps or []) if t > 0) < 2:
+                logger.error(
+                    f"🚨 [{self.symbol}] 接管/恢复未关联 TV 信号且 tv_tps 不足，"
+                    f"已禁止 entry+ATR 本地重算 TP。请人工补挂 TP 或确认 TV 日志。"
+                )
             # 禁止写入历史 tv_sl_ref 冒充本仓 TV 硬止损
             self.tv_sl_ref = 0.0
             if entry > 0 and side in ("LONG", "SHORT"):
@@ -2268,16 +2260,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     notes.append(f"补全TP123 {tps}")
                     break
 
-        if sum(1 for t in (self.tv_tps or []) if t > 0) < 3 and entry > 0 and self.current_atr > 0:
-            payload = enrich_entry_tp_prices(
-                side, entry, self.current_atr, self.regime, {},
+        # v2.1: TV 信源/账本/盘口均不足时，禁止用 entry+ATR 本地重算 TP。
+        if sum(1 for t in (self.tv_tps or []) if t > 0) < 3:
+            logger.error(
+                f"🚨 [{self.symbol}] 接管/恢复后仍无法补全 TP123，"
+                f"已禁止 entry+ATR 本地重算。请确认 TV 日志或人工补挂 TP。"
             )
-            tps = self._sanitize_tp_prices([
-                payload.get("tv_tp1"), payload.get("tv_tp2"), payload.get("tv_tp3"),
-            ])
-            if self._tp_prices_valid_for_side(side, entry, tps):
-                self.tv_tps = tps
-                notes.append(f"ATR本地补全TP {tps}")
 
         if float(getattr(self, "tv_sl", 0) or 0) <= 0:
             for src in sources:
@@ -2477,7 +2465,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return self._adopt_tp_prices_from_open_orders(entry)
 
     def _ensure_tp123_prices_from_tv(self, entry):
-        """以实盘 entry + open_atr/regime 确保 TP123 三价齐全（人工开仓必跑）"""
+        """以 TV 信源/账本为准确保 TP123 三价齐全；禁止用 entry+ATR 重算覆盖 TV 价格。"""
         side = self.current_side
         entry = float(entry or self.watched_entry or 0)
         if self._tp_prices_valid_for_side(side, entry):
@@ -2499,22 +2487,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         if sum(1 for t in (self.tv_tps or []) if t > 0) >= 3:
             logger.warning(
-                f"⚠️ 陈旧 TP 价位与 {side} @ {entry:.2f} 方向不符 → 丢弃重算"
+                f"⚠️ 陈旧 TP 价位与 {side} @ {entry:.2f} 方向不符 → 丢弃"
             )
             self.tv_tps = [0.0, 0.0, 0.0]
 
-        atr = float(getattr(self, "open_atr", None) or self.current_atr or 30)
-        regime = int(getattr(self, "open_regime", None) or self.regime or 3)
-        if not side or entry <= 0:
-            return False
-        payload = enrich_entry_tp_prices(side, entry, atr, regime, {})
-        self.tv_tps = self._sanitize_tp_prices([
-            payload.get("tv_tp1"), payload.get("tv_tp2"), payload.get("tv_tp3"),
-        ])
-        ok = self._tp_prices_valid_for_side(side, entry)
-        if ok:
-            logger.info(f"📐 人工接管 ATR 补全 TP123 @ entry={entry:.2f} → {self.tv_tps}")
-        return ok
+        logger.error(
+            f"🚨 [{self.symbol}] TV/账本/盘口均无有效 TP123，且已禁止 entry+ATR "
+            f"本地重算。请确认 TV 信号包含 tp1/tp2/tp3。"
+        )
+        return False
 
     def _resolve_defense_stop_for_audit(self, radar_sl=None):
         """审计用止损价：雷达已激活则合并线；否则 tv_sl"""
@@ -13101,20 +13082,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if px_for_tp > 0 and not validate_tp_prices_for_side(
                 raw_action, px_for_tp, self.tv_tps,
             ):
-                enriched = enrich_entry_tp_prices(
-                    raw_action, px_for_tp, self.current_atr, self.regime, payload,
-                )
-                self.tv_tps = self._sanitize_tp_prices([
-                    self._safe_float(enriched.get("tv_tp1"), 0),
-                    self._safe_float(enriched.get("tv_tp2"), 0),
-                    self._safe_float(enriched.get("tv_tp3"), 0),
-                ])
-                if enriched.get("_tp_source"):
-                    payload = dict(payload)
-                    payload["_tp_source"] = enriched.get("_tp_source")
-                logger.info(
-                    f"📐 开仓信号 TP 本地补全 @ {px_for_tp:.2f} → {self.tv_tps} "
-                    f"({payload.get('_tp_source', 'local')})"
+                logger.warning(
+                    f"⚠️ [{self.symbol}] TV 信号 TP{self.tv_tps} 与现价 "
+                    f"{px_for_tp:.2f} 方向/距离异常，保留 TV 原始价由下游推离逻辑处理，"
+                    f"禁止 entry+ATR 本地重算覆盖。"
                 )
         elif sum(1 for t in new_tps if t > 0) >= 2:
             self.tv_tps = new_tps
@@ -13857,18 +13828,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tps = self._sanitize_tp_prices(list(snap.get("tv_tps") or self.tv_tps or []))
         if side in ("LONG", "SHORT") and entry > 0:
             if not validate_tp_prices_for_side(side, entry, tps):
-                atr = float(snap.get("atr") or self.current_atr or 30)
-                regime = int(snap.get("regime") or self.regime or 3)
-                enriched = enrich_entry_tp_prices(
-                    side, entry, atr, regime, snap.get("payload") or {},
-                )
-                tps = self._sanitize_tp_prices([
-                    self._safe_float(enriched.get("tv_tp1"), 0),
-                    self._safe_float(enriched.get("tv_tp2"), 0),
-                    self._safe_float(enriched.get("tv_tp3"), 0),
-                ])
-                logger.warning(
-                    f"📐 [{source}] TV TP 与方向不符 → ATR 重算 {tps}"
+                logger.error(
+                    f"🚨 [{self.symbol}] [{source}] TV TP{tps} 与 {side}@{entry:.2f} "
+                    f"方向/距离异常，已禁止 entry+ATR 本地重算覆盖；保留 TV 原始价。"
                 )
         self.tv_tps = list(tps)
         self.tp_levels_consumed = []
