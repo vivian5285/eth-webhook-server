@@ -12424,7 +12424,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return change, None
 
         elif kind == "tp_fill":
-            levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"]])
+            levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"])
             credible, _ = self._filter_credible_tp_fills(
                 change["tp_fills"], curr_px_safe, old_qty, new_qty,
             )
