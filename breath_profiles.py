@@ -3,13 +3,14 @@
 """
 按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
 
-规格 v2.0：
-  - 雷达激活 = TP2成交后（取消提前保本检查点）
+规格 v2.1：
+  - 雷达激活 = 中点激活（首次=(TP1+TP2)/2，重入=TP2）
   - 呼吸空间大幅增加（市价前面跑，雷达保持安全距离跟在后面）
+  - 步进参数同步大幅放宽（约40-60%）
   - 硬止损呼吸垫已迁至 defense_profiles 统一 1.15（本文件不管 buffer）
   - 本文件存基线；运行时 apply_tier_to_breath_profile 覆盖 step/breath/trail
   - 规格 §5.0 提前保本检查点已废除
-  - 规格 §5.1 雷达激活 = TP2成交 + 价格达到TP2水平
+  - 规格 §5.1 雷达激活 = (TP1+TP2)/2（首次）/ TP2（重入）
   - 规格 §5.2/§5.3 雷达跟踪步长、呼吸空间按档位查 reentry_tiers.json
 """
 from __future__ import annotations
@@ -20,25 +21,25 @@ from typing import Any, Dict, List, Optional
 RATIO_FLOOR = 0.6
 RATIO_CEILING = 2.2
 
-# ETH 基线（中趋势档会 overlay）
+# ETH 基线（中趋势档会 overlay，规格 v2.1：步进大幅放宽）
 BREATH_ETH: Dict[str, Any] = {
     "name": "ETH",
-    "initial_sl_atr": 0.0,  # 规格 v1.0：激活用保本位，不用 ATR 臂
+    "initial_sl_atr": 0.0,  # 规格 v2.1：激活用保本位，不用 ATR 臂
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.60,   # v2.0：增大步进阈值
-    "step_advance_atr": 0.40,   # v2.0：增大步进幅度
+    "step_trigger_atr": 0.85,   # v2.1：步进放宽（T1中趋势基线）
+    "step_advance_atr": 0.55,   # v2.1：步进幅度同步放宽
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.00,  # v2.0：大幅增加呼吸空间
-    "breath_tp23": 2.80,  # v2.0：大幅增加
+    "breath_tp12": 2.00,  # v2.1：中趋势档基线
+    "breath_tp23": 2.80,  # v2.1：中趋势档基线
     "phase2_trail_mult": 1.0,
-    "min_mult": 3.0,      # v2.0：大幅增加最小ATR倍数
-    "max_mult": 4.5,      # v2.0：大幅增加最大ATR倍数
+    "min_mult": 3.0,      # v2.1：动态追踪最小ATR倍数
+    "max_mult": 4.5,      # v2.1：动态追踪最大ATR倍数
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -46,25 +47,25 @@ BREATH_ETH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# XAU 基线（规格 v2.0：呼吸空间大幅增加，波动大需要更宽松）
+# XAU 基线（规格 v2.1：呼吸空间与步进同步大幅放宽，波动大需要更宽松）
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.5,
     "early_be_atr": 0.0,  # 提前保本检查点已废除
-    "step_trigger_atr": 0.60,   # v2.0：增大步进阈值
-    "step_advance_atr": 0.40,   # v2.0：增大步进幅度
+    "step_trigger_atr": 0.85,   # v2.1：步进放宽（T1中趋势基线）
+    "step_advance_atr": 0.55,   # v2.1：步进幅度同步放宽
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.50,  # v2.0：大幅增加呼吸空间
-    "breath_tp23": 3.50,  # v2.0：大幅增加
+    "breath_tp12": 2.50,  # v2.1：中趋势档基线
+    "breath_tp23": 3.50,  # v2.1：中趋势档基线
     "phase2_trail_mult": 1.0,
-    "min_mult": 3.5,      # v2.0：大幅增加最小ATR倍数
-    "max_mult": 5.5,      # v2.0：大幅增加最大ATR倍数
+    "min_mult": 3.5,      # v2.1：动态追踪最小ATR倍数
+    "max_mult": 5.5,      # v2.1：动态追踪最大ATR倍数
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

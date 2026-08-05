@@ -15495,7 +15495,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_activation_price(self):
         """
-        【规格 v1.0 · 绝对价格锚定】
+        【规格 v2.1 · 绝对价格锚定】
         首次开仓：雷达激活价 = (TP1 + TP2) / 2（TP1/TP2 为 webhook 原始信号价格）
         重入开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）
         不再使用 ADX 比例 × TP1 距离的旧公式。
@@ -15836,19 +15836,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _activation_reached_for_arm(self, curr_px):
         """
-        规格 v2.0：雷达武装闸
-        激活条件（必须同时满足）：
-        1) TP2 已成交（tp_levels_consumed 包含 2）
-        2) 现价达到 TP2 水平（价格触线或 sticky）
-        与 TP1 限价是否成交无关。
+        规格 v2.1：雷达武装闸
+        - 首次开仓(attempt=0)：价格到达 (TP1+TP2)/2 即激活（TP1是否成交仅记日志不阻塞）
+        - 重入开仓(attempt>=1)：价格到达 TP2 才激活
+        - 插针 sticky 闩锁：激活线被穿越过则永久激活（不依赖 TP 成交）
         """
         self._note_mark_extremum(curr_px)
         if bool(getattr(self, "radar_activation_sticky", False)):
             return True
-        # v2.0：必须 TP2 已成交
-        consumed = set(getattr(self, "tp_levels_consumed", []) or [])
-        if 2 not in consumed:
-            return False
+        # v2.1：首次用中点激活（仅价格判），重入维持TP2激活
+        attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        if attempt >= 1:
+            # 重入：仍需 TP2 已成交（防止 TP1 未成时雷达先于 TP1 触发）
+            consumed = set(getattr(self, "tp_levels_consumed", []) or [])
+            if 2 not in consumed:
+                return False
         return self._price_reached_radar_activation(float(curr_px or 0), live_only=True)
 
     def _sleep_with_extremum_tracking(

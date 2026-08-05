@@ -3,16 +3,16 @@
 """
 雷达止损引擎（被动跟随）
 
-规格 v2.0 边界：
+规格 v2.1 边界：
   · 雷达激活前不调用本引擎推进止损
-  · 激活时机 = TP2成交 + 价格达到TP2水平（取消提前保本检查点）
+  · 激活时机 = 中点激活（首次=(TP1+TP2)/2，重入=TP2，TP1是否成交仅记日志不阻塞）
   · 激活臂 = 保本起步 entry ± tick ± fee_cover（禁止跳到 TP1 底线）
-  · 阶梯：step_trigger / step_advance × initial_atr（按 ADX 档）
+  · 阶梯：step_trigger / step_advance × initial_atr（按 ADX 档，v2.1大幅放宽）
   · 分区呼吸：TP1–TP2 / TP2–TP3 / TP3+ 使用 breath_tp12 / breath_tp23 / trail(min~max)
   · 取消 TP1/TP2 强制底线；浮盈≥phase_switch_atr(默认3) 切入动态追踪阶段
   · 禁用早保本抢跑（early_be_atr=0）
   · 规格 §5.0 提前保本检查点已废除
-  · 规格 §5.1 雷达激活 = TP2成交 + 价格达到TP2水平
+  · 规格 §5.1 雷达激活 = (TP1+TP2)/2（首次）/ TP2（重入）
 """
 from __future__ import annotations
 

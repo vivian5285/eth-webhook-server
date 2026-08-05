@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 智能再入场状态机辅助（无交易所 IO；由 PositionSupervisor / mixin 驱动）。
-规格 v2.0：最多 1 次重入；窗口按 K 线根数；
-雷达启动 = TP2成交后激活（首次和重入都使用TP2作为激活锚点）。
+规格 v2.1：最多 1 次重入；窗口按 K 线根数；
+雷达启动 = 中点激活（首次=(TP1+TP2)/2，重入=TP2，TP1是否成交仅记日志不阻塞）。
 """
 from __future__ import annotations
 
@@ -87,19 +87,19 @@ def init_cycle_on_open(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
-    首次开仓 reentry_attempt=0：雷达激活价 = TP2
+    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）】
+    首次开仓 reentry_attempt=0：雷达激活价 = (TP1+TP2)/2
     重入开仓 reentry_attempt>=1：雷达激活价 = TP2
-    激活必须满足：1) TP2已成交  2) 现价达到TP2水平
-    雷达在TP2成交前完全休眠，仅硬止损守护。
+    TP1 是否已成交：只作为日志核对项，不作为激活的阻塞条件。
+    雷达在未达到激活价前完全休眠，仅硬止损守护。
     """
     rp = get_reentry_profile(symbol)
     attempt = int(reentry_attempt or 0)
     adx_v = float(adx) if adx is not None else 25.0
-    # 规格 v1.0：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
+    # 规格 v2.1：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
     frac = 0.0
 
-    # 规格 v2.0：雷达激活价 = TP2（首次和重入都使用TP2）
+    # 规格 v2.1：首次用中点激活，重入用TP2
     tp1_v = float(tp1 or 0)
     tp2_v = float(tp2 or 0)
     gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=attempt)
@@ -201,23 +201,23 @@ def bump_after_reentry_fill(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
+    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）】
     重入开仓 reentry_attempt>=1：雷达激活价 = TP2（价格必须真正到达 TP2 才激活）
-    激活必须满足：1) TP2已成交  2) 现价达到TP2水平
     不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
     """
     rp = get_reentry_profile(symbol)
     nxt = int(prev_attempt or 0) + 1
     base = int(adx_tier if adx_tier is not None else 1)
     loose = looser_tier(base)
-    # 规格 v1.0：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
+    # 规格 v2.1：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
     frac = 0.0
 
-    # v1.0 规格 §5.1：重入时雷达激活价 = TP2 绝对价格
+    # v2.1 规格 §5.1：重入时雷达激活价 = TP2 绝对价格
     tp1_v = float(tp1 or 0)
     tp2_v = float(tp2 or 0)
     gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=nxt)
 
+    adx_v = float(adx) if adx is not None else 25.0
     return {
         "reentry_attempt": nxt,
         "adx_tier": base,

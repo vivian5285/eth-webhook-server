@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.22 · 规格 v2.0 TP2成交后激活 · 高速公路模式）。
+双币种雷达 + 智能再入场（v16.24 · 规格 v2.1 中点激活 · 高速公路模式）。
 
-核心规格（v2.0）：
-  - 雷达激活 = TP2成交 + 价格达到TP2水平（首次和重入都相同）
+核心规格（v2.1，覆盖 v2.0）：
+  - 首次开仓雷达激活 = 价格到达 (TP1+TP2)/2（TP1是否成交仅记日志不阻塞）
+  - 重入开仓雷达激活 = 价格到达 TP2（不变）
   - 取消提前保本检查点（_check_early_be_checkpoint 已废除）
   - 雷达激活前完全休眠，仅硬止损守护
   - 硬止损缓冲垫：统一 1.15（不分档）；硬止损独立于雷达，始终并存
@@ -31,20 +32,20 @@ _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.40, "step_advance_atr": 0.25,
-     "breath_tp12": 0.80, "breath_tp23": 1.00, "min_mult": 1.2, "max_mult": 1.5},
-    {"step_trigger_atr": 0.50, "step_advance_atr": 0.35,
-     "breath_tp12": 1.20, "breath_tp23": 1.60, "min_mult": 1.8, "max_mult": 2.5},
-    {"step_trigger_atr": 0.60, "step_advance_atr": 0.40,
+    {"step_trigger_atr": 0.70, "step_advance_atr": 0.42,
      "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 0.85, "step_advance_atr": 0.55,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.65,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 _DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.35, "step_advance_atr": 0.20,
-     "breath_tp12": 0.70, "breath_tp23": 0.90, "min_mult": 1.0, "max_mult": 1.3},
-    {"step_trigger_atr": 0.40, "step_advance_atr": 0.30,
-     "breath_tp12": 1.00, "breath_tp23": 1.40, "min_mult": 1.5, "max_mult": 2.0},
-    {"step_trigger_atr": 0.50, "step_advance_atr": 0.35,
-     "breath_tp12": 1.30, "breath_tp23": 1.80, "min_mult": 2.0, "max_mult": 2.8},
+    {"step_trigger_atr": 0.70, "step_advance_atr": 0.50,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 0.85, "step_advance_atr": 0.55,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 3.5, "max_mult": 5.5},
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.65,
+     "breath_tp12": 3.00, "breath_tp23": 4.00, "min_mult": 5.0, "max_mult": 7.0},
 ]
 
 REENTRY_TIERS_JSON = os.path.join(
@@ -262,19 +263,21 @@ def radar_gate_price_from_tps(
     **kwargs,
 ) -> float:
     """
-    【规格 v2.0 · TP2成交后激活 · 高速公路模式】
-    - 首次开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才激活）
-    - 重入开仓：雷达激活价 = TP2（同样必须到达 TP2）
-    - 雷达激活必须满足两个条件：1) TP2已成交  2) 现价达到TP2水平
-    - 不再使用 (TP1+TP2)/2 中点激活（旧设计对XAU波动太大）
+    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）· 高速公路模式】
+    - 首次开仓 reentry_attempt=0：雷达激活价 = (TP1 + TP2) / 2（中点）
+    - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
+    - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
+    - 不再使用 TP2激活作为首次开仓条件（v2.0 已废弃）
     """
     t1 = float(tp1 or 0)
     t2 = float(tp2 or 0)
     attempt = int(reentry_attempt or 0)
-    if t2 <= 0:
+    if t1 <= 0 or t2 <= 0:
         return 0.0
-    # v2.0: 统一使用TP2作为激活锚点
-    return round(t2, 4)
+    # v2.1: 首次用中点，重入用TP2
+    if attempt >= 1:
+        return round(t2, 4)
+    return round((t1 + t2) / 2.0, 4)
 
 
 def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:

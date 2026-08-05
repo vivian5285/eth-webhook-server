@@ -209,7 +209,12 @@ class RadarReentryMixin:
         return not bool(getattr(self, "radar_activated", False))
 
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
-        """价触激活线（或本周期 sticky）：挂雷达 STOP@保本位，开始雷达动态跟随。"""
+        """
+        规格 v2.1：价触激活线（或 sticky）：挂雷达 STOP@保本位，开始雷达动态跟随。
+        - 首次开仓：价格到达 (TP1+TP2)/2 即武装（TP1是否成交仅记日志不阻塞）
+        - 重入开仓：价格到达 TP2 才武装
+        - 防御兜底：TP1+TP2 均已成交时直接强制武装（覆盖所有边界）
+        """
         if bool(getattr(self, "radar_activated", False)):
             return True
         force = "强制" in str(source or "") or "force" in str(source or "").lower()
