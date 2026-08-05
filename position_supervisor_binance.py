@@ -8323,7 +8323,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         UPDATE_TP（v6.9.108 动能止盈升级）：
         只撤换限价 TP123，绝不触碰硬止损 / 雷达 STOP。
+        v16.24.5 修复：重启恢复期间禁止 UPDATE_TP 与防线对齐互相踩踏，
+        防止「撤→挂→撤→挂」死循环。
         """
+        # 重启恢复 / 防线对齐期间禁止 UPDATE_TP 触发撤挂
+        if getattr(self, "_recover_in_progress", False):
+            logger.info("UPDATE_TP 跳过：重启恢复中（_recover_in_progress）")
+            return
+        if getattr(self, "_defense_align_in_progress", False):
+            logger.info("UPDATE_TP 跳过：防线对齐进行中（_defense_align_in_progress）")
+            return
+
         side = str(payload.get("side") or "").strip().upper()
         new_tps = self._sanitize_tp_prices([
             self._safe_float(payload.get("tv_tp1"), 0),
@@ -10872,7 +10882,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": n_actions > 0,
                         "audit": audit,
                         "nuclear": False,
@@ -10892,7 +10902,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return {
                     "matched": audit["matched_full"],
                     "expected": audit["expected"],
-                    "pending_prices": audit["pending_prices"],
+                    "pending_prices": audit.get("pending_prices", []),
                     "rebuilt": False,
                     "audit": audit,
                     "nuclear": False,
@@ -10919,7 +10929,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": n_orphan > 0,
                         "audit": audit,
                         "nuclear": False,
@@ -10972,7 +10982,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": False,
                         "audit": audit,
                         "nuclear": False,
@@ -10986,7 +10996,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": False,
                         "audit": audit,
                         "nuclear": False,
@@ -11046,7 +11056,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return {
                 "matched": audit["matched_full"],
                 "expected": audit["expected"],
-                "pending_prices": audit["pending_prices"],
+                "pending_prices": audit.get("pending_prices", []),
                 "rebuilt": True,
                 "audit": audit,
                 "nuclear": True,
