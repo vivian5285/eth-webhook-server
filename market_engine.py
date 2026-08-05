@@ -4,13 +4,11 @@
 # 规格 v2.1：ATR 全程只用 TV webhook.atr，VPS 不再计算 ATR/ADX 用于止损决策。
 # 本模块保留 ADX（用于雷达档位系数），ATR 计算已废弃但函数尚存（待清理）。
 # 合成锚点（与 TradingView 90 分钟图一致）：
-  PERIOD_90M_MS = 90 * 60 * 1000
-  bucket_open = open_time - (open_time % PERIOD_90M_MS)
-仅当某 bucket 凑齐 3 根完整 30m（bucket / +30m / +60m）才产出一根已闭合 90m。
-禁止「从进程启动时刻随意起算」的滑动三元组。
-
-止损决策只认本模块数值；webhook 不传 ATR/ADX。
-"""
+#   PERIOD_90M_MS = 90 * 60 * 1000
+#   bucket_open = open_time - (open_time % PERIOD_90M_MS)
+# 仅当某 bucket 凑齐 3 根完整 30m（bucket / +30m / +60m）才产出一根已闭合 90m。
+# 禁止「从进程启动时刻随意起算」的滑动三元组。
+# 止损决策只认本模块数值；webhook 不传 ATR/ADX。
 from __future__ import annotations
 
 import logging
