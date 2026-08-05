@@ -8064,7 +8064,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _sanitize_open_tps_vs_mark(self, entry, curr_px=None):
         """
         开仓挂 TP 前：穿市价的档禁止挂出（否则开完秒平大半剩蚂蚁仓）。
-        优先 entry+ATR 重算；仍穿价则把价格推离市价一侧，绝不挂出即成交的限价。
+        以 TV 信号中的 tv_tps 为权威基准；若某档已穿市价，仅做最小推离，
+        不再用 entry+ATR 重算，避免 TV 价与盘口价反复冲突导致撤挂死循环。
         """
         side = str(self.current_side or "").strip().upper()
         entry = float(entry or self.watched_entry or 0)
@@ -8089,7 +8090,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 atr = 8.0
             else:
                 atr = 30.0
-        regime = int(getattr(self, "open_regime", None) or self.regime or 3)
         if side not in ("LONG", "SHORT") or curr_px <= 0:
             return list(self.tv_tps or [])
 
@@ -8102,21 +8102,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._tp_is_marketable(side, p, curr_px)
                 for p in prices if float(p or 0) > 0
             )
-
-        if _any_marketable(tps) and entry > 0:
-            enriched = enrich_entry_tp_prices(side, entry, atr, regime, {})
-            rebuilt = self._sanitize_tp_prices([
-                self._safe_float(enriched.get("tv_tp1"), 0),
-                self._safe_float(enriched.get("tv_tp2"), 0),
-                self._safe_float(enriched.get("tv_tp3"), 0),
-            ])
-            if validate_tp_prices_for_side(side, entry, rebuilt):
-                logger.warning(
-                    f"⚠️ [{self.symbol}] 开仓 TP 穿市价 → ATR 重算 "
-                    f"{[round(float(x or 0), 2) for x in tps]} → {rebuilt} | "
-                    f"mark={curr_px:.2f}"
-                )
-                tps = list(rebuilt)
 
         # 仍穿价：强制推离市价（LONG 抬高 / SHORT 压低），保持单调
         min_gap = max(curr_px * 0.0015, atr * 0.15, 0.5)
