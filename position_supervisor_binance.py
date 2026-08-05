@@ -169,7 +169,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.24-tp-baseline-fix"
+BINANCE_VPS_VERSION = "v16.24.1-empty-pos-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -10684,6 +10684,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 }
         except Exception:
             pass
+        # v16.24.1: 核武前必须核实交易所真实持仓；防止 watched_qty > 0（状态残留）
+        # 但交易所已空仓时反复撤挂空仓的 TP 导致孤儿单累积
+        real_pos = None
+        try:
+            real_pos = binance_client.get_position(self.symbol)
+        except Exception:
+            pass
+        real_qty = float((real_pos or {}).get("size") or 0) if real_pos else 0.0
+        if real_qty <= 0:
+            logger.info(
+                f"☢️ [{self.symbol}] 核武跳过：交易所持仓={real_qty} | watched={live_qty} | "
+                f"防止空仓撤挂孤儿单"
+            )
+            return {
+                "expected": 0,
+                "matched_full": 0,
+                "missing": [],
+                "orphans": [],
+                "skipped_no_position": True,
+            }
         live_qty = self._resolve_live_qty(live_qty)
         self._clear_spurious_tp_consumed_if_full_size(
             live_qty, source="核武前清假成交",
@@ -11397,9 +11417,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _has_tp_limit_at_price(self, price, tolerance=None):
-        """v16.22：tolerance 品种感知"""
+        """v16.24.1: 查单用精确容差(≤0.5)，与审计统一；防止孤儿单被误判为某档匹配"""
+        # 严格小容差：品种price_step的2倍，防止孤儿单4243被误判为TP1(4230)
         if tolerance is None:
-            tolerance = self._tolerance_for_price()
+            price_step = float(getattr(self, "price_step", 0) or 0.01)
+            tolerance = max(price_step * 2, 0.1)  # XAU: 0.1, BNB: 0.2
         if price <= 0:
             return False
         orders = self._collect_tp_limit_orders()
@@ -12835,7 +12857,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return checks_fn()
 
     def _resolve_live_qty(self, fallback_qty: float) -> float:
-        pos = self._get_active_position()
+        # v16.24.1: fallback_qty > 0 但 WebSocket 返回 0 → 强制 REST 核实
+        pos = self._get_active_position(prefer_ws=True)
         if pos == "QUERY_FAILED":
             return float(fallback_qty or 0)
         if pos and float(pos.get("size") or 0) > 0:
@@ -12843,6 +12866,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if abs(live - fallback_qty) > 0.001:
                 logger.info(f"📐 实盘数量校正: 账本 {fallback_qty} → 交易所 {live} ETH")
             return live
+        # WebSocket 空仓但 fallback 非 0 → 可能缓存过期，强制 REST 核实
+        if float(fallback_qty or 0) > 0:
+            pos_rest = self._get_active_position(prefer_ws=False, force_rest=True)
+            if pos_rest and float(pos_rest.get("size") or 0) > 0:
+                live = round(float(pos_rest["size"]), 3)
+                logger.warning(
+                    f"📐 [{self.symbol}] WS空仓但账本残留 {fallback_qty} → REST核实 {live} ETH"
+                )
+                return live
+            # REST 也空 → 真实空仓，清账本
+            if pos_rest is None:
+                logger.info(
+                    f"🧹 [{self.symbol}] 确认空仓：WS+REST均为0，清账本 {fallback_qty} ETH"
+                )
+                self.watched_qty = 0.0
+                try:
+                    self._save_state()
+                except Exception:
+                    pass
         return fallback_qty
 
     def _split_tp_quantities(self, qty: float, ratios: list) -> tuple:

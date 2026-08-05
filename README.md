@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.24-tp-baseline-fix`**（雷达升级至v2.1：中点激活+放宽呼吸空间与步进参数；TP基准数量修复：减仓后用live_qty替代旧initial，避免TP数量虚高导致撤单循环）
+**当前版本：`v16.24.1-empty-pos-fix`**（雷达升级至v2.1：中点激活+放宽呼吸空间与步进参数；TP基准数量修复：减仓后用live_qty替代旧initial；空仓核武防护：核武执行前强制REST核实持仓，WS空仓+REST空仓=确认空仓，清账本防孤儿单循环；孤儿单判定容差收紧：严格0.1/0.2替代宽松0.5/1.0，防止孤儿单4243被误判为TP1匹配）
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
@@ -62,7 +62,7 @@
 ```bash
 # 币安主账户
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.24-tp-baseline-fix · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
+# version: v16.24.1-empty-pos-fix · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
 
