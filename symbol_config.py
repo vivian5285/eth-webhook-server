@@ -202,15 +202,14 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 
 
 def active_binance_symbols():
-    # ⚠️ BNB 需要在此显式加入，例如 os.getenv("BINANCE_SYMBOLS","ETHUSDT,XAUUSDT,BNBUSDT")
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BCHUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT"]
+    return out or ["ETHUSDT", "BCHUSDT"]
 
 
 def active_deepcoin_symbols():
