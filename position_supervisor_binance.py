@@ -2703,6 +2703,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.warning(f"接管档位限额跳过: {e}")
 
         # 与开仓一致：穿价 TP 先推离再挂，禁止跳过全档导致无 TP
+        # v16.24.x: 优先从 TV 日志恢复最新 TP 价格，避免 _sanitize_open_tps_vs_mark
+        #   用陈旧 ATR 重建导致 TP2 价格污染（如 XAU 12:00 重启后用旧 ATR 算到 4252）
+        try:
+            self._ensure_tp123_prices_from_tv(entry)
+        except Exception as e:
+            logger.warning(f"接管 TP 从 TV 加载跳过: {e}")
         try:
             self._sanitize_open_tps_vs_mark(entry, curr_px)
         except Exception as e:
@@ -4544,7 +4550,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         铁律（2026-07-26）：本地标签只锁「下单飞行中」窗口。
         - status=pending 且无 orderId：超时 → 清除（防永久拒挂）
         - 已有 orderId（acked/open）：下单已落地，不再占用拒挂锁 → 清除
-        标签残留曾导致：核武撤 TP 后补挂 0 笔、雷达止损无法上移。
+
+        v16.24.x 修复：
+        - acked 标签必须无条件清理（不再仅在遍历时清除），否则 worker 重启后
+          内存无标签但磁盘 state 有 acked，导致 _has_open_pending_defense_tag 误判
+          为无锁、反复重建 TP，触发死亡螺旋。
+        - 已成交/已撤单同样清理。
         """
         tags = dict(getattr(self, "_pending_order_tags", {}) or {})
         if not tags:
@@ -4557,15 +4568,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             oid = str(meta.get("order_id") or "").strip()
             ts = float(meta.get("ts") or 0)
             age = (now - ts) if ts > 0 else 9999.0
-            if st in ("done", "filled", "cancelled", "canceled"):
+            # 已成交/已撤/已确认（acked）→ 全部无条件清除，不再仅在遍历时处理
+            if st in ("done", "filled", "cancelled", "canceled", "acked"):
                 tags.pop(tag, None)
-                dropped.append(f"{tag}:done")
+                dropped.append(f"{tag}:{st}")
                 continue
             if oid:
-                # 已落地：锁解除；盘口存活由交易所订单本身负责
-                tags.pop(tag, None)
-                dropped.append(f"{tag}:acked")
+                # 有 orderId 但非 acked/done：正常在盘口，不清理
                 continue
+            # 无 orderId + pending 状态：检查是否过期
             if st == "pending" and age >= float(max_pending_age_sec or 45.0):
                 tags.pop(tag, None)
                 dropped.append(f"{tag}:stale:{age:.0f}s")
@@ -6432,7 +6443,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or self.tv_price
             or 0
         )
-        atr = float(getattr(self, "open_atr", None) or self.current_atr or 30)
+        atr = float(getattr(self, "open_atr", None) or self.current_atr or 0)
+        if atr <= 0:
+            sym = str(self.symbol or "").upper()
+            if "ETH" in sym:
+                atr = 12.0
+            elif "XAU" in sym:
+                atr = 20.0
+            elif "BNB" in sym:
+                atr = 4.0
+            elif "ZEC" in sym:
+                atr = 3.0
+            elif "BCH" in sym:
+                atr = 8.0
+            else:
+                atr = 30.0
         if side not in ("LONG", "SHORT") or curr_px <= 0:
             return list(self.tv_tps or [])
         self._sanitize_open_tps_vs_mark(entry, curr_px)
@@ -8134,7 +8159,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or self.tv_price
             or 0
         )
-        atr = float(getattr(self, "open_atr", None) or self.current_atr or 30)
+        atr = float(getattr(self, "open_atr", None) or self.current_atr or 0)
+        if atr <= 0:
+            sym = str(self.symbol or "").upper()
+            if "ETH" in sym:
+                atr = 12.0
+            elif "XAU" in sym:
+                atr = 20.0
+            elif "BNB" in sym:
+                atr = 4.0
+            elif "ZEC" in sym:
+                atr = 3.0
+            elif "BCH" in sym:
+                atr = 8.0
+            else:
+                atr = 30.0
         regime = int(getattr(self, "open_regime", None) or self.regime or 3)
         if side not in ("LONG", "SHORT") or curr_px <= 0:
             return list(self.tv_tps or [])
@@ -11416,7 +11455,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _has_tp_limit_at_price(self, price, tolerance=None):
-        """v16.24.1: 查单用精确容差(≤0.5)，与审计统一；防止孤儿单被误判为某档匹配"""
+        """v16.24.1: 查单用精确容差(≤0.5)，与审计统一；防止孤儿单被误判为某档匹配
+
+        v16.24.x 修复：
+        - 查单失败时：优先查本地近期挂单记录（有近期记录→允许补挂）；
+          仅在无近期记录时才保守当作已有（防 IP 限流时狂挂）。
+        - 核心原则：TP 是 reduceOnly，无叠单风险；消失后应尽快补回。
+          与硬止损不同（硬止损重复挂有爆仓风险）。
+        """
         # 严格小容差：品种price_step的2倍，防止孤儿单4243被误判为TP1(4230)
         if tolerance is None:
             price_step = float(getattr(self, "price_step", 0) or 0.01)
@@ -11424,22 +11470,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if price <= 0:
             return False
         orders = self._collect_tp_limit_orders()
-        # 查不到：保守视为「已有」→ 禁止上层补挂（防叠单击穿）
-        if is_orders_query_failed(orders):
-            close_side = "BUY" if self.current_side == "SHORT" else "SELL"
-            key = (self.symbol, close_side, round(float(price), 2))
-            cached = getattr(binance_client, "_recent_limit_place", {}).get(key)
-            if cached and (time.time() - float(cached[0])) < 120.0:
-                return True
+        if not is_orders_query_failed(orders):
+            for o in orders:
+                if abs(o["price"] - price) <= tolerance:
+                    return True
+            return False
+
+        # 查单失败：先看本地近期挂单记录（防止 worker 重启后丢失标签导致死亡螺旋）
+        close_side = "BUY" if self.current_side == "SHORT" else "SELL"
+        key = (self.symbol, close_side, round(float(price), 2))
+        recent_place = getattr(binance_client, "_recent_limit_place", {}).get(key)
+        if recent_place and (time.time() - float(recent_place[0])) < 180.0:
+            # 本地近期刚挂过 → 允许补挂（防死亡螺旋）
             logger.warning(
                 f"🛡️ [{self.symbol}] TP查单失败 @{float(price):.2f} "
-                f"→ 保守当作已有，禁止补挂"
+                f"但近期刚挂过 → 允许补挂（防标签丢失·死亡螺旋）"
             )
-            return True
-        for o in orders:
-            if abs(o["price"] - price) <= tolerance:
-                return True
-        return False
+            return False
+
+        # 无近期记录：保守当作已有（防 IP 限流时狂挂）
+        logger.warning(
+            f"🛡️ [{self.symbol}] TP查单失败 @{float(price):.2f} "
+            f"→ 保守当作已有，禁止补挂"
+        )
+        return True
 
     def _price_reached_tp_zone(self, level, curr_px=0.0, tp_px=None, live_only=False):
         """现价（或 best）是否已触及/越过指定 TP 档。live_only=True 仅用实时价。"""
@@ -17357,6 +17411,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self._pending_order_tags = (
                         dict(raw_tags) if isinstance(raw_tags, dict) else {}
                     )
+                    # v16.24.x: state 恢复后立即清理 acked/done 标签，防止 worker 重启后
+                    # 磁盘有 acked 但内存丢失 → _has_open_pending_defense_tag 误判为无锁
+                    # → 反复放单 → 死亡螺旋。
+                    if self._pending_order_tags:
+                        n = self._gc_stale_pending_defense_tags(save=True)
+                        if n > 0:
+                            logger.info(
+                                f"🧹 [{self.symbol}] 状态恢复后清理 {n} 个陈旧标签"
+                            )
                     self._mutex_leg = str(s.get("mutex_leg", "") or "")
                     if self.sizing_principal <= 0:
                         eq = binance_client.get_principal_wallet_balance()
