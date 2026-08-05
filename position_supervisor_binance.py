@@ -6700,7 +6700,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _count_matched_tp_orders(self, tp_pxs, tolerance=None, live_qty=None):
         if live_qty is not None and live_qty > 0:
             audit = self._audit_tp_levels(live_qty, tolerance)
-            return audit["matched_full"], audit["pending_prices"]
+            return audit["matched_full"], audit.get("pending_prices", [])
         pending_prices = self._collect_limit_tp_prices()
         matched = 0
         for tp in tp_pxs:
@@ -10856,7 +10856,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return {
                     "matched": audit["matched_full"],
                     "expected": audit["expected"],
-                    "pending_prices": audit["pending_prices"],
+                    "pending_prices": audit.get("pending_prices", []),
                     "rebuilt": False,
                     "audit": audit,
                     "nuclear": False,
@@ -10952,7 +10952,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": placed > 0,
                         "audit": audit,
                         "nuclear": False,
@@ -10968,7 +10968,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return {
                         "matched": audit["matched_full"],
                         "expected": audit["expected"],
-                        "pending_prices": audit["pending_prices"],
+                        "pending_prices": audit.get("pending_prices", []),
                         "rebuilt": placed > 0,
                         "audit": audit,
                         "nuclear": False,
@@ -11014,7 +11014,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return {
                     "matched": audit["matched_full"],
                     "expected": audit["expected"],
-                    "pending_prices": audit["pending_prices"],
+                    "pending_prices": audit.get("pending_prices", []),
                     "rebuilt": False,
                     "audit": audit,
                     "nuclear": False,
@@ -11228,7 +11228,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             live_qty, entry, dynamic_sl=dynamic_sl, reason="全量重建", rounds=3,
         )
         audit = result["audit"]
-        return audit["matched_full"], audit["pending_prices"], audit["expected"]
+        return audit["matched_full"], audit.get("pending_prices", []), audit["expected"]
 
     def _ensure_defenses_on_recover(self, live_qty, entry, dynamic_sl=None):
         """
@@ -11238,7 +11238,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         audit = self._audit_tp_levels(live_qty)
         expected = audit["expected"]
         matched = audit["matched_full"]
-        pending_prices = audit["pending_prices"]
+        pending_prices = audit.get("pending_prices", [])
         logger.info(
             f"📊 防线审计: 持仓 {live_qty} ETH | TP {matched}/{expected} | "
             f"{self._format_audit_summary(audit)}"
@@ -11253,7 +11253,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 time.sleep(0.4)
                 audit = self._audit_tp_levels(live_qty)
                 matched = audit["matched_full"]
-                pending_prices = audit["pending_prices"]
+                pending_prices = audit.get("pending_prices", [])
                 expected = audit["expected"]
 
         if self._audit_requires_nuclear(audit) or self._has_duplicate_tp_orders():
@@ -11262,7 +11262,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"{self._format_audit_summary(audit)}"
             )
             audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
-            return audit["matched_full"], audit["pending_prices"], audit["expected"], True
+            return audit["matched_full"], audit.get("pending_prices", []), audit["expected"], True
 
         if self._defenses_fully_ok(live_qty, dynamic_sl):
             logger.info(
@@ -11286,14 +11286,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.info(f"✅ 增量补挂成功 ({matched}/{expected}) @ {audit['pending_prices']}")
             if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
                 self._ensure_radar_sl(dynamic_sl, live_qty)
-            return matched, audit["pending_prices"], expected, True
+            return matched, audit.get("pending_prices", []), expected, True
 
         logger.warning(
             f"⚠️ 增量补挂仍不足 ({matched}/{expected}) {audit['issues']}，升级核武级重挂"
         )
         audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
         self._maintain_hard_shield(live_qty, None, force=True, radar_sl=dynamic_sl)
-        return audit["matched_full"], audit["pending_prices"], expected, True
+        return audit["matched_full"], audit.get("pending_prices", []), expected, True
 
     def _wait_tp_hung(self, tp_pxs, live_qty=None, retries=5, delay=0.8):
         expected = self._expected_tp_count(tp_pxs)
@@ -11302,7 +11302,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if live_qty is not None and live_qty > 0:
                 audit = self._audit_tp_levels(live_qty)
                 matched = audit["matched_full"]
-                pending = audit["pending_prices"]
+                pending = audit.get("pending_prices", [])
             else:
                 matched, pending = self._count_matched_tp_orders(tp_pxs)
             if expected == 0 or matched >= expected:
