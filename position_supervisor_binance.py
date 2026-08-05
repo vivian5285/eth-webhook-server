@@ -11031,18 +11031,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         now = time.time()
         since_ok = now - getattr(self, "_last_defense_align_ok_ts", 0)
         if since_ok < DEFENSE_ALIGN_COOLDOWN_SEC:
-            audit = self._audit_tp_levels(real_amt)
-            naked_tp = (
-                int(audit.get("matched_full") or 0) <= 0
-                and int(audit.get("expected") or 0) > 0
+            # v16.25.3-fix: 冷却期内不再因为审计显示"裸仓"就强制对齐。
+            # API 传播延迟 / IP 限流会让 open_orders 查询返回空，导致刚补挂的 TP
+            # 被误判为缺失，从而重复挂单甚至触发撤->挂->撤死循环。
+            # 冷却期内统一跳过，让挂单在交易所侧完成传播；真有严重异常会由
+            # 冷却期后的 severe 路径或哨兵对账处理。
+            logger.info(
+                f"📡 [雷达守护] 冷却期内跳过对齐({since_ok:.0f}s/{DEFENSE_ALIGN_COOLDOWN_SEC}s) | "
+                f"等待TP挂单传播"
             )
-            if not naked_tp:
-                return None
-            # 裸仓：冷却期也必须对齐，但用 rounds=1 限制激进程度
-            logger.warning(
-                f"📡 [雷达守护] 冷却期内裸仓强制对齐({since_ok:.0f}s/{DEFENSE_ALIGN_COOLDOWN_SEC}s) "
-                f"| {self._format_audit_summary(audit)}"
-            )
+            return None
 
         cap = self._radar_enforce_regime_cap(real_amt, curr_px)
         if cap:
