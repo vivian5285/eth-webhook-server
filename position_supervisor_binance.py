@@ -6443,8 +6443,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 if float(lv.get("price") or 0) > 0
             ]
             if remaining:
-                self._force_tps_unmarketable(mark, entry)
-            placed = self._place_tp_levels_only(live_qty, retries=3)
+                placed = self._place_tp_levels_only(live_qty, retries=3)
             radar_sl = None
             if takeover_mode and self._radar_ready_to_handoff(mark, live_qty):
                 try:
@@ -10088,23 +10087,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"🧩 TP{level} @{px:.2f} 现价已近但无减仓证据 "
                     f"(mark={curr_px:.2f}) → 开仓推离后补挂，禁止假吃"
                 )
-                self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
-                tps = list(self.tv_tps or [])
+                tps = self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
                 px = float(tps[level - 1]) if level - 1 < len(tps) else 0.0
                 if px <= 0:
                     continue
             # 穿价：推离后再挂，禁止挂出即成交把仓位在 TP1 削光
             if self._tp_is_marketable(self.current_side, px, curr_px):
-                self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
-                tps = list(self.tv_tps or [])
+                tps = self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
                 px = float(tps[level - 1]) if level - 1 < len(tps) else 0.0
                 q = float(lv["qty"] or 0)
                 if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
                     logger.error(
                         f"🚨 补挂仍穿价 TP{level} mark={curr_px:.2f} → 再推一轮"
                     )
-                    self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
-                    tps = list(self.tv_tps or [])
+                    tps = self._force_tps_unmarketable(curr_px, self.watched_entry or 0)
                     px = float(tps[level - 1]) if level - 1 < len(tps) else 0.0
                     if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
                         logger.error(
@@ -10720,9 +10716,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._gc_stale_pending_defense_tags(save=False)
             for lv in (1, 2):
                 self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
-            self._force_tps_unmarketable(
+            self.tv_tps = self._force_tps_unmarketable(
                 binance_client.get_current_price(self.symbol), entry,
             )
+            self._save_state()
             placed = self._rebuild_defenses(
                 live_qty, entry, dynamic_sl=None, cancel_first=False,
             )
@@ -16609,8 +16606,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self._mark_tp_levels_consumed([int(lv["level"])])
                     continue
                 if self._tp_is_marketable(self.current_side, px, curr_px):
-                    self._force_tps_unmarketable(curr_px, entry or self.watched_entry or 0)
-                    tps = list(self.tv_tps or [])
+                    tps = self._force_tps_unmarketable(curr_px, entry or self.watched_entry or 0)
                     idx = int(lv["level"]) - 1
                     px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
                     if px <= 0 or self._tp_is_marketable(self.current_side, px, curr_px):
@@ -16618,10 +16614,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             f"🚨 重建仍穿价 TP{lv['level']} mark={curr_px:.2f} "
                             f"→ 再强制推离"
                         )
-                        self._force_tps_unmarketable(
+                        tps = self._force_tps_unmarketable(
                             curr_px, entry or self.watched_entry or 0,
                         )
-                        tps = list(self.tv_tps or [])
                         px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
                         if px <= 0 or self._tp_is_marketable(
                             self.current_side, px, curr_px
@@ -16651,10 +16646,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     logger.warning(
                         f"🧩 重建 TP{lv['level']} 现价已近但无减仓 → 推离后挂"
                     )
-                    self._force_tps_unmarketable(
+                    tps = self._force_tps_unmarketable(
                         curr_px, entry or self.watched_entry or 0,
                     )
-                    tps = list(self.tv_tps or [])
                     idx = int(lv["level"]) - 1
                     px = float(tps[idx]) if 0 <= idx < len(tps) else 0.0
                     if px <= 0:
