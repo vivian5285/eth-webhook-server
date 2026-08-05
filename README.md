@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.24.1-empty-pos-fix`**（雷达升级至v2.1：中点激活+放宽呼吸空间与步进参数；TP基准数量修复：减仓后用live_qty替代旧initial；空仓核武防护：核武执行前强制REST核实持仓，WS空仓+REST空仓=确认空仓，清账本防孤儿单循环；孤儿单判定容差收紧：严格0.1/0.2替代宽松0.5/1.0，防止孤儿单4243被误判为TP1匹配）
+**当前版本：`v16.24.2-v2.1-cleanup`**（雷达v2.1彻底清理：中点激活+放宽呼吸与步进参数；BCH支持完整落地；核武空仓防护+孤儿单容差收紧；钉钉已禁用，全量通知仅走TG）
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
@@ -9,15 +9,15 @@
 **硬止损：`｜TV.price−TV.stop_loss｜×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
 **雷达（v16.24 v2.1）**：激活用 **(TP1+TP2)/2 中点激活**（首次），重入用TP2激活。TP1是否成交仅记日志不阻塞。激活瞬间**保本起步**（entry±tick±fee）；呼吸空间与步进参数大幅放宽约40-60%（市价在前面跑，雷达保持安全距离跟在后面）  
 **ATR：只信 TV webhook `atr`**（已删除 VPS 独立拉 1h/合成 ATR、场景一二与降级切换）  
-**重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h · ZEC 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
-**提前保本检查点（v16.21）**：**已废除（v16.22+v16.24）**——XAU/ZEC波动大，雷达太早启动易出局  
+**重入：最多 1 次**；窗口 ETH 2×90m≈3h · XAU 3×45m≈2.25h · ZEC/BCH 3×45m≈2.25h；双保险再入价；成功后雷达放宽一档  
+**提前保本检查点（v16.21）**：**已废除（v16.22+v16.24 v2.1）**——XAU/ZEC波动大，雷达太早启动易出局  
 **幂等铁律（v15.9.1+）**：本地订单标签未释放 → 绝对拒挂；查单失败 fail-closed；未成交挂单硬上限 **5**  
 **生产闸门（v15.9.3）**：竞态/部分成交失败/限流/`本地标签vs空盘` → **`trading_paused`**；REST 单品种 ≥100ms；档位 `config/reentry_tiers.json`；30s 状态快照；日志 `[OPS|STATE|ALERT|AUDIT]`  
 **日熔断开仓闸门（v15.9.2）**：**暂时关闭**（`CIRCUIT_BREAKER_OPEN_GATE_ENABLED=False`）；`risk_manager` 仅记账，不挡真实 TV  
-**TV 图表周期：ETH 90m · XAU/ZEC 45m**（VPS **不再**另拉 ATR）  
+**TV 图表周期：ETH 90m · XAU/ZEC/BCH 45m**（VPS **不再**另拉 ATR）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：仅 Telegram 全量事件（2026-07-31 取消钉钉，`DINGTALK_DISABLE=True`）**
-**ZEC支持**：2026-08-04 新增 ZECUSDT 合约支持，使用 ETH 相同的呼吸参数和雷达配置
+**ZEC/BCH支持**：ZECUSDT（2026-08-04）和BCHUSDT（2026-08-05）均使用ETH相同的呼吸参数和雷达配置，待独立回测校准
 
 > **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：雷达未激活时盘口**只应有硬止损**；激活后才硬+雷达双挂。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
@@ -62,7 +62,7 @@
 ```bash
 # 币安主账户
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.24.1-empty-pos-fix · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
+# version: v16.24.2-v2.1-cleanup · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
 
