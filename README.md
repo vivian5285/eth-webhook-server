@@ -59,10 +59,16 @@
 
 
 ```bash
+# 币安主账户
 curl -s http://127.0.0.1:5003/health | python3 -m json.tool
 # version: v16.22-tp2-activation-highway-zec · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
 # Console: http://VPS_IP:5003/console
 # TV Webhook: http://187.77.130.144/binance/webhook
+
+# 币安B账户
+curl -s http://127.0.0.1:5007/health | python3 -m json.tool
+# Console: http://VPS_IP:5007/console
+# TV Webhook: http://187.77.130.144/binance-b/webhook
 
 python3 -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py
 python3 test_defense_v1590.py
@@ -75,10 +81,11 @@ python3 test_stop_idempotent_and_tp_levels.py
 # sudo -u trading ./venv/bin/python3 live_test_20u_matrix.py
 ```
 
-| 工厂 | VPS 目录 | 端口 | 品种 |
-|------|----------|------|------|
-| **币安**（本仓库） | `~/binance-engine` | **5003** | ETHUSDT + XAUUSDT + BNBUSDT + ZECUSDT |
-| **深币**（对照） | `~/deepcoin-hft-server` | **5004** | ETH + XAU |
+|| 工厂 | VPS 目录 | 端口 | Webhook 路由 | 品种 |
+|------|----------|------|--------------|------|
+|| **币安**（本仓库） | `~/binance-engine` | **5003** | `/binance/webhook` | ETHUSDT + XAUUSDT + BNBUSDT + ZECUSDT |
+|| **币安B**（对照） | `~/binance-engine` | **5007** | `/binance-b/webhook` | ETHUSDT + XAUUSDT + BNBUSDT |
+|| **深币**（对照） | `~/deepcoin-hft-server` | **5004** | `/deepcoin/webhook` | ETH + XAU |
 
 ---
 
