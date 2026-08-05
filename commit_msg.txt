@@ -1,11 +1,19 @@
-fix(binance_client): 修复 -4130 止损单死循环问题
+fix(v16.24.x): 多币种TP污染+BNB死亡螺旋修复
 
-问题：closePosition 止损单价格小幅跟随时（如 1857.64→1858.29），
-价差 0.65 > 容差 0.05，导致 _existing_same_stop 返回 None，
-系统误以为无同价单而不断重试挂单，触发 -4130 错误死循环。
+问题根因：
+1. XAU TP污染：重启恢复时_sanitize_open_tps_vs_mark用陈旧ATR=0重建TP价格
+   → TP2从TV的4230.56被重建为4252.55（12.00ATR覆盖TV的20.0）
+2. BNB死亡螺旋：acked_pending_tag在worker重启后内存丢失但磁盘残留
+   → _has_open_pending返回False → 反复重建TP → cancel循环
+3. _has_tp_limit查单失败时恒返True（保守），阻止补挂进一步加剧螺旋
 
-修复：
-1. 扩大 _existing_same_stop 价格容差 0.05 → 1.0，覆盖 closePosition 止损小幅跟随
-2. 遇到 -4130 错误时写入本地缓存，防止后续死循环重试
-
-影响范围：所有账户（两系统同步更新）
+修复内容：
+1. _gc_stale_pending：acked/done状态无条件清除（不再仅在遍历时清除）
+2. _load_state后：立即调用_gc清理陈旧标签
+3. _has_tp_limit：查单失败时优先查本地近期挂单记录(180s)
+   → 有记录则允许补挂（防标签丢失）
+   → 无记录才保守禁止
+4. 接管恢复流程：先调用_ensure_tp123_from_tv恢复TV价格，再sanitize
+   → 避免ATR重建覆盖正确TV价格
+5. ATR fallback改为品种感知(ETH=12,XAU=20,BNB=4,ZEC=3,BCH=8)
+   → 禁止用错误的品种ATR重建

@@ -129,7 +129,9 @@ from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import RadarReentryMixin
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
-from smart_tp_reconciliation import SmartTPReconciliation, format_tp_health_report
+# smart_tp_reconciliation 已废除（v2简化架构）
+# from smart_tp_reconciliation import SmartTPReconciliation, format_tp_health_report
+# 重启TP恢复改用 _simple_core.recover_defenses_on_startup()
 from chief_auditor import check_tp_slice_budget
 from market_engine import (
     get_market_engine,
@@ -326,8 +328,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._pending_open_defense_snap = None
         self._open_in_progress = False
         self._open_tp_unconfirmed = False
-        # 智能TP对账器（防止重启后重复挂单）
-        self._tp_reconciler = SmartTPReconciliation(symbol=self.symbol)
+        # _tp_reconciler 已废除（smart_tp_reconciliation.py 已删除）
         self._last_signal_fp = None
         self._last_signal_fp_ts = 0.0
         self._defense_align_in_progress = False
@@ -3014,113 +3015,44 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _smart_tp_reconcile_on_recover(self, pos, live_qty):
         """
-        【增强 v2.0】重启后智能TP对账
-        核心职责：
-        1. 检测TV信号与实盘TP单的匹配度
-        2. 判断TP是否已被交易所成交
-        3. 智能决定是否需要补挂TP（防止重复挂单）
-        4. 发送钉钉通知
+        简洁版重启TP恢复（v2架构）：
+        直接调用 _simple_core.recover_defenses_on_startup，
+        异常才补，不对账。
         """
-        reconciler = getattr(self, '_tp_reconciler', None)
-        if reconciler is None:
-            reconciler = SmartTPReconciliation(symbol=self.symbol)
-            self._tp_reconciler = reconciler
+        live_qty = float(live_qty or 0)
+        if live_qty <= 0.001:
+            return {"skipped": True, "reason": "无持仓，跳过"}
 
-        # 检查冷却
-        can_reconcile, reason = reconciler.can_reconcile()
-        if not can_reconcile:
-            logger.info(f"🛡️ [{self.symbol}] TP对账冷却中: {reason}")
-            return {"skipped": True, "reason": reason}
-
-        # 获取TV信号的TP价格和比例
-        tv_tps = list(self.tv_tps or [0, 0, 0])
-        tv_ratios = [0.10, 0.20, 0.70]  # 固定比例
-
-        # 获取已消耗的TP档位
-        tp_levels_consumed = list(getattr(self, 'tp_levels_consumed', []) or [])
-
-        # 获取当前价格
-        current_price = 0.0
-        try:
-            current_price = float(binance_client.get_current_price(self.symbol) or 0)
-        except Exception:
-            pass
-
-        # 获取交易所TP订单
-        exchange_orders = []
-        try:
-            exchange_orders = list(self._collect_tp_limit_orders() or [])
-            if is_orders_query_failed(exchange_orders):
-                exchange_orders = []
-        except Exception:
-            pass
-
-        # 获取开仓数量
-        initial_qty = float(getattr(self, 'initial_qty', 0) or live_qty or 0)
-
-        # 执行健康评估
-        health = reconciler.assess_tp_health(
-            tv_tps=tv_tps,
-            tv_ratios=tv_ratios,
+        from _simple_core import recover_defenses_on_startup, format_recover_report
+        result = recover_defenses_on_startup(
+            binance_client,
+            symbol=self.symbol,
+            position_side=self.current_side or "LONG",
             live_qty=live_qty,
-            initial_qty=initial_qty,
-            exchange_orders=exchange_orders,
-            current_price=current_price,
-            tp_levels_consumed=tp_levels_consumed,
+            tv_tps=list(self.tv_tps or [0, 0, 0]),
+            tv_sl_price=float(getattr(self, "frozen_hard_sl_px", 0) or getattr(self, "tv_sl", 0) or 0),
+            tv_sl_qty=live_qty,
         )
+        report = format_recover_report(result)
+        logger.info(f"🛡️ [{self.symbol}] 重启TP恢复: {report}")
 
-        # 记录日志
-        logger.info(f"🛡️ [{self.symbol}] TP健康评估: {format_tp_health_report(health, self.symbol)}")
-
-        # 判断是否需要修复
-        should_repair, repair_reason = reconciler.should_repair(health)
-        if should_repair:
-            # 检查修复冷却
-            can_repair, repair_cooldown = reconciler.can_repair()
-            if not can_repair:
-                logger.warning(f"🛡️ [{self.symbol}] TP修复冷却中: {repair_cooldown}")
-                reconciler.mark_reconcile_done(actions_taken=0)
-                return {"skipped": True, "reason": repair_cooldown}
-
-            # 生成修复计划
-            plan = reconciler.get_repair_plan(
-                health=health,
-                live_qty=live_qty,
-                current_side=str(getattr(self, 'current_side', '') or ''),
-            )
-
-            logger.warning(f"🛡️ [{self.symbol}] TP需要修复: {plan['reason']}")
-
-            # 钉钉通知
+        if result.get("needs_attention"):
             try:
                 import dingtalk
                 self._call_dingtalk(
                     dingtalk.send_alert,
-                    f"🛡️ [{self.symbol}] TP对账异常",
-                    {
-                        "severity": f"等级{health.get('severity', 0)}",
-                        "issues": "; ".join(health.get('issues', [])),
-                        "plan": plan.get('reason', '待定'),
-                        "missing_tps": str([f"TP{t['level']}@{t['price']:.2f}" for t in health.get('missing_tps', [])]),
-                        "live_qty": f"{live_qty:.4f}",
-                        "exchange_orders": f"{len(exchange_orders)}个",
-                    },
+                    f"🛡️ [{self.symbol}] 重启防御恢复需关注",
+                    {"details": "; ".join(result.get("notes", []))},
                     immediate=True,
                     level=2,
                 )
             except Exception:
                 pass
 
-            reconciler.mark_reconcile_done(actions_taken=1)
-        else:
-            reconciler.mark_reconcile_done(actions_taken=0)
-            logger.info(f"🛡️ [{self.symbol}] TP状态正常，无需修复: {repair_reason}")
-
         return {
             "skipped": False,
-            "health": health,
-            "should_repair": should_repair,
-            "reason": repair_reason,
+            "result": result,
+            "reason": "TP恢复完成",
         }
 
     def _trusted_initial_qty(self, live_qty, entry=None):
@@ -4757,8 +4689,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _held_position_reconcile(self, live_qty, curr_px=0.0):
         """
-        持仓期监管（约 30s）：强制 REST 核对真实头寸 + 挂单硬上限 + 标签。
-        查单失败 → 保守跳过，绝不因此补挂。
+        持仓期安全检查（v2简化版）：
+        仅检查：挂单数量是否超限、本地标签与盘口一致性。
+        不再检查/补挂/撤单TP——TP单在交易所，交易所负责保管。
         """
         if getattr(self, "trading_paused", False) or getattr(
             self, "api_monitor_only", False
@@ -4772,7 +4705,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_qty = float(live_qty or 0)
         if live_qty <= 0:
             return True
-        # v16.6.2：持仓对账默认用缓存/WS；禁止周期性 force_rest 打穿配额
+
+        # 持仓同步（仅同步数量，不动TP）
         try:
             rest_pos = self._get_active_position(prefer_ws=True, force_rest=False)
             if rest_pos == "QUERY_FAILED":
@@ -4786,16 +4720,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     logger.info(
                         f"📎 [{self.symbol}] 30s对账头寸 {live_qty}→{rq}"
                     )
-                    live_qty = rq
                     self.watched_qty = rq
                     if float(rest_pos.get("entry_price") or 0) > 0:
                         self.watched_entry = float(rest_pos["entry_price"])
-                    if not self._is_dust_qty(rq):
-                        self._atomic_resize_after_partial_tp(
-                            rq, reason="held_reconcile_30s",
-                        )
+                    # 不再调用 _atomic_resize_after_partial_tp（避免撤单重挂）
         except Exception as e:
             logger.debug(f"持仓REST对账跳过: {e}")
+
+        # 安全检查：挂单数量上限
         book = binance_client.get_open_orders(self.symbol)
         if is_orders_query_failed(book):
             logger.warning(
@@ -4809,14 +4741,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"→ 暂停交易等待人工"
             )
             logger.error(f"🚨 [硬上限熔断] {msg}")
-            # 走统一暂停闸：同 reason 抑制钉钉/TG 风暴
             self._pause_symbol_trading(
                 f"open_orders_cap:{n}",
                 title=f"挂单硬上限击穿 [{self.symbol}]",
                 detail=msg,
             )
             return False
-        # 仅「飞行中」pending（无 orderId）与空盘口冲突才熔断；acked 不暂停
+
+        # 仅「飞行中」pending 与空盘口冲突才熔断
         self._gc_stale_pending_defense_tags(save=False)
         inflight = {
             t: m for t, m in dict(getattr(self, "_pending_order_tags", {}) or {}).items()
@@ -4840,8 +4772,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _atomic_resize_after_partial_tp(self, live_qty, reason=""):
         """
-        TP 部分成交后原子同步：更新头寸 → 收缩硬/雷达数量 → 调整剩余 TP（含 TP3）。
-        任一步失败 → 告警；不在中间状态继续开新挂单路径。
+        TP 部分成交后同步（v2简化版）：
+        1) 更新头寸数量（止损用reduceOnly，交易所自动处理数量）
+        2) 同步止损单数量
+        不再撤单重挂TP——TP单用reduceOnly，交易所自动维护数量。
         """
         if getattr(self, "_defense_ops_locked", False):
             logger.warning(
@@ -4854,7 +4788,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             pos = self._get_active_position(prefer_ws=False, force_rest=True)
             if pos == "QUERY_FAILED":
                 logger.error(
-                    f"🚨 [{self.symbol}] 部分成交原子同步失败：持仓不可读 | {reason}"
+                    f"🚨 [{self.symbol}] 部分成交同步失败：持仓不可读 | {reason}"
                 )
                 self._pause_symbol_trading(
                     f"partial_tp_query_failed:{reason}",
@@ -4870,45 +4804,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             init_q = float(getattr(self, "initial_qty", 0) or 0)
             if init_q > 0 and live_qty > 0:
                 self.remaining_qty_pct = max(0.0, min(1.0, live_qty / init_q))
-            # 1) 止损数量（硬 closePosition + 雷达按剩余仓）
+
+            # 止损数量同步（用reduceOnly，交易所自动收缩）
             ok_sl = self._breath_resize_stop_on_tp(
-                live_qty, reason=reason or "部分成交原子收缩",
+                live_qty, reason=reason or "部分成交数量同步",
             )
-            # 2) 剩余 TP（含 TP3）数量对齐
-            self._cancel_tp_orders_at_levels(
-                getattr(self, "tp_levels_consumed", []) or []
-            )
-            time.sleep(0.25)
-            self._cancel_mismatched_remaining_tps(live_qty)
-            time.sleep(0.25)
-            placed = self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
-            audit = self._audit_tp_levels(live_qty)
+
             self._save_state()
-            if not ok_sl or not self._tp_audit_ok(audit):
-                logger.error(
-                    f"🚨 [{self.symbol}] 部分成交原子同步未齐 "
-                    f"sl_ok={ok_sl} placed={placed} | "
-                    f"{self._format_audit_summary(audit)} | {reason}"
+            if not ok_sl:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 止损数量同步未完成 | {reason}"
                 )
-                self._pause_symbol_trading(
-                    f"partial_tp_sync_fail:{reason}",
-                    title=f"部分成交同步异常 [{self.symbol}]",
-                    detail=(
-                        f"{reason} | qty={live_qty} sl_ok={ok_sl} "
-                        f"| {self._format_audit_summary(audit)}"
-                    ),
+            else:
+                logger.info(
+                    f"✅ [{self.symbol}] 部分成交同步完成 qty={live_qty} | {reason}"
                 )
-                return False
-            logger.info(
-                f"✅ [{self.symbol}] 部分成交原子同步完成 qty={live_qty} "
-                f"placed={placed} | {reason}"
-            )
-            ops_log.ops(
-                f"[{self.symbol}] partial_tp_resize ok qty={live_qty} | {reason}"
-            )
-            return True
+                ops_log.ops(
+                    f"[{self.symbol}] partial_tp_resize ok qty={live_qty} | {reason}"
+                )
+            return ok_sl
         except Exception as e:
-            logger.error(f"🚨 [{self.symbol}] 部分成交原子同步异常: {e}")
+            logger.error(f"🚨 [{self.symbol}] 部分成交同步异常: {e}")
             self._pause_symbol_trading(
                 f"partial_tp_exception:{e}",
                 title=f"部分成交同步异常 [{self.symbol}]",
@@ -12101,28 +12017,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             }
         consumed = getattr(self, "tp_levels_consumed", []) or []
         logger.info(
-            f"🎯 TP 成交后静默对齐: 剩余 {live_qty} ETH | "
-            f"已成交 TP{consumed} | 补未成交档+原子收缩止损"
+            f"🎯 TP 成交后对齐: 剩余 {live_qty} ETH | "
+            f"已成交 TP{consumed} | 仅同步数量，不撤单重挂"
         )
         ok = self._atomic_resize_after_partial_tp(
             live_qty, reason=reason or "TP成交后对齐",
         )
         audit = self._audit_tp_levels(live_qty)
-        if not ok and not self._tp_audit_ok(audit):
-            logger.warning(
-                f"⚠️ TP 成交后仍不齐 → 增量修复 | {self._format_audit_summary(audit)}"
-            )
-            repaired, _ = self._surgical_repair_tp_defenses(live_qty, self.watched_entry)
-            audit = repaired
-            self._breath_resize_stop_on_tp(live_qty, reason=reason or "TP成交后兜底收缩")
+        # 简化：TP成交后不撤单重挂（TP单在交易所，交易所负责保管直到成交或被主动撤单）
+        # 只同步止损数量，TP单维持现状
+        self._breath_resize_stop_on_tp(live_qty, reason=reason or "TP成交后数量同步")
         self._mark_defense_align_ok()
         return {
             "matched": audit["matched_full"],
             "expected": audit["expected"],
-            "pending_prices": audit["pending_prices"],
-            "rebuilt": True,
+            "pending_prices": audit.get("pending_prices", []),
+            "rebuilt": False,
             "audit": audit,
             "nuclear": False,
+            "note": "简化版：TP成交后不撤单重挂，仅同步止损数量",
         }
 
     def _detect_shield_fills(self, old_qty, new_qty, curr_px):
@@ -12491,291 +12404,107 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return self._tp1_triad_ok(live_qty, curr_px, require_fresh=True)
 
     def _handle_smart_qty_change(self, old_qty, new_qty, curr_px):
-        """按减仓原因分流：TP成交→雷达推进；防护盾成交→保留剩余档位；其他→通用对齐"""
+        """
+        简洁版仓位变化处理（v2简化架构）：
+        - TP成交：记账+雷达推进（不撤单重挂）
+        - 硬止损成交：平仓处理
+        - 仓位减少（原因不明）：仅同步数量，不撤单重挂
+        - 仓位增加：同步数量
+        """
         change = self._classify_position_change(old_qty, new_qty, curr_px)
         kind = change["kind"]
         result = None
-        sl_to_pass = None
+        curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
 
         if kind == "add":
             logger.info(f"🔄 [智慧大脑] 加仓 {old_qty} ➔ {new_qty}")
-            sl_to_pass = self._radar_sl_to_pass()
-            result = self._smart_realign_defenses(
-                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
-                reason="加仓后防线对齐",
-            )
-            if self._should_activate_shield(curr_px):
-                self._maintain_hard_shield(new_qty, curr_px, force=True)
+            self.watched_qty = new_qty
+            self._breath_resize_stop_on_tp(new_qty, reason="加仓数量同步")
+            self._save_state()
+            return change, None
+
         elif kind == "tp_fill":
-            levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"])
-            credible, reject_why = self._filter_credible_tp_fills(
-                change["tp_fills"], curr_px, old_qty, new_qty,
+            levels = ",".join(f"TP{f['level']}" for f in change["tp_fills"]])
+            credible, _ = self._filter_credible_tp_fills(
+                change["tp_fills"], curr_px_safe, old_qty, new_qty,
             )
             if not credible:
-                # 仅当「声称含 TP1 却证据全无」才打伪TP1；纯 TP2/TP3 拒认走对账重试
-                claimed_tp1 = any(
-                    int(f.get("level") or 0) == 1 for f in (change["tp_fills"] or [])
+                logger.warning(
+                    f"🎯 [智慧大脑] {levels} 证据不足 → 仅同步数量，不撤单重挂 | {old_qty}→{new_qty}"
                 )
-                if claimed_tp1:
-                    logger.warning(
-                        f"🎯 [智慧大脑] {levels} 疑似伪TP1"
-                        f"（{reject_why or '证据不足'}）→ 再对账 | "
-                        f"{old_qty}→{new_qty}"
-                    )
-                else:
-                    logger.warning(
-                        f"🎯 [智慧大脑] {levels} 证据不足（{reject_why}）→ 价量再对账 | "
-                        f"{old_qty}→{new_qty}"
-                    )
-                retry = self._detect_tp_fills_by_price_qty_reconcile(
-                    old_qty, new_qty, curr_px,
-                )
-                credible, reject_why = self._filter_credible_tp_fills(
-                    retry, curr_px, old_qty, new_qty,
-                )
-            if not credible:
-                # 证据不足：先头寸对账记账；禁止立刻按现仓重挂全部 TP123
-                newly = self._reconcile_tp_consumed_from_live_qty(
-                    new_qty, curr_px, source="TP证据不足·头寸对账", notify=True,
-                )
-                if newly or list(getattr(self, "tp_levels_consumed", []) or []):
-                    logger.warning(
-                        f"🎯 [智慧大脑] {levels} 证据不足但头寸对账已记账 "
-                        f"TP{getattr(self, 'tp_levels_consumed', [])} → 只挂剩余档"
-                    )
-                    result = self._realign_remaining_tps_after_fill(
-                        new_qty, dynamic_sl=None,
-                        reason="头寸对账后静默对齐剩余TP",
-                    )
-                    if self._radar_ready_to_handoff(curr_px, new_qty):
-                        self._perform_radar_handoff(
-                            new_qty, curr_px, reason="价触激活线/TP1·防回吐",
-                        )
-                    elif self._should_activate_shield(curr_px) or getattr(
-                        self, "shield_active", False
-                    ):
-                        self._maintain_hard_shield(new_qty, curr_px, force=True)
-                    change = {
-                        "kind": "tp_fill" if newly else "reduce_unknown",
-                        "tp_fills": [
-                            {"level": lv, "price": 0, "qty": 0} for lv in (newly or [])
-                        ],
-                        "shield_fills": [],
-                    }
-                    self._save_state()
-                    return change, result
-
-                if any(int(f.get("level") or 0) == 1 for f in (change["tp_fills"] or [])):
-                    dingtalk.report_system_alert(
-                        f"雷达拒启·伪TP1拦截 [{self.symbol}]",
-                        f"{self.current_side} {old_qty}→{new_qty} {self._unit()} | {levels} | "
-                        f"现价 {float(curr_px or 0):.2f} | {reject_why or '证据不足'} | "
-                        f"规则：伪TP1不记账；近TP1禁止补挂TP1",
-                    )
-                # 近 TP1 且减仓：禁止 smart_realign 把 TP1 再挂回盘口
-                if self._price_reached_tp1_zone(curr_px) or self._qty_reduction_looks_like_tp(
-                    old_qty, new_qty, curr_px
-                ):
-                    logger.warning(
-                        f"🎯 [{self.symbol}] 减仓近TP区但未核实 → 禁止重挂TP123，"
-                        f"保留TV硬止损/已挂剩余档 | {old_qty}→{new_qty}"
-                    )
-                    dingtalk.report_system_alert(
-                        f"止盈对账中·暂禁补挂 [{self.symbol}]",
-                        f"{self.current_side} {old_qty}→{new_qty} {self._unit()} | "
-                        f"现价 {float(curr_px or 0):.2f} | 疑似TP成交但证据不足 | "
-                        f"已禁止按现仓重挂TP1（防TP1附近循环成交）",
-                    )
-                    if self._should_activate_shield(curr_px) or getattr(
-                        self, "shield_active", False
-                    ):
-                        self._maintain_hard_shield(new_qty, curr_px, force=True)
-                    change = {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
-                    self._save_state()
-                    return change, None
-
-                result = self._smart_realign_defenses(
-                    new_qty, self.watched_entry, dynamic_sl=None,
-                    reason="TP证据不足·保TV硬止损+重挂剩余TP",
-                )
-                self._reconcile_open_qty_vs_tp123(new_qty, source="TP证据不足")
-                self._breath_resize_stop_on_tp(new_qty, reason="减仓近TP区·止损数量同步")
-                change = {"kind": "reduce_unknown", "tp_fills": [], "shield_fills": []}
+                self.watched_qty = new_qty
+                self._breath_resize_stop_on_tp(new_qty, reason="TP疑似成交数量同步")
                 self._save_state()
-                return change, result
+                return change, None
 
-            change = {
-                "kind": "tp_fill",
-                "tp_fills": credible,
-                "shield_fills": [],
-            }
-            levels = ",".join(f"TP{f['level']}" for f in credible)
             logger.info(
                 f"🎯 [智慧大脑] {levels} 成交减仓 {old_qty} ➔ {new_qty} "
-                f"→ 记账 + 守剩余TP + 雷达锁利"
+                f"→ 记账 + 止损数量同步（不撤单重挂）"
             )
             self._mark_tp_levels_consumed([f["level"] for f in credible])
-            curr_px_safe = curr_px or binance_client.get_current_price(self.symbol) or 0
             self._advance_radar_on_tp_fill(credible, curr_px_safe, new_qty)
-            self._reconcile_open_qty_vs_tp123(new_qty, source=f"{levels}成交")
-            # 只撤/重挂剩余 TP1+TP2；止损数量由雷达引擎原子收缩
-            result = self._realign_remaining_tps_after_fill(
-                new_qty, dynamic_sl=None,
-                reason=f"{levels} 成交静默对齐",
-            )
-            # 止损数量收缩已在 _realign_remaining_tps_after_fill → _breath_resize_stop_on_tp
-            # 无 TP3：TP 进度足够则强制武装；已激活则追随 + 数量贴合
-            if self._should_force_radar_after_tp_progress(new_qty, curr_px_safe):
-                self._force_arm_radar_after_tp(
-                    new_qty, curr_px_safe, source=f"{levels}成交·强制武装",
-                )
+            self.watched_qty = new_qty
+            self._breath_resize_stop_on_tp(new_qty, reason=f"{levels}成交数量同步")
             if self._is_radar_active() or float(getattr(self, "current_sl", 0) or 0) > 0:
                 self._process_radar_trailing(new_qty, curr_px_safe)
-            if self._is_radar_active():
-                self._ensure_radar_qty_matches_live(
-                    new_qty, reason=f"{levels}成交·雷达数量",
-                )
-            else:
-                logger.info(
-                    f"📡 [{self.symbol}] {levels}已记账，止损数量已同步 | "
-                    f"剩余 {new_qty} {self._unit()}"
-                )
+            self._save_state()
+            return change, None
+
         elif kind == "shield_fill":
             f = change["shield_fills"][0]
             logger.warning(
-                f"🛡️ [智慧大脑] TV硬止损成交 "
-                f"{old_qty} ➔ {new_qty} @ {f['price']:.2f}"
+                f"🛡️ [智慧大脑] 硬止损成交 {old_qty} ➔ {new_qty} @ {f['price']:.2f}"
             )
             if new_qty <= 0.0005 or self._is_dust_qty(new_qty):
-                near_sl = self._likely_exchange_stop_exit(curr_px)
+                near_sl = self._likely_exchange_stop_exit(curr_px_safe)
                 if self._radar_was_armed():
                     flat_meta = self._infer_flat_close_meta(
-                        curr_px, hint_reason="雷达保本/追踪止损全平",
+                        curr_px_safe, hint_reason="雷达保本/追踪止损全平",
                     )
-                    try:
-                        # 雷达全平：顺手清任何历史 TP3 限价残留
-                        self._strip_legacy_tp3_limits(reason="雷达全平·清历史TP3")
-                    except Exception as e:
-                        logger.error(f"[{self.symbol}] 清历史TP3异常: {e}")
                 else:
                     reason = (
                         "触碰硬止损平仓（TV硬止损）"
                         if near_sl else
-                        "仓位归零（现价未到硬止损·疑似人工/异动/市价强平）"
+                        "仓位归零（来源未明）"
                     )
                     flat_meta = self._build_close_meta(
                         "CLOSE_STOPLOSS" if near_sl else "CLOSE",
                         self.current_side,
-                        self._estimate_pnl_pct(curr_px),
+                        self._estimate_pnl_pct(curr_px_safe),
                         reason,
                     )
                     if near_sl:
                         flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
                         flat_meta["exit_source"] = EXIT_SOURCE_VPS_HARD_SL
-                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS[
-                            EXIT_SOURCE_VPS_HARD_SL
-                        ]
-                    else:
-                        flat_meta["exit_source"] = EXIT_SOURCE_MANUAL
-                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS[
-                            EXIT_SOURCE_MANUAL
-                        ]
-                self._disarm_shield(
-                    "雷达/硬止损全平" if self._radar_was_armed() or near_sl else "异动全平",
-                    notify=False,
-                )
+                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
+                            EXIT_SOURCE_VPS_HARD_SL, "硬止损平仓"
+                        )
+                self._disarm_shield("硬止损全平", notify=False)
                 self._handle_manual_flat_detected(
                     flat_meta.get("tv_reason") or flat_meta.get("exit_source_label"),
                     close_meta=flat_meta,
-                    curr_px=curr_px,
+                    curr_px=curr_px_safe,
                 )
                 self._save_state()
                 return change, None
-            self._disarm_shield("TV硬止损成交", notify=True)
+            # 部分成交：同步数量，继续持
+            self._disarm_shield("硬止损部分成交", notify=True)
             self.shield_tiers_consumed = []
-            result = self._smart_realign_defenses(
-                new_qty, self.watched_entry, dynamic_sl=None,
-                reason=f"硬止损成交后 TP 重算",
-            )
-            self._call_dingtalk(
-                dingtalk.report_shield_tier_fill,
-                side=self.current_side,
-                tier_pct=f["pct"],
-                tier_price=f["price"],
-                filled_qty=f["qty"],
-                remain_qty=new_qty,
-                entry_px=self.watched_entry,
-                remaining_tiers=[],
-                verify_note=(
-                    f"硬止损 -{f['pct']:.0%} @ {f['price']:.2f} 成交 | "
-                    f"剩余 {new_qty} ETH"
-                ),
-            )
-        else:
-            pct = abs(new_qty - old_qty) / old_qty if old_qty > 0 else 1.0
-            # 再查：成交史 / 限价消失 / 价量对账 → 优先改判为止盈（禁误报人工）
-            self._ensure_tv_tps_for_fill_detect()
-            retry_fills = self._detect_tp_fills(old_qty, new_qty, curr_px)
-            if not retry_fills:
-                peak = max(float(self.initial_qty or 0), float(old_qty or 0))
-                retry_fills = self._detect_tp_fills_from_trades(
-                    old_qty, new_qty, initial=peak, lookback_ms=300000,
-                )
-            if not retry_fills:
-                retry_fills = self._detect_tp_fills_by_price_qty_reconcile(
-                    old_qty, new_qty, curr_px,
-                )
-            if retry_fills:
-                credible, why = self._filter_credible_tp_fills(
-                    retry_fills, curr_px, old_qty, new_qty,
-                )
-                if credible:
-                    change = {
-                        "kind": "tp_fill",
-                        "tp_fills": credible,
-                        "shield_fills": [],
-                    }
-                    self._save_state()
-                    return self._handle_smart_qty_change(old_qty, new_qty, curr_px)
-                logger.warning(
-                    f"🎯 [智慧大脑] 重试判 TP 仍缺证据 "
-                    f"{[f.get('level') for f in retry_fills]} ({why}) → 通用对齐"
-                )
-            # 价已过 TP 区但仍未匹配切片 → 标注「待核实止盈」而非武断「手动减仓」
-            near_tp = any(
-                self._price_reached_tp_zone(lv, curr_px)
-                for lv in (1, 2, 3)
-            )
-            action_msg = (
-                "手动增仓" if new_qty > old_qty
-                else (
-                    "限价止盈待核实对账" if near_tp
-                    else "仓位减仓（未匹配TP切片）"
-                )
-            )
-            logger.info(
-                f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {new_qty} ({pct:.1%})，"
-                f"{action_msg} → 通用重对齐 + 对账"
-            )
-            self._bump_best_on_tp_fill(old_qty, new_qty, curr_px)
-            self._reconcile_open_qty_vs_tp123(new_qty, source=action_msg)
-            self._sync_radar_sl_from_best(curr_px)
-            sl_to_pass = self._radar_sl_to_pass()
-            result = self._smart_realign_defenses(
-                new_qty, self.watched_entry, dynamic_sl=sl_to_pass,
-                reason=f"仓位异动: {action_msg}",
-            )
-            if self._radar_ready_to_handoff(curr_px, new_qty):
-                self._perform_radar_handoff(
-                    new_qty, curr_px, reason="价触激活线/TP1·防回吐",
-                )
-                if self._radar_legitimately_armed(new_qty, curr_px):
-                    self._process_radar_trailing(new_qty, curr_px)
-            elif self._should_activate_shield(curr_px) or getattr(self, "shield_active", False):
-                self._maintain_hard_shield(new_qty, curr_px, force=True)
+            self.watched_qty = new_qty
+            self._breath_resize_stop_on_tp(new_qty, reason="硬止损部分成交数量同步")
+            self._save_state()
+            return change, None
 
-        self._save_state()
-        return change, result
+        else:  # unchanged / reduce_unknown / other
+            if abs(new_qty - old_qty) < 0.0005:
+                return change, None
+            logger.info(
+                f"🔄 [智慧大脑] 仓位变化 {old_qty} ➔ {new_qty}，原因未明 → 仅同步数量，不撤单重挂"
+            )
+            self.watched_qty = new_qty
+            self._breath_resize_stop_on_tp(new_qty, reason="仓位变化数量同步")
+            self._save_state()
+            return change, None
 
     def _report_qty_change_dingtalk(self, old_qty, new_qty, realign_result, change=None):
         verified_pos = self._wait_verify(
