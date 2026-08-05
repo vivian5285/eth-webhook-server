@@ -332,7 +332,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._last_signal_fp = None
         self._last_signal_fp_ts = 0.0
         self._defense_align_in_progress = False
-        self._last_defense_align_ok_ts = 0.0
+        self._last_defense_align_ok_ts = time.time()  # v16.24.5：初始化为当前时间，防止重启后瞬间裸TP死循环
         self._guardian_bad_streak = 0
         self._last_nuclear_realign_ts = 0.0
         self._nuclear_fail_streak = 0
