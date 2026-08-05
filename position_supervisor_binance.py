@@ -132,14 +132,6 @@ from pipeline_ledger import Phase, Role
 from chief_auditor import check_tp_slice_budget
 from market_engine import (
     get_market_engine,
-    atr_divergence_pct,
-    resolve_tv_atr_for_compare,
-    evaluate_atr_emergency_degrade,
-    tv_implied_atr_for_degrade,
-    ATR_COMPARE_ALERT_PCT,
-    ATR_ANOMALY_RATIO,
-    ATR_MEDIAN_LOOKBACK,
-    TV_HARD_SL_ATR_MULT,
 )
 from tv_seq import (
     TVSeqBuffer,
@@ -792,9 +784,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _confirm_position_flat(self, retries=None, delay=None):
         """REST 延迟/重启抖动时多次复核，避免误报空仓触发常规清场。
-        查询失败 → False（fail-closed，禁止清账本）。"""
+        查询失败 → False（fail-closed，禁止清账本）。
+
+        同时：当 exchange 确认空仓且账本有仓时，自动清除 stale 本地状态
+        （避免 watched_qty/stale_side 残留导致幽灵仓位）。
+        """
         retries = retries if retries is not None else FLAT_CONFIRM_RETRIES
         delay = delay if delay is not None else FLAT_CONFIRM_DELAY_SEC
+        confirmed = False
         for i in range(max(1, int(retries))):
             qty = self._live_position_qty()
             if qty is None:
@@ -806,7 +803,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         final = self._live_position_qty()
         if final is None:
             return False
-        return final <= self.dust_qty
+        confirmed = final <= self.dust_qty
+        if confirmed and self._book_thinks_active():
+            logger.warning(
+                f"🧹 [确认平仓] 交易所空仓且账本有仓 → 清除stale本地状态 "
+                f"(watched_qty={self.watched_qty} current_side={self.current_side})"
+            )
+            self._reset_breath_ledger_on_flat(source="confirm_flat_stale_clean")
+        return confirmed
 
     def _reconcile_stale_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
         """
@@ -1084,37 +1088,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_qty = float(pos["size"]) if pos else 0.0
 
         if live_qty <= 0:
+            if self._confirm_position_flat():
+                if self._book_thinks_active():
+                    curr_px = binance_client.get_current_price(self.symbol)
+                    logger.warning("📭 [空闲巡检] 交易所空仓且账本有仓 → 强制清零stale状态")
+                    self._handle_manual_flat_detected(
+                        "空闲巡检·stale本地状态强制清除",
+                        close_meta={"exit_source": "stale_reconcile", "tv_reason": "空闲巡检·交易所空仓但账本有仓"},
+                        curr_px=curr_px,
+                    )
+                return
             if self._book_thinks_active():
-                if not self._confirm_position_flat():
-                    logger.warning(
-                        "📭 [空闲巡检] 首次无仓但复核仍有持仓/查询失败 → 跳过误清场"
-                    )
-                    return
-                curr_px = binance_client.get_current_price(self.symbol)
-                logger.warning("📭 [空闲巡检] 账本有仓且复核空仓 → 补发收网钉钉")
-                try:
-                    flat_meta = self._infer_flat_close_meta(
-                        curr_px=curr_px, hint_reason="",
-                    )
-                    src_lab = flat_meta.get("exit_source_label") or ""
-                    note = flat_meta.get("tv_reason") or ""
-                    if src_lab and src_lab not in str(note):
-                        flat_meta["tv_reason"] = (
-                            f"{src_lab} · {note}" if note else src_lab
-                        )
-                    elif not note:
-                        flat_meta["tv_reason"] = (
-                            src_lab or "仓位归零（空闲巡检·来源未明·请查交易所成交）"
-                        )
-                except Exception as e:
-                    logger.error(f"空闲巡检归因失败: {e}")
-                    flat_meta = {
-                        "tv_reason": "仓位归零（空闲巡检·归因异常·请查交易所成交）",
-                    }
-                self._handle_manual_flat_detected(
-                    flat_meta.get("tv_reason"),
-                    close_meta=flat_meta,
-                    curr_px=curr_px,
+                logger.warning(
+                    "📭 [空闲巡检] 首次无仓但复核仍有持仓/查询失败 → 跳过误清场"
                 )
                 return
             # 账本空 + 仓位空：仍必须扫残留限价/条件单（防幽灵 TP 空仓挂着）
@@ -3707,12 +3693,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         # 持仓已清但挂单未净：第二次撤单后仍有幽灵单
         # 关键判断：持仓已清 → 允许开仓（幽灵单不阻止新仓）
+        # 但必须同步清除stale本地状态，避免幽灵watched_qty残留
         counted2 = self._count_open_limits_and_stops(orders=orders2)
         tp2 = self._collect_tp_limit_orders(orders=orders2)
         n_limit2 = counted2[0] if counted2 else n_limit
         n_stop2 = counted2[1] if counted2 else n_stop
         n_tp2 = -1 if is_orders_query_failed(tp2) else len(tp2)
         detail2 = f"持仓=无 limits={n_limit2} stops={n_stop2} TP={n_tp2}"
+        # 若本地stale状态有残留，强制清除（持仓已确认清零，幽灵单不挡）
+        if self._book_thinks_active():
+            logger.warning(
+                f"🧹 [{tag}] 持仓已清但账本有仓 → 强制清除stale本地状态 | {detail2}"
+            )
+            self._reset_breath_ledger_on_flat(source="ghost_orders_stale_clean")
         logger.warning(
             f"⚠️ [{tag}] 幽灵挂单残留但持仓已清 → 越过暂停继续开仓 | {detail2}"
         )
@@ -6895,52 +6888,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _refresh_market_metrics(self, force=False):
         """
-        VPS 行情引擎：30m 合成 90m → ATR(14)/ADX(14)。
-        返回 (atr, adx)。止损距离只用 open_atr(initialAtr)；ADX 可刷新。
+        VPS 行情引擎：30m 合成 90m → ADX(14)。
+        ATR 全程只用 TV webhook.atr（open_atr 锁定），本函数不再写入 current_atr。
+        返回 (atr=0, adx)。保留返回值签名不变避免破坏调用方。
         """
-        atr, adx = self._market_engine().refresh(force=bool(force))
-        if atr > 0:
-            self.current_atr = float(atr)
+        _, adx = self._market_engine().refresh(force=bool(force))
         if adx > 0:
             self.last_adx = float(adx)
-        return float(self.current_atr or 0), float(self.last_adx or 0)
-
-    def _debug_compare_tv_implied_atr(self, entry, tv_sl_ref, vps_atr, tv_atr=None):
-        """
-        纯调试：VPS ATR vs TV ATR；不参与交易决策、不挡开仓。
-        优先用 webhook atr；否则按 TV 硬止损≈1.0×ATR 反推（禁止误用 VPS 1.5，
-        否则会系统性报出 ~33% 假偏差——与 2026-07-22 实盘误告警同源）。
-        """
-        vps = float(vps_atr or 0)
-        if vps <= 0:
-            return
-        ref, source = resolve_tv_atr_for_compare(
-            vps,
-            tv_atr=float(tv_atr or 0),
-            entry=entry,
-            stop_loss=tv_sl_ref,
-            tv_sl_mult=TV_HARD_SL_ATR_MULT,
-        )
-        if ref <= 0:
-            return
-        div = atr_divergence_pct(vps, ref)
-        msg = (
-            f"🔍 [{self.symbol}] ATR核对(仅日志) VPS={vps:.4f} "
-            f"TV={ref:.4f}({source}) 差={div:.1%} | "
-            f"止损仍只用 VPS ATR；TV硬止损距仅影响 sizing sl_adj"
-        )
-        if div >= ATR_COMPARE_ALERT_PCT:
-            logger.warning(msg + " → 超阈值，请人工核 90m 周期/数据源")
-            try:
-                dingtalk.report_system_alert(
-                    f"ATR核对差异 [{self.symbol}]",
-                    msg + " | 请核对 TV 90m 与 VPS 合成是否一致（本告警不拦截开仓）",
-                    level="提示",
-                )
-            except Exception:
-                pass
-        else:
-            logger.info(msg)
+        # current_atr 只由 TV ATR 填充；禁止 VPS 计算覆盖
+        return 0.0, float(self.last_adx or 0)
 
     def _get_locked_initial_atr(self):
         """
@@ -9308,6 +9264,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"init={float(self.initial_stop or 0):.2f} "
                 f"open_atr={float(self.open_atr or 0):.2f} | {source}"
             )
+            # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
+            if self._book_thinks_active():
+                live_qty = self._live_position_qty()
+                if live_qty is None:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 热加载后交易所持仓查询失败，暂保留本地状态"
+                    )
+                elif live_qty <= 0:
+                    logger.warning(
+                        f"🧹 [{self.symbol}] 热加载stale状态已清除：交易所空仓但账本有仓 "
+                        f"(watched_qty={self.watched_qty} current_side={self.current_side})"
+                    )
+                    self._reset_breath_ledger_on_flat(source="load_state_stale_clean")
             try:
                 self._pipeline_load_blob(s.get("pipeline"))
                 self._pipeline_align_monitoring_if_held()
@@ -10374,6 +10343,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 ok = True
                 n_limit, n_stop = 0, 0
                 tp_n = 0
+                remaining = 0
             else:
                 # 仍有持仓且无法查挂单 → 谨慎处理，不误判
                 logger.warning(
@@ -10382,11 +10352,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 ok = False  # 暂不确定，但不上报为错误
                 n_limit, n_stop = -1, -1
                 tp_n = -1
+                remaining = -1
         elif counted is None or not isinstance(orders, list):
             # 其他查询失败情况
             ok = False
             n_limit, n_stop = -1, -1
             tp_n = -1
+            remaining = -1
         else:
             remaining = len(orders)
             n_limit, n_stop, _ = counted
@@ -10610,17 +10582,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 }
         except Exception:
             pass
-        # v16.24.1: 核武前必须核实交易所真实持仓；防止 watched_qty > 0（状态残留）
-        # 但交易所已空仓时反复撤挂空仓的 TP 导致孤儿单累积
+        # v16.25.2-fix: 核武前不再二次查询持仓。传入的 live_qty 已经由主循环/调用方
+        # 通过 _get_active_position() 取得；此处再查一次会在 API 限流/传播延迟时拿到
+        # 不一致结果，导致「已撤 TP -> 补挂失败」的死亡螺旋。
+        # 若调用方错误地传入了 0，则 _enforce_defense_alignment 入口处早已返回，不会到达此处。
         real_pos = None
+        real_qty = 0.0
         try:
             real_pos = binance_client.get_position(self.symbol)
         except Exception:
             pass
-        real_qty = float((real_pos or {}).get("size") or 0) if real_pos else 0.0
-        if real_qty <= 0:
+        else:
+            real_qty = float((real_pos or {}).get("size") or 0) if real_pos else 0.0
+        if real_qty <= 0 and live_qty > 0:
+            logger.warning(
+                f"☢️ [{self.symbol}] 核武二次查询持仓={real_qty} 但传入 live_qty={live_qty}，"
+                f"可能存在 API 传播延迟；信任传入值继续补挂TP，避免撤->挂->撤死循环"
+            )
+        if live_qty <= 0:
             logger.info(
-                f"☢️ [{self.symbol}] 核武跳过：交易所持仓={real_qty} | watched={live_qty} | "
+                f"☢️ [{self.symbol}] 核武跳过：传入持仓={live_qty}（二次查询={real_qty}）| "
                 f"防止空仓撤挂孤儿单"
             )
             return {
@@ -12677,15 +12658,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.enqueue_signal(payload)
 
     def _enrich_tv_payload(self, payload):
-        """v6.9.76：TV 全量 regime/atr/tp 优先；规格 v1.0 §6 ATR 禁止独立拉取。"""
+        """v6.9.76：TV 全量 regime/atr/tp 优先；规格 v2.1 ATR 全程只用 TV。"""
         action = str(payload.get("action", "")).strip().upper()
         live_px = binance_client.get_current_price(self.symbol) or self.tv_price or 0.0
         return enrich_signal_fields(
             payload,
             action,
-            fetch_atr=None,   # 规格 v1.0 §6：禁止 VPS 独立拉取 ATR
+            fetch_atr=None,   # 规格 v2.1：禁止 VPS 独立拉取 ATR
             fallback_regime=self.regime or 3,
-            fallback_atr=self.current_atr or 30.0,
+            fallback_atr=0.0,   # ATR 必须来自 TV，禁止用本地缓存兜底
             fallback_price=live_px,
         )
 
@@ -13049,12 +13030,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.trading_pause_reason = ""
             self._save_state()
 
-        # 90m ATR 仅作展示/ADX；开仓 initial_atr 只认 TV atr（见 _resolve_open_atr）
+        # ADX 仅作展示；ATR 全程只用 TV atr（见 _resolve_open_atr）
         if raw_action in ("LONG", "SHORT"):
             try:
-                vps_atr, _adx = self._refresh_market_metrics(force=False)
-                if float(vps_atr or 0) > 0:
-                    self.current_atr = float(vps_atr)
+                _, _adx = self._refresh_market_metrics(force=False)
             except Exception:
                 pass
 
@@ -13785,14 +13764,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🚨 [{self._tag()}] 开仓快照缺 TV atr → 拒开 | meta={atr_meta}"
             )
 
-        # 90m 仅作对比/ADX 日志，不覆盖 initial_atr
-        vps_atr, vps_adx = self._refresh_market_metrics(force=False)
-        self._debug_compare_tv_implied_atr(
-            entry_px,
-            tv_sl_ref,
-            float(vps_atr or 0),
-            tv_atr=tv_atr if tv_atr > 0 else init_atr,
-        )
+        # ADX 仅作展示/ADX日志（已删除VPS ATR对比调试）
+        _, vps_adx = self._refresh_market_metrics(force=False)
 
         return {
             "action": str(action or payload.get("action") or self.current_side or "").upper(),
@@ -15849,8 +15822,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _maybe_refresh_atr(self):
         """
-        刷新 current_atr + last_adx（90m 合成）；open_atr(initialAtr) 锁定不变。
-        止损距离全程用 initialAtr；ADX 仅影响雷达动态追踪倍数。
+        刷新 last_adx（90m 合成）；ATR 全程只用 TV webhook atr。
+        open_atr 锁定不变，current_atr 不再被 VPS 计算覆盖。
         """
         now = time.time()
         last = float(getattr(self, "_atr_last_update_ts", 0) or 0)
@@ -15858,25 +15831,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if last > 0 and (now - last) < 180.0:
             return False
         try:
-            atr, adx = self._refresh_market_metrics(force=True)
+            _, adx = self._refresh_market_metrics(force=True)
         except Exception as e:
             logger.debug(f"行情引擎刷新失败: {e}")
             return False
-        if atr <= 0 and adx <= 0:
+        if adx <= 0:
             return False
-        old_a = float(self.current_atr or 0)
         old_x = float(getattr(self, "last_adx", 0) or 0)
-        if atr > 0:
-            self.current_atr = atr
         if adx > 0:
             self.last_adx = adx
-        # v16.4.0：禁止用 90m ATR 回填 open_atr
         self._atr_last_update_ts = now
-        if abs(atr - old_a) > 1e-6 or abs(adx - old_x) > 1e-6:
+        if abs(adx - old_x) > 1e-6:
             logger.info(
-                f"📐 [{self.symbol}] 行情刷新 ATR {old_a:.2f}→{float(self.current_atr):.2f} "
-                f"ADX {old_x:.1f}→{float(self.last_adx):.1f} "
-                f"(open_atr锁定={float(getattr(self, 'open_atr', 0) or 0):.2f})"
+                f"📐 [{self.symbol}] 行情刷新 ADX {old_x:.1f}→{float(self.last_adx):.1f} "
+                f"(ATR仅用TV·{self.atr_source})"
             )
             self._save_state()
         return True
@@ -17127,6 +17095,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
                             self.sizing_principal = eq
+
+            # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
+            # 例如：进程重启前持仓已平但未调用 _reset_breath_ledger_on_flat
+            if self._book_thinks_active():
+                live_qty = self._live_position_qty()
+                if live_qty is None:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 热加载后交易所持仓查询失败，暂保留本地状态"
+                    )
+                elif live_qty <= 0:
+                    logger.warning(
+                        f"🧹 [{self.symbol}] 热加载stale状态已清除：交易所空仓但账本有仓 "
+                        f"(watched_qty={self.watched_qty} current_side={self.current_side})"
+                    )
+                    self._reset_breath_ledger_on_flat(source="load_state_stale_clean")
 
             if self.base_qty <= 0 and os.path.exists(self.state_file):
                 last_open = self._load_last_journal_entry(None, kind="open")

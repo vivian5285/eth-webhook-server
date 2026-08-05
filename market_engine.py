@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-VPS 行情引擎：30m×3 合成 90m → ATR(14) / ADX(14)
-
-币安无原生 90m；拉 30m K 线后按 **UTC epoch 90m 边界** 合并，
-再算 Wilder ATR/ADX（与 TV RMA 对齐）。
-
-合成锚点（与 TradingView 90 分钟图一致）：
+# VPS 行情引擎：30m×3 合成 90m → ADX(14)
+# 规格 v2.1：ATR 全程只用 TV webhook.atr，VPS 不再计算 ATR/ADX 用于止损决策。
+# 本模块保留 ADX（用于雷达档位系数），ATR 计算已废弃但函数尚存（待清理）。
+# 合成锚点（与 TradingView 90 分钟图一致）：
   PERIOD_90M_MS = 90 * 60 * 1000
   bucket_open = open_time - (open_time % PERIOD_90M_MS)
 仅当某 bucket 凑齐 3 根完整 30m（bucket / +30m / +60m）才产出一根已闭合 90m。
