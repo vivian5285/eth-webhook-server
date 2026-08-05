@@ -78,6 +78,7 @@ _BY_BINANCE = {
     "XAUUSDT": BREATH_XAU,
     "BNBUSDT": BREATH_ETH,
     "ZECUSDT": BREATH_ETH,
+    "BCHUSDT": BREATH_ETH,  # v2.1过渡：使用ETH结构，待独立回测标定
 }
 
 _BY_DEEPCOIN = {

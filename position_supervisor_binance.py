@@ -169,7 +169,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.24.1-empty-pos-fix"
+BINANCE_VPS_VERSION = "v16.24.2-v2.1-cleanup"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -10634,12 +10634,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             if ok:
                 return True
+        # v2.1：breakeven_phase 已废除，但雷达追踪仍需通知
         if getattr(self, "_radar_activation_notified", False):
             self._radar_notify_pending = False
             return False
         if not getattr(self, "_radar_notify_pending", False):
-            return False
-        if not bool(getattr(self, "breakeven_phase", False)):
             return False
         logger.warning(
             f"🫁 [{self.symbol}] 补发雷达追踪钉钉 | SL={sl:.2f} | "

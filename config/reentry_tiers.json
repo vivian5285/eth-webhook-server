@@ -125,5 +125,43 @@
         "max_mult": 6.0
       }
     ]
+  },
+  "BCH": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "过渡系数：BNB/ZEC/BCH三币种尚无独立回测标定，使用ETH结构过渡，标注待独立校准",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "过渡：弱趋势（未经独立回测校准）",
+        "step_trigger_atr": 0.70,
+        "step_advance_atr": 0.42,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "过渡：中趋势（未经独立回测校准）",
+        "step_trigger_atr": 0.85,
+        "step_advance_atr": 0.55,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "过渡：强趋势（未经独立回测校准）",
+        "step_trigger_atr": 1.00,
+        "step_advance_atr": 0.65,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
   }
 }

@@ -1,0 +1,9 @@
+feat: v16.24.2 - v2.1彻底清理+BCH支持+雷达追踪通知修复
+
+v2.1 全面清理：
+1. breath_profiles.py: 添加BCHUSDT条目（使用ETH过渡配置）
+2. symbol_config.py: BCH已存在于BINANCE_SYMBOL_META，默认已支持
+3. _flush_pending_radar_notify(): 移除breakeven_phase检查（已废除），雷达追踪通知正常发送
+4. dingtalk.py: 钉钉已禁用(2026-07-31)，所有通知仅走TG
+5. 确认v16.24.1修复已保留：核武空仓防护+孤儿单容差收紧+WS/REST双核实
+6. 版本 → v16.24.2-v2.1-cleanup
