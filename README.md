@@ -1,6 +1,6 @@
 # 币安单一账户系统（binance-engine）· 终极生产级
 
-**当前版本：`v16.22.2-tp2-activation-highway-zec`**（雷达TP2成交后激活·TP补挂修复·ZEC支持）
+**当前版本：`v16.24-tp-baseline-fix`**（TP基准数量修复：减仓后用live_qty替代旧initial，避免TP数量虚高导致撤单循环）
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
 **仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）

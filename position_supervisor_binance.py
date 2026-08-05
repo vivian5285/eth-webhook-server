@@ -169,7 +169,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BINANCE_VPS_VERSION = "v16.22.2-tp2-activation-highway"
+BINANCE_VPS_VERSION = "v16.24-tp-baseline-fix"
 
 # 白皮书：OPEN 成交后 15s 内迟到 CLOSE 直接丢弃（OPEN 先到场景）
 LATE_CLOSE_SUPPRESS_SEC = 15.0
@@ -2561,6 +2561,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 or live_qty
                 or 0
             )
+            # v16.24 fix: 当 initial > live_qty 时，应该用 live_qty 避免TP数量虚高
+            if initial > live_qty:
+                initial = live_qty
             ratios = list(
                 getattr(self, "_leg_ratios", None)
                 or LEG_TP_RATIOS
@@ -6564,7 +6567,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or self.initial_qty
             or live_qty
         )
-        if initial < live_qty:
+        # v16.24 fix: 当 initial > live_qty 时，说明有减仓发生（如TP成交、部分平仓）
+        # 应该用 live_qty 作为基准，避免用旧的偏大 initial 造成TP数量虚高
+        if initial > live_qty:
             initial = live_qty
 
         def _abs_qty_for_idx(idx):
