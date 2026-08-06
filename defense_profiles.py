@@ -49,6 +49,8 @@ _BY_SYMBOL = {
     "ETHUSDT": DEFENSE_ETH,
     "XAUUSDT": DEFENSE_XAU,
     "BNBUSDT": DEFENSE_ETH,
+    "ZECUSDT": DEFENSE_ETH,  # 过渡：沿用ETH结构，待独立回测标定
+    "BCHUSDT": DEFENSE_ETH,  # 过渡：沿用ETH结构，待独立回测标定
     "ETH-USDT-SWAP": DEFENSE_ETH,
     "XAU-USDT-SWAP": DEFENSE_XAU,
 }

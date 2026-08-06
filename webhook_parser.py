@@ -69,7 +69,6 @@ RADAR_STAGE_COST_BUFFER_PCT = 0.0
 ATR_UPDATE_SEC = 300
 ORDER_TIMEOUT_SEC = 300
 SIGNAL_DEDUP_SEC = 60
-ATR_FALLBACK_ETH = 12.0
 ATR_FALLBACK_DEFAULT = 30.0
 
 # 已废除：档位相关空壳（防旧 import 崩）
@@ -793,13 +792,6 @@ def normalize_tv_payload(data):
     out["_is_reconcile"] = is_reconcile_action(action)
     out["_is_flatten"] = is_flatten_action(action)
     return out
-
-
-def atr_fallback_for_symbol(symbol="ETHUSDT"):
-    sym = str(symbol or "").upper()
-    if "ETH" in sym:
-        return ATR_FALLBACK_ETH
-    return ATR_FALLBACK_DEFAULT
 
 
 def _field_present(val):
