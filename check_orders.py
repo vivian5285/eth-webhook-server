@@ -2,13 +2,17 @@
 import sys
 sys.path.insert(0, '/home/binanceB/binance-engine')
 
-from binance_client import binance_client
+from binance.client import Client
+from account_profiles import get_active_profile
 
-# XAUUSDT my trades
+profile = get_active_profile()
+client = Client(profile['api_key'], profile['api_secret'])
+
+# XAUUSDT my trades (futures)
 try:
-    trades = binance_client.client.get_account_trades(symbol='XAUUSDT', limit=20)
+    trades = client.futures_account_trades(symbol='XAUUSDT', limit=20)
     print('XAUUSDT trades:', len(trades))
-    for t in trades:
+    for t in trades[:5]:
         ts = t['time']
         side = t['side']
         qty = t['qty']
@@ -18,11 +22,11 @@ try:
 except Exception as e:
     print('trades ERROR:', e)
 
-# XAUUSDT all orders
+# XAUUSDT all orders (futures)
 try:
-    orders = binance_client.client.get_all_orders(symbol='XAUUSDT', limit=30)
+    orders = client.futures_get_all_orders(symbol='XAUUSDT', limit=30)
     print('XAUUSDT orders:', len(orders))
-    for o in orders[-10:]:
+    for o in orders[-5:]:
         ts = o['time']
         side = o['side']
         qty = o['origQty']
