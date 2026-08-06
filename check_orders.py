@@ -1,15 +1,12 @@
+#!/usr/bin/env python3
 import sys
-sys.path.insert(0, '/home/trading/binance-engine')
+sys.path.insert(0, '/home/binanceB/binance-engine')
 
-from binance.client import Client
-from account_profiles import get_account_config
-
-cfg = get_account_config()
-client = Client(cfg['api_key'], cfg['api_secret'])
+from binance_client import binance_client
 
 # XAUUSDT my trades
 try:
-    trades = client.get_account_trades(symbol='XAUUSDT', limit=20)
+    trades = binance_client.client.get_account_trades(symbol='XAUUSDT', limit=20)
     print('XAUUSDT trades:', len(trades))
     for t in trades:
         ts = t['time']
@@ -23,7 +20,7 @@ except Exception as e:
 
 # XAUUSDT all orders
 try:
-    orders = client.get_all_orders(symbol='XAUUSDT', limit=30)
+    orders = binance_client.client.get_all_orders(symbol='XAUUSDT', limit=30)
     print('XAUUSDT orders:', len(orders))
     for o in orders[-10:]:
         ts = o['time']
