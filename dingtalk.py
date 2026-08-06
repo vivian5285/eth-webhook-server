@@ -1748,6 +1748,17 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     send_alert(f"🫁 [{sym}] 雷达止损 · 单槽维护", data, G_TITLE)
 
 
+# 规格 v2.1 §8 / VPS v2.0 §5.6：BNB/ZEC/BCH 尚无独立回测标定，沿用 ETH 结构过渡
+_CALIBRATED_SYMBOLS = ("ETHUSDT", "XAUUSDT")
+
+
+def _transitional_note(symbol):
+    sym = str(symbol or "").strip().upper()
+    if sym and sym not in _CALIBRATED_SYMBOLS:
+        return "过渡系数，未经独立回测校准（沿用ETH结构）"
+    return ""
+
+
 # breath-stop / 白皮书 v3.0：雷达首次接管通知
 def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=3,
                            shield_cleared=True, verify_note="", verified=True,
@@ -1791,6 +1802,9 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         data["ADX"] = _g(f"**{float(adx):.1f}**", G_MUTED)
     if trigger_gate:
         data["触发"] = _g(str(trigger_gate)[:120], G_MUTED)
+    trans_note = _transitional_note(sym)
+    if trans_note:
+        data["⚠️ 系数说明"] = _g(trans_note, G_WARN)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
     # 规格 v1.0：绝对价格锚定标签（首次=(TP1+TP2)/2 · 重入=TP2）

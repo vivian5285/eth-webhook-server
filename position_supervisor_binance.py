@@ -6897,10 +6897,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 continue
         return None
 
-    def _legacy_shield_stop_price(self, entry=None):
-        """已废弃"""
-        return None
-
     def _shield_stop_price(self, entry=None):
         """实盘保护止损 = 雷达止损 currentStop。"""
         return self._tv_hard_sl_target(entry) or None
@@ -14963,10 +14959,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if stage >= 5:
             return 1.0
         return 0.0
-
-    def _compute_radar_sl_for_stage(self, stage, curr_px=0.0):
-        """已废除旧阶段雷达表 → 连续阶梯追踪。"""
-        return self._compute_ladder_sl(curr_px)
 
     def _refresh_radar_state_on_recover(self, curr_px, entry):
         """
