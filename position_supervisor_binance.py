@@ -184,7 +184,7 @@ TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
 # 60s 去重键 = action+symbol+price（见 _signal_fingerprint 注释：意图/风险）
 SIGNAL_DEDUP_SEC = int(WP_SIGNAL_DEDUP_SEC or 60)
-DEFENSE_ALIGN_COOLDOWN_SEC = 300
+DEFENSE_ALIGN_COOLDOWN_SEC = 3600
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 SENTINEL_GRACE_AFTER_OPEN_SEC = 90
 # 递进雷达：开仓后休眠至 TP 绝对价格激活线；无固定秒级禁窗
@@ -6608,6 +6608,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 "live_qty": live_qty,
                 "orders_unreadable": True,
             }
+        # v16.25.6-fix: 若盘口返回空，但本地仍持有最近成功补挂的 TP orderId，
+        # 极可能是 API 传播延迟 / IP 限流导致查询为空。此时把空结果视为不可读，
+        # 避免据此撤销并重复挂单。
+        if not orders and live_qty > 0 and expected > 0:
+            ids = dict(getattr(self, "_defense_order_ids", None) or {})
+            has_recent_ids = bool(
+                ids.get("tp1") or ids.get("tp2") or ids.get("tp3")
+            )
+            last_align = float(getattr(self, "_last_defense_align_ok_ts", 0) or 0)
+            recently_aligned = (time.time() - last_align) < 1800.0
+            if has_recent_ids and recently_aligned:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 盘口TP查询为空但本地持有orderIds "
+                    f"({ids.get('tp1')}/{ids.get('tp2')})，视为查询延迟，跳过审计"
+                )
+                return {
+                    "matched_full": 0,
+                    "expected": expected,
+                    "levels": [],
+                    "issues": ["orders_unreadable"],
+                    "orphans": [],
+                    "pending_prices": [],
+                    "live_qty": live_qty,
+                    "orders_unreadable": True,
+                }
         levels = []
         matched_full = 0
         issues = []
