@@ -894,7 +894,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._ensure_sentinel_running()
         self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_RECOVER_SEC
         logger.info(
-            f"📡 [{source}] 恢复实盘监督 {pos['side']} {pos['size']} ETH "
+            f"📡 [{source}] 恢复实盘监督 {pos['side']} {pos['size']} {self._unit()} "
             f"| 雷达={'已激活' if self._is_radar_active() else '待命'}"
         )
 
@@ -986,8 +986,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         extra_notes = stack.get("notes") or []
         extra_txt = (" | " + " · ".join(extra_notes)) if extra_notes else ""
         verify_note = (
-            f"[{source}] 接管 {real_amt} ETH @ {entry_px:.2f} | "
-            f"开单 {saved_initial} ETH | "
+            f"[{source}] 接管 {real_amt} {self._unit()} @ {entry_px:.2f} | "
+            f"开单 {saved_initial} {self._unit()} | "
             f"来源={provenance.get('label') or ('历史TV关联' if link_historical_tv else '待核实')} | "
             f"止盈 {matched}/{expected} 档 | "
             f"雷达止损@{float(self._tv_hard_sl_target(entry_px) or 0):.2f} | "
@@ -1058,13 +1058,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if expected > 0 and matched < expected:
             dingtalk.report_system_alert(
                 f"{source} · 止盈未完全对齐",
-                f"{side} {real_amt} ETH @ {entry_px:.2f} | "
+                f"{side} {real_amt} {self._unit()} @ {entry_px:.2f} | "
                 f"仅 {matched}/{expected} 档 | 哨兵将接力纠偏",
             )
         else:
             self._mark_defense_align_ok()
 
-        logger.info(f"✅ [{source}] 实盘接管完成 {side} {real_amt} ETH @ {entry_px:.2f}")
+        logger.info(f"✅ [{source}] 实盘接管完成 {side} {real_amt} {self._unit()} @ {entry_px:.2f}")
         return True
 
     def _run_idle_live_reconcile(self):
@@ -1125,7 +1125,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if not self.current_side:
                 self.current_side = pos["side"]
             logger.warning(
-                f"🐜 [空闲巡检] 发现残量 {pos['side']} {live_qty} ETH → 扫尾"
+                f"🐜 [空闲巡检] 发现残量 {pos['side']} {live_qty} {self._unit()} → 扫尾"
             )
             self._sweep_dust_and_finalize("空闲巡检：盘口蚂蚁仓自动扫平")
             return
@@ -1142,7 +1142,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if now - getattr(self, "_last_idle_takeover_ts", 0) < IDLE_TAKEOVER_COOLDOWN_SEC:
                 return
             logger.warning(
-                f"🔍 [空闲巡检] VPS空仓但实盘同向持仓 {live_side} {live_qty} ETH "
+                f"🔍 [空闲巡检] VPS空仓但实盘同向持仓 {live_side} {live_qty} {self._unit()} "
                 f"(TV={tv_side}) → 未登记来源接管+挂防线"
             )
             self._perform_live_takeover(
@@ -1155,7 +1155,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         if self._is_material_qty_change(watched, live_qty):
             logger.warning(
-                f"🔍 [空闲巡检] 人工异动 {watched} → {live_qty} ETH → 重算TP123+止损"
+                f"🔍 [空闲巡检] 人工异动 {watched} → {live_qty} {self._unit()} → 重算TP123+止损"
             )
             curr_px = binance_client.get_current_price(self.symbol)
             old_qty = watched
@@ -2792,7 +2792,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if exp and audit.get("matched_full", 0) < exp:
                 dingtalk.report_system_alert(
                     f"{source} · 止盈未完全对齐",
-                    f"{self.current_side} {live_qty} ETH @ {entry:.2f} | "
+                    f"{self.current_side} {live_qty} {self._unit()} @ {entry:.2f} | "
                     f"仅 {audit.get('matched_full', 0)}/{exp} 档 | "
                     f"VPS@{float(self._vps_hard_sl_target() or 0):.2f} | 哨兵接力",
                 )
@@ -2923,7 +2923,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if float(getattr(self, "base_qty", 0) or 0) <= 0:
                 self.base_qty = real_amt
             notes.append(
-                f"人工开仓(重启): 账本空仓 → 实盘 {real_amt} ETH {side}，已接管为基准仓"
+                f"人工开仓(重启): 账本空仓 → 实盘 {real_amt} {self._unit()} {side}，已接管为基准仓"
             )
         elif saved_watched > 0 and real_amt > 0:
             entry_px = float(pos.get("entry_price", 0) or 0)
@@ -2955,7 +2955,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             reconcile["qty_manual_change"] = (saved_watched, real_amt, action_msg)
             notes.append(
-                f"人工异动(重启): {saved_watched} ETH → {real_amt} ETH ({action_msg})"
+                f"人工异动(重启): {saved_watched} {self._unit()} → {real_amt} {self._unit()} ({action_msg})"
             )
 
         if not self.last_tv_side:
@@ -3044,7 +3044,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             peak = max(jq, saved if saved > 0 else 0.0, live_qty)
             if live_qty > 0 and jq > live_qty + 0.001:
                 logger.info(
-                    f"📖 OPEN日志开单 {jq} ETH @ {je:.2f} > 现仓 {live_qty} ETH "
+                    f"📖 OPEN日志开单 {jq} {self._unit()} @ {je:.2f} > 现仓 {live_qty} {self._unit()} "
                     f"→ 保留开单量（部分止盈/减仓）"
                 )
             return peak
@@ -3081,7 +3081,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 非监控接管：仅当入场与 OPEN 日志明显不符时才重置为现仓
         if saved > live_qty + 0.001 and trusted <= live_qty + 0.001:
             logger.warning(
-                f"📖 丢弃陈旧 initial_qty={saved} → 锚定 {trusted} ETH "
+                f"📖 丢弃陈旧 initial_qty={saved} → 锚定 {trusted} {self._unit()} "
                 f"(现仓 {live_qty}，换仓/无同笔开仓证据)"
             )
             self.initial_qty = trusted
@@ -3850,16 +3850,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if retain < CAP_MIN_RETAIN_RATIO and live > target * 2:
             return (
                 f"目标仅相当于实盘的 {retain:.1%}，疑似误用「可用保证金」而非「本金快照」"
-                f"（目标 {target:.4f} ETH vs 实盘 {live:.4f} ETH）"
+                f"（目标 {target:.4f} {self._unit()} vs 实盘 {live:.4f} {self._unit()}）"
             )
         if trim > live * 0.85 and target < live * 0.15:
             return (
-                f"裁减幅度过大：将平掉 {trim:.4f} ETH，仅保留 {target:.4f} ETH，"
+                f"裁减幅度过大：将平掉 {trim:.4f} {self._unit()}，仅保留 {target:.4f} {self._unit()}，"
                 f"疑似额度基数算错"
             )
         expected = round(live - target, 3)
         if abs(trim - expected) > max(live * 0.05, 0.01):
-            return f"裁减量不符：计划 {trim:.4f} ETH，应为 {expected:.4f} ETH"
+            return f"裁减量不符：计划 {trim:.4f} {self._unit()}，应为 {expected:.4f} {self._unit()}"
         return None
 
     def _apply_tv_sizing_params(self, payload):
@@ -5224,7 +5224,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         excess = float(live_qty) - target
         if excess > REGIME_CAP_TOLERANCE_ETH and excess <= tol:
             logger.info(
-                f"📎 [档位限额] 微超 {live_qty} > {target} ETH "
+                f"📎 [档位限额] 微超 {live_qty} > {target} {self._unit()} "
                 f"(+{excess:.3f}, {excess / target:.2%} ≤ {QTY_ALIGN_MIN_PCT:.0%} 容忍)，跳过裁减"
             )
         return live_qty > target + tol, target, margin_pct, reg
@@ -5289,7 +5289,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if meta.get("entry_px") and float(meta.get("entry_px") or 0) > 0:
             base_note += f" | 开仓 {float(meta['entry_px']):.2f}"
         if meta.get("closed_qty") and float(meta.get("closed_qty") or 0) > 0:
-            base_note += f" | 平仓 {float(meta['closed_qty']):.3f} ETH"
+            base_note += f" | 平仓 {float(meta['closed_qty']):.3f} {self._unit()}"
         if meta.get("live_exit_px") and float(meta.get("live_exit_px") or 0) > 0:
             base_note += f" | 现价 {float(meta['live_exit_px']):.2f}"
         # regime 仅内部逻辑使用，禁止拼进用户可见 verify_note
@@ -5310,7 +5310,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             residual = pos["size"] if pos else 0.0
             if residual > 0 and not self._is_dust_qty(residual):
                 logger.warning(
-                    f"平仓钉钉跳过：空仓核查未通过 | 残留 {residual} ETH | reason={reason}"
+                    f"平仓钉钉跳过：空仓核查未通过 | 残留 {residual} {self._unit()} | reason={reason}"
                 )
                 return
             verify_note = f"{base_note} | REST 同步略延迟"
@@ -5351,7 +5351,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 break
             close_side = "SELL" if pos["side"] == "LONG" else "BUY"
             qty = round(float(pos["size"]), 3)
-            logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {qty} ETH reduceOnly")
+            logger.info(f"🐜 扫尾第 {round_i + 1}/4: {close_side} {qty} {self._unit()} reduceOnly")
             order = binance_client.place_market_order(
                 close_side, qty, symbol=self.symbol, reduce_only=True,
             )
@@ -5422,7 +5422,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 DUST_QTY_ETH, ref * TP_COMPLETE_RESIDUAL_RATIO
             ):
                 logger.info(
-                    f"🔄 [重启扫描] 活跃主仓 {real_amt} ETH (ref={ref})，跳过蚂蚁扫尾"
+                    f"🔄 [重启扫描] 活跃主仓 {real_amt} {self._unit()} (ref={ref})，跳过蚂蚁扫尾"
                 )
                 return False
         if not self._is_dust_qty(real_amt) and not self._should_finalize_tp_victory(real_amt):
@@ -5432,7 +5432,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         else:
             reason = "重启扫描：盘口蚂蚁仓自动扫平"
         logger.warning(
-            f"🐜 [重启扫描] {self.current_side} 残量 {real_amt} ETH "
+            f"🐜 [重启扫描] {self.current_side} 残量 {real_amt} {self._unit()} "
             f"(initial={self.initial_qty}, watched={self.watched_qty}) → 扫尾强平"
         )
         self._sweep_dust_and_finalize(reason)
@@ -5486,7 +5486,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._save_state()
 
         verify_note = (
-            f"重启对账补发 | 原账本 {prev_watched} ETH {prev_side or ''} | "
+            f"重启对账补发 | 原账本 {prev_watched} {self._unit()} {prev_side or ''} | "
             f"盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
         )
         recover_meta = self._infer_flat_close_meta(hint_reason="重启对账补发收网")
@@ -5710,7 +5710,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         if len(saved) >= 3 and live_qty > DUST_QTY_ETH and not price_past:
             logger.warning(
-                f"⚠️ tp_levels_consumed={saved} 但仍有 {live_qty} ETH → "
+                f"⚠️ tp_levels_consumed={saved} 但仍有 {live_qty} {self._unit()} → "
                 f"按开单 {initial_qty} 重算为 TP{inferred or '无'}"
             )
             saved = inferred
@@ -6822,7 +6822,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     time.sleep(0.2)
                 logger.info(
                     f"🔧 重启去重 TP{lv['level']} @{price:.2f}："
-                    f"撤 {len(at_px) - 1} 留 {keep['qty']} ETH"
+                    f"撤 {len(at_px) - 1} 留 {keep['qty']} {self._unit()}"
                 )
                 time.sleep(0.35)
                 at_px = [keep]
@@ -6843,7 +6843,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if res:
                         actions += 1
                         logger.info(
-                            f"🔧 重启纠偏 TP{lv['level']} @{price:.2f} → {target_q} ETH"
+                            f"🔧 重启纠偏 TP{lv['level']} @{price:.2f} → {target_q} {self._unit()}"
                         )
                     time.sleep(0.35)
                 continue
@@ -6856,7 +6856,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             if res:
                 actions += 1
-                logger.info(f"🔧 重启补挂 TP{lv['level']} @{price:.2f} qty={target_q} ETH")
+                logger.info(f"🔧 重启补挂 TP{lv['level']} @{price:.2f} qty={target_q} {self._unit()}")
             time.sleep(0.35)
 
         final = self._audit_tp_levels(live_qty, tolerance, qty_tol)
@@ -8386,7 +8386,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"动能UPDATE_TP | {old_tps} → {new_tps} | "
             f"撤旧 {cancelled} | 新挂 {placed} | "
             f"止盈 {audit.get('matched_full', 0)}/{audit.get('expected', 0)} | "
-            f"持仓 {live_qty} ETH @ {entry:.2f} | "
+            f"持仓 {live_qty} {self._unit()} @ {entry:.2f} | "
             f"市价 {curr_px:.2f} | 硬止损/雷达未触碰"
         )
         logger.info(
@@ -9762,12 +9762,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
             logger.error(
-                f"维护硬止损失败：持仓 {real_amt} ETH | entry={self.watched_entry} "
+                f"维护硬止损失败：持仓 {real_amt} {self._unit()} | entry={self.watched_entry} "
                 f"| side={self.current_side} | regime={self.regime} | 盘口无STOP"
             )
             dingtalk.report_system_alert(
                 "TV硬止损缺失",
-                f"持仓 {real_amt} ETH · 账本与盘口均无硬止损 "
+                f"持仓 {real_amt} {self._unit()} · 账本与盘口均无硬止损 "
                 f"(entry={self.watched_entry or '空'} side={self.current_side or '空'} "
                 f"R{int(getattr(self, 'open_regime', None) or self.regime or 0)})",
                 suggestion="哨兵将按 TV tv_sl 原值补挂；若盘口已有请忽略本条",
@@ -10097,7 +10097,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 break
             at_px = [o for o in orders if abs(o["price"] - px) <= tolerance]
             if len(at_px) == 1 and abs(at_px[0]["qty"] - q) <= qty_tol:
-                logger.info(f"  ✓ TP{level} @ {px:.2f} 已存在 {at_px[0]['qty']} ETH，跳过")
+                logger.info(f"  ✓ TP{level} @ {px:.2f} 已存在 {at_px[0]['qty']} {self._unit()}，跳过")
                 continue
             for o in at_px:
                 if o.get("orderId"):
@@ -10105,7 +10105,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     time.sleep(0.25)
             # 撤旧后释放本地标签，才允许带新标签重挂（防拒挂死锁）
             self._clear_pending_tags_for_kind(f"TP{int(level)}", save=False)
-            logger.info(f"  + 补挂 TP{level} @ {px:.2f} qty={q} ETH")
+            logger.info(f"  + 补挂 TP{level} @ {px:.2f} qty={q} {self._unit()}")
             res = self._place_defense_tp_limit(
                 close_side, q, px, int(level), retries=0,
             )
@@ -10689,7 +10689,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._mark_defense_align_ok()
                 return last_audit
             logger.warning(
-                f"☢️ 核武级止盈清场重挂 {r + 1}/{rounds} | 持仓 {live_qty} ETH | "
+                f"☢️ 核武级止盈清场重挂 {r + 1}/{rounds} | 持仓 {live_qty} {self._unit()} | "
                 f"当前 {last_audit['matched_full']}/{last_audit['expected']} | "
                 f"{self._format_audit_summary(last_audit)}"
             )
@@ -10806,7 +10806,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if not set(range(1, place_n + 1)).issubset(consumed):
                 self._ensure_tp123_prices_from_tv(entry)
         if reason:
-            logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} ETH")
+            logger.info(f"🛡️ 防线对齐: {reason} | 持仓 {live_qty} {self._unit()}")
 
         self._defense_align_in_progress = True
         try:
@@ -11158,7 +11158,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 dingtalk.report_system_alert,
                 title="雷达守护：止盈仍未对齐",
                 detail=(
-                    f"{self.current_side} {real_amt} ETH | "
+                    f"{self.current_side} {real_amt} {self._unit()} | "
                     f"{self._format_audit_summary(new_audit)} | 请人工核查币安挂单"
                 ),
             )
@@ -11220,7 +11220,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         matched = audit["matched_full"]
         pending_prices = audit.get("pending_prices", [])
         logger.info(
-            f"📊 防线审计: 持仓 {live_qty} ETH | TP {matched}/{expected} | "
+            f"📊 防线审计: 持仓 {live_qty} {self._unit()} | TP {matched}/{expected} | "
             f"{self._format_audit_summary(audit)}"
         )
 
@@ -11748,7 +11748,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             dingtalk.report_system_alert(
                 "雷达孤儿TP清理",
-                f"{self.current_side} {live_qty} ETH | 雷达SL `{radar_sl:.2f}` | "
+                f"{self.current_side} {live_qty} {self._unit()} | 雷达SL `{radar_sl:.2f}` | "
                 f"已撤 TP{stale_levels} 限价 {cancelled} 笔 | "
                 f"等止盈已无意义，改由雷达锁利",
             )
@@ -11832,7 +11832,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     time.sleep(0.2)
                     logger.info(
                         f"🔧 撤偏差 TP{lv['level']} @{px:.2f}: "
-                        f"盘口 {o['qty']} → 应 {target_q} ETH"
+                        f"盘口 {o['qty']} → 应 {target_q} {self._unit()}"
                     )
         return cancelled
 
@@ -11924,7 +11924,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.tp_levels_consumed = merged
                 self._save_state()
             actions.append(
-                f"已成交/已过价档 TP{merged} | 开单 {initial_qty} → 现仓 {live_qty} ETH"
+                f"已成交/已过价档 TP{merged} | 开单 {initial_qty} → 现仓 {live_qty} {self._unit()}"
             )
 
         consumed = getattr(self, "tp_levels_consumed", []) or []
@@ -11994,7 +11994,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         rem_levels = self._expected_tp_levels(live_qty)
         rem_sum = round(sum(lv["qty"] for lv in rem_levels), 3)
         actions.append(
-            f"剩余 TP 重分 {rem_sum}/{live_qty} ETH | "
+            f"剩余 TP 重分 {rem_sum}/{live_qty} {self._unit()} | "
             f"对齐 {audit.get('matched_full', 0)}/{audit.get('expected', 0)} 档 | "
             f"应挂 {[lv['level'] for lv in rem_levels]}"
         )
@@ -12020,7 +12020,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             }
         consumed = getattr(self, "tp_levels_consumed", []) or []
         logger.info(
-            f"🎯 TP 成交后对齐: 剩余 {live_qty} ETH | "
+            f"🎯 TP 成交后对齐: 剩余 {live_qty} {self._unit()} | "
             f"已成交 TP{consumed} | 仅同步数量，不撤单重挂"
         )
         ok = self._atomic_resize_after_partial_tp(
@@ -12524,7 +12524,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if verified_pos else self.watched_entry
         )
         verify_note = (
-            f"核实 {new_qty} ETH @ {entry_px:.2f} | "
+            f"核实 {new_qty} {self._unit()} @ {entry_px:.2f} | "
             f"止盈 {realign_result['matched']}/{realign_result['expected']} 档 | "
             f"{self._format_audit_summary(realign_result['audit'])}"
         )
@@ -12649,7 +12649,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if pos and float(pos.get("size") or 0) > 0:
             live = round(float(pos["size"]), 3)
             if abs(live - fallback_qty) > 0.001:
-                logger.info(f"📐 实盘数量校正: 账本 {fallback_qty} → 交易所 {live} ETH")
+                logger.info(f"📐 实盘数量校正: 账本 {fallback_qty} → 交易所 {live} {self._unit()}")
             return live
         # WebSocket 空仓但 fallback 非 0 → 可能缓存过期，强制 REST 核实
         if float(fallback_qty or 0) > 0:
@@ -12657,13 +12657,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if pos_rest and float(pos_rest.get("size") or 0) > 0:
                 live = round(float(pos_rest["size"]), 3)
                 logger.warning(
-                    f"📐 [{self.symbol}] WS空仓但账本残留 {fallback_qty} → REST核实 {live} ETH"
+                    f"📐 [{self.symbol}] WS空仓但账本残留 {fallback_qty} → REST核实 {live} {self._unit()}"
                 )
                 return live
             # REST 也空 → 真实空仓，清账本
             if pos_rest is None:
                 logger.info(
-                    f"🧹 [{self.symbol}] 确认空仓：WS+REST均为0，清账本 {fallback_qty} ETH"
+                    f"🧹 [{self.symbol}] 确认空仓：WS+REST均为0，清账本 {fallback_qty} {self._unit()}"
                 )
                 self.watched_qty = 0.0
                 try:
@@ -13449,7 +13449,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             tv_atr=tv_atr,
             qty=pos["size"],
             verify_note=(
-                f"核实持仓 {pos['size']} ETH @ {live_entry:.2f} | {reason_txt} | 执行先平后开"
+                f"核实持仓 {pos['size']} {self._unit()} @ {live_entry:.2f} | {reason_txt} | 执行先平后开"
             ),
         )
 
@@ -14152,7 +14152,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.watched_entry = float(confirmed.get("entry_price") or 0)
                     self.current_side = confirmed.get("side")
                     logger.info(
-                        f"✅ 开仓确认: {self.current_side} {self.watched_qty} ETH @ {self.watched_entry}"
+                        f"✅ 开仓确认: {self.current_side} {self.watched_qty} {self._unit()} @ {self.watched_entry}"
                     )
                 elif confirmed == "QUERY_FAILED":
                     # 订单可能成功但查不到 → TG紧急告警，账本留空（雷达守护兜底）
@@ -16335,7 +16335,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                                 drift = self._qty_change_ratio(self.watched_qty, real_amt)
                                 if drift >= QTY_DRIFT_TOLERANCE_PCT:
                                     logger.info(
-                                        f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} ETH "
+                                        f"📎 [哨兵] 仓位微漂 {self.watched_qty}→{real_amt} {self._unit()} "
                                         f"({drift:.2%}，未达 {QTY_ALIGN_MIN_PCT:.0%} 对齐阈值)"
                                     )
                                 self.watched_qty = real_amt
@@ -16424,7 +16424,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         live_qty = self._resolve_live_qty(qty)
         if live_qty <= 0:
-            logger.warning(f"重建防线跳过：交易所无可用持仓 (传入 {qty} ETH)")
+            logger.warning(f"重建防线跳过：交易所无可用持仓 (传入 {qty} {self._unit()})")
             return 0
 
         # 查单失败禁止撤/补：否则会撤光 TP 再盲挂叠出几十张
@@ -16448,7 +16448,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         placed = 0
 
         logger.info(
-            f"🕸️ 补挂 TP: 总 {live_qty} ETH | 已成交 TP{consumed or '无'} | "
+            f"🕸️ 补挂 TP: 总 {live_qty} {self._unit()} | 已成交 TP{consumed or '无'} | "
             f"R{self._tp_split_regime()} 剩余档"
         )
 
@@ -16641,7 +16641,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if closed_ok:
             logger.info(f"✅ [{tag}] 并行平仓成功，已确认无仓")
         else:
-            logger.warning(f"⚠️ [{tag}] 并行平仓后仍有持仓: {verify_amt} ETH")
+            logger.warning(f"⚠️ [{tag}] 并行平仓后仍有持仓: {verify_amt} {self._unit()}")
 
         # 5. 快速撤单清理残余（仅 1 轮，不再多轮循环）
         purge_result = self._purge_all_defense_orders_on_flat(
@@ -16695,7 +16695,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             residual_sz = residual["size"] if residual else 0.0
             if residual_sz > 0 and self._is_dust_qty(residual_sz):
                 close_side = "SELL" if residual["side"] == "LONG" else "BUY"
-                logger.warning(f"🐜 强平后残 {residual_sz} ETH，触发蚂蚁仓扫尾")
+                logger.warning(f"🐜 强平后残 {residual_sz} {self._unit()}，触发蚂蚁仓扫尾")
                 order = binance_client.place_market_order(
                     close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
                 )
@@ -16711,7 +16711,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         return self._verify_flat()
                     residual_amt = float(residual.get("positionAmt", 0))
                     residual_sz = round(abs(residual_amt), 3)
-                    logger.info(f"[蚂蚁仓复核] {self.symbol}: {residual_sz} ETH")
+                    logger.info(f"[蚂蚁仓复核] {self.symbol}: {residual_sz} {self._unit()}")
                     time.sleep(0.5)
                     order = binance_client.place_market_order(
                         close_side, residual_sz, symbol=self.symbol, reduce_only=True, emergency=True,
@@ -16730,10 +16730,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     logger.error(f"❌ 6 轮强平后持仓不可读 (QUERY_FAILED)")
                 else:
                     residual_sz = residual["size"] if residual else 0.0
-                    logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} ETH")
+                    logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz} {self._unit()}")
                 dingtalk.report_system_alert(
                     "强平未完全归零",
-                    f"6 轮市价平仓后仍剩 {residual_sz} ETH，请人工核查币安盘口",
+                    f"6 轮市价平仓后仍剩 {residual_sz} {self._unit()}，请人工核查币安盘口",
                 )
 
         if reset_state:
@@ -16747,7 +16747,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.current_side = residual["side"]
                     self.watched_entry = residual["entry_price"]
                     logger.warning(
-                        f"强平未归零，账本同步实盘: {self.current_side} {self.watched_qty} ETH"
+                        f"强平未归零，账本同步实盘: {self.current_side} {self.watched_qty} {self._unit()}"
                     )
             self._save_state()
 
@@ -17253,7 +17253,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
                     if reconcile.get("manual_open") or float(self.watched_qty or 0) <= 0:
                         logger.info(
-                            f"🔄 [重启] 人工/孤儿同向仓 {side} {pos['size']} ETH "
+                            f"🔄 [重启] 人工/孤儿同向仓 {side} {pos['size']} {self._unit()} "
                             f"→ 闪电接管 TP123+止损+雷达"
                         )
                         self._perform_live_takeover(
@@ -17308,8 +17308,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     _rebuilt = result.get("rebuilt", False)
 
                     logger.info(
-                        f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} ETH @ "
-                        f"{self.watched_entry:.2f} | 开单 {saved_initial} ETH | "
+                        f"🔄 [系统重启点火] 检测到实盘持仓 {self.current_side} {real_amt} {self._unit()} @ "
+                        f"{self.watched_entry:.2f} | 开单 {saved_initial} {self._unit()} | "
                         f"已成交 TP{getattr(self, 'tp_levels_consumed', []) or '无'} | "
                         f"雷达={'已激活' if radar_active else '待命(价触激活线)'} | "
                         f"TV对齐 {self.last_tv_side} | 对账 {len(reconcile_notes)} 项"
@@ -17339,8 +17339,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     skip_note = " | 盘口已齐全，未重复补挂" if not _rebuilt else ""
                     vps_sl = float(self._vps_hard_sl_target(entry_px) or 0)
                     verify_note = (
-                        f"接管 {real_amt} ETH @ {entry_px:.2f} | "
-                        f"开单 {saved_initial} ETH | "
+                        f"接管 {real_amt} {self._unit()} @ {entry_px:.2f} | "
+                        f"开单 {saved_initial} {self._unit()} | "
                         f"已成交 TP{getattr(self, 'tp_levels_consumed', []) or '无'} | "
                         f"TV方向 {self.last_tv_side} | "
                         f"TV硬止损@{vps_sl:.2f}"
@@ -17372,7 +17372,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         self._recover_tp_unconfirmed = True
                         dingtalk.report_system_alert(
                             "重启接管后限价止盈未对齐",
-                            f"{self.current_side} {real_amt} ETH @ {entry_px:.2f} | "
+                            f"{self.current_side} {real_amt} {self._unit()} @ {entry_px:.2f} | "
                             f"仅 {matched}/{expected} 档 | {self._format_audit_summary(audit)} | "
                             f"{hint} | 雷达哨兵将接力纠偏；仍失败请 APP 手动全撤后重启",
                         )

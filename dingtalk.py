@@ -156,7 +156,7 @@ _ctx_symbol = contextvars.ContextVar("dingtalk_symbol", default=None)
 
 
 def _resolve_unit(unit_label=None, symbol=None):
-    """按品种解析数量单位：XAUUSDT → XAU，ETHUSDT → ETH。禁止黄金单显示 ETH。"""
+    """按品种解析数量单位：XAUUSDT → XAU，ETHUSDT/BNBUSDT → ETH，BCHUSDT → BCH，ZECUSDT → ZEC。"""
     if unit_label:
         u = str(unit_label).strip().upper()
         if u:
@@ -166,6 +166,10 @@ def _resolve_unit(unit_label=None, symbol=None):
         sym = sym.split(":")[-1]
     if "XAU" in sym or "GOLD" in sym:
         return "XAU"
+    if "BCH" in sym:
+        return "BCH"
+    if "ZEC" in sym:
+        return "ZEC"
     if "ETH" in sym or "BNB" in sym:
         return "ETH"
     # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
@@ -177,6 +181,10 @@ def _resolve_unit(unit_label=None, symbol=None):
         ctx_s = ctx_s.split(":")[-1]
     if "XAU" in ctx_s or "GOLD" in ctx_s:
         return "XAU"
+    if "BCH" in ctx_s:
+        return "BCH"
+    if "ZEC" in ctx_s:
+        return "ZEC"
     if "ETH" in ctx_s or "BNB" in ctx_s:
         return "ETH"
     return UNIT_LABEL
