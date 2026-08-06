@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 import sys
+import os
 sys.path.insert(0, '/home/binanceB/binance-engine')
 
 from binance.client import Client
-from account_profiles import get_active_profile
+from dotenv import load_dotenv
 
-profile = get_active_profile()
-client = Client(profile['api_key'], profile['api_secret'])
+load_dotenv()
+
+api_key = os.getenv('BINANCE_API_KEY', '')
+api_secret = os.getenv('BINANCE_API_SECRET', '')
+
+if not api_key or not api_secret:
+    print('ERROR: BINANCE_API_KEY or BINANCE_API_SECRET not set')
+    sys.exit(1)
+
+client = Client(api_key, api_secret)
 
 # XAUUSDT my trades (futures)
 try:
