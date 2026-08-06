@@ -10734,6 +10734,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"☢️ 核武轮 {r + 1} 仍未对齐: {self._format_audit_summary(last_audit)}"
             )
             time.sleep(1.5)
+        # 核武结束前：清理孤儿单（防止遗留旧TP干扰）
+        if last_audit.get("orphans"):
+            self._cancel_orphan_tp_orders(live_qty)
+            time.sleep(0.5)
+            last_audit = self._audit_tp_levels(live_qty)
         self._nuclear_fail_streak = int(getattr(self, "_nuclear_fail_streak", 0) or 0) + 1
         return last_audit
 
@@ -11870,6 +11875,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         actions.extend(plan.get("notes") or [])
         self._sanitize_tp_consumed(initial_qty, live_qty, curr_px)
         consumed = getattr(self, "tp_levels_consumed", []) or []
+        # v16.26-fix: 当数量太小时（如XAU 0.004 ETH ×10% = 0.0004 < 最小下单量0.001），
+        # 推断不可靠，应直接清除consumed让TP1参与重挂
+        if self._tp_baseline_qty(live_qty) or self.initial_qty or live_qty:
+            baseline = float(self._tp_baseline_qty(live_qty) or self.initial_qty or live_qty or 0)
+            if baseline > 0:
+                qty_step = float(getattr(self, "qty_step", 0) or 0.001)
+                min_placeable = max(qty_step, 0.001)
+                ratios = list(getattr(self, "_leg_ratios", None) or [0.10, 0.20, 0.70])
+                if baseline * ratios[0] < min_placeable:
+                    logger.warning(
+                        f"⚠️ [{self.symbol}] 数量太小({baseline}×{ratios[0]}={baseline*ratios[0]:.4f}<{min_placeable})，"
+                        f"推断不可靠 → 清除consumed让TP1参与重挂"
+                    )
+                    consumed = []
+                    self.tp_levels_consumed = []
+                    self._save_state()
         if consumed and initial_qty <= live_qty + 0.001:
             inferred = self._infer_tp_consumed_sequential(initial_qty, live_qty, curr_px)
             price_past = [
