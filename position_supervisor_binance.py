@@ -11030,14 +11030,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 纯缺失/数量偏差等普通情况一律跳过，等待传播稳定
         now = time.time()
         since_ok = now - getattr(self, "_last_defense_align_ok_ts", 0)
-        if since_ok < DEFENSE_ALIGN_COOLDOWN_SEC:
-            # v16.25.3-fix: 冷却期内不再因为审计显示"裸仓"就强制对齐。
-            # API 传播延迟 / IP 限流会让 open_orders 查询返回空，导致刚补挂的 TP
-            # 被误判为缺失，从而重复挂单甚至触发撤->挂->撤死循环。
-            # 冷却期内统一跳过，让挂单在交易所侧完成传播；真有严重异常会由
-            # 冷却期后的 severe 路径或哨兵对账处理。
+        streak = int(getattr(self, "_guardian_bad_streak", 0) or 0)
+        # v16.25.4-fix: 对齐安静期随 bad_streak 指数退避。
+        # API 传播延迟 / IP 限流会让 open_orders 查询返回空，导致刚补挂的 TP
+        # 被误判为缺失，从而重复挂单甚至触发撤->挂->撤死循环。
+        # 扩大安静窗口，让挂单在交易所侧完成传播；真有严重异常会由
+        # severe 路径或哨兵对账处理。
+        quiet_sec = DEFENSE_ALIGN_COOLDOWN_SEC * (1 + min(streak, 4))
+        if since_ok < quiet_sec:
             logger.info(
-                f"📡 [雷达守护] 冷却期内跳过对齐({since_ok:.0f}s/{DEFENSE_ALIGN_COOLDOWN_SEC}s) | "
+                f"📡 [雷达守护] 对齐安静期跳过 "
+                f"({since_ok:.0f}s/{quiet_sec}s, streak={streak}) | "
                 f"等待TP挂单传播"
             )
             return None
@@ -11070,39 +11073,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             < DEFENSE_ALIGN_COOLDOWN_SEC
         )
         # 纯缺失：宽限期/冷却期内最多轻量补挂，禁止核武连环
-        # 例外：有仓却 0 档 TP → 必须升级强制对齐（禁裸奔）
-        naked_tp = (
-            int(audit.get("matched_full") or 0) <= 0
-            and int(audit.get("expected") or 0) > 0
-        )
-        if naked_tp:
-            self._clear_spurious_tp_consumed_if_full_size(
-                real_amt, source="雷达守护·TP全缺",
-            )
-            logger.error(
-                f"📡 [雷达守护] 有仓 TP 全缺 → 无视宽限/冷却，强制对齐 | "
-                f"{self._format_audit_summary(audit)}"
-            )
-            self._nuclear_fail_streak = 0
-            # 冷却期内用 rounds=1 限制激进；API传播延迟可能导致误判，
-            # 多次 rounds=3 核武会形成「撤→挂→撤」死循环
-            rounds = 3 if since_ok >= DEFENSE_ALIGN_COOLDOWN_SEC else 1
-            result = self._enforce_defense_alignment(
-                real_amt, self.watched_entry,
-                dynamic_sl=(sl if self._is_radar_active() else None),
-                reason="雷达守护·裸仓强制补TP", rounds=rounds,
-            )
-            _stops = binance_client.find_protective_stop_prices(self.symbol)
-            if _stops is not None and not _stops:
-                self._sync_exchange_stop(
-                    real_amt, radar_sl=None,
-                    reason="雷达守护·裸仓强制TV硬止损", force=True,
-                )
-            elif _stops is None:
-                logger.error(
-                    f"📡 [雷达守护] 挂单查询失败 → 禁止裸仓强制补止损 | {self.symbol}"
-                )
-            return result
+        # v16.25.4-fix: 删除「有仓却 0 档 TP」的裸仓强制对齐例外。
+        # 在 API 传播延迟 / IP 限流下，open_orders 查询会短暂返回空，
+        # 该例外会导致反复撤挂 TP。缺失情况由下方 in_cooldown 轻量补挂
+        # 或冷却期后的正常 severe 路径处理。
         # 接管强检：雷达守护/防线对齐均强制检查 TP1 是否真正成交
         take_check = True  # 始终启用接管强检，防止漏挂雪崩
         if (in_grace or in_cooldown) and not severe:
