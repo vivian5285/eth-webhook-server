@@ -184,7 +184,7 @@ TP_COMPLETE_RESIDUAL_RATIO = 0.12
 OPEN_OVERSIZE_RATIO = 1.10  # 与 QTY_ALIGN_MIN_PCT 一致：偏离 ≥10% 才裁减
 # 60s 去重键 = action+symbol+price（见 _signal_fingerprint 注释：意图/风险）
 SIGNAL_DEDUP_SEC = int(WP_SIGNAL_DEDUP_SEC or 60)
-DEFENSE_ALIGN_COOLDOWN_SEC = 60
+DEFENSE_ALIGN_COOLDOWN_SEC = 300
 SENTINEL_GRACE_AFTER_RECOVER_SEC = 45
 SENTINEL_GRACE_AFTER_OPEN_SEC = 90
 # 递进雷达：开仓后休眠至 TP 绝对价格激活线；无固定秒级禁窗
@@ -11037,6 +11037,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 扩大安静窗口，让挂单在交易所侧完成传播；真有严重异常会由
         # severe 路径或哨兵对账处理。
         quiet_sec = DEFENSE_ALIGN_COOLDOWN_SEC * (1 + min(streak, 4))
+        # v16.25.5-fix: IP 限流期间直接暂停雷达守护对齐，避免耗尽预算并防止
+        # open_orders 查询因限流返回空，导致误判 TP 缺失而重复挂单。
+        rate_limit_left = binance_client.ip_rate_limit_remaining()
+        if rate_limit_left > 0:
+            logger.info(
+                f"📡 [雷达守护] IP限流剩余{rate_limit_left:.0f}s，暂停对齐 | "
+                f"等待API预算恢复"
+            )
+            return None
         if since_ok < quiet_sec:
             logger.info(
                 f"📡 [雷达守护] 对齐安静期跳过 "
