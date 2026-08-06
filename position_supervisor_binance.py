@@ -4975,6 +4975,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         ATR/stop 仍用于雷达 initialStop 账本；ATR 缺失时仍允许纯名义 sizing。
         """
         # per-symbol 固定金额模式（前端直接设 USDT 数量）
+        px = float(curr_px or self.tv_price or 0)
         try:
             from account_profiles import get_symbol_settings
             s = get_symbol_settings(self.symbol)
@@ -5001,7 +5002,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.debug(f"[{self.symbol}] fixed_amount check: {e}")
 
         principal = self._resolve_cap_sizing_base()
-        px = float(curr_px or self.tv_price or 0)
         tv_qty = float(getattr(self, "tv_suggested_qty", 0) or 0)
         tv_sl_ref = float(getattr(self, "tv_sl_ref", 0) or 0)
         atr, atr_meta = self._resolve_open_atr_with_degrade(px, tv_sl_ref=tv_sl_ref)
@@ -5155,6 +5155,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or 0
         )
         new_notional = float(qty or 0) * float(price or 0)
+        # 固定金额模式：名义敞口检查基于实开金额，不与全仓其他品种合并计算
+        if (sizing_meta or {}).get("mode") == "fixed_amount":
+            logger.info(f"💰 [{self.symbol}] 固定金额模式，跳过双品种敞口上限检查 | qty={qty} notional={new_notional:.2f}U")
+            return True, {"mode": "fixed_amount", "symbol": self.symbol}
         other, by_sym, all_total = self._other_symbols_notional(self.symbol)
         # 本品种若已有仓，开仓流程本应先平；保守起见从 existing 去掉本品种
         existing = other

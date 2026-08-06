@@ -1,32 +1,38 @@
-#!/usr/bin/env python3
-import json
 import sys
 sys.path.insert(0, '/home/trading/binance-engine')
-from binance_client import BinanceClient
 
-bc = BinanceClient()
+from binance.client import Client
+from account_profiles import get_account_config
 
-print("=== XAU未成交订单 ===")
-xau_orders = bc.client.get_open_orders(symbol='XAUUSDT')
-print(json.dumps(xau_orders, indent=2))
-print()
+cfg = get_account_config()
+client = Client(cfg['api_key'], cfg['api_secret'])
 
-print("=== ETH未成交订单 ===")
-eth_orders = bc.client.get_open_orders(symbol='ETHUSDT')
-print(json.dumps(eth_orders, indent=2))
-print()
+# XAUUSDT my trades
+try:
+    trades = client.get_account_trades(symbol='XAUUSDT', limit=20)
+    print('XAUUSDT trades:', len(trades))
+    for t in trades:
+        ts = t['time']
+        side = t['side']
+        qty = t['qty']
+        price = t['price']
+        tid = t['id']
+        print('  %s | %s %s @ %s | id=%s' % (ts, side, qty, price, tid))
+except Exception as e:
+    print('trades ERROR:', e)
 
-print("=== ETH持仓 ===")
-pos = bc.client.get_position_risk(symbol='ETHUSDT')
-print(json.dumps(pos, indent=2))
-print()
-
-print("=== 账户余额 ===")
-acc = bc.client.get_account()
-print(f"可用: {acc['availableBalance']} USDT")
-print(f"未实现盈亏: {acc['totalUnrealizedProfit']} USDT")
-print()
-
-print("=== XAU持仓 ===")
-xau_pos = bc.client.get_position_risk(symbol='XAUUSDT')
-print(json.dumps(xau_pos, indent=2))
+# XAUUSDT all orders
+try:
+    orders = client.get_all_orders(symbol='XAUUSDT', limit=30)
+    print('XAUUSDT orders:', len(orders))
+    for o in orders[-10:]:
+        ts = o['time']
+        side = o['side']
+        qty = o['origQty']
+        price = o['price']
+        otype = o['type']
+        status = o['status']
+        oid = o['orderId']
+        print('  %s | %s %s @ %s | %s | status=%s | id=%s' % (ts, side, qty, price, otype, status, oid))
+except Exception as e:
+    print('orders ERROR:', e)
