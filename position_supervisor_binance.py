@@ -5307,7 +5307,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             verify_note = base_note
         else:
             pos = self._get_active_position()
-            residual = pos["size"] if pos else 0.0
+            if pos == "QUERY_FAILED":
+                residual = 0.0
+            else:
+                residual = pos["size"] if pos else 0.0
             if residual > 0 and not self._is_dust_qty(residual):
                 logger.warning(
                     f"平仓钉钉跳过：空仓核查未通过 | 残留 {residual} {self._unit()} | reason={reason}"
@@ -5510,6 +5513,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _verify_position(self, expected_side=None):
         pos = self._get_active_position()
+        if pos == "QUERY_FAILED":
+            return None
         if not pos or pos["size"] <= 0:
             return None
         if expected_side and pos["side"] != expected_side:
@@ -8292,6 +8297,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
 
         pos = self._get_active_position()
+        if pos == "QUERY_FAILED":
+            self._on_position_query_failed("UPDATE_TP")
+            logger.error(f"🚫 [{self.symbol}] UPDATE_TP 跳过：持仓查询失败，状态未知")
+            return
         if not pos or float(pos.get("size", 0) or 0) <= 0:
             logger.info("UPDATE_TP 到达但盘口已空仓 → 忽略")
             return
@@ -13031,7 +13040,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if getattr(self, "api_monitor_only", False):
                 needs_manual = True
             live = self._get_active_position()
-            live_qty = float((live or {}).get("size") or 0)
+            if live == "QUERY_FAILED":
+                self._on_position_query_failed("暂停期开仓核对")
+                needs_manual = True
+                live_qty = 0.0
+            else:
+                live_qty = float((live or {}).get("size") or 0)
             if needs_manual or live_qty > float(getattr(self, "min_qty", 0.001) or 0.001):
                 logger.error(
                     f"🚫 [{self.symbol}] 交易已暂停，拒绝开仓 {raw_action} | {reason}"
@@ -13195,6 +13209,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.monitoring = False
                 self._release_tv_seq_after_close(payload, reason=raw_action)
                 pos = self._get_active_position()
+                if pos == "QUERY_FAILED":
+                    self.monitoring = True
+                    self._on_position_query_failed(f"反转保护平仓·{raw_action}")
+                    logger.error(
+                        f"🚫 [{self.symbol}] {raw_action} 平仓延迟：持仓查询失败，"
+                        f"状态未知，保留账本等待下次查询恢复"
+                    )
+                    return
                 tv_reason = close_reason or raw_action
                 tag = (
                     "反转保护"
@@ -13966,6 +13988,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
 
         pos = self._get_active_position()
+        if pos == "QUERY_FAILED":
+            self._on_position_query_failed("开仓前持仓核对")
+            logger.error(f"🚫 [{self.symbol}] 开仓拒绝：持仓查询失败，状态未知 [{action}]")
+            return
         live_sz = float((pos or {}).get("size", 0) or 0)
         live_side = (pos or {}).get("side")
         logger.info(
@@ -14218,6 +14244,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 time.sleep(delay)
                 try:
                     pos = self._get_active_position()
+                    if pos == "QUERY_FAILED":
+                        pos = None
                 except Exception as e:
                     logger.warning(f"成交后持仓查询异常({i + 1}/5): {e}")
                     pos = None
@@ -14238,13 +14266,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     raw = binance_client.get_position(self.symbol, prefer_ws=False)
                     amt = abs(float((raw or {}).get("positionAmt") or 0))
                     if amt > 0:
-                        pos = self._get_active_position() or {
-                            "size": amt,
-                            "side": action,
-                            "entry_price": float(
-                                (raw or {}).get("entryPrice") or 0
-                            ),
-                        }
+                        _fallback_pos = self._get_active_position()
+                        if not isinstance(_fallback_pos, dict):
+                            _fallback_pos = {
+                                "size": amt,
+                                "side": action,
+                                "entry_price": float(
+                                    (raw or {}).get("entryPrice") or 0
+                                ),
+                            }
+                        pos = _fallback_pos
                 except Exception as e:
                     logger.error(f"成交后强制 REST 持仓查询失败: {e}")
             if not pos or float(pos.get("size") or 0) <= 0:
@@ -14761,6 +14792,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 竞态：市价已成但 REST 滞后 → 再探一轮，能探到就挂齐防线，禁止裸奔
             time.sleep(1.2)
             late = self._get_active_position()
+            if late == "QUERY_FAILED":
+                late = None
             if late and float(late.get("size") or 0) > 0:
                 late_qty = float(late["size"])
                 late_entry = float(late.get("entry_price") or entry_price or 0)
