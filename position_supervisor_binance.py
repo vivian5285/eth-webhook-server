@@ -8602,12 +8602,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return round(float(cand), 2)
         return None
 
-    def _notify_shield_handoff_to_radar(self, real_amt, curr_px, new_sl, reason="",
-                                        sl_verified=False, cancelled_hint=0):
-        """旧「交棒撤硬止损」钉钉已废除；雷达止损开仓即单槽，不再发本条。"""
-        self._shield_handoff_notified = True
-        return
-
     def _qty_noise_floor(self, baseline=0.0):
         """品种感知噪声下限：ETH/XAU 用各自 qty_step，禁止硬编码 0.003 误伤小仓。"""
         step = float(getattr(self, "qty_step", 0) or 0.001)
@@ -8617,54 +8611,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _unit(self):
         return str(getattr(self, "unit_label", None) or "ETH")
-
-    def _perform_radar_handoff(self, real_amt, curr_px, reason=""):
-        """
-        兼容旧交棒入口 → 雷达止损同步（开仓即运行，无激活线门槛）。
-        禁止发旧「转雷达/撤硬止损」钉钉。
-        """
-        real_amt = float(self._resolve_live_qty(real_amt) or 0)
-        if real_amt <= 0:
-            return False
-        if self._radar_placement_blocked(real_amt, curr_px, reason=reason or "handoff"):
-            return False
-        if getattr(self, "_open_in_progress", False) or getattr(
-            self, "_defense_align_in_progress", False
-        ):
-            return False
-
-        tick = self._apply_breath_stop_tick(curr_px)
-        new_sl = float((tick or {}).get("stop") or self.current_sl or 0)
-        if new_sl <= 0:
-            new_sl = float(self._tv_hard_sl_target() or 0)
-        if new_sl <= 0:
-            return False
-        safe_sl = self._clamp_radar_sl_for_market(curr_px, new_sl) or new_sl
-        if not self._can_safely_place_radar_sl(curr_px, safe_sl):
-            logger.info(
-                f"🫁 [{self.symbol}] 雷达止损暂缓挂单：@{safe_sl:.2f} 距市不足 | "
-                f"{reason or ''}"
-            )
-            return False
-
-        self.current_sl = float(safe_sl)
-        self.tv_sl = float(safe_sl)
-        self.radar_activated = True
-        self.radar_pending_arm = False
-        self._radar_handoff_done = True
-        self._radar_armed_after_tp1 = True
-        self._radar_trigger_gate = "递进雷达已激活·兼容交棒"
-        self._shield_handoff_notified = True
-        self._post_open_radar_block_until = 0.0
-        self._save_state()
-
-        ok = self._ensure_radar_sl(safe_sl, live_qty=real_amt, for_handoff=True)
-        if ok and bool((tick or {}).get("phase_entered")):
-            self._report_breath_phase2(real_amt, curr_px, safe_sl, sl_placed=True)
-        logger.info(
-            f"🫁 [{self.symbol}] 雷达止损同步 @{safe_sl:.2f} | {reason or '兼容交棒入口'}"
-        )
-        return bool(ok)
 
     def _radar_handoff_min_gap(self, curr_px=0.0):
         px = float(curr_px or 0)
@@ -8688,16 +8634,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if self.current_side == "SHORT":
             return sl >= curr_px + gap
         return False
-
-    def _force_disarm_shield_before_radar(self, curr_px, reason="", notify=True):
-        """兼容旧调用 → 雷达止损同步（禁止先撤 STOP 裸仓）。"""
-        real_amt = self._resolve_live_qty(self.watched_qty or 0)
-        if real_amt <= 0:
-            return {"cancelled": 0, "cleared": True, "verified": True}
-        ok = self._perform_radar_handoff(
-            real_amt, curr_px, reason=reason or "雷达止损同步",
-        )
-        return {"cancelled": 1 if ok else 0, "cleared": ok, "verified": ok}
 
     def _should_disarm_shield_for_favorable(self, curr_px):
         """雷达止损已单槽合并，无需再「撤硬止损交棒」。"""
@@ -8870,7 +8806,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _should_force_radar_after_tp_progress(self, live_qty, curr_px):
-        """TP1+TP2 已成交，或现价已过 TP2 / 激活线 → 不允许继续休眠。"""
+        """TP1+TP2 已成交，或现价已过 TP2 / 激活线 → 不允许继续休眠。
+
+        规格 v2.1 §3.1/§5.2：雷达激活唯一门槛=(TP1+TP2)/2 绝对中点价（首次）
+        或 TP2（重入），二者仅由 _activation_reached_for_arm() 判定。仅 TP1
+        单独触及（即便仓位已因 TP1 成交而缩量）不得作为强制武装依据 ——
+        曾经存在的"仓位缩至85% + 现价过TP1"分支等同于变相复活"TP1触及即
+        启动"旧逻辑，已删除，禁止再加回。
+        """
         if not self._radar_is_dormant():
             return False
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
@@ -8886,16 +8829,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return True
             if self.current_side == "SHORT" and px <= tp2:
                 return True
-        # 仓位已明显小于开仓（≈吃掉 TP1 或更多）且现价在 TP1 外侧
-        init = float(self._tp_baseline_qty(live_qty) or self.initial_qty or 0)
-        live = float(live_qty or 0)
-        if init > 0 and live > 0 and live <= init * 0.85:
-            tp1 = float(tps[0] or 0) if tps else 0.0
-            if tp1 > 0 and px > 0:
-                if self.current_side == "LONG" and px >= tp1:
-                    return True
-                if self.current_side == "SHORT" and px <= tp1:
-                    return True
         return False
 
     def _force_arm_radar_after_tp(self, live_qty, curr_px, source=""):
@@ -13367,13 +13300,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         self._save_state()
         if handoff_radar:
-            self.radar_activated = True
+            # 规格 v2.1 §3.1/§5.2：雷达激活唯一条件=中点绝对价格，TP超时撤单
+            # 只是清理挂单+记账移交，禁止在此处直接置位 radar_activated，
+            # 否则等同于变相复活"TP1触及即启动"的旧逻辑（提前保本检查点同类问题）。
             self._mark_tp_radar_handoff([level], source=f"取消TP{level}移交")
+            radar_note = (
+                "雷达已激活，剩余仓位止盈改由雷达止损管理"
+                if getattr(self, "radar_activated", False)
+                else "雷达尚未到达(TP1+TP2)/2中点激活线，该档仓位暂由硬止损独立守护"
+            )
             try:
                 dingtalk.report_system_alert(
-                    f"TP超时已撤单·改由雷达止损 [{self.symbol}]",
-                    f"TP{level} 限价已确认从盘口撤销；该档禁止重挂；"
-                    f"剩余仓位止盈改由雷达止损管理。",
+                    f"TP超时已撤单 [{self.symbol}]",
+                    f"TP{level} 限价已确认从盘口撤销；该档禁止重挂；{radar_note}。",
                     level="提示",
                 )
             except Exception:
