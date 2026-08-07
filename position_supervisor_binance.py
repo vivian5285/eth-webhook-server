@@ -287,6 +287,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.regime = 3
         self.current_atr = 30.0
         self.best_price = 0.0
+        self._adverse_worst_px = 0.0
+        self._adverse_worst_px_ts = 0.0
         self.current_sl = 0.0
         self.tv_price = 0.0
         self.tv_tps = [0.0, 0.0, 0.0]
@@ -809,8 +811,55 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🧹 [确认平仓] 交易所空仓且账本有仓 → 清除stale本地状态 "
                 f"(watched_qty={self.watched_qty} current_side={self.current_side})"
             )
+            # 必须在 reset 之前算好：_reset_breath_ledger_on_flat 会清空
+            # frozen_hard_sl_px / _adverse_worst_px / _ws_hard_sl_fill_hint 本身。
+            synthesized_hint = self._build_adverse_extreme_hint()
             self._reset_breath_ledger_on_flat(source="confirm_flat_stale_clean")
+            if synthesized_hint:
+                self._ws_hard_sl_fill_hint = synthesized_hint
         return confirmed
+
+    def _build_adverse_extreme_hint(self):
+        """
+        REST巡检发现「交易所空仓但账本有仓」且此前没有任何WS成交回报兜底时，
+        用本周期WS mark极值(_adverse_worst_px)补一条硬止损归因线索——插针打穿
+        止损后价格若迅速回撤，现价对比在检测时已经失效，只有"曾经到过的极值"
+        还留有证据。只在最近一段时间内刚创新极值时才采信，避免用开仓早期一次
+        无关的小回撤，去误盖后续实际由雷达在有利价位正常退出的这笔平仓。
+        不覆盖真实WS成交回报（那个更可信，优先级更高）。
+        只返回待写入的hint dict（或None），不直接赋值——调用方须在
+        _reset_breath_ledger_on_flat 清空旧字段之后再写回，否则会被清掉。
+        """
+        existing = getattr(self, "_ws_hard_sl_fill_hint", None) or {}
+        if float(existing.get("ts") or 0) > 0:
+            return None
+        hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+        worst = float(getattr(self, "_adverse_worst_px", 0) or 0)
+        worst_ts = float(getattr(self, "_adverse_worst_px_ts", 0) or 0)
+        side = str(self.current_side or "").strip().upper()
+        if hard <= 0 or worst <= 0 or worst_ts <= 0:
+            return None
+        if time.time() - worst_ts > 180.0:
+            return None
+        tol = max(3.0, hard * 0.003)
+        if side == "LONG":
+            touched = worst <= hard + tol
+        elif side == "SHORT":
+            touched = worst >= hard - tol
+        else:
+            touched = False
+        if not touched:
+            return None
+        logger.info(
+            f"📌 [{self.symbol}] mark极值兜底闩锁硬止损归因 "
+            f"worst={worst:.2f} hard={hard:.2f} | 疑似插针打穿后已回撤"
+        )
+        return {
+            "ts": time.time(),
+            "px": worst,
+            "stop": hard,
+            "source": "mark_extreme_fallback",
+        }
 
     def _reconcile_stale_tp_consumed(self, initial_qty, live_qty, curr_px=0.0):
         """
@@ -13545,6 +13594,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.base_qty = 0.0
         self.current_side = None
         self.best_price = 0.0
+        self._adverse_worst_px = 0.0
+        self._adverse_worst_px_ts = 0.0
         self.current_sl = 0.0
         self.tv_sl = 0.0
         self.tv_sl_ref = 0.0
@@ -15028,6 +15079,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
         # 更新 best + sticky（精密追随 / 插针闩锁）
         self._note_mark_extremum(px)
+        # 归因专用：只记不逆向影响任何止损/雷达计算，供插针后平仓归因兜底
+        self._note_adverse_extreme(px)
 
         armed = self._radar_legitimately_armed(self.watched_qty, px)
         near_act = self._activation_reached_for_arm(px)
@@ -15475,6 +15528,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         else:
             return False
         return self._latch_radar_activation_sticky(px)
+
+    def _note_adverse_extreme(self, curr_px):
+        """
+        本周期不利方向极值（LONG记最低/SHORT记最高），仅供插针平仓归因兜底用，
+        绝不参与止损/雷达任何计算——避免与 best_price 的跟踪止损语义混淆。
+        修复：插针打穿硬止损后价格迅速回撤，若 WS 订单成交回报错过/延迟，
+        REST 巡检发现空仓时现价已远离止损位，_exit_px_near_hard 会误判为
+        "来源未明"；用该极值兜底确认"确实插针到过止损价"。
+        """
+        px = float(curr_px or 0)
+        if px <= 0:
+            return
+        side = str(self.current_side or "").strip().upper()
+        wp = float(getattr(self, "_adverse_worst_px", 0) or 0)
+        new_wp = None
+        if side == "LONG":
+            new_wp = min(wp, px) if wp > 0 else px
+        elif side == "SHORT":
+            new_wp = max(wp, px) if wp > 0 else px
+        if new_wp is None:
+            return
+        if new_wp != wp:
+            self._adverse_worst_px = new_wp
+            self._adverse_worst_px_ts = time.time()
 
     def _latch_radar_activation_sticky(self, curr_px=0.0):
         """本周期 mark/best 一旦触过激活线 → sticky，直到平仓/新开仓清除。"""
