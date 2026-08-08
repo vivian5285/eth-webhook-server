@@ -1254,6 +1254,25 @@ class BinanceClient:
         """兼容别名 → get_total_equity（清单口径：总权益非可用余额）"""
         return self.get_total_equity(asset)
 
+    def get_symbol_leverage(self, symbol, default=5.0):
+        """
+        读交易所当前该品种真实生效杠杆（futures_position_information 自带
+        "leverage" 字段，用户可在币安APP自行修改）。复用 _refresh_all_positions
+        已有的30s缓存，不额外消耗REST；查询失败/字段缺失时返回 default，
+        绝不假设固定值——用于保证金安全网准确估算「这笔单实际会占用多少
+        保证金」，避免用系统内部下单量公式的杠杆假设去误判真实保证金占用。
+        """
+        try:
+            rows = self._refresh_all_positions(force=False) or {}
+            row = rows.get(str(symbol or "").upper())
+            if row:
+                lev = float(row.get("leverage") or 0)
+                if lev > 0:
+                    return lev
+        except Exception as e:
+            logger.debug(f"[{symbol}] 读真实杠杆失败，回退默认值: {e}")
+        return float(default or 5.0)
+
     def get_all_usdt_position_notionals(self):
         """
         账户全部 USDT 永续名义敞口（|qty|×mark）。

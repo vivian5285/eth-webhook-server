@@ -5142,7 +5142,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             avail = float(summary.get("available_balance") or 0)
             if avail <= 0:
                 avail = float(binance_client.get_available_balance() or 0)
-            lev = float(FIXED_LEVERAGE) or 5.0
+            # 用户要求（2026-08-08）：交易所真实杠杆可能高于下单公式假设的
+            # FIXED_LEVERAGE（用户手动在APP调高杠杆释放保证金）——这里必须用
+            # 真实杠杆估算「这笔单实际占用多少保证金」，否则安全网会按假设的
+            # 低杠杆误判保证金不够，白白裁剪掉本可以下的仓位，钉钉释放不到位。
+            lev = float(
+                binance_client.get_symbol_leverage(
+                    self.symbol, default=FIXED_LEVERAGE,
+                ) or FIXED_LEVERAGE or 5.0
+            )
             haircut = 0.92
             if avail > 0 and px > 0 and lev > 0 and float(qty or 0) > 0:
                 required_margin = float(qty) * px / lev
