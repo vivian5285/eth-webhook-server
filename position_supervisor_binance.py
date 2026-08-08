@@ -5095,9 +5095,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         try:
             from account_profiles import get_active_sizing
-            _rp, _lv = get_active_sizing(self.symbol)
+            _rp, _ = get_active_sizing(self.symbol)
         except Exception:
-            _rp, _lv = FIXED_RISK_PCT, FIXED_LEVERAGE
+            _rp = FIXED_RISK_PCT
+        # 用户要求（2026-08-08）：仓位公式与交易所真实杠杆彻底解耦——
+        # 头寸永远按 FIXED_LEVERAGE 计算，跟交易所APP上手动设的杠杆无关，
+        # 交易所杠杆调高只释放保证金，不放大下单量。
         qty, meta = compute_fixed_order_qty(
             principal=principal,
             price=px,
@@ -5108,7 +5111,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
             min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
             margin_pct=float(_rp),
-            leverage=float(_lv),
+            leverage=float(FIXED_LEVERAGE),
         )
         meta["principal"] = principal
         meta["symbol"] = self.symbol
@@ -14057,25 +14060,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.trading_paused = False
                 self.trading_pause_reason = ""
 
-            try:
-                from account_profiles import get_active_sizing
-                _risk, _lev = get_active_sizing()
-                lev = int(float(_lev or FIXED_LEVERAGE))
-            except Exception:
-                lev = int(FIXED_LEVERAGE)
+            # 用户要求（2026-08-08）：仓位公式与交易所真实杠杆彻底解耦。
+            # 头寸计算恒用 FIXED_LEVERAGE，系统永不再调用 set_leverage 改交易所
+            # 杠杆——完全尊重用户在币安APP上手动设置的真实杠杆倍数；交易所杠杆
+            # 调高只降低同样名义仓位的保证金占用，不影响下单数量。
+            lev = int(FIXED_LEVERAGE)
             self.leverage = float(lev)
             self.tv_sizing_leverage = float(lev)
-            # v16.16 温和优化：杠杆恒为 5x，跳过重复 REST 设置调用
-            if float(getattr(self, '_last_set_leverage', 0) or 0) != lev:
-                binance_client.set_leverage(self.symbol, leverage=lev)
-                self._last_set_leverage = float(lev)
-            else:
-                logger.debug(f"[{self.symbol}] 杠杆已是 {lev}x，跳过 set_leverage REST 调用")
             notional = qty * curr_px
             budget_txt = format_vps_sizing_note(sizing_meta, qty=qty, entry_type=ENTRY_TYPE_OPEN)
             logger.info(
                 f"📐 仓位预算 [{self.symbol}]: {budget_txt} "
-                f"| set_leverage={lev}x(档案) | 名义 ~{notional:.0f}U"
+                f"| 仓位公式按{lev}x(交易所真实杠杆由用户自行设置) | 名义 ~{notional:.0f}U"
             )
 
             cap_ok, _cap_meta = self._assert_notional_cap_or_reject(
