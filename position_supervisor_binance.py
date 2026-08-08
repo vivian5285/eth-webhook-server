@@ -5330,6 +5330,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
         if self._expected_tp_count() > 0 and not self._tp1_filled_verified(real_amt):
             return False
+        # 一档 TP 都没被确认吃掉，绝不能算"止盈网格已吃完"——否则小仓位下
+        # ref×12% 的残留阈值会和"刚开仓、一笔都没成交"的整仓撞在一起，
+        # 误判成蚂蚁仓直接扫尾平仓（2026-08-08 deepcoin 实盘复现过同类问题）。
+        if not (getattr(self, "tp_levels_consumed", []) or []):
+            return False
         ref = self.initial_qty or self.watched_qty
         if ref > 0 and real_amt <= ref * TP_COMPLETE_RESIDUAL_RATIO:
             return True
@@ -11828,7 +11833,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 if abs(o["price"] - px) <= tolerance
             ]
             for o in at_px:
-                if abs(o["qty"] - target_q) > qty_tol and o.get("orderId"):
+                # 只在盘口数量"偏多"时才撤——偏少大概率是这一档已经部分成交、
+                # 订单还挂着剩余部分，此时撤单重挂到完整目标量会把已成交的
+                # 部分重复计数进去，多吃一档仓位。
+                if (o["qty"] - target_q) > qty_tol and o.get("orderId"):
                     binance_client.cancel_order(self.symbol, order=o)
                     cancelled += 1
                     time.sleep(0.2)
