@@ -390,6 +390,7 @@ def recover_defenses_on_startup(
     tv_tps: List[float],          # [tp1, tp2, tp3]
     tv_sl_price: float,           # 硬止损价格
     tv_sl_qty: float,
+    tp_levels_consumed: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     重启后恢复防御单（异常才补，正常不动）
@@ -398,8 +399,16 @@ def recover_defenses_on_startup(
     1. 查询交易所当前TP单
     2. 对比应该存在的TP（tp1, tp2）
     3. 缺失才补，不缺失不管
+    4. tp_levels_consumed 里的档位直接跳过，不查也不补
 
     不对账、不循环、不自检。
+
+    tp_levels_consumed 不能省略：这个函数在每次重启接管时都会被调用，
+    而"限价单不在盘口"既可能是"从没挂上"也可能是"已经成交"——不看
+    调用方已经核实过的成交记账，见到限价单不在盘口就一律当"缺失"
+    补挂,会把已经真实成交的档位重新挂一遍造成同一档被吃两次
+    (2026-08-09 ZEC实盘复现：TP1插针成交后进程重启，这里在更精确的
+    成交历史核实逻辑跑完之前就已经抢先无条件补挂了一次)。
 
     返回：
     {
@@ -437,10 +446,20 @@ def recover_defenses_on_startup(
         return result
 
     # 2. 检查TP单
-    tp_prices = [p for p in tv_tps[:2] if p > 0]  # TP1, TP2
+    consumed = set(int(lv) for lv in (tp_levels_consumed or []))
     tp_side = "SELL" if position_side == "LONG" else "BUY"
 
-    for level, tp_price in enumerate(tp_prices, start=1):
+    # 用 tv_tps[:2] 直接按位置对应 level=1/2，不能先过滤掉价格<=0或已
+    # 消费的档再 enumerate——那样会把后面档位的编号往前顶，导致TP2
+    # 被误当成TP1去挂（价位对但数量比例错，10% vs 20%）。
+    for level, tp_price in enumerate(tv_tps[:2], start=1):
+        tp_price = float(tp_price or 0)
+        if tp_price <= 0:
+            continue
+        if level in consumed:
+            result[f"tp{level}_exists"] = True
+            result["notes"].append(f"TP{level} 已成交(账本记账)，跳过恢复检查")
+            continue
         tp_rounded = round(tp_price, 2)
         found = False
         for o in open_orders:

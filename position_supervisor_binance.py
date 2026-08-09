@@ -3055,6 +3055,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             tv_tps=list(self.tv_tps or [0, 0, 0]),
             tv_sl_price=float(getattr(self, "frozen_hard_sl_px", 0) or getattr(self, "tv_sl", 0) or 0),
             tv_sl_qty=live_qty,
+            # 不传的话这个"简版"恢复完全不知道哪些档已经成交，见到限价单
+            # 不在盘口就一律当"缺失"补挂，把已经真实成交的档重新挂一遍
+            # (2026-08-09 ZEC实盘复现：每次重启都抢在更精确的成交历史核实
+            # 逻辑跑完之前，无条件补挂了一次已成交的TP1)。
+            tp_levels_consumed=list(getattr(self, "tp_levels_consumed", []) or []),
         )
         report = format_recover_report(result)
         logger.info(f"🛡️ [{self.symbol}] 重启TP恢复: {report}")
