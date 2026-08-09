@@ -1019,7 +1019,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._save_state()
         self._ensure_price_ws()
         log_source = source.split("·")[0].replace(" ", "")
-        self._record_open_log(side, real_amt, self.watched_entry, source=log_source)
+        # 写"开单量"要用 saved_initial(峰值/可信开单量)，不能用 real_amt(接管
+        # 那一刻的现仓)——TP1早成交过的仓位重启接管时 real_amt 已经是缩量后
+        # 的数字，写进 open journal 会把这条journal下一次被读到时误当成
+        # "这笔仓从一开始就这么小"，摧毁 _trusted_initial_qty 的判断依据
+        # (2026-08-09 ZEC实盘复现：binanceC/D连续多次重启接管，每次都把
+        # 缩量后的现仓重新记成"开单量"，最终 initial_qty 被拉平到等于
+        # live_qty，TP1兜底核实的"old_qty>live_qty"前提条件永久失效)。
+        self._record_open_log(side, saved_initial, self.watched_entry, source=log_source)
         self._ensure_sentinel_running()
         self._sentinel_grace_until = time.time() + SENTINEL_GRACE_AFTER_RECOVER_SEC
         self._last_idle_takeover_ts = time.time()
@@ -17433,8 +17440,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.monitoring = True
                     self._save_state()
                     self._ensure_price_ws()
+                    # binance parity(同函数上方 saved_initial 修复)：写 open
+                    # journal 用 saved_initial(峰值/可信开单量)，不能用
+                    # real_amt(重启接管那一刻的现仓)，理由同上。
                     self._record_open_log(
-                        self.current_side, real_amt, self.watched_entry, source="recover",
+                        self.current_side, saved_initial, self.watched_entry, source="recover",
                     )
 
                     verified = self._wait_verify(
