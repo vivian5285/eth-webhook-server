@@ -5868,6 +5868,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         f"(自撤窗口或无减仓证据) → 不记账"
                     )
             else:
+                # 现价/best 只是某一时刻的抽样，波动大的品种可能在两次巡检
+                # 之间插针穿过TP价位又缩回去，抽样完全错过——此时"未达"是
+                # 假阴性，不是真的没成交。用成交历史(权威、不依赖抽样时机)
+                # 再兜底核实一次，避免把真实TP成交误判成"未知减仓"，反复刷
+                # 假警报，还可能污染TP1是否成交的记账(影响重入资格判断)。
+                old_qty = float(getattr(self, "watched_qty", 0) or 0)
+                trade_fills = []
+                if old_qty > live_qty + 0.0005:
+                    trade_fills = self._detect_tp_fills_from_trades(
+                        old_qty, live_qty, self._tp_baseline_qty(live_qty),
+                    )
+                if any(f.get("level") == lv for f in trade_fills):
+                    logger.info(
+                        f"🎯 [{self.symbol}] TP{lv}@{px:.2f} 抽样漏判但成交历史核实到位 "
+                        f"(mark={curr_px:.2f} best={float(self.best_price or 0):.2f}) → 记账成交"
+                    )
+                    consumed.append(lv)
+                    continue
                 logger.info(
                     f"🧮 [{self.symbol}] TP{lv}@{px:.2f} 限价已消失但现价/best未达 "
                     f"(mark={curr_px:.2f} best={float(self.best_price or 0):.2f}) "
