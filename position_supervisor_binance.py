@@ -6359,6 +6359,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         self._ensure_tp123_prices_from_tv(entry)
         place_n = self._effective_place_tp_levels()
+        # 接管时若某档限价单已经不在盘口了，说明要么从未挂上要么已经成交；
+        # 只用"现价是否越过"判断会漏掉"插针成交后价格已回落"的情况——
+        # 现价只是重启这一刻的抽样，插针可能发生在停机前的任意时间点。
+        # 用成交历史(24小时窗口，权威、不依赖抽样时机)兜底核实一次，
+        # 避免把已经真实成交的档误判成"还没到"、重新挂出来造成同一档
+        # 被吃两次(2026-08-09 ZEC实盘复现：TP1插针成交后进程重启，接管
+        # 判定"未过TP1"又重新挂了一遍0.15，跟已成交的0.166重复)。
+        baseline = float(self._tp_baseline_qty(live_qty) or self.initial_qty or 0)
+        trade_confirmed = set()
+        if baseline > live_qty + 0.0005:
+            for f in self._detect_tp_fills_from_trades(
+                baseline, live_qty, baseline, lookback_ms=86400000,
+            ):
+                trade_confirmed.add(int(f.get("level") or 0))
         past = []
         for lv in range(1, place_n + 1):
             if not self.tv_tps or lv - 1 >= len(self.tv_tps):
@@ -6368,6 +6382,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 break
             if self._price_reached_tp_zone(lv, curr_px, px, live_only=True):
                 past.append(lv)
+            elif lv in trade_confirmed:
+                past.append(lv)
+                notes.append(
+                    f"TP{lv}现价未达但成交历史核实到位(接管抽样漏判兜底)"
+                )
             else:
                 break
         past = self._sequential_tp_prefix(past)
