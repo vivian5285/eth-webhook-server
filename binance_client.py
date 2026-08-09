@@ -1550,12 +1550,23 @@ class BinanceClient:
             return None
         return pos
 
-    def get_recent_user_trades(self, symbol="ETHUSDT", limit=50):
-        """最近用户成交（核对 TP 限价成交 vs 手工减仓）"""
+    def get_recent_user_trades(self, symbol="ETHUSDT", limit=50, start_time_ms=None):
+        """最近用户成交（核对 TP 限价成交 vs 手工减仓）。
+
+        不传 start_time_ms 时，币安 /fapi/v1/userTrades 不保证按"最近N笔"
+        返回——账户历史上任何一次平仓如果被撮合拆成几十笔小额成交，就可能
+        把 limit 全部占满，挤掉真正想查的近期成交(2026-08-09 ZEC 实盘复现：
+        limit=40 拿到的全是前一天的碎片成交，当天的TP1成交完全查不到)。
+        调用方要核对"最近N分钟内有没有成交"时，必须显式传 start_time_ms，
+        让交易所按时间过滤，而不是依赖条数分页。
+        """
         try:
             self._throttle_rest(symbol, kind="rest_probe")
             limit = max(1, min(int(limit or 50), 100))
-            rows = self.client.futures_account_trades(symbol=symbol, limit=limit)
+            params = {"symbol": symbol, "limit": limit}
+            if start_time_ms is not None:
+                params["startTime"] = int(start_time_ms)
+            rows = self.client.futures_account_trades(**params)
             return list(rows or [])
         except IpRateLimitedError:
             logger.warning(f"[成交历史] {symbol}: 节流阀/IP冷却拒绝")

@@ -5873,11 +5873,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 假阴性，不是真的没成交。用成交历史(权威、不依赖抽样时机)
                 # 再兜底核实一次，避免把真实TP成交误判成"未知减仓"，反复刷
                 # 假警报，还可能污染TP1是否成交的记账(影响重入资格判断)。
-                old_qty = float(getattr(self, "watched_qty", 0) or 0)
+                #
+                # 两个坑(2026-08-09 ZEC 实盘复现，第一版修复没接住)：
+                # ① old_qty 不能取 self.watched_qty——本函数常在 watched_qty
+                #   已经被同一轮巡检同步成新值之后才跑到这里，届时
+                #   watched_qty==live_qty，条件恒假，兜底根本不会执行。
+                #   要用 _tp_baseline_qty(live_qty)（跟外层"initial→live"日志
+                #   同一个数据源），才是这次改动前的真实基线。
+                # ② lookback_ms 不能用默认3分钟——插针发生到VPS重启/巡检
+                #   命中之间可能隔了远不止3分钟(本例隔了20多分钟)，默认窗口
+                #   在这种"迟到的对账"场景下必然查空。这里显式放宽到24小时。
+                old_qty = float(self._tp_baseline_qty(live_qty) or 0)
                 trade_fills = []
                 if old_qty > live_qty + 0.0005:
                     trade_fills = self._detect_tp_fills_from_trades(
-                        old_qty, live_qty, self._tp_baseline_qty(live_qty),
+                        old_qty, live_qty, old_qty, lookback_ms=86400000,
                     )
                 if any(f.get("level") == lv for f in trade_fills):
                     logger.info(
@@ -11462,10 +11472,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if initial <= 0:
             return []
         close_side = "SELL" if self.current_side == "LONG" else "BUY"
-        trades = binance_client.get_recent_user_trades(self.symbol, limit=40)
+        now_ms = int(time.time() * 1000)
+        # 按时间过滤，不能只按"最近40条"分页——账户历史上任何一次平仓被
+        # 撮合拆成几十笔小额成交，就会把limit=40占满、把真正想查的近期
+        # 成交挤出去(2026-08-09 ZEC实盘复现：前一天的碎片成交塞满了40条
+        # 名额，当天的TP1成交完全查不到)。显式传 startTime 让交易所按
+        # 时间筛，而不是依赖条数。
+        trades = binance_client.get_recent_user_trades(
+            self.symbol, limit=40, start_time_ms=now_ms - int(lookback_ms),
+        )
         if not trades:
             return []
-        now_ms = int(time.time() * 1000)
         recent = []
         for t in trades:
             if str(t.get("side") or "").upper() != close_side:
