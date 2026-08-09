@@ -7156,10 +7156,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 仅当已锁定真实 open_atr（非空账本默认）时才允许 ATR 补算
             locked = float(getattr(self, "open_atr", 0) or 0)
             if locked > 0 and entry > 0 and side in ("LONG", "SHORT"):
-                target = round(float(initial_stop_price(
-                    side, entry, locked,
-                    profile=getattr(self, "breath_profile", None),
-                ) or 0), 2)
+                # 休眠窗：优先用永久硬止损兜底，禁止用保本价(initial_stop_price)
+                # 当账本消毒结果——那正是13.1节点名废除的"提前保本检查点"
+                # 变种（2026-08-09 XAU实测：此处算出的保本价一度被当作
+                # dynamic_sl 试图挂出，靠市价安全检查侥幸拦下）。
+                hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                if self._radar_is_dormant() and hard > 0:
+                    target = round(hard, 2)
+                else:
+                    target = round(float(initial_stop_price(
+                        side, entry, locked,
+                        profile=getattr(self, "breath_profile", None),
+                    ) or 0), 2)
             if target <= 0:
                 logger.error(
                     f"🚨 [{self.symbol}] 雷达止损账本消毒失败：无账本/盘口/锁定ATR "
@@ -7244,8 +7252,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if (not force_open) and old_init > 0:
             init = old_init
         self.initial_stop = init
+        # 休眠窗（接管/重启且非开仓）：current_sl 只认永久硬止损，禁止用
+        # 保本价(init)——曾导致接管时把 current_sl 直接写成保本价，一路
+        # 传导到 _resolve_armed_radar_sl → _ensure_radar_sl 试图挂出
+        # （2026-08-09 XAU实测：靠市价安全检查侥幸拦下，非设计使然）。
+        sl_candidate = init
+        if not force_open and self._radar_is_dormant():
+            hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+            if hard > 0:
+                sl_candidate = hard
         if force_open or old <= 0:
-            self.current_sl = init
+            self.current_sl = sl_candidate
             self.breakeven_phase = False
             # 新开仓：雷达休眠至激活线；接管保留已激活状态
             if force_open:
@@ -7256,11 +7273,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if entry > 0 and force_open:
                 self.best_price = entry
         else:
-            # 只允许向有利方向与 initial 合并
+            # 只允许向有利方向与 initial(或休眠期的硬止损)合并
             if side == "LONG":
-                self.current_sl = max(old, init)
+                self.current_sl = max(old, sl_candidate)
             else:
-                self.current_sl = min(old, init) if old > 0 else init
+                self.current_sl = min(old, sl_candidate) if old > 0 else sl_candidate
 
         self.tv_sl = float(self.current_sl)
         if abs(float(self.current_sl) - old) > SHIELD_STOP_TOLERANCE:
