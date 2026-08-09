@@ -6416,10 +6416,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 hang.append(lv)
 
         act_prog = float(self._radar_activation_progress(curr_px) or 0)
-        should_radar = bool(
-            self._activation_reached_for_arm(curr_px)
-            or (1 in merged)
-        )
+        # 只能用真正的激活线(中点/重入TP2)判定，不能用"TP1是否成交"
+        # 兜底——那正是 _should_force_radar_after_tp_progress 文档里点名
+        # 禁止再加回的"TP1触及即启动"旧逻辑，这里之前一直留着没删
+        # (2026-08-09 ZEC实盘复现：should_radar 被 TP1 记账错误地判True，
+        # 一路传导到 _process_radar_trailing 等下游，在真正到激活线之前
+        # 就真实挂出了雷达止损单)。
+        should_radar = bool(self._activation_reached_for_arm(curr_px))
         default_hang = list(range(1, place_n + 1))
         if past:
             rem = hang if hang else ["无(全过)"]
@@ -7697,7 +7700,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._breath_tick_paused = True
         try:
             live_qty = float(self._resolve_live_qty(live_qty) or 0)
-            stop = round(float(getattr(self, "current_sl", 0) or getattr(self, "initial_stop", 0) or 0), 2)
+            # 雷达仍休眠时，current_sl 不代表任何真实追踪值——它可能是
+            # 上一次留下的陈旧/污染值(现网实测过 522.0 这类不上不下的数)，
+            # 这里如果照单全收去挂单，等于无视规格5.2节"仅硬止损守护"，
+            # 又一次变相复活了提前保本锁(2026-08-09 ZEC实盘复现：本函数
+            # 不看radar_activated，TP1一成交detected就无条件按current_sl
+            # 挂雷达腿，是当天最终定位到的第三处同类问题)。休眠期改用
+            # frozen_hard_sl_px 作为唯一可信目标价。
+            if self._radar_is_dormant():
+                hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                stop = round(hard, 2) if hard > 0 else round(
+                    float(getattr(self, "current_sl", 0) or getattr(self, "initial_stop", 0) or 0), 2,
+                )
+            else:
+                stop = round(float(getattr(self, "current_sl", 0) or getattr(self, "initial_stop", 0) or 0), 2)
             init_q = float(getattr(self, "initial_qty", 0) or 0)
             if init_q > 0 and live_qty > 0:
                 self.remaining_qty_pct = max(0.0, min(1.0, live_qty / init_q))
