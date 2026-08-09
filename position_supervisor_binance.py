@@ -15080,7 +15080,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 side, entry, atr, profile=getattr(self, "breath_profile", None),
             )
         if float(getattr(self, "current_sl", 0) or 0) <= 0:
-            self.current_sl = float(self.initial_stop or 0)
+            if self._radar_is_dormant():
+                # 规格5.2节："激活条件满足之前，雷达完全休眠，仅硬止损守护
+                # 仓位"。此前这里无条件补种成 initial_stop(保本+手续费价，
+                # 贴着entry)，哪怕雷达根本还没到(TP1+TP2)/2激活线也照补，
+                # 相当于变相复活了13.1节点名要求彻底删除的"提前保本检查
+                # 点"(2026-08-09 ZEC实盘复现：5007在真正到激活线之前，
+                # 被这处补种在entry附近提前挂了止损，价格一回落就被打
+                # 出局，只吃到一点点利润)。"开仓即要有保护"这个意图不
+                # 动，但休眠期该补的是硬止损价，不是保本价。
+                hard = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                if hard > 0:
+                    self.current_sl = hard
+            else:
+                self.current_sl = float(self.initial_stop or 0)
 
         # 过价 TP1 仅记账，不作为止损门槛
         if self._price_reached_tp_zone(1, curr_px, live_only=True):
