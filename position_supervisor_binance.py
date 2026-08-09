@@ -10518,13 +10518,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _ensure_radar_sl(self, dynamic_sl, live_qty=None, for_handoff=False):
         """
         挂雷达止损 STOP（closePosition 单槽，不占 TP reduceOnly）。
-        开仓即允许；无旧激活线/交棒门槛。
         """
         if not dynamic_sl:
             return False
         live_qty = float(live_qty or self.watched_qty or 0)
         curr_px = float(binance_client.get_current_price(self.symbol) or 0)
         if self._radar_placement_blocked(live_qty, curr_px, reason="ensure_radar_sl"):
+            return False
+        # 休眠窗（仅价触激活武装 _radar_arming 可越过）：禁止把调用方传入的
+        # dynamic_sl 挂出——current_sl 在休眠期可能仍是保本价等账本值，
+        # 唯一写入函数 _sync_exchange_stop 早已有此门禁，本函数是另一条能
+        # 直达下单的路径，此前一直没有同款门禁（2026-08-09 XAU实测：休眠
+        # 期 ideal=4361.94 曾走到这里试图挂出，靠市价距离检查侥幸拦下）。
+        if self._radar_is_dormant() and not getattr(self, "_radar_arming", False):
             return False
         if not self._is_valid_radar_sl(dynamic_sl):
             logger.warning(
