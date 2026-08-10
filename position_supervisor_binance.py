@@ -12574,29 +12574,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🛡️ [智慧大脑] 硬止损成交 {old_qty} ➔ {new_qty} @ {f['price']:.2f}"
             )
             if new_qty <= 0.0005 or self._is_dust_qty(new_qty):
-                near_sl = self._likely_exchange_stop_exit(curr_px_safe)
                 if self._radar_was_armed():
                     flat_meta = self._infer_flat_close_meta(
                         curr_px_safe, hint_reason="雷达保本/追踪止损全平",
                     )
                 else:
-                    reason = (
-                        "触碰硬止损平仓（TV硬止损）"
-                        if near_sl else
-                        "仓位归零（来源未明）"
-                    )
+                    # kind=="shield_fill" 本身已经是 _detect_shield_fills 核实过
+                    # 的结论（挂单消失+数量减少+成交价贴近 stop_px），不该再用
+                    # 这一刻重新取的 curr_px_safe 二次判断——detection 到这里
+                    # 之间往往已经过了几秒到几十秒，价格可能已经continuing走远，
+                    # 二次判断失败会把明明查清楚的硬止损误标成"来源未明"
+                    # （2026-08-10 binanceD ETHUSDT 实盘复现：成交价1928.76贴着
+                    # 硬止损1928.42，但 near_sl 用滞后的 curr_px 判定失败，
+                    # 落到了"来源未明"分支）。
+                    reason = f"触碰永久硬止损平仓 @ {f['price']:.2f}（TV硬止损）"
                     flat_meta = self._build_close_meta(
-                        "CLOSE_STOPLOSS" if near_sl else "CLOSE",
+                        "CLOSE_STOPLOSS",
                         self.current_side,
                         self._estimate_pnl_pct(curr_px_safe),
                         reason,
                     )
-                    if near_sl:
-                        flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
-                        flat_meta["exit_source"] = EXIT_SOURCE_VPS_HARD_SL
-                        flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
-                            EXIT_SOURCE_VPS_HARD_SL, "硬止损平仓"
-                        )
+                    flat_meta["close_type"] = CLOSE_TYPE_VPS_SHIELD
+                    flat_meta["exit_source"] = EXIT_SOURCE_VPS_HARD_SL
+                    flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
+                        EXIT_SOURCE_VPS_HARD_SL, "硬止损平仓"
+                    )
                 self._disarm_shield("硬止损全平", notify=False)
                 self._handle_manual_flat_detected(
                     flat_meta.get("tv_reason") or flat_meta.get("exit_source_label"),
