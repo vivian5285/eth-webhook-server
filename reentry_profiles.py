@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.26 · 规格 v2.2 TP1临近激活 · 高速公路模式）。
+双币种雷达 + 智能再入场（v16.27 · 规格 v2.3 TP1/ATR双触发激活 · 高速公路模式）。
 
-核心规格（v2.2，覆盖 v2.1）：
-  - 首次开仓雷达激活 = 价格到达 entry+0.8×(TP1-entry)（即距 TP1 剩 20% 距离处，
-    TP1是否成交仅记日志不阻塞）——早于旧版 (TP1+TP2)/2 中点，更早启动保本+
-    手续费覆盖，随后持续跟随市价动态锁仓
+核心规格（v2.3，覆盖 v2.2）：
+  - 首次开仓雷达激活 = entry 沿盈利方向推进 min(0.8×|TP1-entry|, 1×ATR) 距离
+    ——"距TP1剩20%"和"顺向浮盈满1×ATR"两条线谁先到用谁，TP1是否成交仅
+    记日志不阻塞。纯按 TP1 距离会被强趋势档更远的 TP1 连带拖慢触发，加
+    ATR 线兜底；触发后同样启动保本+手续费覆盖，随后跟随市价动态锁仓
   - 重入开仓雷达激活 = 价格到达 TP2（不变）
   - 取消提前保本检查点（_check_early_be_checkpoint 已废除）
   - 雷达激活前完全休眠，仅硬止损守护
@@ -261,6 +262,7 @@ def buffer_for_adx(adx: float = 0.0) -> float:
 
 
 RADAR_GATE_TP1_PROGRESS = 0.8  # 首次开仓：entry→TP1 走完 80%（剩 20%）即激活
+RADAR_GATE_ATR_MULT = 1.0  # 首次开仓：顺向浮盈达到 1×ATR 即激活（双触发的另一条腿）
 
 
 def radar_gate_price_from_tps(
@@ -268,13 +270,19 @@ def radar_gate_price_from_tps(
     tp2: float,
     reentry_attempt: int = 0,
     entry: float = 0.0,
+    atr: float = 0.0,
     **kwargs,
 ) -> float:
     """
-    【规格 v2.2 · TP1临近激活（首次）/ TP2激活（重入）· 高速公路模式】
-    - 首次开仓 reentry_attempt=0：雷达激活价 = entry + 0.8×(TP1-entry)
-      （多空通用：TP1>entry 时公式自然向上算，TP1<entry 时自然向下算）
-      即价格走完 entry→TP1 距离的 80%、还剩 20% 未到 TP1 时就激活
+    【规格 v2.3 · TP1临近/ATR双触发（首次，谁先到用谁）· TP2激活（重入）】
+    - 首次开仓 reentry_attempt=0：雷达激活价 = entry 沿盈利方向推进
+      min(0.8×|TP1-entry|, 1×ATR) 的距离——即"距TP1剩20%"和"顺向浮盈满
+      1×ATR"两条线谁先到就用谁。
+      单纯按 TP1 距离的老公式有个漏洞：强趋势档 TP1 定得更远，连带触发
+      点也被动拉远（同样 20%，中趋势档≈1.08×ATR，强趋势档≈1.42×ATR，
+      拿实盘持仓验证过），导致强趋势单反而更容易在触发前把浮盈吐回去。
+      加一条独立的 ATR 触发线兜底这个漏洞，同时保留 TP1 这条线（尊重策略
+      自己对"这笔该跑多远"的判断，不因为 ATR line 更早就完全弃用它）。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -288,7 +296,12 @@ def radar_gate_price_from_tps(
     e = float(entry or 0)
     if t1 <= 0 or t2 <= 0 or e <= 0:
         return 0.0
-    gate = e + RADAR_GATE_TP1_PROGRESS * (t1 - e)
+    direction = 1.0 if t1 >= e else -1.0
+    dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
+    a = float(atr or 0)
+    dist_atr = RADAR_GATE_ATR_MULT * a if a > 0 else dist_tp1
+    dist = min(dist_tp1, dist_atr)
+    gate = e + direction * dist
     return round(gate, 4)
 
 
