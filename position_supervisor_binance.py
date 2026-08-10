@@ -4927,15 +4927,33 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return False
 
     def _refresh_breathing_coefficient(self, force=False):
-        """雷达系数固定 1.0（ATR 只用 TV 锁值，不再拉 1h 比值）。"""
+        """
+        TP3+ 呼吸倍数（雷达系数）：按实时ADX连续插值，不再写死 1.0。
+        ATR 依旧只用 TV 锁值，不拉 1h 比值——这里只消费本来就持续在拉的
+        last_adx，不新增任何波动率数据源，不重蹈 v16.4.0 VPS ATR 与 TV
+        对不上的老路。
+        """
+        from reentry_profiles import live_tp3_trail_mult
+
         init = float(getattr(self, "open_atr", 0) or 0)
-        self.breathing_coefficient = 1.0
+        attempt = int(
+            getattr(self, "radar_tier", 0) or getattr(self, "adx_tier", 1) or 1
+        )
+        try:
+            coeff = live_tp3_trail_mult(
+                float(getattr(self, "last_adx", 0) or 0),
+                get_reentry_profile(self.symbol),
+                fallback_tier=attempt,
+            )
+        except Exception:
+            coeff = 1.0
+        self.breathing_coefficient = float(coeff or 1.0)
         self._breath_coeff_meta = {
             "atr_1h": 0.0,
             "initial_atr": init,
-            "ratio": 1.0,
-            "smoothed": 1.0,
-            "source": "tv_fixed",
+            "adx": float(getattr(self, "last_adx", 0) or 0),
+            "coeff": self.breathing_coefficient,
+            "source": "live_adx",
             "ratio_history": list(getattr(self, "_breath_ratio_history", None) or []),
         }
         if init > 0:

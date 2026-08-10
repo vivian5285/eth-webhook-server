@@ -360,6 +360,48 @@ def live_breath_zone_values(
     return round(b12, 4), round(b23, 4)
 
 
+def _tp3_tier_anchor(tier_row: Dict[str, float]) -> float:
+    """
+    某档位在 TP3+ 阶段的锚点倍数：min_mult~max_mult 之间取原设计
+    ratio=1.0(冷启动/波动无变化)时的插值点——floor=0.6/ceiling=2.2 下
+    t=(1.0-0.6)/(2.2-0.6)=0.25，即 min_mult + 0.25×(max_mult-min_mult)。
+    只是借用这个历史比例当锚点，不代表真的在算某个波动率比值。
+    """
+    mn = float(tier_row.get("min_mult") or 2.0)
+    mx = float(tier_row.get("max_mult") or 2.5)
+    return mn + 0.25 * (mx - mn)
+
+
+def live_tp3_trail_mult(
+    adx_now: float,
+    reentry_profile: Optional[Dict[str, Any]] = None,
+    fallback_tier: int = 1,
+) -> float:
+    """
+    TP3+ 阶段（无限价单，70% 仓位全靠雷达追踪锁利润）的呼吸倍数，按实时
+    ADX 连续插值，用 min_mult/max_mult 派生的弱/强档锚点当插值端点——
+    持仓最久、盈利空间最大的这一段理应给最宽的呼吸空间，趋势越强越要
+    敢给空间让它跑；这两个字段在 tier 配置里本来就有，此前 TP3+ 呼吸
+    倍数被写死成 1.0（早于 breath_tp12/tp23 的档位值），比 TP1-TP2 段
+    还紧，顺序是反的——这里把它接上同一套 live-ADX 插值机制修正回来。
+
+    同样只用实时ADX，不碰ATR（理由与 live_breath_zone_values 一致）。
+    """
+    rp = reentry_profile if isinstance(reentry_profile, dict) and reentry_profile else REENTRY_ETH
+    a = float(adx_now or 0)
+    if a <= 0:
+        c = tier_coeffs(fallback_tier, rp)
+        return round(_tp3_tier_anchor(c), 4)
+    weak_anchor = _tp3_tier_anchor(tier_coeffs(0, rp))
+    strong_anchor = _tp3_tier_anchor(tier_coeffs(2, rp))
+    if a <= ADX_WEAK_LT:
+        return round(weak_anchor, 4)
+    if a >= ADX_STRONG_GT:
+        return round(strong_anchor, 4)
+    t = (a - ADX_WEAK_LT) / (ADX_STRONG_GT - ADX_WEAK_LT)
+    return round(weak_anchor + t * (strong_anchor - weak_anchor), 4)
+
+
 def apply_tier_to_breath_profile(
     breath_profile: Dict[str, Any],
     tier: int,
