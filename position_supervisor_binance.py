@@ -15446,10 +15446,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _radar_activation_price(self):
         """
-        【规格 v2.1 · 绝对价格锚定】
-        首次开仓：雷达激活价 = (TP1 + TP2) / 2（TP1/TP2 为 webhook 原始信号价格）
+        【规格 v2.2 · 绝对价格锚定】
+        首次开仓：雷达激活价 = entry + 0.8×(TP1-entry)（距 TP1 剩 20% 距离即激活）
         重入开仓：雷达激活价 = TP2（价格必须真正到达 TP2 才接管）
-        不再使用 ADX 比例 × TP1 距离的旧公式。
+        不再使用 ADX 比例 × TP1 距离的旧公式，也不再用 (TP1+TP2)/2 中点。
         优先账本冻结价（已开仓持仓期不漂移）。
         """
         from reentry_profiles import (
@@ -15462,12 +15462,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tp1_px = float(tps[0] or 0) if len(tps) > 0 else 0.0
         tp2_px = float(tps[1] or 0) if len(tps) > 1 else 0.0
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+        entry_px = float(getattr(self, "watched_entry", 0) or 0)
 
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and tp1_px > 0 and tp2_px > 0:
-            # 旧 ADX 比例公式残留检测：偏差 >0.2% 且未激活则重算
+            # 旧公式残留检测：偏差 >0.2% 且未激活则重算（含本次中点→TP1临近的迁移）
             if not activated:
-                expect = radar_gate_price_from_tps(tp1_px, tp2_px, attempt)
+                expect = radar_gate_price_from_tps(
+                    tp1_px, tp2_px, attempt, entry=entry_px,
+                )
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
                     return expect
@@ -15475,7 +15478,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         # 首次计算
         if tp1_px > 0 and tp2_px > 0:
-            px = radar_gate_price_from_tps(tp1_px, tp2_px, attempt)
+            px = radar_gate_price_from_tps(tp1_px, tp2_px, attempt, entry=entry_px)
             if px > 0:
                 self.radar_activation_price = px
                 return px

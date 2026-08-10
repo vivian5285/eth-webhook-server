@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-双币种雷达 + 智能再入场（v16.24 · 规格 v2.1 中点激活 · 高速公路模式）。
+双币种雷达 + 智能再入场（v16.26 · 规格 v2.2 TP1临近激活 · 高速公路模式）。
 
-核心规格（v2.1，覆盖 v2.0）：
-  - 首次开仓雷达激活 = 价格到达 (TP1+TP2)/2（TP1是否成交仅记日志不阻塞）
+核心规格（v2.2，覆盖 v2.1）：
+  - 首次开仓雷达激活 = 价格到达 entry+0.8×(TP1-entry)（即距 TP1 剩 20% 距离处，
+    TP1是否成交仅记日志不阻塞）——早于旧版 (TP1+TP2)/2 中点，更早启动保本+
+    手续费覆盖，随后持续跟随市价动态锁仓
   - 重入开仓雷达激活 = 价格到达 TP2（不变）
   - 取消提前保本检查点（_check_early_be_checkpoint 已废除）
   - 雷达激活前完全休眠，仅硬止损守护
@@ -258,28 +260,36 @@ def buffer_for_adx(adx: float = 0.0) -> float:
     return float(HARD_SL_BUFFER_MULT)
 
 
+RADAR_GATE_TP1_PROGRESS = 0.8  # 首次开仓：entry→TP1 走完 80%（剩 20%）即激活
+
+
 def radar_gate_price_from_tps(
     tp1: float,
     tp2: float,
     reentry_attempt: int = 0,
+    entry: float = 0.0,
     **kwargs,
 ) -> float:
     """
-    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）· 高速公路模式】
-    - 首次开仓 reentry_attempt=0：雷达激活价 = (TP1 + TP2) / 2（中点）
+    【规格 v2.2 · TP1临近激活（首次）/ TP2激活（重入）· 高速公路模式】
+    - 首次开仓 reentry_attempt=0：雷达激活价 = entry + 0.8×(TP1-entry)
+      （多空通用：TP1>entry 时公式自然向上算，TP1<entry 时自然向下算）
+      即价格走完 entry→TP1 距离的 80%、还剩 20% 未到 TP1 时就激活
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
-    - 不再使用 TP2激活作为首次开仓条件（v2.0 已废弃）
     """
     t1 = float(tp1 or 0)
     t2 = float(tp2 or 0)
     attempt = int(reentry_attempt or 0)
-    if t1 <= 0 or t2 <= 0:
-        return 0.0
-    # v2.1: 首次用中点，重入用TP2
     if attempt >= 1:
+        if t2 <= 0:
+            return 0.0
         return round(t2, 4)
-    return round((t1 + t2) / 2.0, 4)
+    e = float(entry or 0)
+    if t1 <= 0 or t2 <= 0 or e <= 0:
+        return 0.0
+    gate = e + RADAR_GATE_TP1_PROGRESS * (t1 - e)
+    return round(gate, 4)
 
 
 def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str, float]:

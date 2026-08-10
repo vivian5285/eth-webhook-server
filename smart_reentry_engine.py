@@ -87,8 +87,8 @@ def init_cycle_on_open(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）】
-    首次开仓 reentry_attempt=0：雷达激活价 = (TP1+TP2)/2
+    【规格 v2.2 · TP1临近激活（首次）/ TP2激活（重入）】
+    首次开仓 reentry_attempt=0：雷达激活价 = entry + 0.8×(TP1-entry)（距TP1剩20%）
     重入开仓 reentry_attempt>=1：雷达激活价 = TP2
     TP1 是否已成交：只作为日志核对项，不作为激活的阻塞条件。
     雷达在未达到激活价前完全休眠，仅硬止损守护。
@@ -99,10 +99,15 @@ def init_cycle_on_open(
     # 规格 v2.1：雷达激活不再使用 ADX/TP1 距离百分比；frac 字段保留为 0 仅作兼容性占位。
     frac = 0.0
 
-    # 规格 v2.1：首次用中点激活，重入用TP2
+    # 规格 v2.2：首次距TP1剩20%激活，重入用TP2
     tp1_v = float(tp1 or 0)
     tp2_v = float(tp2 or 0)
-    gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=attempt)
+    # 注意：此前误用关键字 attempt=（函数形参名是 reentry_attempt），因函数带
+    # **kwargs 未报错但被静默吞掉，导致重入激活价一直被当成 attempt=0 处理
+    # （即误用首次公式，未曾真正走到"重入用TP2"分支）——顺带修正。
+    gate = radar_gate_price_from_tps(
+        tp1_v, tp2_v, reentry_attempt=attempt, entry=float(entry or 0),
+    )
 
     base_tier = int(adx_tier if adx_tier is not None else 1)
     # 首次开仓：雷达档=ADX档；重入成交后由 bump 写入放宽档
@@ -201,7 +206,7 @@ def bump_after_reentry_fill(
     tp2: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    【规格 v2.1 · 中点激活（首次）/ TP2激活（重入）】
+    【规格 v2.2 · TP1临近激活（首次）/ TP2激活（重入）】
     重入开仓 reentry_attempt>=1：雷达激活价 = TP2（价格必须真正到达 TP2 才激活）
     不再使用 radar_activation_price_adx()（旧 ADX-ratio × TP1距 公式）。
     """
@@ -215,7 +220,11 @@ def bump_after_reentry_fill(
     # v2.1 规格 §5.1：重入时雷达激活价 = TP2 绝对价格
     tp1_v = float(tp1 or 0)
     tp2_v = float(tp2 or 0)
-    gate = radar_gate_price_from_tps(tp1_v, tp2_v, attempt=nxt)
+    # 同上：此前误用 attempt= 关键字，被 **kwargs 静默吞掉，nxt(>=1) 从未真正
+    # 传给 reentry_attempt，重入激活价其实一直在走首次公式而非 TP2——顺带修正。
+    gate = radar_gate_price_from_tps(
+        tp1_v, tp2_v, reentry_attempt=nxt, entry=float(entry or 0),
+    )
 
     adx_v = float(adx) if adx is not None else 25.0
     return {
