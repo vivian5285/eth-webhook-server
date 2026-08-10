@@ -35,19 +35,20 @@ _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.70, "step_advance_atr": 0.42,
+    # v2.2（2026-08-10）：step_trigger/step_advance 再放宽，理由见 config/reentry_tiers.json 顶层 note
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.23,
      "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
-    {"step_trigger_atr": 0.85, "step_advance_atr": 0.55,
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.30,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.00, "step_advance_atr": 0.65,
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.36,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 _DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.70, "step_advance_atr": 0.50,
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.28,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 0.85, "step_advance_atr": 0.55,
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.30,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 3.5, "max_mult": 5.5},
-    {"step_trigger_atr": 1.00, "step_advance_atr": 0.65,
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.36,
      "breath_tp12": 3.00, "breath_tp23": 4.00, "min_mult": 5.0, "max_mult": 7.0},
 ]
 
