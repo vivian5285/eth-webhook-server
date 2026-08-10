@@ -146,14 +146,17 @@ class RadarReentryMixin:
             get_reentry_profile(self.symbol),
         )
         # 呼吸空间(TP1-TP2/TP2-TP3)按实时ADX连续微调，不再锁死在开仓时的
-        # 离散档位；ATR 不动，仍全程只信 TV 锁定值（不重蹈 v16.4.0 VPS拉
-        # ATR 与 TV 对不上而弃用的老路，last_adx 本来就在持续更新，不新增
-        # 数据源）。last_adx 尚未就绪时优雅退回本次离散档位值。
+        # 离散档位；叠加实时动量做有界微调(见_adx_momentum_t)——同样ADX下
+        # 正在加速冲的多给一点空间，横盘磨的收紧一点。ATR 不动，仍全程只
+        # 信 TV 锁定值（不重蹈 v16.4.0 VPS拉ATR与TV对不上而弃用的老路，
+        # last_adx/last_momentum 本来就在持续更新，不新增数据源）。
+        # last_adx 尚未就绪时优雅退回本次离散档位值。
         try:
             b12, b23 = live_breath_zone_values(
                 float(getattr(self, "last_adx", 0) or 0),
                 get_reentry_profile(self.symbol),
                 fallback_tier=attempt,
+                momentum=float(getattr(self, "last_momentum", 0) or 0),
             )
             self.breath_profile["breath_tp12"] = b12
             self.breath_profile["breath_tp23"] = b23

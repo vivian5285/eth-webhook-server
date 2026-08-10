@@ -408,6 +408,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._partial_resize_pending = False
         self._last_partial_resize_ts = 0.0
         self.last_adx = float(ADX_FALLBACK)  # 兼容旧状态；雷达动态追踪阶段不依赖 ADX
+        self.last_momentum = 0.0  # 实时动量(-1~1)，呼吸空间连续微调的第二维信号
         self.adx_tier = 1
         self.hard_sl_buffer = 1.15
         self.breathing_coefficient = cold_start_multiplier(
@@ -4914,10 +4915,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _refresh_breathing_coefficient(self, force=False):
         """
-        TP3+ 呼吸倍数（雷达系数）：按实时ADX连续插值，不再写死 1.0。
+        TP3+ 呼吸倍数（雷达系数）：按实时ADX+动量连续插值，不再写死 1.0。
         ATR 依旧只用 TV 锁值，不拉 1h 比值——这里只消费本来就持续在拉的
-        last_adx，不新增任何波动率数据源，不重蹈 v16.4.0 VPS ATR 与 TV
-        对不上的老路。
+        last_adx/last_momentum，不新增任何波动率数据源，不重蹈 v16.4.0
+        VPS ATR 与 TV 对不上的老路。
         """
         from reentry_profiles import live_tp3_trail_mult
 
@@ -4925,11 +4926,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         attempt = int(
             getattr(self, "radar_tier", 0) or getattr(self, "adx_tier", 1) or 1
         )
+        mom = float(getattr(self, "last_momentum", 0) or 0)
         try:
             coeff = live_tp3_trail_mult(
                 float(getattr(self, "last_adx", 0) or 0),
                 get_reentry_profile(self.symbol),
                 fallback_tier=attempt,
+                momentum=mom,
             )
         except Exception:
             coeff = 1.0
@@ -4938,8 +4941,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             "atr_1h": 0.0,
             "initial_atr": init,
             "adx": float(getattr(self, "last_adx", 0) or 0),
+            "momentum": mom,
             "coeff": self.breathing_coefficient,
-            "source": "live_adx",
+            "source": "live_adx_momentum",
             "ratio_history": list(getattr(self, "_breath_ratio_history", None) or []),
         }
         if init > 0:
@@ -7049,13 +7053,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _refresh_market_metrics(self, force=False):
         """
-        VPS 行情引擎：30m 合成 90m → ADX(14)。
+        VPS 行情引擎：30m 合成 90m → ADX(14) + 动量(-1~1)。
         ATR 全程只用 TV webhook.atr（open_atr 锁定），本函数不再写入 current_atr。
         返回 (atr=0, adx)。保留返回值签名不变避免破坏调用方。
         """
-        _, adx = self._market_engine().refresh(force=bool(force))
+        eng = self._market_engine()
+        _, adx = eng.refresh(force=bool(force))
         if adx > 0:
             self.last_adx = float(adx)
+        self.last_momentum = float(getattr(eng, "momentum", 0.0) or 0.0)
         # current_atr 只由 TV ATR 填充；禁止 VPS 计算覆盖
         return 0.0, float(self.last_adx or 0)
 

@@ -28,6 +28,10 @@ ADX_PERIOD = 14
 FETCH_LIMIT = 220
 REFRESH_MIN_SEC = 60.0
 ATR_COMPARE_ALERT_PCT = 0.20
+# 动量/速度：最近几根已闭合90m的净方向位移，除以同期平均振幅，
+# 反映"现在冲得快不快"——跟ADX(反映"趋势强不强")是两个维度，互补。
+# 只用于呼吸空间的连续调节，不参与止损/TP绝对值计算，不与TV的ATR比较。
+MOMENTUM_LOOKBACK_BARS = 3
 # TV 策略硬止损常见约 1.0×ATR（与 VPS initialStop=1.5×ATR 不同）。
 # 用 stop_loss 反推「TV ATR」时必须除以该倍数；若误用 1.5，会系统性报出 ~33% 假偏差。
 TV_HARD_SL_ATR_MULT = 1.0
@@ -131,6 +135,27 @@ def _true_ranges(bars: Sequence) -> List[float]:
 def wilder_atr(bars: Sequence, period: int = ATR_PERIOD) -> float:
     series = atr_series(bars, period)
     return float(series[-1]) if series else 0.0
+
+
+def bar_momentum_score(bars: Sequence, lookback: int = MOMENTUM_LOOKBACK_BARS) -> float:
+    """
+    最近 lookback 根已闭合K的净方向位移 / (同期平均振幅×lookback)，夹在[-1,1]。
+    接近 +1 = 持续单边冲高，接近 -1 = 持续单边下冲，接近 0 = 横盘磨/振幅内噪音。
+    纯本地归一化（除数是自己这几根K的振幅，不是ATR、不跟TV比较），
+    只用于呼吸空间的连续微调，禁止用于止损/TP绝对值计算。
+    """
+    n = len(bars or [])
+    if n < lookback + 1:
+        return 0.0
+    recent = bars[-(lookback + 1):]
+    closes = [_f(b[4]) for b in recent]
+    ranges = [max(_f(b[2]) - _f(b[3]), 1e-9) for b in recent[1:]]
+    avg_range = sum(ranges) / len(ranges) if ranges else 0.0
+    if avg_range <= 0:
+        return 0.0
+    change = closes[-1] - closes[0]
+    raw = change / (avg_range * lookback)
+    return max(-1.0, min(1.0, raw))
 
 
 def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
@@ -352,6 +377,7 @@ class MarketEngine:
         self._lock = threading.RLock()
         self.atr = 0.0
         self.adx = 0.0
+        self.momentum = 0.0
         self.last_bar_open_ms = 0
         self.last_refresh_ts = 0.0
         self.last_error = ""
@@ -368,6 +394,7 @@ class MarketEngine:
                 "symbol": self.symbol,
                 "atr": float(self.atr),
                 "adx": float(self.adx),
+                "momentum": float(self.momentum),
                 "interval": SYNTH_INTERVAL,
                 "source_interval": KLINE_INTERVAL,
                 "align": "utc_epoch_90m",
@@ -423,6 +450,7 @@ class MarketEngine:
         series = atr_series(bars, ATR_PERIOD)
         atr = float(series[-1]) if series else 0.0
         adx = wilder_adx(bars, ADX_PERIOD)
+        momentum = bar_momentum_score(bars, MOMENTUM_LOOKBACK_BARS)
         bar_open = int(bars[-1][0]) if bars else 0
 
         with self._lock:
@@ -430,6 +458,7 @@ class MarketEngine:
                 self.atr = atr
             if adx > 0:
                 self.adx = adx
+            self.momentum = float(momentum)
             if bar_open > 0:
                 self.last_bar_open_ms = bar_open
             self.bars_count = len(bars)
@@ -441,7 +470,8 @@ class MarketEngine:
             logger.info(
                 f"[行情引擎] {self.symbol} 90m={len(bars)}根(UTC epoch对齐←30m) | "
                 f"last_open={bar_open} | "
-                f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f} | "
+                f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f} "
+                f"动量={self.momentum:+.2f} | "
                 f"ATR中位(近{min(len(self.atr_history), ATR_MEDIAN_LOOKBACK)})="
                 f"{self.get_atr_median():.4f}"
             )

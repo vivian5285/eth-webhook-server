@@ -263,7 +263,11 @@ def buffer_for_adx(adx: float = 0.0) -> float:
 
 
 RADAR_GATE_TP1_PROGRESS = 0.8  # 首次开仓：entry→TP1 走完 80%（剩 20%）即激活
-RADAR_GATE_ATR_MULT = 1.0  # 首次开仓：顺向浮盈达到 1×ATR 即激活（双触发的另一条腿）
+RADAR_GATE_ATR_MULT = 1.5  # 首次开仓：顺向浮盈达到 1.5×ATR 即激活（双触发的另一条腿）
+# v2.4：从 1.0 提到 1.5——对齐TV"加仓"策略自己的保本触发(beTriggerATRMult=1.5，
+# 该策略TP1拉得极宽，0.8×TP1恒大于ATR腿，实际由ATR腿单独决定激活点)。
+# 旧值1.0会让VPS雷达在TV自己都还没打算保护仓位时就先武装保本，
+# 造成"雷达已保本、TV仍持有"的错位（2026-08-10 5007端口ETH实盘现象）。
 
 
 def radar_gate_price_from_tps(
@@ -275,15 +279,17 @@ def radar_gate_price_from_tps(
     **kwargs,
 ) -> float:
     """
-    【规格 v2.3 · TP1临近/ATR双触发（首次，谁先到用谁）· TP2激活（重入）】
+    【规格 v2.4 · TP1临近/ATR双触发（首次，谁先到用谁）· TP2激活（重入）】
     - 首次开仓 reentry_attempt=0：雷达激活价 = entry 沿盈利方向推进
-      min(0.8×|TP1-entry|, 1×ATR) 的距离——即"距TP1剩20%"和"顺向浮盈满
-      1×ATR"两条线谁先到就用谁。
+      min(0.8×|TP1-entry|, 1.5×ATR) 的距离——即"距TP1剩20%"和"顺向浮盈满
+      1.5×ATR"两条线谁先到就用谁。
       单纯按 TP1 距离的老公式有个漏洞：强趋势档 TP1 定得更远，连带触发
       点也被动拉远（同样 20%，中趋势档≈1.08×ATR，强趋势档≈1.42×ATR，
       拿实盘持仓验证过），导致强趋势单反而更容易在触发前把浮盈吐回去。
       加一条独立的 ATR 触发线兜底这个漏洞，同时保留 TP1 这条线（尊重策略
       自己对"这笔该跑多远"的判断，不因为 ATR line 更早就完全弃用它）。
+      v2.4：ATR腿从1.0上调到1.5，对齐TV"加仓"策略自己的保本触发线
+      (beTriggerATRMult=1.5)，避免VPS雷达比TV自己的止损逻辑更早锁保本。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -325,10 +331,28 @@ def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str
     }
 
 
+MOMENTUM_TILT_WEIGHT = 0.15  # 动量对ADX插值位置的最大牵动幅度（15%的弱强区间）
+
+
+def _adx_momentum_t(adx_now: float, momentum: float = 0.0) -> float:
+    """
+    ADX 决定插值主位置 t∈[0,1]（弱档→强档），动量在其基础上做有界微调——
+    ADX 答"趋势强不强"，动量答"现在冲得快不快"，两个维度互补，动量绝不
+    喧宾夺主（微调幅度封顶 MOMENTUM_TILT_WEIGHT）。
+    """
+    a = float(adx_now or 0)
+    t_adx = (a - ADX_WEAK_LT) / (ADX_STRONG_GT - ADX_WEAK_LT)
+    t_adx = max(0.0, min(1.0, t_adx))
+    m = max(-1.0, min(1.0, float(momentum or 0)))
+    t = t_adx + MOMENTUM_TILT_WEIGHT * m
+    return max(0.0, min(1.0, t))
+
+
 def live_breath_zone_values(
     adx_now: float,
     reentry_profile: Optional[Dict[str, Any]] = None,
     fallback_tier: int = 1,
+    momentum: float = 0.0,
 ) -> Tuple[float, float]:
     """
     breath_tp12/breath_tp23（TP1-TP2、TP2-TP3两段的呼吸空间）按实时ADX
@@ -336,13 +360,18 @@ def live_breath_zone_values(
     趋势中途走强就给更宽空间让利润跑，走弱就收紧保住已有浮盈，不再锁死
     在开仓那一刻的离散档位。
 
-    注意：这里只用实时ADX（_refresh_market_metrics 本来就持续在拉，未曾
-    停过），不碰ATR——ATR全程只信TV webhook锁定值，不拉实时ATR/1h ATR
+    v2.5：叠加动量(momentum∈[-1,1])做有界微调（见 _adx_momentum_t）——
+    同样ADX下，正在加速冲的给多一点空间，横盘磨的收紧一点，比单看ADX
+    更贴近当下盘面；动量只是"调节阀"，插值端点(weak/strong tier数值)
+    本身不变，也不影响止损/TP绝对值。
+
+    注意：这里只用实时ADX/动量（_refresh_market_metrics 本来就持续在拉，
+    未曾停过），不碰ATR——ATR全程只信TV webhook锁定值，不拉实时ATR/1h ATR
     （v16.4.0教训：VPS自己拉的ATR经常跟TV对不上，已统一弃用，此处不重蹈）。
 
     adx_now<=0（尚未有实时读数，比如刚开仓）时优雅退回fallback_tier对应
-    的离散档位值，不阻塞不报错；ADX 数值本身通过 weak/strong 两端天然
-    夹在配置范围内，任何异常大小的 adx_now 都不会插值出界外的值。
+    的离散档位值，不阻塞不报错；t 经 _adx_momentum_t 夹在[0,1]内，任何
+    异常大小的 adx_now/momentum 都不会插值出界外的值。
     """
     rp = reentry_profile if isinstance(reentry_profile, dict) and reentry_profile else REENTRY_ETH
     a = float(adx_now or 0)
@@ -351,11 +380,7 @@ def live_breath_zone_values(
         return float(c["breath_tp12"]), float(c["breath_tp23"])
     weak = tier_coeffs(0, rp)
     strong = tier_coeffs(2, rp)
-    if a <= ADX_WEAK_LT:
-        return float(weak["breath_tp12"]), float(weak["breath_tp23"])
-    if a >= ADX_STRONG_GT:
-        return float(strong["breath_tp12"]), float(strong["breath_tp23"])
-    t = (a - ADX_WEAK_LT) / (ADX_STRONG_GT - ADX_WEAK_LT)
+    t = _adx_momentum_t(a, momentum)
     b12 = weak["breath_tp12"] + t * (strong["breath_tp12"] - weak["breath_tp12"])
     b23 = weak["breath_tp23"] + t * (strong["breath_tp23"] - weak["breath_tp23"])
     return round(b12, 4), round(b23, 4)
@@ -377,6 +402,7 @@ def live_tp3_trail_mult(
     adx_now: float,
     reentry_profile: Optional[Dict[str, Any]] = None,
     fallback_tier: int = 1,
+    momentum: float = 0.0,
 ) -> float:
     """
     TP3+ 阶段（无限价单，70% 仓位全靠雷达追踪锁利润）的呼吸倍数，按实时
@@ -386,7 +412,9 @@ def live_tp3_trail_mult(
     倍数被写死成 1.0（早于 breath_tp12/tp23 的档位值），比 TP1-TP2 段
     还紧，顺序是反的——这里把它接上同一套 live-ADX 插值机制修正回来。
 
-    同样只用实时ADX，不碰ATR（理由与 live_breath_zone_values 一致）。
+    v2.5：同样叠加动量做有界微调，见 live_breath_zone_values / _adx_momentum_t。
+
+    同样只用实时ADX/动量，不碰ATR（理由与 live_breath_zone_values 一致）。
     """
     rp = reentry_profile if isinstance(reentry_profile, dict) and reentry_profile else REENTRY_ETH
     a = float(adx_now or 0)
@@ -395,11 +423,7 @@ def live_tp3_trail_mult(
         return round(_tp3_tier_anchor(c), 4)
     weak_anchor = _tp3_tier_anchor(tier_coeffs(0, rp))
     strong_anchor = _tp3_tier_anchor(tier_coeffs(2, rp))
-    if a <= ADX_WEAK_LT:
-        return round(weak_anchor, 4)
-    if a >= ADX_STRONG_GT:
-        return round(strong_anchor, 4)
-    t = (a - ADX_WEAK_LT) / (ADX_STRONG_GT - ADX_WEAK_LT)
+    t = _adx_momentum_t(a, momentum)
     return round(weak_anchor + t * (strong_anchor - weak_anchor), 4)
 
 
