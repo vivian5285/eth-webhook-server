@@ -15,6 +15,7 @@ from reentry_profiles import (
     apply_tier_to_breath_profile,
     arm_stop_price,
     get_reentry_profile,
+    live_breath_zone_values,
     make_reentry_client_order_id,
     reentry_enabled,
     tier_label,
@@ -144,6 +145,20 @@ class RadarReentryMixin:
             attempt,
             get_reentry_profile(self.symbol),
         )
+        # 呼吸空间(TP1-TP2/TP2-TP3)按实时ADX连续微调，不再锁死在开仓时的
+        # 离散档位；ATR 不动，仍全程只信 TV 锁定值（不重蹈 v16.4.0 VPS拉
+        # ATR 与 TV 对不上而弃用的老路，last_adx 本来就在持续更新，不新增
+        # 数据源）。last_adx 尚未就绪时优雅退回本次离散档位值。
+        try:
+            b12, b23 = live_breath_zone_values(
+                float(getattr(self, "last_adx", 0) or 0),
+                get_reentry_profile(self.symbol),
+                fallback_tier=attempt,
+            )
+            self.breath_profile["breath_tp12"] = b12
+            self.breath_profile["breath_tp23"] = b23
+        except Exception:
+            pass
 
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,
                                   reentry_attempt=None, adx_tier=None, radar_tier=None,

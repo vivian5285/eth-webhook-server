@@ -324,6 +324,42 @@ def tier_coeffs(tier: int, profile: Optional[Dict[str, Any]] = None) -> Dict[str
     }
 
 
+def live_breath_zone_values(
+    adx_now: float,
+    reentry_profile: Optional[Dict[str, Any]] = None,
+    fallback_tier: int = 1,
+) -> Tuple[float, float]:
+    """
+    breath_tp12/breath_tp23（TP1-TP2、TP2-TP3两段的呼吸空间）按实时ADX
+    连续插值，弱档(ADX_WEAK_LT)到强档(ADX_STRONG_GT)之间线性过渡——
+    趋势中途走强就给更宽空间让利润跑，走弱就收紧保住已有浮盈，不再锁死
+    在开仓那一刻的离散档位。
+
+    注意：这里只用实时ADX（_refresh_market_metrics 本来就持续在拉，未曾
+    停过），不碰ATR——ATR全程只信TV webhook锁定值，不拉实时ATR/1h ATR
+    （v16.4.0教训：VPS自己拉的ATR经常跟TV对不上，已统一弃用，此处不重蹈）。
+
+    adx_now<=0（尚未有实时读数，比如刚开仓）时优雅退回fallback_tier对应
+    的离散档位值，不阻塞不报错；ADX 数值本身通过 weak/strong 两端天然
+    夹在配置范围内，任何异常大小的 adx_now 都不会插值出界外的值。
+    """
+    rp = reentry_profile if isinstance(reentry_profile, dict) and reentry_profile else REENTRY_ETH
+    a = float(adx_now or 0)
+    if a <= 0:
+        c = tier_coeffs(fallback_tier, rp)
+        return float(c["breath_tp12"]), float(c["breath_tp23"])
+    weak = tier_coeffs(0, rp)
+    strong = tier_coeffs(2, rp)
+    if a <= ADX_WEAK_LT:
+        return float(weak["breath_tp12"]), float(weak["breath_tp23"])
+    if a >= ADX_STRONG_GT:
+        return float(strong["breath_tp12"]), float(strong["breath_tp23"])
+    t = (a - ADX_WEAK_LT) / (ADX_STRONG_GT - ADX_WEAK_LT)
+    b12 = weak["breath_tp12"] + t * (strong["breath_tp12"] - weak["breath_tp12"])
+    b23 = weak["breath_tp23"] + t * (strong["breath_tp23"] - weak["breath_tp23"])
+    return round(b12, 4), round(b23, 4)
+
+
 def apply_tier_to_breath_profile(
     breath_profile: Dict[str, Any],
     tier: int,
