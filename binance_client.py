@@ -74,11 +74,17 @@ class BinanceClient:
         self.api_key = os.getenv("BINANCE_API_KEY")
         self.api_secret = os.getenv("BINANCE_API_SECRET")
         # v16.16.0：注入 BinanceWeightedSession，实时解析 X-MBX-USED-WEIGHT-1M 主动预判降速
+        # 注意：装的 python-binance==1.0.37 的 Client.__init__ 根本没有 session=
+        # 这个形参（曾经直接传参导致每次都 TypeError、静默回退成普通Client，权重
+        # 预判从装上那天起就没真正生效过）。python-binance 内部请求走
+        # getattr(self.session, method)(...)，self.session 只是个普通属性，
+        # 构造完 Client 后直接换掉这个属性即可，不需要经过 __init__。
         try:
             from adapters import BinanceWeightedSession
-            _wsession = BinanceWeightedSession()
+            self.client = Client(self.api_key, self.api_secret)
+            _wsession = BinanceWeightedSession(upstream_session=self.client.session)
             _wsession.set_preemptive_callback(self._on_preemptive_weight)
-            self.client = Client(self.api_key, self.api_secret, session=_wsession)
+            self.client.session = _wsession
             self._weighted_session = _wsession
             logger.info(f"🟢 Binance Client {BINANCE_CLIENT_VERSION} 已加载 (权重感知 Session)")
         except Exception as _e:
@@ -155,10 +161,12 @@ class BinanceClient:
             if same and not force:
                 return True
             try:
+                self.client = Client(key, secret)
                 if getattr(self, "_weighted_session", None) is not None:
-                    self.client = Client(key, secret, session=self._weighted_session)
-                else:
-                    self.client = Client(key, secret)
+                    # 复用同一个 BinanceWeightedSession 实例（权重计数跨账户切换
+                    # 延续），只是底层 upstream 换成新 Client 自带的 session。
+                    self._weighted_session._upstream = self.client.session
+                    self.client.session = self._weighted_session
                 self.api_key = key
                 self.api_secret = secret
                 # 清缓存，避免旧账户挂单/持仓串读

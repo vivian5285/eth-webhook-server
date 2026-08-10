@@ -2890,20 +2890,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             "price_plan": price_plan,
         }
 
-    def _smart_recover_defenses(self, real_amt, entry, dynamic_sl=None):
-        """重启智能补挂：审计齐全则跳过，缺档增量补，避免重复挂单"""
-        matched, pending, expected, rebuilt = self._ensure_defenses_on_recover(
-            real_amt, entry, dynamic_sl=dynamic_sl,
-        )
-        audit = self._audit_tp_levels(real_amt)
-        return {
-            "matched": matched,
-            "expected": expected,
-            "pending_prices": pending,
-            "rebuilt": rebuilt,
-            "audit": audit,
-        }
-
     def _reconcile_context_on_recover(self, pos):
         """重启对账：实盘头寸 vs 账本 vs 最新 TV / 开仓日志"""
         notes = []
@@ -11332,71 +11318,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         audit = result["audit"]
         return audit["matched_full"], audit.get("pending_prices", []), audit["expected"]
-
-    def _ensure_defenses_on_recover(self, live_qty, entry, dynamic_sl=None):
-        """
-        重启/异动接管：审计 → 齐全跳过 → 增量补挂 → 仍失败才清场重建
-        返回 (matched, pending_prices, expected, rebuilt)
-        """
-        audit = self._audit_tp_levels(live_qty)
-        expected = audit["expected"]
-        matched = audit["matched_full"]
-        pending_prices = audit.get("pending_prices", [])
-        logger.info(
-            f"📊 防线审计: 持仓 {live_qty} {self._unit()} | TP {matched}/{expected} | "
-            f"{self._format_audit_summary(audit)}"
-        )
-
-        if self._has_duplicate_tp_orders():
-            pruned = self._prune_duplicate_tp_limits()
-            if pruned:
-                logger.warning(
-                    f"🧹 [{self.symbol}] 同价叠单轻量去重 {pruned} 张 → 再审计"
-                )
-                time.sleep(0.4)
-                audit = self._audit_tp_levels(live_qty)
-                matched = audit["matched_full"]
-                pending_prices = audit.get("pending_prices", [])
-                expected = audit["expected"]
-
-        if self._audit_requires_nuclear(audit) or self._has_duplicate_tp_orders():
-            logger.warning(
-                f"☢️ 审计触发核武级重挂: {len(self._collect_tp_limit_orders() or [])} 张止盈 | "
-                f"{self._format_audit_summary(audit)}"
-            )
-            audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
-            return audit["matched_full"], audit.get("pending_prices", []), audit["expected"], True
-
-        if self._defenses_fully_ok(live_qty, dynamic_sl):
-            logger.info(
-                f"✅ TP123 比例齐全 ({matched}/{expected}) @ {pending_prices}，跳过补挂"
-            )
-            if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
-                self._ensure_radar_sl(dynamic_sl, live_qty)
-            return matched, pending_prices, expected, False
-
-        self._cancel_orphan_tp_orders(live_qty)
-        logger.info(f"📋 止盈未齐 ({matched}/{expected})，增量补挂缺失档（保留已有正确单）")
-        self._patch_missing_tp_levels(live_qty, force_takeover_recheck=True)
-        time.sleep(0.8)
-        matched, pending_prices = self._wait_tp_hung(
-            self.tv_tps, live_qty=live_qty, retries=5, delay=1.0,
-        )
-        audit = self._audit_tp_levels(live_qty)
-        matched = audit["matched_full"]
-
-        if self._defenses_fully_ok(live_qty, dynamic_sl):
-            logger.info(f"✅ 增量补挂成功 ({matched}/{expected}) @ {audit['pending_prices']}")
-            if dynamic_sl and not self._has_stop_sl_near(dynamic_sl):
-                self._ensure_radar_sl(dynamic_sl, live_qty)
-            return matched, audit.get("pending_prices", []), expected, True
-
-        logger.warning(
-            f"⚠️ 增量补挂仍不足 ({matched}/{expected}) {audit['issues']}，升级核武级重挂"
-        )
-        audit = self._nuclear_realign_tp(live_qty, entry, dynamic_sl=dynamic_sl, rounds=3)
-        self._maintain_hard_shield(live_qty, None, force=True, radar_sl=dynamic_sl)
-        return audit["matched_full"], audit.get("pending_prices", []), expected, True
 
     def _wait_tp_hung(self, tp_pxs, live_qty=None, retries=5, delay=0.8):
         expected = self._expected_tp_count(tp_pxs)

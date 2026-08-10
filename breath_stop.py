@@ -70,7 +70,18 @@ def get_breathing_coefficient(
     ratio_history: Optional[List[float]] = None,
     profile: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, float, List[float]]:
-    """TP3+ 动态追踪带宽系数（min_mult~max_mult 插值）。"""
+    """
+    TP3+ 动态追踪带宽系数（min_mult~max_mult 插值），按 1h ATR / 开仓 ATR 比值。
+
+    2026-08-10 现状核查：生产代码里没有任何地方在调用这个函数（只有
+    check_vps_logic.py 这个手跑诊断脚本还在引用），position_supervisor_binance.py
+    的 _refresh_breathing_coefficient 早在 v16.4.0 删 VPS ATR 拉取时就
+    被简化成硬编码返回 1.0，never 调用过这里；当天晚些时候 TP3+ 系数
+    已经改用另一套机制（reentry_profiles.live_tp3_trail_mult，按实时ADX
+    插值，不依赖 1h ATR）接管。这个函数留着没删，是怕破坏
+    check_vps_logic.py 里的引用，但生产链路已经不吃它了，不要被这个
+    docstring误导成"这就是现在在用的TP3+系数逻辑"。
+    """
     p = _profile(profile)
     init = float(initial_atr or 0)
     cur = float(current_atr_1h or 0)
