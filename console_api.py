@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -403,6 +404,135 @@ def api_symbol_settings_update(symbol):
         fixed_amount=body.get("fixed_amount"),
     )
     return jsonify({"status": "ok", "symbol": sym, **updated})
+
+
+# ── TV 信号日志 · 重放 · 手动发单 ──────────────────────────────────────────
+# 均只回环打本机自己的 /webhook（127.0.0.1:$PORT），走和 TradingView 完全相同
+# 的生产鉴权+解析+派发路径，不直接调用 supervisor 的任何方法。
+
+def _local_webhook_port() -> str:
+    return str(os.getenv("PORT") or os.getenv("WEBHOOK_PORT") or "5003").strip() or "5003"
+
+
+def _post_to_local_webhook(payload: dict, extra_headers: dict):
+    import requests
+    from account_profiles import get_webhook_secret
+    body = dict(payload)
+    for k in ("secret", "token", "key"):
+        body.pop(k, None)
+    secret = str(get_webhook_secret() or "")
+    if not secret:
+        return {"status": "error", "message": "webhook_secret_not_configured"}, 500
+    body["secret"] = secret
+    headers = {"Content-Type": "application/json"}
+    headers.update(extra_headers or {})
+    url = f"http://127.0.0.1:{_local_webhook_port()}/webhook"
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=10)
+        try:
+            payload_out = resp.json()
+        except Exception:
+            payload_out = {"raw": resp.text[:500]}
+        return payload_out, resp.status_code
+    except Exception as e:
+        return {"status": "error", "message": f"loopback_post_failed: {e}"}, 502
+
+
+@console_bp.route("/api/console/tv_signals", methods=["GET"])
+@require_login
+def api_tv_signals_list():
+    import webhook_log
+    rows = webhook_log.list_signals(
+        limit=request.args.get("limit") or 50,
+        offset=request.args.get("offset") or 0,
+        symbol=request.args.get("symbol") or None,
+        action=request.args.get("action") or None,
+        source=request.args.get("source") or None,
+    )
+    return jsonify({"status": "ok", "signals": rows})
+
+
+@console_bp.route("/api/console/tv_signals/meta", methods=["GET"])
+@require_login
+def api_tv_signals_meta():
+    from symbol_config import active_binance_symbols, BINANCE_SYMBOL_META
+    from webhook_parser import VALID_ACTIONS
+    symbols = []
+    for sym in active_binance_symbols():
+        meta = BINANCE_SYMBOL_META.get(sym, {})
+        symbols.append({
+            "symbol": sym,
+            "unit": meta.get("unit", sym),
+            "tag": meta.get("tag", sym),
+            "price_precision": meta.get("price_precision", 2),
+            "qty_step": meta.get("qty_step"),
+            "min_qty": meta.get("min_qty"),
+        })
+    return jsonify({
+        "status": "ok",
+        "symbols": symbols,
+        "actions": sorted(VALID_ACTIONS),
+        "tiers": [{"value": 0, "label": "弱"}, {"value": 1, "label": "中"}, {"value": 2, "label": "强"}],
+    })
+
+
+@console_bp.route("/api/console/tv_signals/<int:signal_id>", methods=["GET"])
+@require_login
+def api_tv_signal_detail(signal_id):
+    import webhook_log
+    row = webhook_log.get_signal(signal_id)
+    if not row:
+        return jsonify({"status": "error", "message": "not_found"}), 404
+    return jsonify({"status": "ok", "signal": row})
+
+
+@console_bp.route("/api/console/tv_signals/<int:signal_id>/replay", methods=["POST"])
+@require_login
+def api_tv_signal_replay(signal_id):
+    import webhook_log
+    row = webhook_log.get_signal(signal_id)
+    if not row:
+        return jsonify({"status": "error", "message": "not_found"}), 404
+    try:
+        payload = json.loads(row.get("raw_json") or "{}")
+    except Exception:
+        payload = {}
+    body = request.get_json(silent=True) or {}
+    overrides = body.get("overrides") or {}
+    if not isinstance(overrides, dict):
+        return jsonify({"status": "error", "message": "overrides_must_be_object"}), 400
+    payload.update(overrides)
+    for k in webhook_log.STRIP_ON_REPLAY_KEYS:
+        payload.pop(k, None)
+    if not payload.get("reason"):
+        payload["reason"] = f"[控制台重放#{signal_id}]"
+    resp_body, status = _post_to_local_webhook(payload, {
+        "X-TV-Source": "console_replay",
+        "X-TV-Replay-Of": str(signal_id),
+    })
+    return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
+
+
+@console_bp.route("/api/console/tv_manual_send", methods=["POST"])
+@require_login
+def api_tv_manual_send():
+    from symbol_config import active_binance_symbols
+    from webhook_parser import VALID_ACTIONS
+    body = request.get_json(silent=True) or {}
+    symbol = str(body.get("symbol") or body.get("ticker") or "").strip().upper()
+    action = str(body.get("action") or "").strip().upper()
+    if action not in VALID_ACTIONS:
+        return jsonify({"status": "error", "message": "bad_action", "allowed": sorted(VALID_ACTIONS)}), 400
+    if action != "PING" and symbol not in set(active_binance_symbols()):
+        return jsonify({"status": "error", "message": "bad_symbol", "allowed": active_binance_symbols()}), 400
+    payload = {k: v for k, v in body.items() if k not in ("secret", "token", "key") and v not in (None, "")}
+    payload["symbol"] = symbol
+    payload["ticker"] = symbol
+    payload["action"] = action
+    if not payload.get("reason"):
+        payload["reason"] = "[控制台手动发单]"
+    resp_body, status = _post_to_local_webhook(payload, {"X-TV-Source": "console_manual"})
+    return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
 
 
 @console_bp.route("/api/console/resume/<path:symbol>", methods=["POST"])

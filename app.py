@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, threading, logging
+import os, threading, logging, time
 from flask import Flask, request, jsonify
 from position_supervisor_binance import (
     get_supervisor,
@@ -18,6 +18,7 @@ from webhook_parser import (
 from symbol_config import active_binance_symbols, resolve_binance_symbol
 from console_api import init_console
 from account_profiles import bootstrap_from_env, get_webhook_secret, get_active_sizing
+import webhook_log
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Binance: %(message)s')
 logger = logging.getLogger(__name__)
@@ -34,6 +35,30 @@ except Exception as _e:
 @app.route('/webhook', methods=['POST'])
 @app.route('/webhook/<path:ticker>', methods=['POST'])
 def webhook(ticker=None):
+    # 观测旁路：不参与鉴权/交易判定，任何异常内部自吞。来源标签由网关/Console
+    # 重放&手动发单在转发时自行打 header，TradingView 直连则留空落到默认值。
+    _t0 = time.time()
+    _source = str(request.headers.get("X-TV-Source") or "tv_direct").strip() or "tv_direct"
+    _remote_addr = str(request.remote_addr or "")
+    _replay_of = request.headers.get("X-TV-Replay-Of")
+    try:
+        _replay_of = int(_replay_of) if _replay_of else None
+    except (TypeError, ValueError):
+        _replay_of = None
+    data = {}
+
+    def _log(status, msg, sig_data=None):
+        try:
+            webhook_log.record_signal(
+                sig_data if isinstance(sig_data, dict) else data,
+                source=_source, remote_addr=_remote_addr,
+                http_status=status, http_message=str(msg)[:200],
+                dispatch_ms=(time.time() - _t0) * 1000.0,
+                replay_of=_replay_of,
+            )
+        except Exception:
+            pass
+
     try:
         _, data = parse_webhook_request(
             request.get_data(),
@@ -43,18 +68,30 @@ def webhook(ticker=None):
         data = normalize_tv_payload(data)
     except ValueError as e:
         logger.warning(f"[Webhook] 解析失败: {e}")
+        _log(400, f"parse_error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 400
 
     if not data:
+        _log(400, "empty_payload")
         return jsonify({"status": "error", "message": "Empty payload"}), 400
     # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值来自 Console/档案或 .env
     auth = str(
         data.get("secret") or data.get("token") or ""
     ).strip()
-    expected = str(get_webhook_secret() or os.getenv("WEBHOOK_SECRET", "528586")).strip()
+    # 2026-08-16修正：原来这里还有一层"528586"硬编码兜底，跟
+    # get_webhook_secret()内部那层重复——两处都写死了实盘真实密钥。
+    # 现在密钥读取失败/未配置一律返回空字符串，空字符串直接拒绝所有
+    # 请求(fail-closed)，不再有任何硬编码密钥兜底值。
+    expected = str(get_webhook_secret() or "").strip()
+    if not expected:
+        logger.error("[Webhook] WEBHOOK_SECRET 未配置 → 拒绝所有请求(fail-closed)")
+        _log(500, "server_misconfigured")
+        return jsonify({"status": "error", "message": "Server misconfigured"}), 500
     if auth != expected:
+        _log(403, "invalid_secret")
         return jsonify({"status": "error", "message": "Invalid secret"}), 403
     if not data.get("_parse_ok"):
+        _log(400, "missing_or_invalid_action")
         return jsonify({"status": "error", "message": "Missing or invalid action"}), 400
 
     # URL 路径品种优先（/webhook/XAUUSDT），否则读 payload ticker
@@ -64,6 +101,7 @@ def webhook(ticker=None):
 
     raw_action = data.get("action", "UNKNOWN")
     if raw_action == "PING":
+        _log(200, "pong")
         return jsonify({
             "status": "success",
             "message": "pong",
@@ -75,6 +113,7 @@ def webhook(ticker=None):
     supervisor, sym = get_supervisor_for_payload(data)
     if supervisor is None:
         logger.warning(f"[Webhook] 不支持的品种: {sym}")
+        _log(400, f"unsupported_symbol: {sym}")
         return jsonify({
             "status": "error",
             "message": f"Unsupported or missing symbol: {sym}",
@@ -92,6 +131,7 @@ def webhook(ticker=None):
         except (TypeError, ValueError):
             px_ok = False
         if not px_ok:
+            _log(400, "missing_or_invalid_price")
             return jsonify({
                 "status": "error",
                 "message": "LONG/SHORT require valid price (ATR/ADX computed on VPS)",
@@ -109,11 +149,23 @@ def webhook(ticker=None):
         ).start()
     except Exception as e:
         logger.error(f"启动线程失败 [{sym}]: {e}")
+        _log(500, f"thread_start_failed: {e}")
         return jsonify({
             "status": "error",
             "message": f"Failed to start processing: {e}",
             "symbol": sym,
         }), 500
+
+    _sig_id = None
+    try:
+        _sig_id = webhook_log.record_signal(
+            data, source=_source, remote_addr=_remote_addr,
+            http_status=200, http_message="dispatched",
+            dispatch_ms=(time.time() - _t0) * 1000.0, replay_of=_replay_of,
+        )
+        webhook_log.start_finalizer(_sig_id, sym)
+    except Exception:
+        pass
 
     return jsonify({
         "status": "success",
@@ -215,7 +267,10 @@ def admin_smoke_arm_radar(symbol):
     烟测专用：在主进程军师上强制越过激活线挂雷达 STOP。
     仅当 monitoring 且有持仓、雷达仍休眠时生效；需 WEBHOOK_SECRET。
     """
-    expected = str(os.getenv("WEBHOOK_SECRET", "528586")).strip()
+    # 2026-08-16：同一批修正，去掉硬编码"528586"兜底——这条路由能直接
+    # 越过激活线强挂雷达STOP，比普通webhook更敏感，之前"if not expected"
+    # 这层fail-closed保护形同虚设(硬编码兜底让expected永远不会真的为空)。
+    expected = str(os.getenv("WEBHOOK_SECRET") or "").strip()
     data = request.get_json(silent=True) or {}
     auth = str(
         data.get("secret")

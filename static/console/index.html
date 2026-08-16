@@ -339,6 +339,55 @@
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
     .spinner.dark { border-color: rgba(0,0,0,.15); border-top-color: var(--ink); }
 
+    /* ── Select ── */
+    select {
+      width: 100%; border: 1.5px solid rgba(0,0,0,.10); background: rgba(255,255,255,.70);
+      border-radius: 12px; padding: 11px 14px; font: var(--font); font-size: 15px;
+      color: var(--ink); outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    select:focus { border-color: rgba(0,113,227,.50); box-shadow: 0 0 0 4px rgba(0,113,227,.10); }
+    textarea {
+      width: 100%; border: 1.5px solid rgba(0,0,0,.10); background: rgba(255,255,255,.70);
+      border-radius: 12px; padding: 11px 14px; font: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px;
+      color: var(--ink); outline: none; resize: vertical;
+    }
+
+    /* ── Badges (TV 信号来源 / 处理结果) ── */
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+    .badge-blue { background: var(--blue-bg); color: var(--blue); }
+    .badge-green { background: var(--green-bg); color: #0f7a32; }
+    .badge-red { background: var(--red-bg); color: #c9342a; }
+    .badge-orange { background: var(--orange-bg); color: #b06600; }
+    .badge-gray { background: rgba(0,0,0,.06); color: var(--ink2); }
+
+    /* ── Warning banner ── */
+    .warn-banner {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--orange-bg); border: 1px solid rgba(255,159,10,.28);
+      border-radius: 14px; padding: 12px 16px; margin-bottom: 18px;
+      font-size: 13px; color: #96560a; font-weight: 600;
+    }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.35); backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center; z-index: 200; padding: 20px;
+    }
+    .modal-box {
+      width: min(560px,100%); max-height: 86vh; overflow: auto;
+      background: var(--glass2); backdrop-filter: blur(40px) saturate(1.6);
+      -webkit-backdrop-filter: blur(40px) saturate(1.6);
+      border: 1px solid rgba(255,255,255,.6); border-radius: var(--radius);
+      box-shadow: 0 30px 80px rgba(0,0,0,.20); padding: 26px;
+    }
+    .modal-box h3 { margin: 0 0 16px; font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+    .tv-row-detail {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+      white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,.03);
+      border-radius: 12px; padding: 12px; margin-top: 8px; color: #2c2c2e;
+    }
+
     /* ── Responsive ── */
     @media (max-width: 700px) {
       .metrics { grid-template-columns: 1fr 1fr; }
@@ -401,6 +450,8 @@
       <button class="tab" onclick="switchTab('profiles')" id="tab-profiles">API 档案</button>
       <button class="tab" onclick="switchTab('positions')" id="tab-positions">持仓</button>
       <button class="tab" onclick="switchTab('logs')" id="tab-logs">日志</button>
+      <button class="tab" onclick="switchTab('tvsignals')" id="tab-tvsignals">TV信号</button>
+      <button class="tab" onclick="switchTab('manual')" id="tab-manual">手动发单</button>
     </div>
 
     <!-- ── Sizing tab ── -->
@@ -521,9 +572,113 @@
         <div class="logbox" id="logBox">登录后自动加载…</div>
       </div>
     </div>
+
+    <!-- ── TV 信号 tab ── -->
+    <div id="page-tvsignals" class="hidden">
+      <div class="card" style="margin-bottom:18px">
+        <h3>筛选</h3>
+        <div class="row">
+          <div class="field">
+            <label>品种</label>
+            <select id="tvFSymbol"><option value="">全部</option></select>
+          </div>
+          <div class="field">
+            <label>动作</label>
+            <select id="tvFAction"><option value="">全部</option></select>
+          </div>
+          <div class="field">
+            <label>来源</label>
+            <select id="tvFSource">
+              <option value="">全部</option>
+              <option value="tv_direct">直连</option>
+              <option value="gateway">经网关</option>
+              <option value="console_replay">控制台重放</option>
+              <option value="console_manual">控制台手动</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:8px">
+            <button class="btn btn-primary" onclick="loadTvSignals()">刷新</button>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2);font-weight:600">
+              <input type="checkbox" id="tvAutoRefresh" style="width:auto" onchange="toggleTvAutoRefresh()" /> 自动刷新
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>已收到的 TV 信号</h3>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th><th>来源</th><th>品种</th><th>动作</th><th>价格</th>
+                <th>TP1/2/3</th><th>硬止损</th><th>档位</th><th>处理结果</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="tvSignalBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 手动发单 tab ── -->
+    <div id="page-manual" class="hidden">
+      <div class="warn-banner">⚠️ 该操作等效于收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，请仔细核对参数。</div>
+      <div class="card">
+        <h3>手动构造 TV 信号</h3>
+        <div class="row">
+          <div class="field">
+            <label>品种</label>
+            <select id="mSymbol"></select>
+          </div>
+          <div class="field">
+            <label>动作</label>
+            <select id="mAction">
+              <option value="LONG">LONG</option>
+              <option value="SHORT">SHORT</option>
+              <option value="CLOSE_QUICK_EXIT">CLOSE_QUICK_EXIT</option>
+              <option value="CLOSE_RSI_EXIT">CLOSE_RSI_EXIT</option>
+              <option value="PING">PING</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>趋势档位</label>
+            <select id="mTier">
+              <option value="">自动(ADX反推)</option>
+              <option value="0">弱</option>
+              <option value="1">中</option>
+              <option value="2">强</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>价格</label><input id="mPrice" type="number" step="any" placeholder="开仓/参考价" /></div>
+          <div class="field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
+          <div class="field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>TP1</label><input id="mTp1" type="number" step="any" /></div>
+          <div class="field"><label>TP2</label><input id="mTp2" type="number" step="any" /></div>
+          <div class="field"><label>TP3</label><input id="mTp3" type="number" step="any" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>硬止损参考价 stop_loss</label><input id="mSl" type="number" step="any" /></div>
+          <div class="field"><label>数量 qty（可选，天文值会被忽略）</label><input id="mQty" type="number" step="any" /></div>
+        </div>
+        <div class="field">
+          <label>备注 reason（可选）</label>
+          <input id="mReason" type="text" placeholder="不填则自动标注为控制台手动发单" />
+        </div>
+        <div class="save-bar" style="border-top:0;margin-top:8px;padding-top:0;justify-content:flex-end">
+          <button class="btn btn-primary" onclick="confirmManualSend()">发送到实盘</button>
+        </div>
+        <div id="mResult" class="tv-row-detail hidden"></div>
+      </div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
+
+  <div id="tvModalRoot"></div>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
@@ -531,6 +686,14 @@ let overview = null;
 let activeId = "";
 let currentEquity = 0;
 let symSettings = {};   // symbol -> {enabled, mode, risk_pct, leverage, fixed_amount, ...}
+let tvMeta = { symbols: [], actions: [] };
+let tvMetaLoaded = false;
+let tvSignalsCache = [];
+let tvAutoTimer = null;
+
+function esc(s) { return String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function fmtTs(t) { if (!t) return "—"; const d = new Date(t*1000); return d.toLocaleString("zh-CN", {hour12:false}); }
+function fmtN(v, digits=2) { return (v===null||v===undefined||v==="") ? "—" : Number(v).toFixed(digits); }
 
 // ── Toast ─────────────────────────────────────────────────────────────────
 function toast(msg, type="") {
@@ -582,9 +745,14 @@ document.getElementById("loginPw").addEventListener("keydown", e => { if(e.key==
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.getElementById("tab-"+name).classList.add("active");
-  ["sizing","profiles","positions","logs"].forEach(p => {
+  ["sizing","profiles","positions","logs","tvsignals","manual"].forEach(p => {
     document.getElementById("page-"+p).classList.toggle("hidden", p !== name);
   });
+  if (name === "tvsignals") {
+    if (!tvMetaLoaded) loadTvMeta();
+    loadTvSignals();
+  }
+  if (name === "manual" && !tvMetaLoaded) loadTvMeta();
 }
 
 // ── Overview ───────────────────────────────────────────────────────────────
@@ -1024,6 +1192,233 @@ async function loadLogs() {
     document.getElementById("logBox").textContent = (d.lines||[]).join("\n")||"(无日志)";
   } catch(e) {
     document.getElementById("logBox").textContent = "加载失败："+e.message;
+  }
+}
+
+// ── TV 信号：来源/结果徽标 ─────────────────────────────────────────────────
+const TV_SOURCE_LABEL = {
+  tv_direct: ["直连", "badge-blue"],
+  gateway: ["经网关", "badge-gray"],
+  console_replay: ["控制台重放", "badge-orange"],
+  console_manual: ["控制台手动", "badge-orange"],
+};
+const TV_PHASE_LABEL = {
+  "": ["处理中…", "badge-blue"],
+  "n/a": ["无需处理", "badge-gray"],
+  "timeout": ["超时未知", "badge-gray"],
+  "IDLE": ["空仓复位", "badge-gray"],
+  "FAILED": ["失败", "badge-red"],
+  "REPORTED": ["已完成", "badge-green"],
+  "MONITORING": ["监控中", "badge-green"],
+};
+
+function tvBadge(label, cls) { return `<span class="badge ${cls}">${esc(label)}</span>`; }
+
+function tvResultBadge(row) {
+  if (row.http_status && row.http_status >= 400) {
+    return tvBadge(`拒绝 ${row.http_status}`, "badge-red");
+  }
+  const phase = row.final_phase || "";
+  const [label, cls] = TV_PHASE_LABEL[phase] || [phase, "badge-blue"];
+  const ms = row.dispatch_ms != null ? ` · ${Math.round(row.dispatch_ms)}ms` : "";
+  return tvBadge(label + ms, cls);
+}
+
+// ── TV 信号：元数据（品种/动作下拉） ───────────────────────────────────────
+async function loadTvMeta() {
+  try {
+    const d = await api("/api/console/tv_signals/meta");
+    tvMeta = d;
+    tvMetaLoaded = true;
+    const symOpts = (d.symbols||[]).map(s => `<option value="${esc(s.symbol)}">${esc(s.tag||s.symbol)}</option>`).join("");
+    document.getElementById("tvFSymbol").innerHTML = `<option value="">全部</option>` + symOpts;
+    document.getElementById("mSymbol").innerHTML = symOpts;
+    document.getElementById("tvFAction").innerHTML = `<option value="">全部</option>` +
+      (d.actions||[]).map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+  } catch(e) { toast("加载品种/动作列表失败: "+e.message, "err"); }
+}
+
+// ── TV 信号：列表 ──────────────────────────────────────────────────────────
+async function loadTvSignals() {
+  const params = new URLSearchParams();
+  const sym = document.getElementById("tvFSymbol").value;
+  const act = document.getElementById("tvFAction").value;
+  const src = document.getElementById("tvFSource").value;
+  if (sym) params.set("symbol", sym);
+  if (act) params.set("action", act);
+  if (src) params.set("source", src);
+  params.set("limit", "80");
+  try {
+    const d = await api("/api/console/tv_signals?"+params.toString());
+    tvSignalsCache = d.signals || [];
+    renderTvSignals();
+  } catch(e) { toast("加载 TV 信号失败: "+e.message, "err"); }
+}
+
+function toggleTvAutoRefresh() {
+  const on = document.getElementById("tvAutoRefresh").checked;
+  if (tvAutoTimer) { clearInterval(tvAutoTimer); tvAutoTimer = null; }
+  if (on) tvAutoTimer = setInterval(loadTvSignals, 10000);
+}
+
+function renderTvSignals() {
+  const body = document.getElementById("tvSignalBody");
+  if (!tvSignalsCache.length) {
+    body.innerHTML = `<tr><td colspan="10" style="color:var(--ink3)">暂无信号</td></tr>`;
+    return;
+  }
+  body.innerHTML = tvSignalsCache.map(row => {
+    const [srcLabel, srcCls] = TV_SOURCE_LABEL[row.source] || [row.source, "badge-gray"];
+    const tierMap = {0:"弱",1:"中",2:"强"};
+    const tp = `${fmtN(row.tp1)}/${fmtN(row.tp2)}/${fmtN(row.tp3)}`;
+    const rawEsc = esc(JSON.stringify(JSON.parse(row.raw_json||"{}"), null, 2));
+    const detailEsc = row.final_detail_json ? esc(JSON.stringify(JSON.parse(row.final_detail_json), null, 2)) : "";
+    return `
+      <tr>
+        <td class="mono">${fmtTs(row.received_at)}</td>
+        <td>${tvBadge(srcLabel, srcCls)}</td>
+        <td>${esc(row.symbol||"—")}</td>
+        <td>${esc(row.action||"—")}</td>
+        <td class="mono">${fmtN(row.price)}</td>
+        <td class="mono">${tp}</td>
+        <td class="mono">${fmtN(row.stop_loss)}</td>
+        <td>${tierMap[row.tier] ?? "—"}</td>
+        <td>${tvResultBadge(row)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="toggleTvDetail(${row.id})">详情</button>
+          <button class="btn btn-ghost btn-sm" onclick="doReplay(${row.id})">重新执行</button>
+          <button class="btn btn-primary btn-sm" onclick="openEditReplay(${row.id})">编辑后执行</button>
+        </td>
+      </tr>
+      <tr id="tvDetail-${row.id}" class="hidden"><td colspan="10">
+        <div class="tv-row-detail">原始payload:\n${rawEsc}${detailEsc ? "\n\n最终状态快照:\n"+detailEsc : ""}</div>
+      </td></tr>`;
+  }).join("");
+}
+
+function toggleTvDetail(id) {
+  const el = document.getElementById("tvDetail-"+id);
+  if (el) el.classList.toggle("hidden");
+}
+
+function findTvSignal(id) { return tvSignalsCache.find(r => r.id === id); }
+
+// ── TV 信号：重新执行 / 编辑后执行 ──────────────────────────────────────────
+async function doReplay(id, overrides) {
+  if (!confirm("即将以" + (overrides ? "编辑后的" : "完全相同的") + "参数重新发送该笔 TV 信号到实盘，币安将按正常流程下单/平仓。确认执行？")) return;
+  try {
+    const d = await api(`/api/console/tv_signals/${id}/replay`, {
+      method: "POST", body: JSON.stringify({ overrides: overrides || {} }),
+    });
+    const up = d.upstream || {};
+    if (d.upstream_status === 200) {
+      toast("已重新发送: " + (up.message || "success"), "ok");
+    } else {
+      toast("上游返回 " + d.upstream_status + ": " + (up.message || JSON.stringify(up)).slice(0,120), "err");
+    }
+    closeTvModal();
+    loadTvSignals();
+  } catch(e) { toast("重放失败: "+e.message, "err"); }
+}
+
+function closeTvModal() { document.getElementById("tvModalRoot").innerHTML = ""; }
+
+function openEditReplay(id) {
+  const row = findTvSignal(id);
+  if (!row) return;
+  const tierMap = {0:"弱",1:"中",2:"强"};
+  const html = `
+    <div class="modal-overlay" onclick="if(event.target===this) closeTvModal()">
+      <div class="modal-box">
+        <h3>编辑后重新执行 · #${id} ${esc(row.symbol)}</h3>
+        <p style="font-size:12px;color:var(--ink2);margin:-8px 0 16px">
+          提示：完全相同的 动作+品种+价格 组合 60 秒内会被系统自动去重（防止重复下单），
+          如需确保重新触发，请微调价格或稍等。
+        </p>
+        <div class="row">
+          <div class="field"><label>动作</label>
+            <select id="erAction">
+              ${["LONG","SHORT","CLOSE_QUICK_EXIT","CLOSE_RSI_EXIT"].map(a=>`<option value="${a}" ${a===row.action?"selected":""}>${a}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field"><label>趋势档位</label>
+            <select id="erTier">
+              <option value="">自动</option>
+              <option value="0" ${row.tier===0?"selected":""}>弱</option>
+              <option value="1" ${row.tier===1?"selected":""}>中</option>
+              <option value="2" ${row.tier===2?"selected":""}>强</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>价格</label><input id="erPrice" type="number" step="any" value="${row.price??""}" /></div>
+          <div class="field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr??""}" /></div>
+          <div class="field"><label>ADX</label><input id="erAdx" type="number" step="any" value="${row.adx??""}" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>TP1</label><input id="erTp1" type="number" step="any" value="${row.tp1??""}" /></div>
+          <div class="field"><label>TP2</label><input id="erTp2" type="number" step="any" value="${row.tp2??""}" /></div>
+          <div class="field"><label>TP3</label><input id="erTp3" type="number" step="any" value="${row.tp3??""}" /></div>
+        </div>
+        <div class="field"><label>硬止损参考价 stop_loss</label><input id="erSl" type="number" step="any" value="${row.stop_loss??""}" /></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" onclick="closeTvModal()">取消</button>
+          <button class="btn btn-primary" onclick="submitEditReplay(${id})">确认执行</button>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById("tvModalRoot").innerHTML = html;
+}
+
+function submitEditReplay(id) {
+  const val = (elId) => { const v = document.getElementById(elId).value; return v === "" ? null : Number(v); };
+  const overrides = {
+    action: document.getElementById("erAction").value,
+    price: val("erPrice"), atr: val("erAtr"), adx: val("erAdx"),
+    tp1: val("erTp1"), tp2: val("erTp2"), tp3: val("erTp3"),
+    stop_loss: val("erSl"),
+  };
+  const tier = document.getElementById("erTier").value;
+  if (tier !== "") overrides.tier = Number(tier);
+  Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
+  doReplay(id, overrides);
+}
+
+// ── 手动发单 ───────────────────────────────────────────────────────────────
+function confirmManualSend() {
+  const symbol = document.getElementById("mSymbol").value;
+  const action = document.getElementById("mAction").value;
+  if (!confirm(`即将以【${action} ${symbol||""}】发送一笔手动信号到实盘，等效于收到一笔真实 TradingView 警报。确认发送？`)) return;
+  doManualSend();
+}
+
+async function doManualSend() {
+  const val = (elId) => { const v = document.getElementById(elId).value; return v === "" ? null : Number(v); };
+  const body = {
+    symbol: document.getElementById("mSymbol").value,
+    action: document.getElementById("mAction").value,
+    price: val("mPrice"), atr: val("mAtr"), adx: val("mAdx"),
+    tp1: val("mTp1"), tp2: val("mTp2"), tp3: val("mTp3"),
+    stop_loss: val("mSl"), qty: val("mQty"),
+    reason: document.getElementById("mReason").value || undefined,
+  };
+  const tier = document.getElementById("mTier").value;
+  if (tier !== "") body.tier = Number(tier);
+  Object.keys(body).forEach(k => { if (body[k] === null || body[k] === undefined) delete body[k]; });
+  const resultEl = document.getElementById("mResult");
+  resultEl.classList.remove("hidden");
+  resultEl.textContent = "发送中…";
+  try {
+    const d = await api("/api/console/tv_manual_send", { method: "POST", body: JSON.stringify(body) });
+    resultEl.textContent = JSON.stringify(d, null, 2);
+    if (d.upstream_status === 200) {
+      toast("已发送: " + (d.upstream && d.upstream.message || "success"), "ok");
+    } else {
+      toast("上游返回 " + d.upstream_status, "err");
+    }
+  } catch(e) {
+    resultEl.textContent = "发送失败: " + e.message;
+    toast("发送失败: "+e.message, "err");
   }
 }
 
