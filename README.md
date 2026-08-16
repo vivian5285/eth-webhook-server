@@ -17,7 +17,9 @@
 **TV 图表周期：ETH 90m · XAU/ZEC/BCH 45m**（VPS **不再**另拉 ATR）  
 **生产唯一大脑：`position_supervisor_binance.py`**（每 symbol 一实例）  
 **通知：仅 Telegram 全量事件（2026-07-31 取消钉钉，`DINGTALK_DISABLE=True`）**
-**ZEC/BCH支持**：ZECUSDT（2026-08-04）和BCHUSDT（2026-08-05）均使用ETH相同的呼吸参数和雷达配置，待独立回测校准
+**当前活跃品种（13个，B/C/D三账户一致）**：ETHUSDT(90m) · XAUUSDT(50m) · BNBUSDT(150m) · ZECUSDT(150m) · BCHUSDT(6h) · XMRUSDT(6h) · SNDKUSDT(90m) · PAXGUSDT(150m) · SKHYNIXUSDT(150m) · XPDUSDT(150m) · OPENAIUSDT(150m) · ANTHROPICUSDT(90m) · ASMLUSDT(90m)。OPENAI/ANTHROPIC是币安 `underlyingType=PREMARKET`（未上市股权盘前代币化）品类，24h成交量明显薄于其它TradFi品种（约449万/612万U），实盘留意滑点/挂单成交率；SKHYNIX/ASML是 `underlyingType=EQUITY`（已上市正股代币化）。每个品种在 `breath_profiles.py`（呼吸空间/雷达步进）与 `reentry_profiles.py`（保本激活门槛/ADX三档step_trigger表）两条链路均有各自独立、基于真实K线回调分布校准的档案，禁止静默退回 ETH 默认值——`_BY_BINANCE`/`_BY_SYMBOL` 两张表新增品种时必须同步补齐，2026-08-15 曾因 `reentry_profiles.py` 的 `_BY_SYMBOL` 漏更新导致 XMR/SNDK/PAXG 静默吃 ETH 的90分钟表（此后每次新增品种都同步补齐两张表，未再复发），详见 [`docs/SYSTEM_ISSUE_FIX_LOG.md`](docs/SYSTEM_ISSUE_FIX_LOG.md)。
+
+**弱中强档位仓位倾斜**：`webhook_parser.py` 的 `TIER_NOTIONAL_MULT`全局表，13个品种统一。经过几轮调整——2026-08-14先是1/2/3倍；2026-08-15当天ANTHROPIC强趋势撞上3倍杠杆保证金占用太大手动全平过一次，先给6个新品种单独收紧到0.5/0.8/1.0倍（`SYMBOL_TIER_NOTIONAL_MULT`per-symbol覆盖），随后"细水长流"决定全部品种统一收紧到0.5/0.8/1.0，当天又把弱档从0.5微调到0.7——最终定为**0.7/0.8/1.0倍**，`SYMBOL_TIER_NOTIONAL_MULT`重新清空。`MAX_TOTAL_NOTIONAL_MULT`（总敞口安全网）精确等于"全部品种同时强趋势"的理论值：1.0×13个品种 = 13倍权益，每次调档位倍数/加减品种都要跟着重算这个值。
 
 > **绝对红线（曾实盘击穿）**：查不到挂单 → **禁止**「再挂一张」。历史事故：同价 LIMIT 叠到 **50+ 笔**。现行多层铁律见下文「防叠单专章」。  
 > **双 STOP 说明**：雷达未激活时盘口**只应有硬止损**；激活后才硬+雷达双挂。TV 原 `stop_loss` **不挂盘**（只作硬止损距离输入）。  
@@ -54,7 +56,7 @@
 ### Console 管理页
 - 地址：`http://VPS_IP:5003/console`（无需域名）
 - 默认口令：环境变量 `CONSOLE_PASSWORD`（务必修改）
-- 支持 ETHUSDT、XAUUSDT、BNBUSDT、ZECUSDT 四合约独立仓位设置（苹果毛玻璃风格）
+- 支持全部活跃品种独立仓位设置（苹果毛玻璃风格）；具体品种清单见上方「当前活跃品种」
 - 档案存 `data/account_profiles.json`；切换 API 默认要求无持仓
 - 前端保存后下一笔 TV 信号直接按新设置下单，无需重启服务
 
@@ -64,16 +66,15 @@
 
 
 ```bash
-# 币安主账户
-curl -s http://127.0.0.1:5003/health | python3 -m json.tool
-# version: v16.24.2-v2.1-cleanup · pipeline: {ETHUSDT, XAUUSDT, BNBUSDT, ZECUSDT} · trading_paused: false
-# Console: http://VPS_IP:5003/console
-# TV Webhook: http://187.77.130.144/binance/webhook
+# 币安B/C/D三账户（B/C/D各自独立子账户+独立API Key，代码/品种/校准完全一致）
+curl -s http://187.77.130.144/binance-b/health | python3 -m json.tool
+curl -s http://187.77.130.144/binance-c/health | python3 -m json.tool
+curl -s http://187.77.130.144/binance-d/health | python3 -m json.tool
+# Console: http://VPS_IP:5007(/5008/5009)/console
+# TV Webhook: http://187.77.130.144/binance-b/webhook （c/d 同理）
 
-# 币安B账户
-curl -s http://127.0.0.1:5007/health | python3 -m json.tool
-# Console: http://VPS_IP:5007/console
-# TV Webhook: http://187.77.130.144/binance-b/webhook
+# 三账户只读监控面板（密码保护）
+# http://187.77.130.144/dashboard/
 
 python3 -m unittest test_pipeline_workflow.py test_ip_rate_hard_block.py
 python3 test_defense_v1590.py
@@ -88,9 +89,20 @@ python3 test_stop_idempotent_and_tp_levels.py
 
 || 工厂 | VPS 目录 | 端口 | Webhook 路由 | 品种 |
 |------|----------|------|--------------|------|
-|| **币安**（本仓库） | `~/binance-engine` | **5003** | `/binance/webhook` | ETHUSDT + XAUUSDT + BNBUSDT + ZECUSDT |
-|| **币安B**（对照） | `~/binance-engine` | **5007** | `/binance-b/webhook` | ETHUSDT + XAUUSDT + BNBUSDT |
+|| **币安B** | `~/binance-engine` | **5007** | `/binance-b/webhook` | 全部13个活跃品种（见上方清单）|
+|| **币安C** | `~/binance-engine` | **5008** | `/binance-c/webhook` | 同上 |
+|| **币安D** | `~/binance-engine` | **5009** | `/binance-d/webhook` | 同上 |
+|| **广播网关** | `~/binance-gateway`(VPS: `/root/binance-gateway`) | **5006** | `/binance-all/webhook` | 转发给B+C（D暂停使用中，`gateway.py`里注释掉了） |
 || **深币**（对照） | `~/deepcoin-hft-server` | **5004** | `/deepcoin/webhook` | ETH + XAU |
+
+> **广播网关**（2026-08-15新增，`binance-gateway.service`）：TradingView订阅上限20条警报，若每个品种要覆盖多个账户需要多条独立警报（`/binance-b/c/d/webhook`各一条），品种一多就超限。网关让这类品种在TV只需配**1条**警报指向 `http://187.77.130.144/binance-all/webhook`，网关收到后并发原样转发给各账户各自的 `/webhook`，各账户自己的secret校验/解析/去重/风控逻辑完全不变，网关本身是纯转发的哑管道，不做任何业务判断、不持有任何API密钥。当前转发目标是B（自己账户）+C（妈妈账户）——**D账户暂停使用中**（未接TV、未放资金），`gateway.py`的`BACKENDS`里D那行先注释掉，重新启用D时取消注释即可。各账户独立超时（8s），其中一个慢/挂（比如正在deploy重启）不阻塞另外两个正常接收。原有 `/binance-b(-c/-d)/webhook` 三条独立路由**保持不变**，两种方式可以按品种混用——哪些品种走直连、哪些走网关，由 TV 那端的警报 URL 配置决定，网关对 payload 内容无感知。网关自身健康也纳入 `watchdog.service` 每轮探活（`check_gateway()`），挂了会单独告警（不会体现在各账户自己的 `/health` 里，比普通账户异常更隐蔽，必须单独探测）。2026-08-16：用户把全部TV警报都切到本网关后单点风险明显升高，加固为`Restart=always`+转发失败即时钉钉告警+独立的`gateway-heartbeat.timer`（每60秒探活，失败先自愈重启、仍失败才紧急告警，不必等主监督狗10分钟一轮），实测手动停服到自愈恢复约9秒，详见 [`binance-gateway/README.md`](binance-gateway/README.md)。
+
+> 独立只读监督：`watchdog.service`（systemd timer，每10分钟）核对 TV信号 vs 实盘执行、裸奔仓位、雷达激活卡死、ERROR日志噪音过滤、广播网关健康、**nginx健康**（2026-08-16新增，见下方），异常走独立钉钉群（`WATCHDOG_DINGTALK_WEBHOOK`，跟主引擎的TG通知完全独立的第二条通道）。2026-08-15：品种数涨到10个后，原按品种循环发REST查持仓/挂单的写法实测耗时42.3s、超过subprocess 40s超时，B/C/D三账户短暂出现"持仓查询失败"误报（真实交易未受影响，只是watchdog自检链路本身超时）；已改为账户级批量REST（1次查全部持仓+1次查全部挂单+1次查全部条件单，不再逐品种循环），实测<1s，品种数再涨不会再变慢。
+
+> **2026-08-16 全域安全审计**（用户要求"全域优化"后做的一轮真实代码排查，不是清单式brainstorm）：
+> 1. **nginx此前完全没被监控**——三账户/网关的`/health`检查全部直连`127.0.0.1`，绕开了nginx，nginx真挂了这些检查还会显示正常。nginx是所有TV流量（直连+网关）共同前门，比网关单独挂更致命。新增`check_nginx()`：进程存活+真实走80端口反代路径核实，已用"手动停nginx模拟故障"实测验证告警和恢复检测都生效。
+> 2. **Webhook密钥曾有3处硬编码兜底**（`app.py`两处+`account_profiles.py`一处），实盘真实密钥直接写死在源码里当默认值——密钥/环境变量读取失败时会静默降级接受这个源码里的值，不报错不拒绝。修正为密钥读取失败一律返回空字符串，空字符串直接拒绝所有请求（fail-closed），不再有任何硬编码密钥兜底。已用正确密钥/错误密钥各测一遍确认没有影响正常鉴权。
+> 3. **跨品种并发开仓存在TOCTOU竞态**——两个不同品种的信号几乎同时到同一账户时（各自独立线程处理，不互相阻塞），`_assert_notional_cap_or_reject`总敞口检查可能都读到"其它品种=0增量"从而都通过，叠加后总敞口略微超出`MAX_TOTAL_NOTIONAL_MULT`。修法：加`_OPEN_NOTIONAL_LOCK`只锁"读敞口→判断→登记预占"这一微秒级步骤（不锁开仓全流程，实测开仓终检要47-53秒，锁全程会把品种间开仓拖成事实上的串行，比不修还伤）；预占用90秒TTL自动过期，不用在`_open_position`众多提前return分支里挨个补显式清理（那样漏一条就会留下永久卡住后续开仓的假预占，风险比竞态本身还大）。用隔离mock测试(`test_notional_race_fix.py`)先验证了竞态确实被堵住、过期预占确实自动失效、同品种不会自己卡自己，再部署上线。
 
 ---
 

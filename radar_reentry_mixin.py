@@ -19,6 +19,7 @@ from reentry_profiles import (
     make_reentry_client_order_id,
     reentry_enabled,
     tier_label,
+    tp_amplitude_scale,
 )
 from smart_reentry_engine import (
     blank_reentry_state,
@@ -162,6 +163,43 @@ class RadarReentryMixin:
             self.breath_profile["breath_tp23"] = b23
         except Exception:
             pass
+        # v2.6：呼吸空间（止损离最高点多远）按这笔单自己的TP1距离重新校准，
+        # 见 reentry_profiles.tp_amplitude_scale 的docstring——同一品种不同
+        # 账户可能接完全不同的TV策略(窄止盈TP1≈1×ATR / 宽止盈TP1≈6-9×ATR)，
+        # 死记固定ATR倍数的表格对其中一边必然错位，用这笔单实际TP1距离
+        # 相对标定基准(tp1_atr=1.35)做等比例缩放，自动适配当前策略振幅。
+        # v2.6.2教训：step_trigger_atr/step_advance_atr（阶梯止损"多久收一次
+        # 档"）曾经也套用同一个scale，结果2026-08-11实盘发现宽止盈账户
+        # (C账户ZEC scale=1.5)价格已经favorable移动2.25×ATR，阶梯却因为
+        # 触发门槛被放宽到2.10×ATR迟迟不收档，浮盈几乎没锁住——阶梯止损是
+        # "多久该收紧一档"，跟着的是波动率节奏，不是目标定多远，跟呼吸空间
+        # (止损离最高点该留多宽)是两件事，不该共用同一个缩放，已经拆开。
+        try:
+            tp1 = (self.tv_tps or [0])[0]
+            scale = tp_amplitude_scale(
+                float(tp1 or 0),
+                float(getattr(self, "watched_entry", 0) or 0),
+                self._get_locked_initial_atr(),
+                float(self.breath_profile.get("tp1_atr") or 1.35),
+            )
+            self._tp_amplitude_scale = scale
+            if abs(scale - 1.0) > 1e-9:
+                for k in ("breath_tp12", "breath_tp23"):
+                    if k in self.breath_profile:
+                        self.breath_profile[k] = round(float(self.breath_profile[k]) * scale, 4)
+            # TP3确认过渡区（防"一冲即回"假突破）默认写死1×ATR确认距离，
+            # 同样是按窄止盈基准标定的——宽止盈账户TP3远在15×ATR开外时，
+            # 1×ATR只占整段距离的6%，确认门槛太松；窄止盈账户TP3才2-3×ATR
+            # 时，1×ATR却占了三分之一强，确认门槛又太紧。同一个scale一并
+            # 校准，不用等真出现"TP3确认区也错位"才补。
+            base_confirm_atr = float(
+                self.breath_profile.get("tp3_confirm_atr")
+                if self.breath_profile.get("tp3_confirm_atr") is not None
+                else 1.0
+            )
+            self.breath_profile["tp3_confirm_atr"] = round(base_confirm_atr * scale, 4)
+        except Exception:
+            self._tp_amplitude_scale = 1.0
 
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,
                                   reentry_attempt=None, adx_tier=None, radar_tier=None,
@@ -213,7 +251,7 @@ class RadarReentryMixin:
         # v1.0 §5.1：init_cycle_on_open 已内用 radar_gate_price_from_tps(tp1, tp2, attempt)
         # 保证 tp1/tp2 均已传入；若 gate=0（tp1/tp2 缺失）则写死标签供诊断
         gate_px = float(st.get("radar_activation_price") or 0)
-        gate_lab = f"绝对价格锚定 {'(重入=TP2)' if attempt >= 1 else '(首次=(TP1+TP2)/2)'}"
+        gate_lab = f"绝对价格锚定 {'(重入=TP2)' if attempt >= 1 else '(首次=min(距TP1剩20%,1.5×ATR))'}"
         self._radar_trigger_gate = f"被动雷达·{gate_lab}"
         self._apply_tier_breath_overlay()
         logger.info(

@@ -19,6 +19,34 @@ EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"
 
+# 2026-08-12：趋势强弱仓位倾斜（用户决策：弱中强 = 1/2/3倍权益名义，
+# 线性递增）。作用在 RISK20_NOTIONAL5 算出来的基础qty上做整体缩放，
+# 不改变止损/呼吸空间等其它逻辑；乘完仍会过 _assert_notional_cap_or_reject
+# 的总敞口上限(MAX_TOTAL_NOTIONAL_MULT)兜底，不会绕过。
+# tier: 0=弱 1=中 2=强（缺省/未知按中档处理）。
+# 2026-08-14：全局倍数从2/3/5回调到1/2/3，所有品种统一用这一份。
+# 2026-08-15：先只给SNDK/PAXG/SKHYNIX/XPD/OPENAI/ANTHROPIC这6个品种单独
+# 收紧到0.5/0.8/1.0倍（当天ANTHROPIC强趋势撞上3倍杠杆，保证金占用太大，
+# 手动全平了一次）；观察一段时间后，用户决定"为了多币种都能合理持仓，
+# 细水长流"——干脆全部12个品种统一收紧到0.5/0.8/1.0倍（最高档=1倍本金=
+# 现货满仓，不再有任何品种叠加杠杆倾斜放大超过现货仓位）。SYMBOL_TIER_
+# NOTIONAL_MULT重新清空，全局表已经统一，不需要per-symbol覆盖；这个
+# 覆盖机制留着，以后哪个品种要单独调整，往下面这个空字典里加一条即可，
+# 不用改调用逻辑。
+# 2026-08-15（当天再调）：弱档从0.5上调到0.7——中强档不变，只是把弱趋势
+# 档的仓位下限收窄一点，弱/中/强三档从0.5/0.8/1.0改成0.7/0.8/1.0。强档
+# 仍是1.0倍(=现货)不变，MAX_TOTAL_NOTIONAL_MULT不用跟着重算。
+TIER_NOTIONAL_MULT = {0: 0.7, 1: 0.8, 2: 1.0}
+
+SYMBOL_TIER_NOTIONAL_MULT = {}
+
+
+def get_tier_notional_mult(symbol, tier):
+    table = SYMBOL_TIER_NOTIONAL_MULT.get(str(symbol or "").upper())
+    if table:
+        return float(table.get(tier, TIER_NOTIONAL_MULT.get(tier, 1.0)))
+    return float(TIER_NOTIONAL_MULT.get(tier, 1.0))
+
 
 def get_runtime_risk_pct():
     """Console 生效档案风险比例；失败回退常量。"""
@@ -51,6 +79,12 @@ MAX_RISK_PCT = 50.0
 MIN_RISK_PCT = 0.01
 MAX_POSITION_SIZE = 9999.0
 MIN_QTY_DEFAULT = 0.001
+# 2026-08-15：新增ASML，实际活跃品种共13个。理论总敞口 = 强档1.0×13个
+# 品种 = 13倍权益。从12上调到13，继续精确对齐"全品种同时强趋势"这个
+# 理论极端场景，不多不少。
+# 注意：以后再调TIER_NOTIONAL_MULT/SYMBOL_TIER_NOTIONAL_MULT里任何品种的
+# 强档倍数、或停用/启用某品种的TV、或再加新品种，这个值要跟着重算，否则
+# 要么裁过头要么裁不住。
 MAX_TOTAL_NOTIONAL_MULT = 13.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE

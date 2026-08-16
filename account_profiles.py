@@ -254,12 +254,19 @@ def get_sizing_base_for_symbol(symbol: str) -> float:
 
 
 def get_webhook_secret() -> str:
+    """
+    2026-08-16修正：原来兜底值硬编码"528586"（实盘正在用的真实密钥）写死
+    在源码里——.env/console配置一旦读取失败或为空就静默降级接受这个源码
+    里明晃晃的默认值，不报错不拒绝，等于密钥本身泄露在代码里。改成
+    读不到就返回空字符串，交给调用方(app.py webhook路由)在密钥为空时
+    直接拒绝所有请求(fail-closed)，不再有任何硬编码兜底值。
+    """
     with _LOCK:
         store = _load_raw()
         s = str(store.get("webhook_secret") or "").strip()
         if s:
             return s
-        return str(os.getenv("WEBHOOK_SECRET", "528586") or "").strip()
+        return str(os.getenv("WEBHOOK_SECRET") or "").strip()
 
 
 def set_webhook_secret(secret: str) -> None:

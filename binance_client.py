@@ -2027,6 +2027,15 @@ class BinanceClient:
                     with self._place_dedupe_lock:
                         self._recent_stop_place[key] = (time.time(), order)
                 return order
+            # -4509：reduceOnly止损单要求"有仓位可减"，只会在挂单瞬间仓位已经
+            # 平掉时触发——不是操作失败，是慢了一步，上层(_ensure_frozen_hard_sl
+            # 等)会自己核实仓位是否真的归零，这里降级成WARNING，别报ERROR吓人。
+            if "code=-4509" in str(e):
+                logger.warning(
+                    f"[止损单] {side} Stop @ {stop_price} 被拒(-4509 TIF GTE需要持仓)，"
+                    f"大概率仓位已在挂单瞬间平掉：{e}"
+                )
+                return None
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             # -4130：已有同向 closePosition 止损单 → 写入本地缓存防止死循环重试
             if "code=-4130" in str(e):

@@ -288,6 +288,8 @@ def calculate_stop_long(
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
     )
     trail_dist = trail_mult * initial_atr
+    # 分区呼吸：止损不得远落后于最高价超过 trail_dist（先算出来，阶梯要用它封顶）
+    trail_floor = new_highest - trail_dist
     # 浮盈≥phase_switch → 动态追踪阶段；或已过 TP3
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
     mfe_atr = (new_highest - entry_price) / initial_atr if initial_atr > 0 else 0.0
@@ -297,15 +299,19 @@ def calculate_stop_long(
     step_trigger = step_trig * initial_atr
     step_count = max(0, int((price - entry_price) / step_trigger)) if step_trigger > 0 else 0
     step_stop = initial_stop + step_count * step_adv * initial_atr
+    # v2.10（2026-08-11）：阶梯止损不能收得比当前呼吸空间(trail_floor)更紧——
+    # 阶梯是阶段一的稳定过渡保护，步进节奏不跟TP振幅缩放（今天专门拆开的，
+    # 保证捕获速度不被稀释），但这也意味着宽止盈信号上，阶梯攒了很多档之后
+    # 可能比同一时刻trail_floor(呼吸空间，会跟着TP振幅放宽)还紧，止损公式
+    # 取两者更紧的那个，宽呼吸空间就白算了(2026-08-11实盘复现：BNB宽止盈单，
+    # 阶梯早锁到608附近，trail_floor本该给到605.7附近的宽呼吸空间全程没
+    # 用上)。这里给阶梯的贡献封个顶，不让它比trail_floor还紧；trail_floor
+    # 本身依旧只进不退（下面candidate的ratchet逻辑不变），不影响已经锁定
+    # 的止损倒退，只是不让阶梯自己在trail_floor之前抢跑到更紧的位置。
+    if trail_floor > 0:
+        step_stop = min(step_stop, trail_floor)
     candidate = max(float(new_stop or 0), float(current_stop or 0), float(step_stop or 0))
-
-    # 分区呼吸：止损不得远落后于最高价超过 trail_dist
-    trail_floor = new_highest - trail_dist
-    if new_phase:
-        # 动态追踪阶段：连续追踪为主，阶梯不打断
-        candidate = max(candidate, trail_floor)
-    else:
-        candidate = max(candidate, trail_floor)
+    candidate = max(candidate, trail_floor)
 
     # 规格 v1.0：禁止 TP1/TP2 强制底线抬升（floor_atr<=0 跳过）
     f1 = float(p.get("tp1_floor_atr") or 0.0)
@@ -374,6 +380,7 @@ def calculate_stop_short(
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
     )
     trail_dist = trail_mult * initial_atr
+    trail_ceil = new_lowest + trail_dist
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
     mfe_atr = (entry_price - new_lowest) / initial_atr if initial_atr > 0 else 0.0
     new_phase = zone == "tp3_plus" or (phase_sw > 0 and mfe_atr >= phase_sw)
@@ -381,10 +388,13 @@ def calculate_stop_short(
     step_trigger = step_trig * initial_atr
     step_count = max(0, int((entry_price - price) / step_trigger)) if step_trigger > 0 else 0
     step_stop = initial_stop - step_count * step_adv * initial_atr
+    # v2.10：SHORT对称版——阶梯不能比trail_ceil(呼吸空间上限)更紧，
+    # 理由同LONG侧，见calculate_stop_long对应注释。
+    if trail_ceil > 0:
+        step_stop = max(step_stop, trail_ceil)
     refs = [x for x in (current_stop, new_stop, step_stop) if x > 0]
     candidate = min(refs) if refs else step_stop
 
-    trail_ceil = new_lowest + trail_dist
     if candidate <= 0:
         candidate = trail_ceil
     else:

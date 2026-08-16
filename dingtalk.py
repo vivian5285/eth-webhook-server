@@ -156,7 +156,13 @@ _ctx_symbol = contextvars.ContextVar("dingtalk_symbol", default=None)
 
 
 def _resolve_unit(unit_label=None, symbol=None):
-    """按品种解析数量单位：XAUUSDT → XAU，ETHUSDT/BNBUSDT → ETH，BCHUSDT → BCH，ZECUSDT → ZEC。"""
+    """按品种解析数量单位：XAUUSDT → XAU，ETHUSDT/BNBUSDT → ETH，BCHUSDT → BCH，ZECUSDT → ZEC，
+    XMRUSDT → XMR，SNDKUSDT → SNDK，PAXGUSDT → PAXG，SKHYNIXUSDT → SKHYNIX。
+    注：这条子串匹配只是兜底路径——正常调用链路里 position_supervisor_binance.py 的
+    _dingtalk 包装会用 kwargs.setdefault("unit_label", self.unit_label) 自动注入
+    正确的unit_label，这里的分支只在调用方绕过该包装、既不传unit_label也没有
+    context时才会走到。2026-08-15：补全XMR/SNDK/PAXG/SKHYNIX四个新品种分支，
+    此前会落空到ETH/BNB分支之后的context兜底、最终吃UNIT_LABEL缺省值。"""
     if unit_label:
         u = str(unit_label).strip().upper()
         if u:
@@ -170,6 +176,22 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "BCH"
     if "ZEC" in sym:
         return "ZEC"
+    if "XMR" in sym:
+        return "XMR"
+    if "SNDK" in sym:
+        return "SNDK"
+    if "PAXG" in sym:
+        return "PAXG"
+    if "SKHYNIX" in sym:
+        return "SKHYNIX"
+    if "XPD" in sym:
+        return "XPD"
+    if "OPENAI" in sym:
+        return "OPENAI"
+    if "ANTHROPIC" in sym:
+        return "ANTHROPIC"
+    if "ASML" in sym:
+        return "ASML"
     if "ETH" in sym or "BNB" in sym:
         return "ETH"
     # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
@@ -185,6 +207,22 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "BCH"
     if "ZEC" in ctx_s:
         return "ZEC"
+    if "XMR" in ctx_s:
+        return "XMR"
+    if "SNDK" in ctx_s:
+        return "SNDK"
+    if "PAXG" in ctx_s:
+        return "PAXG"
+    if "SKHYNIX" in ctx_s:
+        return "SKHYNIX"
+    if "XPD" in ctx_s:
+        return "XPD"
+    if "OPENAI" in ctx_s:
+        return "OPENAI"
+    if "ANTHROPIC" in ctx_s:
+        return "ANTHROPIC"
+    if "ASML" in ctx_s:
+        return "ASML"
     if "ETH" in ctx_s or "BNB" in ctx_s:
         return "ETH"
     return UNIT_LABEL
@@ -1756,8 +1794,18 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
     send_alert(f"🫁 [{sym}] 雷达止损 · 单槽维护", data, G_TITLE)
 
 
-# 规格 v2.1 §8 / VPS v2.0 §5.6：BNB/ZEC/BCH 尚无独立回测标定，沿用 ETH 结构过渡
-_CALIBRATED_SYMBOLS = ("ETHUSDT", "XAUUSDT")
+# 规格 v2.1 §8 / VPS v2.0 §5.6：标记"已独立回测标定"的品种，未在此列表内的
+# 品种，雷达激活播报会带⚠️过渡系数说明。2026-08-15：发现这个表从BNB/ZEC/BCH
+# 完成独立标定(2026-08-11)后就没再更新过——那次之后到今天，BNB/ZEC/BCH/XMR/
+# SNDK/PAXG/SKHYNIX全部已用真实K线独立校准(breath_profiles.py+
+# reentry_profiles.py)，但雷达激活播报一直在错误提示"过渡系数，未经独立
+# 回测校准"，全部更新为当前9个活跃品种。以后新品种校准完成也要记得同步
+# 加到这里，否则播报会一直显示"未校准"过渡说明。
+_CALIBRATED_SYMBOLS = (
+    "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT",
+    "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT",
+    "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT",
+)
 
 
 def _transitional_note(symbol):
@@ -1815,9 +1863,9 @@ def report_radar_activated(side, qty, entry, new_sl, radar_progress=1.0, regime=
         data["⚠️ 系数说明"] = _g(trans_note, G_WARN)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
-    # 规格 v1.0：绝对价格锚定标签（首次=(TP1+TP2)/2 · 重入=TP2）
+    # 规格 v2.9：绝对价格锚定标签（首次=距TP1剩20%/1.5×ATR/收益率三选一 · 重入=TP2）
     # 使用传入参数判断，不要硬编码 attempt=0
-    gate_lab = f"首次开仓→(TP1+TP2)/2"
+    gate_lab = f"首次开仓→距TP1剩20%/1.5×ATR/收益率三选一"
     if open_kind and "重入" in str(open_kind):
         gate_lab = f"重入开仓→TP2"
     # 雷达激活属于重要事件，钉钉同步通知（level=2：TG+钉钉）

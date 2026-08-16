@@ -42,6 +42,8 @@ from webhook_parser import (
     FIXED_MARGIN_PCT,
     FIXED_RISK_PCT,
     FIXED_NOTIONAL_MULT,
+    TIER_NOTIONAL_MULT,
+    get_tier_notional_mult,
     SIZING_MODE,
     LEG_TP_RATIOS,
     PLACE_TP_LEVELS,
@@ -248,6 +250,27 @@ EXCHANGE_JOURNAL = "logs/binance_exchange_journal.jsonl"
 # 硬止损同步冷却：同目标禁止反复撤挂（R3/R4 横跳抢权限）
 HARD_SL_SYNC_COOLDOWN_SEC = 45
 OPEN_REGIME_ENTRY_MATCH_PCT = 0.008  # 开仓日志匹配入场价容差 0.8%
+
+# 2026-08-16：总敞口安全网(_assert_notional_cap_or_reject)存在TOCTOU竞态——
+# 两个不同品种的信号若在几秒内先后到达同一账户（各自跑在独立线程里，
+# webhook收到后立即起线程异步处理，不会互相阻塞），各自检查"其它品种
+# 敞口"时都读不到对方"通过检查但还没真正下单"这笔，可能都通过检查、
+# 都下单，叠加后总敞口略微超出MAX_TOTAL_NOTIONAL_MULT。
+# 修法：不锁开仓全流程（实测一笔开仓终检要47-53秒，锁全程等于把品种间
+# 开仓拖回串行，比不修还伤）；只锁"读敞口→判断→登记预占"这一小步（微秒
+# 级），登记后马上放锁，后续挂单验证照常异步跑。
+# 预占清理用自动过期而不是显式清理——_open_position()有太多中途return
+# 分支，显式清理必须在每条退出路径都补一遍，漏一条就会留下永久卡住的
+# 假预占误伤后续开仓，风险比竞态本身还大。改成预占带时间戳，超过TTL
+# 自动失效不再计入；TTL(90s)比实测开仓终检最长约53秒留了余量。副作用
+# 是"某笔单刚成交完的90秒内，它的预占额度可能被重复计入一次"，但这个
+# 方向是保守的（让后续开仓的敞口判断更严格而不是更松），风险控制场景
+# 里宁可保守也不要激进，可以接受。
+# 按账户进程共享（同一账户内的品种互相看得见彼此的预占），不跨B/C/D账户
+# 进程（各自独立gunicorn进程，敞口原本就是各账户自己核算，不需要跨进程）。
+_OPEN_NOTIONAL_LOCK = threading.Lock()
+_PENDING_OPEN_NOTIONAL: dict = {}  # {symbol: (notional_usdt, reserved_at_ts)}
+_PENDING_OPEN_NOTIONAL_TTL_SEC = 90
 
 
 class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
@@ -818,6 +841,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._reset_breath_ledger_on_flat(source="confirm_flat_stale_clean")
             if synthesized_hint:
                 self._ws_hard_sl_fill_hint = synthesized_hint
+            # 2026-08-11 实盘发现：这里只清了本地账本，没撤盘口挂单——人工平仓
+            # (或任何账本没能及时感知的平仓路径)之后，雷达STOP_MARKET幽灵单会
+            # 一直挂在交易所上，价格回撤到那个价位就可能被意外触发。账本/实盘
+            # 一旦确认不一致，必须连带撤单，不能只改本地记账。
+            try:
+                self._purge_all_defense_orders_on_flat("confirm_flat_stale_clean")
+            except Exception:
+                pass
         return confirmed
 
     def _build_adverse_extreme_hint(self):
@@ -1759,7 +1790,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         sizing_note = ""
         et = normalize_entry_type(payload.get("entry_type"))
         open_sizing_meta = None
-        if et == ENTRY_TYPE_OPEN and self.tv_price > 0:
+        # normalize_entry_type 恒返回 ENTRY_TYPE_OPEN（存根函数，不看payload），
+        # 必须靠 raw_action 本身判断是不是真开仓——否则 CLOSE_RSI_EXIT/
+        # CLOSE_QUICK_EXIT 这类平仓信号（payload 里压根没有 entry_type 字段）
+        # 会被当成开仓走"信号预览sizing"，对着已经空仓的账本算止损/sizing，
+        # 触发"雷达止损无法计算"假警报（2026-08-11 实盘：雷达已正常出局后
+        # TV的CLOSE_RSI_EXIT信号才到，被误判成开仓预览，报了假的止损失败TG）
+        if et == ENTRY_TYPE_OPEN and raw_action in ("LONG", "SHORT") and self.tv_price > 0:
             # 铁律：信号播报 sizing 必须与本笔 payload 同步，禁止沿用上笔残留 tv_suggested_qty
             # （2026-07-22 事故：钉钉显示 0.02，真实下单却用巨大 TV.qty→notional=4.445）
             try:
@@ -3224,6 +3261,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "_early_be_checkpoint_done": True,  # 直接写True等效禁用
                     "last_adx": float(getattr(self, "last_adx", ADX_FALLBACK) or ADX_FALLBACK),
                     "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
+                    "tv_open_tier": getattr(self, "tv_open_tier", None),
                     "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.15) or 1.15),
                     "remaining_qty_pct": float(getattr(self, "remaining_qty_pct", 1.0) or 1.0),
                     "breathing_coefficient": float(
@@ -3932,6 +3970,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             0,
         )
         self.tv_sl_ref = float(tv_sl) if tv_sl > 0 else 0.0
+        # 2026-08-12：趋势强弱仓位倾斜——记下这笔开仓信号自带的tier，
+        # 供 _calc_vps_open_qty 用 TIER_NOTIONAL_MULT 整体缩放基础qty。
+        self.tv_open_tier = self._extract_tv_tier(payload)
         ratios = get_leg_tp_ratios(payload)
         for k in self.regime_settings:
             self.regime_settings[k]["ratios"] = list(ratios)
@@ -4915,12 +4956,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _refresh_breathing_coefficient(self, force=False):
         """
-        TP3+ 呼吸倍数（雷达系数）：按实时ADX+动量连续插值，不再写死 1.0。
+        TP3+ 呼吸倍数（雷达系数）：按实时ADX+动量连续插值，再按这笔单自己的
+        TP1距离(tp_amplitude_scale)等比例缩放，不再写死 1.0。
         ATR 依旧只用 TV 锁值，不拉 1h 比值——这里只消费本来就持续在拉的
         last_adx/last_momentum，不新增任何波动率数据源，不重蹈 v16.4.0
         VPS ATR 与 TV 对不上的老路。
         """
-        from reentry_profiles import live_tp3_trail_mult
+        from reentry_profiles import live_tp3_trail_mult, tp_amplitude_scale
 
         init = float(getattr(self, "open_atr", 0) or 0)
         attempt = int(
@@ -4936,14 +4978,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
         except Exception:
             coeff = 1.0
+        tp_scale = 1.0
+        try:
+            tp1 = (self.tv_tps or [0])[0]
+            tp_scale = tp_amplitude_scale(
+                float(tp1 or 0),
+                float(getattr(self, "watched_entry", 0) or 0),
+                self._get_locked_initial_atr(),
+                float((getattr(self, "breath_profile", None) or {}).get("tp1_atr") or 1.35),
+            )
+            coeff = float(coeff or 1.0) * tp_scale
+        except Exception:
+            pass
+        self._tp_amplitude_scale = tp_scale
         self.breathing_coefficient = float(coeff or 1.0)
         self._breath_coeff_meta = {
             "atr_1h": 0.0,
             "initial_atr": init,
             "adx": float(getattr(self, "last_adx", 0) or 0),
             "momentum": mom,
+            "tp_amplitude_scale": tp_scale,
             "coeff": self.breathing_coefficient,
-            "source": "live_adx_momentum",
+            "source": "live_adx_momentum_tpscale",
             "ratio_history": list(getattr(self, "_breath_ratio_history", None) or []),
         }
         if init > 0:
@@ -5133,6 +5189,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             margin_pct=float(_rp),
             leverage=float(FIXED_LEVERAGE),
         )
+        # 2026-08-12：趋势强弱仓位倾斜——在RISK20_NOTIONAL5基础qty上按tier整体
+        # 缩放（全局默认弱1.0x/中2.0x/强3.0x；XAU单独覆盖为2.0x/3.0x/5.0x，
+        # 见get_tier_notional_mult），缩放后按交易所qty_step重新对齐，
+        # 缩放后的qty仍会走下面的_assert_notional_cap_or_reject总敞口上限校验，
+        # 不绕过任何现有安全网。
+        tier = getattr(self, "tv_open_tier", None)
+        tier_mult = float(get_tier_notional_mult(self.symbol, tier))
+        if qty > 0 and tier_mult != 1.0:
+            qty_step_v = float(getattr(self, "qty_step", 0.001) or 0.001)
+            min_qty_v = float(getattr(self, "min_qty", 0.001) or 0.001)
+            scaled = qty * tier_mult
+            if qty_step_v > 0:
+                scaled = math.floor(scaled / qty_step_v) * qty_step_v
+            if scaled < min_qty_v:
+                scaled = 0.0
+            logger.info(
+                f"📊 [{self.symbol}] 趋势档位仓位倾斜 tier={tier}({tier_mult}x) "
+                f"qty {qty:.6f} → {scaled:.6f}"
+            )
+            qty = float(scaled)
+            meta["order_amount"] = round(qty * px, 2)
+            meta["position_value"] = meta["order_amount"]
+            meta["notional"] = meta["order_amount"]
+        meta["tier"] = tier
+        meta["tier_mult"] = tier_mult
         meta["principal"] = principal
         meta["symbol"] = self.symbol
         meta["initial_stop"] = stop
@@ -5239,25 +5320,40 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if (sizing_meta or {}).get("mode") == "fixed_amount":
             logger.info(f"💰 [{self.symbol}] 固定金额模式，跳过双品种敞口上限检查 | qty={qty} notional={new_notional:.2f}U")
             return True, {"mode": "fixed_amount", "symbol": self.symbol}
-        other, by_sym, all_total = self._other_symbols_notional(self.symbol)
-        # 本品种若已有仓，开仓流程本应先平；保守起见从 existing 去掉本品种
-        existing = other
-        ok, meta = check_total_notional_cap(
-            equity, existing, new_notional, mult=MAX_TOTAL_NOTIONAL_MULT,
-        )
-        meta["by_symbol"] = by_sym
-        meta["symbol"] = self.symbol
-        if ok:
-            logger.info(
-                f"📐 敞口校验通过 {self.symbol}: 其它 {existing:.0f}U + 本笔 {new_notional:.0f}U "
-                f"= {meta['total_notional']:.0f}U ≤ 本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}"
+        # 2026-08-16：读敞口→判断→登记并发预占，整体加锁防TOCTOU竞态，
+        # 详见 _OPEN_NOTIONAL_LOCK/_PENDING_OPEN_NOTIONAL 定义处注释。
+        with _OPEN_NOTIONAL_LOCK:
+            other, by_sym, all_total = self._other_symbols_notional(self.symbol)
+            # 本品种若已有仓，开仓流程本应先平；保守起见从 existing 去掉本品种
+            existing = other
+            now = time.time()
+            pending_other = 0.0
+            for sym, (notional, ts) in list(_PENDING_OPEN_NOTIONAL.items()):
+                if now - ts > _PENDING_OPEN_NOTIONAL_TTL_SEC:
+                    _PENDING_OPEN_NOTIONAL.pop(sym, None)
+                    continue
+                if sym != self.symbol:
+                    pending_other += notional
+            existing_with_pending = existing + pending_other
+            ok, meta = check_total_notional_cap(
+                equity, existing_with_pending, new_notional, mult=MAX_TOTAL_NOTIONAL_MULT,
             )
-            return True, meta
-        logger.error(
-            f"🚫 敞口硬顶拦截 {self.symbol}: 其它 {existing:.0f}U + 本笔 {new_notional:.0f}U "
-            f"= {meta['total_notional']:.0f}U > 上限 {meta['cap']:.0f}U "
-            f"(本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}) | 盘口 {by_sym}"
-        )
+            meta["by_symbol"] = by_sym
+            meta["symbol"] = self.symbol
+            meta["pending_other"] = round(pending_other, 2)
+            if ok:
+                _PENDING_OPEN_NOTIONAL[self.symbol] = (new_notional, now)
+                logger.info(
+                    f"📐 敞口校验通过 {self.symbol}: 其它 {existing:.0f}U(+并发预占{pending_other:.0f}U) "
+                    f"+ 本笔 {new_notional:.0f}U = {meta['total_notional']:.0f}U "
+                    f"≤ 本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}"
+                )
+                return True, meta
+            logger.error(
+                f"🚫 敞口硬顶拦截 {self.symbol}: 其它 {existing:.0f}U(+并发预占{pending_other:.0f}U) "
+                f"+ 本笔 {new_notional:.0f}U = {meta['total_notional']:.0f}U > 上限 {meta['cap']:.0f}U "
+                f"(本金 {equity:.0f}U×{MAX_TOTAL_NOTIONAL_MULT:.0f}) | 盘口 {by_sym}"
+            )
         dingtalk.report_system_alert(
             f"开仓拦截·名义敞口超限 [{self.symbol}]",
             f"本金 {equity:.0f}U · 上限 {meta['cap']:.0f}U ({MAX_TOTAL_NOTIONAL_MULT:.0f}x)\n"
@@ -5360,9 +5456,35 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return True
         return False
 
+    def _log_tier_close_stats(self, meta):
+        """
+        2026-08-12：趋势档位复盘埋点——每次平仓打一条统一格式的日志，
+        方便半个月/一个月后用 journalctl | grep TIER_LOG 跨账户拉出来，
+        按弱/中/强分组统计止损命中率、盈亏分布，为后续调整
+        TIER_NOTIONAL_MULT 提供实盘数据依据（而不是凭感觉再调）。
+        纯记录，不影响任何交易决策。
+        """
+        try:
+            tier = getattr(self, "tv_open_tier", None)
+            tier_label = {0: "弱", 1: "中", 2: "强"}.get(tier, "未知")
+            tier_mult = get_tier_notional_mult(self.symbol, tier)
+            pnl_pct = meta.get("pnl_pct")
+            pnl_txt = f"{self._safe_float(pnl_pct):+.2f}%" if pnl_pct is not None else "-"
+            exit_source = meta.get("exit_source") or "-"
+            logger.info(
+                f"📊 [TIER_LOG] symbol={self.symbol} tier={tier}({tier_label},{tier_mult}x) "
+                f"exit_source={exit_source} pnl_pct={pnl_txt} side={meta.get('side') or '-'} "
+                f"entry={self._safe_float(meta.get('entry_px')):.4f} "
+                f"exit_px={self._safe_float(meta.get('live_exit_px')):.4f} "
+                f"qty={self._safe_float(meta.get('closed_qty')):.4f}"
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] TIER_LOG 记录跳过: {e}")
+
     def _report_flat_close(self, reason, swept_dust=False, close_meta=None, curr_px=0.0):
         """平仓/止盈收网钉钉：REST 核查重试，与 Pine 四标签对齐"""
         meta = self._enrich_close_meta_live(close_meta, curr_px)
+        self._log_tier_close_stats(meta)
         flat = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
         base_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
         if swept_dust:
@@ -7717,6 +7839,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._save_state()
         except Exception:
             pass
+        # 2026-08-11 实盘：即使挂单前才核实过持仓非空(pos_now)，从那一刻到
+        # 这里真正下单，中间还隔着_has_stop_sl_near/_orders_book_readable/
+        # _has_open_pending_defense_tag/_save_state 好几次REST——仓位如果
+        # 在这个窗口内被雷达/TP打平，交易所就会用-4509拒掉这笔reduceOnly
+        # 止损单。挂单已经失败，再核实一次仓位：真平了就不是"缺失且补挂
+        # 失败"，是"仓位没了不需要挂"，二者对宝贝的意义完全不同，不该都
+        # 报同一条ERROR吓人。
+        try:
+            pos_after = self._get_active_position()
+            confirmed_flat = pos_after is None or (
+                pos_after != "QUERY_FAILED"
+                and isinstance(pos_after, dict)
+                and float(pos_after.get("size") or 0) <= 0
+            )
+            if confirmed_flat:
+                logger.info(
+                    f"🛡️ [{self.symbol}] {reason} 挂单未成但复查仓位已归零 → "
+                    f"仓位已由别的路径平仓，无需再挂硬止损"
+                )
+                return True
+        except Exception:
+            pass
         return False
 
     def _breath_resize_stop_on_tp(self, live_qty, reason=""):
@@ -8073,6 +8217,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "ok": True, "skipped": True, "target": ledger_target,
                     "exchange_target": exchange_target, "purged": 0,
                     "reason": "protected_by_hard_or_existing_stop",
+                }
+            # 3次重试跨度约1.5~2s，仓位可能在这期间已被雷达止损/TP实际打平——
+            # 挂不上止损是因为已经没仓位要保护，不是真的裸仓，重新核实一次
+            # 再决定要不要报警，避免"仓位早已安全落袋"却报"裸仓风险"吓人。
+            pos_recheck = self._get_active_position(prefer_ws=False, force_rest=True)
+            if pos_recheck is None or float((pos_recheck or {}).get("size") or 0) <= 0:
+                logger.info(
+                    f"✅ [{self.symbol}] 止损挂单未核实但复查仓位已归零 → "
+                    f"仓位已由雷达/TP实际平仓，无需再挂止损 | {reason}"
+                )
+                self._record_shield_maintain(success=True)
+                return {
+                    "ok": True, "skipped": True, "target": ledger_target,
+                    "exchange_target": exchange_target, "purged": 0,
+                    "reason": "already_flat_during_retry",
                 }
             logger.error(
                 f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 新挂失败且盘口无 STOP → 裸仓 | {reason}"
@@ -10374,11 +10533,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tp_cancelled = 0
         init_orders = None
 
-        # 【重要修复】撤单前先检查持仓：已空仓时无需撤单，减少无意义 REST
+        # 2026-08-11 实盘修复：原来的"已空仓就跳过撤单"前置检查，前提假设错了——
+        # 恰恰是"仓位已经没了、但挂单还在"这种情况(手动平仓/账本滞后确认flat)
+        # 才是调用本函数最典型的场景，如果只看仓位不看挂单就跳过，等于永远
+        # 撤不掉这类幽灵单(2026-08-11实盘复现两次：ZEC/ETH各一次，雷达止损
+        # 单在仓位归零后一直挂在盘口)。改成仓位和挂单都确认为空才跳过。
         try:
             pre_pos = binance_client.get_position(self.symbol, prefer_ws=False, force_rest=False)
-            if not pre_pos or float(pre_pos.get("positionAmt", 0) or 0) == 0:
-                logger.info(f"🧹 [{tag}] 持仓已清零，跳过撤单循环")
+            pre_orders = binance_client.get_open_orders(self.symbol)
+            pos_empty = not pre_pos or float(pre_pos.get("positionAmt", 0) or 0) == 0
+            orders_empty = not is_orders_query_failed(pre_orders) and not pre_orders
+            if pos_empty and orders_empty:
+                logger.info(f"🧹 [{tag}] 持仓已清零且无挂单，跳过撤单循环")
                 return {
                     "ok": True,
                     "rounds": 0,
@@ -14447,7 +14613,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         1) 核实持仓 → 绑回本笔 TV TP1/TP2 价
         2) 共同第一步：永久硬止损(|TV−SL|×buffer 锚定成交价) + TP1+TP2(10%/20%)
         3) ATR 全程只用 TV webhook.atr（VPS 不拉独立 ATR）
-        4) 递进雷达休眠至激活线(TP1+TP2中点)后接管（TP3永不挂限价)
+        4) 递进雷达休眠至激活线(距TP1剩20%/1.5×ATR双触发谁先到)后接管（TP3永不挂限价)
         5) 实盘核实后 TG 一条
         """
         entry_price = float(entry_price or 0)
@@ -15412,6 +15578,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         entry_px = float(getattr(self, "watched_entry", 0) or 0)
         atr_v = float(self._get_locked_initial_atr() or 0)
+        return_pct = float(get_reentry_profile(self.symbol).get("radar_gate_return_pct") or 0)
 
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and tp1_px > 0 and tp2_px > 0:
@@ -15419,6 +15586,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if not activated:
                 expect = radar_gate_price_from_tps(
                     tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
+                    return_pct=return_pct,
                 )
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
@@ -15429,6 +15597,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if tp1_px > 0 and tp2_px > 0:
             px = radar_gate_price_from_tps(
                 tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
+                return_pct=return_pct,
             )
             if px > 0:
                 self.radar_activation_price = px
@@ -16395,6 +16564,35 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         if curr_px > 0:
                             self._note_mark_extremum(curr_px)
 
+                        # 2026-08-13：雷达未激活期间，每120s强制打一次真实REST价格
+                        # 交叉核对best_price——get_current_price()默认prefer_ws=True，
+                        # 上面那次调用哪怕WS缓存单品种静默卡死也照样会读到那份卡住的
+                        # 缓存值（合并流连接本身没断，日志看不出异常）。实盘复现过一次：
+                        # XAU真实markPrice冲过了激活线，但best_price定住没跟上，雷达
+                        # 该激活没激活，仓位错过保本锁利（当时还是活的仓位、有硬止损
+                        # 兜底，不算裸仓，但雷达失效了）。只在未激活时做这个強制核对，
+                        # 已激活后精度要求没那么高，不额外加REST负担。
+                        if not getattr(self, "radar_activated", False):
+                            last_check = float(
+                                getattr(self, "_last_forced_rest_price_ts", 0) or 0
+                            )
+                            if time.time() - last_check >= 120.0:
+                                self._last_forced_rest_price_ts = time.time()
+                                try:
+                                    fresh_px = binance_client.get_current_price(
+                                        self.symbol, prefer_ws=False,
+                                    )
+                                    if fresh_px and fresh_px > 0:
+                                        stale_gap = abs(fresh_px - curr_px)
+                                        if stale_gap > 0:
+                                            logger.debug(
+                                                f"[{self.symbol}] WS缓存交叉核对 "
+                                                f"REST={fresh_px:.2f} vs WS={curr_px:.2f}"
+                                            )
+                                        self._note_mark_extremum(fresh_px)
+                                except Exception as e:
+                                    logger.debug(f"[{self.symbol}] 强制REST核对跳过: {e}")
+
                         # ATR 每 5 分钟刷新（阶梯 step_count 不回溯）
                         try:
                             self._maybe_refresh_atr()
@@ -17040,6 +17238,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)
                     self.adx_tier = int(s.get("adx_tier", 1) or 1)
+                    self.tv_open_tier = s.get("tv_open_tier")
                     self.hard_sl_buffer = float(s.get("hard_sl_buffer", 1.15) or 1.15)
                     self.remaining_qty_pct = float(s.get("remaining_qty_pct", 1.0) or 1.0)
                     self.breathing_coefficient = float(

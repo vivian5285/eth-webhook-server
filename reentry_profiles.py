@@ -35,21 +35,135 @@ _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
-    # v2.2（2026-08-10）：step_trigger/step_advance 再放宽，理由见 config/reentry_tiers.json 顶层 note
-    {"step_trigger_atr": 1.00, "step_advance_atr": 0.23,
+    # v2.7（2026-08-11）：step_advance/step_trigger 捕获比例从~25%提到50%，
+    # step_trigger 不动，理由见 config/reentry_tiers.json 顶层 note
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
      "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
-    {"step_trigger_atr": 1.20, "step_advance_atr": 0.30,
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.60,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.40, "step_advance_atr": 0.36,
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.70,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 _DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 1.00, "step_advance_atr": 0.28,
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.20, "step_advance_atr": 0.30,
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.60,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 3.5, "max_mult": 5.5},
-    {"step_trigger_atr": 1.40, "step_advance_atr": 0.36,
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.70,
      "breath_tp12": 3.00, "breath_tp23": 4.00, "min_mult": 5.0, "max_mult": 7.0},
+]
+# v2.8（2026-08-11）：BNB/ZEC/BCH此前全部共用_DEFAULT_ETH_TIERS（且_BY_SYMBOL
+# 曾把三者都指向同一个REENTRY_ETH对象，config/reentry_tiers.json里各自的
+# "tiers"字段从未被实际读取——死配置，本次一并修复接线）。数值来自各自
+# 近73根90m K线局部高点回撤分布分析，理由见 config/reentry_tiers.json 对应
+# symbol的顶层note。
+_DEFAULT_BNB_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.60,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.70,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+_DEFAULT_ZEC_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.14, "step_advance_atr": 0.57,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.37, "step_advance_atr": 0.68,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.60, "step_advance_atr": 0.80,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+_DEFAULT_BCH_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.23, "step_advance_atr": 0.62,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.48, "step_advance_atr": 0.74,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.73, "step_advance_atr": 0.86,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# 2026-08-15：新增XMR/SNDK/PAXG，同一批发现——_BY_SYMBOL此前没有这三个品种
+# 的独立条目，get_reentry_profile一直静默退回REENTRY_ETH，导致这三个品种
+# 持仓武装雷达后，apply_tier_to_breath_profile每次都用ETH的90分钟tier表
+# 覆盖掉breath_profiles.py校准的step_trigger/step_advance（tv_tf_sec/
+# reentry_window_bars/reentry_zone_atr同样被ETH的值覆盖）——跟2026-08-11
+# BNB/ZEC/BCH那次死配置是同一类问题，本次一并接线修复。
+# step_trigger/step_advance按sqrt(该品种breath_profiles.py中位数回调/ETH
+# 中位数回调3.26)缩放ETH三档基线，breath_tp12/23/min/max维持ETH同款不动
+# （沿用BNB/ZEC/BCH的既有约定：这四个字段本来就有ADX+动量连续插值，不在
+# 这里叠加改动）。
+_DEFAULT_XMR_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.96, "step_advance_atr": 0.48,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.15, "step_advance_atr": 0.58,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.35, "step_advance_atr": 0.67,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+_DEFAULT_SNDK_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.93, "step_advance_atr": 0.46,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.11, "step_advance_atr": 0.56,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.30, "step_advance_atr": 0.65,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+_DEFAULT_PAXG_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.07, "step_advance_atr": 0.54,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.29, "step_advance_atr": 0.64,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.50, "step_advance_atr": 0.75,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# 2026-08-15：新增SKHYNIX，跟XMR/SNDK/PAXG当天一起接线，不再重蹈
+# _BY_SYMBOL遗漏新品种的老问题。step_trigger/step_advance按
+# sqrt(SKHYNIX breath_profiles.py中位数回调2.97/ETH中位数回调3.26)≈0.955
+# 倍缩放ETH三档基线。
+_DEFAULT_SKHYNIX_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.96, "step_advance_atr": 0.48,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.15, "step_advance_atr": 0.57,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.34, "step_advance_atr": 0.67,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# 2026-08-15：新增XPD，sqrt(XPD breath_profiles.py中位数回调3.25/ETH中位数
+# 回调3.26)≈0.998——跟ETH基线几乎完全重合（巧合），直接沿用ETH三档数值。
+_DEFAULT_XPD_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.20, "step_advance_atr": 0.60,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.40, "step_advance_atr": 0.70,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# 2026-08-15：新增OPENAI/ANTHROPIC（PREMARKET未上市股权盘前品种）。
+# OPENAI: sqrt(OPENAI breath_profiles.py中位数回调2.59/ETH中位数回调3.26)≈0.891。
+_DEFAULT_OPENAI_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.89, "step_advance_atr": 0.45,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.07, "step_advance_atr": 0.53,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.25, "step_advance_atr": 0.62,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# ANTHROPIC: sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961。
+_DEFAULT_ANTHROPIC_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.96, "step_advance_atr": 0.48,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.15, "step_advance_atr": 0.58,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.35, "step_advance_atr": 0.67,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# ASML: sqrt(ASML breath_profiles.py中位数回调3.10/ETH中位数回调3.26)≈0.975。
+_DEFAULT_ASML_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.98, "step_advance_atr": 0.49,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.17, "step_advance_atr": 0.59,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.37, "step_advance_atr": 0.68,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 
 REENTRY_TIERS_JSON = os.path.join(
@@ -113,12 +227,95 @@ ETH_TIERS: List[Dict[str, float]] = list(
 XAU_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("XAU") or {}).get("tiers") or _DEFAULT_XAU_TIERS)
 )
+BNB_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("BNB") or {}).get("tiers") or _DEFAULT_BNB_TIERS)
+)
+ZEC_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("ZEC") or {}).get("tiers") or _DEFAULT_ZEC_TIERS)
+)
+BCH_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("BCH") or {}).get("tiers") or _DEFAULT_BCH_TIERS)
+)
+XMR_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("XMR") or {}).get("tiers") or _DEFAULT_XMR_TIERS)
+)
+SNDK_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("SNDK") or {}).get("tiers") or _DEFAULT_SNDK_TIERS)
+)
+PAXG_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("PAXG") or {}).get("tiers") or _DEFAULT_PAXG_TIERS)
+)
+SKHYNIX_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("SKHYNIX") or {}).get("tiers") or _DEFAULT_SKHYNIX_TIERS)
+)
+XPD_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("XPD") or {}).get("tiers") or _DEFAULT_XPD_TIERS)
+)
+OPENAI_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("OPENAI") or {}).get("tiers") or _DEFAULT_OPENAI_TIERS)
+)
+ANTHROPIC_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("ANTHROPIC") or {}).get("tiers") or _DEFAULT_ANTHROPIC_TIERS)
+)
+ASML_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("ASML") or {}).get("tiers") or _DEFAULT_ASML_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
+_BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
+_ZEC_ZONE = float((_CFG.get("ZEC") or {}).get("reentry_zone_atr") or 0.5)
+_BCH_ZONE = float((_CFG.get("BCH") or {}).get("reentry_zone_atr") or 0.5)
+_XMR_ZONE = float((_CFG.get("XMR") or {}).get("reentry_zone_atr") or 0.5)
+_SNDK_ZONE = float((_CFG.get("SNDK") or {}).get("reentry_zone_atr") or 0.5)
+_PAXG_ZONE = float((_CFG.get("PAXG") or {}).get("reentry_zone_atr") or 0.5)
+_SKHYNIX_ZONE = float((_CFG.get("SKHYNIX") or {}).get("reentry_zone_atr") or 0.5)
+_XPD_ZONE = float((_CFG.get("XPD") or {}).get("reentry_zone_atr") or 0.5)
+_OPENAI_ZONE = float((_CFG.get("OPENAI") or {}).get("reentry_zone_atr") or 0.5)
+_ANTHROPIC_ZONE = float((_CFG.get("ANTHROPIC") or {}).get("reentry_zone_atr") or 0.5)
+_ASML_ZONE = float((_CFG.get("ASML") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
+# 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
+# REENTRY_BNB/ZEC/BCH时是照抄ETH的90min假设定的2根，后来BNB/ZEC确认是
+# 150分钟、BCH确认是6小时，2根分别变成300min/12小时，明显超出其它品种
+# ~150-180min的窗口惯例，收到1根才对齐；tv_tf_sec同一批一起修正，见下方。
+_BNB_WINDOW_BARS = int((_CFG.get("BNB") or {}).get("reentry_window_bars") or 1)
+_ZEC_WINDOW_BARS = int((_CFG.get("ZEC") or {}).get("reentry_window_bars") or 1)
+_BCH_WINDOW_BARS = int((_CFG.get("BCH") or {}).get("reentry_window_bars") or 1)
+# XMR(6h)/PAXG(150m)原生周期偏长，1根K线已接近/超过其它品种2根的时间窗口
+# （ETH 2×90m=180min，XAU 3×45m=135min），故窗口收到1根，避免重入窗口被
+# 动拉到6-12小时；SNDK(90m)跟ETH同周期，沿用2根一致。
+_XMR_WINDOW_BARS = int((_CFG.get("XMR") or {}).get("reentry_window_bars") or 1)
+_SNDK_WINDOW_BARS = int((_CFG.get("SNDK") or {}).get("reentry_window_bars") or 2)
+_PAXG_WINDOW_BARS = int((_CFG.get("PAXG") or {}).get("reentry_window_bars") or 1)
+# SKHYNIX同PAXG，150m原生周期，1根K线(150min)已接近ETH 2×90m=180min目标窗口
+_SKHYNIX_WINDOW_BARS = int((_CFG.get("SKHYNIX") or {}).get("reentry_window_bars") or 1)
+_XPD_WINDOW_BARS = int((_CFG.get("XPD") or {}).get("reentry_window_bars") or 1)
+# OPENAI(150m)同PAXG/SKHYNIX/XPD收到1根；ANTHROPIC(90m)同ETH/SNDK沿用2根
+_OPENAI_WINDOW_BARS = int((_CFG.get("OPENAI") or {}).get("reentry_window_bars") or 1)
+_ANTHROPIC_WINDOW_BARS = int((_CFG.get("ANTHROPIC") or {}).get("reentry_window_bars") or 2)
+# ASML(90m)同ETH/SNDK/ANTHROPIC沿用2根
+_ASML_WINDOW_BARS = int((_CFG.get("ASML") or {}).get("reentry_window_bars") or 2)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
-_XAU_TF_SEC = int((_CFG.get("XAU") or {}).get("tv_tf_sec") or 2700)
+# 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
+# XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
+# BCH从5400(90min)改21600(6h)。这几个都是早期建REENTRY_XAU/BNB/ZEC/BCH
+# 时按当时的周期假设写的，后来breath_profiles.py那边跟着用户的实盘周期
+# 修正更新过，但这条reentry_profiles.py的tv_tf_sec表一直没跟着改，是
+# reentry_window_sec()唯一的输入源——用错的tf算出错的重入窗口时长，
+# 直到今天用户发来TV警报截图逐个核对周期才挖出来。
+_XAU_TF_SEC = int((_CFG.get("XAU") or {}).get("tv_tf_sec") or 3000)
+_BNB_TF_SEC = int((_CFG.get("BNB") or {}).get("tv_tf_sec") or 9000)
+_ZEC_TF_SEC = int((_CFG.get("ZEC") or {}).get("tv_tf_sec") or 9000)
+_BCH_TF_SEC = int((_CFG.get("BCH") or {}).get("tv_tf_sec") or 21600)
+_XMR_TF_SEC = int((_CFG.get("XMR") or {}).get("tv_tf_sec") or 21600)
+_SNDK_TF_SEC = int((_CFG.get("SNDK") or {}).get("tv_tf_sec") or 5400)
+_PAXG_TF_SEC = int((_CFG.get("PAXG") or {}).get("tv_tf_sec") or 9000)
+_SKHYNIX_TF_SEC = int((_CFG.get("SKHYNIX") or {}).get("tv_tf_sec") or 9000)
+_XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
+_OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
+_ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 5400)
+_ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
 
 
 def make_reentry_client_order_id(
@@ -173,13 +370,220 @@ REENTRY_XAU: Dict[str, Any] = {
     "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
     "tick_size": 0.01,
 }
+# v2.8（2026-08-11）：此前BNB/ZEC/BCH全部共用REENTRY_ETH对象，_BY_SYMBOL指向
+# 同一个字典，config/reentry_tiers.json里各自的"tiers"字段从未被实际读取——
+# 死配置，本次拆成三个独立profile对象，各自的tiers表才真正生效。
+REENTRY_BNB: Dict[str, Any] = {
+    "name": "BNB",
+    "tv_tf": "90m",
+    "tv_tf_sec": _BNB_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": BNB_TIERS,
+    "reentry_zone_atr": _BNB_ZONE,
+    "reentry_window_bars": _BNB_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+REENTRY_ZEC: Dict[str, Any] = {
+    "name": "ZEC",
+    "tv_tf": "90m",
+    "tv_tf_sec": _ZEC_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    # v2.9：雷达激活三触发的第三条腿，只给ZEC配置，见radar_gate_price_from_tps
+    # docstring——1.5×ATR封顶换算成价格百分比对ZEC来说是2.15%，比其它品种
+    # 高出不少，加这条1%的收益率腿兜底，不影响其它品种(它们return_pct=0)。
+    "radar_gate_return_pct": 0.01,
+    "tiers": ZEC_TIERS,
+    "reentry_zone_atr": _ZEC_ZONE,
+    "reentry_window_bars": _ZEC_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+REENTRY_BCH: Dict[str, Any] = {
+    "name": "BCH",
+    "tv_tf": "90m",
+    "tv_tf_sec": _BCH_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": BCH_TIERS,
+    "reentry_zone_atr": _BCH_ZONE,
+    "reentry_window_bars": _BCH_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_XMR: Dict[str, Any] = {
+    "name": "XMR",
+    "tv_tf": "6h",
+    "tv_tf_sec": _XMR_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": XMR_TIERS,
+    "reentry_zone_atr": _XMR_ZONE,
+    "reentry_window_bars": _XMR_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+REENTRY_SNDK: Dict[str, Any] = {
+    "name": "SNDK",
+    "tv_tf": "90m",
+    "tv_tf_sec": _SNDK_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": SNDK_TIERS,
+    "reentry_zone_atr": _SNDK_ZONE,
+    "reentry_window_bars": _SNDK_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+REENTRY_PAXG: Dict[str, Any] = {
+    "name": "PAXG",
+    "tv_tf": "150m",
+    "tv_tf_sec": _PAXG_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": PAXG_TIERS,
+    "reentry_zone_atr": _PAXG_ZONE,
+    "reentry_window_bars": _PAXG_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_SKHYNIX: Dict[str, Any] = {
+    "name": "SKHYNIX",
+    "tv_tf": "150m",
+    "tv_tf_sec": _SKHYNIX_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": SKHYNIX_TIERS,
+    "reentry_zone_atr": _SKHYNIX_ZONE,
+    "reentry_window_bars": _SKHYNIX_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_XPD: Dict[str, Any] = {
+    "name": "XPD",
+    "tv_tf": "150m",
+    "tv_tf_sec": _XPD_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": XPD_TIERS,
+    "reentry_zone_atr": _XPD_ZONE,
+    "reentry_window_bars": _XPD_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_OPENAI: Dict[str, Any] = {
+    "name": "OPENAI",
+    "tv_tf": "150m",
+    "tv_tf_sec": _OPENAI_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": OPENAI_TIERS,
+    "reentry_zone_atr": _OPENAI_ZONE,
+    "reentry_window_bars": _OPENAI_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+REENTRY_ANTHROPIC: Dict[str, Any] = {
+    "name": "ANTHROPIC",
+    "tv_tf": "90m",
+    "tv_tf_sec": _ANTHROPIC_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": ANTHROPIC_TIERS,
+    "reentry_zone_atr": _ANTHROPIC_ZONE,
+    "reentry_window_bars": _ANTHROPIC_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_ASML: Dict[str, Any] = {
+    "name": "ASML",
+    "tv_tf": "90m",
+    "tv_tf_sec": _ASML_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": ASML_TIERS,
+    "reentry_zone_atr": _ASML_ZONE,
+    "reentry_window_bars": _ASML_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
 
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
-    "BNBUSDT": REENTRY_ETH,
-    "ZECUSDT": REENTRY_ETH,  # 过渡：使用ETH结构，待独立回测标定
-    "BCHUSDT": REENTRY_ETH,  # 过渡：使用ETH结构，待独立回测标定
+    "BNBUSDT": REENTRY_BNB,
+    "ZECUSDT": REENTRY_ZEC,
+    "BCHUSDT": REENTRY_BCH,
+    "XMRUSDT": REENTRY_XMR,
+    "SNDKUSDT": REENTRY_SNDK,
+    "PAXGUSDT": REENTRY_PAXG,
+    "SKHYNIXUSDT": REENTRY_SKHYNIX,
+    "XPDUSDT": REENTRY_XPD,
+    "OPENAIUSDT": REENTRY_OPENAI,
+    "ANTHROPICUSDT": REENTRY_ANTHROPIC,
+    "ASMLUSDT": REENTRY_ASML,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }
@@ -276,13 +680,14 @@ def radar_gate_price_from_tps(
     reentry_attempt: int = 0,
     entry: float = 0.0,
     atr: float = 0.0,
+    return_pct: float = 0.0,
     **kwargs,
 ) -> float:
     """
-    【规格 v2.4 · TP1临近/ATR双触发（首次，谁先到用谁）· TP2激活（重入）】
+    【规格 v2.9 · TP1临近/ATR/收益率三触发（首次，谁先到用谁）· TP2激活（重入）】
     - 首次开仓 reentry_attempt=0：雷达激活价 = entry 沿盈利方向推进
-      min(0.8×|TP1-entry|, 1.5×ATR) 的距离——即"距TP1剩20%"和"顺向浮盈满
-      1.5×ATR"两条线谁先到就用谁。
+      min(0.8×|TP1-entry|, 1.5×ATR, return_pct×entry) 的距离——"距TP1剩
+      20%"、"顺向浮盈满1.5×ATR"、"顺向涨跌幅满return_pct"三条线谁先到用谁。
       单纯按 TP1 距离的老公式有个漏洞：强趋势档 TP1 定得更远，连带触发
       点也被动拉远（同样 20%，中趋势档≈1.08×ATR，强趋势档≈1.42×ATR，
       拿实盘持仓验证过），导致强趋势单反而更容易在触发前把浮盈吐回去。
@@ -290,6 +695,13 @@ def radar_gate_price_from_tps(
       自己对"这笔该跑多远"的判断，不因为 ATR line 更早就完全弃用它）。
       v2.4：ATR腿从1.0上调到1.5，对齐TV"加仓"策略自己的保本触发线
       (beTriggerATRMult=1.5)，避免VPS雷达比TV自己的止损逻辑更早锁保本。
+      v2.9（2026-08-11）：新增可选收益率腿——只给ZEC配置(见REENTRY_ZEC的
+      radar_gate_return_pct=0.01)，其余品种return_pct=0不生效(退化为原
+      双触发)。背景：1.5×ATR这个封顶换算成价格百分比，品种间差异很大
+      (ZEC≈2.15%，ETH/XAU/BNB只有0.6~0.8%)——ZEC波动率相对价格占比更大，
+      同样1.5倍ATR的"保护垫"，落到价格百分比上比其它品种迟得多，实盘
+      观察下来ZEC经常感觉"该保护的时候还没触发"。收益率腿只针对ZEC生效，
+      不碰其它品种已经跟TV自身逻辑对齐过的1.5×ATR封顶。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -307,7 +719,9 @@ def radar_gate_price_from_tps(
     dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
     a = float(atr or 0)
     dist_atr = RADAR_GATE_ATR_MULT * a if a > 0 else dist_tp1
-    dist = min(dist_tp1, dist_atr)
+    rp = float(return_pct or 0)
+    dist_pct = rp * e if rp > 0 else dist_tp1
+    dist = min(dist_tp1, dist_atr, dist_pct)
     gate = e + direction * dist
     return round(gate, 4)
 
@@ -346,6 +760,58 @@ def _adx_momentum_t(adx_now: float, momentum: float = 0.0) -> float:
     m = max(-1.0, min(1.0, float(momentum or 0)))
     t = t_adx + MOMENTUM_TILT_WEIGHT * m
     return max(0.0, min(1.0, t))
+
+
+TP_AMPLITUDE_SCALE_MIN = 0.5
+TP_AMPLITUDE_SCALE_MAX = 1.5
+# v2.6.1：封顶从3.0收紧到1.5——sqrt缓冲解决了"呼吸空间比TP1距离本身还宽"
+# 这个荒谬情况，但极端比例(如C账户ZEC TP1远达5.86×ATR)缓冲后依然接近
+# TP1距离的89%，最坏情况(价格刚摸到TP1就立刻回撤)几乎能把浮盈吃光。
+# 收到1.5后同一情形降到TP1距离的64%，回吐空间更收敛，仍比scale=1时更宽
+# （给宽止盈策略应有的呼吸余地），但不再逼近"利润全部吐回"的边缘。
+
+
+def tp_amplitude_scale(
+    tp1: float, entry: float, atr: float, reference_tp1_atr: float = 1.35,
+) -> float:
+    """
+    v2.6：呼吸空间/阶梯参数的整体缩放系数，按"这笔单自己的TP1距离"重新校准。
+
+    背景：breath_tp12/tp23/step_trigger_atr/step_advance_atr 这些ATR倍数，
+    是按"TP1≈1.35×ATR"这个假设标定的（breath_profiles.py里tp1_atr=1.35，
+    对应窄止盈风格的TV策略）。但同一个品种不同账户可能接的是完全不同的
+    TV策略——2026-08-11实盘发现：同一个ZEC，B账户TV策略TP1只有1.17×ATR，
+    C账户TV策略TP1却远在5.86×ATR开外，相差5倍。同一套固定ATR倍数的呼吸
+    空间，对窄止盈账户可能比TP1本身还宽（起不到分区收紧作用），对宽止盈
+    账户又显得成比例过紧（半路就被收窄跟丢），因为两边对"这笔该跑多远"
+    的预期完全不同，死记ATR绝对值就会错位。
+
+    用这笔单自己的 |TP1-entry|/ATR 除以标定基准(reference_tp1_atr，来自
+    breath_profile['tp1_atr'])得到原始比例，**开平方根缓冲**后再作为缩放
+    系数——breath_tp12基线本身相对基准TP1距离就已经偏宽（2.5×ATR vs
+    1.35×ATR，约1.85倍，窄止盈策略下让后半段有空间跑是合理的），若直接
+    线性放大这个比例，宽止盈账户会被放大到"呼吸空间超过TP1自身距离"，
+    等于价格还没真正到TP1、浮盈就可能被全部吐光都触发不了止损（2026-08-
+    11实盘发现：C账户ZEC线性放大到7.5×ATR，比它TP1距离5.86×ATR还宽）。
+    开平方根能在比例接近1时几乎不变(sqrt(1)=1，不影响已验证过的常规账户)，
+    但显著压低极端比例的放大幅度，避免放大后的呼吸空间反而超过TP1自身
+    距离，让"回吐容忍度"更收敛。
+
+    夹在[0.5, 3.0]之间：防止极端TP1距离（比如异常信号、close-to-entry的
+    TP1）把呼吸空间炸到失真；数据缺失/TP1<=0时返回1.0（不缩放，退回原表）。
+    """
+    e = float(entry or 0)
+    a = float(atr or 0)
+    t1 = float(tp1 or 0)
+    ref = float(reference_tp1_atr or 0) or 1.35
+    if e <= 0 or a <= 0 or t1 <= 0:
+        return 1.0
+    actual_tp1_atr = abs(t1 - e) / a
+    if actual_tp1_atr <= 0:
+        return 1.0
+    raw_ratio = actual_tp1_atr / ref
+    scale = raw_ratio ** 0.5
+    return max(TP_AMPLITUDE_SCALE_MIN, min(TP_AMPLITUDE_SCALE_MAX, scale))
 
 
 def live_breath_zone_values(

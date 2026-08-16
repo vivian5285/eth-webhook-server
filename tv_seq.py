@@ -514,38 +514,23 @@ def reorder_batch_close_then_open(messages: List[dict]) -> List[dict]:
 
 def collapse_batch_for_execution(messages: List[dict]) -> List[dict]:
     """
-    缓存窗口到期后折叠执行集（白皮书 15s 开平铁律）：
-    1. 若同批既有 OPEN 又有 CLOSE：按到达序判定
-       · OPEN 先到 → 丢弃全部 CLOSE，只执行开仓
-       · CLOSE 先到 → 先平后开
+    缓存窗口到期后折叠执行集：
+    1. 同批CLOSE+OPEN并存 → 两条都保留，输出顺序永远先平后开
+       （2026-08-13修复：原来按"到达VPS的顺序"判断"OPEN先到就丢弃CLOSE"，
+       但到达顺序只反映网络传输快慢，不代表Pine脚本里两个alert()谁先触发——
+       防修正+平开不互斥版脚本改成closeFired/entryFired各自独立alert()后，
+       同一根K线的反手信号会拆成两条独立webhook，网络抖动完全可能让LONG
+       先到而CLOSE后到，旧规则会把这条CLOSE整条丢掉、只剩一条孤立LONG，
+       worker执行时旧仓位其实还没平，_verify_flat会中止开仓，导致该反手
+       的信号平仓开仓全部落空。现在不再按到达序丢弃，只按action类型分流，
+       靠下面固定的"exit先→other→entry后"拼接顺序保证先平后开，
+       不依赖也不比较到达顺序）
     2. P0 平仓只保留一条；P1 开仓只保留最新一条
-    最终顺序：平仓(若保留) → 其它 → 开仓(至多一条)
+    最终顺序：平仓(若有) → 其它 → 开仓(至多一条)
     """
     msgs = list(messages or [])
     if not msgs:
         return []
-
-    first_open_i = None
-    first_close_i = None
-    for i, m in enumerate(msgs):
-        act = str((m or {}).get("action", "") or "").strip().upper()
-        if first_open_i is None and is_open_action(act):
-            first_open_i = i
-        if first_close_i is None and (
-            is_flatten_action(act) or is_close_action(act)
-        ):
-            first_close_i = i
-
-    # OPEN 先到：同批 CLOSE 一律丢弃（迟到 CLOSE 由 15s 执行窗再拦）
-    drop_closes = (
-        first_open_i is not None
-        and first_close_i is not None
-        and first_open_i < first_close_i
-    )
-    if drop_closes:
-        logger.info(
-            "📬 15s窗口规则：OPEN先到 → 丢弃同批CLOSE，只执行开仓"
-        )
 
     exit_msgs: List[dict] = []
     entry_msgs: List[dict] = []
@@ -571,8 +556,6 @@ def collapse_batch_for_execution(messages: List[dict]) -> List[dict]:
         if is_flatten_action(act) or (
             is_close_action(act) and not is_open_action(act)
         ):
-            if drop_closes:
-                continue
             if fp in seen_exit_fp:
                 continue  # 窗口内相同平仓合并
             seen_exit_fp.add(fp)

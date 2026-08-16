@@ -1,6 +1,6 @@
 {
-  "schema": "v2.2-step-ladder-loosened",
-  "note": "规格 v2.2（覆盖v2.1）：首次开仓雷达激活 = 距TP1剩20%与顺向浮盈满1×ATR谁先到（详见 reentry_profiles.radar_gate_price_from_tps）；重入开仓 = TP2。TP1是否成交仅记日志不阻塞。取消提前保本检查点。2026-08-10实盘发现：v2.1步进参数(step_trigger/step_advance)放宽后仍明显比同期呼吸空间(breath_tp12)紧，导致仓位浮盈仅数美元的余地就贴止损——因为止损公式取阶梯止损与呼吸空间止损中更紧的那个，阶梯不松、呼吸空间的改进就白做。本次step_trigger整体上调约40-65%、step_advance整体下调约35-45%，让呼吸空间机制能实际接管，不再被更紧的阶梯抢跑。",
+  "schema": "v2.8-per-symbol-calibration",
+  "note": "规格 v2.2（覆盖v2.1）：首次开仓雷达激活 = 距TP1剩20%与顺向浮盈满1×ATR谁先到（详见 reentry_profiles.radar_gate_price_from_tps）；重入开仓 = TP2。TP1是否成交仅记日志不阻塞。取消提前保本检查点。2026-08-10实盘发现：v2.1步进参数(step_trigger/step_advance)放宽后仍明显比同期呼吸空间(breath_tp12)紧，导致仓位浮盈仅数美元的余地就贴止损——因为止损公式取阶梯止损与呼吸空间止损中更紧的那个，阶梯不松、呼吸空间的改进就白做。本次step_trigger整体上调约40-65%、step_advance整体下调约35-45%，让呼吸空间机制能实际接管，不再被更紧的阶梯抢跑。v2.7（2026-08-11）：step_trigger不动（保留'等多久才收第一档'的保护，避免重蹈提前出局覆辙），但step_advance/step_trigger捕获比例从约25%提到50%——实盘发现ZEC强趋势档单子已顺向走了2.25×ATR，阶梯却只触发1档、只锁住约22%的浮盈，大部分利润裸奔；呼吸空间(breath_tp12)本身没被顶到，真正卡住止损的是阶梯每档收得太少。",
   "arm_mode": "breakeven_fee",
   "arm_sl_atr": 0.0,
   "fee_cover_pct": 0.0008,
@@ -23,7 +23,7 @@
         "name": "weak",
         "note": "弱趋势：呼吸宽松，允许行情充分跑动（v2.2再放宽：2026-08-10实盘验证v2.1步进仍偏紧，阶梯跟出的止损常年比同期呼吸空间breath_tp12紧一大截，导致呼吸空间的改进被更紧的阶梯抢先卡住不生效）",
         "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.23,
+        "step_advance_atr": 0.50,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -33,7 +33,7 @@
         "name": "mid",
         "note": "中趋势：平衡配置（v2.2再放宽，理由同上）",
         "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.30,
+        "step_advance_atr": 0.60,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -43,7 +43,7 @@
         "name": "strong",
         "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（v2.2再放宽，理由同上）",
         "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.36,
+        "step_advance_atr": 0.70,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,
@@ -52,15 +52,16 @@
     ]
   },
   "XAU": {
-    "tv_tf_sec": 2700,
+    "tv_tf_sec": 3000,
     "reentry_window_bars": 3,
     "reentry_zone_atr": 0.3,
+    "note": "2026-08-15：tv_tf_sec从2700(45min)修正为3000(50min)——用户当天把XAU策略周期从45分改成50分后，breath_profiles.py同步校准过，但这条reentry_profiles.py的tv_tf_sec表没跟着改，一直停在旧的45分钟没被发现，直到今天核对TV截图才挖出来。reentry_window_sec()=window_bars×tv_tf_sec，之前一直用错的45分钟在算重入窗口时长，3×45=135min，修正后3×50=150min，窗口本身变化不大，但数值终于跟真实周期对上了。",
     "tiers": [
       {
         "name": "weak",
         "note": "弱趋势XAU：波动大，呼吸空间必须足够大（v2.2再放宽，理由同ETH）",
         "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.28,
+        "step_advance_atr": 0.50,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -70,7 +71,7 @@
         "name": "mid",
         "note": "中趋势XAU：标准宽松配置（v2.2再放宽，理由同ETH）",
         "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.30,
+        "step_advance_atr": 0.60,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 3.5,
@@ -80,7 +81,7 @@
         "name": "strong",
         "note": "强趋势XAU：呼吸空间最大，市价在前面跑，雷达保持安全距离（v2.2再放宽，理由同ETH）",
         "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.36,
+        "step_advance_atr": 0.70,
         "breath_tp12": 3.00,
         "breath_tp23": 4.00,
         "min_mult": 5.0,
@@ -89,16 +90,16 @@
     ]
   },
   "BNB": {
-    "tv_tf_sec": 5400,
-    "reentry_window_bars": 2,
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
     "reentry_zone_atr": 0.5,
-    "note": "过渡系数：BNB/ZEC/BCH三币种尚无独立回测标定，使用ETH结构过渡，标注待独立校准",
+    "note": "v2.8（2026-08-11）：用BNB自己近73根90m K线做过局部高点回撤分布分析——P75回撤≈1.31×ATR，比ETH当前mid档(1.20)只窄一点点，数据不支持收紧或放宽，维持ETH同款数值。⚠️注意：这是本次校准之前才发现的死配置修复——此前_BY_SYMBOL把BNB/ZEC/BCH全部指向同一个REENTRY_ETH对象，这里的tiers字段从未被代码实际读取过，本次已在reentry_profiles.py把三个币种拆成各自独立的REENTRY_BNB/REENTRY_ZEC/REENTRY_BCH，这个tiers表从今天起才真正生效。2026-08-15追加修正：tv_tf_sec当时按ETH的90min设的，用户后来把BNB纠正成150分钟周期(2026-08-14 breath_profiles.py同步校准过)，但这张表没跟着改，一直用90min错误值算reentry_window_sec()，直到核对TV警报截图才发现。window_bars从2改成1——按150min的真实周期，2根=300min比其它品种通行的~150-180min窗口明显偏长，收到1根=150min，跟PAXG/SKHYNIX/XPD这些150分钟品种的处理方式保持一致。",
     "tiers": [
       {
         "name": "weak",
-        "note": "过渡：弱趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
+        "note": "弱趋势：数据支持维持ETH同款数值",
         "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.23,
+        "step_advance_atr": 0.50,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -106,9 +107,9 @@
       },
       {
         "name": "mid",
-        "note": "过渡：中趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
+        "note": "中趋势：数据支持维持ETH同款数值（P75回撤1.31×ATR接近当前1.20）",
         "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.30,
+        "step_advance_atr": 0.60,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -116,9 +117,47 @@
       },
       {
         "name": "strong",
-        "note": "过渡：强趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
+        "note": "强趋势：数据支持维持ETH同款数值",
         "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.36,
+        "step_advance_atr": 0.70,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "ZEC": {
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "v2.8（2026-08-11）：ZEC自己近73根90m K线局部高点回撤分析——P75回撤≈1.82×ATR，比ETH当前strong档(1.40)宽出约30%，跟今天实盘反复验证ZEC需要更宽呼吸空间的结论一致。step_trigger/step_advance整体按sqrt(1.82/1.40)≈1.14倍放宽（开根号缓冲避免直接按线性比例放大，样本量约29个局部高点/4.5天数据，量不算大）；breath_tp12/23/min_mult/max_mult暂不动，运行时还有ADX+动量+TP振幅三层连续调节，不在这里叠加更多改动。2026-08-15追加修正：tv_tf_sec同BNB一样一直停在ETH的90min没跟着ZEC后来确认的150分钟周期更新，reentry_window_sec()算错了窗口时长，核对TV截图才发现。window_bars同样从2改成1，理由同BNB。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按ZEC自身波动率放宽",
+        "step_trigger_atr": 1.14,
+        "step_advance_atr": 0.57,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按ZEC自身波动率放宽",
+        "step_trigger_atr": 1.37,
+        "step_advance_atr": 0.68,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按ZEC自身波动率放宽（今天实盘ADX长期在38-41，多数时间落在这一档）",
+        "step_trigger_atr": 1.60,
+        "step_advance_atr": 0.80,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,
@@ -127,16 +166,16 @@
     ]
   },
   "BCH": {
-    "tv_tf_sec": 5400,
-    "reentry_window_bars": 2,
+    "tv_tf_sec": 21600,
+    "reentry_window_bars": 1,
     "reentry_zone_atr": 0.5,
-    "note": "过渡系数：BNB/ZEC/BCH三币种尚无独立回测标定，使用ETH结构过渡，标注待独立校准",
+    "note": "v2.8（2026-08-11）：BCH自己近73根90m K线局部高点回撤分析——弱趋势档(ADX=14.3时)P75回撤≈1.52×ATR，比ETH当前weak档(1.00)宽出约52%，低流动性品种弱趋势/横盘阶段噪音明显更大。step_trigger/step_advance整体按sqrt(1.52/1.00)≈1.23倍放宽（开根号缓冲，样本量约26个局部高点/4.5天数据，不算大）；breath_tp12/23/min_mult/max_mult暂不动，理由同ZEC。2026-08-15追加修正：tv_tf_sec一直停在ETH的90min，从未跟着BCH后来确认的6小时周期(2026-08-14 breath_profiles.py同步校准过)更新，reentry_window_sec()算错了窗口时长，核对TV截图才发现。window_bars从2改成1——按6小时真实周期，2根=12小时明显偏长，收到1根=6小时，跟XMR(同为6h周期)的处理方式保持一致。",
     "tiers": [
       {
         "name": "weak",
-        "note": "过渡：弱趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
-        "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.23,
+        "note": "弱趋势：按BCH自身波动率放宽（当前实盘ADX=14.3多数落在此档）",
+        "step_trigger_atr": 1.23,
+        "step_advance_atr": 0.62,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -144,9 +183,9 @@
       },
       {
         "name": "mid",
-        "note": "过渡：中趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
-        "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.30,
+        "note": "中趋势：按BCH自身波动率放宽",
+        "step_trigger_atr": 1.48,
+        "step_advance_atr": 0.74,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -154,9 +193,313 @@
       },
       {
         "name": "strong",
-        "note": "过渡：强趋势（未经独立回测校准，v2.2随ETH同步再放宽step参数）",
+        "note": "强趋势：按BCH自身波动率放宽",
+        "step_trigger_atr": 1.73,
+        "step_advance_atr": 0.86,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "XMR": {
+    "tv_tf_sec": 21600,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种，此前_BY_SYMBOL遗漏XMR/SNDK/PAXG三个新品种，静默退回REENTRY_ETH（跟2026-08-11 BNB/ZEC/BCH那次死配置同类问题），本次一并接线修复。周期6h，原生K线偏长，reentry_window_bars从2根收到1根（1根已达360min，比ETH 2×90m=180min的窗口还长）。step_trigger/step_advance按sqrt(XMR breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍缩放ETH三档基线（两边用同一套breath_profiles.py校准方法测得，比原BNB/ZEC/BCH那次用的局部高点法样本更大更稳）；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH（ADX+动量已有连续插值）。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按XMR自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 0.96,
+        "step_advance_atr": 0.48,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按XMR自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.15,
+        "step_advance_atr": 0.58,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按XMR自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.35,
+        "step_advance_atr": 0.67,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "SNDK": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种，同XMR一并修复_BY_SYMBOL遗漏。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(SNDK breath_profiles.py中位数回调2.81/ETH中位数回调3.26)≈0.928倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按SNDK自身波动率(0.928倍)微收紧",
+        "step_trigger_atr": 0.93,
+        "step_advance_atr": 0.46,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按SNDK自身波动率(0.928倍)微收紧",
+        "step_trigger_atr": 1.11,
+        "step_advance_atr": 0.56,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按SNDK自身波动率(0.928倍)微收紧",
+        "step_trigger_atr": 1.30,
+        "step_advance_atr": 0.65,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "PAXG": {
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种，同XMR一并修复_BY_SYMBOL遗漏。周期150m，reentry_window_bars从2根收到1根（1根=150min，接近ETH 2×90m=180min/XAU 3×45m=135min的目标窗口，2根=300min会明显偏长）。step_trigger/step_advance按sqrt(PAXG breath_profiles.py中位数回调3.75/ETH中位数回调3.26)≈1.072倍放宽ETH三档基线（金价类品种回调分布尾巴肥，同breath_profiles.py校准结论一致）；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按PAXG自身波动率(1.072倍)微放宽",
+        "step_trigger_atr": 1.07,
+        "step_advance_atr": 0.54,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按PAXG自身波动率(1.072倍)微放宽",
+        "step_trigger_atr": 1.29,
+        "step_advance_atr": 0.64,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按PAXG自身波动率(1.072倍)微放宽",
+        "step_trigger_atr": 1.50,
+        "step_advance_atr": 0.75,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "SKHYNIX": {
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种（币安新品类TRADIFI_PERPETUAL，韩国SK海力士股票代币化永续），跟XMR/SNDK/PAXG一起补齐_BY_SYMBOL，不再让新品种静默吃ETH的表。周期150m，reentry_window_bars同PAXG收到1根（150min接近ETH 2×90m=180min目标窗口）。step_trigger/step_advance按sqrt(SKHYNIX breath_profiles.py中位数回调2.97/ETH中位数回调3.26)≈0.955倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按SKHYNIX自身波动率(0.955倍)微收紧",
+        "step_trigger_atr": 0.96,
+        "step_advance_atr": 0.48,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按SKHYNIX自身波动率(0.955倍)微收紧",
+        "step_trigger_atr": 1.15,
+        "step_advance_atr": 0.57,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按SKHYNIX自身波动率(0.955倍)微收紧",
+        "step_trigger_atr": 1.34,
+        "step_advance_atr": 0.67,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "XPD": {
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，钯金永续），跟SKHYNIX一起补齐_BY_SYMBOL。周期150m，reentry_window_bars同PAXG/SKHYNIX收到1根。step_trigger/step_advance按sqrt(XPD breath_profiles.py中位数回调3.25/ETH中位数回调3.26)≈0.998倍——几乎跟ETH基线完全重合(巧合)，直接沿用ETH三档数值；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：与ETH基线几乎重合，直接沿用",
+        "step_trigger_atr": 1.00,
+        "step_advance_atr": 0.50,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：与ETH基线几乎重合，直接沿用",
+        "step_trigger_atr": 1.20,
+        "step_advance_atr": 0.60,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：与ETH基线几乎重合，直接沿用",
         "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.36,
+        "step_advance_atr": 0.70,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "OPENAI": {
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，OpenAI未上市股权盘前代币化永续，24h成交量约449万U比其它TradFi品种薄）。周期150m，reentry_window_bars同PAXG/SKHYNIX/XPD收到1根。step_trigger/step_advance按sqrt(OPENAI breath_profiles.py中位数回调2.59/ETH中位数回调3.26)≈0.891倍收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按OPENAI自身波动率(0.891倍)收紧",
+        "step_trigger_atr": 0.89,
+        "step_advance_atr": 0.45,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按OPENAI自身波动率(0.891倍)收紧",
+        "step_trigger_atr": 1.07,
+        "step_advance_atr": 0.53,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按OPENAI自身波动率(0.891倍)收紧",
+        "step_trigger_atr": 1.25,
+        "step_advance_atr": 0.62,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "ANTHROPIC": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 0.96,
+        "step_advance_atr": 0.48,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.15,
+        "step_advance_atr": 0.58,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.35,
+        "step_advance_atr": 0.67,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "ASML": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，ASML阿斯麦光刻机设备股票代币化永续，已上市正股类跟SKHYNIX同类）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ASML breath_profiles.py中位数回调3.10/ETH中位数回调3.26)≈0.975倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按ASML自身波动率(0.975倍)微收紧",
+        "step_trigger_atr": 0.98,
+        "step_advance_atr": 0.49,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按ASML自身波动率(0.975倍)微收紧",
+        "step_trigger_atr": 1.17,
+        "step_advance_atr": 0.59,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按ASML自身波动率(0.975倍)微收紧",
+        "step_trigger_atr": 1.37,
+        "step_advance_atr": 0.68,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,

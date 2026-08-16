@@ -8,6 +8,9 @@ binance_vps_state_*.json
 *.jsonl
 data/
 evidence/
+*.db
+*.sqlite3
+venv/
 # Cursor / Agent 临时文件
 _tmp_*
 _vps_*

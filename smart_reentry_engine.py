@@ -108,6 +108,7 @@ def init_cycle_on_open(
     gate = radar_gate_price_from_tps(
         tp1_v, tp2_v, reentry_attempt=attempt, entry=float(entry or 0),
         atr=float(open_atr or 0),
+        return_pct=float(rp.get("radar_gate_return_pct") or 0),
     )
 
     base_tier = int(adx_tier if adx_tier is not None else 1)
@@ -226,6 +227,7 @@ def bump_after_reentry_fill(
     gate = radar_gate_price_from_tps(
         tp1_v, tp2_v, reentry_attempt=nxt, entry=float(entry or 0),
         atr=float(open_atr or 0),
+        return_pct=float(rp.get("radar_gate_return_pct") or 0),
     )
 
     adx_v = float(adx) if adx is not None else 25.0
