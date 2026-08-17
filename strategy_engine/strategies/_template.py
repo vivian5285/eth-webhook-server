@@ -8,22 +8,15 @@
 证明"拉K线→算指标→出信号"整条链路是通的，同时给后续真实策略一个统一的
 接口范式照抄。
 
-接口约定（所有策略模块必须实现）：
-    generate_signal(bars: list[dict], params: dict) -> dict | None
+接口约定见 strategies/__init__.py 顶部注释：
+    generate_signal(bars_by_tf: dict[str, list[dict]], params: dict, position: dict | None) -> dict | None
 
-- bars：strategy_engine.klines.get_bars() 的输出，按时间升序、全部已收盘，
-  最后一根 bars[-1] 就是"当前最新已收盘K线"。
-- params：symbol_registry.py 里给这个品种配的参数字典。
-- 无状态设计：策略每次都拿完整历史重新判断"最新收盘的这根K线是否触发信号"，
-  不依赖外部保存的状态——重启/回测/实盘用同一份逻辑，行为不会因为"有没有
-  记住上次状态"而分裂成两套。
-- 返回 None 表示这根K线没有新信号；返回 dict 时字段形状故意跟 TV webhook
-  payload 同构（action/price/atr/tp1/tp2/tp3/stop_loss/tier/bar_time），
-  方便复用现有的信号展示/去重/对比逻辑。
+这个占位策略不需要多周期数据、也不需要持仓状态（纯粹看最新收盘K线的双EMA
+是否刚穿越），只用 bars_by_tf["base"]，position 参数接收但不使用。
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from strategy_engine import indicators
 
@@ -38,7 +31,8 @@ DEFAULT_PARAMS = {
 }
 
 
-def generate_signal(bars: List[dict], params: Optional[dict] = None) -> Optional[dict]:
+def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = None, position: Optional[dict] = None) -> Optional[dict]:
+    bars = bars_by_tf.get("base") or []
     p = {**DEFAULT_PARAMS, **(params or {})}
     fast_len, slow_len, atr_len = int(p["fast_len"]), int(p["slow_len"]), int(p["atr_len"])
     need = max(fast_len, slow_len, atr_len) + 2

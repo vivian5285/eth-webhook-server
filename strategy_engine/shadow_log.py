@@ -65,9 +65,11 @@ def _init_db() -> None:
                 side TEXT NOT NULL,
                 entry_price REAL NOT NULL,
                 entry_bar_time INTEGER NOT NULL,
+                stop_loss REAL,               -- 开仓时锁定，供通用止损价格触碰检查用
+                tp1 REAL,                     -- 开仓时锁定，供通用止盈价格触碰检查用（简化模型只用TP1）
                 exit_price REAL,
                 exit_bar_time INTEGER,
-                exit_reason TEXT,            -- 'stop_loss' | 'take_profit' | 'reverse_signal'
+                exit_reason TEXT,            -- 'stop_loss' | 'take_profit' | 'reverse_signal' | 'signal_close'
                 pnl_pct REAL,
                 status TEXT NOT NULL,        -- 'open' | 'closed'
                 created_at REAL NOT NULL,
@@ -76,6 +78,13 @@ def _init_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sig_symbol ON shadow_signals (symbol, run_type, run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pos_symbol ON shadow_positions (symbol, run_type, run_id, status)")
+        # 轻量迁移：早期版本的 shadow_positions 没有 stop_loss/tp1 两列，老库文件
+        # 直接 ALTER 补上（影子数据本身没有保留价值，但顺手写成迁移而不是要求
+        # 手动删库重建，以后再加字段也是同一个模式）。
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(shadow_positions)").fetchall()}
+        for col in ("stop_loss", "tp1"):
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE shadow_positions ADD COLUMN {col} REAL")
         conn.commit()
 
 
@@ -110,15 +119,16 @@ def record_signal(
 def open_position(
     symbol: str, strategy: str, timeframe: str, run_type: str,
     side: str, entry_price: float, entry_bar_time: int, run_id: Optional[str] = None,
+    stop_loss: Optional[float] = None, tp1: Optional[float] = None,
 ) -> Optional[int]:
     try:
         with _lock, _connect() as conn:
             cur = conn.execute(
                 """INSERT INTO shadow_positions
                    (symbol, strategy, timeframe, run_type, run_id, side, entry_price,
-                    entry_bar_time, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?, 'open', ?)""",
-                (symbol, strategy, timeframe, run_type, run_id, side, entry_price, entry_bar_time, time.time()),
+                    entry_bar_time, stop_loss, tp1, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?, 'open', ?)""",
+                (symbol, strategy, timeframe, run_type, run_id, side, entry_price, entry_bar_time, stop_loss, tp1, time.time()),
             )
             conn.commit()
             return int(cur.lastrowid)
