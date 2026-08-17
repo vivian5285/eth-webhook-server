@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>币安三账户实盘监控</title>
+<style>
+  :root {
+    --glass-bg: rgba(255,255,255,0.62);
+    --glass-bg-strong: rgba(255,255,255,0.82);
+    --glass-border: rgba(255,255,255,0.85);
+    --text-hi: rgba(20,20,26,0.94);
+    --text-mid: rgba(40,42,52,0.68);
+    --text-lo: rgba(50,52,62,0.48);
+    --green: #14a874;
+    --green-bg: rgba(20,168,116,0.14);
+    --amber: #b8860b;
+    --red: #e0392f;
+    --red-bg: rgba(224,57,47,0.10);
+    --blue: #1f6fd6;
+    --blue-bg: rgba(31,111,214,0.12);
+    --purple: #8b3fc9;
+    --purple-bg: rgba(139,63,201,0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC",
+      "Helvetica Neue", "Segoe UI", sans-serif;
+    color: var(--text-hi);
+    background: #eef0f4;
+    overflow-x: hidden;
+  }
+  .bg-blob {
+    position: fixed; border-radius: 50%; filter: blur(110px);
+    opacity: 0.55; z-index: 0; pointer-events: none;
+  }
+  .blob1 { width: 560px; height: 560px; top: -180px; left: -120px;
+    background: radial-gradient(circle, #a78bfa, transparent 70%); }
+  .blob2 { width: 620px; height: 620px; top: 10%; right: -220px;
+    background: radial-gradient(circle, #f9a8d4, transparent 70%); }
+  .blob3 { width: 520px; height: 520px; bottom: -220px; left: 30%;
+    background: radial-gradient(circle, #67e8d4, transparent 70%); }
+
+  .wrap { position: relative; z-index: 1; max-width: 1560px; margin: 0 auto; padding: 28px 28px 60px; }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-bottom: 22px; flex-wrap: wrap;
+  }
+  .title-block h1 {
+    font-size: 22px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em;
+  }
+  .title-block .sub { font-size: 13px; color: var(--text-lo); }
+  .top-right { display: flex; align-items: center; gap: 12px; }
+  .pill {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 16px; border-radius: 999px;
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    font-size: 13px; color: var(--text-mid);
+  }
+  .pill.alert { color: var(--red); border-color: rgba(224,57,47,0.4); background: rgba(224,57,47,0.10); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.g { background: var(--green); box-shadow: 0 0 6px rgba(20,168,116,0.6); }
+  .dot.r { background: var(--red); box-shadow: 0 0 6px rgba(224,57,47,0.6); }
+  .dot.a { background: var(--amber); box-shadow: 0 0 6px rgba(184,134,11,0.5); }
+
+  .refresh-btn {
+    padding: 9px 16px; border-radius: 999px; border: 1px solid var(--glass-border);
+    background: var(--glass-bg); color: var(--text-hi); font-size: 13px; font-weight: 600; cursor: pointer;
+    backdrop-filter: blur(20px);
+  }
+  .refresh-btn:active { transform: scale(0.97); }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 1180px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 22px;
+    backdrop-filter: blur(28px) saturate(160%);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    box-shadow: 0 8px 32px rgba(31,41,55,0.12), inset 0 1px 0 rgba(255,255,255,0.6);
+    overflow: hidden;
+  }
+
+  .acct-card { display: flex; flex-direction: column; gap: 0; }
+  .acct-head {
+    padding: 18px 20px 14px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid rgba(31,41,55,0.08);
+  }
+  .acct-head .name { font-size: 16px; font-weight: 700; }
+  .acct-head .port { font-size: 12px; color: var(--text-lo); margin-top: 2px; }
+  .acct-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-mid); }
+
+  .section-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-lo); padding: 14px 20px 6px; font-weight: 700;
+  }
+
+  .positions { padding: 0 14px 8px; display: flex; flex-direction: column; gap: 10px; }
+  .pos-card {
+    background: var(--glass-bg-strong); border: 1px solid rgba(31,41,55,0.09);
+    border-radius: 16px; padding: 12px 14px;
+    box-shadow: 0 1px 2px rgba(31,41,55,0.06);
+  }
+  .pos-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .pos-sym { font-weight: 700; font-size: 14px; }
+  .side-tag {
+    font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 999px;
+    letter-spacing: 0.02em;
+  }
+  .side-tag.LONG { background: var(--green-bg); color: var(--green); }
+  .side-tag.SHORT { background: var(--red-bg); color: var(--red); }
+  .pnl-row { margin-bottom: 8px; }
+  .pnl-tag {
+    display: inline-block; font-size: 13px; font-weight: 700;
+    padding: 3px 10px; border-radius: 8px;
+  }
+  .pnl-tag.up { background: var(--green-bg); color: var(--green); }
+  .pnl-tag.down { background: var(--red-bg); color: var(--red); }
+  .pnl-tag.na { background: rgba(31,41,55,0.05); color: var(--text-lo); font-weight: 500; }
+  .pos-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 14px;
+    font-size: 12px; color: var(--text-mid);
+  }
+  .pos-grid b { color: var(--text-hi); font-weight: 700; }
+  .tp-row { display: flex; gap: 6px; margin-top: 8px; }
+  .tp-chip {
+    font-size: 11px; padding: 3px 8px; border-radius: 8px;
+    background: rgba(31,41,55,0.05); color: var(--text-lo); border: 1px solid rgba(31,41,55,0.08);
+  }
+  .tp-chip.done { background: var(--green-bg); color: var(--green); border-color: transparent; font-weight: 700; }
+  .radar-row { margin-top: 8px; font-size: 11px; display: flex; align-items: center; gap: 6px; color: var(--text-lo); }
+  .radar-row .dot { width: 6px; height: 6px; }
+  .pause-flag {
+    margin-top: 8px; font-size: 11px; color: var(--red);
+    background: var(--red-bg); border: 1px solid rgba(224,57,47,0.3);
+    border-radius: 8px; padding: 5px 8px;
+  }
+  .empty-pos { padding: 20px; text-align: center; color: var(--text-lo); font-size: 12px; }
+
+  .close-btn {
+    margin-top: 10px; width: 100%; padding: 7px 0; border-radius: 10px;
+    border: 1px solid rgba(224,57,47,0.35); background: rgba(224,57,47,0.08);
+    color: var(--red); font-size: 12px; font-weight: 700; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .close-btn:hover { background: rgba(224,57,47,0.16); }
+  .close-btn:disabled { opacity: 0.5; cursor: wait; }
+
+  .feed { padding: 0 20px 6px; max-height: 260px; overflow-y: auto; }
+  .feed::-webkit-scrollbar { width: 5px; }
+  .feed::-webkit-scrollbar-thumb { background: rgba(31,41,55,0.18); border-radius: 4px; }
+  .ev-row { display: flex; gap: 8px; padding: 6px 0; font-size: 12px; border-bottom: 1px dashed rgba(31,41,55,0.08); }
+  .ev-row:last-child { border-bottom: none; }
+  .ev-time { color: var(--text-lo); flex: none; width: 60px; font-variant-numeric: tabular-nums; }
+  .ev-tag {
+    flex: none; font-size: 10px; padding: 1px 6px; border-radius: 6px; height: fit-content;
+    font-weight: 700; text-transform: uppercase;
+  }
+  .ev-tag { background: rgba(31,41,55,0.06); color: var(--text-mid); border: 1px solid rgba(31,41,55,0.08); }
+  .ev-tag.tv_signal { background: var(--blue-bg); color: var(--blue); border-color: transparent; }
+  .ev-tag.open, .ev-tag.tp_fill { background: var(--green-bg); color: var(--green); border-color: transparent; }
+  .ev-tag.close { background: var(--purple-bg); color: var(--purple); border-color: transparent; }
+  .ev-tag.radar { background: var(--blue-bg); color: var(--blue); border-color: transparent; opacity: 0.75; }
+  .ev-tag.recover { background: rgba(31,41,55,0.06); color: var(--text-mid); }
+  .ev-tag.self_healed { background: rgba(217,119,6,0.08); color: #b45309; border-color: transparent; opacity: 0.8; }
+  .ev-msg { color: var(--text-mid); line-height: 1.4; }
+
+  .anomaly-section { padding: 8px 20px 18px; }
+  .anomaly-item {
+    font-size: 12px; color: var(--red); background: var(--red-bg);
+    border: 1px solid rgba(224,57,47,0.25); border-radius: 10px; padding: 8px 10px;
+    margin-bottom: 6px; line-height: 1.4;
+  }
+  .anomaly-item .ts { color: rgba(224,57,47,0.75); font-size: 11px; margin-right: 6px; }
+  .no-anomaly { font-size: 12px; color: var(--text-lo); padding: 4px 20px 16px; }
+
+  .empty-feed { padding: 10px 0; color: var(--text-lo); font-size: 12px; }
+
+  footer { text-align: center; color: var(--text-lo); font-size: 11px; margin-top: 26px; }
+
+  /* ── TV 信号 / 手动发单 ── */
+  .tv-section { margin-top: 22px; }
+  .tv-card { padding: 18px 20px 20px; }
+  .tv-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .tv-head h2 { font-size: 15px; font-weight: 700; margin: 0; }
+  .tv-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  select, input[type=text], input[type=number] {
+    font-family: inherit; font-size: 12.5px; padding: 7px 10px; border-radius: 10px;
+    border: 1px solid rgba(31,41,55,0.14); background: rgba(255,255,255,0.7); color: var(--text-hi);
+  }
+  .btn-mini {
+    padding: 7px 14px; border-radius: 999px; border: 1px solid rgba(31,41,55,0.14);
+    background: var(--glass-bg-strong); color: var(--text-hi); font-size: 12.5px; font-weight: 600; cursor: pointer;
+  }
+  .btn-mini:hover { background: #fff; }
+  .btn-mini.primary { background: var(--blue); color: #fff; border-color: transparent; }
+  .btn-mini.primary:hover { background: #1a5fb8; }
+  .tv-table-wrap { overflow-x: auto; }
+  table.tv-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tv-table th { text-align: left; padding: 8px 8px; color: var(--text-lo); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid rgba(31,41,55,0.1); white-space: nowrap; }
+  table.tv-table td { padding: 8px 8px; border-bottom: 1px solid rgba(31,41,55,0.06); vertical-align: top; white-space: nowrap; }
+  .src-badge, .res-badge, .acct-badge {
+    display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  }
+  .acct-badge { background: rgba(31,41,55,0.06); color: var(--text-mid); }
+  .src-badge.tv_direct { background: var(--blue-bg); color: var(--blue); }
+  .src-badge.gateway { background: rgba(31,41,55,0.06); color: var(--text-mid); }
+  .src-badge.console_replay, .src-badge.console_manual { background: var(--purple-bg); color: var(--purple); }
+  .res-badge.ok { background: var(--green-bg); color: var(--green); }
+  .res-badge.err { background: var(--red-bg); color: var(--red); }
+  .res-badge.pending { background: var(--blue-bg); color: var(--blue); }
+  .res-badge.na { background: rgba(31,41,55,0.05); color: var(--text-lo); }
+  .tv-detail-row td { white-space: normal; }
+  .tv-detail-box {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;
+    white-space: pre-wrap; word-break: break-all; background: rgba(31,41,55,0.04);
+    border-radius: 10px; padding: 10px; max-height: 220px; overflow: auto;
+  }
+  .tv-empty { padding: 18px; text-align: center; color: var(--text-lo); font-size: 12px; }
+
+  .manual-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px; }
+  @media (max-width: 900px) { .manual-grid { grid-template-columns: repeat(2, 1fr); } }
+  .manual-field label { display: block; font-size: 11px; color: var(--text-lo); margin-bottom: 4px; font-weight: 700; }
+  .manual-field select, .manual-field input { width: 100%; }
+  .warn-bar {
+    background: var(--red-bg); border: 1px solid rgba(224,57,47,0.25); color: var(--red);
+    border-radius: 12px; padding: 10px 14px; font-size: 12px; font-weight: 600; margin-bottom: 14px;
+  }
+
+  .modal-mask { position: fixed; inset: 0; background: rgba(20,20,26,0.4); backdrop-filter: blur(3px); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .modal-box { width: min(560px, 100%); max-height: 86vh; overflow: auto; background: var(--glass-bg-strong); border: 1px solid var(--glass-border); border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.25); padding: 22px; backdrop-filter: blur(30px); }
+  .modal-box h3 { margin: 0 0 14px; font-size: 15px; }
+  .modal-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 12px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+</style>
+</head>
+<body>
+  <div class="bg-blob blob1"></div>
+  <div class="bg-blob blob2"></div>
+  <div class="bg-blob blob3"></div>
+
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title-block">
+        <h1>币安三账户实盘监控</h1>
+        <div class="sub">binanceB · binanceC · binanceD &nbsp;|&nbsp; 只读快照 + 手动平仓（唯一的写操作，点击有二次确认）</div>
+      </div>
+      <div class="top-right">
+        <div class="pill" id="lastUpdated">加载中…</div>
+        <div class="pill" id="anomalyPill">异常 0</div>
+        <button class="refresh-btn" onclick="loadStatus(true)">立即刷新</button>
+      </div>
+    </div>
+
+    <div class="grid" id="grid"></div>
+
+    <div class="tv-section card tv-card">
+      <div class="tv-head">
+        <h2>TV 信号（三账户聚合）</h2>
+        <div class="tv-filters">
+          <select id="tvAccount" onchange="loadTvSignals()">
+            <option value="all">全部账户</option>
+            <option value="B">B · 妈妈的币安账户</option>
+            <option value="C">C · 我自己的币安账户</option>
+            <option value="D">D · 我的币安子账户</option>
+          </select>
+          <select id="tvSymbol"><option value="">全部品种</option></select>
+          <select id="tvActionFilter"><option value="">全部动作</option></select>
+          <button class="btn-mini" onclick="loadTvSignals()">刷新</button>
+        </div>
+      </div>
+      <div class="tv-table-wrap">
+        <table class="tv-table">
+          <thead><tr>
+            <th>时间</th><th>账户</th><th>来源</th><th>品种</th><th>动作</th><th>价格</th>
+            <th>TP1/2/3</th><th>硬止损</th><th>结果</th><th></th>
+          </tr></thead>
+          <tbody id="tvBody"><tr><td colspan="10" class="tv-empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="tv-section card tv-card">
+      <div class="tv-head"><h2>手动发单</h2></div>
+      <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。</div>
+      <div class="manual-grid">
+        <div class="manual-field"><label>账户</label>
+          <select id="mAccount">
+            <option value="B">B · 妈妈的币安账户</option>
+            <option value="C">C · 我自己的币安账户</option>
+            <option value="D">D · 我的币安子账户</option>
+          </select>
+        </div>
+        <div class="manual-field"><label>品种</label><select id="mSymbol"></select></div>
+        <div class="manual-field"><label>动作</label>
+          <select id="mAction">
+            <option value="LONG">LONG</option>
+            <option value="SHORT">SHORT</option>
+            <option value="CLOSE_QUICK_EXIT">CLOSE_QUICK_EXIT</option>
+            <option value="CLOSE_RSI_EXIT">CLOSE_RSI_EXIT</option>
+            <option value="PING">PING</option>
+          </select>
+        </div>
+        <div class="manual-field"><label>趋势档位</label>
+          <select id="mTier"><option value="">自动</option><option value="0">弱</option><option value="1">中</option><option value="2">强</option></select>
+        </div>
+        <div class="manual-field"><label>价格</label><input id="mPrice" type="number" step="any" /></div>
+        <div class="manual-field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
+        <div class="manual-field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
+        <div class="manual-field"><label>TP1</label><input id="mTp1" type="number" step="any" /></div>
+        <div class="manual-field"><label>TP2</label><input id="mTp2" type="number" step="any" /></div>
+        <div class="manual-field"><label>TP3</label><input id="mTp3" type="number" step="any" /></div>
+        <div class="manual-field"><label>硬止损参考价</label><input id="mSl" type="number" step="any" /></div>
+        <div class="manual-field"><label>数量 qty（可选）</label><input id="mQty" type="number" step="any" /></div>
+        <div class="manual-field"><label>备注</label><input id="mReason" type="text" placeholder="不填自动标注来源" /></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-mini primary" onclick="confirmManualSend()">发送到实盘</button>
+      </div>
+      <div id="mResult" class="tv-detail-box" style="display:none;margin-top:12px"></div>
+    </div>
+
+    <div id="tvModalRoot"></div>
+
+    <footer>后台每 30 秒自动刷新一次 · 数据来自本机状态文件与 journalctl 日志</footer>
+  </div>
+
+<script>
+const ACCOUNTS_META = {
+  B: {label: "妈妈的币安账户", port: 5007},
+  C: {label: "我自己的币安账户", port: 5008},
+  D: {label: "我的币安子账户", port: 5009},
+};
+
+function fmtTime(ts) {
+  if (!ts) return "";
+  const parts = ts.split(" ");
+  return parts.length > 1 ? parts[1] : ts;
+}
+
+function renderPosition(p, acctId) {
+  const tpChips = (p.tv_tps || []).map((px, i) => {
+    const lvl = i + 1;
+    const done = (p.tp_consumed || []).includes(lvl);
+    return `<span class="tp-chip ${done ? 'done' : ''}">TP${lvl} ${px.toFixed ? px.toFixed(2) : px}${done ? ' ✓' : ''}</span>`;
+  }).join("");
+  const radarDot = p.radar_activated ? '<span class="dot g"></span>已激活追踪' : '<span class="dot a"></span>休眠待激活';
+  const pauseHtml = p.trading_paused
+    ? `<div class="pause-flag">⏸ 交易已暂停：${p.pause_reason || '未知原因'}</div>` : '';
+  let pnlHtml = '<span class="pnl-tag na">现价获取中</span>';
+  if (p.pnl !== null && p.pnl !== undefined) {
+    const up = p.pnl >= 0;
+    const sign = up ? '+' : '';
+    pnlHtml = `<span class="pnl-tag ${up ? 'up' : 'down'}">${sign}${p.pnl.toFixed(2)} U (${sign}${p.pnl_pct.toFixed(2)}%)</span>`;
+  }
+  const markHtml = p.mark ? `<div>现价 <b>${p.mark.toFixed(2)}</b></div>` : '<div>现价 <b>—</b></div>';
+  const btnId = `close-${acctId}-${p.symbol}`;
+  return `
+    <div class="pos-card">
+      <div class="pos-top">
+        <span class="pos-sym">${p.symbol}</span>
+        <span class="side-tag ${p.side}">${p.side}</span>
+      </div>
+      <div class="pnl-row">${pnlHtml}</div>
+      <div class="pos-grid">
+        <div>数量 <b>${p.qty}</b></div>
+        <div>开仓价 <b>${p.entry.toFixed(2)}</b></div>
+        ${markHtml}
+        <div>现价止损 <b>${p.current_sl.toFixed(2)}</b></div>
+        <div>永久硬止损 <b>${p.frozen_hard_sl.toFixed(2)}</b></div>
+      </div>
+      <div class="tp-row">${tpChips}</div>
+      <div class="radar-row">${radarDot}</div>
+      ${pauseHtml}
+      <button class="close-btn" id="${btnId}"
+        onclick="closePosition('${acctId}', '${p.symbol}', ${p.qty}, '${p.side}', this)">
+        市价平仓
+      </button>
+    </div>`;
+}
+
+async function closePosition(acctId, symbol, qty, side, btn) {
+  const label = (ACCOUNTS_META[acctId] || {}).label || acctId;
+  const ok = confirm(
+    `确认市价平仓？\n\n账户：${label}\n品种：${symbol}\n方向：${side}\n数量：${qty}\n\n` +
+    `这是真实下单，会立即市价全平并撤净该品种残留挂单，无法撤销。`
+  );
+  if (!ok) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "平仓中…";
+  try {
+    const res = await fetch("api/close_position", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({account: acctId, symbol: symbol}),
+    });
+    const json = await res.json();
+    if (json.ok) {
+      // 2026-08-13：平仓成功先把这张卡片立刻淡出移除，不用等下一次
+      // 整页刷新（缓存最长30s）——之前实盘复现过：平仓其实已经成功，
+      // 但面板还显示旧持仓，容易让人以为没生效，连续点了好几个品种。
+      const card = btn.closest(".pos-card");
+      if (card) {
+        card.style.transition = "opacity 0.3s, transform 0.3s";
+        card.style.opacity = "0";
+        card.style.transform = "scale(0.97)";
+        setTimeout(() => card.remove(), 300);
+      }
+    }
+    alert(json.ok ? `✅ ${json.msg}` : `❌ ${json.msg}`);
+  } catch (e) {
+    alert(`❌ 请求失败: ${e}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    loadStatus(true);
+  }
+}
+
+function renderEvent(e) {
+  return `
+    <div class="ev-row">
+      <span class="ev-time">${fmtTime(e.ts)}</span>
+      <span class="ev-tag ${e.kind}">${e.kind}</span>
+      <span class="ev-msg">${escapeHtml(e.msg)}</span>
+    </div>`;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function renderAccount(acct) {
+  const meta = ACCOUNTS_META[acct.id] || {};
+  const svcDot = acct.svc_active === true ? '<span class="dot g"></span>运行中'
+    : acct.svc_active === false ? '<span class="dot r"></span>已停止'
+    : '<span class="dot a"></span>未知';
+
+  const posHtml = acct.positions.length
+    ? acct.positions.map(p => renderPosition(p, acct.id)).join("")
+    : '<div class="empty-pos">当前空仓</div>';
+
+  const evHtml = acct.events.length
+    ? acct.events.slice(0, 20).map(renderEvent).join("")
+    : '<div class="empty-feed">暂无最近事件</div>';
+
+  const anomHtml = acct.anomalies.length
+    ? acct.anomalies.slice(0, 8).map(a => `
+        <div class="anomaly-item"><span class="ts">${fmtTime(a.ts)}</span>${escapeHtml(a.msg)}</div>
+      `).join("")
+    : '<div class="no-anomaly">近期无异常</div>';
+
+  return `
+    <div class="card acct-card">
+      <div class="acct-head">
+        <div>
+          <div class="name">${meta.label || acct.id}</div>
+          <div class="port">端口 ${meta.port || acct.port} · ${acct.git_rev || ''}</div>
+        </div>
+        <div class="acct-status">${svcDot}</div>
+      </div>
+
+      <div class="section-label">持仓（${acct.positions.length}）</div>
+      <div class="positions">${posHtml}</div>
+
+      <div class="section-label">最近事件</div>
+      <div class="feed">${evHtml}</div>
+
+      <div class="section-label">异常</div>
+      <div class="anomaly-section">${anomHtml}</div>
+    </div>`;
+}
+
+async function loadStatus(force) {
+  try {
+    const res = await fetch("api/status" + (force ? "?force=1" : ""));
+    const json = await res.json();
+    if (!json.data) return;
+    const grid = document.getElementById("grid");
+    grid.innerHTML = json.data.accounts.map(renderAccount).join("");
+
+    let totalAnomaly = 0;
+    json.data.accounts.forEach(a => totalAnomaly += a.anomalies.length);
+    const pill = document.getElementById("anomalyPill");
+    pill.textContent = `异常 ${totalAnomaly}`;
+    pill.className = "pill" + (totalAnomaly > 0 ? " alert" : "");
+
+    const d = new Date(json.data.fetched_at * 1000);
+    document.getElementById("lastUpdated").textContent =
+      "更新于 " + d.toLocaleTimeString("zh-CN", {hour12: false});
+  } catch (e) {
+    document.getElementById("lastUpdated").textContent = "刷新失败";
+  }
+}
+
+loadStatus(false);
+setInterval(() => loadStatus(false), 30000);
+
+// ── TV 信号聚合 / 重放 / 手动发单 ────────────────────────────────────────────
+let tvCache = [];
+let tvMetaLoaded = false;
+
+function fmtTs(sec) {
+  if (!sec) return "—";
+  return new Date(sec * 1000).toLocaleString("zh-CN", {hour12: false});
+}
+function fmtN(v) { return (v === null || v === undefined || v === "") ? "—" : Number(v).toFixed(2); }
+
+async function loadTvMeta() {
+  try {
+    const d = await (await fetch("api/tv_meta?account=B")).json();
+    const symOpts = (d.symbols || []).map(s => `<option value="${s.symbol}">${s.tag || s.symbol}</option>`).join("");
+    document.getElementById("tvSymbol").innerHTML = `<option value="">全部品种</option>` + symOpts;
+    document.getElementById("mSymbol").innerHTML = symOpts;
+    document.getElementById("tvActionFilter").innerHTML = `<option value="">全部动作</option>` +
+      (d.actions || []).map(a => `<option value="${a}">${a}</option>`).join("");
+    tvMetaLoaded = true;
+  } catch (e) { console.warn("tv meta load failed", e); }
+}
+
+const SRC_LABEL = {tv_direct: "直连", gateway: "经网关", console_replay: "控制台重放", console_manual: "控制台手动"};
+const ACCT_LABEL = {B: "B", C: "C", D: "D"};
+
+function tvResultBadge(row) {
+  if (row.http_status && row.http_status >= 400) return `<span class="res-badge err">拒绝${row.http_status}</span>`;
+  const phase = row.final_phase || "";
+  if (phase === "" ) return `<span class="res-badge pending">处理中</span>`;
+  if (phase === "n/a") return `<span class="res-badge na">无需处理</span>`;
+  if (phase === "FAILED") return `<span class="res-badge err">失败</span>`;
+  if (phase === "REPORTED" || phase === "MONITORING") return `<span class="res-badge ok">已完成</span>`;
+  return `<span class="res-badge na">${phase}</span>`;
+}
+
+function escapeHtml(s) {
+  return (s || "").toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadTvSignals() {
+  if (!tvMetaLoaded) await loadTvMeta();
+  const acct = document.getElementById("tvAccount").value;
+  const sym = document.getElementById("tvSymbol").value;
+  const act = document.getElementById("tvActionFilter").value;
+  const params = new URLSearchParams();
+  if (acct && acct !== "all") params.set("account", acct); else params.set("account", "all");
+  if (sym) params.set("symbol", sym);
+  if (act) params.set("action", act);
+  params.set("limit", "80");
+  const body = document.getElementById("tvBody");
+  try {
+    const d = await (await fetch("api/tv_signals?" + params.toString())).json();
+    tvCache = d.signals || [];
+    renderTvSignals();
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="10" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderTvSignals() {
+  const body = document.getElementById("tvBody");
+  if (!tvCache.length) { body.innerHTML = `<tr><td colspan="10" class="tv-empty">暂无信号</td></tr>`; return; }
+  body.innerHTML = tvCache.map(row => {
+    const tp = `${fmtN(row.tp1)}/${fmtN(row.tp2)}/${fmtN(row.tp3)}`;
+    const srcLabel = SRC_LABEL[row.source] || row.source || "—";
+    let raw = {}, detail = null;
+    try { raw = JSON.parse(row.raw_json || "{}"); } catch (e) {}
+    try { detail = row.final_detail_json ? JSON.parse(row.final_detail_json) : null; } catch (e) {}
+    const rid = `${row._account}-${row.id}`;
+    return `
+      <tr>
+        <td class="mono">${fmtTs(row.received_at)}</td>
+        <td><span class="acct-badge">${ACCT_LABEL[row._account] || row._account}</span></td>
+        <td><span class="src-badge ${row.source}">${srcLabel}</span></td>
+        <td>${escapeHtml(row.symbol || "—")}</td>
+        <td>${escapeHtml(row.action || "—")}</td>
+        <td>${fmtN(row.price)}</td>
+        <td>${tp}</td>
+        <td>${fmtN(row.stop_loss)}</td>
+        <td>${tvResultBadge(row)}</td>
+        <td>
+          <button class="btn-mini" onclick="toggleTvDetail('${rid}')">详情</button>
+          <button class="btn-mini" onclick="doReplay('${row._account}', ${row.id})">重新执行</button>
+          <button class="btn-mini primary" onclick="openEditReplay('${row._account}', ${row.id})">编辑重放</button>
+        </td>
+      </tr>
+      <tr class="tv-detail-row hidden" id="tvdet-${rid}" style="display:none"><td colspan="10">
+        <div class="tv-detail-box">原始payload:\n${escapeHtml(JSON.stringify(raw, null, 2))}${detail ? "\n\n最终状态:\n" + escapeHtml(JSON.stringify(detail, null, 2)) : ""}</div>
+      </td></tr>`;
+  }).join("");
+}
+
+function toggleTvDetail(rid) {
+  const el = document.getElementById("tvdet-" + rid);
+  if (el) el.style.display = el.style.display === "none" ? "" : "none";
+}
+
+function findTvSignal(acct, id) { return tvCache.find(r => r._account === acct && r.id === id); }
+
+async function doReplay(acct, id, overrides) {
+  const label = (overrides && Object.keys(overrides).length) ? "编辑后的" : "完全相同的";
+  if (!confirm(`即将以${label}参数重新发送账户 ${acct} 的这笔 TV 信号到实盘，交易所将按正常流程下单/平仓。确认执行？`)) return;
+  try {
+    const res = await fetch("api/tv_replay", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({account: acct, signal_id: id, overrides: overrides || {}}),
+    });
+    const d = await res.json();
+    alert(d.status === "ok" || res.ok ? `✅ 已发送: ${(d.upstream && d.upstream.message) || d.message || "success"}` : `❌ ${d.message || JSON.stringify(d)}`);
+  } catch (e) { alert(`❌ 请求失败: ${e}`); }
+  closeTvModal();
+  loadTvSignals();
+}
+
+function closeTvModal() { document.getElementById("tvModalRoot").innerHTML = ""; }
+
+function openEditReplay(acct, id) {
+  const row = findTvSignal(acct, id);
+  if (!row) return;
+  const html = `
+    <div class="modal-mask" onclick="if(event.target===this) closeTvModal()">
+      <div class="modal-box">
+        <h3>编辑后重新执行 · 账户${acct} #${id} ${escapeHtml(row.symbol)}</h3>
+        <p style="font-size:12px;color:var(--text-lo);margin:-6px 0 12px">相同 动作+品种+价格 60秒内会被自动去重，如需确保重新触发请微调价格。</p>
+        <div class="modal-grid">
+          <div class="manual-field"><label>动作</label>
+            <select id="erAction">
+              ${["LONG","SHORT","CLOSE_QUICK_EXIT","CLOSE_RSI_EXIT"].map(a => `<option value="${a}" ${a===row.action?"selected":""}>${a}</option>`).join("")}
+            </select>
+          </div>
+          <div class="manual-field"><label>趋势档位</label>
+            <select id="erTier">
+              <option value="">自动</option>
+              <option value="0" ${row.tier===0?"selected":""}>弱</option>
+              <option value="1" ${row.tier===1?"selected":""}>中</option>
+              <option value="2" ${row.tier===2?"selected":""}>强</option>
+            </select>
+          </div>
+          <div class="manual-field"><label>价格</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
+          <div class="manual-field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr ?? ""}" /></div>
+          <div class="manual-field"><label>TP1</label><input id="erTp1" type="number" step="any" value="${row.tp1 ?? ""}" /></div>
+          <div class="manual-field"><label>TP2</label><input id="erTp2" type="number" step="any" value="${row.tp2 ?? ""}" /></div>
+          <div class="manual-field"><label>TP3</label><input id="erTp3" type="number" step="any" value="${row.tp3 ?? ""}" /></div>
+          <div class="manual-field"><label>硬止损</label><input id="erSl" type="number" step="any" value="${row.stop_loss ?? ""}" /></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-mini" onclick="closeTvModal()">取消</button>
+          <button class="btn-mini primary" onclick="submitEditReplay('${acct}', ${id})">确认执行</button>
+        </div>
+      </div>
+    </div>`;
+  document.getElementById("tvModalRoot").innerHTML = html;
+}
+
+function submitEditReplay(acct, id) {
+  const v = (elId) => { const x = document.getElementById(elId).value; return x === "" ? null : Number(x); };
+  const overrides = {
+    action: document.getElementById("erAction").value,
+    price: v("erPrice"), atr: v("erAtr"), tp1: v("erTp1"), tp2: v("erTp2"), tp3: v("erTp3"), stop_loss: v("erSl"),
+  };
+  const tier = document.getElementById("erTier").value;
+  if (tier !== "") overrides.tier = Number(tier);
+  Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
+  doReplay(acct, id, overrides);
+}
+
+function confirmManualSend() {
+  const acct = document.getElementById("mAccount").value;
+  const symbol = document.getElementById("mSymbol").value;
+  const action = document.getElementById("mAction").value;
+  if (!confirm(`即将向账户 ${acct} 发送【${action} ${symbol || ""}】手动信号，等效于该账户收到一笔真实 TradingView 警报。确认发送？`)) return;
+  doManualSend();
+}
+
+async function doManualSend() {
+  const v = (elId) => { const x = document.getElementById(elId).value; return x === "" ? null : Number(x); };
+  const body = {
+    account: document.getElementById("mAccount").value,
+    symbol: document.getElementById("mSymbol").value,
+    action: document.getElementById("mAction").value,
+    price: v("mPrice"), atr: v("mAtr"), adx: v("mAdx"),
+    tp1: v("mTp1"), tp2: v("mTp2"), tp3: v("mTp3"),
+    stop_loss: v("mSl"), qty: v("mQty"),
+    reason: document.getElementById("mReason").value || undefined,
+  };
+  const tier = document.getElementById("mTier").value;
+  if (tier !== "") body.tier = Number(tier);
+  Object.keys(body).forEach(k => { if (body[k] === null || body[k] === undefined) delete body[k]; });
+  const resultEl = document.getElementById("mResult");
+  resultEl.style.display = "";
+  resultEl.textContent = "发送中…";
+  try {
+    const res = await fetch("api/tv_manual_send", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    resultEl.textContent = JSON.stringify(d, null, 2);
+    loadTvSignals();
+  } catch (e) {
+    resultEl.textContent = "发送失败: " + e;
+  }
+}
+
+loadTvMeta();
+loadTvSignals();
+setInterval(loadTvSignals, 20000);
+</script>
+</body>
+</html>
