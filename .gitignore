@@ -24,6 +24,7 @@ _extract_patch.py
 _verify_commits.py
 # 临时测试脚本（保留项目根目录的正式 test_*.py 除外）
 live_*.py
+!strategy_engine/live_runner.py
 test_api_*.py
 test_attribution_*.py
 test_breath_*.py
