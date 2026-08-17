@@ -316,7 +316,12 @@
             <option value="MARKET">市价（立即成交）</option>
           </select>
         </div>
-        <div class="manual-field"><label id="mPriceLabel">限价（LONG/SHORT开仓价）</label><input id="mPrice" type="number" step="any" /></div>
+        <div class="manual-field"><label id="mPriceLabel">限价（LONG/SHORT开仓价）</label>
+          <div style="display:flex;gap:6px">
+            <input id="mPrice" type="number" step="any" style="flex:1" />
+            <button type="button" class="btn-mini" onclick="fetchMPrice()">取现价</button>
+          </div>
+        </div>
         <div class="manual-field" id="mLimitTimeoutField"><label>限价超时(分钟,1~30)</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
         <div class="manual-field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
         <div class="manual-field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
@@ -682,7 +687,12 @@ function openEditReplay(acct, id) {
               <option value="MARKET">市价（立即成交）</option>
             </select>
           </div>
-          <div class="manual-field"><label id="erPriceLabel">限价</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
+          <div class="manual-field"><label id="erPriceLabel">限价</label>
+            <div style="display:flex;gap:6px">
+              <input id="erPrice" type="number" step="any" value="${row.price ?? ""}" style="flex:1" />
+              <button type="button" class="btn-mini" onclick="fetchErPrice('${escapeHtml(row.symbol)}')">取现价</button>
+            </div>
+          </div>
           <div class="manual-field" id="erLimitTimeoutField"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
           <div class="manual-field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr ?? ""}" /></div>
           <div class="manual-field"><label>TP1</label><input id="erTp1" type="number" step="any" value="${row.tp1 ?? ""}" /></div>
@@ -697,6 +707,16 @@ function openEditReplay(acct, id) {
       </div>
     </div>`;
   document.getElementById("tvModalRoot").innerHTML = html;
+}
+
+async function fetchErPrice(symbol) {
+  if (!symbol) { alert("缺品种"); return; }
+  try {
+    const res = await fetch(`api/price/${encodeURIComponent(symbol)}`);
+    const d = await res.json();
+    if (d.status !== "ok") { alert("取现价失败: " + (d.message || "")); return; }
+    document.getElementById("erPrice").value = d.price;
+  } catch (e) { alert("取现价失败: " + e); }
 }
 
 function onErOrderTypeChange() {
@@ -717,6 +737,17 @@ function submitEditReplay(acct, id) {
   const orderType = document.getElementById("erOrderType").value;
   const limitTimeoutMin = orderType === "MARKET" ? null : v("erLimitTimeout");
   doReplay(acct, id, overrides, limitTimeoutMin, orderType);
+}
+
+async function fetchMPrice() {
+  const symbol = document.getElementById("mSymbol").value;
+  if (!symbol) { alert("先选品种"); return; }
+  try {
+    const res = await fetch(`api/price/${encodeURIComponent(symbol)}`);
+    const d = await res.json();
+    if (d.status !== "ok") { alert("取现价失败: " + (d.message || "")); return; }
+    document.getElementById("mPrice").value = d.price;
+  } catch (e) { alert("取现价失败: " + e); }
 }
 
 function onMOrderTypeChange() {

@@ -487,6 +487,34 @@ def api_tv_signal_detail(signal_id):
     return jsonify({"status": "ok", "signal": row})
 
 
+@console_bp.route("/api/console/price/<symbol>", methods=["GET"])
+@require_login
+def api_console_price(symbol):
+    """
+    只读代查币安公开现价（手动发单/编辑重放面板"取现价"按钮用）。
+    走公开 ticker 端点，不签名不需要 API Key，跟哪个账户无关。
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return jsonify({"status": "error", "message": "bad_symbol"}), 400
+    url = "https://fapi.binance.com/fapi/v1/ticker/price?" + urllib.parse.urlencode({"symbol": sym})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "console-price-lookup"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        price = float(data.get("price") or 0)
+        if price <= 0:
+            return jsonify({"status": "error", "message": "empty_price"}), 502
+        return jsonify({"status": "ok", "symbol": sym, "price": price})
+    except urllib.error.HTTPError as e:
+        return jsonify({"status": "error", "message": f"binance_http_{e.code}"}), 502
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"lookup_failed: {e}"}), 502
+
+
 def _inject_system_limit_order(payload: dict, body: dict) -> None:
     """
     Console 发出的 LONG/SHORT 默认按限价单执行（用户自己挑的时机/价格，不是

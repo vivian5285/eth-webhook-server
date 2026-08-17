@@ -560,6 +560,27 @@ def api_tv_replay():
     return jsonify(data), (code or 502)
 
 
+@app.route("/api/price/<symbol>", methods=["GET"])
+def api_price(symbol):
+    """只读代查币安公开现价，跟哪个账户无关，不需要登录哪个账户。"""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return jsonify({"status": "error", "message": "bad_symbol"}), 400
+    url = "https://fapi.binance.com/fapi/v1/ticker/price?" + urllib.parse.urlencode({"symbol": sym})
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "dashboard-price-lookup"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        price = float(data.get("price") or 0)
+        if price <= 0:
+            return jsonify({"status": "error", "message": "empty_price"}), 502
+        return jsonify({"status": "ok", "symbol": sym, "price": price})
+    except urllib.error.HTTPError as e:
+        return jsonify({"status": "error", "message": f"binance_http_{e.code}"}), 502
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"lookup_failed: {e}"}), 502
+
+
 @app.route("/api/tv_manual_send", methods=["POST"])
 def api_tv_manual_send():
     body = request.get_json(force=True, silent=True) or {}
