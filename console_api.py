@@ -551,6 +551,63 @@ def _inject_system_limit_order(payload: dict, body: dict) -> None:
     payload["limit_timeout_sec"] = min(max(timeout_min * 60.0, 30.0), 1800.0)
 
 
+def _auto_fill_tp_via_atr(payload: dict) -> None:
+    """
+    控制面板专属兜底：LONG/SHORT 手动开仓漏填 tp1/tp2/tp3 时，VPS 自己拉
+    15分钟K线算 ATR，按中趋势档参数(1.35/2.5/3.6×ATR)补出完整 TP123，
+    补完后行为跟真实 TV 信号开的仓完全一样——TP1/TP2 先锁 10%/20% 小部分
+    利润，剩余 70% 交给现有的递进雷达动态追踪(即"跟踪止盈")。
+
+    只在控制台手动发单/编辑重放这两个入口调用；真实 TV webhook 永远不
+    经过这个函数，position_supervisor_binance.py 里"禁止 entry+ATR 本地
+    重算覆盖 TV 价格"的铁律完全不受影响——那条铁律防的是"VPS 自己瞎猜
+    TV 该给什么价"，这里是反过来："用户自己手动开仓、自己没给，VPS 给
+    个跟系统里其它品种一致的合理起点"，场景不同。
+    tp1/tp2/tp3 只要有一个缺失就当作"用户没打算自己填"，三个一起重算，
+    避免用户手填一部分、VPS 补另一部分导致三档价位顺序不合理。
+    """
+    action = str(payload.get("action") or "").strip().upper()
+    if action not in ("LONG", "SHORT"):
+        return
+    if all(float(payload.get(k) or 0) > 0 for k in ("tp1", "tp2", "tp3")):
+        return
+    try:
+        entry = float(payload.get("price") or 0)
+    except (TypeError, ValueError):
+        entry = 0.0
+    if entry <= 0:
+        return
+    try:
+        atr = float(payload.get("atr") or 0)
+    except (TypeError, ValueError):
+        atr = 0.0
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if atr <= 0 and symbol:
+        try:
+            from strategy_engine import klines as _sk_klines
+            from strategy_engine import indicators as _sk_ind
+            bars = _sk_klines.get_bars(symbol, "15m", limit=60)
+            if bars:
+                atr = _sk_ind.wilder_atr(bars, 14)
+        except Exception as e:
+            logger.warning(f"[控制台] 自动ATR拉取失败: {e}")
+            atr = 0.0
+    if atr <= 0:
+        logger.warning(f"[控制台] {symbol} 缺TP且无法取得ATR，跳过自动补TP")
+        return
+    direction = 1.0 if action == "LONG" else -1.0
+    payload["atr"] = round(atr, 6)
+    payload["tp1"] = round(entry + direction * 1.35 * atr, 6)
+    payload["tp2"] = round(entry + direction * 2.5 * atr, 6)
+    payload["tp3"] = round(entry + direction * 3.6 * atr, 6)
+    reason = str(payload.get("reason") or "").strip()
+    payload["reason"] = (reason + " [VPS自动ATR算TP]").strip()
+    logger.info(
+        f"[控制台] {symbol} 漏填TP，自动补齐 atr={atr:.4f} "
+        f"tp1={payload['tp1']} tp2={payload['tp2']} tp3={payload['tp3']}"
+    )
+
+
 @console_bp.route("/api/console/tv_signals/<int:signal_id>/replay", methods=["POST"])
 @require_login
 def api_tv_signal_replay(signal_id):
@@ -571,6 +628,7 @@ def api_tv_signal_replay(signal_id):
         payload.pop(k, None)
     if not payload.get("reason"):
         payload["reason"] = f"[控制台重放#{signal_id}]"
+    _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {
         "X-TV-Source": "console_replay",
@@ -600,6 +658,7 @@ def api_tv_manual_send():
     payload["action"] = action
     if not payload.get("reason"):
         payload["reason"] = "[控制台手动发单]"
+    _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {"X-TV-Source": "console_manual"})
     return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
