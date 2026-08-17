@@ -238,6 +238,50 @@
   .modal-box h3 { margin: 0 0 14px; font-size: 15px; }
   .modal-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 12px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+  /* ── 专业后台布局：左侧导航 + 右侧内容区 ── */
+  .app-shell { display: flex; align-items: flex-start; position: relative; z-index: 1; min-height: 100vh; }
+  .sidebar {
+    width: 216px; flex: none; position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column; padding: 22px 14px;
+    background: var(--glass-bg-strong); border-right: 1px solid var(--glass-border);
+    backdrop-filter: blur(28px) saturate(160%); -webkit-backdrop-filter: blur(28px) saturate(160%);
+    z-index: 2;
+  }
+  .sidebar-brand { padding: 2px 10px 22px; }
+  .sidebar-brand .name { font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
+  .sidebar-brand .sub { font-size: 11px; color: var(--text-lo); margin-top: 5px; line-height: 1.5; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    padding: 10px 12px; border-radius: 12px; border: none; background: transparent;
+    color: var(--text-mid); font-size: 13.5px; font-weight: 600; cursor: pointer;
+    margin-bottom: 3px; transition: background 0.15s, color 0.15s;
+  }
+  .nav-item:hover { background: rgba(31,41,55,0.06); color: var(--text-hi); }
+  .nav-item.active { background: var(--blue); color: #fff; box-shadow: 0 4px 14px rgba(31,111,214,0.32); }
+  .nav-item .ico { font-size: 15px; width: 18px; text-align: center; flex: none; }
+  .nav-item .nav-badge {
+    margin-left: auto; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+    background: var(--red-bg); color: var(--red);
+  }
+  .nav-item.active .nav-badge { background: rgba(255,255,255,0.25); color: #fff; }
+  .sidebar-footer { margin-top: auto; padding-top: 14px; border-top: 1px solid rgba(31,41,55,0.08); }
+  .sidebar-footer .pill { width: 100%; box-sizing: border-box; justify-content: center; margin-bottom: 8px; }
+  .sidebar-footer .refresh-btn { width: 100%; box-sizing: border-box; }
+
+  .main-content { flex: 1; min-width: 0; padding: 26px 30px 60px; max-width: 1360px; }
+  .page.hidden { display: none; }
+  .page-head { margin-bottom: 18px; }
+  .page-head h1 { font-size: 19px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .page-head .sub { font-size: 12.5px; color: var(--text-lo); }
+
+  @media (max-width: 980px) {
+    .app-shell { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; position: relative; flex-direction: row; overflow-x: auto; padding: 10px; }
+    .sidebar-brand, .sidebar-footer { display: none; }
+    .nav-item { flex: none; margin-bottom: 0; margin-right: 6px; white-space: nowrap; }
+    .main-content { padding: 18px 16px 40px; }
+  }
 </style>
 </head>
 <body>
@@ -245,22 +289,47 @@
   <div class="bg-blob blob2"></div>
   <div class="bg-blob blob3"></div>
 
-  <div class="wrap">
-    <div class="topbar">
-      <div class="title-block">
-        <h1>币安三账户实盘监控</h1>
-        <div class="sub">binanceB · binanceC · binanceD &nbsp;|&nbsp; 只读快照 + 手动平仓（唯一的写操作，点击有二次确认）</div>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <div class="name">币安实盘监控后台</div>
+        <div class="sub">binanceB · binanceC · binanceD</div>
       </div>
-      <div class="top-right">
+      <button class="nav-item active" data-page="overview" onclick="switchPage('overview')">
+        <span class="ico">📊</span>账户总览<span class="nav-badge hidden" id="navBadgeOverview"></span>
+      </button>
+      <button class="nav-item" data-page="tvsignals" onclick="switchPage('tvsignals')">
+        <span class="ico">📡</span>TV 信号
+      </button>
+      <button class="nav-item" data-page="manual" onclick="switchPage('manual')">
+        <span class="ico">✏️</span>手动发单
+      </button>
+      <button class="nav-item" data-page="strategy" onclick="switchPage('strategy')">
+        <span class="ico">🧪</span>策略 / 回测
+      </button>
+      <div class="sidebar-footer">
         <div class="pill" id="lastUpdated">加载中…</div>
         <div class="pill" id="anomalyPill">异常 0</div>
         <button class="refresh-btn" onclick="loadStatus(true)">立即刷新</button>
       </div>
+    </nav>
+
+    <main class="main-content">
+
+    <div id="page-overview" class="page">
+      <div class="page-head">
+        <h1>账户总览</h1>
+        <div class="sub">只读快照 + 手动平仓（唯一的写操作，点击有二次确认）</div>
+      </div>
+      <div class="grid" id="grid"></div>
     </div>
 
-    <div class="grid" id="grid"></div>
-
-    <div class="tv-section card tv-card">
+    <div id="page-tvsignals" class="page hidden">
+      <div class="page-head">
+        <h1>TV 信号</h1>
+        <div class="sub">三账户聚合的真实 TradingView 警报记录，支持重新执行 / 编辑重放</div>
+      </div>
+    <div class="card tv-card">
       <div class="tv-head">
         <h2>TV 信号（三账户聚合）</h2>
         <div class="tv-filters">
@@ -285,8 +354,14 @@
         </table>
       </div>
     </div>
+    </div>
 
-    <div class="tv-section card tv-card">
+    <div id="page-manual" class="page hidden">
+      <div class="page-head">
+        <h1>手动发单</h1>
+        <div class="sub">等效于收到一笔真实 TradingView 警报，会直接触发实盘下单 / 平仓</div>
+      </div>
+    <div class="card tv-card">
       <div class="tv-head"><h2>手动发单</h2></div>
       <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。LONG/SHORT 默认按限价挂单开仓（不吃市价滑点，超时未成交自动撤单）；选"市价"立即按现价成交，吃滑点换即时性。平仓永远是市价，不受此选项影响。</div>
       <div class="manual-grid">
@@ -337,8 +412,14 @@
       </div>
       <div id="mResult" class="tv-detail-box" style="display:none;margin-top:12px"></div>
     </div>
+    </div>
 
-    <div class="tv-section card tv-card">
+    <div id="page-strategy" class="page hidden">
+      <div class="page-head">
+        <h1>策略 / 回测</h1>
+        <div class="sub">VPS 本地影子信号，跟真实 TV 交易完全隔离，仅供策略表现参考</div>
+      </div>
+    <div class="card tv-card">
       <div class="tv-head">
         <h2>策略 / 回测</h2>
         <div class="tv-filters">
@@ -358,14 +439,22 @@
         </table>
       </div>
     </div>
+    </div>
 
     <div id="tvModalRoot"></div>
     <div id="strategyModalRoot"></div>
 
     <footer>后台每 30 秒自动刷新一次 · 数据来自本机状态文件与 journalctl 日志</footer>
+    </main>
   </div>
 
 <script>
+// ── 左侧导航切页 ──────────────────────────────────────────────────────────
+function switchPage(name) {
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.toggle("active", el.dataset.page === name));
+  document.querySelectorAll(".page").forEach(el => el.classList.toggle("hidden", el.id !== "page-" + name));
+}
+
 const ACCOUNTS_META = {
   B: {label: "妈妈的币安账户", port: 5007},
   C: {label: "我自己的币安账户", port: 5008},
@@ -527,6 +616,11 @@ async function loadStatus(force) {
     const pill = document.getElementById("anomalyPill");
     pill.textContent = `异常 ${totalAnomaly}`;
     pill.className = "pill" + (totalAnomaly > 0 ? " alert" : "");
+    const navBadge = document.getElementById("navBadgeOverview");
+    if (navBadge) {
+      navBadge.textContent = totalAnomaly;
+      navBadge.classList.toggle("hidden", totalAnomaly === 0);
+    }
 
     const d = new Date(json.data.fetched_at * 1000);
     document.getElementById("lastUpdated").textContent =
