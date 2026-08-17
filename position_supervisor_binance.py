@@ -14679,6 +14679,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         if not order:
             logger.error(f"❌ [{self.symbol}] 系统限价开仓挂单失败")
+            # 2026-08-17 D账户实测发现：挂单失败这条分支忘了标记账本FAILED，
+            # 阶段停在ENTRY_SUBMITTED不会自动前进，下一次同品种信号处理时会
+            # 被_pipeline_stale_check当成"卡阶段"误报（_limit_entry_pending
+            # 这时还没置True，pipeline_bridge.py那条跳过逻辑也不会生效）。
+            try:
+                self._pipeline_fail(Role.EXECUTION, "LIMIT_ENTRY_PLACE_FAILED")
+            except Exception:
+                pass
             try:
                 dingtalk.report_system_alert(
                     f"系统限价开仓挂单失败 [{self.symbol}]",
