@@ -183,10 +183,24 @@ FLAT_CONFIRM_RE = re.compile(
     r"确认空仓：WS\+REST均为0|"
     r"止损挂单未核实但复查仓位已归零|"
     r"仓位已由雷达/TP实际平仓，无需再挂止损|"
-    r"确认平仓.*清除stale本地状态"
+    r"确认平仓.*清除stale本地状态|"
+    r"雷达/防线账本已清零"  # 2026-08-17：跟watchdog同步——这条才是平仓/账本
+                            # 清零最常见的实际文案，原来四条经常对不上
 )
 
 FLAT_CONFIRM_WINDOW_SEC = 90
+
+# 2026-08-17：跟watchdog/check.py同步加的第二条降噪证据——只靠"最终仓位
+# 清零"太粗，裸奔窗口可能长达一两分钟才等到真正平仓，中间风险和"几秒内就
+# 补上另一层防线"完全不是一回事。实测案例：B账户ETH止损补挂失败→4秒内
+# 雷达止损就补上→117秒后才真正平仓，原90秒窗口没识别出来，其实裸奔窗口
+# 只有4秒。新增"防线很快补上"这条独立证据，覆盖率更高也更贴近真实风险。
+DEFENSE_RESTORED_RE = re.compile(
+    r"place (HARD|RADAR) stop|"
+    r"雷达止损已挂|"
+    r"硬止损已挂"
+)
+DEFENSE_RESTORED_WINDOW_SEC = 30
 
 ERROR_LINE_RE = re.compile(r"\[ERROR\]|Traceback|🚨")
 
@@ -215,6 +229,7 @@ def parse_logs_for_account(raw_block):
     events = []
     anomalies = []
     flat_confirm_ts = []
+    defense_restored_ts = []
     parsed_lines = []
 
     for line in raw_block.splitlines():
@@ -225,6 +240,10 @@ def parse_logs_for_account(raw_block):
                 dt = _parse_ts(ts)
                 if dt:
                     flat_confirm_ts.append(dt)
+            if DEFENSE_RESTORED_RE.search(msg):
+                dt = _parse_ts(ts)
+                if dt:
+                    defense_restored_ts.append(dt)
             kind = classify_line(ts, level, msg)
             if kind:
                 parsed_lines.append({"ts": ts, "level": level, "msg": msg.strip(), "kind": kind})
@@ -243,8 +262,17 @@ def parse_logs_for_account(raw_block):
         kind = item.pop("kind")
         if kind == "anomaly" and CLOSING_CHATTER_RE.search(item["msg"]):
             dt = _parse_ts(item["ts"]) if item["ts"] else None
-            if dt and any(abs((dt - c).total_seconds()) <= FLAT_CONFIRM_WINDOW_SEC for c in flat_confirm_ts):
-                kind = "self_healed"
+            if dt:
+                restored = any(
+                    0 <= (r - dt).total_seconds() <= DEFENSE_RESTORED_WINDOW_SEC
+                    for r in defense_restored_ts
+                )
+                flattened = any(
+                    abs((dt - c).total_seconds()) <= FLAT_CONFIRM_WINDOW_SEC
+                    for c in flat_confirm_ts
+                )
+                if restored or flattened:
+                    kind = "self_healed"
         if kind == "anomaly":
             anomalies.append(item)
         else:
