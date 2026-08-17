@@ -32,15 +32,24 @@ except Exception as _e:
     logger.warning(f"account_profiles bootstrap: {_e}")
 
 
-@app.route('/webhook', methods=['POST'])
-@app.route('/webhook/<path:ticker>', methods=['POST'])
-def webhook(ticker=None):
-    # 观测旁路：不参与鉴权/交易判定，任何异常内部自吞。来源标签由网关/Console
-    # 重放&手动发单在转发时自行打 header，TradingView 直连则留空落到默认值。
+def process_webhook_payload(raw_bytes, content_type, headers, remote_addr, ticker=None, as_json=None):
+    """
+    /webhook 的实际处理逻辑，独立于 Flask 的 request 全局对象，可以直接被
+    Console 的重放/手动发单在同进程内调用（不经过网络）。
+
+    2026-08-17 发现：B/C/D 三账户的 gunicorn 都是 `-w 1 --threads 1`（单进程
+    单线程，sync worker），Console 那两个路由原本是"回环 POST 自己的
+    127.0.0.1:$PORT/webhook"——同一个请求处理线程等自己发给自己的 HTTP 请求
+    的响应，而唯一能接这个请求的正好是它自己，直接死锁（连最简单的 PING 都
+    10 秒超时）。改成同进程直接调用这个函数，不再有任何网络往返，也就没有
+    死锁的余地；Flask 路由本身仍然是唯一对外暴露的入口，鉴权/解析/派发逻辑
+    原样保留，一步没少。
+    """
+    headers = headers or {}
     _t0 = time.time()
-    _source = str(request.headers.get("X-TV-Source") or "tv_direct").strip() or "tv_direct"
-    _remote_addr = str(request.remote_addr or "")
-    _replay_of = request.headers.get("X-TV-Replay-Of")
+    _source = str(headers.get("X-TV-Source") or "tv_direct").strip() or "tv_direct"
+    _remote_addr = str(remote_addr or "")
+    _replay_of = headers.get("X-TV-Replay-Of")
     try:
         _replay_of = int(_replay_of) if _replay_of else None
     except (TypeError, ValueError):
@@ -60,20 +69,16 @@ def webhook(ticker=None):
             pass
 
     try:
-        _, data = parse_webhook_request(
-            request.get_data(),
-            request.content_type or "",
-            as_json=request.get_json(silent=True),
-        )
+        _, data = parse_webhook_request(raw_bytes, content_type or "", as_json=as_json)
         data = normalize_tv_payload(data)
     except ValueError as e:
         logger.warning(f"[Webhook] 解析失败: {e}")
         _log(400, f"parse_error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 400
+        return {"status": "error", "message": str(e)}, 400
 
     if not data:
         _log(400, "empty_payload")
-        return jsonify({"status": "error", "message": "Empty payload"}), 400
+        return {"status": "error", "message": "Empty payload"}, 400
     # 鉴权：优先 secret（TV v6.5.6+）；兼容旧字段 token；值来自 Console/档案或 .env
     auth = str(
         data.get("secret") or data.get("token") or ""
@@ -86,13 +91,13 @@ def webhook(ticker=None):
     if not expected:
         logger.error("[Webhook] WEBHOOK_SECRET 未配置 → 拒绝所有请求(fail-closed)")
         _log(500, "server_misconfigured")
-        return jsonify({"status": "error", "message": "Server misconfigured"}), 500
+        return {"status": "error", "message": "Server misconfigured"}, 500
     if auth != expected:
         _log(403, "invalid_secret")
-        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+        return {"status": "error", "message": "Invalid secret"}, 403
     if not data.get("_parse_ok"):
         _log(400, "missing_or_invalid_action")
-        return jsonify({"status": "error", "message": "Missing or invalid action"}), 400
+        return {"status": "error", "message": "Missing or invalid action"}, 400
 
     # URL 路径品种优先（/webhook/XAUUSDT），否则读 payload ticker
     if ticker:
@@ -102,24 +107,24 @@ def webhook(ticker=None):
     raw_action = data.get("action", "UNKNOWN")
     if raw_action == "PING":
         _log(200, "pong")
-        return jsonify({
+        return {
             "status": "success",
             "message": "pong",
             "action": "PING",
             "schema": TV_STRATEGY_VERSION,
             "symbols": active_binance_symbols(),
-        }), 200
+        }, 200
 
     supervisor, sym = get_supervisor_for_payload(data)
     if supervisor is None:
         logger.warning(f"[Webhook] 不支持的品种: {sym}")
         _log(400, f"unsupported_symbol: {sym}")
-        return jsonify({
+        return {
             "status": "error",
             "message": f"Unsupported or missing symbol: {sym}",
             "hint": "TV JSON must include symbol/ticker e.g. ETHUSDT.P or XAUUSDT.P",
             "allowed": active_binance_symbols(),
-        }), 400
+        }, 400
 
     logger.info(f"[Webhook] [{sym}] {format_webhook_log(data)}")
 
@@ -132,11 +137,11 @@ def webhook(ticker=None):
             px_ok = False
         if not px_ok:
             _log(400, "missing_or_invalid_price")
-            return jsonify({
+            return {
                 "status": "error",
                 "message": "LONG/SHORT require valid price (ATR/ADX computed on VPS)",
                 "got": {"price": px},
-            }), 400
+            }, 400
         # stop_loss → 永久硬止损距离输入（与 atr 一并进入 v15.7.8+ 唯一公式）；亦可作 sizing 收紧 / 调试对比
         sl = data.get("stop_loss") or data.get("tv_sl")
         if sl is not None:
@@ -150,11 +155,11 @@ def webhook(ticker=None):
     except Exception as e:
         logger.error(f"启动线程失败 [{sym}]: {e}")
         _log(500, f"thread_start_failed: {e}")
-        return jsonify({
+        return {
             "status": "error",
             "message": f"Failed to start processing: {e}",
             "symbol": sym,
-        }), 500
+        }, 500
 
     _sig_id = None
     try:
@@ -167,13 +172,24 @@ def webhook(ticker=None):
     except Exception:
         pass
 
-    return jsonify({
+    return {
         "status": "success",
         "message": "Signal received and processing started",
         "action": raw_action,
         "symbol": sym,
         "schema": TV_STRATEGY_VERSION,
-    }), 200
+    }, 200
+
+
+@app.route('/webhook', methods=['POST'])
+@app.route('/webhook/<path:ticker>', methods=['POST'])
+def webhook(ticker=None):
+    resp, code = process_webhook_payload(
+        request.get_data(), request.content_type, request.headers,
+        request.remote_addr, ticker=ticker,
+        as_json=request.get_json(silent=True),
+    )
+    return jsonify(resp), code
 
 
 @app.route('/admin/resume/<path:symbol>', methods=['POST'])

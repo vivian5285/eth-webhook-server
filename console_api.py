@@ -407,29 +407,18 @@ def api_symbol_settings_update(symbol):
 
 
 # ── TV 信号日志 · 重放 · 手动发单 ──────────────────────────────────────────
-# 均只回环打本机自己的 /webhook（127.0.0.1:$PORT），走和 TradingView 完全相同
-# 的生产鉴权+解析+派发路径，不直接调用 supervisor 的任何方法。
+# 直接同进程调用 app.py 的 process_webhook_payload，走和 TradingView 完全
+# 相同的鉴权+解析+派发路径，不直接调用 supervisor 的任何方法。
+#
+# 2026-08-17 教训：这里原来是"回环 POST 自己的 127.0.0.1:$PORT/webhook"，
+# 但 B/C/D 三账户 gunicorn 都是 `-w 1 --threads 1`（单进程单线程）——当前
+# 这一个请求处理线程去等自己发给自己的 HTTP 请求的响应，而唯一能接这个
+# 请求的又正好是它自己，直接死锁，连最简单的 PING 都会 10 秒超时。改成
+# 同进程直接函数调用，没有网络往返，也就没有死锁的余地。
 
-def _local_webhook_port() -> str:
-    """
-    B/C/D 三账户的端口是 gunicorn 启动命令行里 `-b 0.0.0.0:500X` 直接指定的，
-    没有 PORT/WEBHOOK_PORT 环境变量可读（2026-08-17 实测发现，之前这里一直
-    静默 fallback 到硬编码 5003，导致回环 POST 全部打去了错误端口，
-    手动发单/重放实际从未真正打到过 /webhook）。这里改成直接读当前这次
-    Console 请求本身进来的端口——Console 和 /webhook 是同一个 Flask app、
-    同一个进程、同一个端口，请求到达时这个端口必然是对的。
-    """
-    try:
-        port = request.environ.get("SERVER_PORT")
-        if port:
-            return str(int(port))
-    except Exception:
-        pass
-    return str(os.getenv("PORT") or os.getenv("WEBHOOK_PORT") or "5003").strip() or "5003"
-
-
-def _post_to_local_webhook(payload: dict, extra_headers: dict):
-    import requests
+def _call_local_webhook(payload: dict, extra_headers: dict):
+    import json as _json
+    from app import process_webhook_payload
     from account_profiles import get_webhook_secret
     body = dict(payload)
     for k in ("secret", "token", "key"):
@@ -440,16 +429,14 @@ def _post_to_local_webhook(payload: dict, extra_headers: dict):
     body["secret"] = secret
     headers = {"Content-Type": "application/json"}
     headers.update(extra_headers or {})
-    url = f"http://127.0.0.1:{_local_webhook_port()}/webhook"
     try:
-        resp = requests.post(url, json=body, headers=headers, timeout=10)
-        try:
-            payload_out = resp.json()
-        except Exception:
-            payload_out = {"raw": resp.text[:500]}
-        return payload_out, resp.status_code
+        raw_bytes = _json.dumps(body).encode("utf-8")
+        resp, status = process_webhook_payload(
+            raw_bytes, "application/json", headers, "127.0.0.1(console)",
+        )
+        return resp, status
     except Exception as e:
-        return {"status": "error", "message": f"loopback_post_failed: {e}"}, 502
+        return {"status": "error", "message": f"local_dispatch_failed: {e}"}, 502
 
 
 @console_bp.route("/api/console/tv_signals", methods=["GET"])
@@ -546,7 +533,7 @@ def api_tv_signal_replay(signal_id):
     if not payload.get("reason"):
         payload["reason"] = f"[控制台重放#{signal_id}]"
     _inject_system_limit_order(payload, body)
-    resp_body, status = _post_to_local_webhook(payload, {
+    resp_body, status = _call_local_webhook(payload, {
         "X-TV-Source": "console_replay",
         "X-TV-Replay-Of": str(signal_id),
     })
@@ -575,7 +562,7 @@ def api_tv_manual_send():
     if not payload.get("reason"):
         payload["reason"] = "[控制台手动发单]"
     _inject_system_limit_order(payload, body)
-    resp_body, status = _post_to_local_webhook(payload, {"X-TV-Source": "console_manual"})
+    resp_body, status = _call_local_webhook(payload, {"X-TV-Source": "console_manual"})
     return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
 
 
