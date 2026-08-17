@@ -327,7 +327,29 @@
       <div id="mResult" class="tv-detail-box" style="display:none;margin-top:12px"></div>
     </div>
 
+    <div class="tv-section card tv-card">
+      <div class="tv-head">
+        <h2>策略 / 回测</h2>
+        <div class="tv-filters">
+          <button class="btn-mini" onclick="loadStrategySummary()">刷新</button>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px">
+        VPS 本地拉K线自算指标出的"影子信号"，跟真实TV信号完全隔离、不触发任何下单——
+        用于对比策略本身的表现。回测/实时影子数据来自独立的 strategy_engine 服务。
+      </p>
+      <div class="tv-table-wrap">
+        <table class="tv-table">
+          <thead><tr>
+            <th>品种</th><th>策略</th><th>周期</th><th>影子信号数</th><th>最近信号时间</th><th></th>
+          </tr></thead>
+          <tbody id="strategyBody"><tr><td colspan="6" class="tv-empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="tvModalRoot"></div>
+    <div id="strategyModalRoot"></div>
 
     <footer>后台每 30 秒自动刷新一次 · 数据来自本机状态文件与 journalctl 日志</footer>
   </div>
@@ -714,8 +736,195 @@ async function doManualSend() {
   }
 }
 
+// ── 策略 / 回测面板 ──────────────────────────────────────────────────────
+let strategyRegistry = {};   // symbol -> {strategy, timeframe, params}
+let strategySummaryMap = {}; // symbol -> {last_live_bar_time, live_signal_count}
+
+function fmtBarTime(ms) {
+  if (!ms) return "—";
+  return new Date(Number(ms)).toLocaleString("zh-CN", {hour12: false});
+}
+
+async function loadStrategyRegistry() {
+  try {
+    const d = await (await fetch("api/strategy/registry")).json();
+    if (d.status === "ok") strategyRegistry = d.symbols || {};
+  } catch (e) { console.warn("策略配置加载失败", e); }
+}
+
+async function loadStrategySummary() {
+  const body = document.getElementById("strategyBody");
+  if (Object.keys(strategyRegistry).length === 0) await loadStrategyRegistry();
+  try {
+    const d = await (await fetch("api/strategy/summary")).json();
+    strategySummaryMap = {};
+    (d.summary || []).forEach(r => { strategySummaryMap[r.symbol] = r; });
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    return;
+  }
+  const symbols = Object.keys(strategyRegistry).length ? Object.keys(strategyRegistry) : Object.keys(strategySummaryMap);
+  if (!symbols.length) { body.innerHTML = `<tr><td colspan="6" class="tv-empty">暂无数据</td></tr>`; return; }
+  body.innerHTML = symbols.map(sym => {
+    const cfg = strategyRegistry[sym] || {};
+    const sm = strategySummaryMap[sym] || {};
+    return `
+      <tr>
+        <td>${escapeHtml(sym)}</td>
+        <td>${escapeHtml(cfg.strategy || "—")}</td>
+        <td>${escapeHtml(cfg.timeframe || "—")}</td>
+        <td class="mono">${sm.live_signal_count || 0}</td>
+        <td class="mono">${fmtBarTime(sm.last_live_bar_time)}</td>
+        <td><button class="btn-mini primary" onclick="openStrategyDetail('${sym}')">详情/回测</button></td>
+      </tr>`;
+  }).join("");
+}
+
+// 跟 strategy_engine/backtest_stats.py 同一套口径，前端直接算，不用再跨进程调一次
+function computeStrategyStats(positions) {
+  const closed = (positions || []).filter(p => p.status === "closed" && p.pnl_pct !== null && p.pnl_pct !== undefined);
+  const n = closed.length;
+  if (!n) return {trades: 0, win_rate: 0, profit_factor: 0, max_drawdown_pct: 0, avg_trade_pct: 0, total_pnl_pct: 0, equity_curve: []};
+  const wins = closed.filter(p => p.pnl_pct > 0);
+  const losses = closed.filter(p => p.pnl_pct <= 0);
+  const grossProfit = wins.reduce((s, p) => s + p.pnl_pct, 0);
+  const grossLoss = Math.abs(losses.reduce((s, p) => s + p.pnl_pct, 0));
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? null : 0);
+  let cum = 0, peak = 0, maxDd = 0;
+  const equity = closed.map(p => {
+    cum += p.pnl_pct;
+    peak = Math.max(peak, cum);
+    maxDd = Math.max(maxDd, peak - cum);
+    return {t: p.exit_bar_time || p.entry_bar_time, cum};
+  });
+  return {
+    trades: n,
+    win_rate: +(wins.length / n * 100).toFixed(2),
+    profit_factor: profitFactor === null ? null : +profitFactor.toFixed(3),
+    max_drawdown_pct: +maxDd.toFixed(4),
+    avg_trade_pct: +(closed.reduce((s, p) => s + p.pnl_pct, 0) / n).toFixed(4),
+    total_pnl_pct: +cum.toFixed(4),
+    equity_curve: equity,
+  };
+}
+
+function renderEquitySvg(equityCurve) {
+  if (!equityCurve.length) return `<div class="tv-empty">暂无成交，无法画权益曲线</div>`;
+  const w = 640, h = 180, pad = 24;
+  const vals = equityCurve.map(p => p.cum);
+  const min = Math.min(0, ...vals), max = Math.max(0, ...vals);
+  const range = (max - min) || 1;
+  const stepX = equityCurve.length > 1 ? (w - pad * 2) / (equityCurve.length - 1) : 0;
+  const pts = equityCurve.map((p, i) => {
+    const x = pad + i * stepX;
+    const y = h - pad - ((p.cum - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const zeroY = h - pad - ((0 - min) / range) * (h - pad * 2);
+  const last = vals[vals.length - 1];
+  const lineColor = last >= 0 ? "var(--green)" : "var(--red)";
+  return `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px" preserveAspectRatio="none">
+      <line x1="${pad}" y1="${zeroY.toFixed(1)}" x2="${w - pad}" y2="${zeroY.toFixed(1)}" stroke="rgba(31,41,55,0.15)" stroke-dasharray="4,3" />
+      <polyline points="${pts}" fill="none" stroke="${lineColor}" stroke-width="2" />
+    </svg>`;
+}
+
+let strategyDetailState = {symbol: null, runType: "live", runId: null};
+
+async function openStrategyDetail(symbol) {
+  strategyDetailState = {symbol, runType: "live", runId: null};
+  document.getElementById("strategyModalRoot").innerHTML = `
+    <div class="modal-mask" onclick="if(event.target===this) closeStrategyModal()">
+      <div class="modal-box" style="width:min(760px,100%)">
+        <h3>${escapeHtml(symbol)} · 策略详情</h3>
+        <div id="strategyDetailBody">加载中…</div>
+        <div class="modal-actions">
+          <input id="btDays" type="number" value="30" min="1" max="180" style="width:80px" />
+          <button class="btn-mini" onclick="runStrategyBacktest()">跑回测(天)</button>
+          <button class="btn-mini" onclick="closeStrategyModal()">关闭</button>
+        </div>
+      </div>
+    </div>`;
+  await renderStrategyDetail();
+}
+
+function closeStrategyModal() { document.getElementById("strategyModalRoot").innerHTML = ""; }
+
+async function renderStrategyDetail() {
+  const {symbol, runType, runId} = strategyDetailState;
+  const el = document.getElementById("strategyDetailBody");
+  if (!el) return;
+  el.innerHTML = "加载中…";
+  try {
+    const qs = new URLSearchParams({run_type: runType});
+    if (runId) qs.set("run_id", runId);
+    const d = await (await fetch(`api/strategy/${symbol}/positions?${qs.toString()}`)).json();
+    const positions = d.positions || [];
+    const stats = computeStrategyStats(positions);
+    const pf = stats.profit_factor === null ? "∞" : stats.profit_factor;
+    el.innerHTML = `
+      <div class="tv-filters" style="margin-bottom:12px">
+        <button class="btn-mini ${runType==='live'?'primary':''}" onclick="switchStrategyRunType('live')">实时影子</button>
+        ${runId ? `<span class="acct-badge">回测批次 ${escapeHtml(runId)}</span>` : ""}
+      </div>
+      <div class="manual-grid" style="grid-template-columns:repeat(5,1fr)">
+        <div class="manual-field"><label>交易数</label><div class="mono">${stats.trades}</div></div>
+        <div class="manual-field"><label>胜率</label><div class="mono">${stats.win_rate}%</div></div>
+        <div class="manual-field"><label>盈亏比</label><div class="mono">${pf}</div></div>
+        <div class="manual-field"><label>最大回撤</label><div class="mono">${stats.max_drawdown_pct}%</div></div>
+        <div class="manual-field"><label>累计收益</label><div class="mono">${stats.total_pnl_pct}%</div></div>
+      </div>
+      <div style="margin:14px 0">${renderEquitySvg(stats.equity_curve)}</div>
+      <div class="tv-table-wrap" style="max-height:260px;overflow-y:auto">
+        <table class="tv-table">
+          <thead><tr><th>方向</th><th>开仓时间</th><th>开仓价</th><th>平仓时间</th><th>平仓价</th><th>原因</th><th>盈亏%</th></tr></thead>
+          <tbody>${positions.slice().reverse().map(p => `
+            <tr>
+              <td>${escapeHtml(p.side)}</td>
+              <td class="mono">${fmtBarTime(p.entry_bar_time)}</td>
+              <td class="mono">${fmtN(p.entry_price)}</td>
+              <td class="mono">${fmtBarTime(p.exit_bar_time)}</td>
+              <td class="mono">${fmtN(p.exit_price)}</td>
+              <td>${escapeHtml(p.exit_reason || "—")}</td>
+              <td class="mono" style="color:${(p.pnl_pct||0)>=0?'var(--green)':'var(--red)'}">${p.pnl_pct!=null?p.pnl_pct.toFixed(3):"—"}</td>
+            </tr>`).join("") || `<tr><td colspan="7" class="tv-empty">暂无模拟交易</td></tr>`}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="tv-empty">加载失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function switchStrategyRunType(runType) {
+  strategyDetailState.runType = runType;
+  strategyDetailState.runId = null;
+  renderStrategyDetail();
+}
+
+async function runStrategyBacktest() {
+  const symbol = strategyDetailState.symbol;
+  const days = Number(document.getElementById("btDays").value) || 30;
+  const el = document.getElementById("strategyDetailBody");
+  el.innerHTML = "回测运行中，可能需要几十秒…";
+  try {
+    const d = await (await fetch(`api/strategy/${symbol}/backtest`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({days}),
+    })).json();
+    if (!d.ok) { el.innerHTML = `<div class="tv-empty">回测失败: ${escapeHtml(d.message || "未知错误")}</div>`; return; }
+    strategyDetailState.runType = "backtest";
+    strategyDetailState.runId = d.run_id;
+    await renderStrategyDetail();
+  } catch (e) {
+    el.innerHTML = `<div class="tv-empty">回测请求失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
 loadTvMeta();
 loadTvSignals();
+loadStrategySummary();
 setInterval(loadTvSignals, 20000);
 </script>
 </body>

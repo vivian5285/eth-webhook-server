@@ -14,10 +14,20 @@
 自己 .env 里的 CONSOLE_PASSWORD 登录换 session cookie，再转发一次调用。跟
 close_position 一样只调用已有的最小必要接口，不导入 position_supervisor，
 不绕过原账户自己的鉴权/校验/去重逻辑。
+
+2026-08-17 新增：策略/回测面板——数据来自完全独立的 strategy_engine 服务
+（部署在 /root/strategy-engine/，无API Key、不import任何账户代码、只读
+公开K线自己算指标出信号）。本面板对它的数据只做只读查询（直接开
+strategy_engine 自己维护的 sqlite 文件，跟读账户 state 文件是同一个"直接
+读别的服务落盘产物"的模式，不需要额外起HTTP层）；"跑回测"这个唯一的
+写操作，走跟 close_position 一样的 subprocess 调用模式——调 strategy_engine
+自己venv里的python跑一次性脚本，dashboard进程本身不import它的任何代码。
 """
 import http.cookiejar
 import json
+import os
 import re
+import sqlite3
 import subprocess
 import threading
 import time
@@ -558,6 +568,119 @@ def api_tv_manual_send():
     code, data = _console_call(acct, "POST", "/api/console/tv_manual_send", body=payload)
     print(f"[TV_MANUAL_SEND] account={acct['id']} payload={payload} -> {data}", flush=True)
     return jsonify(data), (code or 502)
+
+
+# ── 策略/回测面板：直接读 strategy_engine 自己维护的 sqlite，"跑回测"走
+# subprocess 调用它自己venv的python（跟 close_position 同一种模式）──────────
+
+STRATEGY_ENGINE_DIR = "/root/strategy-engine"
+STRATEGY_ENGINE_PY = f"{STRATEGY_ENGINE_DIR}/venv/bin/python"
+SHADOW_DB_PATH = f"{STRATEGY_ENGINE_DIR}/strategy_engine/data/shadow.db"
+
+
+def _shadow_query(sql, params=()):
+    if not os.path.exists(SHADOW_DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(SHADOW_DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[strategy] shadow.db 查询失败: {e}", flush=True)
+        return []
+
+
+def _strategy_engine_call(code, timeout=20):
+    """一次性子进程调 strategy_engine 自己venv的python，取stdout最后一行JSON。"""
+    try:
+        p = subprocess.run(
+            [STRATEGY_ENGINE_PY, "-c", code],
+            capture_output=True, timeout=timeout, cwd=STRATEGY_ENGINE_DIR,
+        )
+        out = p.stdout.decode("utf-8", errors="replace").strip()
+        if out:
+            return json.loads(out.splitlines()[-1])
+        err = p.stderr.decode("utf-8", errors="replace")[-300:]
+        return {"ok": False, "message": f"无输出: {err}"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+
+@app.route("/api/strategy/registry")
+def api_strategy_registry():
+    code = (
+        "from strategy_engine.symbol_registry import SYMBOLS\n"
+        "import json\n"
+        "print(json.dumps(SYMBOLS))"
+    )
+    result = _strategy_engine_call(code, timeout=10)
+    if isinstance(result, dict) and result.get("ok") is False:
+        return jsonify({"status": "error", "message": result.get("message")}), 502
+    return jsonify({"status": "ok", "symbols": result})
+
+
+@app.route("/api/strategy/summary")
+def api_strategy_summary():
+    rows = _shadow_query("""
+        SELECT symbol,
+               MAX(CASE WHEN run_type='live' THEN bar_time END) AS last_live_bar_time,
+               COUNT(CASE WHEN run_type='live' THEN 1 END) AS live_signal_count
+        FROM shadow_signals GROUP BY symbol
+    """)
+    return jsonify({"status": "ok", "summary": rows})
+
+
+@app.route("/api/strategy/<symbol>/positions")
+def api_strategy_positions(symbol):
+    run_type = request.args.get("run_type", "live")
+    run_id = request.args.get("run_id")
+    if run_id:
+        rows = _shadow_query(
+            "SELECT * FROM shadow_positions WHERE symbol=? AND run_type=? AND run_id=? ORDER BY entry_bar_time ASC",
+            (symbol, run_type, run_id),
+        )
+    else:
+        rows = _shadow_query(
+            "SELECT * FROM shadow_positions WHERE symbol=? AND run_type=? AND run_id IS NULL ORDER BY entry_bar_time ASC",
+            (symbol, run_type),
+        )
+    return jsonify({"status": "ok", "positions": rows})
+
+
+@app.route("/api/strategy/<symbol>/signals")
+def api_strategy_signals(symbol):
+    run_type = request.args.get("run_type", "live")
+    run_id = request.args.get("run_id")
+    limit = int(request.args.get("limit", 100))
+    if run_id:
+        rows = _shadow_query(
+            "SELECT * FROM shadow_signals WHERE symbol=? AND run_type=? AND run_id=? ORDER BY id DESC LIMIT ?",
+            (symbol, run_type, run_id, limit),
+        )
+    else:
+        rows = _shadow_query(
+            "SELECT * FROM shadow_signals WHERE symbol=? AND run_type=? AND run_id IS NULL ORDER BY id DESC LIMIT ?",
+            (symbol, run_type, limit),
+        )
+    return jsonify({"status": "ok", "signals": rows})
+
+
+@app.route("/api/strategy/<symbol>/backtest", methods=["POST"])
+def api_strategy_backtest(symbol):
+    body = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(int(body.get("days") or 30), 180))
+    except (TypeError, ValueError):
+        days = 30
+    code = (
+        "from strategy_engine.backtest_runner import run_backtest\n"
+        "import json\n"
+        f"print(json.dumps(run_backtest({symbol!r}, days={days})))"
+    )
+    result = _strategy_engine_call(code, timeout=60)
+    return jsonify(result)
 
 
 @app.route("/")
