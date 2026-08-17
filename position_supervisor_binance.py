@@ -7989,6 +7989,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         target = round(float(target), 2)
         # 账本理论止损；盘口挂单再 ±0.3 执行缓冲（多减空加）
         ledger_target = target
+        # 雷达止损棘轮铁律：已有正向账本止损后只准前进、不准回退（同
+        # _apply_breath_stop_tick / _sync_radar_sl_from_best 两处的 max()/min()
+        # 棘轮保护一致，"雷达止损只前进不回撤"是全系统的既定铁律，见
+        # _disarm_premature_radar 文档）。本函数是唯一实际写盘口+账本的落点，
+        # 此前漏了这道闸门——2026-08-17 SKHYNIXUSDT(C账户)实盘复现：账本从
+        # 1213.63 被本函数直接改写成回退的 1211.86 并原样挂到交易所，随后
+        # 现价小幅回落就触发了本不该在场的更松止损，提前止盈了一大截。
+        # 开仓/反手/平仓后 current_sl 会被清零（_reset_breath_ledger_on_flat），
+        # 所以这里的 prior_sl>0 判断不会误伤首次挂单。
+        prior_sl = round(float(getattr(self, "current_sl", 0) or 0), 2)
+        side_u = str(self.current_side or "").strip().upper()
+        if prior_sl > 0 and side_u in ("LONG", "SHORT"):
+            if side_u == "LONG" and ledger_target < prior_sl:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达止损棘轮拦截回退 目标@{ledger_target:.2f} "
+                    f"< 账本@{prior_sl:.2f} → 保留原值 | {reason}"
+                )
+                ledger_target = prior_sl
+            elif side_u == "SHORT" and ledger_target > prior_sl:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达止损棘轮拦截回退 目标@{ledger_target:.2f} "
+                    f"> 账本@{prior_sl:.2f} → 保留原值 | {reason}"
+                )
+                ledger_target = prior_sl
         exchange_target = round(
             float(order_stop_price(
                 self.current_side, ledger_target,
