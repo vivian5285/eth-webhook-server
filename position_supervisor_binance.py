@@ -15849,12 +15849,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         new_phase = bool(out["breakeven_phase"])
         self.early_be_done = bool(out.get("early_be_done") or early)
         meta = out.get("meta") or {}
-        logger.info(
-            f"🔍[DEBUG-临时排查] [{self.symbol}] px={px:.2f} entry={entry:.2f} "
-            f"atr={atr:.4f} init={init:.2f} cur={cur:.2f} best={best:.2f} "
-            f"→ new_stop={new_stop:.2f} zone={meta.get('zone')} "
-            f"step={meta.get('step_count')} phase={new_phase}"
-        )
         meta["breathing_coefficient"] = coeff
         breath_meta = getattr(self, "_breath_coeff_meta", None) or {}
         if breath_meta:
