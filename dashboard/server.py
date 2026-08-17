@@ -551,6 +551,8 @@ def api_tv_replay():
     relay_body = {"overrides": overrides}
     if body.get("limit_timeout_min") is not None:
         relay_body["limit_timeout_min"] = body.get("limit_timeout_min")
+    if body.get("order_type"):
+        relay_body["order_type"] = body.get("order_type")
     code, data = _console_call(
         acct, "POST", f"/api/console/tv_signals/{sig_id}/replay", body=relay_body
     )

@@ -622,7 +622,7 @@
 
     <!-- ── 手动发单 tab ── -->
     <div id="page-manual" class="hidden">
-      <div class="warn-banner">⚠️ 该操作等效于收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，请仔细核对参数。LONG/SHORT 开仓按下方限价挂单执行（不吃市价滑点，超时未成交会自动撤单）；平仓动作仍是市价，退出速度优先。</div>
+      <div class="warn-banner">⚠️ 该操作等效于收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，请仔细核对参数。LONG/SHORT 开仓默认按下方价格挂限价单执行（不吃市价滑点，超时未成交会自动撤单）；选"市价"则立即按现价成交，吃滑点换即时性，仅在追单/限价迟迟不成交时使用。平仓动作永远是市价，退出速度优先，不受此选项影响。</div>
       <div class="card">
         <h3>手动构造 TV 信号</h3>
         <div class="row">
@@ -651,8 +651,17 @@
           </div>
         </div>
         <div class="row">
-          <div class="field"><label>限价（LONG/SHORT 按此价挂限价单开仓）</label><input id="mPrice" type="number" step="any" placeholder="开仓限价/参考价" /></div>
-          <div class="field"><label>限价超时（分钟，1~30，默认5）</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
+          <div class="field">
+            <label>订单类型（仅影响 LONG/SHORT 开仓）</label>
+            <select id="mOrderType" onchange="onMOrderTypeChange()">
+              <option value="LIMIT">限价（默认，不吃滑点）</option>
+              <option value="MARKET">市价（立即成交，吃滑点）</option>
+            </select>
+          </div>
+          <div class="field"><label id="mPriceLabel">限价（LONG/SHORT 按此价挂限价单开仓）</label><input id="mPrice" type="number" step="any" placeholder="开仓限价/参考价" /></div>
+          <div class="field" id="mLimitTimeoutField"><label>限价超时（分钟，1~30，默认5）</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
+        </div>
+        <div class="row">
           <div class="field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
         </div>
         <div class="row">
@@ -1305,11 +1314,13 @@ function toggleTvDetail(id) {
 function findTvSignal(id) { return tvSignalsCache.find(r => r.id === id); }
 
 // ── TV 信号：重新执行 / 编辑后执行 ──────────────────────────────────────────
-async function doReplay(id, overrides, limitTimeoutMin) {
-  if (!confirm("即将以" + (overrides ? "编辑后的" : "完全相同的") + "参数重新发送该笔 TV 信号到实盘，币安将按正常流程下单/平仓。确认执行？")) return;
+async function doReplay(id, overrides, limitTimeoutMin, orderType) {
+  const marketWarn = (orderType === "MARKET") ? "\n⚠️ 已选市价，会立即按现价成交，吃滑点！" : "";
+  if (!confirm("即将以" + (overrides ? "编辑后的" : "完全相同的") + "参数重新发送该笔 TV 信号到实盘，币安将按正常流程下单/平仓。" + marketWarn + "\n确认执行？")) return;
   try {
     const body = { overrides: overrides || {} };
     if (limitTimeoutMin) body.limit_timeout_min = limitTimeoutMin;
+    if (orderType) body.order_type = orderType;
     const d = await api(`/api/console/tv_signals/${id}/replay`, {
       method: "POST", body: JSON.stringify(body),
     });
@@ -1355,8 +1366,17 @@ function openEditReplay(id) {
           </div>
         </div>
         <div class="row">
-          <div class="field"><label>限价</label><input id="erPrice" type="number" step="any" value="${row.price??""}" /></div>
-          <div class="field"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
+          <div class="field">
+            <label>订单类型</label>
+            <select id="erOrderType" onchange="onErOrderTypeChange()">
+              <option value="LIMIT">限价（默认，不吃滑点）</option>
+              <option value="MARKET">市价（立即成交，吃滑点）</option>
+            </select>
+          </div>
+          <div class="field"><label id="erPriceLabel">限价</label><input id="erPrice" type="number" step="any" value="${row.price??""}" /></div>
+          <div class="field" id="erLimitTimeoutField"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
+        </div>
+        <div class="row">
           <div class="field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr??""}" /></div>
           <div class="field"><label>ADX</label><input id="erAdx" type="number" step="any" value="${row.adx??""}" /></div>
         </div>
@@ -1375,6 +1395,12 @@ function openEditReplay(id) {
   document.getElementById("tvModalRoot").innerHTML = html;
 }
 
+function onErOrderTypeChange() {
+  const isMarket = document.getElementById("erOrderType").value === "MARKET";
+  document.getElementById("erLimitTimeoutField").style.display = isMarket ? "none" : "";
+  document.getElementById("erPriceLabel").textContent = isMarket ? "参考价（市价单，仅记账用）" : "限价";
+}
+
 function submitEditReplay(id) {
   const val = (elId) => { const v = document.getElementById(elId).value; return v === "" ? null : Number(v); };
   const overrides = {
@@ -1386,15 +1412,27 @@ function submitEditReplay(id) {
   const tier = document.getElementById("erTier").value;
   if (tier !== "") overrides.tier = Number(tier);
   Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
-  const limitTimeoutMin = val("erLimitTimeout");
-  doReplay(id, overrides, limitTimeoutMin);
+  const orderType = document.getElementById("erOrderType").value;
+  const limitTimeoutMin = orderType === "MARKET" ? null : val("erLimitTimeout");
+  doReplay(id, overrides, limitTimeoutMin, orderType);
 }
 
 // ── 手动发单 ───────────────────────────────────────────────────────────────
+function onMOrderTypeChange() {
+  const isMarket = document.getElementById("mOrderType").value === "MARKET";
+  document.getElementById("mLimitTimeoutField").style.display = isMarket ? "none" : "";
+  document.getElementById("mPriceLabel").textContent = isMarket
+    ? "参考价（市价单，仅记账用，不影响成交价）"
+    : "限价（LONG/SHORT 按此价挂限价单开仓）";
+}
+
 function confirmManualSend() {
   const symbol = document.getElementById("mSymbol").value;
   const action = document.getElementById("mAction").value;
-  if (!confirm(`即将以【${action} ${symbol||""}】发送一笔手动信号到实盘，等效于收到一笔真实 TradingView 警报。确认发送？`)) return;
+  const orderType = document.getElementById("mOrderType").value;
+  const marketWarn = (orderType === "MARKET" && (action === "LONG" || action === "SHORT"))
+    ? "\n⚠️ 已选市价，会立即按现价成交，吃滑点！" : "";
+  if (!confirm(`即将以【${action} ${symbol||""}】发送一笔手动信号到实盘，等效于收到一笔真实 TradingView 警报。${marketWarn}\n确认发送？`)) return;
   doManualSend();
 }
 
@@ -1403,6 +1441,7 @@ async function doManualSend() {
   const body = {
     symbol: document.getElementById("mSymbol").value,
     action: document.getElementById("mAction").value,
+    order_type: document.getElementById("mOrderType").value,
     price: val("mPrice"), atr: val("mAtr"), adx: val("mAdx"),
     tp1: val("mTp1"), tp2: val("mTp2"), tp3: val("mTp3"),
     stop_loss: val("mSl"), qty: val("mQty"),

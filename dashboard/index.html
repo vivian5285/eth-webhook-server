@@ -288,7 +288,7 @@
 
     <div class="tv-section card tv-card">
       <div class="tv-head"><h2>手动发单</h2></div>
-      <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。LONG/SHORT 按限价挂单开仓（不吃市价滑点，超时未成交自动撤单）；平仓仍是市价。</div>
+      <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。LONG/SHORT 默认按限价挂单开仓（不吃市价滑点，超时未成交自动撤单）；选"市价"立即按现价成交，吃滑点换即时性。平仓永远是市价，不受此选项影响。</div>
       <div class="manual-grid">
         <div class="manual-field"><label>账户</label>
           <select id="mAccount">
@@ -310,8 +310,14 @@
         <div class="manual-field"><label>趋势档位</label>
           <select id="mTier"><option value="">自动</option><option value="0">弱</option><option value="1">中</option><option value="2">强</option></select>
         </div>
-        <div class="manual-field"><label>限价（LONG/SHORT开仓价）</label><input id="mPrice" type="number" step="any" /></div>
-        <div class="manual-field"><label>限价超时(分钟,1~30)</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
+        <div class="manual-field"><label>订单类型</label>
+          <select id="mOrderType" onchange="onMOrderTypeChange()">
+            <option value="LIMIT">限价（默认）</option>
+            <option value="MARKET">市价（立即成交）</option>
+          </select>
+        </div>
+        <div class="manual-field"><label id="mPriceLabel">限价（LONG/SHORT开仓价）</label><input id="mPrice" type="number" step="any" /></div>
+        <div class="manual-field" id="mLimitTimeoutField"><label>限价超时(分钟,1~30)</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
         <div class="manual-field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
         <div class="manual-field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
         <div class="manual-field"><label>TP1</label><input id="mTp1" type="number" step="any" /></div>
@@ -627,12 +633,14 @@ function toggleTvDetail(rid) {
 
 function findTvSignal(acct, id) { return tvCache.find(r => r._account === acct && r.id === id); }
 
-async function doReplay(acct, id, overrides, limitTimeoutMin) {
+async function doReplay(acct, id, overrides, limitTimeoutMin, orderType) {
   const label = (overrides && Object.keys(overrides).length) ? "编辑后的" : "完全相同的";
-  if (!confirm(`即将以${label}参数重新发送账户 ${acct} 的这笔 TV 信号到实盘，交易所将按正常流程下单/平仓。确认执行？`)) return;
+  const marketWarn = orderType === "MARKET" ? "\n⚠️ 已选市价，会立即按现价成交，吃滑点！" : "";
+  if (!confirm(`即将以${label}参数重新发送账户 ${acct} 的这笔 TV 信号到实盘，交易所将按正常流程下单/平仓。${marketWarn}\n确认执行？`)) return;
   try {
     const body = {account: acct, signal_id: id, overrides: overrides || {}};
     if (limitTimeoutMin) body.limit_timeout_min = limitTimeoutMin;
+    if (orderType) body.order_type = orderType;
     const res = await fetch("api/tv_replay", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
@@ -668,8 +676,14 @@ function openEditReplay(acct, id) {
               <option value="2" ${row.tier===2?"selected":""}>强</option>
             </select>
           </div>
-          <div class="manual-field"><label>限价</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
-          <div class="manual-field"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
+          <div class="manual-field"><label>订单类型</label>
+            <select id="erOrderType" onchange="onErOrderTypeChange()">
+              <option value="LIMIT">限价（默认）</option>
+              <option value="MARKET">市价（立即成交）</option>
+            </select>
+          </div>
+          <div class="manual-field"><label id="erPriceLabel">限价</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
+          <div class="manual-field" id="erLimitTimeoutField"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
           <div class="manual-field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr ?? ""}" /></div>
           <div class="manual-field"><label>TP1</label><input id="erTp1" type="number" step="any" value="${row.tp1 ?? ""}" /></div>
           <div class="manual-field"><label>TP2</label><input id="erTp2" type="number" step="any" value="${row.tp2 ?? ""}" /></div>
@@ -685,6 +699,12 @@ function openEditReplay(acct, id) {
   document.getElementById("tvModalRoot").innerHTML = html;
 }
 
+function onErOrderTypeChange() {
+  const isMarket = document.getElementById("erOrderType").value === "MARKET";
+  document.getElementById("erLimitTimeoutField").style.display = isMarket ? "none" : "";
+  document.getElementById("erPriceLabel").textContent = isMarket ? "参考价（市价单，仅记账用）" : "限价";
+}
+
 function submitEditReplay(acct, id) {
   const v = (elId) => { const x = document.getElementById(elId).value; return x === "" ? null : Number(x); };
   const overrides = {
@@ -694,15 +714,27 @@ function submitEditReplay(acct, id) {
   const tier = document.getElementById("erTier").value;
   if (tier !== "") overrides.tier = Number(tier);
   Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
-  const limitTimeoutMin = v("erLimitTimeout");
-  doReplay(acct, id, overrides, limitTimeoutMin);
+  const orderType = document.getElementById("erOrderType").value;
+  const limitTimeoutMin = orderType === "MARKET" ? null : v("erLimitTimeout");
+  doReplay(acct, id, overrides, limitTimeoutMin, orderType);
+}
+
+function onMOrderTypeChange() {
+  const isMarket = document.getElementById("mOrderType").value === "MARKET";
+  document.getElementById("mLimitTimeoutField").style.display = isMarket ? "none" : "";
+  document.getElementById("mPriceLabel").textContent = isMarket
+    ? "参考价（市价单，仅记账用，不影响成交价）"
+    : "限价（LONG/SHORT开仓价）";
 }
 
 function confirmManualSend() {
   const acct = document.getElementById("mAccount").value;
   const symbol = document.getElementById("mSymbol").value;
   const action = document.getElementById("mAction").value;
-  if (!confirm(`即将向账户 ${acct} 发送【${action} ${symbol || ""}】手动信号，等效于该账户收到一笔真实 TradingView 警报。确认发送？`)) return;
+  const orderType = document.getElementById("mOrderType").value;
+  const marketWarn = (orderType === "MARKET" && (action === "LONG" || action === "SHORT"))
+    ? "\n⚠️ 已选市价，会立即按现价成交，吃滑点！" : "";
+  if (!confirm(`即将向账户 ${acct} 发送【${action} ${symbol || ""}】手动信号，等效于该账户收到一笔真实 TradingView 警报。${marketWarn}\n确认发送？`)) return;
   doManualSend();
 }
 
@@ -712,6 +744,7 @@ async function doManualSend() {
     account: document.getElementById("mAccount").value,
     symbol: document.getElementById("mSymbol").value,
     action: document.getElementById("mAction").value,
+    order_type: document.getElementById("mOrderType").value,
     price: v("mPrice"), atr: v("mAtr"), adx: v("mAdx"),
     tp1: v("mTp1"), tp2: v("mTp2"), tp3: v("mTp3"),
     stop_loss: v("mSl"), qty: v("mQty"),

@@ -489,13 +489,24 @@ def api_tv_signal_detail(signal_id):
 
 def _inject_system_limit_order(payload: dict, body: dict) -> None:
     """
-    Console 发出的 LONG/SHORT 一律按限价单执行（用户自己挑的时机/价格，不是
+    Console 发出的 LONG/SHORT 默认按限价单执行（用户自己挑的时机/价格，不是
     追一根实时触发的K线，没必要吃市价滑点）；CLOSE_*/PING 不受影响，退出
     速度优先于省滑点。真实 TV webhook 走 /webhook 直连或网关，永远不会经过
     这个函数，market 路径不受任何影响。
+
+    2026-08-17：面板加了"市价"选项——body.order_type 显式传 "MARKET" 时跳过
+    限价注入，改走跟真实TV信号一样的市价路径（用户想现价追单/限价迟迟不成
+    交时手动切市价的场景，接受滑点换即时成交）。不传该字段时默认仍是限价，
+    不改变任何既有行为。
     """
     action = str(payload.get("action") or "").strip().upper()
     if action not in ("LONG", "SHORT"):
+        return
+    order_type = str(body.get("order_type") or "LIMIT").strip().upper()
+    if order_type == "MARKET":
+        payload.pop("order_type", None)
+        payload.pop("limit_price", None)
+        payload.pop("limit_timeout_sec", None)
         return
     try:
         limit_price = float(payload.get("price") or 0)
