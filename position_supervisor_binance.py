@@ -16450,8 +16450,32 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             ) or new_sl,
             exclude_shield=False,
         ):
-            self.current_sl = new_sl
-            self.tv_sl = new_sl
+            # 棘轮铁律：new_sl 在上面已经过 _clamp_radar_sl_for_market 贴市安全
+            # 夹取，那一步是"这个价能不能挂到交易所"的市场约束，可能把
+            # _apply_breath_stop_tick 算出的棘轮安全值往回拉（价格贴近止损时
+            # safe_cap 会比原目标更松）——只该影响"这次实际挂单价"，不该让
+            # 账本记忆的止损地板跟着一起后退（2026-08-17 XAUUSDT(B账户)实盘
+            # 复现：current_sl 从4403.05被这里直接改写成回退的4401.55）。
+            # 已有正向账本止损时，只用新值来同步"盘口已有的单子"本身没问题
+            # （下面_last_applied_exchange_sl照常更新），但current_sl这个"该
+            # 挂在哪"的记忆只允许朝有利方向变。
+            prior_sl = round(float(getattr(self, "current_sl", 0) or 0), 2)
+            side_u = str(self.current_side or "").strip().upper()
+            regressed = (
+                prior_sl > 0 and (
+                    (side_u == "LONG" and new_sl < prior_sl)
+                    or (side_u == "SHORT" and new_sl > prior_sl)
+                )
+            )
+            if not regressed:
+                self.current_sl = new_sl
+                self.tv_sl = new_sl
+            else:
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达止损棘轮拦截回退(贴市安全夹取) "
+                    f"目标@{new_sl:.2f} vs 账本@{prior_sl:.2f} → 账本保留原值，"
+                    f"仅同步盘口已有挂单价"
+                )
             self._last_applied_exchange_sl = round(
                 float(order_stop_price(
                     self.current_side, new_sl,
@@ -16497,6 +16521,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return False
 
         old_sl = float(self.current_sl or 0)
+        # 同款棘轮兜底：moved_enough 对 LONG 的判定条件本身已隐含"比现有
+        # current_sl 更靠前"，但为免旁支条件变化后失去保护，SHORT这边
+        # 的 ref 优先取 _last_applied_exchange_sl 而非 current_sl，存在
+        # 理论上的同类回退窗口，这里跟上面_has_stop_sl_near分支一样统一
+        # 加棘轮兜底，不依赖moved_enough内部逻辑的隐含保证。
+        if old_sl > 0 and (
+            (self.current_side == "LONG" and new_sl < old_sl)
+            or (self.current_side == "SHORT" and new_sl > old_sl)
+        ):
+            logger.warning(
+                f"🛡️ [{self.symbol}] 雷达止损棘轮拦截回退(追踪重挂) "
+                f"目标@{new_sl:.2f} vs 账本@{old_sl:.2f} → 放弃本次重挂"
+            )
+            return False
         self.current_sl = new_sl
         self.tv_sl = new_sl
         self._save_state()
