@@ -308,7 +308,16 @@ def calculate_stop_long(
     # 用上)。这里给阶梯的贡献封个顶，不让它比trail_floor还紧；trail_floor
     # 本身依旧只进不退（下面candidate的ratchet逻辑不变），不影响已经锁定
     # 的止损倒退，只是不让阶梯自己在trail_floor之前抢跑到更紧的位置。
-    if trail_floor > 0:
+    # v2.11（2026-08-17）：这条封顶只该管"已经在追踪阶段(过了TP1)"的阶梯，
+    # pre_tp1区排除在外——pre_tp1的呼吸空间(breath_tp12)是给"入场到TP1之间
+    # 别被正常波动打掉"用的，天生比entry到TP1的实际距离宽得多，trail_floor
+    # 算出来几乎必然落在保本锚点下方，导致这条封顶从雷达激活第一秒就把阶梯
+    # 死死摁住——13个品种全部复现：只要还没摸到TP1，阶梯止损全程锁死在
+    # 保本位，一步都推进不了(2026-08-17 SKHYNIXUSDT实盘复现：涨了1.5×ATR、
+    # 只差1点到TP1，止损三小时纹丝不动)。pre_tp1阶段跳过这条封顶，让阶梯
+    # 按自己的步进节奏(step_trigger_atr/step_advance_atr)正常推进；追踪阶段
+    # (tp1_tp2及以后)的原有保护不变。
+    if trail_floor > 0 and zone != "pre_tp1":
         step_stop = min(step_stop, trail_floor)
     candidate = max(float(new_stop or 0), float(current_stop or 0), float(step_stop or 0))
     candidate = max(candidate, trail_floor)
@@ -390,7 +399,8 @@ def calculate_stop_short(
     step_stop = initial_stop - step_count * step_adv * initial_atr
     # v2.10：SHORT对称版——阶梯不能比trail_ceil(呼吸空间上限)更紧，
     # 理由同LONG侧，见calculate_stop_long对应注释。
-    if trail_ceil > 0:
+    # v2.11：同LONG侧修复，pre_tp1区排除在外，见calculate_stop_long对应注释。
+    if trail_ceil > 0 and zone != "pre_tp1":
         step_stop = max(step_stop, trail_ceil)
     refs = [x for x in (current_stop, new_stop, step_stop) if x > 0]
     candidate = min(refs) if refs else step_stop
