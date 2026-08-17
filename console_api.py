@@ -411,6 +411,20 @@ def api_symbol_settings_update(symbol):
 # 的生产鉴权+解析+派发路径，不直接调用 supervisor 的任何方法。
 
 def _local_webhook_port() -> str:
+    """
+    B/C/D 三账户的端口是 gunicorn 启动命令行里 `-b 0.0.0.0:500X` 直接指定的，
+    没有 PORT/WEBHOOK_PORT 环境变量可读（2026-08-17 实测发现，之前这里一直
+    静默 fallback 到硬编码 5003，导致回环 POST 全部打去了错误端口，
+    手动发单/重放实际从未真正打到过 /webhook）。这里改成直接读当前这次
+    Console 请求本身进来的端口——Console 和 /webhook 是同一个 Flask app、
+    同一个进程、同一个端口，请求到达时这个端口必然是对的。
+    """
+    try:
+        port = request.environ.get("SERVER_PORT")
+        if port:
+            return str(int(port))
+    except Exception:
+        pass
     return str(os.getenv("PORT") or os.getenv("WEBHOOK_PORT") or "5003").strip() or "5003"
 
 
