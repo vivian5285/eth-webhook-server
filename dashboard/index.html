@@ -288,7 +288,7 @@
 
     <div class="tv-section card tv-card">
       <div class="tv-head"><h2>手动发单</h2></div>
-      <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。</div>
+      <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。LONG/SHORT 按限价挂单开仓（不吃市价滑点，超时未成交自动撤单）；平仓仍是市价。</div>
       <div class="manual-grid">
         <div class="manual-field"><label>账户</label>
           <select id="mAccount">
@@ -310,7 +310,8 @@
         <div class="manual-field"><label>趋势档位</label>
           <select id="mTier"><option value="">自动</option><option value="0">弱</option><option value="1">中</option><option value="2">强</option></select>
         </div>
-        <div class="manual-field"><label>价格</label><input id="mPrice" type="number" step="any" /></div>
+        <div class="manual-field"><label>限价（LONG/SHORT开仓价）</label><input id="mPrice" type="number" step="any" /></div>
+        <div class="manual-field"><label>限价超时(分钟,1~30)</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
         <div class="manual-field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
         <div class="manual-field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
         <div class="manual-field"><label>TP1</label><input id="mTp1" type="number" step="any" /></div>
@@ -604,13 +605,15 @@ function toggleTvDetail(rid) {
 
 function findTvSignal(acct, id) { return tvCache.find(r => r._account === acct && r.id === id); }
 
-async function doReplay(acct, id, overrides) {
+async function doReplay(acct, id, overrides, limitTimeoutMin) {
   const label = (overrides && Object.keys(overrides).length) ? "编辑后的" : "完全相同的";
   if (!confirm(`即将以${label}参数重新发送账户 ${acct} 的这笔 TV 信号到实盘，交易所将按正常流程下单/平仓。确认执行？`)) return;
   try {
+    const body = {account: acct, signal_id: id, overrides: overrides || {}};
+    if (limitTimeoutMin) body.limit_timeout_min = limitTimeoutMin;
     const res = await fetch("api/tv_replay", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({account: acct, signal_id: id, overrides: overrides || {}}),
+      body: JSON.stringify(body),
     });
     const d = await res.json();
     alert(d.status === "ok" || res.ok ? `✅ 已发送: ${(d.upstream && d.upstream.message) || d.message || "success"}` : `❌ ${d.message || JSON.stringify(d)}`);
@@ -643,7 +646,8 @@ function openEditReplay(acct, id) {
               <option value="2" ${row.tier===2?"selected":""}>强</option>
             </select>
           </div>
-          <div class="manual-field"><label>价格</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
+          <div class="manual-field"><label>限价</label><input id="erPrice" type="number" step="any" value="${row.price ?? ""}" /></div>
+          <div class="manual-field"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
           <div class="manual-field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr ?? ""}" /></div>
           <div class="manual-field"><label>TP1</label><input id="erTp1" type="number" step="any" value="${row.tp1 ?? ""}" /></div>
           <div class="manual-field"><label>TP2</label><input id="erTp2" type="number" step="any" value="${row.tp2 ?? ""}" /></div>
@@ -668,7 +672,8 @@ function submitEditReplay(acct, id) {
   const tier = document.getElementById("erTier").value;
   if (tier !== "") overrides.tier = Number(tier);
   Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
-  doReplay(acct, id, overrides);
+  const limitTimeoutMin = v("erLimitTimeout");
+  doReplay(acct, id, overrides, limitTimeoutMin);
 }
 
 function confirmManualSend() {
@@ -689,6 +694,7 @@ async function doManualSend() {
     tp1: v("mTp1"), tp2: v("mTp2"), tp3: v("mTp3"),
     stop_loss: v("mSl"), qty: v("mQty"),
     reason: document.getElementById("mReason").value || undefined,
+    limit_timeout_min: v("mLimitTimeout"),
   };
   const tier = document.getElementById("mTier").value;
   if (tier !== "") body.tier = Number(tier);

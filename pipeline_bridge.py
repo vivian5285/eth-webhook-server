@@ -417,6 +417,13 @@ class PipelineBridgeMixin:
         阶段前进或状态重置时由 _pipeline_advance / _pipeline_*_cleared / reset 清除 _pipeline_stale_notified。
         """
         try:
+            # 系统限价开仓（Console 手动发单/编辑重放）挂着等成交期间会正常
+            # 停在 ENTRY_SUBMITTED 超过 30s（最长可到 30 分钟，用户在 UI 里
+            # 自己设的超时），这是预期状态不是卡死，跳过这次卡阶段检查，
+            # 避免刷"流水线卡住"误报——真正的超时/失败由
+            # _await_limit_entry_fill 自己撤单+告警，不依赖这条通用检查。
+            if getattr(self, "_limit_entry_pending", False):
+                return
             pl = self._pipeline_obj()
             msg = pl.stale()
             if not msg:

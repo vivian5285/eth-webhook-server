@@ -931,7 +931,7 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
                            principal_balance=None, margin_pct=None, margin_usdt=None, leverage=None,
                            tv_field_sources=None, vps_sizing_meta=None, symbol=None, unit_label=None,
                            hard_sl_px=None, radar_act_px=None,
-                           tier=None, adx=None, tier_source=""):
+                           tier=None, adx=None, tier_source="", source_label=""):
     """开仓通知（含趋势档位）。"""
     unit = _resolve_unit(unit_label, symbol)
     sym = str(symbol or _ctx_symbol.get() or "").upper() or "?"
@@ -956,6 +956,8 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
     }
     if tier_line:
         data["📊 趋势档位"] = _g(f"**{tier_line}**", G_ACCENT)
+    if source_label:
+        data["🧭 来源"] = _g(str(source_label)[:60], G_LIGHT)
     if verify_note:
         data["核实"] = _g(str(verify_note)[:200], G_MUTED)
     send_alert(f"📈 [{sym}] 开仓 {direction}", data, G_TITLE)
@@ -1591,7 +1593,7 @@ def report_atr_degrade_abort(
 def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
                               tv_sl=0, risk_pct=0, leverage=None, qty_ratio=1.0,
                               reason="", vps_sizing_meta=None, vps_hard_sl_note="",
-                              bar_index=None, seq=None):
+                              bar_index=None, seq=None, source_label=""):
     """TV Webhook 信号到达（接收确认，非成交核实）"""
     act = str(action or "").upper()
     et = normalize_entry_type(entry_type)
@@ -1644,6 +1646,8 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     )
     if reason:
         data["📝 原因"] = _g(str(reason)[:120], G_MUTED)
+    if source_label:
+        data["🧭 来源"] = _g(str(source_label)[:60], G_LIGHT)
     data["✅ 状态"] = _g("信号已入队 · 等待实盘核实后二次播报", G_MAIN)
     send_alert(f"📡 TV信号接收 · {act}", data, G_MUTED)
 

@@ -1847,6 +1847,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 if raw_action in ("LONG", "SHORT") and self.tv_price > 0
                 else ""
             ),
+            source_label=(
+                "控制台限价单" if str(payload.get("order_type") or "").upper() == "LIMIT"
+                else ("控制台" if str(payload.get("reason") or "").startswith("[控制台") else "")
+            ),
         )
 
     def _record_open_log(self, side, qty, entry, source="open"):
@@ -14235,6 +14239,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _open_position(self, action, curr_px, payload=None):
         payload = payload or {}
+        # 供开仓播报标注来源（TV / 控制台手动 / 控制台重放），跟这笔是否走
+        # 限价没有强绑定关系，纯粹给人工复盘时一眼区分用。
+        self._last_open_source_label = (
+            "控制台限价单" if str(payload.get("order_type") or "").upper() == "LIMIT"
+            else ("控制台" if str(payload.get("reason") or "").startswith("[控制台") else "")
+        )
         if self._open_in_progress:
             logger.error(f"开仓中止：已有开仓流程进行中，拒绝叠仓 [{action}]")
             return
@@ -14350,6 +14360,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return
 
             open_side = "BUY" if action == "LONG" else "SELL"
+
+            # 系统内部单（Console 手动发单/编辑重放）走限价，不走市价，避免
+            # 追市价滑点——只有 payload 显式带 order_type=="LIMIT" 才会进这条
+            # 分支；真实 TV webhook 的 payload 永远不会带这个字段（app.py 只
+            # 在 X-TV-Source 为 console_* 时才由 console_api.py 注入），下面
+            # 原有市价路径不受影响、一行未动。
+            if str(payload.get("order_type") or "").strip().upper() == "LIMIT":
+                try:
+                    limit_price = float(payload.get("limit_price") or 0)
+                except (TypeError, ValueError):
+                    limit_price = 0.0
+                if limit_price <= 0:
+                    logger.error(f"❌ [{self.symbol}] 系统限价开仓缺少有效 limit_price，拒绝")
+                    return
+                self._open_position_limit_entry(
+                    action, open_side, qty, limit_price, payload, snap,
+                    sizing_meta, budget_txt, margin_usdt, curr_px,
+                )
+                return
+
             logger.info(
                 f"🚀 [唯一主仓] 极速开仓: {open_side} {qty} {self.unit_label} "
                 f"| {self.symbol} | RISK20 | 待挂TP={self.tv_tps}"
@@ -14551,59 +14581,175 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         pass
                     return
 
-            real_qty = pos["size"]
-            if real_qty > qty * OPEN_OVERSIZE_RATIO:
-                # CAP_ALIGN 已废除：禁止 reduceOnly 自主减仓，仅告警并以实盘为准继续挂防
-                logger.error(
-                    f"🚨 持仓偏离目标: 目标 {qty} {self.unit_label}，实盘 {real_qty} "
-                    f"(>{qty * OPEN_OVERSIZE_RATIO:.3f}) → 不减仓(CAP_ALIGN已删除)"
-                )
-                dingtalk.report_system_alert(
-                    f"持仓偏离目标·不减仓 [{self.symbol}]",
-                    f"目标 {qty} {self.unit_label} (保证金 {margin_usdt:.0f}U)，"
-                    f"实盘 {real_qty} @ {pos['entry_price']:.2f} | "
-                    f"CAP_ALIGN已废除，以实盘为准挂TP+雷达止损",
-                    level="紧急",
-                )
+            self._finalize_new_entry(pos, qty, action, snap, budget_txt, sizing_meta, margin_usdt)
+            # 旧 ATR_DEGRADE 暂停已废除；两场景路径不暂停
+        finally:
+            # 系统限价开仓已经把 _open_in_progress 的清理权交给后台等待成交的
+            # 线程（_await_limit_entry_fill）——那笔单可能还挂在盘口没成交，
+            # 这里如果照常清掉会让 enqueue_signal 的同品种防叠加信号闸门失效。
+            if not getattr(self, "_limit_entry_pending", False):
+                self._open_in_progress = False
+                self._takeover_price_skip = False
+                # 开仓未成交则丢弃降级挂起，避免误暂停
+                if not getattr(self, "monitoring", False):
+                    self._pending_atr_degrade = None
 
-            self.current_side = action
-            self.open_regime = int(snap.get("regime") or self.regime or 3)
-            # 锁定本笔 provisional atr（TV）；场景决议后可升级为 VPS 真实 ATR
-            self.open_atr = float(snap.get("atr") or self.current_atr or 0)
-            self.atr_source = str(snap.get("atr_source") or "tv")
-            self.atr_degraded = False
-            self._pending_atr_degrade = None
-            self._open_regime_sticky = True
-            self.initial_qty = real_qty
-            self._last_open_exec_ts = time.time()
-            # 新仓重置雷达系数采样 / 早保本（场景决议后再 force refresh）
-            self._breath_ratio_history = []
-            self.breathing_coefficient = 1.0
-            self.early_be_done = False
-            self.breakeven_phase = False
-            self._breath_ratio_history = []
-            self.base_qty = float(real_qty)
+    def _finalize_new_entry(self, pos, qty, action, snap, budget_txt, sizing_meta, margin_usdt):
+        """
+        开仓成交后的收尾（从 _open_position 抽出，市价/系统限价两条路径共用）：
+        记录 real_qty → 锁 ATR/regime → 账本 ENTRY_CONFIRMED → 绑 TV 防线 →
+        _protect_and_monitor 挂硬止损+TP+雷达。行为与原市价路径完全一致，
+        只是不再要求调用方一定是刚从市价单确认出来的 pos。
+        """
+        real_qty = pos["size"]
+        if real_qty > qty * OPEN_OVERSIZE_RATIO:
+            # CAP_ALIGN 已废除：禁止 reduceOnly 自主减仓，仅告警并以实盘为准继续挂防
+            logger.error(
+                f"🚨 持仓偏离目标: 目标 {qty} {self.unit_label}，实盘 {real_qty} "
+                f"(>{qty * OPEN_OVERSIZE_RATIO:.3f}) → 不减仓(CAP_ALIGN已删除)"
+            )
+            dingtalk.report_system_alert(
+                f"持仓偏离目标·不减仓 [{self.symbol}]",
+                f"目标 {qty} {self.unit_label} (保证金 {margin_usdt:.0f}U)，"
+                f"实盘 {real_qty} @ {pos['entry_price']:.2f} | "
+                f"CAP_ALIGN已废除，以实盘为准挂TP+雷达止损",
+                level="紧急",
+            )
+
+        self.current_side = action
+        self.open_regime = int(snap.get("regime") or self.regime or 3)
+        # 锁定本笔 provisional atr（TV）；场景决议后可升级为 VPS 真实 ATR
+        self.open_atr = float(snap.get("atr") or self.current_atr or 0)
+        self.atr_source = str(snap.get("atr_source") or "tv")
+        self.atr_degraded = False
+        self._pending_atr_degrade = None
+        self._open_regime_sticky = True
+        self.initial_qty = real_qty
+        self._last_open_exec_ts = time.time()
+        # 新仓重置雷达系数采样 / 早保本（场景决议后再 force refresh）
+        self._breath_ratio_history = []
+        self.breathing_coefficient = 1.0
+        self.early_be_done = False
+        self.breakeven_phase = False
+        self._breath_ratio_history = []
+        self.base_qty = float(real_qty)
+        try:
+            self._pipeline_entry_confirmed(
+                action, float(real_qty), float(pos["entry_price"] or 0),
+            )
+        except Exception:
+            pass
+        # 成交后再绑一次（防无菌/并发冲掉 TV TP）
+        self._bind_tv_open_defenses(
+            snap, entry=pos["entry_price"], side=action, source="开仓成交后绑定",
+        )
+        self._protect_and_monitor(
+            real_qty, pos["entry_price"],
+            budget_note=f"[{self.symbol}] {budget_txt} | ",
+            target_qty=qty,
+            sizing_meta=sizing_meta,
+        )
+
+    def _open_position_limit_entry(
+        self, action, open_side, qty, limit_price, payload, snap,
+        sizing_meta, budget_txt, margin_usdt, curr_px,
+    ):
+        """
+        系统内部单（Console 手动发单/编辑重放）专用：挂限价开仓单，后台线程
+        等成交，不占用信号处理线程、不阻塞同品种其它信号排队之外的任何东西。
+        真实 TV 信号永远不会走到这里（见 _open_position 里的分支门控）。
+        """
+        try:
+            timeout_sec = float(payload.get("limit_timeout_sec") or 300)
+        except (TypeError, ValueError):
+            timeout_sec = 300.0
+        timeout_sec = min(max(timeout_sec, 30.0), 1800.0)  # 30s ~ 30min 硬边界
+        tag = f"SYSLIMIT_{action}_{int(time.time() * 1000) % 100000000}"
+        logger.info(
+            f"🎯 [系统限价开仓] {open_side} {qty} {self.unit_label} | {self.symbol} | "
+            f"限价={limit_price:.4f} 超时={timeout_sec:.0f}s | 来源=控制台"
+        )
+        try:
+            self._pipeline_entry_submitted(action, qty)
+        except Exception:
+            pass
+        order = binance_client.place_limit_order(
+            open_side, qty, limit_price,
+            symbol=self.symbol, reduce_only=False, client_order_id=tag,
+        )
+        if not order:
+            logger.error(f"❌ [{self.symbol}] 系统限价开仓挂单失败")
             try:
-                self._pipeline_entry_confirmed(
-                    action, float(real_qty), float(pos["entry_price"] or 0),
+                dingtalk.report_system_alert(
+                    f"系统限价开仓挂单失败 [{self.symbol}]",
+                    f"{action} {qty} {self.unit_label} @ {limit_price:.4f} 挂单失败，未开仓，请人工检查",
+                    level="提示",
+                    notify_level=1,
                 )
             except Exception:
                 pass
-            # 成交后再绑一次（防无菌/并发冲掉 TV TP）
-            self._bind_tv_open_defenses(
-                snap, entry=pos["entry_price"], side=action, source="开仓成交后绑定",
-            )
-            self._protect_and_monitor(
-                real_qty, pos["entry_price"],
-                budget_note=f"[{self.symbol}] {budget_txt} | ",
-                target_qty=qty,
-                sizing_meta=sizing_meta,
-            )
-            # 旧 ATR_DEGRADE 暂停已废除；两场景路径不暂停
+            return
+        # 交给后台线程等成交/超时；_open_in_progress 保持 True 直到线程收尾，
+        # 期间 enqueue_signal 会照常挡住同品种的新 LONG/SHORT 信号排队等待。
+        self._limit_entry_pending = True
+        threading.Thread(
+            target=self._await_limit_entry_fill,
+            args=(order, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt),
+            daemon=True, name=f"limit-entry-{self.symbol}",
+        ).start()
+
+    def _await_limit_entry_fill(self, order, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt):
+        deadline = time.time() + timeout_sec
+        poll_interval = 5.0  # 尽量少占用账号级 REST 预算，跟哨兵/雷达等其它轮询共用同一节流阀
+        pos = None
+        try:
+            while time.time() < deadline:
+                time.sleep(poll_interval)
+                try:
+                    p = self._get_active_position(force_rest=True)
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 限价开仓等待期查询跳过: {e}")
+                    p = None
+                if isinstance(p, dict) and float(p.get("size") or 0) > 0:
+                    pos = p
+                    break
+            # 无论是否成交，都撤掉这笔单剩余部分——成交了撤单是空操作
+            # （交易所会返回"已不存在"，cancel_order 内部按已撤销处理）；
+            # 没成交/只部分成交则撤掉挂着的剩余量，不留裸露的限价单在盘口。
+            try:
+                binance_client.cancel_order(symbol=self.symbol, order=order)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 撤销限价开仓剩余挂单跳过: {e}")
+
+            if pos and float(pos.get("size") or 0) > 0:
+                logger.info(
+                    f"✅ [{self.symbol}] 系统限价开仓成交 {pos.get('side')} "
+                    f"{pos.get('size')} @ {pos.get('entry_price')}"
+                )
+                self._finalize_new_entry(pos, qty, action, snap, budget_txt, sizing_meta, margin_usdt)
+            else:
+                logger.info(
+                    f"⏰ [{self.symbol}] 系统限价开仓超时未成交（{timeout_sec:.0f}s）@ "
+                    f"{limit_price:.4f}，已撤单，未开仓"
+                )
+                try:
+                    self._pipeline_fail(Role.EXECUTION, "LIMIT_ENTRY_TIMEOUT")
+                except Exception:
+                    pass
+                try:
+                    dingtalk.report_system_alert(
+                        f"系统限价开仓超时未成交 [{self.symbol}]",
+                        f"{action} {qty} {self.unit_label} @ {limit_price:.4f} "
+                        f"超时 {timeout_sec:.0f}s 未成交，已撤单，未开仓（限价没成交是正常结果，非故障）",
+                        level="提示",
+                        notify_level=1,
+                    )
+                except Exception:
+                    pass
         finally:
+            self._limit_entry_pending = False
             self._open_in_progress = False
             self._takeover_price_skip = False
-            # 开仓未成交则丢弃降级挂起，避免误暂停
             if not getattr(self, "monitoring", False):
                 self._pending_atr_degrade = None
 
@@ -14984,6 +15130,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 tier=int(getattr(self, "adx_tier", 1) or 1),
                 adx=float(getattr(self, "last_adx", 0) or 0),
                 tier_source=str(getattr(self, "_adx_tier_source", "") or ""),
+                source_label=str(getattr(self, "_last_open_source_label", "") or ""),
             )
             try:
                 self._pipeline_reported(note="supervisor_open")

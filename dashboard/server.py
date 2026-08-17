@@ -128,6 +128,10 @@ LOG_LINE_RE = re.compile(
 
 EVENT_RULES = [
     ("tv_signal", re.compile(r"TV信号接收")),
+    # 系统内部单（Console 手动发单/编辑重放，限价挂开仓单）必须排在通用
+    # "open" 规则前面单独识别，否则会被"极速开仓"之类子串误吞（这两条
+    # 文案刻意不重叠，但顺序仍然重要——EVENT_RULES 是"先命中先归类"）。
+    ("system_order", re.compile(r"系统限价开仓")),
     ("open", re.compile(r"极速开仓|市价开仓成功|开仓共同第一步")),
     ("close", re.compile(r"平仓成功|全部平仓|止损触发平仓|止盈触发平仓")),
     ("tp_fill", re.compile(r"TP[123].*(成交|在盘口)")),
@@ -503,8 +507,14 @@ def api_tv_replay():
     overrides = body.get("overrides") or {}
     if not isinstance(overrides, dict):
         return jsonify({"status": "error", "message": "overrides_must_be_object"}), 400
+    # limit_timeout_min 是顶层字段（不属于 overrides），账户自己的
+    # console_api.py 的 _inject_system_limit_order 从请求体顶层读取，
+    # 转发时必须一并带上，否则限价超时会静默退回默认 5 分钟。
+    relay_body = {"overrides": overrides}
+    if body.get("limit_timeout_min") is not None:
+        relay_body["limit_timeout_min"] = body.get("limit_timeout_min")
     code, data = _console_call(
-        acct, "POST", f"/api/console/tv_signals/{sig_id}/replay", body={"overrides": overrides}
+        acct, "POST", f"/api/console/tv_signals/{sig_id}/replay", body=relay_body
     )
     print(f"[TV_REPLAY] account={acct['id']} signal_id={sig_id} overrides={overrides} -> {data}", flush=True)
     return jsonify(data), (code or 502)

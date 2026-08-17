@@ -622,7 +622,7 @@
 
     <!-- ── 手动发单 tab ── -->
     <div id="page-manual" class="hidden">
-      <div class="warn-banner">⚠️ 该操作等效于收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，请仔细核对参数。</div>
+      <div class="warn-banner">⚠️ 该操作等效于收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，请仔细核对参数。LONG/SHORT 开仓按下方限价挂单执行（不吃市价滑点，超时未成交会自动撤单）；平仓动作仍是市价，退出速度优先。</div>
       <div class="card">
         <h3>手动构造 TV 信号</h3>
         <div class="row">
@@ -651,11 +651,12 @@
           </div>
         </div>
         <div class="row">
-          <div class="field"><label>价格</label><input id="mPrice" type="number" step="any" placeholder="开仓/参考价" /></div>
+          <div class="field"><label>限价（LONG/SHORT 按此价挂限价单开仓）</label><input id="mPrice" type="number" step="any" placeholder="开仓限价/参考价" /></div>
+          <div class="field"><label>限价超时（分钟，1~30，默认5）</label><input id="mLimitTimeout" type="number" step="1" min="1" max="30" placeholder="5" /></div>
           <div class="field"><label>ATR</label><input id="mAtr" type="number" step="any" /></div>
-          <div class="field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
         </div>
         <div class="row">
+          <div class="field"><label>ADX</label><input id="mAdx" type="number" step="any" /></div>
           <div class="field"><label>TP1</label><input id="mTp1" type="number" step="any" /></div>
           <div class="field"><label>TP2</label><input id="mTp2" type="number" step="any" /></div>
           <div class="field"><label>TP3</label><input id="mTp3" type="number" step="any" /></div>
@@ -1304,11 +1305,13 @@ function toggleTvDetail(id) {
 function findTvSignal(id) { return tvSignalsCache.find(r => r.id === id); }
 
 // ── TV 信号：重新执行 / 编辑后执行 ──────────────────────────────────────────
-async function doReplay(id, overrides) {
+async function doReplay(id, overrides, limitTimeoutMin) {
   if (!confirm("即将以" + (overrides ? "编辑后的" : "完全相同的") + "参数重新发送该笔 TV 信号到实盘，币安将按正常流程下单/平仓。确认执行？")) return;
   try {
+    const body = { overrides: overrides || {} };
+    if (limitTimeoutMin) body.limit_timeout_min = limitTimeoutMin;
     const d = await api(`/api/console/tv_signals/${id}/replay`, {
-      method: "POST", body: JSON.stringify({ overrides: overrides || {} }),
+      method: "POST", body: JSON.stringify(body),
     });
     const up = d.upstream || {};
     if (d.upstream_status === 200) {
@@ -1332,7 +1335,8 @@ function openEditReplay(id) {
       <div class="modal-box">
         <h3>编辑后重新执行 · #${id} ${esc(row.symbol)}</h3>
         <p style="font-size:12px;color:var(--ink2);margin:-8px 0 16px">
-          提示：完全相同的 动作+品种+价格 组合 60 秒内会被系统自动去重（防止重复下单），
+          提示：LONG/SHORT 会按下面的价格挂限价单开仓（不吃市价滑点），超时未成交自动撤单；
+          平仓动作仍是市价。完全相同的 动作+品种+价格 组合 60 秒内会被系统自动去重，
           如需确保重新触发，请微调价格或稍等。
         </p>
         <div class="row">
@@ -1351,7 +1355,8 @@ function openEditReplay(id) {
           </div>
         </div>
         <div class="row">
-          <div class="field"><label>价格</label><input id="erPrice" type="number" step="any" value="${row.price??""}" /></div>
+          <div class="field"><label>限价</label><input id="erPrice" type="number" step="any" value="${row.price??""}" /></div>
+          <div class="field"><label>限价超时(分钟)</label><input id="erLimitTimeout" type="number" step="1" min="1" max="30" value="5" /></div>
           <div class="field"><label>ATR</label><input id="erAtr" type="number" step="any" value="${row.atr??""}" /></div>
           <div class="field"><label>ADX</label><input id="erAdx" type="number" step="any" value="${row.adx??""}" /></div>
         </div>
@@ -1381,7 +1386,8 @@ function submitEditReplay(id) {
   const tier = document.getElementById("erTier").value;
   if (tier !== "") overrides.tier = Number(tier);
   Object.keys(overrides).forEach(k => { if (overrides[k] === null) delete overrides[k]; });
-  doReplay(id, overrides);
+  const limitTimeoutMin = val("erLimitTimeout");
+  doReplay(id, overrides, limitTimeoutMin);
 }
 
 // ── 手动发单 ───────────────────────────────────────────────────────────────
@@ -1401,6 +1407,7 @@ async function doManualSend() {
     tp1: val("mTp1"), tp2: val("mTp2"), tp3: val("mTp3"),
     stop_loss: val("mSl"), qty: val("mQty"),
     reason: document.getElementById("mReason").value || undefined,
+    limit_timeout_min: val("mLimitTimeout"),
   };
   const tier = document.getElementById("mTier").value;
   if (tier !== "") body.tier = Number(tier);

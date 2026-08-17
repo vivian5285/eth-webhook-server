@@ -486,6 +486,31 @@ def api_tv_signal_detail(signal_id):
     return jsonify({"status": "ok", "signal": row})
 
 
+def _inject_system_limit_order(payload: dict, body: dict) -> None:
+    """
+    Console 发出的 LONG/SHORT 一律按限价单执行（用户自己挑的时机/价格，不是
+    追一根实时触发的K线，没必要吃市价滑点）；CLOSE_*/PING 不受影响，退出
+    速度优先于省滑点。真实 TV webhook 走 /webhook 直连或网关，永远不会经过
+    这个函数，market 路径不受任何影响。
+    """
+    action = str(payload.get("action") or "").strip().upper()
+    if action not in ("LONG", "SHORT"):
+        return
+    try:
+        limit_price = float(payload.get("price") or 0)
+    except (TypeError, ValueError):
+        limit_price = 0.0
+    if limit_price <= 0:
+        return
+    payload["order_type"] = "LIMIT"
+    payload["limit_price"] = limit_price
+    try:
+        timeout_min = float(body.get("limit_timeout_min") or 5)
+    except (TypeError, ValueError):
+        timeout_min = 5.0
+    payload["limit_timeout_sec"] = min(max(timeout_min * 60.0, 30.0), 1800.0)
+
+
 @console_bp.route("/api/console/tv_signals/<int:signal_id>/replay", methods=["POST"])
 @require_login
 def api_tv_signal_replay(signal_id):
@@ -506,6 +531,7 @@ def api_tv_signal_replay(signal_id):
         payload.pop(k, None)
     if not payload.get("reason"):
         payload["reason"] = f"[控制台重放#{signal_id}]"
+    _inject_system_limit_order(payload, body)
     resp_body, status = _post_to_local_webhook(payload, {
         "X-TV-Source": "console_replay",
         "X-TV-Replay-Of": str(signal_id),
@@ -525,12 +551,16 @@ def api_tv_manual_send():
         return jsonify({"status": "error", "message": "bad_action", "allowed": sorted(VALID_ACTIONS)}), 400
     if action != "PING" and symbol not in set(active_binance_symbols()):
         return jsonify({"status": "error", "message": "bad_symbol", "allowed": active_binance_symbols()}), 400
-    payload = {k: v for k, v in body.items() if k not in ("secret", "token", "key") and v not in (None, "")}
+    payload = {
+        k: v for k, v in body.items()
+        if k not in ("secret", "token", "key", "limit_timeout_min") and v not in (None, "")
+    }
     payload["symbol"] = symbol
     payload["ticker"] = symbol
     payload["action"] = action
     if not payload.get("reason"):
         payload["reason"] = "[控制台手动发单]"
+    _inject_system_limit_order(payload, body)
     resp_body, status = _post_to_local_webhook(payload, {"X-TV-Source": "console_manual"})
     return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
 
