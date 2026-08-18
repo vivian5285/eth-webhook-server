@@ -237,6 +237,14 @@ RADAR_STOP_MIN_GAP_USD = 2.5
 RADAR_STOP_MIN_GAP_PCT = 0.0012
 # 交棒额外安全：理想保本线相对现价至少再留 0.15% 利润缓冲，禁止夹成贴市毛刺止损
 RADAR_HANDOFF_EXTRA_GAP_PCT = 0.0015
+# 2026-08-18修复：这个曾经是_normalize_tp_qty_map判断"档位太小该合并"的唯一
+# 阈值，对所有品种一刀切用0.001——但ANTHROPICUSDT/SNDKUSDT等品种交易所真实
+# 最小下单量是0.01，比这个值大10倍。今天把弱档倍数压到0.1x后，ANTHROPIC开仓
+# qty=0.03，TP1按10%分腿=0.003，没低于这里的0.001所以没被合并，直接送进
+# place_limit_order，被币安LOT_SIZE stepSize=0.01就地舍成0，挂单失败，反复
+# 重试2分钟后触发"蚂蚁仓扫尾"安全网强制平仓（实盘复现：B/C两账户同时失败）。
+# 现在_normalize_tp_qty_map改用self.min_qty（symbol_config.py里每个品种已经
+# 配置了实测的真实LOT_SIZE最小量），这个常量只做self.min_qty取不到时的兜底。
 MIN_TP_LEG_QTY = 0.001
 # 空仓短时重复 OPEN 去重；有仓 OPEN 一律先平后开（废除「同向仅刷 TP」）
 SAME_DIR_MIN_SPREAD_PCT = 0.15
@@ -2606,15 +2614,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if len(levels) <= 1:
             return qty_map
         out = {int(k): float(v or 0) for k, v in qty_map.items()}
+        # 品种感知最小下单量（symbol_config.py实测LOT_SIZE），而不是全品种
+        # 一刀切的MIN_TP_LEG_QTY——否则ANTHROPIC/SNDK这类min_qty=0.01的品种，
+        # 仓位缩小后TP1分腿量会卡在"没低到触发合并、又低到交易所拒单"的夹缝里。
+        min_leg_qty = float(getattr(self, "min_qty", 0) or MIN_TP_LEG_QTY)
         carry = 0.0
         last = levels[-1]
         for lvl in levels[:-1]:
             q = float(out.get(lvl, 0) or 0)
-            if 0 < q < MIN_TP_LEG_QTY:
+            if 0 < q < min_leg_qty:
                 carry += q
                 out[lvl] = 0.0
         if carry > 0:
             out[last] = round(float(out.get(last, 0) or 0) + carry, 3)
+        # 兜底：仓位小到连"最后一档吸收完前面所有carry"都还凑不够最小下单量
+        # （比如实盘复现的ANTHROPIC：qty=0.03，TP1+TP2两档合计只占30%=0.009，
+        # 本身就低于min_qty=0.01）——这种情况不勉强挂单，两档全部清零，交给
+        # 硬止损+雷达单独兜底，好过挂一笔必定被交易所拒的单。
+        last_q = float(out.get(last, 0) or 0)
+        if 0 < last_q < min_leg_qty:
+            logger.warning(
+                f"🧩 [{self.symbol}] TP限价档合计{last_q:.4f}仍低于最小下单量"
+                f"{min_leg_qty}，仓位过小放弃挂限价TP，只留硬止损+雷达"
+            )
+            out[last] = 0.0
         total = round(sum(float(out.get(l, 0) or 0) for l in levels), 3)
         if total > live_qty + 0.001:
             out[last] = round(max(out.get(last, 0) - (total - live_qty), 0.0), 3)
@@ -2653,7 +2676,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if int(l) <= 2:
                         portion = float(out.get(l, 0) or 0) / tot_raw if tot_raw > 0 else 0
                         reduction = excess * portion
-                        out[l] = round(max(out[l] - reduction, MIN_TP_LEG_QTY), 3)
+                        out[l] = round(max(out[l] - reduction, min_leg_qty), 3)
         return out
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
