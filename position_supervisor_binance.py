@@ -5467,6 +5467,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """止盈网格已吃完、盘口无 TP 限价单，但可能残留蚂蚁仓 → 扫尾收网"""
         if real_amt <= 0:
             return False
+        ref = self.initial_qty or self.watched_qty
+        consumed = getattr(self, "tp_levels_consumed", []) or []
+        # 2026-08-18修复：dust_qty是给"止盈吃掉大半、只剩零头"这种残留场景
+        # 设计的固定阈值（ANTHROPIC等品种配的是0.05），今天弱档倍数压到
+        # 0.1x后，一笔全新仓位本身可能就只有0.03，比这个阈值还小——没有
+        # 任何TP档被吃过、现仓又约等于开仓基线，说明这就是刚开的小仓位，
+        # 不是止盈后的残留蚂蚁仓，不该被_is_dust_qty这条短路判定直接当
+        # "可收网"市价扫掉（实盘复现：B/C两账户ANTHROPIC开仓1-2分钟内就
+        # 被误扫平，是跟2026-08-08 deepcoin那次同一类问题，但这次是从
+        # dust_qty短路进来的，绕开了下面那道"一档都没吃掉不算"的老防线）。
+        if not consumed and ref > 0 and real_amt >= ref * 0.98:
+            return False
         if self._is_dust_qty(real_amt):
             return True
         if self._collect_limit_tp_prices():
@@ -5476,9 +5488,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 一档 TP 都没被确认吃掉，绝不能算"止盈网格已吃完"——否则小仓位下
         # ref×12% 的残留阈值会和"刚开仓、一笔都没成交"的整仓撞在一起，
         # 误判成蚂蚁仓直接扫尾平仓（2026-08-08 deepcoin 实盘复现过同类问题）。
-        if not (getattr(self, "tp_levels_consumed", []) or []):
+        if not consumed:
             return False
-        ref = self.initial_qty or self.watched_qty
         if ref > 0 and real_amt <= ref * TP_COMPLETE_RESIDUAL_RATIO:
             return True
         return False
