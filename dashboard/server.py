@@ -564,6 +564,15 @@ def api_tv_replay():
 def api_price(symbol):
     """只读代查币安公开现价，跟哪个账户无关，不需要登录哪个账户。"""
     sym = str(symbol or "").strip().upper()
+    # 2026-08-18修复：TV信号页面"编辑重放"里的品种直接来自TV原始payload
+    # （比如"ANTHROPICUSDT.P"），取现价按钮把这个原样传给这个接口——币安
+    # 公开行情端点不认TV那个".P"永续合约后缀，会400。手动发单面板走的是
+    # mSymbol下拉菜单（值本来就是干净的symbol），没这个问题；这里统一做
+    # 一次归一化，两边都覆盖到。
+    if ":" in sym:
+        sym = sym.rsplit(":", 1)[-1]
+    if sym.endswith(".P"):
+        sym = sym[:-2]
     if not sym:
         return jsonify({"status": "error", "message": "bad_symbol"}), 400
     url = "https://fapi.binance.com/fapi/v1/ticker/price?" + urllib.parse.urlencode({"symbol": sym})
@@ -704,6 +713,53 @@ def api_strategy_backtest(symbol):
     )
     result = _strategy_engine_call(code, timeout=60)
     return jsonify(result)
+
+
+WATCHDOG_RUN_LINE_RE = re.compile(r"^(\S+) \S+ python\[\d+\]: (.*)$")
+
+
+def _fetch_watchdog_runs(n_lines=1000, limit_runs=60):
+    """解析 watchdog.service 的 journalctl 输出成"每轮检查"的结构化列表。
+    2026-08-18：check.py 现在每轮都会把异常明细打成 [ANOMALY] key | text
+    行（不受钉钉30分钟去重影响），这里按"遇到本轮无异常/本轮发现N条异常"
+    这行收尾一轮，之前攒的 [ANOMALY] 行就是这一轮的明细。只读 journalctl，
+    不碰 watchdog 自己的状态文件/进程。
+    """
+    raw = _run(["journalctl", "-u", "watchdog.service", "-n", str(n_lines), "-o", "short-iso", "--no-pager"], timeout=20)
+    runs = []
+    pending = []
+    for line in raw.splitlines():
+        m = WATCHDOG_RUN_LINE_RE.match(line)
+        if not m:
+            continue
+        ts, body = m.group(1), m.group(2)
+        if body.startswith("[ANOMALY] "):
+            rest = body[len("[ANOMALY] "):]
+            key, _, text = rest.partition(" | ")
+            pending.append({"key": key, "text": text})
+            continue
+        if body == "本轮无异常":
+            runs.append({"ts": ts, "ok": True, "anomaly_count": 0, "sent_count": 0, "anomalies": []})
+            pending = []
+            continue
+        m2 = re.match(r"本轮发现 (\d+) 条异常，(\d+) 条新发送", body)
+        if m2:
+            runs.append({
+                "ts": ts, "ok": False,
+                "anomaly_count": int(m2.group(1)), "sent_count": int(m2.group(2)),
+                "anomalies": pending,
+            })
+            pending = []
+    runs.reverse()
+    return runs[:limit_runs]
+
+
+@app.route("/api/watchdog/logs")
+def api_watchdog_logs():
+    limit = min(int(request.args.get("limit", 60)), 200)
+    runs = _fetch_watchdog_runs(n_lines=2000, limit_runs=limit)
+    svc_state = _run(["systemctl", "is-active", "watchdog.timer"]).strip()
+    return jsonify({"status": "ok", "runs": runs, "timer_active": svc_state == "active"})
 
 
 @app.route("/")
