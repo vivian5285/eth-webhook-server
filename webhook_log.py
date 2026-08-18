@@ -163,6 +163,7 @@ def _snapshot_supervisor(sup) -> Dict[str, Any]:
         blob = {}
     return {
         "phase": blob.get("phase"),
+        "phase_ts": float(blob.get("phase_ts") or 0.0),
         "current_side": getattr(sup, "current_side", None),
         "watched_qty": float(getattr(sup, "watched_qty", 0) or 0),
         "monitoring": bool(getattr(sup, "monitoring", False)),
@@ -181,7 +182,17 @@ def _finalizer_loop(signal_id: int, symbol: str) -> None:
     except Exception as e:
         logger.warning(f"[webhook_log] finalizer import 跳过: {e}")
         return
-    deadline = time.time() + _FINALIZE_TIMEOUT_SEC
+    # 2026-08-18修复：pipeline 是 per-symbol 共享单例，不是 per-signal——如果
+    # 同一品种短时间内连续发出好几笔信号（重放/手动发单），后面信号的
+    # finalizer 轮询时可能看到的是"更早那笔信号"遗留下来的旧终态（比如旧的
+    # LIMIT 单超时变成 FAILED），被错误地当成"这笔信号自己的结果"记下来——
+    # 实盘复现过：ANTHROPIC 连续测试时下单其实成功了，面板却显示"失败"。
+    # start_ts 记录本轮观察开始的时间；只信任 phase_ts 不早于 start_ts 的终态
+    # （说明这次阶段变化确实发生在本信号进来之后），旧终态视为"还没轮到我"
+    # 继续等，不当场采信——signal_officer 那层本身就有≥1s的缓存合并窗口，
+    # 给这道时间戳校验留了足够余量，不会误伤本信号自己的正常终态。
+    start_ts = time.time()
+    deadline = start_ts + _FINALIZE_TIMEOUT_SEC
     last_snapshot: Dict[str, Any] = {}
     phase = ""
     try:
@@ -193,12 +204,22 @@ def _finalizer_loop(signal_id: int, symbol: str) -> None:
         try:
             last_snapshot = _snapshot_supervisor(sup)
             phase = str(last_snapshot.get("phase") or "")
+            phase_ts = float(last_snapshot.get("phase_ts") or 0.0)
         except Exception as e:
             last_snapshot = {"error": str(e)}
+            phase = "n/a"
             break
-        if phase in _TERMINAL_PHASES:
+        if phase in _TERMINAL_PHASES and phase_ts >= start_ts:
             break
         time.sleep(_FINALIZE_POLL_SEC)
+    else:
+        # while 自然耗尽 deadline 退出（没有 break）：60秒内没等到"本信号自己
+        # 触发的"新终态——可能是限价单还在等成交（LIMIT最长300s超时，本来就
+        # 比这里60秒的观察窗口长，属于正常未决），也可能是还卡着某个旧终态
+        # 没刷新。两种情况都不能把当时读到的 phase 当真实结果写回去（旧终态
+        # 会被上面 phase_ts 校验挡住走不到 break，中间态又不算数），统一记
+        # "timeout"，前端按"处理中/待确认"展示，不会误报成功也不会误报失败。
+        phase = "timeout"
     finalize_signal(signal_id, phase or "timeout", last_snapshot)
 
 
