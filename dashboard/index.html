@@ -809,7 +809,8 @@ function renderTvSignals() {
         <td data-label="结果">${tvResultBadge(row)}</td>
         <td>
           <button class="btn-mini" onclick="toggleTvDetail('${rid}')">详情</button>
-          <button class="btn-mini" onclick="doReplay('${row._account}', ${row.id}, null, null, 'MARKET')">重新执行</button>
+          <button class="btn-mini" onclick="doReplay('${row._account}', ${row.id}, null, null, 'LIMIT')">重新执行(限价)</button>
+          <button class="btn-mini" onclick="doReplay('${row._account}', ${row.id}, null, null, 'MARKET')">重新执行(市价)</button>
           <button class="btn-mini primary" onclick="openEditReplay('${row._account}', ${row.id})">编辑重放</button>
         </td>
       </tr>

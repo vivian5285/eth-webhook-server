@@ -1301,7 +1301,8 @@ function renderTvSignals() {
         <td>${tvResultBadge(row)}</td>
         <td style="white-space:nowrap">
           <button class="btn btn-ghost btn-sm" onclick="toggleTvDetail(${row.id})">详情</button>
-          <button class="btn btn-ghost btn-sm" onclick="doReplay(${row.id}, null, null, 'MARKET')">重新执行</button>
+          <button class="btn btn-ghost btn-sm" onclick="doReplay(${row.id}, null, null, 'LIMIT')">重新执行(限价)</button>
+          <button class="btn btn-ghost btn-sm" onclick="doReplay(${row.id}, null, null, 'MARKET')">重新执行(市价)</button>
           <button class="btn btn-primary btn-sm" onclick="openEditReplay(${row.id})">编辑后执行</button>
         </td>
       </tr>
