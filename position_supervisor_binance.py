@@ -6921,7 +6921,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         
         live_qty = self._resolve_live_qty(live_qty)
         orders = self._collect_tp_limit_orders()
-        expected = self._expected_tp_count()
+        expected_levels = self._expected_tp_levels(live_qty)
+        # 2026-08-18修复：expected 必须跟下面统计 matched_full 的口径一致——
+        # 按"真的会挂出去的档"（qty>0）算，而不是只看价位是否有效的
+        # _expected_tp_count()。仓位太小时 _normalize_tp_qty_map 会把 TP1
+        # 这类凑不够最小下单量的小档合法并入 TP2（价位仍"有效"但 qty 已
+        # 清零），此时旧的 expected 还是按2档算，可盘口永远只会出现1条
+        # 合并后的单，两边口径对不上——"开仓终检"/"VPS重启终检"就把这个
+        # 正常的合并结果反复当成"漏挂"打 ERROR + 发钉钉告警。实盘复现：
+        # ANTHROPICUSDT tier=0缩量后TP1份额低于min_qty，被合法合并进TP2，
+        # 两次独立重启的终检都误报"TP 1/2"或"TP 0/2"。
+        expected = sum(
+            1 for lv in expected_levels
+            if float(lv.get("qty") or 0) > 0 and float(lv.get("price") or 0) > 0
+        )
         if is_orders_query_failed(orders):
             return {
                 "matched_full": 0,
@@ -6962,7 +6975,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         matched_full = 0
         issues = []
 
-        for lv in self._expected_tp_levels(live_qty):
+        for lv in expected_levels:
             if lv["qty"] <= 0 or lv["price"] <= 0:
                 continue
             at_px = [o for o in orders if abs(o["price"] - lv["price"]) <= tolerance]
