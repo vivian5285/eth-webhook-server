@@ -644,12 +644,6 @@ function renderEvent(e) {
     </div>`;
 }
 
-function escapeHtml(s) {
-  return (s || "").replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-}
-
 function renderAccount(acct) {
   const meta = ACCOUNTS_META[acct.id] || {};
   const svcDot = acct.svc_active === true ? '<span class="dot g"></span>运行中'
