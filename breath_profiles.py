@@ -280,6 +280,9 @@ BREATH_PAXG: Dict[str, Any] = {
 # 1.5×ATR%≈3.4%，比BNB/ETH/XAU这一档明显更宽，但沿用共用公式即可（不是
 # ZEC那种"ATR腿本身就过紧导致该保护时候没触发"的情况，属于品种自身波动
 # 率偏大，不需要额外百分比腿）。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样700根K线、128个摆动回调
+# 样本，中位数≈2.61×ATR，75分位≈3.73×ATR，90分位≈5.53×ATR——比08-15那版收窄
+# 12.3%~33.4%。
 BREATH_SKHYNIX: Dict[str, Any] = {
     "name": "SKHYNIX",
     "initial_sl_atr": 0.0,
@@ -293,11 +296,11 @@ BREATH_SKHYNIX: Dict[str, Any] = {
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.95,  # 覆盖实测中位数回调(2.97)
-    "breath_tp23": 4.85,  # 覆盖实测75分位回调(4.85)
+    "breath_tp12": 2.61,  # 08-18再校准：覆盖实测中位数回调(2.61)
+    "breath_tp23": 3.73,  # 08-18再校准：覆盖实测75分位回调(3.73)
     "phase2_trail_mult": 1.0,
     "min_mult": 5.2,
-    "max_mult": 8.7,      # 覆盖实测90分位回调(8.31)以上
+    "max_mult": 5.8,      # 08-18再校准：覆盖实测90分位回调(5.53)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -340,6 +343,10 @@ BREATH_XPD: Dict[str, Any] = {
 # 量了777根合成样本、55个回调样本的分布：中位数≈2.59×ATR，75分位≈4.11×ATR，
 # 90分位≈7.16×ATR。ATR%=1.66%——盘前品种波动率明显偏高，回调分布也有肥尾特征。
 # 注：24h成交量约449万U，流动性比其它TradFi品种薄，实盘留意滑点。
+# 2026-08-18再校准：用真实摆动点识别（fractal pivot，±3根确认）重新采样800根
+# K线、173个摆动回调样本，中位数≈2.10×ATR，75分位≈3.22×ATR，90分位≈5.26×ATR——
+# 比08-15那版全线收窄18.8%~26.5%，最近行情比刚上线校准时走得更干脆（震荡幅度
+# 相对ATR变小）。用户确认这是"随行情变化定期再校准"的常规操作，不是一次性的。
 BREATH_OPENAI: Dict[str, Any] = {
     "name": "OPENAI",
     "initial_sl_atr": 0.0,
@@ -353,11 +360,11 @@ BREATH_OPENAI: Dict[str, Any] = {
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.60,  # 覆盖实测中位数回调(2.59)
-    "breath_tp23": 4.10,  # 覆盖实测75分位回调(4.11)
+    "breath_tp12": 2.10,  # 08-18再校准：覆盖实测中位数回调(2.10)
+    "breath_tp23": 3.22,  # 08-18再校准：覆盖实测75分位回调(3.22)
     "phase2_trail_mult": 1.0,
     "min_mult": 4.4,
-    "max_mult": 7.6,      # 覆盖实测90分位回调(7.16)以上
+    "max_mult": 5.5,      # 08-18再校准：覆盖实测90分位回调(5.26)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -369,6 +376,9 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 用真实30m K线合成90分钟K线（分页拉了4500根原始K线，覆盖约93.75天），量了1186根
 # 合成样本、84个回调样本的分布：中位数≈3.01×ATR，75分位≈4.65×ATR，90分位≈7.97×ATR。
 # ATR%=0.98%。注：24h成交量约612万U，同样偏薄，实盘留意滑点。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1150根K线、262个摆动回调
+# 样本，中位数≈2.22×ATR，75分位≈3.23×ATR，90分位≈5.23×ATR——比08-15那版全线
+# 收窄26.2%~34.3%，四个"美股"品种里漂移幅度最大的一个。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
@@ -382,11 +392,11 @@ BREATH_ANTHROPIC: Dict[str, Any] = {
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 3.00,  # 覆盖实测中位数回调(3.01)
-    "breath_tp23": 4.65,  # 覆盖实测75分位回调(4.65)
+    "breath_tp12": 2.22,  # 08-18再校准：覆盖实测中位数回调(2.22)
+    "breath_tp23": 3.23,  # 08-18再校准：覆盖实测75分位回调(3.23)
     "phase2_trail_mult": 1.0,
     "min_mult": 5.0,
-    "max_mult": 8.4,      # 覆盖实测90分位回调(7.97)以上
+    "max_mult": 5.5,      # 08-18再校准：覆盖实测90分位回调(5.23)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -399,6 +409,10 @@ BREATH_ANTHROPIC: Dict[str, Any] = {
 # 1054根合成样本、69个回调样本的分布：中位数≈3.10×ATR，75分位≈4.55×ATR，
 # 90分位≈7.51×ATR。ATR%=0.27%——已上市正股类波动率很低（比XAU的0.33%
 # 还低），回调分布尾巴仍偏肥。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1050根K线、211个摆动回调
+# 样本，中位数≈2.50×ATR，75分位≈3.75×ATR，90分位≈6.18×ATR——比08-15那版收窄
+# 17.5%~19.4%。同期ATR%从0.27%涨到0.52%（波动率翻倍），但回调/ATR比值反而更
+# 窄，说明最近走出了一段更干脆的单边行情。
 BREATH_ASML: Dict[str, Any] = {
     "name": "ASML",
     "initial_sl_atr": 0.0,
@@ -412,11 +426,11 @@ BREATH_ASML: Dict[str, Any] = {
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 3.10,  # 覆盖实测中位数回调(3.10)
-    "breath_tp23": 4.55,  # 覆盖实测75分位回调(4.55)
+    "breath_tp12": 2.50,  # 08-18再校准：覆盖实测中位数回调(2.50)
+    "breath_tp23": 3.75,  # 08-18再校准：覆盖实测75分位回调(3.75)
     "phase2_trail_mult": 1.0,
     "min_mult": 4.9,
-    "max_mult": 7.9,      # 覆盖实测90分位回调(7.51)以上
+    "max_mult": 6.5,      # 08-18再校准：覆盖实测90分位回调(6.18)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
