@@ -41,7 +41,10 @@ SIZING_MODE = "RISK20_NOTIONAL5"
 # 不需要per-symbol覆盖）。强档从1.0(=现货满仓)降到0.8，MAX_TOTAL_
 # NOTIONAL_MULT这个总敞口上限兜底不用跟着重算（本来就是"不超过"的
 # 上限检查，档位倍数只会更小不会更大，兜底继续有效）。
-TIER_NOTIONAL_MULT = {0: 0.3, 1: 0.5, 2: 0.8}
+# 2026-08-18：品种数量多，用户要求继续调低，弱/中/强三档从0.3/0.5/0.8
+# 再降到0.2/0.3/0.5，全部品种统一生效。MAX_TOTAL_NOTIONAL_MULT同理
+# 不用重算（档位倍数继续变小，13倍上限兜底依然覆盖得住）。
+TIER_NOTIONAL_MULT = {0: 0.2, 1: 0.3, 2: 0.5}
 
 SYMBOL_TIER_NOTIONAL_MULT = {}
 
