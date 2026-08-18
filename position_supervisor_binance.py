@@ -1217,7 +1217,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if self._enforce_tv_direction_or_flat(pos, source="空闲巡检"):
             return
 
-        if self._is_dust_qty(live_qty) or self._should_finalize_tp_victory(live_qty):
+        # 2026-08-18修复：同一个坑的第三处——这里是持续运行的空闲巡检循环，
+        # 每轮都直接调 _is_dust_qty 短路，走不到 _should_finalize_tp_victory
+        # 里已经加过的"没吃过TP不算残留"防线。没有任何TP档被消费过、且现仓
+        # 约等于开仓基线，说明是刚开的小仓位，不该被巡检当蚂蚁仓扫平。
+        _ref = max(float(self.initial_qty or 0), float(self.watched_qty or 0))
+        _consumed = getattr(self, "tp_levels_consumed", []) or []
+        _fresh_small = (not _consumed and _ref > 0 and live_qty >= _ref * 0.98)
+        if not _fresh_small and (self._is_dust_qty(live_qty) or self._should_finalize_tp_victory(live_qty)):
             if not self.current_side:
                 self.current_side = pos["side"]
             logger.warning(
@@ -5665,6 +5672,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.current_side = pos["side"]
         real_amt = float(pos["size"])
         ref = max(float(self.initial_qty or 0), float(self.watched_qty or 0))
+        # 2026-08-18修复：跟 _should_finalize_tp_victory 同一个坑，但这里是重启
+        # 扫描独立的判定路径，有自己的 _is_dust_qty 短路，走不到那边已经加过的
+        # "没吃过TP不算残留"防线。实盘复现：为部署仓位倍数重启B/C时，
+        # ANTHROPIC(dust_qty=0.05)刚开的0.03全新仓位(initial=watched=0.03，
+        # 一档TP都没吃)被这里当蚂蚁仓直接扫平——用户当时完全没做任何操作，
+        # 纯粹是我自己的重启触发的。没有任何TP档被消费过、且现仓约等于开仓
+        # 基线，说明这就是刚开的小仓位，不是残留，直接跳过扫尾。
+        consumed = getattr(self, "tp_levels_consumed", []) or []
+        if not consumed and ref > 0 and real_amt >= ref * 0.98:
+            logger.info(
+                f"🔄 [重启扫描] {real_amt} {self._unit()} 约等于开仓基线({ref})且未吃过任何TP档 "
+                f"→ 不是残留蚂蚁仓，跳过扫尾"
+            )
+            return False
         if was_monitoring and not self._is_dust_qty(real_amt):
             if ref <= 0 or real_amt > max(
                 DUST_QTY_ETH, ref * TP_COMPLETE_RESIDUAL_RATIO
