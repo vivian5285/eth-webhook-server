@@ -8545,15 +8545,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 int(lv.get("level") or 0): float(lv.get("qty") or 0)
                 for lv in (levels or [])
             }
-            item = check_tp_slice_budget(
-                init_q,
-                float(q_by.get(1) or 0),
-                float(q_by.get(2) or 0),
-                place_levels=place_n,
-                ratios=ratios,
-            )
-            if not item.ok:
-                return False, item.detail
+            got_1_2 = float(q_by.get(1) or 0) + float(q_by.get(2) or 0)
+            min_leg_qty = float(getattr(self, "min_qty", 0) or MIN_TP_LEG_QTY)
+            expected_raw = init_q * sum(float(ratios[i]) for i in range(place_n))
+            # 2026-08-18修复：_normalize_tp_qty_map 已经处理过"仓位太小、TP1+TP2
+            # 应挂份额本身就低于品种真实最小下单量"的情况——合法退化为只留硬止损+
+            # 雷达，不勉强挂必拒的单。这里预算闸不该把这个已经做对的降级结果再当
+            # "漏挂"打回FAILED。实盘复现：ANTHROPICUSDT tier=0缩量后initial=0.03，
+            # TP1+TP2理论份额0.009本身就低于min_qty=0.01，市价开仓+硬止损都已成功
+            # 挂上，就因为这道闸整条流水线被判FAILED+暂停交易告警，控制台显示"失败"
+            # 让人误以为没开成，实际上仓位是真开了的，只是没有限价止盈。
+            if got_1_2 <= 0 and expected_raw < min_leg_qty:
+                logger.info(
+                    f"🧩 [{self.symbol}] TP1+TP2理论份额{expected_raw:.4f}本身低于"
+                    f"最小下单量{min_leg_qty}，预算闸放行（已合法降级为硬止损+雷达）"
+                )
+            else:
+                item = check_tp_slice_budget(
+                    init_q,
+                    float(q_by.get(1) or 0),
+                    float(q_by.get(2) or 0),
+                    place_levels=place_n,
+                    ratios=ratios,
+                )
+                if not item.ok:
+                    return False, item.detail
         # 补挂/开仓：本批合计不得超过剩余比例帽，也绝不可超开仓 35%
         if place_sum > cap + 0.002:
             return False, f"batch_sum={place_sum} cap={cap} init={init_q} consumed={sorted(consumed)}"
