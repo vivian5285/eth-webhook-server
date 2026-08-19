@@ -7473,6 +7473,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.radar_activated = False
                 self.radar_pending_arm = True
                 self.radar_activation_sticky = False
+                self._radar_sync_open_ts = time.time()
             self._radar_stage_last = max(int(getattr(self, "_radar_stage_last", 0) or 0), 1)
             if entry > 0 and force_open:
                 self.best_price = entry
@@ -13964,6 +13965,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.breakeven_phase = False
         self.radar_activated = False
         self.radar_activation_sticky = False
+        self._radar_sync_open_ts = time.time()
         self._ws_hard_sl_fill_hint = None
         self.radar_step_count = 0
         self.remaining_qty_pct = 1.0
@@ -14909,6 +14911,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.radar_activated = False
         self.radar_pending_arm = True
         self.radar_activation_sticky = False
+        self._radar_sync_open_ts = time.time()
         self._radar_stage_last = 0
         self.shield_active = False
         self.shield_tiers_consumed = []
@@ -16069,6 +16072,52 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._adverse_worst_px = new_wp
             self._adverse_worst_px_ts = time.time()
 
+    # 2026-08-19新增：雷达激活线跨账户互通——同一条TV信号广播给B/C/D，各账户
+    # 独立订阅行情各记各的best，实盘复现过SNDKUSDT：C的行情追到1566.82摸过了
+    # 激活线1568.02、雷达接管锁盈利离场；B同一时刻只追到1569.23，差1.35点没
+    # 摸线，雷达全程没接管，硬扛到几小时后被更宽的硬止损打穿，倒亏离场——
+    # 明明是同一笔信号，纯粹因为两条独立行情线的一点点滑点/抽样差异，结果
+    # 天差地别。用/tmp下的共享文件做一层"任一账户摸线，全体账户跟着摸线"的
+    # 互通，账户间不共享凭证/不共享下单权限，只共享"这个品种这个方向的激活线
+    # 摸过了"这一个事实。
+    _RADAR_SYNC_DIR = "/tmp/radar_sync"
+
+    def _radar_sync_file(self):
+        side = str(self.current_side or "").strip().upper()
+        return os.path.join(self._RADAR_SYNC_DIR, f"{self.symbol}_{side}.json")
+
+    def _radar_sync_touch_write(self, curr_px):
+        try:
+            os.makedirs(self._RADAR_SYNC_DIR, exist_ok=True)
+            try:
+                os.chmod(self._RADAR_SYNC_DIR, 0o1777)
+            except Exception:
+                pass
+            import pwd
+            acct = pwd.getpwuid(os.getuid()).pw_name
+            path = self._radar_sync_file()
+            with open(path, "w") as f:
+                json.dump({"ts": time.time(), "mark": float(curr_px or 0), "acct": acct}, f)
+            try:
+                os.chmod(path, 0o666)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 雷达激活互通写入跳过: {e}")
+
+    def _radar_sync_touch_check(self):
+        """姊妹账户是否已经摸过本仓位这一轮的激活线（只信任本仓位开仓之后的记录）。"""
+        try:
+            with open(self._radar_sync_file(), "r") as f:
+                data = json.load(f)
+            ts = float(data.get("ts") or 0)
+            open_ts = float(getattr(self, "_radar_sync_open_ts", 0) or 0)
+            if ts <= 0 or open_ts <= 0 or ts < open_ts - 5:
+                return None
+            return data
+        except Exception:
+            return None
+
     def _latch_radar_activation_sticky(self, curr_px=0.0):
         """本周期 mark/best 一旦触过激活线 → sticky，直到平仓/新开仓清除。"""
         if bool(getattr(self, "radar_activation_sticky", False)):
@@ -16079,14 +16128,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         act = float(self._radar_activation_price() or 0)
         if act <= 0:
             return False
+        # 跨账户互通：姊妹账户（同一条TV信号广播出去的B/C/D）已经摸过线，
+        # 我这边即使自己的行情还差一点没摸到，也直接跟着激活，不再各account
+        # 各自为战。
+        sync = self._radar_sync_touch_check()
+        if sync is not None:
+            self.radar_activation_sticky = True
+            self._post_recover_radar_pulse = True
+            logger.info(
+                f"📌 [{self.symbol}] 激活线跟随姊妹账户({sync.get('acct')})联动闩锁 "
+                f"| 对方 mark={float(sync.get('mark') or 0):.2f} gate≈{act:.2f}"
+            )
+            return True
         side = str(self.current_side or "").strip().upper()
         px = float(curr_px or 0)
         best = float(self.best_price or 0)
+        # 安全容差：价格进到激活线0.1%以内也算摸到，防止"差一点点没摸线、
+        # 雷达整段缺席"这种边界情况（实盘复现：SNDKUSDT B账户就差1.35点/
+        # 约0.08%）。容差是相对激活线价位算的百分比，跟品种价位高低无关。
+        tol = abs(act) * 0.001
         touched = False
         if side == "LONG":
-            touched = (px > 0 and px >= act) or (best > 0 and best >= act)
+            touched = (px > 0 and px >= act - tol) or (best > 0 and best >= act - tol)
         elif side == "SHORT":
-            touched = (px > 0 and px <= act) or (best > 0 and best <= act)
+            touched = (px > 0 and px <= act + tol) or (best > 0 and best <= act + tol)
         if not touched:
             return False
         self.radar_activation_sticky = True
@@ -16094,8 +16159,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._post_recover_radar_pulse = True
         logger.info(
             f"📌 [{self.symbol}] 激活线 sticky 闩锁 | mark={px:.2f} best={best:.2f} "
-            f"gate≈{act:.2f}（不依赖 TP 成交）"
+            f"gate≈{act:.2f}±{tol:.4f}（不依赖 TP 成交）"
         )
+        self._radar_sync_touch_write(px if px > 0 else best)
         return True
 
     def _activation_reached_for_arm(self, curr_px):
