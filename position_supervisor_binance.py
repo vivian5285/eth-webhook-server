@@ -1175,6 +1175,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._reentry_tick()
         except Exception as e:
             logger.debug(f"再入场 tick 跳过: {e}")
+        # 追单确认重入：观察窗口内确认真延续才市价追回（见radar_reentry_mixin.py顶部注释）
+        try:
+            if bool(getattr(self, "_chase_watch_active", False)):
+                self._check_chase_reentry_confirmation()
+        except Exception as e:
+            logger.debug(f"追单确认 tick 跳过: {e}")
 
         pos = self._get_active_position()
         if pos == "QUERY_FAILED":

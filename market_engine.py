@@ -158,6 +158,21 @@ def bar_momentum_score(bars: Sequence, lookback: int = MOMENTUM_LOOKBACK_BARS) -
     return max(-1.0, min(1.0, raw))
 
 
+def ema_series(closes: Sequence[float], length: int) -> List[float]:
+    """标准EMA，跟TV Pine的ta.ema(close, length)算法一致（种子=前length根SMA）。"""
+    vals = [float(c) for c in (closes or [])]
+    n = len(vals)
+    if n < length or length <= 0:
+        return []
+    k = 2.0 / (length + 1.0)
+    seed = sum(vals[:length]) / length
+    out = [seed]
+    for v in vals[length:]:
+        seed = v * k + seed * (1.0 - k)
+        out.append(seed)
+    return out
+
+
 def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
     n = len(bars or [])
     if n < period * 2 + 2:

@@ -33,6 +33,18 @@ from smart_reentry_engine import (
 
 logger = logging.getLogger(__name__)
 
+# 2026-08-19新增：追单确认重入。常规智能重入(_place_reentry_limit)只挂"比TV/
+# 上次开仓价更优"的限价单，专治"刚好在原地被抖出去"——但如果止损时已经先吃到
+# 一截浮盈(exit_source=radar_be、超出常规重入区间reentry_zone_atr)、随后价格
+# 头也不回地继续冲(实盘复现：ETHUSDT 09:39雷达保本止损@1919.54后，13:00-15:00
+# 直接冲到2132，TV仍持仓、VPS却因为等不到"更优价格"的回调永远没能追回去)，
+# 那张等便宜价的限价单会一直挂空、永远等不到成交。这里加一条并列的"追单"腿：
+# 仅tier=2强趋势、仅radar_be退出、仅reentry_zone判定"超出常规区间"时才会武装，
+# 在有限的观察窗口内确认EMA站上+动量非噪音+期间没有跌破(破坏)出场价，才用
+# 市价追回去；确认不了或超时就放弃，不重复触发、不叠加开仓次数上限。
+_CHASE_CONFIRM_WINDOW_SEC = 900.0  # 观察窗口：15分钟，超时未确认就放弃
+_CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -44,6 +56,7 @@ class RadarReentryMixin:
         self._reentry_open_snap = None
         self._reentry_cycle_aborted = False
         self._base_breath_profile = dict(getattr(self, "breath_profile", None) or {})
+        self._clear_chase_watch()
 
     def _reentry_state_dict(self) -> Dict[str, Any]:
         return {
@@ -246,6 +259,7 @@ class RadarReentryMixin:
         self._radar_armed_after_tp1 = False
         self._radar_activation_notified = False
         self._radar_notify_pending = False
+        self._clear_chase_watch()
         frac = float(st.get("radar_activation_frac") or 0)
         attempt = int(getattr(self, "reentry_attempt", 0) or 0)
         # v1.0 §5.1：init_cycle_on_open 已内用 radar_gate_price_from_tps(tp1, tp2, attempt)
@@ -656,6 +670,14 @@ class RadarReentryMixin:
                 "tp1_already_filled", "tier_not_strong",
             ):
                 self._clear_reentry_cycle(source=why)
+            elif (
+                why == "outside_reentry_zone"
+                and exit_src == "radar_be"
+                and int(snap.get("adx_tier") if snap.get("adx_tier") is not None else -1) == 2
+                and not bool(snap.get("tp1_ever_filled"))
+                and attempt < int(get_reentry_profile(self.symbol).get("max_reentries") or 1)
+            ):
+                self._arm_chase_reentry_watch(side=side, exit_px=exit_px, atr=atr, attempt=attempt)
             return False
 
         # 闭环第一步：无菌确认（仓+单皆零）后才允许挂再入限价
@@ -711,6 +733,140 @@ class RadarReentryMixin:
         except Exception:
             pass
         return True
+
+    def _clear_chase_watch(self, reason=""):
+        self._chase_watch_active = False
+        self._chase_watch_side = None
+        self._chase_watch_exit_px = 0.0
+        self._chase_watch_atr = 0.0
+        self._chase_watch_attempt = 0
+        self._chase_watch_deadline_ts = 0.0
+
+    def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt):
+        """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。"""
+        if bool(getattr(self, "_chase_watch_active", False)):
+            return
+        self._chase_watch_active = True
+        self._chase_watch_side = str(side or "").upper()
+        self._chase_watch_exit_px = float(exit_px or 0)
+        self._chase_watch_atr = float(atr or 0)
+        self._chase_watch_attempt = int(attempt or 0)
+        self._chase_watch_deadline_ts = time.time() + _CHASE_CONFIRM_WINDOW_SEC
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        logger.info(
+            f"📡 [{self.symbol}] 武装追单确认窗口 {_CHASE_CONFIRM_WINDOW_SEC:.0f}s | "
+            f"side={self._chase_watch_side} exit={self._chase_watch_exit_px:.2f} "
+            f"→ 观察EMA+动量，确认继续延续才市价追回"
+        )
+
+    def _check_chase_reentry_confirmation(self):
+        """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才市价追回。"""
+        if not bool(getattr(self, "_chase_watch_active", False)):
+            return
+        now = time.time()
+        deadline = float(getattr(self, "_chase_watch_deadline_ts", 0) or 0)
+        if deadline > 0 and now > deadline:
+            logger.info(f"⏱️ [{self.symbol}] 追单确认窗口超时，放弃追回")
+            self._clear_chase_watch()
+            return
+        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
+            self._clear_chase_watch()
+            return
+        side = str(getattr(self, "_chase_watch_side", "") or "").upper()
+        exit_px = float(getattr(self, "_chase_watch_exit_px", 0) or 0)
+        if side not in ("LONG", "SHORT") or exit_px <= 0:
+            self._clear_chase_watch()
+            return
+        try:
+            from binance_client import binance_client
+            from market_engine import ema_series, bar_momentum_score
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 追单确认依赖导入跳过: {e}")
+            return
+        try:
+            bars = binance_client.fetch_klines(self.symbol, interval="15m", limit=60)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 追单确认取K线跳过: {e}")
+            return
+        if not bars or len(bars) < 31:
+            return
+        closes = [float(b[4]) for b in bars]
+        ema_fast_series = ema_series(closes, 15)
+        ema_slow_series = ema_series(closes, 30)
+        if not ema_fast_series or not ema_slow_series:
+            return
+        last_close = closes[-1]
+        fast_now, slow_now = ema_fast_series[-1], ema_slow_series[-1]
+        mom = bar_momentum_score(bars, lookback=3)
+        # 观察窗口内一旦跌破(多)/涨破(空)过出场价，说明已经回头，不是"没回头的
+        # 真延续"，直接放弃——只看武装之后新收的K线，避免拿到武装前的旧反转。
+        watch_bars = [b for b in bars if int(b[0]) >= (deadline - _CHASE_CONFIRM_WINDOW_SEC) * 1000]
+        if not watch_bars:
+            watch_bars = bars[-6:]
+        if side == "LONG":
+            reversed_back = any(float(b[3]) < exit_px for b in watch_bars)
+            confirmed = (
+                not reversed_back
+                and last_close > fast_now > slow_now
+                and mom >= _CHASE_MOMENTUM_MIN
+            )
+        else:
+            reversed_back = any(float(b[2]) > exit_px for b in watch_bars)
+            confirmed = (
+                not reversed_back
+                and last_close < fast_now < slow_now
+                and mom <= -_CHASE_MOMENTUM_MIN
+            )
+        if not confirmed:
+            return
+        logger.info(
+            f"📡 [{self.symbol}] 追单确认通过 | close={last_close:.2f} "
+            f"ema15={fast_now:.2f} ema30={slow_now:.2f} momentum={mom:.2f} → 市价追回"
+        )
+        self._execute_chase_reentry(side)
+
+    def _execute_chase_reentry(self, side):
+        """确认通过后市价追回；成交后复用常规再入的挂防线逻辑(_on_reentry_limit_filled)。"""
+        attempt = int(getattr(self, "_chase_watch_attempt", 0) or 0)
+        self._clear_chase_watch()
+        if getattr(self, "reentry_order_tag", None) or bool(getattr(self, "reentry_active", False)):
+            logger.warning(f"🚫 [{self.symbol}] 追单确认通过但常规再入周期已在进行 → 让位")
+            return False
+        if not self._ensure_sterile_for_reentry(reason="追单确认·仓位归零清场"):
+            return False
+        from binance_client import binance_client
+
+        qty = float((getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0)
+        if qty <= 0:
+            qty = float(getattr(self, "base_qty", 0) or 0)
+        if qty <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追单市价无数量，放弃")
+            return False
+        open_side = "BUY" if side == "LONG" else "SELL"
+        order = binance_client.place_market_order(
+            open_side, qty, symbol=self.symbol, reduce_only=False,
+        )
+        if not order:
+            logger.warning(f"⚠️ [{self.symbol}] 追单市价下单失败")
+            return False
+        pos = self._get_active_position(prefer_ws=False)
+        if pos == "QUERY_FAILED" or not pos or float(pos.get("size") or 0) <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追单市价成交后查仓失败/无仓，人工核对")
+            return False
+        self.reentry_attempt = attempt
+        self.radar_tier = attempt
+        try:
+            from ops_log import audit as ops_audit
+            ops_audit(
+                f"{self.symbol} chase_reentry_filled side={side} "
+                f"qty={qty} entry={pos.get('entry_price')}"
+            )
+        except Exception:
+            pass
+        return bool(self._on_reentry_limit_filled(pos))
 
     def _place_reentry_limit(self, side=None, reason="", *, is_refresh=False):
         side = str(side or getattr(self, "cycle_tv_side", "") or "").upper()
