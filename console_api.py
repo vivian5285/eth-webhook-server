@@ -551,6 +551,43 @@ def _inject_system_limit_order(payload: dict, body: dict) -> None:
     payload["limit_timeout_sec"] = min(max(timeout_min * 60.0, 30.0), 1800.0)
 
 
+def _auto_fill_price(payload: dict) -> None:
+    """
+    控制面板专属兜底：手动发单漏填price（比如忘了点"取现价"）时，VPS自己
+    查一次现价补上——LONG/SHORT在app.py里是硬性必填字段(缺了直接400拒收，
+    HTTP层面因为_call_local_webhook包了一层，看着还是200，容易被误以为
+    "发送成功但实际没生效"，2026-08-19实盘复现：用户连续5笔手动发单全部
+    因为漏填price被静默拒收，只有点开返回JSON细看才能发现)。
+    只在控制台手动发单入口调用；真实TV webhook必须自己带price，这里不
+    影响那条主链路。
+    """
+    action = str(payload.get("action") or "").strip().upper()
+    if action not in ("LONG", "SHORT"):
+        return
+    try:
+        px_ok = float(payload.get("price") or 0) > 0
+    except (TypeError, ValueError):
+        px_ok = False
+    if px_ok:
+        return
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return
+    try:
+        from binance_client import binance_client
+        px = float(binance_client.get_current_price(symbol) or 0)
+    except Exception as e:
+        logger.warning(f"[控制台] {symbol} 漏填price且取现价失败: {e}")
+        return
+    if px <= 0:
+        logger.warning(f"[控制台] {symbol} 漏填price且取现价为空，跳过自动补")
+        return
+    payload["price"] = px
+    reason = str(payload.get("reason") or "").strip()
+    payload["reason"] = (reason + " [VPS自动补现价]").strip()
+    logger.info(f"[控制台] {symbol} 漏填price，自动补现价 price={px}")
+
+
 def _auto_fill_tp_via_atr(payload: dict) -> None:
     """
     控制面板专属兜底：LONG/SHORT 手动开仓漏填 tp1/tp2/tp3 时，VPS 自己拉
@@ -628,6 +665,7 @@ def api_tv_signal_replay(signal_id):
         payload.pop(k, None)
     if not payload.get("reason"):
         payload["reason"] = f"[控制台重放#{signal_id}]"
+    _auto_fill_price(payload)
     _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {
@@ -658,6 +696,7 @@ def api_tv_manual_send():
     payload["action"] = action
     if not payload.get("reason"):
         payload["reason"] = "[控制台手动发单]"
+    _auto_fill_price(payload)
     _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {"X-TV-Source": "console_manual"})
