@@ -454,6 +454,11 @@ REENTRY_SNDK: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：跟ZEC同款问题——1.5×ATR封顶换算成价格百分比实测3.56%，
+    # 比当年ZEC加收益率腿兜底之前的2.15%还夸张（币安TRADIFI_PERPETUAL
+    # 个股品种普遍波动更猛，浮盈很容易在触发前被暴涨暴跌打回浮亏），
+    # 收益率腿封顶到1.5%，让雷达提前接管。
+    "radar_gate_return_pct": 0.015,
     "tiers": SNDK_TIERS,
     "reentry_zone_atr": _SNDK_ZONE,
     "reentry_window_bars": _SNDK_WINDOW_BARS,
@@ -489,6 +494,8 @@ REENTRY_SKHYNIX: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：同SNDK——1.5×ATR封顶实测3.40%，个股品种波动大，提前收紧。
+    "radar_gate_return_pct": 0.015,
     "tiers": SKHYNIX_TIERS,
     "reentry_zone_atr": _SKHYNIX_ZONE,
     "reentry_window_bars": _SKHYNIX_WINDOW_BARS,
@@ -525,6 +532,9 @@ REENTRY_OPENAI: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：1.5×ATR封顶实测2.00%，且本品种流动性明显更差（见上方
+    # symbol_config.py注释），插针幅度更容易失控，收益率腿封顶到1.2%。
+    "radar_gate_return_pct": 0.012,
     "tiers": OPENAI_TIERS,
     "reentry_zone_atr": _OPENAI_ZONE,
     "reentry_window_bars": _OPENAI_WINDOW_BARS,
@@ -542,6 +552,8 @@ REENTRY_ANTHROPIC: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：1.5×ATR封顶实测1.15%，跟ZEC修复后的1%对齐，小幅收紧。
+    "radar_gate_return_pct": 0.01,
     "tiers": ANTHROPIC_TIERS,
     "reentry_zone_atr": _ANTHROPIC_ZONE,
     "reentry_window_bars": _ANTHROPIC_WINDOW_BARS,
@@ -560,6 +572,8 @@ REENTRY_ASML: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：1.5×ATR封顶实测1.11%，跟ZEC修复后的1%对齐，小幅收紧。
+    "radar_gate_return_pct": 0.01,
     "tiers": ASML_TIERS,
     "reentry_zone_atr": _ASML_ZONE,
     "reentry_window_bars": _ASML_WINDOW_BARS,
