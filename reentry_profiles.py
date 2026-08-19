@@ -437,6 +437,9 @@ REENTRY_XMR: Dict[str, Any] = {
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
+    # 2026-08-19：1.5×ATR封顶实测0.96%，跟ANTHROPIC/ASML同一档（0.95~0.97%），
+    # 同样对齐ZEC修复后的1%，小幅收紧。
+    "radar_gate_return_pct": 0.01,
     "tiers": XMR_TIERS,
     "reentry_zone_atr": _XMR_ZONE,
     "reentry_window_bars": _XMR_WINDOW_BARS,
