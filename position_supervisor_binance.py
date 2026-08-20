@@ -13318,16 +13318,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
         """哨兵/重启推断全平类型 + exit_source（雷达 vs TP vs 硬止损一目了然）"""
         exit_src, note = self._resolve_exit_source(curr_px, hint_reason)
-        # 2026-08-21：TV心跳追回专用标记——只在真正判定为硬止损(vps_hard_sl/
-        # sl_initial，雷达还没来得及交棒保护)时打时间戳，雷达保本/已交棒后
-        # 触发的止损(radar_be/sl_breakeven)不算。区别于last_exit_source
+        # 2026-08-21：TV心跳追回专用标记——只在真正判定为永久硬止损
+        # (vps_hard_sl，距离=|TV价-TV.SL|×1.15，比TV自己的止损宽15%)时才
+        # 打时间戳。2026-08-21修订：不含sl_initial(雷达保本前触发的止损，
+        # 距离是我们自己的ATR算的，根本不是从TV止损距离推出来的)——sl_initial
+        # 本质上跟radar_be/sl_breakeven是同一类现象(VPS呼吸止损比TV紧，
+        # 提前出局但方向没错)，只是发生在保本线激活之前，不该被排除在追回
+        # 资格之外，否则会把这个功能最初要解决的那类场景堵掉一半。真正的
+        # vps_hard_sl因为比TV止损宽，理论上TV自己该先触发止损转FLAT——会
+        # 触发这个分支，主要是心跳滞后(TV只在收盘K线才刷新)没来得及反映
+        # TV已经FLAT，属于小概率但仍要防的窗口。区别于last_exit_source
         # (只在_maybe_start_smart_limit_reentry的可重入分支才写，硬止损出局
         # 和"这一轮从未开过仓"两种情况在那边最终都是空值，没法区分)，这个
         # 标记只在心跳转FLAT时才清零(见record_tv_heartbeat)，专门喂给
         # _maybe_start_tv_heartbeat_catchup判断"这段TV仍持仓的时间里，我们
-        # 是不是真被硬止损扫过"——硬止损大概率是TV自己判断失误或行情反打，
-        # 不该追；真正"这一轮从未开过仓"(最初ETH漏单原型)则不受影响，正常追。
-        if exit_src in (EXIT_SOURCE_VPS_HARD_SL, EXIT_SOURCE_SL_INITIAL):
+        # 是不是真被(比TV还宽的)硬止损扫过"——真触发大概率是TV自己判断
+        # 失误或行情反打，不该追；"这一轮从未开过仓"(最初ETH漏单原型)、
+        # 以及雷达保本前/后的正常出局(sl_initial/radar_be/sl_breakeven)
+        # 都不受影响，正常评估追回。
+        if exit_src == EXIT_SOURCE_VPS_HARD_SL:
             self.last_hard_sl_exit_ts = time.time()
         est = self._estimate_pnl_pct(curr_px)
         side = self.current_side

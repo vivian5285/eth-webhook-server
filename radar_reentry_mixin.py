@@ -1350,17 +1350,20 @@ class RadarReentryMixin:
         if hb_entry <= 0 or hb_stop <= 0:
             return
 
-        # 2026-08-21追加：TV这一整段持仓期间(自first_seen往前，即心跳最近
-        # 一次从FLAT转过来之后)，如果我们自己被真正的硬止损扫过——大概率
-        # 是TV自己判断失误或者行情反打(突发反转)，不是"VPS保本太紧提前
-        # 离场"，不该追回，等于错上加错。只排除硬止损这一种，雷达保本/
-        # 已交棒后触发的止损(radar_be/sl_breakeven)、以及这一轮从未开过
-        # 仓(最初ETH漏单原型)都不受影响，正常评估追回。见
-        # position_supervisor_binance.py::_infer_flat_close_meta 顶部注释。
+        # 2026-08-21追加(同日修订，收窄排除范围)：TV这一整段持仓期间(自
+        # first_seen往前，即心跳最近一次从FLAT转过来之后)，如果我们自己被
+        # 真正的永久硬止损(vps_hard_sl，距离=|TV价-TV.SL|×1.15，比TV自己
+        # 的止损宽15%)扫过——大概率是TV自己判断失误或行情反打(突发反转)，
+        # 不该追回，等于错上加错。只排除这一种止损；雷达自己保本前/后触发
+        # 的止损(sl_initial/radar_be/sl_breakeven，距离是我们自己的ATR算的，
+        # 不是从TV止损距离推出来的，本质上都是"VPS比TV紧、提前出局但方向
+        # 没错"同一类现象)、以及这一轮从未开过仓(最初ETH漏单原型)都不受
+        # 影响，正常评估追回。见position_supervisor_binance.py::
+        # _infer_flat_close_meta 顶部注释。
         last_hard_sl_ts = float(getattr(self, "last_hard_sl_exit_ts", 0) or 0)
         if last_hard_sl_ts > 0:
             logger.info(
-                f"🚫 [{self.symbol}] TV心跳漏单：这段持仓期内曾被硬止损出局 "
+                f"🚫 [{self.symbol}] TV心跳漏单：这段持仓期内曾被永久硬止损出局 "
                 f"(exit_ts={last_hard_sl_ts:.0f}) → 不追回，大概率TV判断失误/行情反打"
             )
             return
