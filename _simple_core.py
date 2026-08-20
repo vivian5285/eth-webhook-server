@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 # 辅助函数
 # ───────────────────────────────────────────────────────────────
 
+def _min_tradable_qty(binance_client, symbol: str) -> float:
+    """交易所LOT_SIZE最小下单量；查不到就保守当0（不拦截，维持旧行为）。"""
+    try:
+        sym = binance_client._load_symbol_filters(symbol)
+        for f in sym.get("filters", []):
+            if f.get("filterType") == "LOT_SIZE":
+                return float(f.get("minQty") or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _is_tp_limit_order(order: Dict) -> bool:
     """判断是否是TP限价单（非STOP、非reduceOnly的LIMIT）"""
     o = order or {}
@@ -473,9 +485,21 @@ def recover_defenses_on_startup(
                 break
 
         if not found:
-            result["notes"].append(f"TP{level}@{tp_rounded:.2f} 缺失，尝试补挂")
-            # 补挂
+            # 补挂前先核对：这一档按比例算出来的量，经交易所LOT_SIZE取整后
+            # 是否够格下单——2026-08-20 OPENAIUSDT 实盘复现：仓位本身缩到
+            # 0.05后，TP1按10%算出0.005，低于交易所minQty=0.01，format_
+            # quantity取整后变成0，place_limit_order必然拒单。这不是故障，
+            # 是仓位缩小后这一档天生挂不上，跟开仓时_assert_place_tp_budget
+            # 已经认可的"合法降级为更少档位"是同一类情况，不该报"需要人工"
+            # （之前这里没做这层判断，会假装是异常一直亮着需要人工关注）。
             tp_qty = max(round(live_qty * (0.10 if level == 1 else 0.20), 3), 0.001)
+            min_qty = _min_tradable_qty(binance_client, symbol)
+            if min_qty > 0 and tp_qty < min_qty:
+                result["notes"].append(
+                    f"TP{level}@{tp_rounded:.2f} 份额{tp_qty}低于交易所最小下单量"
+                    f"{min_qty}，合法降级不补挂（非故障）"
+                )
+                continue
             try:
                 order = binance_client.place_limit_order(
                     side=tp_side,
