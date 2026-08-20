@@ -115,6 +115,11 @@
   }
   .side-tag.LONG { background: var(--green-bg); color: var(--green); }
   .side-tag.SHORT { background: var(--red-bg); color: var(--red); }
+  .src-tag {
+    font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 999px;
+    letter-spacing: 0.02em;
+  }
+  .src-tag.grid { background: rgba(168,85,247,0.12); color: #a855f7; }
   .pnl-row { margin-bottom: 8px; }
   .pnl-tag {
     display: inline-block; font-size: 13px; font-weight: 700;
@@ -398,6 +403,9 @@
       <button class="nav-item" data-page="manual" onclick="switchPage('manual')">
         <span class="ico">✏️</span>手动发单
       </button>
+      <button class="nav-item" data-page="grid" onclick="switchPage('grid')">
+        <span class="ico">🎯</span>网格套利
+      </button>
       <button class="nav-item" data-page="watchdog" onclick="switchPage('watchdog')">
         <span class="ico">🐕</span>监督狗日志
       </button>
@@ -508,6 +516,50 @@
     </div>
     </div>
 
+    <div id="page-grid" class="page hidden">
+      <div class="page-head">
+        <h1>网格套利</h1>
+        <div class="sub">TV没信号时手动开区间震荡单——限价开仓+精确止损(不加宽)+一次性止盈(不分批)；TV真实信号一到会无条件先平网格仓位再按TV开仓</div>
+      </div>
+    <div class="card tv-card">
+      <div class="tv-head"><h2>手动开一笔网格套利</h2></div>
+      <div class="warn-bar">⚠️ 这是真实下单。硬止损严格按填写值执行，不会像TV仓位那样加宽；止盈是一次性全平，没有TP1/2/3分批。同一品种同时只能有一笔网格仓位。</div>
+      <div class="manual-grid">
+        <div class="manual-field"><label>账户</label>
+          <select id="gAccount">
+            <option value="B">B · 妈妈的币安账户</option>
+            <option value="C">C · 我自己的币安账户</option>
+            <option value="D">D · 我的币安子账户</option>
+          </select>
+        </div>
+        <div class="manual-field"><label>品种</label><select id="gSymbol"></select></div>
+        <div class="manual-field"><label>方向</label>
+          <select id="gSide"><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select>
+        </div>
+        <div class="manual-field"><label>趋势档位（仓位大小）</label>
+          <select id="gTier"><option value="0">弱</option><option value="1" selected>中</option><option value="2">强</option></select>
+        </div>
+        <div class="manual-field"><label>开仓限价</label>
+          <div style="display:flex;gap:6px">
+            <input id="gEntry" type="number" step="any" style="flex:1" />
+            <button type="button" class="btn-mini" onclick="fetchGPrice()">取现价</button>
+          </div>
+        </div>
+        <div class="manual-field"><label>止盈价（一次性全平）</label><input id="gTp" type="number" step="any" /></div>
+        <div class="manual-field"><label>止损价（精确执行，不加宽）</label><input id="gSl" type="number" step="any" /></div>
+        <div class="manual-field"><label>限价超时(分钟,1~60)</label><input id="gTimeout" type="number" step="1" min="1" max="60" placeholder="30" /></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-mini primary" onclick="confirmGridOrder()">发送到实盘</button>
+      </div>
+      <div id="gResult" class="tv-detail-box" style="display:none;margin-top:12px"></div>
+    </div>
+    <div class="card tv-card">
+      <div class="tv-head"><h2>各账户网格挂单中</h2></div>
+      <div id="gridPendingList"><div class="tv-empty">加载中…</div></div>
+    </div>
+    </div>
+
     <div id="page-watchdog" class="page hidden">
       <div class="page-head">
         <h1>监督狗日志</h1>
@@ -572,11 +624,15 @@ function renderPosition(p, acctId) {
   }
   const markHtml = p.mark ? `<div>现价 <b>${p.mark.toFixed(2)}</b></div>` : '<div>现价 <b>—</b></div>';
   const btnId = `close-${acctId}-${p.symbol}`;
+  const srcHtml = p.position_source === "GRID" ? '<span class="src-tag grid">网格</span>' : '';
   return `
     <div class="pos-card">
       <div class="pos-top">
         <span class="pos-sym">${p.symbol}</span>
-        <span class="side-tag ${p.side}">${p.side}</span>
+        <span style="display:flex;gap:6px;align-items:center">
+          ${srcHtml}
+          <span class="side-tag ${p.side}">${p.side}</span>
+        </span>
       </div>
       <div class="pnl-row">${pnlHtml}</div>
       <div class="pos-grid">
@@ -692,6 +748,7 @@ async function loadStatus(force) {
     if (!json.data) return;
     const grid = document.getElementById("grid");
     grid.innerHTML = json.data.accounts.map(renderAccount).join("");
+    renderGridPendingList(json.data.accounts);
 
     let totalAnomaly = 0;
     json.data.accounts.forEach(a => totalAnomaly += a.anomalies.length);
@@ -736,6 +793,7 @@ async function loadTvMeta() {
     const symOpts = (d.symbols || []).map(s => `<option value="${s.symbol}">${s.tag || s.symbol}</option>`).join("");
     document.getElementById("tvSymbol").innerHTML = `<option value="">全部品种</option>` + symOpts;
     document.getElementById("mSymbol").innerHTML = symOpts;
+    document.getElementById("gSymbol").innerHTML = symOpts;
     document.getElementById("tvActionFilter").innerHTML = `<option value="">全部动作</option>` +
       (d.actions || []).map(a => `<option value="${a}">${a}</option>`).join("");
     tvMetaLoaded = true;
@@ -986,6 +1044,93 @@ async function doManualSend() {
   } catch (e) {
     resultEl.textContent = "发送失败: " + e;
   }
+}
+
+// ── 网格套利 ────────────────────────────────────────────────────────────
+async function fetchGPrice() {
+  const sym = document.getElementById("gSymbol").value;
+  if (!sym) return;
+  try {
+    const d = await (await fetch(`api/price/${sym}`)).json();
+    if (d.status === "ok") document.getElementById("gEntry").value = d.price;
+  } catch (e) { console.warn("price fetch failed", e); }
+}
+
+function confirmGridOrder() {
+  const acct = document.getElementById("gAccount").value;
+  const symbol = document.getElementById("gSymbol").value;
+  const side = document.getElementById("gSide").value;
+  if (!confirm(`即将向账户 ${acct} 发送一笔网格套利【${side} ${symbol}】限价开仓，真实下单。\n确认发送？`)) return;
+  doGridOrder();
+}
+
+async function doGridOrder() {
+  const v = (elId) => { const x = document.getElementById(elId).value; return x === "" ? null : Number(x); };
+  const body = {
+    account: document.getElementById("gAccount").value,
+    symbol: document.getElementById("gSymbol").value,
+    side: document.getElementById("gSide").value,
+    tier: Number(document.getElementById("gTier").value),
+    entry_price: v("gEntry"), tp_price: v("gTp"), stop_price: v("gSl"),
+    timeout_min: v("gTimeout"),
+  };
+  Object.keys(body).forEach(k => { if (body[k] === null || body[k] === undefined) delete body[k]; });
+  const resultEl = document.getElementById("gResult");
+  resultEl.style.display = "";
+  resultEl.textContent = "发送中…";
+  try {
+    const res = await fetch("api/grid_order", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    resultEl.textContent = JSON.stringify(d, null, 2);
+    loadStatus(true);
+  } catch (e) {
+    resultEl.textContent = "发送失败: " + e;
+  }
+}
+
+async function cancelGridOrder(acctId, symbol, btn) {
+  if (!confirm(`撤销账户 ${acctId} 品种 ${symbol} 未成交的网格挂单？`)) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch("api/grid_order_cancel", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({account: acctId, symbol: symbol}),
+    });
+    const d = await res.json();
+    alert(d.ok ? "✅ 已撤销" : `❌ ${d.message || "撤销失败"}`);
+  } catch (e) {
+    alert("❌ 请求失败: " + e);
+  } finally {
+    btn.disabled = false;
+    loadStatus(true);
+  }
+}
+
+function fmtGridDeadline(ts) {
+  if (!ts) return "—";
+  const remain = Math.round(ts - Date.now() / 1000);
+  if (remain <= 0) return "即将超时撤单";
+  const m = Math.floor(remain / 60);
+  return m > 0 ? `约${m}分钟后超时自动撤单` : `约${remain}秒后超时自动撤单`;
+}
+
+function renderGridPendingList(accounts) {
+  const rows = [];
+  accounts.forEach(a => {
+    (a.grid_pending || []).forEach(g => {
+      rows.push(`
+        <div class="anomaly-item">
+          <b>${(ACCOUNTS_META[a.id] || {}).label || a.id}</b> · ${g.symbol} · ${g.side} ·
+          限价挂单中 · ${fmtGridDeadline(g.deadline_ts)}
+          <button class="btn-mini" style="margin-left:8px"
+            onclick="cancelGridOrder('${a.id}', '${g.symbol}', this)">撤销</button>
+        </div>`);
+    });
+  });
+  document.getElementById("gridPendingList").innerHTML =
+    rows.length ? rows.join("") : '<div class="tv-empty">当前没有挂单中的网格套利单</div>';
 }
 
 // ── 监督狗日志 ──────────────────────────────────────────────────────────

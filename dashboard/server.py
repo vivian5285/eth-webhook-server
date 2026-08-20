@@ -300,7 +300,7 @@ def parse_raw(raw):
     result = {a["id"]: {
         "id": a["id"], "port": a["port"], "label": a["label"],
         "positions": [], "events": [], "anomalies": [], "svc_active": None,
-        "git_rev": "",
+        "git_rev": "", "grid_pending": [],
     } for a in ACCOUNTS}
 
     prices = {}
@@ -350,6 +350,15 @@ def parse_raw(raw):
                 "best_price": float(s.get("best_price", 0) or 0),
                 "trading_paused": bool(s.get("trading_paused", False)),
                 "pause_reason": s.get("trading_pause_reason", "") or "",
+                "position_source": s.get("position_source") or "TV",
+            })
+        elif s.get("grid_pending_order_id"):
+            # 网格套利限价还没成交(watched_qty=0)，不算持仓卡片，单独一个
+            # "挂单中"列表——跟持仓卡片走同一份state文件读取，不用额外请求。
+            result[acct]["grid_pending"].append({
+                "symbol": sym,
+                "side": s.get("grid_pending_side") or "",
+                "deadline_ts": float(s.get("grid_pending_deadline_ts", 0) or 0),
             })
 
     rev_pattern = re.compile(r"===REV:(\w)===\n(.*?)(?=\n===|\Z)", re.S)
@@ -638,6 +647,33 @@ def _strategy_engine_call(code, timeout=20):
         return {"ok": False, "message": f"无输出: {err}"}
     except Exception as e:
         return {"ok": False, "message": str(e)}
+
+
+@app.route("/api/grid_order", methods=["POST"])
+def api_grid_order():
+    """网格套利手动开仓——跟tv_manual_send同一套"本机HTTP回环代按已有接口"
+    模式，转发到对应账户自己的/api/console/grid_order，不重新实现任何
+    交易逻辑。"""
+    body = request.get_json(force=True, silent=True) or {}
+    acct = _find_account(body.get("account"))
+    if not acct:
+        return jsonify({"status": "error", "message": "bad_account"}), 400
+    payload = {k: v for k, v in body.items() if k != "account"}
+    code, data = _console_call(acct, "POST", "/api/console/grid_order", body=payload)
+    print(f"[GRID_ORDER] account={acct['id']} payload={payload} -> {data}", flush=True)
+    return jsonify(data), (code or 502)
+
+
+@app.route("/api/grid_order_cancel", methods=["POST"])
+def api_grid_order_cancel():
+    body = request.get_json(force=True, silent=True) or {}
+    acct = _find_account(body.get("account"))
+    if not acct:
+        return jsonify({"status": "error", "message": "bad_account"}), 400
+    payload = {"symbol": body.get("symbol")}
+    code, data = _console_call(acct, "POST", "/api/console/grid_order/cancel", body=payload)
+    print(f"[GRID_ORDER_CANCEL] account={acct['id']} payload={payload} -> {data}", flush=True)
+    return jsonify(data), (code or 502)
 
 
 @app.route("/api/strategy/registry")
