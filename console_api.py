@@ -588,12 +588,59 @@ def _auto_fill_price(payload: dict) -> None:
     logger.info(f"[控制台] {symbol} 漏填price，自动补现价 price={px}")
 
 
+def _auto_fill_atr(payload: dict) -> None:
+    """
+    控制面板专属兜底：LONG/SHORT 手动开仓漏填 atr 时，VPS 自己拉K线算一个。
+
+    独立拆出来，不依赖 TP 是否缺失——之前这段逻辑长在 _auto_fill_tp_via_atr
+    里面，只有 tp1/tp2/tp3 全部缺失时才会顺带算 ATR；如果用户自己填了TP
+    （比如照着图上量出来的价位），只漏填了ATR，会被那个函数"TP已齐→直接
+    return"的早退跳过，ATR永远补不上。position_supervisor_binance.py 那边
+    "开仓 initial_atr 只认 TV webhook.atr>0"是铁律，ATR缺失会被下游直接
+    拒开——2026-08-20实盘复现：手动发单ETHUSDT，TP1/2/3都填了但漏填ATR，
+    日志停在"开仓qty核算"那一步不再往下走，没有任何报错，控制台这边因为
+    price那次已经修过看着又像是"发出去了"，实际这笔根本没真正开仓。
+
+    只在控制台手动发单/编辑重放这两个入口调用，理由跟price/TP那两个兜底
+    一致：铁律防的是"VPS自己瞎猜TV该给什么"，这里是"用户自己手动开仓、
+    自己没给，VPS给个合理起点"，不是同一件事，不影响真实TV webhook路径。
+    """
+    action = str(payload.get("action") or "").strip().upper()
+    if action not in ("LONG", "SHORT"):
+        return
+    try:
+        atr_ok = float(payload.get("atr") or 0) > 0
+    except (TypeError, ValueError):
+        atr_ok = False
+    if atr_ok:
+        return
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return
+    try:
+        from strategy_engine import klines as _sk_klines
+        from strategy_engine import indicators as _sk_ind
+        bars = _sk_klines.get_bars(symbol, "15m", limit=60)
+        atr = _sk_ind.wilder_atr(bars, 14) if bars else 0.0
+    except Exception as e:
+        logger.warning(f"[控制台] {symbol} 漏填atr且自动拉取失败: {e}")
+        return
+    if atr <= 0:
+        logger.warning(f"[控制台] {symbol} 漏填atr且取不到有效ATR，跳过自动补")
+        return
+    payload["atr"] = round(atr, 6)
+    reason = str(payload.get("reason") or "").strip()
+    payload["reason"] = (reason + " [VPS自动补ATR]").strip()
+    logger.info(f"[控制台] {symbol} 漏填atr，自动补ATR atr={atr}")
+
+
 def _auto_fill_tp_via_atr(payload: dict) -> None:
     """
-    控制面板专属兜底：LONG/SHORT 手动开仓漏填 tp1/tp2/tp3 时，VPS 自己拉
-    15分钟K线算 ATR，按中趋势档参数(1.35/2.5/3.6×ATR)补出完整 TP123，
-    补完后行为跟真实 TV 信号开的仓完全一样——TP1/TP2 先锁 10%/20% 小部分
-    利润，剩余 70% 交给现有的递进雷达动态追踪(即"跟踪止盈")。
+    控制面板专属兜底：LONG/SHORT 手动开仓漏填 tp1/tp2/tp3 时，按中趋势档
+    参数(1.35/2.5/3.6×ATR)补出完整 TP123，补完后行为跟真实 TV 信号开的仓
+    完全一样——TP1/TP2 先锁 10%/20% 小部分利润，剩余 70% 交给现有的递进
+    雷达动态追踪(即"跟踪止盈")。ATR 本身由 _auto_fill_atr 保证先行补齐，
+    这里只管拿 atr 算 TP，不再重复拉K线。
 
     只在控制台手动发单/编辑重放这两个入口调用；真实 TV webhook 永远不
     经过这个函数，position_supervisor_binance.py 里"禁止 entry+ATR 本地
@@ -619,21 +666,10 @@ def _auto_fill_tp_via_atr(payload: dict) -> None:
     except (TypeError, ValueError):
         atr = 0.0
     symbol = str(payload.get("symbol") or "").strip().upper()
-    if atr <= 0 and symbol:
-        try:
-            from strategy_engine import klines as _sk_klines
-            from strategy_engine import indicators as _sk_ind
-            bars = _sk_klines.get_bars(symbol, "15m", limit=60)
-            if bars:
-                atr = _sk_ind.wilder_atr(bars, 14)
-        except Exception as e:
-            logger.warning(f"[控制台] 自动ATR拉取失败: {e}")
-            atr = 0.0
     if atr <= 0:
-        logger.warning(f"[控制台] {symbol} 缺TP且无法取得ATR，跳过自动补TP")
+        logger.warning(f"[控制台] {symbol} 缺TP且无有效ATR，跳过自动补TP")
         return
     direction = 1.0 if action == "LONG" else -1.0
-    payload["atr"] = round(atr, 6)
     payload["tp1"] = round(entry + direction * 1.35 * atr, 6)
     payload["tp2"] = round(entry + direction * 2.5 * atr, 6)
     payload["tp3"] = round(entry + direction * 3.6 * atr, 6)
@@ -666,6 +702,7 @@ def api_tv_signal_replay(signal_id):
     if not payload.get("reason"):
         payload["reason"] = f"[控制台重放#{signal_id}]"
     _auto_fill_price(payload)
+    _auto_fill_atr(payload)
     _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {
@@ -697,6 +734,7 @@ def api_tv_manual_send():
     if not payload.get("reason"):
         payload["reason"] = "[控制台手动发单]"
     _auto_fill_price(payload)
+    _auto_fill_atr(payload)
     _auto_fill_tp_via_atr(payload)
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {"X-TV-Source": "console_manual"})
