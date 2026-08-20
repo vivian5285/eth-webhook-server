@@ -158,7 +158,16 @@ NOISE_RE = re.compile(
     r"WS 断开|WS 错误|Websocket connected|增订:|币安公开 WS 启动|币安私有 WS 启动|"
     r"notify ok|持久化订单ID|清理陈旧防御标签|敞口校验通过|仓位预算|开仓qty核算|"
     r"^🏷️|"
-    r"TP已齐.*但止损未确认.*只补STOP"
+    r"TP已齐.*但止损未确认.*只补STOP|"
+    # 2026-08-20：跟watchdog/check.py同步——"终检防线未齐"是重启终检瞬间的
+    # 正常过渡状态，实测两次都是不到1秒内自己补挂修好，本面板有独立于
+    # watchdog的这一份anomaly解析(读同一份journalctl)，之前只在watchdog
+    # 那边过滤了，这里没同步，"异常N"角标照样会亮
+    r"终检防线未齐|"
+    # Telegram单次超时(还有重试机会)不算真失败，只有attempt=3/3才算真的
+    # 通知不出去
+    r"notify fail channel=telegram attempt=1/|"
+    r"notify fail channel=telegram attempt=2/"
 )
 
 KNOWN_HARMLESS_ERROR_RE = re.compile(
