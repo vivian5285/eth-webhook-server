@@ -1099,7 +1099,18 @@ class RadarReentryMixin:
             return
         hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
         now = time.time()
-        if hb_ts <= 0 or now - hb_ts > TV_HEARTBEAT_STALE_SEC:
+        # 2026-08-20修复：TV_HEARTBEAT_STALE_SEC固定4小时，但BCH/XMR的TV
+        # 图表周期是6小时(tv_tf_sec=21600)——每根收盘后到下一根收盘之间，
+        # 有近2小时心跳会被这条固定阈值误判成"太旧不可信"直接跳过，等于
+        # 这两个品种的漏单检测大半时间形同虚设。改成"至少2根K线的时间"
+        # 跟固定下限取更宽的那个，短周期品种不受影响，长周期品种才是
+        # 真正要解决的问题。
+        try:
+            tv_tf_sec = int(get_reentry_profile(self.symbol).get("tv_tf_sec") or 0)
+        except Exception:
+            tv_tf_sec = 0
+        stale_sec = max(TV_HEARTBEAT_STALE_SEC, tv_tf_sec * 2)
+        if hb_ts <= 0 or now - hb_ts > stale_sec:
             return  # 心跳太旧不可信，可能TV那边早换了状态但新心跳还没到
         if bool(getattr(self, "trading_paused", False)):
             return
