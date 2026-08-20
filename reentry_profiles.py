@@ -1218,7 +1218,17 @@ def can_smart_reenter(
 ) -> Tuple[bool, str]:
     """
     返回 (ok, reason)。硬止损 / 亏损 / 已重入过 / 窗口过期 / 区间外 /
-    TP1已成交 / 非强趋势 → 拒绝。
+    TP1已成交 → 拒绝。
+
+    2026-08-20实盘复现(SKHYNIXUSDT)：原规格8.1.6"仅强趋势tier=2允许重入"
+    是开仓那一刻的静态ADX快照，一次性判死不会重新评估——弱档开仓后离场，
+    不管后面行情多强都永久失去重入资格，而且这条检查排在下面的
+    outside_reentry_zone判断之前，弱/中档离场连"是不是该追单"这个判断
+    都走不到。改为不再用静态tier一票否决：入场资格改交给调用方(
+    radar_reentry_mixin.py)用当下实时多周期EMA+动量确认(_multi_tf_
+    trend_confirmed)重新判断，比一次性ADX标签更新鲜也更准；价格优势
+    保证(is_better_than_tv等)和max_reentries硬帽(在本函数更前面，
+    跟触发方式无关)完全不受影响，继续独立生效。
     """
     p = profile if isinstance(profile, dict) else REENTRY_ETH
     if not bool(p.get("enabled", True)):
@@ -1239,14 +1249,6 @@ def can_smart_reenter(
     # 规格 8.1.5：TP1 已成交过 → 禁止重入
     if bool(tp1_ever_filled):
         return False, "tp1_already_filled"
-    # 规格 8.1.6：仅强趋势 tier=2 允许重入
-    if adx_tier is not None:
-        try:
-            tier_i = int(adx_tier)
-        except (TypeError, ValueError):
-            tier_i = -1
-        if tier_i >= 0 and tier_i != 2:
-            return False, "tier_not_strong"
     deadline = float(window_deadline_ts or 0)
     if deadline > 0:
         ts = float(now if now is not None else time.time())

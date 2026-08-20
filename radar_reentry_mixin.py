@@ -695,17 +695,25 @@ class RadarReentryMixin:
             )
             if why in (
                 "hard_sl_no_reentry", "max_reentries", "tv_close_no_reentry",
-                "tp1_already_filled", "tier_not_strong",
+                "tp1_already_filled",
             ):
                 self._clear_reentry_cycle(source=why)
             elif (
                 why == "outside_reentry_zone"
                 and exit_src == "radar_be"
-                and int(snap.get("adx_tier") if snap.get("adx_tier") is not None else -1) == 2
                 and not bool(snap.get("tp1_ever_filled"))
                 and attempt < int(get_reentry_profile(self.symbol).get("max_reentries") or 1)
             ):
-                self._arm_chase_reentry_watch(side=side, exit_px=exit_px, atr=atr, attempt=attempt)
+                # 2026-08-20：不再要求adx_tier==2——开仓那一刻的静态tier快照
+                # 不代表后面行情走势，武装观察窗后交给多周期实时确认
+                # (_check_chase_reentry_confirmation)重新判断值不值得追，
+                # 比一次性tier标签更新鲜也更准（SKHYNIXUSDT实盘复现：弱档
+                # 开仓，之前直接被tier_not_strong永久挡死，连这个判断都
+                # 走不到）。
+                self._arm_chase_reentry_watch(
+                    side=side, exit_px=exit_px, atr=atr, attempt=attempt,
+                    deadline_ts=window_ts,
+                )
             return False
 
         # 闭环第一步：无菌确认（仓+单皆零）后才允许挂再入限价
@@ -769,9 +777,17 @@ class RadarReentryMixin:
         self._chase_watch_atr = 0.0
         self._chase_watch_attempt = 0
         self._chase_watch_deadline_ts = 0.0
+        self._chase_watch_armed_ts = 0.0
 
-    def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt):
-        """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。"""
+    def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt, deadline_ts=None):
+        """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。
+
+        2026-08-20：观察窗口从固定15分钟(_CHASE_CONFIRM_WINDOW_SEC)改为复用
+        品种自己的重入窗口(open_reentry_window，调用方已经算好传进来)——
+        原始案例(ETH 09:39止损、13:00-15:00才冲起来)本身就横跨几个小时，
+        固定15分钟根本盖不住这种"隔了大半天才确认"的真实行情，未传
+        deadline_ts时才退回旧的15分钟兜底（防止有遗漏的调用点传漏）。
+        """
         if bool(getattr(self, "_chase_watch_active", False)):
             return
         self._chase_watch_active = True
@@ -779,15 +795,20 @@ class RadarReentryMixin:
         self._chase_watch_exit_px = float(exit_px or 0)
         self._chase_watch_atr = float(atr or 0)
         self._chase_watch_attempt = int(attempt or 0)
-        self._chase_watch_deadline_ts = time.time() + _CHASE_CONFIRM_WINDOW_SEC
+        self._chase_watch_armed_ts = time.time()
+        dl = float(deadline_ts or 0)
+        self._chase_watch_deadline_ts = dl if dl > time.time() else (
+            time.time() + _CHASE_CONFIRM_WINDOW_SEC
+        )
         try:
             self._save_state()
         except Exception:
             pass
+        window_sec = self._chase_watch_deadline_ts - time.time()
         logger.info(
-            f"📡 [{self.symbol}] 武装追单确认窗口 {_CHASE_CONFIRM_WINDOW_SEC:.0f}s | "
+            f"📡 [{self.symbol}] 武装追单确认窗口 {window_sec:.0f}s | "
             f"side={self._chase_watch_side} exit={self._chase_watch_exit_px:.2f} "
-            f"→ 观察EMA+动量，确认继续延续才市价追回"
+            f"→ 观察多周期EMA+动量，确认继续延续才市价追回"
         )
 
     def _multi_tf_trend_signal(self, side: str, timeframes, adx_threshold=None) -> Dict[str, Any]:
@@ -957,7 +978,12 @@ class RadarReentryMixin:
             return
         # 观察窗口内一旦跌破(多)/涨破(空)过出场价，说明已经回头，不是"没回头的
         # 真延续"，直接放弃——只看武装之后新收的K线，避免拿到武装前的旧反转。
-        watch_bars = [b for b in bars if int(b[0]) >= (deadline - _CHASE_CONFIRM_WINDOW_SEC) * 1000]
+        # 2026-08-20：armed_ts单独存(不再用deadline反推)——观察窗口改成品种
+        # 自己的重入窗口(可能几小时)后，deadline-固定900s会算出一个跟真实
+        # 武装时间对不上的时间点，导致这里过滤出空列表、"有没有反转"这道
+        # 检查形同虚设。
+        armed_ts = float(getattr(self, "_chase_watch_armed_ts", 0) or 0) or (deadline - _CHASE_CONFIRM_WINDOW_SEC)
+        watch_bars = [b for b in bars if int(b[0]) >= armed_ts * 1000]
         if not watch_bars:
             watch_bars = bars[-6:]
         if side == "LONG":
