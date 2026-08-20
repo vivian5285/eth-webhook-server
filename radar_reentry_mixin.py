@@ -77,6 +77,16 @@ CATCHUP_MARKET_FALLBACK_SIZE_MULT = 0.7  # 2026-08-21：市价兜底那条腿没
                                           # 限价优价那条腿，仓位打七折，止损空间
                                           # /距离公式不受影响(只缩qty，止损公式
                                           # 依然按TV止损距离精确锚定)
+CATCHUP_MAX_CONCURRENT_PER_ACCOUNT = 2  # 2026-08-21实盘复现：同一账户短时间内
+                                         # 曾同时出现5个品种一起进入"等待EMA
+                                         # 确认"的观察名单(ETH/BNB/BCH/SKHYNIX/
+                                         # OPENAI)——如果好几个凑巧同时确认，会
+                                         # 在很短时间内并发挂出好几笔真实订单，
+                                         # 敞口叠加、没有账户级上限兜底。这里加
+                                         # 一道账户内"同时已武装(挂着真实订单)"
+                                         # 的追回周期数量上限，跟单笔固定中档
+                                         # 仓位一样走保守克制的路子，不追求一次
+                                         # 吃满所有机会。
 
 # 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
 # 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
@@ -131,6 +141,7 @@ class RadarReentryMixin:
         self._catchup_episode_entry = 0.0
         self._catchup_episode_resolved = False
         self._catchup_stale_give_up_alerted = False
+        self._catchup_capacity_blocked_alerted = False
 
     def _reentry_state_dict(self) -> Dict[str, Any]:
         return {
@@ -1209,8 +1220,11 @@ class RadarReentryMixin:
         self.tv_heartbeat_ts = time.time()
         # 收到任意一条新心跳(不管LONG/SHORT/FLAT)都代表"当下不算过期"，
         # 之前那次"观察期结束未执行"的去重标记翻篇，未来这条心跳再次过期
-        # 时应该能重新提醒，不会被上一段episode的标记永久压住。
+        # 时应该能重新提醒，不会被上一段episode的标记永久压住。同理账户
+        # 并发上限的去重标记也一起翻篇——名额之前满、现在可能已经空出来
+        # 或者又满了，值得重新评估/重新提醒一次。
         self._catchup_stale_give_up_alerted = False
+        self._catchup_capacity_blocked_alerted = False
         if side in ("LONG", "SHORT"):
             def _f(key):
                 try:
@@ -1394,6 +1408,38 @@ class RadarReentryMixin:
             )
             return
 
+        # 2026-08-21实盘复现：账户内曾同时出现5个品种一起进入观察名单——
+        # EMA都通过了不代表可以无限制并发下单，账户级同时"已武装"(挂着
+        # 真实订单)的追回周期数量设上限，超了就先让位，等有名额空出来
+        # 再武装，不会丢失这次机会(episode不算解决，下一轮tick继续评估)。
+        active_siblings = self._count_active_catchup_siblings()
+        if active_siblings >= CATCHUP_MAX_CONCURRENT_PER_ACCOUNT:
+            if not bool(getattr(self, "_catchup_capacity_blocked_alerted", False)):
+                self._catchup_capacity_blocked_alerted = True
+                logger.warning(
+                    f"🚦 [{self.symbol}] TV心跳追回：多周期EMA已确认{hb_side}，"
+                    f"但账户内已有{active_siblings}个品种同时武装追回"
+                    f"(上限{CATCHUP_MAX_CONCURRENT_PER_ACCOUNT}) → 先让位，"
+                    f"等有名额再挂单"
+                )
+                try:
+                    import dingtalk
+                    self._dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"TV心跳追回：账户并发上限已满，暂缓 [{self.symbol}]",
+                        detail=(
+                            f"多周期EMA已确认{hb_side}方向延续，但账户内已有"
+                            f"{active_siblings}个品种同时武装追回(上限"
+                            f"{CATCHUP_MAX_CONCURRENT_PER_ACCOUNT})，本次先让位，"
+                            f"等有名额空出来会自动重新评估，不会丢失机会。"
+                        ),
+                        level="提示",
+                        notify_level=1,
+                    )
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 并发上限提醒钉钉跳过: {e}")
+            return
+
         self._catchup_episode_side = hb_side
         self._catchup_episode_entry = hb_entry
         self._catchup_episode_resolved = False
@@ -1419,6 +1465,25 @@ class RadarReentryMixin:
         )
         self._place_tv_catchup_limit(reason="漏单追回·首次挂单")
 
+    def _count_active_catchup_siblings(self) -> int:
+        """账户内(同一进程SUPERVISORS，一个账户的所有品种军师都在同一个
+        gunicorn worker进程里)当前有几个品种正处于已武装的追回周期
+        (catchup_active=True，挂着真实交易所订单)，不含自己。局部导入
+        避免跟position_supervisor_binance.py的模块级循环引用——
+        position_supervisor_binance在模块顶部导入RadarReentryMixin，
+        这里只能在函数体内、调用那一刻才反向导入，不能放模块顶部。"""
+        try:
+            from position_supervisor_binance import SUPERVISORS
+        except Exception:
+            return 0
+        count = 0
+        for sym, sup in SUPERVISORS.items():
+            if sup is self:
+                continue
+            if bool(getattr(sup, "catchup_active", False)):
+                count += 1
+        return count
+
     def _maybe_notify_catchup_watch_expired(self):
         """2026-08-21追加：心跳漏单曾经报过警(_tv_gap_alerted)、但始终没能
         等到多周期EMA一致确认，心跳自己先过期了——不能就这么默默不再评估。
@@ -1434,8 +1499,8 @@ class RadarReentryMixin:
             return  # 已经武装的周期有自己的收尾路径(成交/中止)，不归这里管
         self._catchup_stale_give_up_alerted = True
         logger.warning(
-            f"⌛ [{self.symbol}] TV心跳追回观察期结束：心跳已过期，多周期EMA"
-            f"始终未能一致确认 → 本次未执行任何追回动作"
+            f"⌛ [{self.symbol}] TV心跳追回观察期结束：心跳已过期，始终未能"
+            f"满足追回条件(多周期EMA确认/账户并发名额) → 本次未执行任何追回动作"
         )
         try:
             import dingtalk
@@ -1443,9 +1508,10 @@ class RadarReentryMixin:
                 dingtalk.report_system_alert,
                 title=f"TV心跳追回：观察期结束未执行 [{self.symbol}]",
                 detail=(
-                    "之前提醒过TV持仓但VPS空仓的疑似漏单——观察期内多周期EMA"
-                    "始终未能一致确认延续该方向，心跳数据现已过期，本次不再"
-                    "追回。若TV后续仍持有该方向，下一次新心跳到达会重新评估。"
+                    "之前提醒过TV持仓但VPS空仓的疑似漏单——观察期内始终未能"
+                    "满足追回条件(多周期EMA一致确认延续该方向、和/或账户内"
+                    "并发追回名额)，心跳数据现已过期，本次不再追回。若TV"
+                    "后续仍持有该方向，下一次新心跳到达会重新评估。"
                 ),
                 level="提示",
                 notify_level=1,
