@@ -130,6 +130,7 @@ class RadarReentryMixin:
         self._catchup_episode_side = None
         self._catchup_episode_entry = 0.0
         self._catchup_episode_resolved = False
+        self._catchup_stale_give_up_alerted = False
 
     def _reentry_state_dict(self) -> Dict[str, Any]:
         return {
@@ -1206,6 +1207,10 @@ class RadarReentryMixin:
             side = "FLAT"
         self.tv_heartbeat_side = side
         self.tv_heartbeat_ts = time.time()
+        # 收到任意一条新心跳(不管LONG/SHORT/FLAT)都代表"当下不算过期"，
+        # 之前那次"观察期结束未执行"的去重标记翻篇，未来这条心跳再次过期
+        # 时应该能重新提醒，不会被上一段episode的标记永久压住。
+        self._catchup_stale_give_up_alerted = False
         if side in ("LONG", "SHORT"):
             def _f(key):
                 try:
@@ -1332,6 +1337,7 @@ class RadarReentryMixin:
         hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
         now = time.time()
         if hb_ts <= 0 or now - hb_ts > self._tv_heartbeat_stale_sec():
+            self._maybe_notify_catchup_watch_expired()
             return
         if bool(getattr(self, "trading_paused", False)):
             return
@@ -1412,6 +1418,40 @@ class RadarReentryMixin:
             f"stop_dist={self.catchup_stop_distance_frozen:.4f}"
         )
         self._place_tv_catchup_limit(reason="漏单追回·首次挂单")
+
+    def _maybe_notify_catchup_watch_expired(self):
+        """2026-08-21追加：心跳漏单曾经报过警(_tv_gap_alerted)、但始终没能
+        等到多周期EMA一致确认，心跳自己先过期了——不能就这么默默不再评估。
+        跟成交/中止/市价兜底一样补一条收尾钉钉，宝贝不用自己去翻dashboard
+        才知道"这次已经不追了"。一次性通知，同一段episode不重复刷屏；
+        新心跳一来(record_tv_heartbeat)就会清掉这个去重标记，下一段episode
+        该提醒还是会提醒。"""
+        if not bool(getattr(self, "_tv_gap_alerted", False)):
+            return  # 连"疑似漏单"这条报警都没触发过，谈不上"放弃"
+        if bool(getattr(self, "_catchup_stale_give_up_alerted", False)):
+            return
+        if bool(getattr(self, "catchup_active", False)):
+            return  # 已经武装的周期有自己的收尾路径(成交/中止)，不归这里管
+        self._catchup_stale_give_up_alerted = True
+        logger.warning(
+            f"⌛ [{self.symbol}] TV心跳追回观察期结束：心跳已过期，多周期EMA"
+            f"始终未能一致确认 → 本次未执行任何追回动作"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"TV心跳追回：观察期结束未执行 [{self.symbol}]",
+                detail=(
+                    "之前提醒过TV持仓但VPS空仓的疑似漏单——观察期内多周期EMA"
+                    "始终未能一致确认延续该方向，心跳数据现已过期，本次不再"
+                    "追回。若TV后续仍持有该方向，下一次新心跳到达会重新评估。"
+                ),
+                level="提示",
+                notify_level=1,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 追回观察期结束钉钉跳过: {e}")
 
     def _fetch_catchup_klines(self):
         """15m为主档、5m为副档——拉回来的两档各取极值后交给
