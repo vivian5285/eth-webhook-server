@@ -291,6 +291,16 @@ DEFENSE_RESTORED_WINDOW_SEC = 30
 LOG_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+")
 FLAT_CONFIRM_WINDOW_SEC = 90
 
+# 2026-08-20：币安公开/私有WS偶尔断线是长连接的正常背景噪音（实测24小时内
+# 每账户4-6次，跟当前有没有持仓无关），断线到自动重连一般1秒多就完事，
+# 之前这类[ERROR]被原样当真异常报出去，面板"异常"角标一直亮着，D账户
+# 空仓也照样报，容易让人误以为出了真问题。跟上面CLOSING_CHATTER_RE同一
+# 思路：只有能在断线后短窗口内找到"Websocket connected"重连成功证据才
+# 降级为噪音；真断了没重连回来（网络/VPS层面问题）依然照常上报，不会漏报。
+WS_DISCONNECT_RE = re.compile(r"Connection to remote host was lost\. - goodbye")
+WS_RECONNECTED_RE = re.compile(r"Websocket connected")
+WS_SELFHEAL_WINDOW_SEC = 10  # 实测重连约1.3秒完成，留出余量
+
 
 def fetch_real_errors(acct: dict, minutes: int = 12) -> list:
     """
@@ -307,6 +317,7 @@ def fetch_real_errors(acct: dict, minutes: int = 12) -> list:
 
     flat_confirm_ts = []
     defense_restored_ts = []
+    ws_reconnect_ts = []
     for line in lines:
         m = None
         if FLAT_CONFIRM_RE.search(line):
@@ -327,6 +338,15 @@ def fetch_real_errors(acct: dict, minutes: int = 12) -> list:
                     )
                 except Exception:
                     pass
+        if WS_RECONNECTED_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    ws_reconnect_ts.append(
+                        datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    )
+                except Exception:
+                    pass
 
     errs = []
     for line in lines:
@@ -334,6 +354,19 @@ def fetch_real_errors(acct: dict, minutes: int = 12) -> list:
             continue
         if any(p in line for p in NOISE_ERROR_PATTERNS):
             continue
+        if WS_DISCONNECT_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    healed = any(
+                        0 <= (r - ts).total_seconds() <= WS_SELFHEAL_WINDOW_SEC
+                        for r in ws_reconnect_ts
+                    )
+                    if healed:
+                        continue
+                except Exception:
+                    pass
         if CLOSING_CHATTER_RE.search(line):
             m = LOG_TS_RE.search(line)
             if m:
@@ -549,6 +582,13 @@ def main():
     maybe_send_heartbeat(state)
 
     if anomalies:
+        # 2026-08-18：之前这里只打印一行计数，被去重吞掉的异常详情就彻底
+        # 丢了（DingTalk 30分钟内同一异常不重发，但问题其实一直存在）。
+        # dashboard 的"监督狗日志"面板要展示真实明细，所以这里把每条异常
+        # 原文也打进 journalctl——每轮都打，不受钉钉去重影响，读日志的人
+        # 能看到问题从第一次出现到消失的完整过程。
+        for a in anomalies:
+            print(f"[ANOMALY] {a['key']} | {a['text']}")
         print(f"本轮发现 {len(anomalies)} 条异常，{len(to_send)} 条新发送")
     else:
         print("本轮无异常")
