@@ -775,6 +775,53 @@ class RadarReentryMixin:
             f"→ 观察EMA+动量，确认继续延续才市价追回"
         )
 
+    def _multi_tf_trend_confirmed(self, side: str, timeframes=("5m", "15m", "30m")) -> bool:
+        """多周期EMA+动量一致确认：每个周期都要"现价站上快线+快线在慢线上方+
+        动量非噪音"才算真延续，任一周期没过就整体不通过。
+
+        2026-08-20 SKHYNIX实盘复现：雷达保本止损出局后TV心跳仍显示持仓，
+        若只看15m，当时快线(1207.47)仍压着慢线(1201.37)，结构看着"还行"；
+        但5m快慢线已经死叉、三个周期现价其实都已跌破快线、动量全部转负——
+        单一周期确认会漏判这种"大结构没破但已经在走弱"的情况，误导去追单。
+        改成三个周期全部一致才算数，任何一个周期掉链子就不追。
+        """
+        try:
+            from binance_client import binance_client
+            from market_engine import ema_series, bar_momentum_score
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 多周期确认依赖导入跳过: {e}")
+            return False
+        side = str(side or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return False
+        for tf in timeframes:
+            try:
+                bars = binance_client.fetch_klines(self.symbol, interval=tf, limit=60)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 多周期确认取{tf}K线跳过: {e}")
+                return False
+            if not bars or len(bars) < 31:
+                return False
+            closes = [float(b[4]) for b in bars]
+            ema_f = ema_series(closes, 15)
+            ema_s = ema_series(closes, 30)
+            if not ema_f or not ema_s:
+                return False
+            last_close = closes[-1]
+            fast_now, slow_now = ema_f[-1], ema_s[-1]
+            mom = bar_momentum_score(bars, lookback=3)
+            if side == "LONG":
+                ok = last_close > fast_now > slow_now and mom >= _CHASE_MOMENTUM_MIN
+            else:
+                ok = last_close < fast_now < slow_now and mom <= -_CHASE_MOMENTUM_MIN
+            if not ok:
+                logger.info(
+                    f"📉 [{self.symbol}] 多周期确认在{tf}未通过 | close={last_close:.4f} "
+                    f"ema_fast={fast_now:.4f} ema_slow={slow_now:.4f} momentum={mom:.3f}"
+                )
+                return False
+        return True
+
     def _check_chase_reentry_confirmation(self):
         """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才市价追回。"""
         if not bool(getattr(self, "_chase_watch_active", False)):
@@ -795,7 +842,6 @@ class RadarReentryMixin:
             return
         try:
             from binance_client import binance_client
-            from market_engine import ema_series, bar_momentum_score
         except Exception as e:
             logger.debug(f"[{self.symbol}] 追单确认依赖导入跳过: {e}")
             return
@@ -806,14 +852,6 @@ class RadarReentryMixin:
             return
         if not bars or len(bars) < 31:
             return
-        closes = [float(b[4]) for b in bars]
-        ema_fast_series = ema_series(closes, 15)
-        ema_slow_series = ema_series(closes, 30)
-        if not ema_fast_series or not ema_slow_series:
-            return
-        last_close = closes[-1]
-        fast_now, slow_now = ema_fast_series[-1], ema_slow_series[-1]
-        mom = bar_momentum_score(bars, lookback=3)
         # 观察窗口内一旦跌破(多)/涨破(空)过出场价，说明已经回头，不是"没回头的
         # 真延续"，直接放弃——只看武装之后新收的K线，避免拿到武装前的旧反转。
         watch_bars = [b for b in bars if int(b[0]) >= (deadline - _CHASE_CONFIRM_WINDOW_SEC) * 1000]
@@ -821,24 +859,13 @@ class RadarReentryMixin:
             watch_bars = bars[-6:]
         if side == "LONG":
             reversed_back = any(float(b[3]) < exit_px for b in watch_bars)
-            confirmed = (
-                not reversed_back
-                and last_close > fast_now > slow_now
-                and mom >= _CHASE_MOMENTUM_MIN
-            )
         else:
             reversed_back = any(float(b[2]) > exit_px for b in watch_bars)
-            confirmed = (
-                not reversed_back
-                and last_close < fast_now < slow_now
-                and mom <= -_CHASE_MOMENTUM_MIN
-            )
-        if not confirmed:
+        if reversed_back:
             return
-        logger.info(
-            f"📡 [{self.symbol}] 追单确认通过 | close={last_close:.2f} "
-            f"ema15={fast_now:.2f} ema30={slow_now:.2f} momentum={mom:.2f} → 市价追回"
-        )
+        if not self._multi_tf_trend_confirmed(side):
+            return
+        logger.info(f"📡 [{self.symbol}] 多周期追单确认通过(5m/15m/30m一致) → 市价追回")
         self._execute_chase_reentry(side)
 
     def _execute_chase_reentry(self, side):
