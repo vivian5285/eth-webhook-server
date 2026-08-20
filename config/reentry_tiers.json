@@ -1,13 +1,13 @@
 {
   "schema": "v2.8-per-symbol-calibration",
-  "note": "规格 v2.2（覆盖v2.1）：首次开仓雷达激活 = 距TP1剩20%与顺向浮盈满1×ATR谁先到（详见 reentry_profiles.radar_gate_price_from_tps）；重入开仓 = TP2。TP1是否成交仅记日志不阻塞。取消提前保本检查点。2026-08-10实盘发现：v2.1步进参数(step_trigger/step_advance)放宽后仍明显比同期呼吸空间(breath_tp12)紧，导致仓位浮盈仅数美元的余地就贴止损——因为止损公式取阶梯止损与呼吸空间止损中更紧的那个，阶梯不松、呼吸空间的改进就白做。本次step_trigger整体上调约40-65%、step_advance整体下调约35-45%，让呼吸空间机制能实际接管，不再被更紧的阶梯抢跑。v2.7（2026-08-11）：step_trigger不动（保留'等多久才收第一档'的保护，避免重蹈提前出局覆辙），但step_advance/step_trigger捕获比例从约25%提到50%——实盘发现ZEC强趋势档单子已顺向走了2.25×ATR，阶梯却只触发1档、只锁住约22%的浮盈，大部分利润裸奔；呼吸空间(breath_tp12)本身没被顶到，真正卡住止损的是阶梯每档收得太少。",
+  "note": "规格 v2.2（覆盖v2.1）：首次开仓雷达激活 = 距TP1剩20%与顺向浮盈满1×ATR谁先到（详见 reentry_profiles.radar_gate_price_from_tps）；重入开仓 = TP2。TP1是否成交仅记日志不阻塞。取消提前保本检查点。2026-08-10实盘发现：v2.1步进参数(step_trigger/step_advance)放宽后仍明显比同期呼吸空间(breath_tp12)紧，导致仓位浮盈仅数美元的余地就贴止损——因为止损公式取阶梯止损与呼吸空间止损中更紧的那个，阶梯不松、呼吸空间的改进就白做。本次step_trigger整体上调约40-65%、step_advance整体下调约35-45%，让呼吸空间机制能实际接管，不再被更紧的阶梯抢跑。v2.7（2026-08-11）：step_trigger不动（保留'等多久才收第一档'的保护，避免重蹈提前出局覆辙），但step_advance/step_trigger捕获比例从约25%提到50%——实盘发现ZEC强趋势档单子已顺向走了2.25×ATR，阶梯却只触发1档、只锁住约22%的浮盈，大部分利润裸奔；呼吸空间(breath_tp12)本身没被顶到，真正卡住止损的是阶梯每档收得太少。2026-08-20：max_reentries从1提到2——离场性质本来就是radar_be(保本，不是真亏钱)，每次重入都要重新过一遍实时多周期确认(不是无脑重复)，风险增量可控；同一晚配合把'仅tier=2允许重入'的静态闸门换成实时多周期确认，弱/中档离场也有机会被重新评估。",
   "arm_mode": "breakeven_fee",
   "arm_sl_atr": 0.0,
   "fee_cover_pct": 0.0008,
   "phase_switch_atr": 3.0,
   "limit_discount": 0.003,
   "limit_ttl_sec": 300,
-  "max_reentries": 1,
+  "max_reentries": 2,
   "max_unfilled_refreshes": 5,
   "adx_bounds": {
     "weak_lt": 20,

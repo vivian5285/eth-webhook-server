@@ -1171,6 +1171,38 @@ class RadarReentryMixin:
                 )
                 self._cancel_reentry_limit(reason="未成交超限")
                 self.reentry_active = False
+                # 2026-08-20：限价反复够不着价，可能是趋势太强、价格一直没回踩——
+                # 不直接放弃，radar_be退出+TP1没成交(此刻仓位还没成交过，
+                # 这个前提在_maybe_start_smart_limit_reentry入口就已验证过，
+                # 这里不会变)+重入名额没用完，交给追单确认接手(多周期实时
+                # 确认+市价追)，跟今天统一的"入场资格看实时确认，不轻易放弃"
+                # 是同一个思路，不留死路。
+                try:
+                    exit_src = str(getattr(self, "last_exit_source", "") or "")
+                    attempt = int(getattr(self, "reentry_attempt", 0) or 0)
+                    max_n = int(get_reentry_profile(self.symbol).get("max_reentries") or 1)
+                    side_now = str(getattr(self, "cycle_tv_side", "") or "").upper()
+                    exit_px_now = float(getattr(self, "last_exit_px", 0) or 0)
+                    if (
+                        exit_src == "radar_be"
+                        and attempt < max_n
+                        and side_now in ("LONG", "SHORT")
+                        and exit_px_now > 0
+                    ):
+                        atr_now = float(
+                            getattr(self, "cycle_open_atr", 0)
+                            or getattr(self, "open_atr", 0)
+                            or 0
+                        )
+                        deadline = float(
+                            getattr(self, "reentry_window_deadline_ts", 0) or 0
+                        )
+                        self._arm_chase_reentry_watch(
+                            side=side_now, exit_px=exit_px_now, atr=atr_now,
+                            attempt=attempt, deadline_ts=deadline,
+                        )
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 限价超限转追单确认跳过: {e}")
                 self._clear_reentry_cycle(source="unfilled_refresh_cap")
                 return False
             # TTL：必须先撤旧 + 释放旧标签，才能生成新标签
