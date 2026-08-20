@@ -224,6 +224,40 @@ def wilder_adx(bars: Sequence, period: int = ADX_PERIOD) -> float:
     return float(adx)
 
 
+def rsi_series(bars: Sequence, period: int = 14) -> List[float]:
+    """标准Wilder RSI序列，跟atr_series同款首值SMA种子+后续Wilder平滑写法。"""
+    if not bars or len(bars) < period + 1:
+        return []
+    closes = [_f(b[4]) for b in bars]
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    if len(gains) < period:
+        return []
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    def _rsi(ag, al):
+        if al <= 0:
+            return 100.0
+        rs = ag / al
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    series = [_rsi(avg_gain, avg_loss)]
+    for g, l in zip(gains[period:], losses[period:]):
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+        series.append(_rsi(avg_gain, avg_loss))
+    return series
+
+
+def wilder_rsi(bars: Sequence, period: int = 14) -> float:
+    series = rsi_series(bars, period)
+    return float(series[-1]) if series else 0.0
+
+
 def implied_atr_from_stop(
     entry: float, stop_loss: float, mult: float = TV_HARD_SL_ATR_MULT
 ) -> float:

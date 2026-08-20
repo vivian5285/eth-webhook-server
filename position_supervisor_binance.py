@@ -125,7 +125,7 @@ from reentry_profiles import (
     tier_label,
 )
 from smart_reentry_engine import blank_reentry_state
-from radar_reentry_mixin import RadarReentryMixin
+from radar_reentry_mixin import RadarReentryMixin, MEGA_TREND_CEILING_MULT
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
 # smart_tp_reconciliation 已废除（v2简化架构）
@@ -5081,6 +5081,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             coeff = float(coeff or 1.0) * tp_scale
         except Exception:
             pass
+        # 2026-08-20：多周期确认的大趋势——15m/1h/4h/日线四选三一致+4h RSI
+        # 非超买超卖，才抬高TP3+跟随系数上限（详见radar_reentry_mixin.py
+        # ::_maybe_refresh_mega_trend顶部注释）。只放宽退出耐心，不影响
+        # 开不开仓；_maybe_refresh_mega_trend自带240s节流，这里调用很便宜。
+        try:
+            self._maybe_refresh_mega_trend()
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 大趋势确认刷新跳过: {e}")
+        mega_trend = bool(getattr(self, "_mega_trend_confirmed", False))
+        if mega_trend:
+            coeff = float(coeff) * MEGA_TREND_CEILING_MULT
         self._tp_amplitude_scale = tp_scale
         self.breathing_coefficient = float(coeff or 1.0)
         self._breath_coeff_meta = {
@@ -5089,6 +5100,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             "adx": float(getattr(self, "last_adx", 0) or 0),
             "momentum": mom,
             "tp_amplitude_scale": tp_scale,
+            "mega_trend_confirmed": mega_trend,
             "coeff": self.breathing_coefficient,
             "source": "live_adx_momentum_tpscale",
             "ratio_history": list(getattr(self, "_breath_ratio_history", None) or []),

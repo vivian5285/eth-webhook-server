@@ -58,6 +58,21 @@ _CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
 TV_HEARTBEAT_STALE_SEC = 4 * 3600.0  # 心跳超过4小时没刷新就不当最新真相用
 TV_HEARTBEAT_GAP_GRACE_SEC = 180.0   # 心跳持仓但实盘空仓，持续超过3分钟才判定漏单
 
+# 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
+# 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
+# 距离即使判定"强趋势档"也有固定上限，遇到真正多周期共振的大趋势不够宽。
+# 15m/1h/4h/日线四选三确认一致趋势 + 4h RSI超买超卖(78/22)反向刹车，确认
+# 后把TP3+跟随系数上限抬高35%——只放宽"退出的耐心"，不放宽"入场的胆子"，
+# 不影响开不开仓/要不要重入，只影响持仓中雷达愿不愿意多给一点跟随空间。
+# 详见 position_supervisor_binance.py::_refresh_breathing_coefficient。
+MEGA_TREND_TIMEFRAMES = ("15m", "1h", "4h", "1d")
+MEGA_TREND_ADX_THRESHOLD = 30.0
+MEGA_TREND_VOTE_MIN = 3  # 四选三
+MEGA_TREND_RSI_LONG_MAX = 78.0
+MEGA_TREND_RSI_SHORT_MIN = 22.0
+MEGA_TREND_CEILING_MULT = 1.35
+MEGA_TREND_REFRESH_SEC = 240.0
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -775,6 +790,60 @@ class RadarReentryMixin:
             f"→ 观察EMA+动量，确认继续延续才市价追回"
         )
 
+    def _multi_tf_trend_signal(self, side: str, timeframes, adx_threshold=None) -> Dict[str, Any]:
+        """
+        多周期趋势一致性评估（纯评估，不下单）。对每个周期各拉K线，判断
+        "现价站上快线+快线在慢线上方(方向跟side一致)+动量非噪音"；
+        adx_threshold给定时额外要求该周期Wilder ADX超过阈值才算过。
+        返回 {tf: {"pass":bool,"close":...,"ema_fast":...,"ema_slow":...,
+        "momentum":...,"adx":...,"bars":[...]}, ..., "score": int, "total": int}。
+        每个周期的bars顺手带出，调用方(如RSI刹车)能直接复用不用再拉一次。
+        """
+        result: Dict[str, Any] = {"score": 0, "total": len(timeframes)}
+        side = str(side or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return result
+        try:
+            from binance_client import binance_client
+            from market_engine import ema_series, bar_momentum_score, wilder_adx
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 多周期趋势评估依赖导入跳过: {e}")
+            return result
+        for tf in timeframes:
+            entry: Dict[str, Any] = {"pass": False}
+            result[tf] = entry
+            try:
+                bars = binance_client.fetch_klines(self.symbol, interval=tf, limit=60)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 多周期趋势评估取{tf}K线跳过: {e}")
+                continue
+            if not bars or len(bars) < 31:
+                continue
+            closes = [float(b[4]) for b in bars]
+            ema_f = ema_series(closes, 15)
+            ema_s = ema_series(closes, 30)
+            if not ema_f or not ema_s:
+                continue
+            last_close = closes[-1]
+            fast_now, slow_now = ema_f[-1], ema_s[-1]
+            mom = bar_momentum_score(bars, lookback=3)
+            entry.update({
+                "close": last_close, "ema_fast": fast_now, "ema_slow": slow_now,
+                "momentum": mom, "bars": bars,
+            })
+            if side == "LONG":
+                ok = last_close > fast_now > slow_now and mom >= _CHASE_MOMENTUM_MIN
+            else:
+                ok = last_close < fast_now < slow_now and mom <= -_CHASE_MOMENTUM_MIN
+            if ok and adx_threshold is not None:
+                adx = wilder_adx(bars, 14)
+                entry["adx"] = adx
+                ok = adx >= float(adx_threshold)
+            entry["pass"] = bool(ok)
+            if ok:
+                result["score"] += 1
+        return result
+
     def _multi_tf_trend_confirmed(self, side: str, timeframes=("5m", "15m", "30m")) -> bool:
         """多周期EMA+动量一致确认：每个周期都要"现价站上快线+快线在慢线上方+
         动量非噪音"才算真延续，任一周期没过就整体不通过。
@@ -784,43 +853,77 @@ class RadarReentryMixin:
         但5m快慢线已经死叉、三个周期现价其实都已跌破快线、动量全部转负——
         单一周期确认会漏判这种"大结构没破但已经在走弱"的情况，误导去追单。
         改成三个周期全部一致才算数，任何一个周期掉链子就不追。
+
+        实现改为调用共享的 _multi_tf_trend_signal(adx_threshold=None)，行为
+        保持不变——严格全过(score==total)，不查ADX。
         """
-        try:
-            from binance_client import binance_client
-            from market_engine import ema_series, bar_momentum_score
-        except Exception as e:
-            logger.debug(f"[{self.symbol}] 多周期确认依赖导入跳过: {e}")
+        sig = self._multi_tf_trend_signal(side, timeframes, adx_threshold=None)
+        total = int(sig.get("total") or 0)
+        score = int(sig.get("score") or 0)
+        if total <= 0:
             return False
-        side = str(side or "").upper()
+        confirmed = score == total
+        if not confirmed:
+            for tf in timeframes:
+                e = sig.get(tf) or {}
+                if not e.get("pass"):
+                    logger.info(
+                        f"📉 [{self.symbol}] 多周期确认在{tf}未通过 | "
+                        f"close={float(e.get('close') or 0):.4f} "
+                        f"ema_fast={float(e.get('ema_fast') or 0):.4f} "
+                        f"ema_slow={float(e.get('ema_slow') or 0):.4f} "
+                        f"momentum={float(e.get('momentum') or 0):.3f}"
+                    )
+        return confirmed
+
+    def _maybe_refresh_mega_trend(self):
+        """节流刷新"确认大趋势"判定——成本高(4个周期各一次REST)，不能挂在
+        每个sentinel tick上，跟_maybe_refresh_atr同款节流模式，240s一次。
+        结果写入self._mega_trend_confirmed，供_refresh_breathing_coefficient
+        读取放宽TP3+跟随系数上限。"""
+        now = time.time()
+        last = float(getattr(self, "_mega_trend_last_refresh_ts", 0) or 0)
+        if last > 0 and (now - last) < MEGA_TREND_REFRESH_SEC:
+            return
+        self._mega_trend_last_refresh_ts = now
+        side = str(getattr(self, "current_side", "") or "").upper()
         if side not in ("LONG", "SHORT"):
-            return False
-        for tf in timeframes:
+            self._mega_trend_confirmed = False
+            return
+        sig = self._multi_tf_trend_signal(
+            side, MEGA_TREND_TIMEFRAMES, adx_threshold=MEGA_TREND_ADX_THRESHOLD,
+        )
+        score = int(sig.get("score") or 0)
+        confirmed = score >= MEGA_TREND_VOTE_MIN
+        if confirmed:
+            bars_4h = (sig.get("4h") or {}).get("bars") or []
             try:
-                bars = binance_client.fetch_klines(self.symbol, interval=tf, limit=60)
+                from market_engine import wilder_rsi
+                rsi_4h = float(wilder_rsi(bars_4h, 14)) if bars_4h else 0.0
             except Exception as e:
-                logger.debug(f"[{self.symbol}] 多周期确认取{tf}K线跳过: {e}")
-                return False
-            if not bars or len(bars) < 31:
-                return False
-            closes = [float(b[4]) for b in bars]
-            ema_f = ema_series(closes, 15)
-            ema_s = ema_series(closes, 30)
-            if not ema_f or not ema_s:
-                return False
-            last_close = closes[-1]
-            fast_now, slow_now = ema_f[-1], ema_s[-1]
-            mom = bar_momentum_score(bars, lookback=3)
-            if side == "LONG":
-                ok = last_close > fast_now > slow_now and mom >= _CHASE_MOMENTUM_MIN
-            else:
-                ok = last_close < fast_now < slow_now and mom <= -_CHASE_MOMENTUM_MIN
-            if not ok:
+                logger.debug(f"[{self.symbol}] 4h RSI计算跳过: {e}")
+                rsi_4h = 0.0
+            if side == "LONG" and rsi_4h > MEGA_TREND_RSI_LONG_MAX:
                 logger.info(
-                    f"📉 [{self.symbol}] 多周期确认在{tf}未通过 | close={last_close:.4f} "
-                    f"ema_fast={fast_now:.4f} ema_slow={slow_now:.4f} momentum={mom:.3f}"
+                    f"🌡️ [{self.symbol}] 多周期趋势够(score={score}/4)但4h RSI="
+                    f"{rsi_4h:.1f}>{MEGA_TREND_RSI_LONG_MAX:.0f}疑似超买 → 不放宽"
                 )
-                return False
-        return True
+                confirmed = False
+            elif side == "SHORT" and rsi_4h < MEGA_TREND_RSI_SHORT_MIN:
+                logger.info(
+                    f"🌡️ [{self.symbol}] 多周期趋势够(score={score}/4)但4h RSI="
+                    f"{rsi_4h:.1f}<{MEGA_TREND_RSI_SHORT_MIN:.0f}疑似超卖 → 不放宽"
+                )
+                confirmed = False
+        prev = bool(getattr(self, "_mega_trend_confirmed", False))
+        self._mega_trend_confirmed = confirmed
+        if confirmed and not prev:
+            logger.info(
+                f"🚀 [{self.symbol}] 确认多周期大趋势(score={score}/4) → "
+                f"TP3+跟随系数上限×{MEGA_TREND_CEILING_MULT}"
+            )
+        elif prev and not confirmed:
+            logger.info(f"📉 [{self.symbol}] 大趋势确认解除(score={score}/4)")
 
     def _check_chase_reentry_confirmation(self):
         """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才市价追回。"""
