@@ -21,8 +21,14 @@ from dingtalk_notify import send_text
 ACCOUNTS = [
     {"name": "B", "port": 5007, "dir": "/home/binanceB/binance-engine", "service": "binanceB-engine"},
     {"name": "C", "port": 5008, "dir": "/home/binanceC/binance-engine", "service": "binanceC-engine"},
-    {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine"},
+    # 2026-08-20：D账户暂停监控——没放资金(权益0)也没接TV，任何健康/持仓/
+    # 开仓检查对它来说本来就该是空的，反而容易制造假警报(比如今天验证网格
+    # 套利闸门时D的"sizing拒绝：权益=0.0"就是预期内的正常拒绝，不是故障)。
+    # monitor=False只是跳过检查，D账户本身/binance_vps_state文件都还在，
+    # 以后放资金接TV了，把这行改回True (或直接删掉这个key) 即可恢复监控。
+    {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine", "monitor": False},
 ]
+MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
 SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT"]
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
@@ -439,7 +445,7 @@ def run_once() -> list:
             "text": f"💽 VPS磁盘使用率 {disk['pct']}% 已过高，可能拖累日志/状态写入",
         })
 
-    for acct in ACCOUNTS:
+    for acct in MONITORED_ACCOUNTS:
         name = acct["name"]
         h = check_health(acct)
         if not h["ok"]:
@@ -548,7 +554,7 @@ def maybe_send_heartbeat(state: dict) -> None:
     tag = f"{now.date()}:{now.hour}"
     if now.hour in HEARTBEAT_HOURS and state.get("last_heartbeat_date_hour") != tag:
         lines = [f"【watchdog心跳】{now.strftime('%Y-%m-%d %H:%M UTC')}"]
-        for acct in ACCOUNTS:
+        for acct in MONITORED_ACCOUNTS:
             pos_data = fetch_positions_and_orders(acct)
             held = [s for s, i in (pos_data or {}).items() if i.get("side")]
             if held:
