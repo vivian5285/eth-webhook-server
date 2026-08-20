@@ -309,7 +309,7 @@ def parse_raw(raw):
     result = {a["id"]: {
         "id": a["id"], "port": a["port"], "label": a["label"],
         "positions": [], "events": [], "anomalies": [], "svc_active": None,
-        "git_rev": "", "grid_pending": [],
+        "git_rev": "", "grid_pending": [], "catchup_status": [],
     } for a in ACCOUNTS}
 
     prices = {}
@@ -368,6 +368,32 @@ def parse_raw(raw):
                 "symbol": sym,
                 "side": s.get("grid_pending_side") or "",
                 "deadline_ts": float(s.get("grid_pending_deadline_ts", 0) or 0),
+            })
+        elif bool(s.get("catchup_active")):
+            # 2026-08-21新增：TV心跳漏单追回已经武装(限价已挂/已升级市价)——
+            # 跟grid_pending同一份state文件读取，不用额外请求/不导入
+            # position_supervisor，纯只读展示。
+            result[acct]["catchup_status"].append({
+                "symbol": sym,
+                "phase": str(s.get("catchup_phase") or "armed"),
+                "side": s.get("catchup_side") or "",
+                "tv_entry": float(s.get("catchup_tv_entry_frozen", 0) or 0),
+                "limit_px": float(s.get("catchup_limit_px", 0) or 0),
+                "deadline_ts": float(s.get("catchup_limit_deadline_ts", 0) or 0),
+                "refreshes": int(s.get("catchup_unfilled_refreshes", 0) or 0),
+            })
+        elif str(s.get("tv_heartbeat_side") or "FLAT").upper() in ("LONG", "SHORT"):
+            # 还没武装(可能还在180秒宽限期内，或者EMA多周期还没一起确认)——
+            # 心跳显示TV仍持仓、本地却空仓，这个组合本身就值得让宝贝随时
+            # 看到，不用等追回真正挂单才显示。
+            result[acct]["catchup_status"].append({
+                "symbol": sym,
+                "phase": "watching",
+                "side": str(s.get("tv_heartbeat_side") or ""),
+                "tv_entry": float(s.get("tv_heartbeat_entry", 0) or 0),
+                "limit_px": 0.0,
+                "deadline_ts": 0.0,
+                "refreshes": 0,
             })
 
     rev_pattern = re.compile(r"===REV:(\w)===\n(.*?)(?=\n===|\Z)", re.S)

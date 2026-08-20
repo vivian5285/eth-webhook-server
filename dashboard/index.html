@@ -185,6 +185,20 @@
   .anomaly-item .ts { color: rgba(224,57,47,0.75); font-size: 11px; margin-right: 6px; }
   .no-anomaly { font-size: 12px; color: var(--text-lo); padding: 4px 20px 16px; }
 
+  .catchup-item {
+    font-size: 12px; color: var(--blue); background: var(--blue-bg);
+    border: 1px solid rgba(31,111,214,0.25); border-radius: 10px; padding: 8px 10px;
+    margin-bottom: 6px; line-height: 1.4;
+  }
+  .catchup-item.watching {
+    color: var(--amber); background: rgba(184,134,11,0.10);
+    border-color: rgba(184,134,11,0.25);
+  }
+  .catchup-item.market_fallback {
+    color: var(--purple); background: var(--purple-bg);
+    border-color: rgba(139,63,201,0.25);
+  }
+
   .empty-feed { padding: 10px 0; color: var(--text-lo); font-size: 12px; }
 
   footer { text-align: center; color: var(--text-lo); font-size: 11px; margin-top: 26px; }
@@ -700,6 +714,36 @@ function renderEvent(e) {
     </div>`;
 }
 
+function fmtCatchupDeadline(ts) {
+  if (!ts) return "";
+  const remain = Math.round(ts - Date.now() / 1000);
+  if (remain <= 0) return "即将刷新/转市价";
+  const m = Math.floor(remain / 60);
+  return m > 0 ? `约${m}分钟后TTL刷新` : `约${remain}秒后TTL刷新`;
+}
+
+function renderCatchupItem(c) {
+  const phaseLabel = {
+    limit: "限价已挂", market_fallback: "市价兜底中",
+    // "watching"只代表"TV心跳持仓、实盘空仓"这个表面状态，背后具体是
+    // 心跳追回的EMA确认门槛在评估、还是自己出场触发的追单确认chase-watch
+    // 在评估(两套机制会互相让位，不会冲突)，state文件里看不出来，措辞
+    // 刻意笼统，不具体点名是哪一套机制，避免误导。
+    watching: "TV持仓·实盘空仓，等待条件确认中",
+  }[c.phase] || c.phase;
+  const fmtPx = (v) => (typeof v === "number" ? v.toFixed(4) : v);
+  const priceHtml = c.limit_px
+    ? `挂单@${fmtPx(c.limit_px)}`
+    : (c.tv_entry ? `TV参考@${fmtPx(c.tv_entry)}` : "");
+  const ddl = fmtCatchupDeadline(c.deadline_ts);
+  const parts = [phaseLabel, priceHtml, ddl].filter(Boolean).join(" · ");
+  return `
+    <div class="catchup-item ${c.phase}">
+      <span class="side-tag ${c.side}" style="margin-right:6px">${c.side}</span>
+      <b>${c.symbol}</b> · ${parts}
+    </div>`;
+}
+
 function renderAccount(acct) {
   const meta = ACCOUNTS_META[acct.id] || {};
   const svcDot = acct.svc_active === true ? '<span class="dot g"></span>运行中'
@@ -720,6 +764,10 @@ function renderAccount(acct) {
       `).join("")
     : '<div class="no-anomaly">近期无异常</div>';
 
+  const catchupHtml = (acct.catchup_status || []).length
+    ? acct.catchup_status.map(renderCatchupItem).join("")
+    : '<div class="no-anomaly">当前无追回中/等待中的品种</div>';
+
   return `
     <div class="card acct-card">
       <div class="acct-head">
@@ -732,6 +780,9 @@ function renderAccount(acct) {
 
       <div class="section-label">持仓（${acct.positions.length}）</div>
       <div class="positions">${posHtml}</div>
+
+      <div class="section-label">TV心跳追回</div>
+      <div class="anomaly-section">${catchupHtml}</div>
 
       <div class="section-label">最近事件</div>
       <div class="feed">${evHtml}</div>
