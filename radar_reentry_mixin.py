@@ -114,7 +114,7 @@ class RadarReentryMixin:
         self._reentry_open_snap = None
         self._reentry_cycle_aborted = False
         self._base_breath_profile = dict(getattr(self, "breath_profile", None) or {})
-        self._clear_chase_watch()
+        self._clear_chase_watch(save=False)  # 进程初始化阶段，state文件还没加载完，禁止提前落盘覆盖
         self._init_tv_catchup_runtime()
 
     def _init_tv_catchup_runtime(self):
@@ -942,7 +942,7 @@ class RadarReentryMixin:
             pass
         return True
 
-    def _clear_chase_watch(self, reason=""):
+    def _clear_chase_watch(self, reason="", save=True):
         self._chase_watch_active = False
         self._chase_watch_side = None
         self._chase_watch_exit_px = 0.0
@@ -950,6 +950,44 @@ class RadarReentryMixin:
         self._chase_watch_attempt = 0
         self._chase_watch_deadline_ts = 0.0
         self._chase_watch_armed_ts = 0.0
+        # 2026-08-21修复：之前这几个字段是纯内存变量，从不落盘——武装后如果
+        # 恰好撞上部署重启，观察窗口整个丢失且没有任何东西会重新武装它
+        # (chase-watch只在"刚好检测到平仓那一刻"才会武装，不像心跳追回
+        # 每轮巡检都会重新评估)。实盘复现：B/C两账户16:56为ETH武装的3小时
+        # 观察窗口，中间经历过好几次部署重启，日志里此后再没有任何chase-
+        # watch相关活动痕迹，观察期大概率就此静默丢失，没人接手。现在把
+        # 武装/清除都落盘，配合下面的_chase_watch_state_dict在重启时正确
+        # 恢复——恢复后既有的安全检查(deadline是否已过/仓位是否已变化/
+        # 观察窗内是否已反转)会照常生效，不会因为"是恢复出来的"就跳过验证。
+        if save:
+            try:
+                self._save_state()
+            except Exception:
+                pass
+
+    def _chase_watch_state_dict(self) -> Dict[str, Any]:
+        return {
+            "_chase_watch_active": bool(getattr(self, "_chase_watch_active", False)),
+            "_chase_watch_side": getattr(self, "_chase_watch_side", None),
+            "_chase_watch_exit_px": float(getattr(self, "_chase_watch_exit_px", 0) or 0),
+            "_chase_watch_atr": float(getattr(self, "_chase_watch_atr", 0) or 0),
+            "_chase_watch_attempt": int(getattr(self, "_chase_watch_attempt", 0) or 0),
+            "_chase_watch_deadline_ts": float(
+                getattr(self, "_chase_watch_deadline_ts", 0) or 0
+            ),
+            "_chase_watch_armed_ts": float(getattr(self, "_chase_watch_armed_ts", 0) or 0),
+        }
+
+    def _load_chase_watch_state_from_dict(self, s: Dict[str, Any]):
+        if not isinstance(s, dict) or "_chase_watch_active" not in s:
+            return  # 旧state文件没有这批字段：保持_clear_chase_watch的默认值
+        self._chase_watch_active = bool(s.get("_chase_watch_active", False))
+        self._chase_watch_side = s.get("_chase_watch_side")
+        self._chase_watch_exit_px = float(s.get("_chase_watch_exit_px", 0) or 0)
+        self._chase_watch_atr = float(s.get("_chase_watch_atr", 0) or 0)
+        self._chase_watch_attempt = int(s.get("_chase_watch_attempt", 0) or 0)
+        self._chase_watch_deadline_ts = float(s.get("_chase_watch_deadline_ts", 0) or 0)
+        self._chase_watch_armed_ts = float(s.get("_chase_watch_armed_ts", 0) or 0)
 
     def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt, deadline_ts=None):
         """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。

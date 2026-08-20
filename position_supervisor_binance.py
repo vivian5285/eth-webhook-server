@@ -3406,6 +3406,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "pipeline": self._pipeline_state_blob(),
                     **self._reentry_state_dict(),
                     **self._tv_catchup_state_dict(),
+                    **self._chase_watch_state_dict(),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -9720,6 +9721,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.radar_activated = bool(s.get("radar_activated", False))
             self._load_reentry_state_from_dict(s)
             self._load_tv_catchup_state_from_dict(s)
+            self._load_chase_watch_state_from_dict(s)
             self.breakeven_phase = bool(s.get("breakeven_phase", False))
             self.best_price = float(s.get("best_price", 0) or 0)
             self.breathing_coefficient = float(
@@ -17972,6 +17974,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         pass
                     self._load_reentry_state_from_dict(s)
                     self._load_tv_catchup_state_from_dict(s)
+                    self._load_chase_watch_state_from_dict(s)
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)
