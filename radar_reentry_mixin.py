@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, Optional
 
@@ -70,6 +71,12 @@ TV_HEARTBEAT_CATCHUP_ENABLED = True  # 追回执行总开关：真实下单路�
                                       # 先关着部署观察一轮idle-patrol全账户无报错，
                                       # 随后XAU实盘复现同款场景(雷达保本止损出局、
                                       # TV仍持有且继续上涨)，确认打开
+CATCHUP_MARKET_FALLBACK_SIZE_MULT = 0.7  # 2026-08-21：市价兜底那条腿没拿到
+                                          # "比TV更优价格"这层保护(价格已经跑
+                                          # 出去才会走到这一步)，风险收益比不如
+                                          # 限价优价那条腿，仓位打七折，止损空间
+                                          # /距离公式不受影响(只缩qty，止损公式
+                                          # 依然按TV止损距离精确锚定)
 
 # 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
 # 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
@@ -1644,6 +1651,26 @@ class RadarReentryMixin:
             logger.error(f"🚨 [{self.symbol}] 追回市价无数量，放弃")
             self._abort_tv_catchup_cycle(reason="no_qty")
             return False
+        # 市价兜底没拿到"比TV更优价格"这层保护，风险收益比不如限价优价，
+        # 仓位打折(只缩qty，止损空间/距离公式不受影响)。折算后按交易所
+        # qty_step重新对齐，跟_calc_vps_open_qty里tier缩放同款做法。
+        qty_step = float(getattr(self, "qty_step", 0.001) or 0.001)
+        min_qty = float(getattr(self, "min_qty", 0.001) or 0.001)
+        discounted = qty * CATCHUP_MARKET_FALLBACK_SIZE_MULT
+        if qty_step > 0:
+            discounted = math.floor(discounted / qty_step) * qty_step
+        if discounted < min_qty:
+            logger.error(
+                f"🚨 [{self.symbol}] 追回市价折算后({discounted})低于最小下单量"
+                f"({min_qty})，放弃"
+            )
+            self._abort_tv_catchup_cycle(reason="market_discount_below_min_qty")
+            return False
+        logger.info(
+            f"📉 [{self.symbol}] 市价兜底仓位打折 ×{CATCHUP_MARKET_FALLBACK_SIZE_MULT} "
+            f"{qty}→{discounted}"
+        )
+        qty = discounted
         open_side = "BUY" if side == "LONG" else "SELL"
         self.catchup_phase = "market_fallback"
         try:
