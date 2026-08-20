@@ -23,6 +23,8 @@
       --orange-bg: rgba(255,159,10,.12);
       --bnb: #f0b90b;
       --bnb-bg: rgba(240,185,11,.12);
+      --grid: #8e44ec;
+      --grid-bg: rgba(142,68,236,.12);
       --glass: rgba(255,255,255,.62);
       --glass2: rgba(255,255,255,.78);
       --glass3: rgba(255,255,255,.45);
@@ -359,6 +361,7 @@
     .badge-red { background: var(--red-bg); color: #c9342a; }
     .badge-orange { background: var(--orange-bg); color: #b06600; }
     .badge-gray { background: rgba(0,0,0,.06); color: var(--ink2); }
+    .badge-grid { background: var(--grid-bg); color: var(--grid); }
 
     /* ── Warning banner ── */
     .warn-banner {
@@ -452,6 +455,7 @@
       <button class="tab" onclick="switchTab('logs')" id="tab-logs">日志</button>
       <button class="tab" onclick="switchTab('tvsignals')" id="tab-tvsignals">TV信号</button>
       <button class="tab" onclick="switchTab('manual')" id="tab-manual">手动发单</button>
+      <button class="tab" onclick="switchTab('grid')" id="tab-grid">网格套利</button>
     </div>
 
     <!-- ── Sizing tab ── -->
@@ -535,7 +539,7 @@
           <table>
             <thead>
               <tr>
-                <th>品种</th><th>方向</th><th>数量</th><th>入场价</th><th>雷达</th><th>状态</th><th></th>
+                <th>品种</th><th>方向</th><th>来源</th><th>数量</th><th>入场价</th><th>雷达</th><th>状态</th><th></th>
               </tr>
             </thead>
             <tbody id="posBody"></tbody>
@@ -689,6 +693,56 @@
         <div id="mResult" class="tv-row-detail hidden"></div>
       </div>
     </div>
+
+    <!-- ── 网格套利 tab ── -->
+    <div id="page-grid" class="hidden">
+      <div class="warn-banner">⚠️ 网格套利是独立于TV的手动区间交易：限价开仓、止损严格按填写值执行（不加宽）、止盈一次性全平（不分批）。持仓期间雷达仍会正常介入移动止损。同一品种同时只能有一笔网格仓位；如果持仓期间该品种来了真实TV信号，会被无条件强平后按TV重新开仓。</div>
+      <div class="card">
+        <h3>手动开一笔网格套利</h3>
+        <div class="row">
+          <div class="field">
+            <label>品种</label>
+            <select id="gSymbol"></select>
+          </div>
+          <div class="field">
+            <label>方向</label>
+            <select id="gSide">
+              <option value="LONG">LONG（做多）</option>
+              <option value="SHORT">SHORT（做空）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>趋势强度（仓位档位）</label>
+            <select id="gTier">
+              <option value="0">弱</option>
+              <option value="1" selected>中</option>
+              <option value="2">强</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field"><label>开仓限价</label>
+            <div style="display:flex;gap:6px">
+              <input id="gEntry" type="number" step="any" placeholder="限价开仓价" style="flex:1" />
+              <button type="button" class="btn btn-ghost btn-sm" onclick="fetchGPrice()">取现价</button>
+            </div>
+          </div>
+          <div class="field"><label>一次性止盈价</label><input id="gTp" type="number" step="any" placeholder="到价一把全平" /></div>
+          <div class="field"><label>硬止损价（严格按此价，不加宽）</label><input id="gSl" type="number" step="any" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>限价超时（分钟，1~60，默认30）</label><input id="gTimeout" type="number" step="1" min="1" max="60" placeholder="30" /></div>
+        </div>
+        <div class="save-bar" style="border-top:0;margin-top:8px;padding-top:0;justify-content:flex-end">
+          <button class="btn btn-primary" onclick="confirmGridOrder()">发送网格套利单</button>
+        </div>
+        <div id="gResult" class="tv-row-detail hidden"></div>
+      </div>
+      <div class="card" style="margin-top:18px">
+        <h3>当前网格挂单/持仓状态</h3>
+        <div id="gStatusList" class="sub">加载中…</div>
+      </div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -760,7 +814,7 @@ document.getElementById("loginPw").addEventListener("keydown", e => { if(e.key==
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.getElementById("tab-"+name).classList.add("active");
-  ["sizing","profiles","positions","logs","tvsignals","manual"].forEach(p => {
+  ["sizing","profiles","positions","logs","tvsignals","manual","grid"].forEach(p => {
     document.getElementById("page-"+p).classList.toggle("hidden", p !== name);
   });
   if (name === "tvsignals") {
@@ -768,6 +822,7 @@ function switchTab(name) {
     loadTvSignals();
   }
   if (name === "manual" && !tvMetaLoaded) loadTvMeta();
+  if (name === "grid" && !tvMetaLoaded) loadTvMeta();
 }
 
 // ── Overview ───────────────────────────────────────────────────────────────
@@ -820,9 +875,91 @@ function renderOverview(d) {
 
   // Positions
   renderPositions(d);
+  renderGridStatus(d);
 
   // PnL
   renderPnL(d);
+}
+
+function renderGridStatus(d) {
+  const el = document.getElementById("gStatusList");
+  if (!el) return;
+  const rows = (d.positions||[]).filter(p => p.position_source === "GRID" || p.grid_pending);
+  if (!rows.length) { el.textContent = "当前没有网格套利仓位或挂单。"; return; }
+  el.innerHTML = rows.map(p => {
+    if (p.side && p.position_source === "GRID") {
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--glass3)">
+        <b>${p.symbol}</b> <span class="badge badge-grid">持仓中</span>
+        ${p.side} ${Number(p.qty||0)} @ ${Number(p.entry||0).toFixed(4)}
+        · 止损 ${Number(p.current_sl||p.hard_sl||0).toFixed(4)}
+        · TP ${(p.tps&&p.tps[0]?Number(p.tps[0]).toFixed(4):"—")}
+      </div>`;
+    }
+    if (p.grid_pending) {
+      const remain = Math.max(0, Math.round((Number(p.grid_pending_deadline_ts||0)*1000 - Date.now())/1000));
+      return `<div style="padding:8px 0;border-bottom:1px solid var(--glass3)">
+        <b>${p.symbol}</b> <span class="badge badge-orange">限价等待成交</span>
+        ${p.grid_pending_side||""} · 剩余约${remain}s
+        <button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="cancelGridOrder('${p.symbol}')">撤销</button>
+      </div>`;
+    }
+    return "";
+  }).join("");
+}
+
+// ── 网格套利 ───────────────────────────────────────────────────────────────
+async function fetchGPrice() {
+  const symbol = document.getElementById("gSymbol").value;
+  if (!symbol) { toast("先选品种", "err"); return; }
+  try {
+    const d = await api(`/api/console/price/${encodeURIComponent(symbol)}`);
+    document.getElementById("gEntry").value = d.price;
+    toast(`现价 ${d.price}`, "ok");
+  } catch (e) { toast("取现价失败: " + e.message, "err"); }
+}
+
+function confirmGridOrder() {
+  const symbol = document.getElementById("gSymbol").value;
+  const side = document.getElementById("gSide").value;
+  const entry = document.getElementById("gEntry").value;
+  const tp = document.getElementById("gTp").value;
+  const sl = document.getElementById("gSl").value;
+  if (!symbol || !entry || !tp || !sl) { toast("品种/限价/止盈/止损都要填", "err"); return; }
+  if (!confirm(`即将发一笔网格套利单：【${side} ${symbol}】限价${entry} 止盈${tp} 止损${sl}。\n真实TV信号到达时会无条件强平这笔仓位。确认发送？`)) return;
+  doGridOrder();
+}
+
+async function doGridOrder() {
+  const body = {
+    symbol: document.getElementById("gSymbol").value,
+    side: document.getElementById("gSide").value,
+    tier: Number(document.getElementById("gTier").value),
+    entry_price: Number(document.getElementById("gEntry").value),
+    tp_price: Number(document.getElementById("gTp").value),
+    stop_price: Number(document.getElementById("gSl").value),
+    timeout_min: Number(document.getElementById("gTimeout").value || 30),
+  };
+  const resultEl = document.getElementById("gResult");
+  resultEl.classList.remove("hidden");
+  resultEl.textContent = "发送中…";
+  try {
+    const d = await api("/api/console/grid_order", { method: "POST", body: JSON.stringify(body) });
+    resultEl.textContent = JSON.stringify(d, null, 2);
+    if (d.ok) { toast("网格套利单已挂出", "ok"); await refreshAll(); }
+    else { toast("失败: " + (d.message||""), "err"); }
+  } catch(e) {
+    resultEl.textContent = "发送失败: " + e.message;
+    toast("发送失败: "+e.message, "err");
+  }
+}
+
+async function cancelGridOrder(symbol) {
+  if (!confirm(`撤销 ${symbol} 尚未成交的网格套利限价单？`)) return;
+  try {
+    await api("/api/console/grid_order/cancel", { method: "POST", body: JSON.stringify({symbol}) });
+    toast("已请求撤销", "ok");
+    await refreshAll();
+  } catch(e) { toast("撤销失败: "+e.message, "err"); }
 }
 
 function renderSymbolGrid() {
@@ -1110,6 +1247,7 @@ function renderPositions(d) {
     tr.innerHTML = `
       <td><b>${p.symbol}</b></td>
       <td>${p.side||"—"}</td>
+      <td>${p.side ? (p.position_source === "GRID" ? '<span class="badge badge-grid">网格</span>' : '<span class="badge badge-blue">TV</span>') : "—"}</td>
       <td class="mono">${Number(p.qty||0)}</td>
       <td class="mono">${Number(p.entry||0).toFixed(2)}</td>
       <td><span class="pill ${p.radar_activated?"on":"off"}">${p.radar_activated?"已激活":"休眠"}</span></td>
@@ -1216,6 +1354,7 @@ const TV_SOURCE_LABEL = {
   gateway: ["经网关", "badge-gray"],
   console_replay: ["控制台重放", "badge-orange"],
   console_manual: ["控制台手动", "badge-orange"],
+  console_grid: ["网格套利", "badge-grid"],
 };
 const TV_PHASE_LABEL = {
   "": ["处理中…", "badge-blue"],
@@ -1248,6 +1387,7 @@ async function loadTvMeta() {
     const symOpts = (d.symbols||[]).map(s => `<option value="${esc(s.symbol)}">${esc(s.tag||s.symbol)}</option>`).join("");
     document.getElementById("tvFSymbol").innerHTML = `<option value="">全部</option>` + symOpts;
     document.getElementById("mSymbol").innerHTML = symOpts;
+    document.getElementById("gSymbol").innerHTML = symOpts;
     document.getElementById("tvFAction").innerHTML = `<option value="">全部</option>` +
       (d.actions||[]).map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
   } catch(e) { toast("加载品种/动作列表失败: "+e.message, "err"); }

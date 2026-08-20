@@ -492,6 +492,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._tv_gap_alerted = False
         self.tv_closed_vps_holding = False
 
+        # 2026-08-20：网格套利（区间震荡）手动交易模式——独立于TV驱动的开仓
+        # 流程，只在真正空仓、TV暂时没信号时由控制台手动触发。position_source
+        # 标记这笔仓位是不是网格来源，供TP1/2/3维护循环(_expected_tp_levels)
+        # 短路跳过（网格只有一张一次性止盈单，不是TV那套三档结构）。真实TV
+        # 信号到达时会被 _full_reentry/_ensure_flat_before_open 无条件强平
+        # （来源无关，见 open_grid_position 顶部注释），不需要额外的"打断"代码。
+        self.position_source = "TV"
+        self._grid_pending_order_id = None
+        self._grid_pending_side = None
+        self._grid_pending_deadline_ts = 0.0
+
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
         )
@@ -3259,6 +3270,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "tv_heartbeat_tp2": float(getattr(self, "tv_heartbeat_tp2", 0) or 0),
                     "tv_heartbeat_tp3": float(getattr(self, "tv_heartbeat_tp3", 0) or 0),
                     "tv_closed_vps_holding": bool(getattr(self, "tv_closed_vps_holding", False)),
+                    "position_source": str(getattr(self, "position_source", "TV") or "TV"),
+                    "grid_pending_order_id": getattr(self, "_grid_pending_order_id", None),
+                    "grid_pending_side": getattr(self, "_grid_pending_side", None),
+                    "grid_pending_deadline_ts": float(getattr(self, "_grid_pending_deadline_ts", 0) or 0),
                     "last_tv_side": self.last_tv_side,
                     "current_side": self.current_side,
                     "watched_qty": self.watched_qty,
@@ -6897,7 +6912,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """
         应挂 TP 列表。铁律：已消费档 / 现价已达档（非开仓瞬间）→ 永不进入应挂。
         返回 PLACE_TP_LEVELS 内档位（v16.4.0 恒=2，仅 TP1+TP2）。
+
+        网格套利仓位（position_source=="GRID"）永远返回空列表——网格只有
+        open_grid_position 自己挂的一张一次性止盈单，不是TV这套TP1/TP2
+        分批结构，这里短路后，所有依赖本函数判断"该补什么TP"的维护/对账
+        循环（_audit_tp_levels/_patch_missing_tp_levels/_nuclear_realign_tp/
+        _wait_defense_settled 等，本函数是它们唯一的调用入口）都会自然
+        认为"没有该补的"，不会试图去修复网格仓位里本不存在的TP1/TP2缺口。
         """
+        if str(getattr(self, "position_source", "TV") or "TV").upper() == "GRID":
+            return []
         place_n = self._effective_place_tp_levels()
         consumed = set(getattr(self, "tp_levels_consumed", []) or [])
         qty_map = self._split_remaining_tp_quantities(live_qty)
@@ -13994,6 +14018,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.initial_stop = 0.0
         self.frozen_hard_sl_px = 0.0
         self.open_atr = 0.0
+        self.position_source = "TV"
         try:
             self._locked_initial_atr.clear_on_flat()
         except Exception:
@@ -14801,6 +14826,237 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             target_qty=qty,
             sizing_meta=sizing_meta,
         )
+
+    def open_grid_position(self, side, entry_price, stop_price, tp_price, tier=1, timeout_min=30):
+        """
+        网格套利（区间震荡）手动开仓——控制台"网格套利"tab专用，跟TV驱动的
+        开仓流程（handle_signal/_process_signal/_handle_smart_entry）完全
+        独立，只复用最底层的下单/雷达原语，不经过任何TV专属的止损加宽/
+        TP1+TP2分批合成逻辑：
+          - 止损严格等于用户填写值，不走 _temp_hard_stop_from_tv 的
+            1.15×距离加宽 + 0.5×ATR地板
+          - 止盈是一张一次性满仓限价单，不是TV那套TP1(10%)+TP2(20%)+
+            TP3(雷达)三档结构
+          - 雷达/移动止损沿用同一套 sentinel_loop + breath_stop 算法，
+            照常介入（trailing 数学本身跟仓位来源无关，只要 tv_tps 有
+            非零值满足激活闸门即可——见下方"雷达激活闸门"注释）
+        真实TV信号到达时不需要在这里处理"打断网格"：_handle_smart_entry
+        对每一条真实LONG/SHORT一律先调 _full_reentry→_ensure_flat_before_
+        open 强平交易所上的真实仓位（来源无关，只看真实交易所持仓，不看
+        本地是TV仓位还是网格仓位）再开新仓——网格仓位会被这条已有的铁律
+        自动、无差别地强平掉，不需要新增"检测网格并打断"的代码。
+        """
+        side = str(side or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return {"ok": False, "message": "bad_side"}
+        if bool(getattr(self, "trading_paused", False)):
+            return {"ok": False, "message": "trading_paused"}
+        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
+            return {"ok": False, "message": "already_has_position"}
+        if getattr(self, "_grid_pending_order_id", None):
+            return {"ok": False, "message": "grid_order_already_pending"}
+        try:
+            entry_price = float(entry_price)
+            stop_price = float(stop_price)
+            tp_price = float(tp_price)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "bad_price"}
+        if entry_price <= 0 or stop_price <= 0 or tp_price <= 0:
+            return {"ok": False, "message": "bad_price"}
+        if side == "LONG" and not (stop_price < entry_price < tp_price):
+            return {"ok": False, "message": "price_order_invalid_for_long"}
+        if side == "SHORT" and not (tp_price < entry_price < stop_price):
+            return {"ok": False, "message": "price_order_invalid_for_short"}
+
+        if not self._ensure_flat_before_open(reason_tag="网格套利·开仓前净场"):
+            return {"ok": False, "message": "flat_gate_failed"}
+
+        # 网格没有TV atr——用真实币安K线现算一个Wilder ATR，跟控制台手动
+        # 发单缺atr时的自动补全（console_api._auto_fill_atr）是同一个思路：
+        # 只有这样雷达/breath的移动止损公式才有真实数值可用，不会因为ATR=0
+        # 全部退化失效。
+        try:
+            from strategy_engine import klines as _sk_klines
+            from strategy_engine import indicators as _sk_ind
+            bars = _sk_klines.get_bars(self.symbol, "15m", limit=60)
+            grid_atr = float(_sk_ind.wilder_atr(bars, 14)) if bars else 0.0
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 网格套利ATR现算失败: {e}")
+            grid_atr = 0.0
+        if grid_atr <= 0:
+            return {"ok": False, "message": "atr_unavailable"}
+        self._tv_signal_atr = float(grid_atr)
+
+        # 仓位大小：复用现有档位(tier→TIER_NOTIONAL_MULT)+开仓数量公式，
+        # 先清掉可能残留的上一笔TV软上限参考，避免污染这笔纯名义计算。
+        self.tv_open_tier = int(tier) if tier in (0, 1, 2) else 1
+        self.last_tv_side = side
+        self.tv_price = entry_price
+        self.tv_suggested_qty = 0.0
+        self.tv_sl_ref = 0.0
+        qty, principal, margin_usdt, margin_pct, meta = self._calc_target_open_qty(entry_price)
+        if qty <= 0:
+            return {"ok": False, "message": "qty_calc_failed", "meta": meta}
+
+        open_side = "BUY" if side == "LONG" else "SELL"
+        tag = f"GRIDENTRY_{side}_{int(time.time() * 1000) % 100000000}"
+        order = binance_client.place_limit_order(
+            open_side, qty, entry_price,
+            symbol=self.symbol, reduce_only=False, client_order_id=tag,
+        )
+        if not order:
+            return {"ok": False, "message": "entry_order_failed"}
+
+        timeout_sec = min(max(float(timeout_min or 30) * 60.0, 30.0), 3600.0)
+        self._grid_pending_side = side
+        self._grid_pending_order_id = str(order.get("orderId") or tag)
+        self._grid_pending_deadline_ts = time.time() + timeout_sec
+        self._save_state()
+
+        logger.info(
+            f"🎯 [网格套利开仓] {open_side} {qty} {self.unit_label} | {self.symbol} | "
+            f"限价={entry_price:.4f} 止损={stop_price:.4f} 止盈={tp_price:.4f} "
+            f"tier={self.tv_open_tier} 超时={timeout_sec:.0f}s"
+        )
+        threading.Thread(
+            target=self._await_grid_entry_fill,
+            args=(order, side, entry_price, stop_price, tp_price, timeout_sec),
+            daemon=True, name=f"grid-entry-{self.symbol}",
+        ).start()
+        return {"ok": True, "message": "grid_order_placed", "qty": qty, "order_id": self._grid_pending_order_id}
+
+    def cancel_grid_pending_entry(self):
+        """撤销尚未成交的网格开仓限价单（面板"撤销"按钮）。不直接调用
+        cancel_order——只把等待线程的deadline拨到当下，让它在下一轮poll
+        （最多约5秒）自己走撤单+收尾，跟超时走同一条代码路径，避免撤单
+        竞态。"""
+        if not getattr(self, "_grid_pending_order_id", None):
+            return {"ok": False, "message": "no_pending_grid_order"}
+        self._grid_pending_deadline_ts = time.time()
+        return {"ok": True, "message": "cancel_requested"}
+
+    def _await_grid_entry_fill(self, order, side, entry_price, stop_price, tp_price, timeout_sec):
+        deadline = time.time() + timeout_sec
+        poll_interval = 5.0
+        pos = None
+        try:
+            while time.time() < min(deadline, float(getattr(self, "_grid_pending_deadline_ts", deadline) or deadline)):
+                time.sleep(poll_interval)
+                try:
+                    p = self._get_active_position(force_rest=True)
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 网格开仓等待期查询跳过: {e}")
+                    p = None
+                if isinstance(p, dict) and float(p.get("size") or 0) > 0:
+                    pos = p
+                    break
+            try:
+                binance_client.cancel_order(symbol=self.symbol, order=order)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 撤销网格开仓剩余挂单跳过: {e}")
+
+            if pos and float(pos.get("size") or 0) > 0:
+                logger.info(
+                    f"✅ [{self.symbol}] 网格套利开仓成交 {pos.get('side')} "
+                    f"{pos.get('size')} @ {pos.get('entry_price')}"
+                )
+                self._finalize_grid_entry(pos, side, stop_price, tp_price)
+            else:
+                logger.info(
+                    f"⏰ [{self.symbol}] 网格套利开仓未成交（撤单/超时），未开仓 "
+                    f"| 限价={entry_price:.4f}"
+                )
+                try:
+                    dingtalk.report_system_alert(
+                        f"网格套利开仓未成交 [{self.symbol}]",
+                        f"{side} @ {entry_price:.4f} 未成交，已撤单，未开仓（正常结果，非故障）",
+                        level="提示", notify_level=1,
+                    )
+                except Exception:
+                    pass
+        finally:
+            self._grid_pending_order_id = None
+            self._grid_pending_side = None
+            self._grid_pending_deadline_ts = 0.0
+            self._save_state()
+
+    def _finalize_grid_entry(self, pos, side, stop_price, tp_price):
+        """网格开仓成交后：绑定精确止损(不加宽)+一次性止盈(不分批)+启动哨兵。"""
+        live_qty = float(pos.get("size") or 0)
+        entry_px = float(pos.get("entry_price") or 0)
+        self.current_side = side
+        self.last_tv_side = side
+        self.watched_qty = live_qty
+        self.watched_entry = entry_px
+        self.initial_qty = live_qty
+        self._open_settled_qty = live_qty
+        self.base_qty = live_qty
+        self.position_source = "GRID"
+        self.monitoring = True
+        self.open_atr = float(getattr(self, "_tv_signal_atr", 0) or 0)
+        self.current_atr = self.open_atr
+        self.open_regime = int(getattr(self, "tv_open_tier", 1) or 1)
+        self.regime = self.open_regime
+        self.adx_tier = self.open_regime
+
+        # 止损：精确按用户填写值，不走_temp_hard_stop_from_tv的加宽逻辑
+        self.frozen_hard_sl_px = float(stop_price)
+        self.initial_stop = float(stop_price)
+        self.current_sl = float(stop_price)
+        self.tv_sl = float(stop_price)
+
+        # 满足雷达激活闸门(_radar_activation_price需要tv_tps[0]/[1]都>0)：
+        # 用户唯一的止盈价同时当TP1/TP2看待，不是伪造数据。tv_tps[2]留0，
+        # 配合position_source=="GRID"短路_expected_tp_levels，TP1/2/3
+        # 维护/对账循环不会试图补挂真实TP1/TP2限价单。
+        self.tv_tps = [float(tp_price), float(tp_price), 0.0]
+        self._save_state()
+
+        sl_ok = self._ensure_frozen_hard_sl(live_qty, reason="网格套利硬止损")
+        if not sl_ok:
+            logger.error(f"🚨 [{self.symbol}] 网格套利硬止损挂单失败，需人工核查")
+            try:
+                dingtalk.report_system_alert(
+                    f"网格套利硬止损挂单失败 [{self.symbol}]",
+                    f"{side} {live_qty} @ {entry_px:.4f} 硬止损@{stop_price:.4f} "
+                    f"挂单失败，请立即人工核查！",
+                    level="紧急", immediate=True,
+                )
+            except Exception:
+                pass
+
+        close_side = "SHORT" if side == "LONG" else "LONG"
+        tp_tag = f"TPGRID_{int(time.time() * 1000) % 100000000}"
+        tp_order = binance_client.place_limit_order(
+            close_side, live_qty, tp_price,
+            symbol=self.symbol, reduce_only=True, client_order_id=tp_tag,
+        )
+        if not tp_order:
+            logger.error(f"🚨 [{self.symbol}] 网格套利止盈挂单失败，需人工核查")
+            try:
+                dingtalk.report_system_alert(
+                    f"网格套利止盈挂单失败 [{self.symbol}]",
+                    f"{side} {live_qty} @ {entry_px:.4f} 止盈@{tp_price:.4f} "
+                    f"挂单失败，硬止损仍在保护，请人工核查",
+                    level="紧急", immediate=True,
+                )
+            except Exception:
+                pass
+
+        self._ensure_sentinel_running()
+        try:
+            self._ensure_price_ws()
+        except Exception:
+            pass
+        try:
+            dingtalk.report_system_alert(
+                f"网格套利已开仓 [{self.symbol}]",
+                f"{side} {live_qty} @ {entry_px:.4f} | 止损={stop_price:.4f} "
+                f"止盈={tp_price:.4f}",
+                level="提示", notify_level=1,
+            )
+        except Exception:
+            pass
 
     def _open_position_limit_entry(
         self, action, open_side, qty, limit_price, payload, snap,
@@ -17556,6 +17812,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.tv_heartbeat_tp1 = float(s.get("tv_heartbeat_tp1", 0) or 0)
                     self.tv_heartbeat_tp2 = float(s.get("tv_heartbeat_tp2", 0) or 0)
                     self.tv_heartbeat_tp3 = float(s.get("tv_heartbeat_tp3", 0) or 0)
+                    self.position_source = str(s.get("position_source", "TV") or "TV")
+                    # 网格挂单等待线程是进程内daemon线程，重启后不会自动恢复
+                    # 巡检/watcher——这里只加载展示用状态，不重新起线程（跟现有
+                    # "系统限价开仓"_open_position_limit_entry同款重启行为一致，
+                    # 不是新引入的缺口）。
                     self.current_side = s.get("current_side")
                     self.current_sl = s.get("current_sl", 0.0)
                     self.regime = s.get("regime", 3)

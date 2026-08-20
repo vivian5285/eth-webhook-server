@@ -119,6 +119,10 @@ def api_overview():
             "tps": list(getattr(sup, "tv_tps", []) or []),
             "hard_sl": float(getattr(sup, "frozen_hard_sl_px", 0) or 0),
             "current_sl": float(getattr(sup, "current_sl", 0) or 0),
+            "position_source": str(getattr(sup, "position_source", "TV") or "TV"),
+            "grid_pending": bool(getattr(sup, "_grid_pending_order_id", None)),
+            "grid_pending_side": getattr(sup, "_grid_pending_side", None),
+            "grid_pending_deadline_ts": float(getattr(sup, "_grid_pending_deadline_ts", 0) or 0),
         })
 
     # per-symbol 仓位设置（随 overview 一起下发，前端直接用）
@@ -739,6 +743,86 @@ def api_tv_manual_send():
     _inject_system_limit_order(payload, body)
     resp_body, status = _call_local_webhook(payload, {"X-TV-Source": "console_manual"})
     return jsonify({"status": "ok", "upstream_status": status, "upstream": resp_body}), 200
+
+
+@console_bp.route("/api/console/grid_order", methods=["POST"])
+@require_login
+def api_grid_order():
+    """
+    网格套利（区间震荡）手动开仓——TV没信号覆盖的时间段，人工填限价开仓/
+    精确止损/一次性止盈直接发单。刻意不经过 process_webhook_payload/
+    webhook_parser/handle_signal（那条主链路强绑定TV六个action，止损会被
+    自动加宽、止盈会被自动补成TP1/2/3三档，不适合网格"精确止损+一把平"的
+    诉求），直接调用 supervisor.open_grid_position（见 position_supervisor_
+    binance.py 顶部同名方法的详细注释）。
+    """
+    from position_supervisor_binance import get_supervisor
+    from symbol_config import resolve_binance_symbol, active_binance_symbols
+    import webhook_log
+
+    body = request.get_json(silent=True) or {}
+    meta = resolve_binance_symbol(str(body.get("symbol") or "").strip(), default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({"status": "error", "message": "bad_symbol", "allowed": active_binance_symbols()}), 400
+    side = str(body.get("side") or "").strip().upper()
+    if side not in ("LONG", "SHORT"):
+        return jsonify({"status": "error", "message": "bad_side"}), 400
+    try:
+        entry_price = float(body.get("entry_price"))
+        stop_price = float(body.get("stop_price"))
+        tp_price = float(body.get("tp_price"))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "bad_price"}), 400
+    try:
+        tier = int(body.get("tier", 1))
+    except (TypeError, ValueError):
+        tier = 1
+    try:
+        timeout_min = float(body.get("timeout_min", 30) or 30)
+    except (TypeError, ValueError):
+        timeout_min = 30.0
+
+    sup = get_supervisor(sym)
+    result = sup.open_grid_position(
+        side, entry_price, stop_price, tp_price, tier=tier, timeout_min=timeout_min,
+    )
+    try:
+        webhook_log.record_signal(
+            {
+                "action": f"GRID_{side}",
+                "symbol": sym,
+                "price": entry_price,
+                "stop_loss": stop_price,
+                "tp1": tp_price,
+                "tier": tier,
+                "reason": "[控制台网格套利]",
+            },
+            source="console_grid",
+            http_status=200 if result.get("ok") else 400,
+            http_message=str(result.get("message") or ""),
+        )
+    except Exception:
+        pass
+    status_code = 200 if result.get("ok") else 400
+    return jsonify({"status": "ok" if result.get("ok") else "error", **result}), status_code
+
+
+@console_bp.route("/api/console/grid_order/cancel", methods=["POST"])
+@require_login
+def api_grid_order_cancel():
+    from position_supervisor_binance import get_supervisor
+    from symbol_config import resolve_binance_symbol, active_binance_symbols
+
+    body = request.get_json(silent=True) or {}
+    meta = resolve_binance_symbol(str(body.get("symbol") or "").strip(), default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({"status": "error", "message": "bad_symbol"}), 400
+    sup = get_supervisor(sym)
+    result = sup.cancel_grid_pending_entry()
+    status_code = 200 if result.get("ok") else 400
+    return jsonify({"status": "ok" if result.get("ok") else "error", **result}), status_code
 
 
 @console_bp.route("/api/console/resume/<path:symbol>", methods=["POST"])
