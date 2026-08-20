@@ -1343,6 +1343,19 @@ class RadarReentryMixin:
         if hb_entry <= 0 or hb_stop <= 0:
             return
 
+        # 2026-08-21追加：光有"K线更优价格"还不够，追多周期EMA+动量一致
+        # (复用追单确认chase-watch同一套_multi_tf_trend_confirmed，5m/15m/
+        # 30m)——没确认就先不启动追回，每次idle-patrol tick都会重新评估，
+        # 一旦确认(或心跳过期/TV转FLAT)自然结束等待，不需要额外计时器。
+        # 只挡"要不要开始追"这一步，已经武装后的限价刷新/市价兜底沿用
+        # 原有节奏，不重复加门槛（市价兜底那步宝贝已经明确要求不要犹豫）。
+        if not self._multi_tf_trend_confirmed(hb_side):
+            logger.debug(
+                f"[{self.symbol}] TV心跳漏单：5m/15m/30m EMA+动量未一致确认{hb_side} "
+                f"→ 暂不启动追回，继续观察"
+            )
+            return
+
         self._catchup_episode_side = hb_side
         self._catchup_episode_entry = hb_entry
         self._catchup_episode_resolved = False
