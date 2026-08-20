@@ -115,6 +115,7 @@ class RadarReentryMixin:
         self.catchup_unfilled_refreshes = 0
         self.catchup_order_tag = None
         self.catchup_started_ts = 0.0
+        self.last_hard_sl_exit_ts = 0.0
         # 内存簿记（不落盘，跟_tv_gap_first_seen_ts同款先例）：判断
         # "这次漏单事件是否已经用掉唯一一次追回机会"，重启后允许重新
         # 评估一次(顶多多追一次而不是漏追)，比持久化一个可能过期的
@@ -218,6 +219,7 @@ class RadarReentryMixin:
             ),
             "catchup_order_tag": getattr(self, "catchup_order_tag", None),
             "catchup_started_ts": float(getattr(self, "catchup_started_ts", 0) or 0),
+            "last_hard_sl_exit_ts": float(getattr(self, "last_hard_sl_exit_ts", 0) or 0),
         }
 
     def _load_tv_catchup_state_from_dict(self, s: Dict[str, Any]):
@@ -243,6 +245,7 @@ class RadarReentryMixin:
         )
         self.catchup_order_tag = s.get("catchup_order_tag")
         self.catchup_started_ts = float(s.get("catchup_started_ts", 0) or 0)
+        self.last_hard_sl_exit_ts = float(s.get("last_hard_sl_exit_ts", 0) or 0)
 
     def _clear_reentry_cycle(self, source=""):
         """新 TV / 硬止损 / 周期结束：清再入场与周期字段。"""
@@ -1216,6 +1219,10 @@ class RadarReentryMixin:
             self._tv_gap_first_seen_ts = 0.0
             self._tv_gap_alerted = False
             self._reset_tv_catchup_episode(source="心跳转FLAT")
+            # TV彻底转FLAT代表这一整段行情翻篇了，中途是否被硬止损扫过
+            # 已经不再相关——清零后下一段新持仓周期不会被上一段的硬止损
+            # 记录误伤（见_infer_flat_close_meta顶部注释）。
+            self.last_hard_sl_exit_ts = 0.0
         # 2026-08-20实盘发现：之前这里不落盘，心跳只活在内存里——当天后续
         # 又部署重启了几次(网格套利/大趋势确认)，每次重启都从磁盘上那份
         # 从未更新过的旧state文件("FLAT")重新加载，把刚收到的"TV仍持仓"
@@ -1341,6 +1348,21 @@ class RadarReentryMixin:
 
         hb_stop = float(getattr(self, "tv_heartbeat_stop", 0) or 0)
         if hb_entry <= 0 or hb_stop <= 0:
+            return
+
+        # 2026-08-21追加：TV这一整段持仓期间(自first_seen往前，即心跳最近
+        # 一次从FLAT转过来之后)，如果我们自己被真正的硬止损扫过——大概率
+        # 是TV自己判断失误或者行情反打(突发反转)，不是"VPS保本太紧提前
+        # 离场"，不该追回，等于错上加错。只排除硬止损这一种，雷达保本/
+        # 已交棒后触发的止损(radar_be/sl_breakeven)、以及这一轮从未开过
+        # 仓(最初ETH漏单原型)都不受影响，正常评估追回。见
+        # position_supervisor_binance.py::_infer_flat_close_meta 顶部注释。
+        last_hard_sl_ts = float(getattr(self, "last_hard_sl_exit_ts", 0) or 0)
+        if last_hard_sl_ts > 0:
+            logger.info(
+                f"🚫 [{self.symbol}] TV心跳漏单：这段持仓期内曾被硬止损出局 "
+                f"(exit_ts={last_hard_sl_ts:.0f}) → 不追回，大概率TV判断失误/行情反打"
+            )
             return
 
         # 2026-08-21追加：光有"K线更优价格"还不够，追多周期EMA+动量一致

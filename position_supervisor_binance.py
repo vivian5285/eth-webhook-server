@@ -13318,6 +13318,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
         """哨兵/重启推断全平类型 + exit_source（雷达 vs TP vs 硬止损一目了然）"""
         exit_src, note = self._resolve_exit_source(curr_px, hint_reason)
+        # 2026-08-21：TV心跳追回专用标记——只在真正判定为硬止损(vps_hard_sl/
+        # sl_initial，雷达还没来得及交棒保护)时打时间戳，雷达保本/已交棒后
+        # 触发的止损(radar_be/sl_breakeven)不算。区别于last_exit_source
+        # (只在_maybe_start_smart_limit_reentry的可重入分支才写，硬止损出局
+        # 和"这一轮从未开过仓"两种情况在那边最终都是空值，没法区分)，这个
+        # 标记只在心跳转FLAT时才清零(见record_tv_heartbeat)，专门喂给
+        # _maybe_start_tv_heartbeat_catchup判断"这段TV仍持仓的时间里，我们
+        # 是不是真被硬止损扫过"——硬止损大概率是TV自己判断失误或行情反打，
+        # 不该追；真正"这一轮从未开过仓"(最初ETH漏单原型)则不受影响，正常追。
+        if exit_src in (EXIT_SOURCE_VPS_HARD_SL, EXIT_SOURCE_SL_INITIAL):
+            self.last_hard_sl_exit_ts = time.time()
         est = self._estimate_pnl_pct(curr_px)
         side = self.current_side
 
