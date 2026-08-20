@@ -33,6 +33,16 @@ NOISE_ERROR_PATTERNS = (
     "NoneType' object has no attribute 'sock' - goodbye",
     "穿价 TP1 推离市价",
     "code=-4509",
+    # 2026-08-20：今天连续部署了7轮(每轮D→B→C共21次重启)后发现watchdog噪音
+    # 几乎全部集中在重启那几秒——"终检防线未齐"是重启后终检瞬间的正常过渡
+    # 状态，实测两次(B账户OPENAI/C账户SKHYNIX)都是不到1秒内就被同一进程
+    # 自己补挂修好("强制闭环"这四个字本身就是代码在原地自愈)，从没见过
+    # 它自愈失败的情况，直接当噪音过滤，不用等证据。
+    "终检防线未齐",
+    # Telegram单次超时(还有重试机会)不算真失败，只有attempt=3/3(最后一次
+    # 还失败)才算真的通知不出去，需要保留上报。
+    "notify fail channel=telegram attempt=1/",
+    "notify fail channel=telegram attempt=2/",
 )
 
 
@@ -67,18 +77,20 @@ def check_health(acct: dict) -> dict:
     2026-08-12：部署重启(systemctl restart)几秒内端口会短暂无响应，
     单次curl失败就报警会跟运维自己的正常重启撞车产生假警报（当晚
     实盘复现两次，时间点跟deploy_safe_restart.sh的重启时刻精确重合）。
-    改成3次重试、每次间隔3s，正常重启几秒内会完成，扛得住；真的挂了
-    (>9s持续无响应)才报警。
+    2026-08-20：单轮部署实测(B/C各5个真实持仓品种)偶尔重启恢复比原来
+    校准时(单一/少量品种)更久，9s窗口有几次跟watchdog的10分钟轮询撞上，
+    再次假警报——重试从3次/3s(9s)放宽到5次/3s(15s)，正常重启仍能扛住，
+    真的挂了(>15s持续无响应)才报警。
     """
     out = ""
-    for attempt in range(3):
+    for attempt in range(5):
         out = _run(["curl", "-sf", "--max-time", "5", f"http://127.0.0.1:{acct['port']}/health"])
         if not out.startswith("__ERR__") and out.strip():
             break
-        if attempt < 2:
+        if attempt < 4:
             time.sleep(3)
     if out.startswith("__ERR__") or not out.strip():
-        return {"ok": False, "detail": "无响应(重试3次仍失败)", "open_in_progress": {}}
+        return {"ok": False, "detail": "无响应(重试5次仍失败)", "open_in_progress": {}}
     try:
         data = json.loads(out)
     except Exception:
