@@ -1039,6 +1039,16 @@ class RadarReentryMixin:
             self.tv_heartbeat_tp3 = 0.0
             self._tv_gap_first_seen_ts = 0.0
             self._tv_gap_alerted = False
+        # 2026-08-20实盘发现：之前这里不落盘，心跳只活在内存里——当天后续
+        # 又部署重启了几次(网格套利/大趋势确认)，每次重启都从磁盘上那份
+        # 从未更新过的旧state文件("FLAT")重新加载，把刚收到的"TV仍持仓"
+        # 心跳直接冲掉，_tv_gap_first_seen_ts的宽限期计时也跟着重置——
+        # 如果真遇到漏单，反复部署重启会让报警窗口一直被打断永远攒不够
+        # 3分钟触发。心跳落盘频率不算高(每根收盘K线一次)，直接存不心疼。
+        try:
+            self._save_state()
+        except Exception:
+            pass
         logger.debug(
             f"💓 [{self.symbol}] TV心跳 side={side} "
             f"entry={self.tv_heartbeat_entry} stop={self.tv_heartbeat_stop}"
