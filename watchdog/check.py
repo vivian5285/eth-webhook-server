@@ -34,6 +34,13 @@ SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SN
 STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
 ALERT_DEDUPE_SEC = 30 * 60
 HEARTBEAT_HOURS = {8, 20}  # VPS本地时区(UTC)的整点小时
+# 2026-08-20：TV心跳失联二级监控——只对"以前真的收到过心跳"的品种生效，
+# 阈值故意给得很宽松(24小时)，够盖住所有品种(哪怕BCH/XMR这种6小时一根
+# K线的)正常的心跳间隔，不会跟任何品种的正常节奏撞车误报，真出问题
+# (比如某个品种的TV心跳代码被改坏/漏发)也不会拖太久才被发现。watchdog
+# 刻意不import引擎自己的reentry_profiles.py(保持独立，引擎有bug也不
+# 连累watchdog)，所以不按各品种精确TV周期算，直接用一个足够宽的固定值。
+HEARTBEAT_SILENCE_SEC = 24 * 3600.0
 NOISE_ERROR_PATTERNS = (
     "AttributeError: 'Client' object has no attribute 'session'",
     "NoneType' object has no attribute 'sock' - goodbye",
@@ -222,11 +229,15 @@ def fetch_positions_and_orders(acct: dict) -> dict:
         "            break\n"
         "    radar_activated = None\n"
         "    gate = 0.0\n"
+        "    hb_side = None\n"
+        "    hb_ts = 0.0\n"
         "    try:\n"
         "        with open(f'binance_vps_state_{sym}.json') as f:\n"
         "            st = json.load(f)\n"
         "        radar_activated = bool(st.get('radar_activated'))\n"
         "        gate = float(st.get('radar_activation_price') or 0)\n"
+        "        hb_side = st.get('tv_heartbeat_side')\n"
+        "        hb_ts = float(st.get('tv_heartbeat_ts') or 0)\n"
         "    except Exception:\n"
         "        pass\n"
         "    out[sym] = {\n"
@@ -238,6 +249,8 @@ def fetch_positions_and_orders(acct: dict) -> dict:
         "        'has_stop': has_stop,\n"
         "        'radar_activated': radar_activated,\n"
         "        'radar_gate': gate,\n"
+        "        'hb_side': hb_side,\n"
+        "        'hb_ts': hb_ts,\n"
         "    }\n"
         "print(json.dumps(out))\n"
     )
@@ -539,6 +552,24 @@ def run_once() -> list:
                     ),
                 })
 
+            # 2026-08-20新增：TV心跳失联检测——只对"以前收到过心跳"的品种
+            # 才检查(hb_ts>0)，还没被加上心跳代码的品种(hb_ts恒为0)不算
+            # 失联，不然13个品种里没加完的那些会天天报警。心跳一旦收到过
+            # 却超过HEARTBEAT_SILENCE_SEC(固定24小时，足够盖住所有品种
+            # 正常的TV周期，不怕误报)没再更新，说明TV那边的心跳代码可能
+            # 被改坏/漏加了，没人会主动发现这种"安静失效"，单独探测一次。
+            hb_ts = float(info.get("hb_ts") or 0)
+            if hb_ts > 0:
+                silent_sec = time.time() - hb_ts
+                if silent_sec > HEARTBEAT_SILENCE_SEC:
+                    anomalies.append({
+                        "key": f"{name}:{sym}:heartbeat_silent",
+                        "text": (
+                            f"💔 {name}账户 {sym} TV心跳已连续{silent_sec / 3600:.1f}小时"
+                            f"没更新，疑似该品种TV策略的心跳代码失效"
+                        ),
+                    })
+
         errs = fetch_real_errors(acct)
         for e in errs:
             # 用错误文本前60字符做key，避免同一类错误刷屏但不同参数被当成新异常
@@ -569,6 +600,7 @@ def maybe_send_heartbeat(state: dict) -> None:
 
 NAKED_DEDUPE_SEC = 5 * 60   # 裸仓级别最高优先，不能被30分钟去重窗口捂住
 RADAR_STALE_DEDUPE_SEC = 10 * 60  # 雷达卡死次优先，比裸仓宽松但也不能等30分钟
+HEARTBEAT_SILENT_DEDUPE_SEC = 6 * 3600  # 心跳失联不是分钟级紧急事件，6小时提醒一次够了
 
 
 def _dedupe_window_for(key: str) -> int:
@@ -576,6 +608,8 @@ def _dedupe_window_for(key: str) -> int:
         return NAKED_DEDUPE_SEC
     if ":radar_stale" in key:
         return RADAR_STALE_DEDUPE_SEC
+    if ":heartbeat_silent" in key:
+        return HEARTBEAT_SILENT_DEDUPE_SEC
     return ALERT_DEDUPE_SEC
 
 

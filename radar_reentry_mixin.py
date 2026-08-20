@@ -1088,6 +1088,19 @@ class RadarReentryMixin:
             f"entry={self.tv_heartbeat_entry} stop={self.tv_heartbeat_stop}"
         )
 
+    def _tv_heartbeat_stale_sec(self) -> float:
+        """按品种自己的TV周期动态算心跳过期阈值，跟固定4小时下限取更宽的
+        那个——2026-08-20修复：TV_HEARTBEAT_STALE_SEC固定4小时，但BCH/XMR
+        的TV图表周期是6小时(tv_tf_sec=21600)，每根收盘后到下一根收盘之间
+        有近2小时心跳会被固定阈值误判成"太旧不可信"直接跳过，等于这两个
+        品种的心跳检测大半时间形同虚设。改成"至少2根K线的时间"跟固定
+        下限取更宽的那个，短周期品种不受影响。"""
+        try:
+            tv_tf_sec = int(get_reentry_profile(self.symbol).get("tv_tf_sec") or 0)
+        except Exception:
+            tv_tf_sec = 0
+        return max(TV_HEARTBEAT_STALE_SEC, tv_tf_sec * 2)
+
     def _check_tv_heartbeat_gap(self):
         """TV心跳显示持仓、但实盘完全空仓超过宽限期 → 判定漏单，钉钉高优先级
         提醒（目前只报警不自动下单，见模块顶部注释）。由 _run_idle_live_reconcile
@@ -1099,18 +1112,7 @@ class RadarReentryMixin:
             return
         hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
         now = time.time()
-        # 2026-08-20修复：TV_HEARTBEAT_STALE_SEC固定4小时，但BCH/XMR的TV
-        # 图表周期是6小时(tv_tf_sec=21600)——每根收盘后到下一根收盘之间，
-        # 有近2小时心跳会被这条固定阈值误判成"太旧不可信"直接跳过，等于
-        # 这两个品种的漏单检测大半时间形同虚设。改成"至少2根K线的时间"
-        # 跟固定下限取更宽的那个，短周期品种不受影响，长周期品种才是
-        # 真正要解决的问题。
-        try:
-            tv_tf_sec = int(get_reentry_profile(self.symbol).get("tv_tf_sec") or 0)
-        except Exception:
-            tv_tf_sec = 0
-        stale_sec = max(TV_HEARTBEAT_STALE_SEC, tv_tf_sec * 2)
-        if hb_ts <= 0 or now - hb_ts > stale_sec:
+        if hb_ts <= 0 or now - hb_ts > self._tv_heartbeat_stale_sec():
             return  # 心跳太旧不可信，可能TV那边早换了状态但新心跳还没到
         if bool(getattr(self, "trading_paused", False)):
             return
@@ -1151,6 +1153,56 @@ class RadarReentryMixin:
             )
         except Exception as e:
             logger.debug(f"[{self.symbol}] 漏单钉钉发送跳过: {e}")
+
+    def _check_tv_heartbeat_direction_mismatch(self):
+        """持仓中(live_qty>0)时，心跳显示的方向如果新鲜且跟实盘方向不一致，
+        钉钉高优先级提醒（只报警不自动下单，边界跟_check_tv_heartbeat_gap
+        一致）。
+
+        2026-08-20新增：这是把心跳最初要解决的"webhook总丢失"盲区，从
+        "该有仓位却没有"延伸到"已有仓位但方向被一条漏掉的反转信号改变了"
+        这个同类场景——旧的watchdog side_mismatch检查靠比对journalctl里
+        成功记录过的TV信号，如果一条反转信号本身就没送达，旧检查看到的
+        还是"上一条信号=原方向"，跟实盘对得上，压根不会报警，是同一类
+        结构性盲区，心跳(TV自己权威的当下状态，不依赖之前有没有留痕)能
+        补上。由_sentinel_loop在持仓期间跟_maybe_refresh_atr同一处定期
+        调用，纯内存比较，不用额外拉数据，可以放心跟着tick跑。"""
+        side = str(getattr(self, "current_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            self._tv_dir_mismatch_alerted = False
+            return
+        hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+        if hb_side not in ("LONG", "SHORT") or hb_side == side:
+            self._tv_dir_mismatch_alerted = False
+            return
+        hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
+        now = time.time()
+        if hb_ts <= 0 or now - hb_ts > self._tv_heartbeat_stale_sec():
+            return
+        if bool(getattr(self, "trading_paused", False)):
+            return
+        if bool(getattr(self, "_tv_dir_mismatch_alerted", False)):
+            return  # 这次不一致已经报过，别刷屏；方向一致/心跳更新会自然重置
+        self._tv_dir_mismatch_alerted = True
+        logger.warning(
+            f"🆘 [{self.symbol}] TV心跳方向{hb_side}但实盘持仓{side} → 疑似方向反转信号漏单"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"[{self.symbol}] TV心跳方向{hb_side}但实盘持仓{side}，疑似漏单",
+                detail=(
+                    f"TV心跳显示当前方向{hb_side}，但{self._tag()}账户实盘仍持仓"
+                    f"{side}——可能是一条方向反转的TV信号没有送达，请人工核实"
+                    f"TV当前真实方向，需要的话手动平仓/反手。"
+                ),
+                level="紧急",
+                suggestion="核实TV当前真实方向，需要的话去控制面板手动平仓/反手",
+                immediate=True,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 方向不一致钉钉发送跳过: {e}")
 
     def _place_reentry_limit(self, side=None, reason="", *, is_refresh=False):
         side = str(side or getattr(self, "cycle_tv_side", "") or "").upper()

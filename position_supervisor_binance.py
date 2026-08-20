@@ -490,6 +490,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.tv_heartbeat_tp3 = 0.0
         self._tv_gap_first_seen_ts = 0.0
         self._tv_gap_alerted = False
+        self._tv_dir_mismatch_alerted = False
         self.tv_closed_vps_holding = False
 
         # 2026-08-20：网格套利（区间震荡）手动交易模式——独立于TV驱动的开仓
@@ -17275,6 +17276,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             self._maybe_refresh_atr()
                         except Exception as e:
                             logger.debug(f"ATR刷新跳过: {e}")
+                        # TV心跳方向核对：持仓期间心跳方向跟实盘方向不一致
+                        # (疑似反转信号漏单)，见radar_reentry_mixin.py::
+                        # _check_tv_heartbeat_direction_mismatch顶部注释
+                        try:
+                            self._check_tv_heartbeat_direction_mismatch()
+                        except Exception as e:
+                            logger.debug(f"[{self.symbol}] 心跳方向核对跳过: {e}")
                         # 挂单超时 5 分钟 → 取消移交雷达
                         try:
                             self._check_tp_order_timeouts(curr_px)
