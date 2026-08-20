@@ -784,8 +784,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     getattr(self, "_idle_patrol_backoff_until", 0.0) or 0.0
                 )
                 sleep_for = float(IDLE_PATROL_INTERVAL_SEC)
-                if bool(getattr(self, "reentry_active", False)):
-                    sleep_for = min(sleep_for, 15.0)  # 再入限价期加快巡检
+                if bool(getattr(self, "reentry_active", False)) or bool(
+                    getattr(self, "catchup_active", False)
+                ):
+                    sleep_for = min(sleep_for, 15.0)  # 再入限价/心跳追回期加快巡检
                 if now < backoff_until:
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
@@ -1224,6 +1226,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._check_tv_heartbeat_gap()
             except Exception as e:
                 logger.debug(f"[{self.symbol}] TV心跳漏单检测跳过: {e}")
+            try:
+                self._tv_heartbeat_catchup_tick()
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] TV心跳追回tick跳过: {e}")
             if self._confirm_position_flat():
                 if self._book_thinks_active():
                     curr_px = binance_client.get_current_price(self.symbol)
@@ -3397,6 +3403,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "mutex_leg": str(getattr(self, "_mutex_leg", "") or ""),
                     "pipeline": self._pipeline_state_blob(),
                     **self._reentry_state_dict(),
+                    **self._tv_catchup_state_dict(),
                 }, f)
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
@@ -9710,6 +9717,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             self.radar_activated = bool(s.get("radar_activated", False))
             self._load_reentry_state_from_dict(s)
+            self._load_tv_catchup_state_from_dict(s)
             self.breakeven_phase = bool(s.get("breakeven_phase", False))
             self.best_price = float(s.get("best_price", 0) or 0)
             self.breathing_coefficient = float(
@@ -14080,6 +14088,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._cancel_reentry_limit(reason=source or "平仓清零")
         except Exception:
             pass
+        try:
+            self._clear_tv_catchup_cycle(source=source or "平仓清零")
+        except Exception:
+            pass
+        # 修复：之前_tv_gap_first_seen_ts/_tv_gap_alerted只在心跳转FLAT时
+        # 重置，如果是我们自己的仓位平仓但TV从未转FLAT，旧计时器会带着
+        # 之前那次的时间戳直接触发"宽限期已过"，导致下一次真正空仓时
+        # 报警/追回瞬间触发而不是等一个新的3分钟宽限窗口。这里一并清零。
+        self._tv_gap_first_seen_ts = 0.0
+        self._tv_gap_alerted = False
         self.reentry_active = False
         self.reentry_attempt = 0  # 规格 §4：反转保护退出后归零
         self.radar_pending_arm = True
@@ -17931,6 +17949,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     except Exception:
                         pass
                     self._load_reentry_state_from_dict(s)
+                    self._load_tv_catchup_state_from_dict(s)
                     self.breakeven_phase = bool(s.get("breakeven_phase", False))
                     self.initial_stop = float(s.get("initial_stop", 0) or 0)
                     self.last_adx = float(s.get("last_adx", ADX_FALLBACK) or ADX_FALLBACK)

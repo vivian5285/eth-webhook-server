@@ -14,9 +14,12 @@ from reentry_profiles import (
     STERILE_MAX_RETRY,
     apply_tier_to_breath_profile,
     arm_stop_price,
+    compute_reentry_limit_px,
     get_reentry_profile,
     live_breath_zone_values,
+    make_catchup_client_order_id,
     make_reentry_client_order_id,
+    pick_best_tier_extreme,
     reentry_enabled,
     tier_label,
     tp_amplitude_scale,
@@ -52,11 +55,20 @@ _CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
 # （网络抖动/nginx瞬断/webhook丢包），本地压根没日志可比，看不见"TV发了但
 # VPS完全没收到"这种最彻底的漏单。心跳的权威依据是TV自己的持仓状态，不
 # 依赖VPS这边有没有留痕，能补上这个洞。
-# 目前只做检测+钉钉高优先级提醒，不接自动追回下单——追回执行需要正确复用
-# 开仓仓位计算(tier/sizing_principal/杠杆)，这块还没有把握吃透就上真单，
-# 留到下一步专门实现（当前先人工看到提醒去控制面板手动补开）。
+# 2026-08-20再追加：漏单不再只报警——TV方向是对的，只是VPS没跟上，白搭建
+# 系统。宽限期一到，VPS自己拉币安K线，用比TV开仓价更优的价格(多周期取
+# 极值)挂限价追回；止损按TV自己的止损"空间"(距离)重新锚定到追回的新
+# 成交价，不是硬搬TV原始止损价；限价反复挂不上、预算(复用常规重入的
+# ~25分钟刷新预算)耗尽后，直接市价追上不犹豫，止损用同一个距离公式锚定
+# 实际市价成交价。全套逻辑用独立的catchup_*状态字段，不跟常规重入/追单
+# 确认共用任何计数器。见_tv_heartbeat_catchup_tick/_maybe_start_tv_heartbeat_
+# catchup/_place_tv_catchup_limit/_escalate_tv_catchup_to_market/
+# _finalize_tv_catchup_fill。
 TV_HEARTBEAT_STALE_SEC = 4 * 3600.0  # 心跳超过4小时没刷新就不当最新真相用
 TV_HEARTBEAT_GAP_GRACE_SEC = 180.0   # 心跳持仓但实盘空仓，持续超过3分钟才判定漏单
+TV_HEARTBEAT_CATCHUP_ENABLED = False  # 追回执行总开关：真实下单路径。先关着
+                                       # 部署观察一轮idle-patrol无报错，再手动
+                                       # 改True并逐账户(D→B→C)重启生效
 
 # 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
 # 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
@@ -85,6 +97,30 @@ class RadarReentryMixin:
         self._reentry_cycle_aborted = False
         self._base_breath_profile = dict(getattr(self, "breath_profile", None) or {})
         self._clear_chase_watch()
+        self._init_tv_catchup_runtime()
+
+    def _init_tv_catchup_runtime(self):
+        """TV心跳漏单追回：独立状态机初始化，跟reentry_*/_chase_watch_*
+        完全分开的一套字段，不共用任何计数器。"""
+        self.catchup_active = False
+        self.catchup_phase = ""
+        self.catchup_side = None
+        self.catchup_tv_entry_frozen = 0.0
+        self.catchup_stop_distance_frozen = 0.0
+        self.catchup_tps_frozen = [0.0, 0.0, 0.0]
+        self.catchup_limit_order_id = None
+        self.catchup_limit_px = 0.0
+        self.catchup_limit_deadline_ts = 0.0
+        self.catchup_unfilled_refreshes = 0
+        self.catchup_order_tag = None
+        self.catchup_started_ts = 0.0
+        # 内存簿记（不落盘，跟_tv_gap_first_seen_ts同款先例）：判断
+        # "这次漏单事件是否已经用掉唯一一次追回机会"，重启后允许重新
+        # 评估一次(顶多多追一次而不是漏追)，比持久化一个可能过期的
+        # dedupe标记更安全。
+        self._catchup_episode_side = None
+        self._catchup_episode_entry = 0.0
+        self._catchup_episode_resolved = False
 
     def _reentry_state_dict(self) -> Dict[str, Any]:
         return {
@@ -153,6 +189,59 @@ class RadarReentryMixin:
                 setattr(self, k, str(val) if val else None)
             else:
                 setattr(self, k, val)
+
+    def _tv_catchup_state_dict(self) -> Dict[str, Any]:
+        """TV心跳漏单追回：只持久化"挂着真实交易所订单"这部分状态
+        （对齐reentry_*的持久化理由），episode去重字段(_catchup_episode_*)
+        纯内存，不落盘，见_init_tv_catchup_runtime注释。"""
+        return {
+            "catchup_active": bool(getattr(self, "catchup_active", False)),
+            "catchup_phase": str(getattr(self, "catchup_phase", "") or ""),
+            "catchup_side": getattr(self, "catchup_side", None),
+            "catchup_tv_entry_frozen": float(
+                getattr(self, "catchup_tv_entry_frozen", 0) or 0
+            ),
+            "catchup_stop_distance_frozen": float(
+                getattr(self, "catchup_stop_distance_frozen", 0) or 0
+            ),
+            "catchup_tps_frozen": list(
+                getattr(self, "catchup_tps_frozen", None) or [0.0, 0.0, 0.0]
+            ),
+            "catchup_limit_order_id": getattr(self, "catchup_limit_order_id", None),
+            "catchup_limit_px": float(getattr(self, "catchup_limit_px", 0) or 0),
+            "catchup_limit_deadline_ts": float(
+                getattr(self, "catchup_limit_deadline_ts", 0) or 0
+            ),
+            "catchup_unfilled_refreshes": int(
+                getattr(self, "catchup_unfilled_refreshes", 0) or 0
+            ),
+            "catchup_order_tag": getattr(self, "catchup_order_tag", None),
+            "catchup_started_ts": float(getattr(self, "catchup_started_ts", 0) or 0),
+        }
+
+    def _load_tv_catchup_state_from_dict(self, s: Dict[str, Any]):
+        if not isinstance(s, dict):
+            return
+        if "catchup_active" not in s:
+            return  # 旧state文件没有这批字段：保持_init_tv_catchup_runtime的默认值
+        self.catchup_active = bool(s.get("catchup_active", False))
+        self.catchup_phase = str(s.get("catchup_phase", "") or "")
+        self.catchup_side = s.get("catchup_side")
+        self.catchup_tv_entry_frozen = float(s.get("catchup_tv_entry_frozen", 0) or 0)
+        self.catchup_stop_distance_frozen = float(
+            s.get("catchup_stop_distance_frozen", 0) or 0
+        )
+        self.catchup_tps_frozen = list(s.get("catchup_tps_frozen") or [0.0, 0.0, 0.0])
+        self.catchup_limit_order_id = s.get("catchup_limit_order_id")
+        self.catchup_limit_px = float(s.get("catchup_limit_px", 0) or 0)
+        self.catchup_limit_deadline_ts = float(
+            s.get("catchup_limit_deadline_ts", 0) or 0
+        )
+        self.catchup_unfilled_refreshes = int(
+            s.get("catchup_unfilled_refreshes", 0) or 0
+        )
+        self.catchup_order_tag = s.get("catchup_order_tag")
+        self.catchup_started_ts = float(s.get("catchup_started_ts", 0) or 0)
 
     def _clear_reentry_cycle(self, source=""):
         """新 TV / 硬止损 / 周期结束：清再入场与周期字段。"""
@@ -517,6 +606,58 @@ class RadarReentryMixin:
             logger.info(
                 f"🏷️ [{self.symbol}] 再入订单标签已释放 tag={old} | {reason}"
             )
+
+    def _clear_catchup_order_tag(self, reason=""):
+        old = getattr(self, "catchup_order_tag", None)
+        self.catchup_order_tag = None
+        if old:
+            logger.info(f"🏷️ [{self.symbol}] 追回订单标签已释放 tag={old} | {reason}")
+
+    def _cancel_catchup_limit(self, reason=""):
+        from binance_client import binance_client
+
+        oid = getattr(self, "catchup_limit_order_id", None)
+        tag = getattr(self, "catchup_order_tag", None)
+        if oid:
+            try:
+                binance_client.cancel_order(self.symbol, order_id=oid)
+                logger.info(f"🗑️ [{self.symbol}] 撤追回限价 id={oid} tag={tag} | {reason}")
+            except Exception as e:
+                try:
+                    binance_client.cancel_order(self.symbol, order={"orderId": oid})
+                except Exception as e2:
+                    logger.debug(f"撤追回限价跳过: {e}/{e2}")
+        self.catchup_limit_order_id = None
+        self.catchup_limit_px = 0.0
+        self.catchup_limit_deadline_ts = 0.0
+        self._clear_catchup_order_tag(reason=reason or "撤单释放标签")
+
+    def _clear_tv_catchup_cycle(self, source=""):
+        """撤掉在飞的追回限价单，重置本轮周期字段（不含episode去重字段——
+        见_init_tv_catchup_runtime注释，那批字段只在成交/中止/心跳重新FLAT
+        时才应该重置）。任何"仓位归零"的路径都该调用一次，避免上一次
+        追回周期留下的挂单/字段污染下一段生命周期。"""
+        try:
+            self._cancel_catchup_limit(reason=source or "清追回周期")
+        except Exception:
+            pass
+        self.catchup_active = False
+        self.catchup_phase = ""
+        self.catchup_side = None
+        self.catchup_tv_entry_frozen = 0.0
+        self.catchup_stop_distance_frozen = 0.0
+        self.catchup_tps_frozen = [0.0, 0.0, 0.0]
+        self.catchup_unfilled_refreshes = 0
+        self.catchup_started_ts = 0.0
+        if source:
+            logger.info(f"🧹 [{self.symbol}] TV心跳追回周期已清零 | {source}")
+
+    def _reset_tv_catchup_episode(self, source=""):
+        """仅重置episode去重簿记——TV心跳重新变FLAT才代表这次漏单事件
+        彻底结束，之后任何新的LONG/SHORT心跳都算全新事件。"""
+        self._catchup_episode_side = None
+        self._catchup_episode_entry = 0.0
+        self._catchup_episode_resolved = False
 
     def _ensure_sterile_for_reentry(self, reason="再入前清场") -> bool:
         """
@@ -1073,6 +1214,7 @@ class RadarReentryMixin:
             self.tv_heartbeat_tp3 = 0.0
             self._tv_gap_first_seen_ts = 0.0
             self._tv_gap_alerted = False
+            self._reset_tv_catchup_episode(source="心跳转FLAT")
         # 2026-08-20实盘发现：之前这里不落盘，心跳只活在内存里——当天后续
         # 又部署重启了几次(网格套利/大趋势确认)，每次重启都从磁盘上那份
         # 从未更新过的旧state文件("FLAT")重新加载，把刚收到的"TV仍持仓"
@@ -1145,14 +1287,478 @@ class RadarReentryMixin:
                     f"TP1/2/3≈{self.tv_heartbeat_tp1:.4f}/"
                     f"{self.tv_heartbeat_tp2:.4f}/{self.tv_heartbeat_tp3:.4f}，"
                     f"但{self._tag()}账户实盘已连续{now - first_seen:.0f}秒完全空仓，"
-                    f"疑似webhook漏单（未送达/未处理），请人工核查是否需要手动补开。"
+                    f"疑似webhook漏单（未送达/未处理）。VPS正自动尝试用更优价格"
+                    f"追回（限价优价→预算耗尽转市价），成交/中止会再发通知，"
+                    f"人工也可随时去控制面板核查。"
                 ),
                 level="紧急",
-                suggestion="确认是否漏单，需要的话去控制面板手动补发开仓",
+                suggestion="自动追回进行中，如需人工介入去控制面板核查/手动补开",
                 immediate=True,
             )
         except Exception as e:
             logger.debug(f"[{self.symbol}] 漏单钉钉发送跳过: {e}")
+
+    def _tv_heartbeat_catchup_tick(self):
+        """由_run_idle_live_reconcile在实盘空仓分支里，紧挨着
+        _check_tv_heartbeat_gap()调用——报警和"开始尝试追回"在同一时刻
+        触发，复用_check_tv_heartbeat_gap已经在维护的_tv_gap_first_seen_ts
+        宽限计时器做触发闸门，不重复造一个计时器。"""
+        if not TV_HEARTBEAT_CATCHUP_ENABLED:
+            return
+        if bool(getattr(self, "catchup_active", False)):
+            self._progress_tv_catchup_cycle()
+            return
+        self._maybe_start_tv_heartbeat_catchup()
+
+    def _maybe_start_tv_heartbeat_catchup(self):
+        hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+        if hb_side not in ("LONG", "SHORT"):
+            return
+        hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
+        now = time.time()
+        if hb_ts <= 0 or now - hb_ts > self._tv_heartbeat_stale_sec():
+            return
+        if bool(getattr(self, "trading_paused", False)):
+            return
+        if (
+            bool(getattr(self, "reentry_active", False))
+            or bool(getattr(self, "_chase_watch_active", False))
+        ):
+            return  # 自己出场触发的重入/追单确认在跑，让位（跟_check_tv_heartbeat_gap一致）
+        first_seen = float(getattr(self, "_tv_gap_first_seen_ts", 0) or 0)
+        if first_seen <= 0 or now - first_seen < TV_HEARTBEAT_GAP_GRACE_SEC:
+            return
+
+        hb_entry = float(getattr(self, "tv_heartbeat_entry", 0) or 0)
+        same_episode = (
+            bool(getattr(self, "_catchup_episode_resolved", False))
+            and str(getattr(self, "_catchup_episode_side", "")) == hb_side
+            and abs(float(getattr(self, "_catchup_episode_entry", 0) or 0) - hb_entry) < 1e-6
+        )
+        if same_episode:
+            return  # 这次漏单事件已经用掉唯一一次追回机会，等心跳重新FLAT再变LONG/SHORT才算新事件
+
+        hb_stop = float(getattr(self, "tv_heartbeat_stop", 0) or 0)
+        if hb_entry <= 0 or hb_stop <= 0:
+            return
+
+        self._catchup_episode_side = hb_side
+        self._catchup_episode_entry = hb_entry
+        self._catchup_episode_resolved = False
+        self.catchup_side = hb_side
+        self.catchup_tv_entry_frozen = hb_entry
+        self.catchup_stop_distance_frozen = abs(hb_entry - hb_stop)
+        self.catchup_tps_frozen = [
+            float(getattr(self, "tv_heartbeat_tp1", 0) or 0),
+            float(getattr(self, "tv_heartbeat_tp2", 0) or 0),
+            float(getattr(self, "tv_heartbeat_tp3", 0) or 0),
+        ]
+        self.catchup_started_ts = now
+        self.catchup_unfilled_refreshes = 0
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
+        logger.warning(
+            f"🚑 [{self.symbol}] TV心跳漏单 → 启动自动追回 side={hb_side} "
+            f"tv_entry={hb_entry:.4f} tv_stop={hb_stop:.4f} "
+            f"stop_dist={self.catchup_stop_distance_frozen:.4f}"
+        )
+        self._place_tv_catchup_limit(reason="漏单追回·首次挂单")
+
+    def _fetch_catchup_klines(self):
+        """15m为主档、5m为副档——拉回来的两档各取极值后交给
+        pick_best_tier_extreme比较谁对该side更有利。"""
+        from binance_client import binance_client
+        k15, k5 = None, None
+        try:
+            k15 = binance_client.fetch_klines(self.symbol, interval="15m", limit=3)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 追回拉15m K线失败: {e}")
+        try:
+            k5 = binance_client.fetch_klines(self.symbol, interval="5m", limit=3)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 追回拉5m K线失败: {e}")
+        return k15, k5
+
+    def _prepare_tv_catchup_sizing(self, side):
+        """仓位大小：固定中档(tier=1)，从零安全取值——照抄
+        open_grid_position已验证过的写法：显式设tier/side/参考价，
+        显式清零tv_suggested_qty/tv_sl_ref（否则会带入上一个TV周期的
+        陈旧值），现算一个真实ATR写入_tv_signal_atr（否则
+        _resolve_open_atr_with_degrade会静默退化成不带止损距离的
+        纯名义下单）。"""
+        from binance_client import binance_client
+
+        curr_px = float(
+            binance_client.get_current_price(self.symbol)
+            or getattr(self, "catchup_tv_entry_frozen", 0)
+            or 0
+        )
+        try:
+            from strategy_engine import klines as _sk_klines
+            from strategy_engine import indicators as _sk_ind
+            bars = _sk_klines.get_bars(self.symbol, "15m", limit=60)
+            atr = float(_sk_ind.wilder_atr(bars, 14)) if bars else 0.0
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 追回ATR现算失败: {e}")
+            atr = 0.0
+        self._catchup_fresh_atr = atr
+        self._tv_signal_atr = float(atr)
+        self.tv_open_tier = 1
+        self.last_tv_side = side
+        self.tv_price = curr_px
+        self.tv_suggested_qty = 0.0
+        self.tv_sl_ref = 0.0
+        qty, principal, margin_usdt, margin_pct, meta = self._calc_target_open_qty(curr_px)
+        self._catchup_qty = float(qty or 0)
+        logger.info(
+            f"📐 [{self.symbol}] 追回sizing tier=1 qty={self._catchup_qty} "
+            f"atr={atr:.4f} meta={meta.get('binding') if isinstance(meta, dict) else meta}"
+        )
+
+    def _tv_catchup_precheck_still_valid(self) -> bool:
+        """下单前复核：TV心跳是否还是原方向且未过期——不追一个TV自己可能
+        已经出场/反转的仓位。限价挂单前、市价兜底前都会调用。"""
+        side = str(getattr(self, "catchup_side", "") or "").upper()
+        hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+        hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
+        if hb_side != side or hb_side not in ("LONG", "SHORT"):
+            return False
+        if hb_ts <= 0 or time.time() - hb_ts > self._tv_heartbeat_stale_sec():
+            return False
+        return True
+
+    def _place_tv_catchup_limit(self, reason="", is_refresh=False):
+        if not self._tv_catchup_precheck_still_valid():
+            logger.warning(
+                f"🚫 [{self.symbol}] 追回前复核：TV心跳已变化/过期 → 中止本次追回周期"
+            )
+            self._abort_tv_catchup_cycle(reason="pre_order_stale_or_flipped")
+            return False
+
+        side = str(getattr(self, "catchup_side", "") or "").upper()
+        from binance_client import binance_client, is_orders_query_failed
+
+        if is_refresh:
+            n = int(getattr(self, "catchup_unfilled_refreshes", 0) or 0) + 1
+            self.catchup_unfilled_refreshes = n
+            cap = max_unfilled_refreshes(self.symbol)
+            if n > cap:
+                logger.warning(
+                    f"🚫 [{self.symbol}] 追回限价连续未成交刷新 {n}>{cap} → 转市价兜底"
+                )
+                self._cancel_catchup_limit(reason="未成交超限·转市价")
+                return bool(self._escalate_tv_catchup_to_market(reason="limit_budget_exhausted"))
+            self._cancel_catchup_limit(reason="TTL刷新·先撤旧标签")
+        elif getattr(self, "catchup_limit_order_id", None):
+            logger.error(f"🚫 [{self.symbol}] 已有追回限价 → 拒挂 | {reason}")
+            return False
+
+        pos = self._get_active_position(prefer_ws=True)
+        if pos == "QUERY_FAILED":
+            return False
+        if pos and float(pos.get("size") or 0) > 0:
+            logger.warning(f"🚫 [{self.symbol}] 追回挂单前仍有仓 → 中止")
+            return False
+        if not is_refresh:
+            if not self._ensure_sterile_for_reentry(reason="追回挂单前清场"):
+                return False
+        else:
+            if hasattr(self, "_verify_sterile_flat"):
+                if not self._wait_verify(self._verify_sterile_flat, retries=5, delay=0.35):
+                    logger.error(f"🚫 [{self.symbol}] TTL刷新后无菌未过 → 拒挂新限价")
+                    return False
+
+        k15, k5 = self._fetch_catchup_klines()
+        lo, hi = pick_best_tier_extreme(side, k15, k5)
+        rp = get_reentry_profile(self.symbol)
+        lim, src = compute_reentry_limit_px(
+            side=side,
+            tv_price=float(getattr(self, "catchup_tv_entry_frozen", 0) or 0),
+            low5=lo, high5=hi, low3=0.0, high3=0.0,
+            tick=float(rp.get("tick_size") or 0.01),
+            discount=float(rp.get("limit_discount") or 0.003),
+            prev_entry=0.0,
+        )
+        if lim <= 0:
+            logger.warning(f"🚫 [{self.symbol}] 追回限价中止: {src}")
+            if src == "not_better_than_tv":
+                self._abort_tv_catchup_cycle(reason="not_better_than_tv")
+            return False
+
+        if not is_refresh:
+            self._prepare_tv_catchup_sizing(side)
+        qty = float(getattr(self, "_catchup_qty", 0) or 0)
+        if qty <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追回限价无数量")
+            return False
+
+        ttl = float(rp.get("limit_ttl_sec") or 300)
+        deadline_ts = time.time() + ttl
+        open_side = "BUY" if side == "LONG" else "SELL"
+        tag = make_catchup_client_order_id(self.symbol, side, lim, time.time())
+        self.catchup_order_tag = tag
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
+        try:
+            book = binance_client.get_open_orders(self.symbol)
+            if is_orders_query_failed(book):
+                logger.error(f"🚫 [{self.symbol}] 追回挂单前查单失败 → 释放标签并拒挂 tag={tag}")
+                self._clear_catchup_order_tag(reason="查单失败拒挂")
+                return False
+            for o in (book or []):
+                if not isinstance(o, dict):
+                    continue
+                if str(o.get("type") or "").upper() != "LIMIT":
+                    continue
+                if str(o.get("side") or "").upper() != open_side:
+                    continue
+                try:
+                    opx = float(o.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(opx - lim) <= max(lim * 1e-8, 1e-6):
+                    oid = o.get("orderId")
+                    self.catchup_active = True
+                    self.catchup_phase = "limit"
+                    self.catchup_limit_order_id = oid
+                    self.catchup_limit_px = lim
+                    self.catchup_limit_deadline_ts = deadline_ts
+                    coid = str(o.get("clientOrderId") or "") or tag
+                    self.catchup_order_tag = coid
+                    self._save_state()
+                    logger.warning(f"♻️ [{self.symbol}] 追回复用已有同价限价 id={oid} @{lim:.2f} tag={coid}")
+                    return True
+        except Exception as e:
+            logger.error(f"🚫 [{self.symbol}] 追回挂单前查单异常 → 拒挂: {e}")
+            self._clear_catchup_order_tag(reason="查单异常拒挂")
+            return False
+
+        order = binance_client.place_limit_order(
+            open_side, qty, lim, symbol=self.symbol, reduce_only=False,
+            client_order_id=tag,
+        )
+        if not order:
+            self._clear_catchup_order_tag(reason="下单失败释放")
+            return False
+        oid = order.get("orderId") or order.get("algoId")
+        self.catchup_active = True
+        self.catchup_phase = "limit"
+        self.catchup_limit_order_id = oid
+        self.catchup_limit_px = lim
+        self.catchup_limit_deadline_ts = deadline_ts
+        self._save_state()
+        logger.info(
+            f"📥 [{self.symbol}] 追回限价已挂 {side} {qty} @{lim:.2f} "
+            f"src={src} id={oid} tag={tag} | {reason} | refresh={n if is_refresh else 0}"
+        )
+        return True
+
+    def _progress_tv_catchup_cycle(self):
+        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
+            return
+        phase = str(getattr(self, "catchup_phase", "") or "")
+        if phase != "limit":
+            return  # market_fallback是同步下单，没有可轮询的中间态
+        side = str(getattr(self, "catchup_side", "") or "").upper()
+        pos = self._get_active_position(prefer_ws=True)
+        if pos == "QUERY_FAILED":
+            return
+        if pos and float(pos.get("size") or 0) > 0:
+            if str(pos.get("side") or "").upper() == side:
+                self._finalize_tv_catchup_fill(pos, escalated=False)
+            else:
+                logger.warning(f"⚠️ [{self.symbol}] 追回期间出现反向仓 → 中止周期")
+                self._abort_tv_catchup_cycle(reason="反向仓")
+            return
+        now = time.time()
+        deadline = float(getattr(self, "catchup_limit_deadline_ts", 0) or 0)
+        if deadline > 0 and now >= deadline:
+            self._place_tv_catchup_limit(reason="TTL刷新", is_refresh=True)
+
+    def _escalate_tv_catchup_to_market(self, reason=""):
+        """限价预算耗尽后无条件市价追上——宝贝原话"这种情形不要犹豫了，
+        直接市价进单"：心跳持续了一整个预算窗口证明TV还在持有，这本身
+        就是确认，不再额外加多周期确认门槛（不同于自己出场后的追单确认
+        chase-watch，那是为了验证"自己出场是不是真的判断错了"）。"""
+        if not self._tv_catchup_precheck_still_valid():
+            logger.warning(f"🚫 [{self.symbol}] 市价追回前复核：TV心跳已变化/过期 → 中止")
+            self._abort_tv_catchup_cycle(reason="pre_market_stale_or_flipped")
+            return False
+        side = str(getattr(self, "catchup_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            self._abort_tv_catchup_cycle(reason="bad_side")
+            return False
+        if not self._ensure_sterile_for_reentry(reason="追回市价·仓位归零清场"):
+            return False
+        from binance_client import binance_client
+
+        if not getattr(self, "_catchup_qty", 0):
+            self._prepare_tv_catchup_sizing(side)
+        qty = float(getattr(self, "_catchup_qty", 0) or 0)
+        if qty <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追回市价无数量，放弃")
+            self._abort_tv_catchup_cycle(reason="no_qty")
+            return False
+        open_side = "BUY" if side == "LONG" else "SELL"
+        self.catchup_phase = "market_fallback"
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        order = binance_client.place_market_order(
+            open_side, qty, symbol=self.symbol, reduce_only=False,
+        )
+        if not order:
+            logger.warning(f"⚠️ [{self.symbol}] 追回市价下单失败")
+            self._abort_tv_catchup_cycle(reason="market_order_failed")
+            return False
+        pos = self._get_active_position(prefer_ws=False)
+        if pos == "QUERY_FAILED" or not pos or float(pos.get("size") or 0) <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追回市价成交后查仓失败/无仓，人工核对")
+            return False  # 不标记episode已解决——状态存疑，需要人工看，catchup_active留True当红旗
+        return bool(self._finalize_tv_catchup_fill(pos, escalated=True))
+
+    def _finalize_tv_catchup_fill(self, pos: Dict[str, Any], escalated: bool) -> bool:
+        """追回成交后：变成完全正常的TV持仓，交还雷达/呼吸止损/TP1-2-3
+        系统全权接管（不像网格套利那样永久简化）——不复用
+        _on_reentry_limit_filled，那深度耦合reentry_attempt递增/
+        _reentry_open_snap等只对"自己出场后重入"有意义的语义。"""
+        side = str(pos.get("side") or getattr(self, "catchup_side", "") or "").upper()
+        entry = float(pos.get("entry_price") or 0)
+        qty = float(pos.get("size") or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0 or qty <= 0:
+            return False
+
+        self.catchup_limit_order_id = None
+        self.catchup_limit_px = 0.0
+        self.catchup_limit_deadline_ts = 0.0
+        self.catchup_active = False
+        self.catchup_phase = ""
+        self._clear_catchup_order_tag(reason="追回成交释放")
+        self._catchup_episode_resolved = True
+
+        self.current_side = side
+        self.last_tv_side = side
+        self.watched_entry = entry
+        self.watched_qty = qty
+        self.initial_qty = qty
+        self._open_settled_qty = qty
+        self.base_qty = qty
+        self.position_source = "TV"
+        self.monitoring = True
+
+        atr = float(
+            getattr(self, "_catchup_fresh_atr", 0) or getattr(self, "_tv_signal_atr", 0) or 0
+        )
+        self.open_atr = atr
+        self.current_atr = atr
+        self._tv_signal_atr = atr
+        tv_ref_price = float(getattr(self, "catchup_tv_entry_frozen", 0) or entry)
+        self.tv_price = tv_ref_price
+
+        tps = list(getattr(self, "catchup_tps_frozen", None) or [0.0, 0.0, 0.0])
+        self.tv_tps = self._sanitize_tp_prices(tps) if hasattr(self, "_sanitize_tp_prices") else tps
+        try:
+            if not self._tp_prices_valid_for_side(side, entry):
+                self.tv_tps = [0.0, 0.0, 0.0]
+            self._ensure_tp123_prices_from_tv(entry)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 追回成交 TP 重算跳过: {e}")
+
+        # 止损：按TV止损"空间"(距离)重新锚定到实际成交价，两条分支(限价
+        # 优价/市价兜底)统一公式，只是fill_px不同——不硬搬TV原始止损绝对价
+        distance = float(getattr(self, "catchup_stop_distance_frozen", 0) or 0)
+        hard_sl = (entry - distance) if side == "LONG" else (entry + distance)
+        self.frozen_hard_sl_px = round(float(hard_sl), 2)
+        self.initial_stop = self.frozen_hard_sl_px
+        self.current_sl = self.frozen_hard_sl_px
+        self.tv_sl = self.frozen_hard_sl_px
+
+        try:
+            self._bind_adx_tier_on_open(adx=float(getattr(self, "last_adx", 0) or 25.0), tier=1)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 追回ADX档绑定失败，默认中档: {e}")
+            self.adx_tier = 1
+            self.radar_tier = 1
+
+        self._begin_open_radar_dormant(
+            side=side, entry=entry, tv_price=tv_ref_price, open_atr=atr,
+            reentry_attempt=0, adx_tier=1, radar_tier=1,
+            adx=float(getattr(self, "last_adx", 0) or 25.0),
+        )
+
+        self._save_state()
+        self._ensure_price_ws()
+        self._ensure_sentinel_running()
+
+        sl_ok = self._ensure_frozen_hard_sl(qty, reason="TV心跳漏单追回·硬止损")
+        placed_tp = 0
+        try:
+            placed_tp = self._place_tp_levels_only(qty, retries=2)
+        except Exception as e:
+            logger.error(f"[{self.symbol}] 追回TP挂单失败: {e}")
+        try:
+            self._resolve_atr_scenario_after_open(entry, side, qty)
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 追回ATR场景绑定跳过: {e}")
+        if float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0:
+            self.current_sl = self.frozen_hard_sl_px
+            self.tv_sl = self.frozen_hard_sl_px
+        if self._radar_is_dormant():
+            self._strip_radar_stop_keep_hard(reason="追回后雷达仍休眠")
+
+        slip = abs(entry - tv_ref_price) if tv_ref_price > 0 else 0.0
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"TV心跳漏单已自动追回 [{self.symbol}]",
+                detail=(
+                    f"{side} {qty} @ {entry:.4f}（TV原开仓价{tv_ref_price:.4f}，滑点{slip:.4f}）"
+                    f"{'· 已升级市价' if escalated else '· 限价优价成交'}\n"
+                    f"硬止损@{self.frozen_hard_sl_px:.4f}（按TV止损空间{distance:.4f}重新锚定）"
+                    f" hard挂单={'成功' if sl_ok else '失败需人工核查'}\n"
+                    f"TP挂出={placed_tp}档 TP目标={self.tv_tps}"
+                ),
+                level="紧急",
+                immediate=True,
+            )
+        except Exception:
+            pass
+        logger.info(
+            f"✅ [{self.symbol}] TV心跳漏单追回成交 {side} {qty}@{entry:.2f} "
+            f"escalated={escalated} hard@{self.frozen_hard_sl_px:.2f} "
+            f"hung={1 if sl_ok else 0} tp_placed={placed_tp}"
+        )
+        return True
+
+    def _abort_tv_catchup_cycle(self, reason=""):
+        self._cancel_catchup_limit(reason=reason)
+        self.catchup_active = False
+        self.catchup_phase = ""
+        self._catchup_episode_resolved = True
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        logger.warning(f"🛑 [{self.symbol}] TV心跳追回周期已中止 | {reason}")
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"TV心跳漏单追回已中止 [{self.symbol}]",
+                detail=f"side={getattr(self, 'catchup_side', None)} 原因={reason}，请人工核查",
+                level="紧急",
+                immediate=True,
+            )
+        except Exception:
+            pass
 
     def _check_tv_heartbeat_direction_mismatch(self):
         """持仓中(live_qty>0)时，心跳显示的方向如果新鲜且跟实盘方向不一致，

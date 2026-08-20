@@ -336,6 +336,22 @@ def make_reentry_client_order_id(
     return f"RE{sym}{sd}{digest}{t % 10000}"[:36]
 
 
+def make_catchup_client_order_id(
+    symbol: str, side: str, price: float, ts: Optional[float] = None,
+) -> str:
+    """TV心跳漏单追回专用标签，前缀跟常规重入(RE)区分，方便订单历史里
+    一眼认出这是漏单追回下的单，不是常规重入。"""
+    sym_u = str(symbol or "").upper()
+    sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
+    sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
+    px = abs(int(round(float(price or 0) * 100))) % 1_000_000
+    t = abs(int(float(ts if ts is not None else time.time()))) % 100_000
+    rnd = random.getrandbits(32)
+    raw = f"{sym_u}|HB|{sd}|{px}|{t}|{rnd}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return f"HB{sym}{sd}{digest}{t % 10000}"[:36]
+
+
 REENTRY_ETH: Dict[str, Any] = {
     "name": "ETH",
     "tv_tf": "90m",
@@ -1061,6 +1077,32 @@ def parse_kline_extreme(klines: Any) -> Tuple[float, float]:
             return lo, hi
     except (TypeError, ValueError, IndexError):
         pass
+    return 0.0, 0.0
+
+
+def pick_best_tier_extreme(side: str, klines_a: Any, klines_b: Any) -> Tuple[float, float]:
+    """两档K线各取极值，选对side更有利的那一档（多选更低的低点、空选更高的
+    高点）。跟compute_reentry_limit_px配合：这里只负责"两档谁更有利"，成交价
+    是否真的优于TV仍由compute_reentry_limit_px的is_better_than_tv把关，不在
+    这里重复判断——供TV心跳漏单追回(_place_tv_catchup_limit)用，跟常规重入
+    "5m为主/3m仅在5m缺失时兜底"的fallback链是两种不同的挑价策略。"""
+    side_u = str(side or "").strip().upper()
+    lo_a, hi_a = parse_kline_extreme(klines_a)
+    lo_b, hi_b = parse_kline_extreme(klines_b)
+    if side_u == "LONG":
+        cands = [(lo_a, hi_a)] if lo_a > 0 else []
+        if lo_b > 0:
+            cands.append((lo_b, hi_b))
+        if not cands:
+            return 0.0, 0.0
+        return min(cands, key=lambda p: p[0])
+    if side_u == "SHORT":
+        cands = [(lo_a, hi_a)] if hi_a > 0 else []
+        if hi_b > 0:
+            cands.append((lo_b, hi_b))
+        if not cands:
+            return 0.0, 0.0
+        return max(cands, key=lambda p: p[1])
     return 0.0, 0.0
 
 
