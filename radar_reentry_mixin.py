@@ -658,7 +658,15 @@ class RadarReentryMixin:
         snap = snap or {}
         meta = meta or {}
         exit_src = str(meta.get("exit_source") or "")
-        side = str(snap.get("side") or meta.get("side") or "").upper()
+        # 2026-08-20实盘复现(B账户XAU)：snap["side"]/meta["side"]偶发已经是
+        # 空的(current_side在这之前的某个环节已经被清掉)，之前武装追单确认
+        # 观察窗时直接拿到空side存进去，_check_chase_reentry_confirmation
+        # 一看side无效就自我清掉，整个观察窗形同虚设、白武装一次。
+        # last_tv_side不在_reset_breath_ledger_on_flat的清空列表里，兜底更可靠。
+        side = str(
+            snap.get("side") or meta.get("side")
+            or getattr(self, "last_tv_side", "") or ""
+        ).upper()
         entry = float(snap.get("entry") or meta.get("entry_px") or 0)
         exit_px = float(
             meta.get("live_exit_px")
@@ -1181,7 +1189,10 @@ class RadarReentryMixin:
                     exit_src = str(getattr(self, "last_exit_source", "") or "")
                     attempt = int(getattr(self, "reentry_attempt", 0) or 0)
                     max_n = int(get_reentry_profile(self.symbol).get("max_reentries") or 1)
-                    side_now = str(getattr(self, "cycle_tv_side", "") or "").upper()
+                    side_now = str(
+                        getattr(self, "cycle_tv_side", "")
+                        or getattr(self, "last_tv_side", "") or ""
+                    ).upper()
                     exit_px_now = float(getattr(self, "last_exit_px", 0) or 0)
                     if (
                         exit_src == "radar_be"
