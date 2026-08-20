@@ -115,6 +115,26 @@ def process_webhook_payload(raw_bytes, content_type, headers, remote_addr, ticke
             "symbols": active_binance_symbols(),
         }, 200
 
+    if raw_action == "HEARTBEAT":
+        # 2026-08-20：TV心跳持仓——每根收盘K线TV都会发一次自己当前的持仓状态，
+        # 独立于开平仓警报，用于VPS核对"TV持仓、实盘漏单"这类现有日志比对
+        # 天然看不见的情况(webhook从没送达，本地journalctl压根没留痕)。
+        # 只写状态，不进 handle_signal 的完整交易流水线，不可能误触发下单。
+        hb_supervisor, hb_sym = get_supervisor_for_payload(data)
+        if hb_supervisor is not None:
+            try:
+                hb_supervisor.record_tv_heartbeat(data)
+            except Exception as e:
+                logger.warning(f"[Heartbeat] [{hb_sym}] 记录失败: {e}")
+        _log(200, "heartbeat_recorded")
+        return {
+            "status": "success",
+            "message": "heartbeat_recorded",
+            "action": "HEARTBEAT",
+            "symbol": hb_sym,
+            "schema": TV_STRATEGY_VERSION,
+        }, 200
+
     supervisor, sym = get_supervisor_for_payload(data)
     if supervisor is None:
         logger.warning(f"[Webhook] 不支持的品种: {sym}")

@@ -476,6 +476,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._temp_stop_active = False
         self._tp3_fallback_active = False
 
+        # 2026-08-20：TV心跳持仓——独立于开平仓警报，TV每根收盘K线都会告知
+        # 自己当前的持仓方向+止损+TP123，用于VPS核对"TV持仓、实盘完全漏单"
+        # 这种journalctl比对天然看不见的场景（webhook从没送达）。只做检测+
+        # 提醒，不接自动下单（见 radar_reentry_mixin.py 里 record_tv_heartbeat
+        # 顶部注释：追回执行这块还没接，先只报警，避免仓位算法没吃透就上真单）。
+        self.tv_heartbeat_side = "FLAT"
+        self.tv_heartbeat_ts = 0.0
+        self.tv_heartbeat_entry = 0.0
+        self.tv_heartbeat_stop = 0.0
+        self.tv_heartbeat_tp1 = 0.0
+        self.tv_heartbeat_tp2 = 0.0
+        self.tv_heartbeat_tp3 = 0.0
+        self._tv_gap_first_seen_ts = 0.0
+        self._tv_gap_alerted = False
+        self.tv_closed_vps_holding = False
+
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
         )
@@ -1190,6 +1206,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         live_qty = float(pos["size"]) if pos else 0.0
 
         if live_qty <= 0:
+            # TV心跳漏单检测：实盘确认空仓，跟TV心跳持仓状态比对（见
+            # radar_reentry_mixin.py 里 record_tv_heartbeat 顶部注释）
+            try:
+                self._check_tv_heartbeat_gap()
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] TV心跳漏单检测跳过: {e}")
             if self._confirm_position_flat():
                 if self._book_thinks_active():
                     curr_px = binance_client.get_current_price(self.symbol)
@@ -3221,8 +3243,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _save_state(self):
         try:
+            # TV心跳=空仓、但VPS雷达/防线仍持有——正常的追踪节奏分歧，不是
+            # bug，只做展示用标记，不触发任何自动动作（雷达继续按自己判断跑，
+            # 见 radar_reentry_mixin.py 里 record_tv_heartbeat 顶部注释）
+            _hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+            _has_pos = bool(self.current_side) and float(getattr(self, "watched_qty", 0) or 0) > 0
+            self.tv_closed_vps_holding = bool(_hb_side == "FLAT" and _has_pos)
             with open(self.state_file, 'w') as f:
                 json.dump({
+                    "tv_heartbeat_side": str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT"),
+                    "tv_heartbeat_ts": float(getattr(self, "tv_heartbeat_ts", 0) or 0),
+                    "tv_heartbeat_entry": float(getattr(self, "tv_heartbeat_entry", 0) or 0),
+                    "tv_heartbeat_stop": float(getattr(self, "tv_heartbeat_stop", 0) or 0),
+                    "tv_heartbeat_tp1": float(getattr(self, "tv_heartbeat_tp1", 0) or 0),
+                    "tv_heartbeat_tp2": float(getattr(self, "tv_heartbeat_tp2", 0) or 0),
+                    "tv_heartbeat_tp3": float(getattr(self, "tv_heartbeat_tp3", 0) or 0),
+                    "tv_closed_vps_holding": bool(getattr(self, "tv_closed_vps_holding", False)),
                     "last_tv_side": self.last_tv_side,
                     "current_side": self.current_side,
                     "watched_qty": self.watched_qty,
@@ -17513,6 +17549,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     s = json.load(f)
                     saved_monitoring = bool(s.get("monitoring"))
                     self.last_tv_side = s.get("last_tv_side")
+                    self.tv_heartbeat_side = str(s.get("tv_heartbeat_side", "FLAT") or "FLAT")
+                    self.tv_heartbeat_ts = float(s.get("tv_heartbeat_ts", 0) or 0)
+                    self.tv_heartbeat_entry = float(s.get("tv_heartbeat_entry", 0) or 0)
+                    self.tv_heartbeat_stop = float(s.get("tv_heartbeat_stop", 0) or 0)
+                    self.tv_heartbeat_tp1 = float(s.get("tv_heartbeat_tp1", 0) or 0)
+                    self.tv_heartbeat_tp2 = float(s.get("tv_heartbeat_tp2", 0) or 0)
+                    self.tv_heartbeat_tp3 = float(s.get("tv_heartbeat_tp3", 0) or 0)
                     self.current_side = s.get("current_side")
                     self.current_sl = s.get("current_sl", 0.0)
                     self.regime = s.get("regime", 3)

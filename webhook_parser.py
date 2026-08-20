@@ -152,7 +152,7 @@ FLATTEN_ACTIONS = frozenset({
     "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
 })
 VALID_ACTIONS = frozenset({
-    "LONG", "SHORT", "PING",
+    "LONG", "SHORT", "PING", "HEARTBEAT",
     "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
 })
 

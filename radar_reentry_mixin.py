@@ -45,6 +45,19 @@ logger = logging.getLogger(__name__)
 _CHASE_CONFIRM_WINDOW_SEC = 900.0  # 观察窗口：15分钟，超时未确认就放弃
 _CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
 
+# 2026-08-20新增：TV心跳持仓。TV每根收盘K线独立发一条自己当前的持仓状态
+# (方向+开仓价+止损+TP123)，跟开平仓警报完全解耦——目的是补上现有"TV信号
+# vs 实盘"比对（watchdog/check.py 的 fetch_last_tv_signals_all）的结构性盲区：
+# 那套比对靠本地 journalctl 里有没有留痕，如果TV那条警报根本没送达VPS
+# （网络抖动/nginx瞬断/webhook丢包），本地压根没日志可比，看不见"TV发了但
+# VPS完全没收到"这种最彻底的漏单。心跳的权威依据是TV自己的持仓状态，不
+# 依赖VPS这边有没有留痕，能补上这个洞。
+# 目前只做检测+钉钉高优先级提醒，不接自动追回下单——追回执行需要正确复用
+# 开仓仓位计算(tier/sizing_principal/杠杆)，这块还没有把握吃透就上真单，
+# 留到下一步专门实现（当前先人工看到提醒去控制面板手动补开）。
+TV_HEARTBEAT_STALE_SEC = 4 * 3600.0  # 心跳超过4小时没刷新就不当最新真相用
+TV_HEARTBEAT_GAP_GRACE_SEC = 180.0   # 心跳持仓但实盘空仓，持续超过3分钟才判定漏单
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -867,6 +880,92 @@ class RadarReentryMixin:
         except Exception:
             pass
         return bool(self._on_reentry_limit_filled(pos))
+
+    def record_tv_heartbeat(self, data: dict):
+        """接收TV心跳持仓，只写状态，不进交易流水线（app.py 的 HEARTBEAT
+        分支调用）。绝不下单、绝不改任何交易相关字段，纯粹记录"TV自己觉得
+        现在是什么状态"，供 _check_tv_heartbeat_gap 等只读比对使用。"""
+        side = str((data or {}).get("tv_side") or "FLAT").strip().upper()
+        if side not in ("LONG", "SHORT", "FLAT"):
+            side = "FLAT"
+        self.tv_heartbeat_side = side
+        self.tv_heartbeat_ts = time.time()
+        if side in ("LONG", "SHORT"):
+            def _f(key):
+                try:
+                    return float((data or {}).get(key) or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+            self.tv_heartbeat_entry = _f("tv_entry")
+            self.tv_heartbeat_stop = _f("tv_stop")
+            self.tv_heartbeat_tp1 = _f("tv_tp1")
+            self.tv_heartbeat_tp2 = _f("tv_tp2")
+            self.tv_heartbeat_tp3 = _f("tv_tp3")
+        else:
+            self.tv_heartbeat_entry = 0.0
+            self.tv_heartbeat_stop = 0.0
+            self.tv_heartbeat_tp1 = 0.0
+            self.tv_heartbeat_tp2 = 0.0
+            self.tv_heartbeat_tp3 = 0.0
+            self._tv_gap_first_seen_ts = 0.0
+            self._tv_gap_alerted = False
+        logger.debug(
+            f"💓 [{self.symbol}] TV心跳 side={side} "
+            f"entry={self.tv_heartbeat_entry} stop={self.tv_heartbeat_stop}"
+        )
+
+    def _check_tv_heartbeat_gap(self):
+        """TV心跳显示持仓、但实盘完全空仓超过宽限期 → 判定漏单，钉钉高优先级
+        提醒（目前只报警不自动下单，见模块顶部注释）。由 _run_idle_live_reconcile
+        在确认实盘空仓那个分支里调用，天然不会跟正在监控的持仓打架。"""
+        hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+        if hb_side not in ("LONG", "SHORT"):
+            self._tv_gap_first_seen_ts = 0.0
+            self._tv_gap_alerted = False
+            return
+        hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
+        now = time.time()
+        if hb_ts <= 0 or now - hb_ts > TV_HEARTBEAT_STALE_SEC:
+            return  # 心跳太旧不可信，可能TV那边早换了状态但新心跳还没到
+        if bool(getattr(self, "trading_paused", False)):
+            return
+        if (
+            bool(getattr(self, "reentry_active", False))
+            or bool(getattr(self, "_chase_watch_active", False))
+        ):
+            return  # 已有重入/追单周期在跑，那本身就是VPS在处理"该有仓位没有"，让位
+        first_seen = float(getattr(self, "_tv_gap_first_seen_ts", 0) or 0)
+        if first_seen <= 0:
+            self._tv_gap_first_seen_ts = now
+            return
+        if now - first_seen < TV_HEARTBEAT_GAP_GRACE_SEC:
+            return
+        if bool(getattr(self, "_tv_gap_alerted", False)):
+            return  # 这次缺口已经报过，别刷屏；新心跳/仓位变化会自然重置
+        self._tv_gap_alerted = True
+        logger.warning(
+            f"🆘 [{self.symbol}] TV心跳持仓{hb_side}但实盘持续"
+            f"{now - first_seen:.0f}s空仓 → 疑似漏单"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"[{self.symbol}] TV持仓{hb_side}但VPS完全空仓，疑似漏单",
+                detail=(
+                    f"TV心跳显示持仓 {hb_side}，开仓价≈{self.tv_heartbeat_entry:.4f}，"
+                    f"止损≈{self.tv_heartbeat_stop:.4f}，"
+                    f"TP1/2/3≈{self.tv_heartbeat_tp1:.4f}/"
+                    f"{self.tv_heartbeat_tp2:.4f}/{self.tv_heartbeat_tp3:.4f}，"
+                    f"但{self._tag()}账户实盘已连续{now - first_seen:.0f}秒完全空仓，"
+                    f"疑似webhook漏单（未送达/未处理），请人工核查是否需要手动补开。"
+                ),
+                level="紧急",
+                suggestion="确认是否漏单，需要的话去控制面板手动补发开仓",
+                immediate=True,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 漏单钉钉发送跳过: {e}")
 
     def _place_reentry_limit(self, side=None, reason="", *, is_refresh=False):
         side = str(side or getattr(self, "cycle_tv_side", "") or "").upper()
