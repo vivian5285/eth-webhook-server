@@ -125,7 +125,9 @@ from reentry_profiles import (
     tier_label,
 )
 from smart_reentry_engine import blank_reentry_state
-from radar_reentry_mixin import RadarReentryMixin, MEGA_TREND_CEILING_MULT
+from radar_reentry_mixin import (
+    RadarReentryMixin, MEGA_TREND_CEILING_MULT, TV_HEARTBEAT_GAP_GRACE_SEC,
+)
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
 # smart_tp_reconciliation 已废除（v2简化架构）
@@ -18722,12 +18724,49 @@ def bootstrap_supervisors():
                             sup._save_state()
                 except Exception as e:
                     logger.debug(f"空仓清暂停跳过: {e}")
+                # 2026-08-21实盘复现(BNBUSDT)：重启期间通用清场流程("全部
+                # 普通挂单已撤销")无差别撤单，认不出这是心跳追回专用的
+                # 限价单，撤完顺带把追回周期也清零(_reset_breath_ledger_
+                # on_flat)——不算丢单(episode去重记忆本来就是纯内存，重启
+                # 后自然清零，下次巡检会重新评估)，但要多等一个全新的180秒
+                # 宽限期才会重新武装，白白错过这段时间的窗口，浪费掉已经
+                # 挂出去过一次的优价机会。这里读一眼重启前state文件里的
+                # catchup_active，recover后如果发现被清空了且确认空仓，
+                # 直接立即重新评估一次，不用再等宽限期。
+                was_catchup_active_pre = False
+                try:
+                    if os.path.exists(sup.state_file):
+                        with open(sup.state_file, "r") as _cf:
+                            was_catchup_active_pre = bool(
+                                json.load(_cf).get("catchup_active", False)
+                            )
+                except Exception:
+                    was_catchup_active_pre = False
                 sup.recover_state_on_startup()
                 after = None
                 try:
                     after = sup._get_active_position(prefer_ws=False)
                 except Exception:
                     after = None
+                if (
+                    was_catchup_active_pre
+                    and not bool(getattr(sup, "catchup_active", False))
+                    and (
+                        after is None
+                        or (isinstance(after, dict) and float(after.get("size") or 0) <= 0)
+                    )
+                ):
+                    try:
+                        sup._tv_gap_first_seen_ts = (
+                            time.time() - TV_HEARTBEAT_GAP_GRACE_SEC - 1.0
+                        )
+                        sup._maybe_start_tv_heartbeat_catchup()
+                        logger.info(
+                            f"🚑 [{sym}] 重启前追回周期被清场流程带走 → "
+                            f"立即重新评估追回，跳过宽限期等待"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[{sym}] 重启后追回重评估跳过: {e}")
                 if after == "QUERY_FAILED":
                     summaries.append(f"{sym}:QUERY_FAILED·哨兵接力")
                 elif isinstance(after, dict) and float(after.get("size") or 0) > 0:
