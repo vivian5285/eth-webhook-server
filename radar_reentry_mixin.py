@@ -66,9 +66,10 @@ _CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
 # _finalize_tv_catchup_fill。
 TV_HEARTBEAT_STALE_SEC = 4 * 3600.0  # 心跳超过4小时没刷新就不当最新真相用
 TV_HEARTBEAT_GAP_GRACE_SEC = 180.0   # 心跳持仓但实盘空仓，持续超过3分钟才判定漏单
-TV_HEARTBEAT_CATCHUP_ENABLED = False  # 追回执行总开关：真实下单路径。先关着
-                                       # 部署观察一轮idle-patrol无报错，再手动
-                                       # 改True并逐账户(D→B→C)重启生效
+TV_HEARTBEAT_CATCHUP_ENABLED = True  # 追回执行总开关：真实下单路径。2026-08-20
+                                      # 先关着部署观察一轮idle-patrol全账户无报错，
+                                      # 随后XAU实盘复现同款场景(雷达保本止损出局、
+                                      # TV仍持有且继续上涨)，确认打开
 
 # 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
 # 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
