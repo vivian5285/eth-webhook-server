@@ -104,6 +104,12 @@ python3 test_stop_idempotent_and_tp_levels.py
 > 2. **Webhook密钥曾有3处硬编码兜底**（`app.py`两处+`account_profiles.py`一处），实盘真实密钥直接写死在源码里当默认值——密钥/环境变量读取失败时会静默降级接受这个源码里的值，不报错不拒绝。修正为密钥读取失败一律返回空字符串，空字符串直接拒绝所有请求（fail-closed），不再有任何硬编码密钥兜底。已用正确密钥/错误密钥各测一遍确认没有影响正常鉴权。
 > 3. **跨品种并发开仓存在TOCTOU竞态**——两个不同品种的信号几乎同时到同一账户时（各自独立线程处理，不互相阻塞），`_assert_notional_cap_or_reject`总敞口检查可能都读到"其它品种=0增量"从而都通过，叠加后总敞口略微超出`MAX_TOTAL_NOTIONAL_MULT`。修法：加`_OPEN_NOTIONAL_LOCK`只锁"读敞口→判断→登记预占"这一微秒级步骤（不锁开仓全流程，实测开仓终检要47-53秒，锁全程会把品种间开仓拖成事实上的串行，比不修还伤）；预占用90秒TTL自动过期，不用在`_open_position`众多提前return分支里挨个补显式清理（那样漏一条就会留下永久卡住后续开仓的假预占，风险比竞态本身还大）。用隔离mock测试(`test_notional_race_fix.py`)先验证了竞态确实被堵住、过期预占确实自动失效、同品种不会自己卡自己，再部署上线。
 
+> **2026-08-20 四项新增**（`BINANCE_VPS_VERSION` 未变，均为叠加式增强，不改变现有TV主链路默认行为）：
+> 1. **追单确认改多周期一致性判断**——雷达保本止损出局、TV仍持有的场景（tier=2强趋势+`radar_be`退出+超出常规重入区间），"追单确认重入"原来只查15m一个周期的EMA15/30+动量，实盘复现过"15m结构没破但5m已经死叉、三个周期现价其实都已跌破快线"的假阳性场景。改为`_multi_tf_trend_confirmed`：5m/15m/30m逐个核对"现价站上快线+快线在慢线上方+动量非噪音"，任一周期没过就整体不追。见 `radar_reentry_mixin.py`。
+> 2. **TV心跳持仓**——TV策略每根收盘K线独立发一条`action:"HEARTBEAT"`，带自己当前的持仓方向/开仓价/止损/TP123，跟开平仓警报完全解耦。补上现有"TV信号vs实盘"比对（`watchdog/check.py`）的结构性盲区：那套比对靠本地journalctl留痕，如果TV那条警报webhook根本没送达VPS（网络抖动/nginx瞬断/丢包），本地压根没日志可比，看不见"TV发了但VPS完全没收到"这种最彻底的漏单。心跳持续显示持仓但实盘空仓超过3分钟（且非重入等待窗口）→ 钉钉紧急提醒(带止损/TP参考值)，目前仅报警不自动下单（追回执行需要正确复用开仓仓位计算，留到下一步）。反过来"心跳空仓但VPS雷达仍持有"是设计上刻意的正常分歧（VPS雷达跟TV追踪节奏不同不算故障），只做展示标记`tv_closed_vps_holding`，不触发任何动作。见 `app.py`/`radar_reentry_mixin.py::record_tv_heartbeat`。
+> 3. **网格套利（区间震荡）手动交易模式**——控制台(`/console`)新增独立tab，TV没信号覆盖的时间段可以手动填品种+方向+限价开仓价+一次性止盈价(不分批)+精确止损价(不走`_temp_hard_stop_from_tv`的1.15×加宽)，仓位大小复用现有档位公式。新增`position_source`("TV"/"GRID")标记仓位来源；`_expected_tp_levels`对GRID仓位短路返回空列表，让TP1/2/3维护对账循环不会试图补挂网格仓位里本不存在的TP1/TP2。真实TV信号到达时不需要额外"打断"代码——`_handle_smart_entry`对每条真实LONG/SHORT一律先`_full_reentry`强平现有仓位（来源无关）再开新仓，网格仓位会被这条已有铁律自动强平。见 `position_supervisor_binance.py::open_grid_position`、`console_api.py`（`/api/console/grid_order`）。
+> 4. **两处告警/日志健壮性修复**：①`watchdog/check.py`新增WS断线自愈降噪——币安WS断线若10秒内能找到"重连成功"证据就判定自愈噪音，不再当异常上报（此前D账户0持仓仍反复触发误报）；②`_simple_core.py`重启TP补挂新增交易所LOT_SIZE最小下单量核对，仓位缩小后个别TP档算出来的量低于交易所最小下单量时，正确识别为"合法降级不补挂"，不再假报"需要人工"（实盘复现于OPENAI，30%仓位下调后TP1份额0.005-0.007低于minQty=0.01）。
+
 ---
 
 ## 防叠单专章（红线 · 曾 50+ 同价 LIMIT）
