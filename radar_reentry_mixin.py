@@ -115,6 +115,19 @@ MEGA_TREND_RSI_SHORT_MIN = 22.0
 MEGA_TREND_CEILING_MULT = 1.35
 MEGA_TREND_REFRESH_SEC = 240.0
 
+# 2026-08-22新增：保本激活"超强趋势"多维度确认——门槛比上面MEGA_TREND
+# (只用于放宽TP3+跟随系数，3/4通过EMA+动量+ADX即可)更高，额外要求量能
+# 和裸K实体强度也一致确认，只有通过才允许把保本激活的主锚点从"ATR距离"
+# 换成"TP1推进比例"（见reentry_profiles.py::RADAR_MEGA_STRONG_TP1_
+# PROGRESS顶部注释）。复用同一批_multi_tf_trend_signal已经拉到的K线算
+# 量能/裸K，不额外发REST请求。见_evaluate_radar_mega_strong。
+RADAR_MEGA_STRONG_REFRESH_SEC = 240.0  # 复用MEGA_TREND同款节流，成本一致
+RADAR_MEGA_STRONG_VOLUME_RATIO_MIN = 1.3  # 近3根量 vs 更早均量，超30%才算放量
+RADAR_MEGA_STRONG_BODY_RATIO_MIN = 0.55  # 单根K线实体/全长比例阈值
+RADAR_MEGA_STRONG_BODY_LOOKBACK = 5  # 每个周期看最近5根已收盘K线
+RADAR_MEGA_STRONG_BODY_SCORE_MIN = 0.5  # 5根里至少过半数满足实体+方向要求
+RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE = 1  # 4个周期允许最多1个不达标
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -128,6 +141,8 @@ class RadarReentryMixin:
         self._base_breath_profile = dict(getattr(self, "breath_profile", None) or {})
         self._clear_chase_watch(save=False)  # 进程初始化阶段，state文件还没加载完，禁止提前落盘覆盖
         self._init_tv_catchup_runtime()
+        self.radar_mega_strong = False
+        self._mega_strong_last_refresh_ts = 0.0
 
     def _init_tv_catchup_runtime(self):
         """TV心跳漏单追回：独立状态机初始化，跟reentry_*/_chase_watch_*
@@ -1223,6 +1238,109 @@ class RadarReentryMixin:
             )
         elif prev and not confirmed:
             logger.info(f"📉 [{self.symbol}] 大趋势确认解除(score={score}/4)")
+
+    def _evaluate_radar_mega_strong(self, side: str) -> bool:
+        """超强趋势多维度确认：复用_multi_tf_trend_signal同一次K线拉取
+        (跟_maybe_refresh_mega_trend共享15m/1h/4h/1d四个周期的EMA+动量+
+        ADX"四选三"投票，零额外REST开销)，再从同一批K线上追加量能+裸K
+        实体两个维度——门槛比_maybe_refresh_mega_trend(只用于放宽TP3+
+        跟随)更高，只有这个通过才允许_maybe_upgrade_radar_mega_strong
+        把保本激活主锚点从ATR距离换成TP进度。"""
+        from market_engine import body_strength_score, volume_strength_ratio, wilder_rsi
+
+        sig = self._multi_tf_trend_signal(
+            side, MEGA_TREND_TIMEFRAMES, adx_threshold=MEGA_TREND_ADX_THRESHOLD,
+        )
+        total = int(sig.get("total") or 0)
+        score = int(sig.get("score") or 0)
+        if total <= 0 or score < MEGA_TREND_VOTE_MIN:
+            return False
+
+        bars_4h = (sig.get("4h") or {}).get("bars") or []
+        try:
+            rsi_4h = float(wilder_rsi(bars_4h, 14)) if bars_4h else 0.0
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 超强趋势确认4h RSI计算跳过: {e}")
+            rsi_4h = 0.0
+        if side == "LONG" and rsi_4h > MEGA_TREND_RSI_LONG_MAX:
+            return False
+        if side == "SHORT" and rsi_4h < MEGA_TREND_RSI_SHORT_MIN:
+            return False
+
+        counted = 0
+        vol_miss = 0
+        body_miss = 0
+        for tf in MEGA_TREND_TIMEFRAMES:
+            bars = (sig.get(tf) or {}).get("bars") or []
+            if not bars:
+                continue
+            counted += 1
+            vr = volume_strength_ratio(bars)
+            if vr < RADAR_MEGA_STRONG_VOLUME_RATIO_MIN:
+                vol_miss += 1
+            bs = body_strength_score(
+                bars, side, lookback=RADAR_MEGA_STRONG_BODY_LOOKBACK,
+                body_ratio_min=RADAR_MEGA_STRONG_BODY_RATIO_MIN,
+            )
+            if bs < RADAR_MEGA_STRONG_BODY_SCORE_MIN:
+                body_miss += 1
+        if counted <= 0:
+            return False
+        tol = RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE
+        return vol_miss <= tol and body_miss <= tol
+
+    def _maybe_upgrade_radar_mega_strong(self):
+        """雷达休眠期(未激活)内周期性复评：多维度一致确认"超强趋势"才
+        单向升级(弱/中/强→超强)，升级后保本激活主锚点改用TP进度锚点。
+        只升不降——"账本冻结价·持仓期不漂移"这条铁律的折衷：开仓那一刻
+        的强弱判断可能错(比如开仓时看着普通、走出来才发现是裸K强趋势)，
+        允许一次性纠正，但不允许反复横跳制造漂移。激活后不再有意义
+        (_radar_activation_price对已激活仓位直接返回冻结价)，直接跳过。"""
+        if bool(getattr(self, "radar_activated", False)):
+            return
+        if bool(getattr(self, "radar_mega_strong", False)):
+            return
+        now = time.time()
+        last = float(getattr(self, "_mega_strong_last_refresh_ts", 0) or 0)
+        if last > 0 and (now - last) < RADAR_MEGA_STRONG_REFRESH_SEC:
+            return
+        self._mega_strong_last_refresh_ts = now
+        side = str(getattr(self, "current_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return
+        try:
+            confirmed = self._evaluate_radar_mega_strong(side)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 超强趋势多维度确认跳过: {e}")
+            return
+        if not confirmed:
+            return
+        old_gate = float(getattr(self, "radar_activation_price", 0) or 0)
+        self.radar_mega_strong = True
+        self.radar_activation_price = 0.0  # 强制下面重算走"首次计算"分支
+        new_gate = float(self._radar_activation_price() or 0)
+        try:
+            self._save_state()
+        except Exception:
+            pass
+        logger.info(
+            f"🔥 [{self.symbol}] 多维度确认超强趋势({side}) → 保本激活主锚点"
+            f"升级为TP进度锚点 激活线 {old_gate:.4f}→{new_gate:.4f}"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"保本激活升级为超强趋势档 [{self.symbol}]",
+                detail=(
+                    f"{side} 持仓期内多维度(EMA+动量+ADX四选三/量能/裸K实体)一致"
+                    f"确认超强趋势 → 保本激活线从ATR距离锚点改为TP1推进60%锚点，"
+                    f"放宽呼吸空间：\n{old_gate:.4f} → {new_gate:.4f}"
+                ),
+                level="提示",
+            )
+        except Exception:
+            pass
 
     def _check_chase_reentry_confirmation(self):
         """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才追回。

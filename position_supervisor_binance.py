@@ -3368,6 +3368,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "tv_qty3": float(getattr(self, "tv_qty3", 0) or 0),
                     "radar_step_count": int(getattr(self, "radar_step_count", 0) or 0),
                     "radar_activated": bool(getattr(self, "radar_activated", False)),
+                    "radar_mega_strong": bool(getattr(self, "radar_mega_strong", False)),
                     "breakeven_phase": bool(getattr(self, "breakeven_phase", False)),
                     "initial_stop": float(getattr(self, "initial_stop", 0) or 0),
         # 规格 v2.0：提前保本检查点已废除，标记持久化字段保留（向后兼容）
@@ -7573,6 +7574,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 新开仓：雷达休眠至激活线；接管保留已激活状态
             if force_open:
                 self.radar_activated = False
+                self.radar_mega_strong = False
                 self.radar_pending_arm = True
                 self.radar_activation_sticky = False
                 self._radar_sync_open_ts = time.time()
@@ -14114,6 +14116,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._pending_atr_degrade = None
         self.breakeven_phase = False
         self.radar_activated = False
+        self.radar_mega_strong = False
         self.radar_activation_sticky = False
         self._radar_sync_open_ts = time.time()
         self._ws_hard_sl_fill_hint = None
@@ -15300,6 +15303,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.best_price = entry_price
         self.breakeven_phase = False
         self.radar_activated = False
+        self.radar_mega_strong = False
         self.radar_pending_arm = True
         self.radar_activation_sticky = False
         self._radar_sync_open_ts = time.time()
@@ -16240,14 +16244,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 见radar_gate_price_from_tps顶部v2.10注释)放宽，strong档给更多
         # 呼吸空间，避免像ZEC那次5.5分钟就被打掉。
         locked_tier = int(getattr(self, "adx_tier", 1) or 1)
+        # 2026-08-22新增：持仓期内多维度(EMA+动量+ADX+量能+裸K实体)一致
+        # 确认的"超强趋势"单向升级标记(见_maybe_upgrade_radar_mega_strong)，
+        # 命中后换用TP进度锚点，不再取ATR腿的min（v2.11，见radar_gate_
+        # price_from_tps顶部注释）。只升不降，一旦为True就不会变回False。
+        mega_strong = bool(getattr(self, "radar_mega_strong", False))
 
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and tp1_px > 0 and tp2_px > 0:
-            # 旧公式残留检测：偏差 >0.2% 且未激活则重算（含中点→TP1临近→双触发的历次迁移）
+            # 旧公式残留检测：偏差 >0.2% 且未激活则重算（含中点→TP1临近→双触发的历次迁移，
+            # 以及mega_strong刚被升级触发的重算）
             if not activated:
                 expect = radar_gate_price_from_tps(
                     tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
-                    return_pct=return_pct, adx_tier=locked_tier,
+                    return_pct=return_pct, adx_tier=locked_tier, mega_strong=mega_strong,
                 )
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
@@ -16258,7 +16268,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if tp1_px > 0 and tp2_px > 0:
             px = radar_gate_price_from_tps(
                 tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
-                return_pct=return_pct, adx_tier=locked_tier,
+                return_pct=return_pct, adx_tier=locked_tier, mega_strong=mega_strong,
             )
             if px > 0:
                 self.radar_activation_price = px
@@ -16286,6 +16296,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 bp = float(self.best_price or 0)
                 self.best_price = min(bp, px0) if bp > 0 else px0
         if self._radar_is_dormant():
+            # 2026-08-22新增：休眠期(未激活)内周期性复评"超强趋势"多维度
+            # 确认(自带240s节流，逐tick调用成本可忽略)，通过则单向升级
+            # 保本激活主锚点(见_maybe_upgrade_radar_mega_strong顶部注释)。
+            try:
+                self._maybe_upgrade_radar_mega_strong()
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 超强趋势升级检查跳过: {e}")
             return None
         atr = self._get_locked_initial_atr()
         try:
@@ -18009,6 +18026,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.tv_qty3 = float(s.get("tv_qty3", 0) or 0)
                     self.radar_step_count = int(s.get("radar_step_count", 0) or 0)
                     self.radar_activated = bool(s.get("radar_activated", False))
+                    self.radar_mega_strong = bool(s.get("radar_mega_strong", False))
                     try:
                         self._pipeline_load_blob(s.get("pipeline"))
                         self._pipeline_align_monitoring_if_held()

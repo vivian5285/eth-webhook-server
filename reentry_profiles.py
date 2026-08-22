@@ -733,6 +733,17 @@ RADAR_GATE_ATR_MULT_BY_TIER = {0: 1.5, 1: 1.5, 2: 2.0}
 # 开仓那一刻锁定的值(self.adx_tier)，不能用实时ADX——否则激活线会随着
 # 后续ADX波动而漂移，跟"账本冻结价·持仓期不漂移"这条既有铁律冲突。
 
+RADAR_MEGA_STRONG_TP1_PROGRESS = 0.6  # 超强趋势档：推进到TP1的60%才激活
+# 2026-08-22新增：同一天调完ATR倍数后宝贝反馈——ZEC/XAU这类"保本刚打掉、
+# TV仍持仓、价格也没走坏"的场景反复出现，根因不是倍数不够大，是"用ATR
+# 距离当激活锚点"这个思路本身在真正的强趋势下就不对——ATR是短期波动
+# 尺度，趋势越强噪音相对越小，用同一把尺子量反而更容易被"正常"的单边
+# 行情提前吃满。超强趋势(见radar_reentry_mixin.py::_evaluate_radar_mega_
+# strong，EMA+动量+ADX+量能+裸K实体多维度一致确认，比现有adx_tier=2门槛
+# 更高)不再取ATR腿的min，直接用TP1推进比例当唯一锚点，真正给强趋势留
+# 呼吸空间；弱/中档、以及未被多维度确认的强档，继续用原有min(TP1进度,
+# ATR距离,收益率)三选一，不动既有行为。
+
 
 def radar_gate_price_from_tps(
     tp1: float,
@@ -742,6 +753,7 @@ def radar_gate_price_from_tps(
     atr: float = 0.0,
     return_pct: float = 0.0,
     adx_tier: int = 1,
+    mega_strong: bool = False,
     **kwargs,
 ) -> float:
     """
@@ -767,6 +779,11 @@ def radar_gate_price_from_tps(
       ADX)从RADAR_GATE_ATR_MULT_BY_TIER取对应倍数，strong档放宽到2.0×ATR
       （weak/mid维持1.5×ATR不变）——见该常量顶部注释，ZEC实盘复现5.5分钟
       内被打掉。
+      v2.11（2026-08-22）：mega_strong=True(持仓期内多维度一致确认的超强
+      趋势，见RADAR_MEGA_STRONG_TP1_PROGRESS顶部注释)不再取ATR腿的min，
+      直接用RADAR_MEGA_STRONG_TP1_PROGRESS(60%)当唯一锚点——ATR倍数这条
+      路已经调过一轮还是不够，根因是"用ATR距离当锚点"本身不适合真正的
+      强趋势，需要换锚点而不是继续加大倍数。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -781,6 +798,9 @@ def radar_gate_price_from_tps(
     if t1 <= 0 or t2 <= 0 or e <= 0:
         return 0.0
     direction = 1.0 if t1 >= e else -1.0
+    if mega_strong:
+        dist = RADAR_MEGA_STRONG_TP1_PROGRESS * abs(t1 - e)
+        return round(e + direction * dist, 4)
     dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
     a = float(atr or 0)
     try:

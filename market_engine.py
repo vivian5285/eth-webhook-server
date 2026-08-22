@@ -158,6 +158,73 @@ def bar_momentum_score(bars: Sequence, lookback: int = MOMENTUM_LOOKBACK_BARS) -
     return max(-1.0, min(1.0, raw))
 
 
+def bar_body_ratio(bar) -> float:
+    """单根K线实体/全长比例(0~1)。裸K强趋势的典型特征是连续大实体、
+    小上下影线；十字星/长影线震荡K线比例接近0。"""
+    try:
+        o, h, l, c = _f(bar[1]), _f(bar[2]), _f(bar[3]), _f(bar[4])
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    return abs(c - o) / rng
+
+
+def body_strength_score(
+    bars: Sequence, side: str, lookback: int = 5, body_ratio_min: float = 0.55,
+) -> float:
+    """最近lookback根已收盘K线里，实体够大(body_ratio_min)且方向跟side
+    一致的比例(0~1)——供"超强趋势"多维度确认使用，跳过正在形成的最后
+    一根。"""
+    side_u = str(side or "").strip().upper()
+    n = len(bars or [])
+    if side_u not in ("LONG", "SHORT") or n < 2:
+        return 0.0
+    closed = bars[:-1]
+    sample = closed[-lookback:] if len(closed) >= lookback else closed
+    if not sample:
+        return 0.0
+    hits = 0
+    for b in sample:
+        try:
+            o, c = _f(b[1]), _f(b[4])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if bar_body_ratio(b) < body_ratio_min:
+            continue
+        if side_u == "LONG" and c > o:
+            hits += 1
+        elif side_u == "SHORT" and c < o:
+            hits += 1
+    return hits / len(sample)
+
+
+def volume_strength_ratio(bars: Sequence, recent_n: int = 3, baseline_n: int = 20) -> float:
+    """最近recent_n根(不含正在形成的那根)成交量均值 / 更早baseline_n根均值。
+    数据不足或均量<=0时返回0(视为不达标，不是"强")——供"超强趋势"多维度
+    确认使用。"""
+    n = len(bars or [])
+    if n < 2:
+        return 0.0
+    closed = bars[:-1]
+    if len(closed) < recent_n + 1:
+        return 0.0
+    try:
+        vols = [_f(b[5]) for b in closed]
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    recent = vols[-recent_n:]
+    baseline = vols[:-recent_n][-baseline_n:]
+    if not baseline:
+        return 0.0
+    baseline_avg = sum(baseline) / len(baseline)
+    if baseline_avg <= 0:
+        return 0.0
+    recent_avg = sum(recent) / len(recent)
+    return recent_avg / baseline_avg
+
+
 def ema_series(closes: Sequence[float], length: int) -> List[float]:
     """标准EMA，跟TV Pine的ta.ema(close, length)算法一致（种子=前length根SMA）。"""
     vals = [float(c) for c in (closes or [])]
