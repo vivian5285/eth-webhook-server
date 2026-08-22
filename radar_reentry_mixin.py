@@ -143,6 +143,18 @@ RADAR_MEGA_STRONG_BODY_LOOKBACK = 5  # 每个周期看最近5根已收盘K线
 RADAR_MEGA_STRONG_BODY_SCORE_MIN = 0.5  # 5根里至少过半数满足实体+方向要求
 RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE = 1  # 4个周期允许最多1个不达标
 
+# 2026-08-22新增：climax(急涨急跌见顶见底)否决项——宝贝提醒："强趋势也
+# 有可能闪崩，比如暴力拉盘后的极速跌，和暴跌后的急涨，1分钟的K线都是
+# 波动好大的"。"趋势强"(EMA+动量+ADX+量能+裸K实体都达标)不等于"安全"，
+# 暴力单边行情见顶/见底前往往各项指标同时冲到最强，这正是最该谨慎的
+# 时候，不是最该放宽保护的时候。同一天ZEC实盘复现：暴跌那根1m K线振幅
+# 是前序正常K线均值的约35倍，命中就否决，跟量能/裸K实体角色相反——那两
+# 个是"确认强"的正向证据，这个是"确认异常"的否决证据，命中即不放宽，
+# 不参与"允许1个不达标"的容错。
+RADAR_MEGA_STRONG_CLIMAX_LOOKBACK_MIN = 3  # 检测最近3根1m K线
+RADAR_MEGA_STRONG_CLIMAX_BASELINE_MIN = 30  # 对比更早30根1m K线均值
+RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX = 2.5  # 振幅超过基准2.5倍视为climax风险
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -1302,7 +1314,40 @@ class RadarReentryMixin:
         if counted <= 0:
             return False
         tol = RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE
-        return vol_miss <= tol and body_miss <= tol
+        if not (vol_miss <= tol and body_miss <= tol):
+            return False
+        if self._detect_recent_climax():
+            return False
+        return True
+
+    def _detect_recent_climax(self) -> bool:
+        """近期是否出现急涨急跌式异常波动(climax见顶/见底的典型特征)——
+        命中时阻止超强趋势升级，哪怕其他维度都显示"趋势很强"：越是这种
+        时候越该谨慎，不是更该放宽保护。见上方RADAR_MEGA_STRONG_CLIMAX_*
+        常量顶部注释。拉不到1m K线数据时保守地当作"有风险"处理，不放宽。
+        """
+        from binance_client import binance_client
+        from market_engine import climax_volatility_ratio
+
+        try:
+            bars_1m = binance_client.fetch_klines(self.symbol, interval="1m", limit=60)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] climax检测拉1m K线跳过(保守判定有风险): {e}")
+            return True
+        if not bars_1m:
+            return True
+        ratio = climax_volatility_ratio(
+            bars_1m,
+            recent_n=RADAR_MEGA_STRONG_CLIMAX_LOOKBACK_MIN,
+            baseline_n=RADAR_MEGA_STRONG_CLIMAX_BASELINE_MIN,
+        )
+        hit = ratio >= RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX
+        if hit:
+            logger.warning(
+                f"⚡ [{self.symbol}] 检测到近期急涨急跌(1m振幅比={ratio:.2f}倍"
+                f"≥{RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX}) → 超强趋势升级本轮否决，维持保守"
+            )
+        return hit
 
     def _maybe_upgrade_radar_mega_strong(self):
         """雷达休眠期(未激活)内周期性复评：多维度一致确认"超强趋势"才

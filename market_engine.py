@@ -225,6 +225,36 @@ def volume_strength_ratio(bars: Sequence, recent_n: int = 3, baseline_n: int = 2
     return recent_avg / baseline_avg
 
 
+def climax_volatility_ratio(bars: Sequence, recent_n: int = 3, baseline_n: int = 30) -> float:
+    """最近recent_n根(不含正在形成的那根)K线平均振幅(high-low) / 更早
+    baseline_n根平均振幅——检测急涨急跌式的异常放幅，"趋势很强"未必等于
+    "安全"，暴力拉升/砸盘见顶见底前往往振幅、量能都同时达到全程最大，
+    这正是最危险的时候。2026-08-22 ZEC实盘复现：暴跌那根1m K线(high-
+    low≈128)振幅是前序18根正常1m K线均值(≈3.7)的约35倍，且崩盘前1~2根
+    已经提前放大到2.5~3.4倍——供"超强趋势"多维度确认的climax否决项使用，
+    命中时不放宽保护，跟量能/裸K实体作为"确认强"的正向证据角色相反，
+    这里是"确认异常"的否决证据。数据不足返回0(视为无风险，不否决)。"""
+    n = len(bars or [])
+    if n < 2:
+        return 0.0
+    closed = bars[:-1]
+    if len(closed) < recent_n + 1:
+        return 0.0
+    try:
+        ranges = [max(_f(b[2]) - _f(b[3]), 0.0) for b in closed]
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    recent = ranges[-recent_n:]
+    baseline = ranges[:-recent_n][-baseline_n:]
+    if not baseline:
+        return 0.0
+    baseline_avg = sum(baseline) / len(baseline)
+    if baseline_avg <= 0:
+        return 0.0
+    recent_avg = sum(recent) / len(recent)
+    return recent_avg / baseline_avg
+
+
 def ema_series(closes: Sequence[float], length: int) -> List[float]:
     """标准EMA，跟TV Pine的ta.ema(close, length)算法一致（种子=前length根SMA）。"""
     vals = [float(c) for c in (closes or [])]
