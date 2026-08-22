@@ -255,6 +255,30 @@ def climax_volatility_ratio(bars: Sequence, recent_n: int = 3, baseline_n: int =
     return recent_avg / baseline_avg
 
 
+def extension_from_mean_atr(bars: Sequence, ema_length: int = 20, atr_period: int = 14) -> float:
+    """现价偏离EMA(ema_length)的距离，按ATR(atr_period)标准化——climax_
+    volatility_ratio抓的是"单根/几根K线暴力插针"式的急涨急跌，这个函数
+    补另一种climax：没有哪根K线振幅特别夸张，但价格已经连续多根温和地
+    跑远、明显偏离自己的近期均值，同样是"该谨慎、不该放宽保护"的信号
+    (2026-08-22 宝贝提醒："暴力拉盘后的极速跌，和暴跌后的急涨"之外，
+    "安静地跑过头"也是一种climax前兆)。跳过正在形成的最后一根，数据
+    不足或ATR<=0时返回0(视为未超涨，不否决)。"""
+    closed = bars[:-1] if len(bars or []) > 1 else (bars or [])
+    if len(closed) < max(ema_length, atr_period) + 1:
+        return 0.0
+    try:
+        closes = [_f(b[4]) for b in closed]
+    except (TypeError, ValueError, IndexError):
+        return 0.0
+    ema_vals = ema_series(closes, ema_length)
+    if not ema_vals:
+        return 0.0
+    atr = wilder_atr(closed, atr_period)
+    if atr <= 0:
+        return 0.0
+    return abs(closes[-1] - ema_vals[-1]) / atr
+
+
 def ema_series(closes: Sequence[float], length: int) -> List[float]:
     """标准EMA，跟TV Pine的ta.ema(close, length)算法一致（种子=前length根SMA）。"""
     vals = [float(c) for c in (closes or [])]

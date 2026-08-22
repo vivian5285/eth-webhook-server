@@ -153,7 +153,26 @@ RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE = 1  # 4个周期允许最多1个不�
 # 不参与"允许1个不达标"的容错。
 RADAR_MEGA_STRONG_CLIMAX_LOOKBACK_MIN = 3  # 检测最近3根1m K线
 RADAR_MEGA_STRONG_CLIMAX_BASELINE_MIN = 30  # 对比更早30根1m K线均值
-RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX = 2.5  # 振幅超过基准2.5倍视为climax风险
+# 2026-08-22跨品种校准：最初定的2.5倍，用XAUUSDT/PAXGUSDT(黄金系合成品种)
+# 最近500根1m K线抽查发现日常就有约8%~13%的时间会超过2.5倍——黄金系品种
+# 1m K线本身天然比加密货币品种更"毛刺"(大概率是这两个合成品种盘口深度
+# 更薄导致)，同一个阈值放在ETH/BNB/ZEC/SKHYNIX这些品种上只有约3%的日常
+# 触发率。改成3.5倍：黄金系触发率降到约5%~7%，加密货币系几乎不受影响
+# (降到约1%~2%)，而真实闪崩(ZEC 2026-08-22复现)的比值高达13.39倍，
+# 依然有巨大的安全边际不会漏判。
+RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX = 3.5  # 振幅超过基准3.5倍视为climax风险
+
+# 2026-08-22新增：温和超涨/超跌否决项——climax_volatility_ratio抓的是
+# "单根/几根K线暴力插针"，这个补另一种climax：没有哪根K线振幅特别夸张，
+# 但价格已经连续多根温和地跑远、明显偏离自己近期均值，同样该谨慎。用
+# 慢一档的周期(1h)算现价偏离EMA20的距离、按ATR标准化——跟climax检测
+# 复用mega_strong已经拉到的1h K线，不额外发REST请求(chase-watch没有
+# 现成1h数据时才会单独拉一次)。3.0倍ATR是常见的技术分析经验值，暂未
+# 像climax那样有真实反转案例校准，后续如果发现阈值不合适需要调整。
+RADAR_MEGA_STRONG_EXTENSION_TF = "1h"
+RADAR_MEGA_STRONG_EXTENSION_EMA_LEN = 20
+RADAR_MEGA_STRONG_EXTENSION_ATR_PERIOD = 14
+RADAR_MEGA_STRONG_EXTENSION_ATR_MAX = 3.0
 
 
 class RadarReentryMixin:
@@ -1316,18 +1335,29 @@ class RadarReentryMixin:
         tol = RADAR_MEGA_STRONG_TIMEFRAME_MISS_TOLERANCE
         if not (vol_miss <= tol and body_miss <= tol):
             return False
-        if self._detect_recent_climax():
+        slow_bars = (sig.get(RADAR_MEGA_STRONG_EXTENSION_TF) or {}).get("bars")
+        if self._detect_recent_climax_or_overextension(side, slow_bars=slow_bars):
             return False
         return True
 
-    def _detect_recent_climax(self) -> bool:
-        """近期是否出现急涨急跌式异常波动(climax见顶/见底的典型特征)——
-        命中时阻止超强趋势升级，哪怕其他维度都显示"趋势很强"：越是这种
-        时候越该谨慎，不是更该放宽保护。见上方RADAR_MEGA_STRONG_CLIMAX_*
-        常量顶部注释。拉不到1m K线数据时保守地当作"有风险"处理，不放宽。
+    def _detect_recent_climax_or_overextension(self, side: str, slow_bars=None) -> bool:
+        """近期是否出现"急涨急跌"式climax(单根/几根K线暴力插针)——命中
+        阻止升级(超强趋势保本、或chase-watch追单确认)，哪怕其他维度都
+        显示"趋势很强"：越是这种时候越该谨慎，不是更该放宽保护。见上方
+        RADAR_MEGA_STRONG_CLIMAX_*常量顶部注释。拉不到1m数据时保守地
+        当作"有风险"处理，不放宽。
+
+        同时观测(不否决)"温和超涨/超跌"(EMA偏离幅度)——见RADAR_MEGA_
+        STRONG_EXTENSION_*常量顶部注释：回测发现这个信号目前区分度不够
+        (健康延续 vs 即将反转，量级本身很接近)，只记日志攒真实案例，
+        暂不接入否决逻辑，避免把本来就很难触发的mega_strong又变回死代码。
+
+        slow_bars: 调用方如果已经拉过RADAR_MEGA_STRONG_EXTENSION_TF这个
+        周期的K线(mega_strong复用同一批_multi_tf_trend_signal数据)就传
+        进来，省一次REST请求；没有就自己现拉(chase-watch用这条路)。
         """
         from binance_client import binance_client
-        from market_engine import climax_volatility_ratio
+        from market_engine import climax_volatility_ratio, extension_from_mean_atr
 
         try:
             bars_1m = binance_client.fetch_klines(self.symbol, interval="1m", limit=60)
@@ -1341,13 +1371,46 @@ class RadarReentryMixin:
             recent_n=RADAR_MEGA_STRONG_CLIMAX_LOOKBACK_MIN,
             baseline_n=RADAR_MEGA_STRONG_CLIMAX_BASELINE_MIN,
         )
-        hit = ratio >= RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX
-        if hit:
+        if ratio >= RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX:
             logger.warning(
                 f"⚡ [{self.symbol}] 检测到近期急涨急跌(1m振幅比={ratio:.2f}倍"
-                f"≥{RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX}) → 超强趋势升级本轮否决，维持保守"
+                f"≥{RADAR_MEGA_STRONG_CLIMAX_RATIO_MAX}) → 本轮升级否决，维持保守"
             )
-        return hit
+            return True
+
+        # 2026-08-22回测发现：extension(温和超涨/超跌)这个信号没有climax
+        # 那么干净——用回测里唯一两笔真实历史mega_strong confirm案例
+        # (XAUUSDT/ASMLUSDT)复核，两笔都是"健康延续、没有反转"的正常案例
+        # (widen-only修复后也确认它们对结果没有实际影响)，但extension值
+        # 分别是3.53倍/4.48倍ATR，双双超过最初设的3.0倍阈值——说明"持续
+        # 健康趋势"和"温和跑过头即将反转"用这一个信号的量级本身很难分开，
+        # 不像climax(那两笔案例分别只有0.69/0.70倍，跟真实闪崩的13.39倍
+        # 隔得很开，区分度好)。在还没有真实反转案例校准清楚之前，先只
+        # 记录不否决——避免一个没验证过的信号把本来就很难触发的mega_
+        # strong又变回死代码；等积累到真实数据再考虑要不要转正。
+        bars_slow = slow_bars
+        if not bars_slow:
+            try:
+                bars_slow = binance_client.fetch_klines(
+                    self.symbol, interval=RADAR_MEGA_STRONG_EXTENSION_TF, limit=60,
+                )
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 超涨观测拉{RADAR_MEGA_STRONG_EXTENSION_TF} K线跳过: {e}")
+                bars_slow = None
+        if bars_slow:
+            ext = extension_from_mean_atr(
+                bars_slow,
+                ema_length=RADAR_MEGA_STRONG_EXTENSION_EMA_LEN,
+                atr_period=RADAR_MEGA_STRONG_EXTENSION_ATR_PERIOD,
+            )
+            if ext >= RADAR_MEGA_STRONG_EXTENSION_ATR_MAX:
+                logger.info(
+                    f"🎈 [{self.symbol}] 观测到{RADAR_MEGA_STRONG_EXTENSION_TF}偏离EMA"
+                    f"{RADAR_MEGA_STRONG_EXTENSION_EMA_LEN}达{ext:.2f}倍ATR"
+                    f"≥{RADAR_MEGA_STRONG_EXTENSION_ATR_MAX}(仅记录，暂不否决，"
+                    f"积累真实案例校准中)"
+                )
+        return False
 
     def _maybe_upgrade_radar_mega_strong(self):
         """雷达休眠期(未激活)内周期性复评：多维度一致确认"超强趋势"才
@@ -1477,6 +1540,13 @@ class RadarReentryMixin:
         if reversed_back:
             return
         if not self._multi_tf_trend_confirmed(side):
+            return
+        # 2026-08-22新增：多周期确认通过后，再加一道climax(急涨急跌/温和
+        # 超涨超跌)否决——跟mega_strong共用同一套检测(见_detect_recent_
+        # climax_or_overextension顶部注释)，同样的道理：EMA+动量"确认强"
+        # 不等于"安全"，追单确认这里也可能在见顶/见底前误判成"真延续"。
+        # 这是在既有严格门槛基础上新增的额外保护，不是放宽。
+        if self._detect_recent_climax_or_overextension(side):
             return
         logger.info(f"📡 [{self.symbol}] 多周期追单确认通过(5m/15m/30m一致) → 优先尝试限价优价重入")
         self._place_chase_limit(side, is_refresh=False)

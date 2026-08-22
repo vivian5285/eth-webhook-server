@@ -475,6 +475,25 @@ def health():
             s: bool(getattr(sup, "_open_in_progress", False))
             for s, sup in SUPERVISORS.items()
         },
+        # 2026-08-22新增：超强趋势/追单确认这几套新状态机之前只能靠SSH进去
+        # 读原始state json才能看，日常排查很不方便。这里只暴露"当前是什么
+        # 状态"这几个轻量字段，不暴露任何下单相关的敏感细节。
+        "radar_mega_strong": {
+            s: bool(getattr(sup, "radar_mega_strong", False))
+            for s, sup in SUPERVISORS.items()
+        },
+        "chase_watch_active": {
+            s: bool(getattr(sup, "_chase_watch_active", False))
+            for s, sup in SUPERVISORS.items()
+        },
+        "chase_watch_phase": {
+            s: str(getattr(sup, "_chase_watch_phase", "") or "")
+            for s, sup in SUPERVISORS.items()
+        },
+        "catchup_active": {
+            s: bool(getattr(sup, "catchup_active", False))
+            for s, sup in SUPERVISORS.items()
+        },
         "deploy_safe": not any(
             bool(getattr(sup, "_open_in_progress", False))
             for sup in SUPERVISORS.values()
