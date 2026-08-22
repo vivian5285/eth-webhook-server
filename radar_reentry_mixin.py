@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 # 市价追回去；确认不了或超时就放弃，不重复触发、不叠加开仓次数上限。
 _CHASE_CONFIRM_WINDOW_SEC = 900.0  # 观察窗口：15分钟，超时未确认就放弃
 _CHASE_MOMENTUM_MIN = 0.15  # bar_momentum_score阈值，滤掉横盘噪音
+_CHASE_REVERSAL_LOOKBACK_BARS = 3  # 反转检查只看最近3根已收盘15m K线(见下方注释)
 
 # 2026-08-20新增：TV心跳持仓。TV每根收盘K线独立发一条自己当前的持仓状态
 # (方向+开仓价+止损+TP123)，跟开平仓警报完全解耦——目的是补上现有"TV信号
@@ -1384,20 +1385,36 @@ class RadarReentryMixin:
             return
         if not bars or len(bars) < 31:
             return
-        # 观察窗口内一旦跌破(多)/涨破(空)过出场价，说明已经回头，不是"没回头的
-        # 真延续"，直接放弃——只看武装之后新收的K线，避免拿到武装前的旧反转。
+        # 最近几根已收盘K线一旦跌破(多)/涨破(空)过出场价，说明还在反转中途，
+        # 不是"没回头的真延续"，本轮先不确认——只看武装之后新收的K线，避免
+        # 拿到武装前的旧反转。
         # 2026-08-20：armed_ts单独存(不再用deadline反推)——观察窗口改成品种
         # 自己的重入窗口(可能几小时)后，deadline-固定900s会算出一个跟真实
         # 武装时间对不上的时间点，导致这里过滤出空列表、"有没有反转"这道
         # 检查形同虚设。
+        # 2026-08-22修复：原来是"武装以来任意一根K线跌破/涨破出场价就永久
+        # 否决"——观察窗口从固定15分钟改成品种自己的重入窗口(可能几小时)
+        # 后，这个"记忆"没跟着设边界。ZEC实盘复现：武装后头一小时内15m
+        # K线反复触及出场价下方好几次，之后价格明确收复且持续按原方向
+        # 走了近2小时，现价已经比出场价高出近1%，但因为"曾经"跌破过，
+        # 整条2.5小时窗口一直卡在watching阶段，永远confirm不了、永远等
+        # 不到限价优价重入——完全背离"确认趋势没走坏就该主动追"的本意。
+        # 改成只看最近_CHASE_REVERSAL_LOOKBACK_BARS根已收盘K线：还是"别在
+        # 反转中途确认"这个原意，但反转记忆有边界，价格真收复后能重新确认。
         armed_ts = float(getattr(self, "_chase_watch_armed_ts", 0) or 0) or (deadline - _CHASE_CONFIRM_WINDOW_SEC)
-        watch_bars = [b for b in bars if int(b[0]) >= armed_ts * 1000]
-        if not watch_bars:
-            watch_bars = bars[-6:]
+        closed_bars = bars[:-1] if len(bars) > 1 else bars
+        since_armed = [b for b in closed_bars if int(b[0]) >= armed_ts * 1000]
+        pool = since_armed if since_armed else closed_bars
+        watch_bars = pool[-_CHASE_REVERSAL_LOOKBACK_BARS:]
+        # 同一次修复：用收盘价而不是K线的低/高影线判定"是否真的反转"——
+        # 影线太敏感，正常趋势行情里插一根长下影线(多)/上影线(空)但依然
+        # 收在高位很常见，跟"没回头的真延续"完全不矛盾；同一次ZEC实盘复
+        # 现即便加了上面的近期窗口，仍然全部命中"低点跌破"(影线)而非"收
+        # 盘跌破"，改用收盘价后这几根实际都收在出场价上方，才是真实信号。
         if side == "LONG":
-            reversed_back = any(float(b[3]) < exit_px for b in watch_bars)
+            reversed_back = any(float(b[4]) < exit_px for b in watch_bars)
         else:
-            reversed_back = any(float(b[2]) > exit_px for b in watch_bars)
+            reversed_back = any(float(b[4]) > exit_px for b in watch_bars)
         if reversed_back:
             return
         if not self._multi_tf_trend_confirmed(side):
