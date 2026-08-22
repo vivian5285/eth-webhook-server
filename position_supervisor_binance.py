@@ -1221,6 +1221,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
         live_qty = float(pos["size"]) if pos else 0.0
 
+        # 2026-08-21实盘复现(BNBUSDT裸仓11+小时事故)：追回市价成交后重试
+        # 查仓仍然失败时会转入market_pending_confirm，交给这里每轮巡检
+        # 持续重新尝试确认+补挂止损。故意不走下面_resolve_tv_authoritative_
+        # side那条常规"未登记来源接管"分支——这笔仓位从头到尾都不是通过
+        # 正常TV开仓信号路径来的，journal里查不到对应记录完全正常，不能拿
+        # "有没有匹配的TV开仓记录"来判断要不要接管；我们自己就是这笔市价单
+        # 的下单方，side/qty/止损距离早就在catchup_side/catchup_stop_
+        # distance_frozen里记着，直接终结成交即可，不需要再去猜测。
+        if getattr(self, "catchup_phase", "") == "market_pending_confirm" and live_qty > 0:
+            logger.warning(f"🔄 [{self.symbol}] 巡检发现追回市价仓位已可查询，补做成交收尾")
+            if self._finalize_tv_catchup_fill(pos, escalated=True):
+                return
+
         if live_qty <= 0:
             # TV心跳漏单检测：实盘确认空仓，跟TV心跳持仓状态比对（见
             # radar_reentry_mixin.py 里 record_tv_heartbeat 顶部注释）

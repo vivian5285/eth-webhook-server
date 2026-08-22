@@ -77,6 +77,17 @@ CATCHUP_MARKET_FALLBACK_SIZE_MULT = 0.7  # 2026-08-21：市价兜底那条腿没
                                           # 限价优价那条腿，仓位打七折，止损空间
                                           # /距离公式不受影响(只缩qty，止损公式
                                           # 依然按TV止损距离精确锚定)
+CATCHUP_MARKET_FILL_CONFIRM_RETRIES = 6  # 2026-08-21实盘复现(BNBUSDT裸仓
+                                          # 11+小时事故)：市价单确认下单成功后
+                                          # 立即查一次仓位，交易所REST端有毫秒~
+                                          # 秒级传播延迟，原地查询空/失败就直接
+                                          # 放弃，导致真实已成交的仓位本地完全
+                                          # 无感知(monitoring/current_side/
+                                          # watched_qty全空白)，止损永远不会挂，
+                                          # 只能靠watchdog独立巡检才发现，此前
+                                          # 裸奔了11+小时。跟_confirm_position_
+                                          # flat同款retry+sleep模式，方向相反。
+CATCHUP_MARKET_FILL_CONFIRM_DELAY_SEC = 1.0
 CATCHUP_MAX_CONCURRENT_PER_ACCOUNT = 2  # 2026-08-21实盘复现：同一账户短时间内
                                          # 曾同时出现5个品种一起进入"等待EMA
                                          # 确认"的观察名单(ETH/BNB/BCH/SKHYNIX/
@@ -1828,10 +1839,47 @@ class RadarReentryMixin:
             logger.warning(f"⚠️ [{self.symbol}] 追回市价下单失败")
             self._abort_tv_catchup_cycle(reason="market_order_failed")
             return False
-        pos = self._get_active_position(prefer_ws=False)
-        if pos == "QUERY_FAILED" or not pos or float(pos.get("size") or 0) <= 0:
-            logger.error(f"🚨 [{self.symbol}] 追回市价成交后查仓失败/无仓，人工核对")
-            return False  # 不标记episode已解决——状态存疑，需要人工看，catchup_active留True当红旗
+        pos = None
+        for _i in range(CATCHUP_MARKET_FILL_CONFIRM_RETRIES):
+            pos = self._get_active_position(prefer_ws=False)
+            if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
+                break
+            if _i + 1 < CATCHUP_MARKET_FILL_CONFIRM_RETRIES:
+                time.sleep(CATCHUP_MARKET_FILL_CONFIRM_DELAY_SEC)
+        if pos == "QUERY_FAILED" or not isinstance(pos, dict) or float(pos.get("size") or 0) <= 0:
+            # 重试耗尽依然查不到：市价单已确认下单成功(place_market_order返回
+            # 非空)，真实仓位大概率已经在交易所存在，只是本地怎么查都查不到。
+            # 不能再像旧代码那样默默放弃——转入market_pending_confirm，交给
+            # _run_idle_live_reconcile每轮巡检持续重试补救(见该函数顶部新增
+            # 的兜底分支)，同时立即发紧急钉钉，不用等watchdog十分钟一轮的
+            # 独立巡检才发现。
+            logger.error(
+                f"🚨 [{self.symbol}] 追回市价成交后连续{CATCHUP_MARKET_FILL_CONFIRM_RETRIES}"
+                f"次查仓失败/无仓，转入持续重试补救，同时紧急人工核对"
+            )
+            self.catchup_phase = "market_pending_confirm"
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"TV心跳追回：市价成交后查仓持续失败 [{self.symbol}]",
+                    detail=(
+                        f"市价单已确认下单成功(side={open_side} qty={qty})，但连续"
+                        f"{CATCHUP_MARKET_FILL_CONFIRM_RETRIES}次查仓都返回空/失败，"
+                        f"疑似真实仓位已存在但本地暂时无法确认。系统会继续每轮"
+                        f"巡检自动重试确认+补挂止损，同时请人工直接去交易所核对"
+                        f"{self.symbol}是否有仓位。"
+                    ),
+                    level="紧急",
+                    immediate=True,
+                )
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 市价查仓失败紧急钉钉跳过: {e}")
+            return False  # 不标记episode已解决，catchup_active留True，交给持续重试补救
         return bool(self._finalize_tv_catchup_fill(pos, escalated=True))
 
     def _finalize_tv_catchup_fill(self, pos: Dict[str, Any], escalated: bool) -> bool:
