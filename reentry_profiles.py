@@ -705,6 +705,17 @@ RADAR_GATE_ATR_MULT = 1.5  # 首次开仓：顺向浮盈达到 1.5×ATR 即激�
 # 该策略TP1拉得极宽，0.8×TP1恒大于ATR腿，实际由ATR腿单独决定激活点)。
 # 旧值1.0会让VPS雷达在TV自己都还没打算保护仓位时就先武装保本，
 # 造成"雷达已保本、TV仍持有"的错位（2026-08-10 5007端口ETH实盘现象）。
+RADAR_GATE_ATR_MULT_BY_TIER = {0: 1.5, 1: 1.5, 2: 2.0}
+# 2026-08-22实盘复现(C账户ZEC)：entry=625.64，ATR腿算出的激活线只比entry高
+# 0.51(≈0.08%)，7:31:19激活、7:36:50(仅5.5分钟后)就被雷达止损打掉，同一条
+# TV信号在B账户扛了10小时都没被打过——固定1.5×ATR不看趋势强弱，强趋势档
+# 反而更容易"一激活就被正常噪音打掉"，没有给行情留呼吸空间。这里只放宽
+# ATR这条腿(TP1那条腿本来就已经因为强趋势档TP1定得更远而自然更宽，见上面
+# radar_gate_price_from_tps顶部注释)：weak/mid维持1.5×ATR不变(本来就该
+# 保守，早锁保本没问题)，strong(tier=2)放宽到2.0×ATR(+33%，跟今天同一轮
+# 修复里"先跑一段观察，不要一次性调太猛"的一贯尺度保持一致)。tier必须是
+# 开仓那一刻锁定的值(self.adx_tier)，不能用实时ADX——否则激活线会随着
+# 后续ADX波动而漂移，跟"账本冻结价·持仓期不漂移"这条既有铁律冲突。
 
 
 def radar_gate_price_from_tps(
@@ -714,6 +725,7 @@ def radar_gate_price_from_tps(
     entry: float = 0.0,
     atr: float = 0.0,
     return_pct: float = 0.0,
+    adx_tier: int = 1,
     **kwargs,
 ) -> float:
     """
@@ -735,6 +747,10 @@ def radar_gate_price_from_tps(
       同样1.5倍ATR的"保护垫"，落到价格百分比上比其它品种迟得多，实盘
       观察下来ZEC经常感觉"该保护的时候还没触发"。收益率腿只针对ZEC生效，
       不碰其它品种已经跟TV自身逻辑对齐过的1.5×ATR封顶。
+      v2.10（2026-08-22）：ATR腿按adx_tier(开仓时锁定的强弱档，不是实时
+      ADX)从RADAR_GATE_ATR_MULT_BY_TIER取对应倍数，strong档放宽到2.0×ATR
+      （weak/mid维持1.5×ATR不变）——见该常量顶部注释，ZEC实盘复现5.5分钟
+      内被打掉。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -751,7 +767,12 @@ def radar_gate_price_from_tps(
     direction = 1.0 if t1 >= e else -1.0
     dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
     a = float(atr or 0)
-    dist_atr = RADAR_GATE_ATR_MULT * a if a > 0 else dist_tp1
+    try:
+        tier_i = int(adx_tier)
+    except (TypeError, ValueError):
+        tier_i = 1
+    atr_mult = float(RADAR_GATE_ATR_MULT_BY_TIER.get(tier_i, RADAR_GATE_ATR_MULT))
+    dist_atr = atr_mult * a if a > 0 else dist_tp1
     rp = float(return_pct or 0)
     dist_pct = rp * e if rp > 0 else dist_tp1
     dist = min(dist_tp1, dist_atr, dist_pct)

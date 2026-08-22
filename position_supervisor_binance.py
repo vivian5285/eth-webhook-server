@@ -16211,6 +16211,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         entry_px = float(getattr(self, "watched_entry", 0) or 0)
         atr_v = float(self._get_locked_initial_atr() or 0)
         return_pct = float(get_reentry_profile(self.symbol).get("radar_gate_return_pct") or 0)
+        # 2026-08-22：ATR腿按开仓时锁定的强弱档(不是实时ADX，持仓期不漂移，
+        # 见radar_gate_price_from_tps顶部v2.10注释)放宽，strong档给更多
+        # 呼吸空间，避免像ZEC那次5.5分钟就被打掉。
+        locked_tier = int(getattr(self, "adx_tier", 1) or 1)
 
         # 已冻结且有效：持仓期不漂移（已激活也保留参考价）
         if frozen > 0 and tp1_px > 0 and tp2_px > 0:
@@ -16218,7 +16222,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if not activated:
                 expect = radar_gate_price_from_tps(
                     tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
-                    return_pct=return_pct,
+                    return_pct=return_pct, adx_tier=locked_tier,
                 )
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
@@ -16229,7 +16233,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if tp1_px > 0 and tp2_px > 0:
             px = radar_gate_price_from_tps(
                 tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
-                return_pct=return_pct,
+                return_pct=return_pct, adx_tier=locked_tier,
             )
             if px > 0:
                 self.radar_activation_price = px
