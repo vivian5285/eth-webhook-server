@@ -19,6 +19,7 @@ from reentry_profiles import (
     get_reentry_profile,
     live_breath_zone_values,
     make_catchup_client_order_id,
+    make_chase_client_order_id,
     make_reentry_client_order_id,
     pick_best_tier_extreme,
     reentry_enabled,
@@ -953,7 +954,31 @@ class RadarReentryMixin:
             pass
         return True
 
+    def _cancel_chase_limit(self, reason=""):
+        """撤掉追单确认阶段挂出的优价限价单(若有)——2026-08-22新增限价优价
+        腿之后，任何清空chase-watch的路径都要先撤这张在飞的单，避免转市价
+        或放弃观察后留下孤儿挂单。"""
+        oid = getattr(self, "_chase_watch_limit_order_id", None)
+        if not oid:
+            self._chase_watch_order_tag = None
+            return
+        tag = getattr(self, "_chase_watch_order_tag", None)
+        try:
+            from binance_client import binance_client
+            binance_client.cancel_order(self.symbol, order_id=oid)
+            logger.info(f"🗑️ [{self.symbol}] 撤追单限价 id={oid} tag={tag} | {reason}")
+        except Exception as e:
+            try:
+                binance_client.cancel_order(self.symbol, order={"orderId": oid})
+            except Exception as e2:
+                logger.debug(f"撤追单限价跳过: {e}/{e2}")
+        self._chase_watch_limit_order_id = None
+        self._chase_watch_limit_px = 0.0
+        self._chase_watch_limit_deadline_ts = 0.0
+        self._chase_watch_order_tag = None
+
     def _clear_chase_watch(self, reason="", save=True):
+        self._cancel_chase_limit(reason=reason or "清追单状态")
         self._chase_watch_active = False
         self._chase_watch_side = None
         self._chase_watch_exit_px = 0.0
@@ -961,6 +986,8 @@ class RadarReentryMixin:
         self._chase_watch_attempt = 0
         self._chase_watch_deadline_ts = 0.0
         self._chase_watch_armed_ts = 0.0
+        self._chase_watch_phase = ""
+        self._chase_watch_unfilled_refreshes = 0
         # 2026-08-21修复：之前这几个字段是纯内存变量，从不落盘——武装后如果
         # 恰好撞上部署重启，观察窗口整个丢失且没有任何东西会重新武装它
         # (chase-watch只在"刚好检测到平仓那一刻"才会武装，不像心跳追回
@@ -987,6 +1014,18 @@ class RadarReentryMixin:
                 getattr(self, "_chase_watch_deadline_ts", 0) or 0
             ),
             "_chase_watch_armed_ts": float(getattr(self, "_chase_watch_armed_ts", 0) or 0),
+            # 2026-08-22新增：限价优价重入子阶段（挂着真实交易所订单，理由
+            # 同catchup_*的持久化——重启不能丢单，也不能丢观察窗口本身）
+            "_chase_watch_phase": str(getattr(self, "_chase_watch_phase", "") or ""),
+            "_chase_watch_limit_order_id": getattr(self, "_chase_watch_limit_order_id", None),
+            "_chase_watch_limit_px": float(getattr(self, "_chase_watch_limit_px", 0) or 0),
+            "_chase_watch_limit_deadline_ts": float(
+                getattr(self, "_chase_watch_limit_deadline_ts", 0) or 0
+            ),
+            "_chase_watch_unfilled_refreshes": int(
+                getattr(self, "_chase_watch_unfilled_refreshes", 0) or 0
+            ),
+            "_chase_watch_order_tag": getattr(self, "_chase_watch_order_tag", None),
         }
 
     def _load_chase_watch_state_from_dict(self, s: Dict[str, Any]):
@@ -999,6 +1038,18 @@ class RadarReentryMixin:
         self._chase_watch_attempt = int(s.get("_chase_watch_attempt", 0) or 0)
         self._chase_watch_deadline_ts = float(s.get("_chase_watch_deadline_ts", 0) or 0)
         self._chase_watch_armed_ts = float(s.get("_chase_watch_armed_ts", 0) or 0)
+        # 旧state文件没有这批限价子阶段字段时，getattr默认值(""/None/0)已经
+        # 安全，不需要再单独判断key是否存在
+        self._chase_watch_phase = str(s.get("_chase_watch_phase", "") or "")
+        self._chase_watch_limit_order_id = s.get("_chase_watch_limit_order_id")
+        self._chase_watch_limit_px = float(s.get("_chase_watch_limit_px", 0) or 0)
+        self._chase_watch_limit_deadline_ts = float(
+            s.get("_chase_watch_limit_deadline_ts", 0) or 0
+        )
+        self._chase_watch_unfilled_refreshes = int(
+            s.get("_chase_watch_unfilled_refreshes", 0) or 0
+        )
+        self._chase_watch_order_tag = s.get("_chase_watch_order_tag")
 
     def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt, deadline_ts=None):
         """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。
@@ -1017,6 +1068,12 @@ class RadarReentryMixin:
         self._chase_watch_atr = float(atr or 0)
         self._chase_watch_attempt = int(attempt or 0)
         self._chase_watch_armed_ts = time.time()
+        self._chase_watch_phase = ""
+        self._chase_watch_limit_order_id = None
+        self._chase_watch_limit_px = 0.0
+        self._chase_watch_limit_deadline_ts = 0.0
+        self._chase_watch_unfilled_refreshes = 0
+        self._chase_watch_order_tag = None
         dl = float(deadline_ts or 0)
         self._chase_watch_deadline_ts = dl if dl > time.time() else (
             time.time() + _CHASE_CONFIRM_WINDOW_SEC
@@ -1168,16 +1225,28 @@ class RadarReentryMixin:
             logger.info(f"📉 [{self.symbol}] 大趋势确认解除(score={score}/4)")
 
     def _check_chase_reentry_confirmation(self):
-        """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才市价追回。"""
+        """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才追回。
+
+        2026-08-22：确认通过后不再直接市价——先按同一套追回价格纪律
+        （K线极值 vs 出场价，见_place_chase_limit）挂一张比出场价更优的
+        限价单，挂不上/找不到优价才退回市价。宝贝原话："趋势没走坏+
+        硬止损没到，应该主动尝试更好的、更有利的价格限价重入……傻傻等
+        心跳给持仓报表才去检查实盘的时候，往往价格已经不是很有利了，
+        压缩了很大的利润空间"——同样的道理也适用于我们自己触发的追单：
+        既然已经确认趋势延续，不必立刻用市价吃滑点，先试一口优价。
+        """
         if not bool(getattr(self, "_chase_watch_active", False)):
+            return
+        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
+            self._clear_chase_watch()
+            return
+        if str(getattr(self, "_chase_watch_phase", "") or "") == "limit":
+            self._progress_chase_limit_cycle()
             return
         now = time.time()
         deadline = float(getattr(self, "_chase_watch_deadline_ts", 0) or 0)
         if deadline > 0 and now > deadline:
             logger.info(f"⏱️ [{self.symbol}] 追单确认窗口超时，放弃追回")
-            self._clear_chase_watch()
-            return
-        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
             self._clear_chase_watch()
             return
         side = str(getattr(self, "_chase_watch_side", "") or "").upper()
@@ -1215,11 +1284,186 @@ class RadarReentryMixin:
             return
         if not self._multi_tf_trend_confirmed(side):
             return
-        logger.info(f"📡 [{self.symbol}] 多周期追单确认通过(5m/15m/30m一致) → 市价追回")
-        self._execute_chase_reentry(side)
+        logger.info(f"📡 [{self.symbol}] 多周期追单确认通过(5m/15m/30m一致) → 优先尝试限价优价重入")
+        self._place_chase_limit(side, is_refresh=False)
+
+    def _place_chase_limit(self, side, is_refresh=False):
+        """追单确认通过后：先试一口比出场价(_chase_watch_exit_px)更优的
+        限价重入，挂不上/刷新预算耗尽/找不到优价再退回市价(_execute_
+        chase_reentry)。结构照抄已验证过的_place_tv_catchup_limit，但
+        参考价是我们自己的出场价而不是TV原始开仓价，成交后走
+        _on_reentry_limit_filled（不是_finalize_tv_catchup_fill）——这是
+        "自己出场后重入"的语义，不是"TV仍持仓但我们漏单"。"""
+        side = str(side or getattr(self, "_chase_watch_side", "") or "").upper()
+        exit_px = float(getattr(self, "_chase_watch_exit_px", 0) or 0)
+        if side not in ("LONG", "SHORT") or exit_px <= 0:
+            self._clear_chase_watch()
+            return False
+
+        from binance_client import binance_client, is_orders_query_failed
+
+        if is_refresh:
+            n = int(getattr(self, "_chase_watch_unfilled_refreshes", 0) or 0) + 1
+            self._chase_watch_unfilled_refreshes = n
+            cap = max_unfilled_refreshes(self.symbol)
+            if n > cap:
+                logger.warning(
+                    f"🚫 [{self.symbol}] 追单限价连续未成交刷新 {n}>{cap} → 转市价追回"
+                )
+                self._cancel_chase_limit(reason="未成交超限·转市价")
+                self._chase_watch_phase = ""
+                try:
+                    self._save_state()
+                except Exception:
+                    pass
+                return bool(self._execute_chase_reentry(side))
+            self._cancel_chase_limit(reason="TTL刷新·先撤旧标签")
+        elif getattr(self, "_chase_watch_limit_order_id", None):
+            logger.error(f"🚫 [{self.symbol}] 已有追单限价 → 拒挂")
+            return False
+
+        pos = self._get_active_position(prefer_ws=True)
+        if pos == "QUERY_FAILED":
+            return False
+        if pos and float(pos.get("size") or 0) > 0:
+            logger.warning(f"🚫 [{self.symbol}] 追单挂单前仍有仓 → 中止")
+            return False
+        if not is_refresh:
+            if not self._ensure_sterile_for_reentry(reason="追单挂单前清场"):
+                return False
+        else:
+            if hasattr(self, "_verify_sterile_flat"):
+                if not self._wait_verify(self._verify_sterile_flat, retries=5, delay=0.35):
+                    logger.error(f"🚫 [{self.symbol}] TTL刷新后无菌未过 → 拒挂新限价")
+                    return False
+
+        k15, k5 = self._fetch_catchup_klines()
+        lo, hi = pick_best_tier_extreme(side, k15, k5)
+        rp = get_reentry_profile(self.symbol)
+        lim, src = compute_reentry_limit_px(
+            side=side,
+            tv_price=exit_px,
+            low5=lo, high5=hi, low3=0.0, high3=0.0,
+            tick=float(rp.get("tick_size") or 0.01),
+            discount=float(rp.get("limit_discount") or 0.003),
+            prev_entry=0.0,
+        )
+        if lim <= 0:
+            logger.info(
+                f"📭 [{self.symbol}] 追单未找到优于出场价{exit_px:.4f}的入场点"
+                f"({src}) → 直接市价追回"
+            )
+            self._chase_watch_phase = ""
+            return bool(self._execute_chase_reentry(side))
+
+        if not is_refresh:
+            qty = float((getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0)
+            if qty <= 0:
+                qty = float(getattr(self, "base_qty", 0) or 0)
+            self._chase_watch_qty = qty
+        qty = float(getattr(self, "_chase_watch_qty", 0) or 0)
+        if qty <= 0:
+            logger.error(f"🚨 [{self.symbol}] 追单限价无数量，放弃")
+            self._clear_chase_watch()
+            return False
+
+        ttl = float(rp.get("limit_ttl_sec") or 300)
+        deadline_ts = time.time() + ttl
+        open_side = "BUY" if side == "LONG" else "SELL"
+        tag = make_chase_client_order_id(self.symbol, side, lim, time.time())
+        self._chase_watch_order_tag = tag
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
+        try:
+            book = binance_client.get_open_orders(self.symbol)
+            if is_orders_query_failed(book):
+                logger.error(f"🚫 [{self.symbol}] 追单挂单前查单失败 → 释放标签并拒挂 tag={tag}")
+                self._chase_watch_order_tag = None
+                return False
+            for o in (book or []):
+                if not isinstance(o, dict):
+                    continue
+                if str(o.get("type") or "").upper() != "LIMIT":
+                    continue
+                if str(o.get("side") or "").upper() != open_side:
+                    continue
+                try:
+                    opx = float(o.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(opx - lim) <= max(lim * 1e-8, 1e-6):
+                    oid = o.get("orderId")
+                    self._chase_watch_phase = "limit"
+                    self._chase_watch_limit_order_id = oid
+                    self._chase_watch_limit_px = lim
+                    self._chase_watch_limit_deadline_ts = deadline_ts
+                    self._chase_watch_order_tag = str(o.get("clientOrderId") or "") or tag
+                    self._save_state()
+                    logger.warning(f"♻️ [{self.symbol}] 追单复用已有同价限价 id={oid} @{lim:.2f}")
+                    return True
+        except Exception as e:
+            logger.error(f"🚫 [{self.symbol}] 追单挂单前查单异常 → 拒挂: {e}")
+            self._chase_watch_order_tag = None
+            return False
+
+        order = binance_client.place_limit_order(
+            open_side, qty, lim, symbol=self.symbol, reduce_only=False,
+            client_order_id=tag,
+        )
+        if not order:
+            self._chase_watch_order_tag = None
+            return False
+        oid = order.get("orderId") or order.get("algoId")
+        self._chase_watch_phase = "limit"
+        self._chase_watch_limit_order_id = oid
+        self._chase_watch_limit_px = lim
+        self._chase_watch_limit_deadline_ts = deadline_ts
+        self._save_state()
+        logger.info(
+            f"📥 [{self.symbol}] 追单限价已挂 {side} {qty} @{lim:.2f}"
+            f"（较出场价{exit_px:.4f}更优） src={src} id={oid} tag={tag} "
+            f"refresh={n if is_refresh else 0}"
+        )
+        return True
+
+    def _progress_chase_limit_cycle(self):
+        """轮询追单确认限价子阶段：成交交给_on_reentry_limit_filled，
+        TTL到期转刷新（预算耗尽后_place_chase_limit会自己转市价）。"""
+        if self.monitoring or float(getattr(self, "watched_qty", 0) or 0) > 0:
+            self._clear_chase_watch()
+            return
+        side = str(getattr(self, "_chase_watch_side", "") or "").upper()
+        attempt = int(getattr(self, "_chase_watch_attempt", 0) or 0)
+        pos = self._get_active_position(prefer_ws=True)
+        if pos == "QUERY_FAILED":
+            return
+        if pos and float(pos.get("size") or 0) > 0:
+            if str(pos.get("side") or "").upper() == side:
+                self._clear_chase_watch()
+                self.reentry_attempt = attempt
+                self.radar_tier = attempt
+                self._on_reentry_limit_filled(pos)
+            else:
+                logger.warning(f"⚠️ [{self.symbol}] 追单限价期间出现反向仓 → 中止")
+                self._clear_chase_watch()
+            return
+        now = time.time()
+        deadline = float(getattr(self, "_chase_watch_limit_deadline_ts", 0) or 0)
+        if deadline > 0 and now >= deadline:
+            self._place_chase_limit(side, is_refresh=True)
 
     def _execute_chase_reentry(self, side):
-        """确认通过后市价追回；成交后复用常规再入的挂防线逻辑(_on_reentry_limit_filled)。"""
+        """限价优价挂不上/预算耗尽后的市价兜底；成交后复用常规再入的
+        挂防线逻辑(_on_reentry_limit_filled)。
+
+        2026-08-22修复：市价成交后查仓原来是零重试——跟已经在心跳追回
+        (_escalate_tv_catchup_to_market)上复现过并修好的BNB裸仓事故是
+        同一类bug(交易所REST传播延迟，成交那一刻立刻查仓容易扑空)。这
+        条腿之前一直没跟上那次修复，现在补齐同款重试。
+        """
         attempt = int(getattr(self, "_chase_watch_attempt", 0) or 0)
         self._clear_chase_watch()
         if getattr(self, "reentry_order_tag", None) or bool(getattr(self, "reentry_active", False)):
@@ -1242,9 +1486,34 @@ class RadarReentryMixin:
         if not order:
             logger.warning(f"⚠️ [{self.symbol}] 追单市价下单失败")
             return False
-        pos = self._get_active_position(prefer_ws=False)
-        if pos == "QUERY_FAILED" or not pos or float(pos.get("size") or 0) <= 0:
-            logger.error(f"🚨 [{self.symbol}] 追单市价成交后查仓失败/无仓，人工核对")
+        pos = None
+        for _i in range(CATCHUP_MARKET_FILL_CONFIRM_RETRIES):
+            pos = self._get_active_position(prefer_ws=False)
+            if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
+                break
+            if _i + 1 < CATCHUP_MARKET_FILL_CONFIRM_RETRIES:
+                time.sleep(CATCHUP_MARKET_FILL_CONFIRM_DELAY_SEC)
+        if pos == "QUERY_FAILED" or not isinstance(pos, dict) or float(pos.get("size") or 0) <= 0:
+            logger.error(
+                f"🚨 [{self.symbol}] 追单市价成交后连续{CATCHUP_MARKET_FILL_CONFIRM_RETRIES}"
+                f"次查仓失败/无仓，紧急人工核对"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"追单确认：市价成交后查仓持续失败 [{self.symbol}]",
+                    detail=(
+                        f"市价单已确认下单成功(side={open_side} qty={qty})，但连续"
+                        f"{CATCHUP_MARKET_FILL_CONFIRM_RETRIES}次查仓都返回空/失败，"
+                        f"疑似真实仓位已存在但本地暂时无法确认。请人工直接去交易所"
+                        f"核对{self.symbol}是否有仓位并补挂止损。"
+                    ),
+                    level="紧急",
+                    immediate=True,
+                )
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 追单市价查仓失败紧急钉钉跳过: {e}")
             return False
         self.reentry_attempt = attempt
         self.radar_tier = attempt

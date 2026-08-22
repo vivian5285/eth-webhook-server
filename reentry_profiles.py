@@ -352,6 +352,22 @@ def make_catchup_client_order_id(
     return f"HB{sym}{sd}{digest}{t % 10000}"[:36]
 
 
+def make_chase_client_order_id(
+    symbol: str, side: str, price: float, ts: Optional[float] = None,
+) -> str:
+    """追单确认(chase-watch)优价限价专用标签，前缀跟常规重入(RE)/心跳
+    追回(HB)区分，方便订单历史里一眼认出这是"自己出场后追单确认"下的单。"""
+    sym_u = str(symbol or "").upper()
+    sym = "E" if "ETH" in sym_u else ("X" if "XAU" in sym_u else "S")
+    sd = "L" if str(side or "").upper() in ("LONG", "BUY", "L") else "S"
+    px = abs(int(round(float(price or 0) * 100))) % 1_000_000
+    t = abs(int(float(ts if ts is not None else time.time()))) % 100_000
+    rnd = random.getrandbits(32)
+    raw = f"{sym_u}|CH|{sd}|{px}|{t}|{rnd}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    return f"CH{sym}{sd}{digest}{t % 10000}"[:36]
+
+
 REENTRY_ETH: Dict[str, Any] = {
     "name": "ETH",
     "tv_tf": "90m",
