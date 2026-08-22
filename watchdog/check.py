@@ -27,6 +27,7 @@ ACCOUNTS = [
     # monitor=False只是跳过检查，D账户本身/binance_vps_state文件都还在，
     # 以后放资金接TV了，把这行改回True (或直接删掉这个key) 即可恢复监控。
     {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine", "monitor": False},
+    {"name": "E", "port": 5010, "dir": "/home/binanceE/binance-engine", "service": "binanceE-engine"},
 ]
 MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
 SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT"]

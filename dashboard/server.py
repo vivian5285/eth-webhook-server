@@ -43,6 +43,7 @@ ACCOUNTS = [
     {"id": "B", "port": 5007, "label": "妈妈的币安账户", "user": "binanceB", "svc": "binanceB-engine"},
     {"id": "C", "port": 5008, "label": "我自己的币安账户", "user": "binanceC", "svc": "binanceC-engine"},
     {"id": "D", "port": 5009, "label": "我的币安子账户", "user": "binanceD", "svc": "binanceD-engine"},
+    {"id": "E", "port": 5010, "label": "MARIO账户", "user": "binanceE", "svc": "binanceE-engine"},
 ]
 
 STATE_MARK = "===STATE:{acct}:{sym}==="

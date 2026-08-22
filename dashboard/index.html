@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>熊猫量化 · 币安三账户实盘监控</title>
+<title>熊猫量化 · 币安四账户实盘监控</title>
 <style>
   :root {
     --glass-bg: rgba(255,255,255,0.62);
@@ -406,7 +406,7 @@
     <nav class="sidebar">
       <div class="sidebar-brand">
         <div class="name">🐼 熊猫量化</div>
-        <div class="sub">币安三账户实盘监控 · B · C · D</div>
+        <div class="sub">币安四账户实盘监控 · B · C · D · E</div>
       </div>
       <button class="nav-item active" data-page="overview" onclick="switchPage('overview')">
         <span class="ico">📊</span>账户总览<span class="nav-badge hidden" id="navBadgeOverview"></span>
@@ -443,17 +443,18 @@
     <div id="page-tvsignals" class="page hidden">
       <div class="page-head">
         <h1>TV 信号</h1>
-        <div class="sub">三账户聚合的真实 TradingView 警报记录，支持重新执行 / 编辑重放</div>
+        <div class="sub">四账户聚合的真实 TradingView 警报记录，支持重新执行 / 编辑重放</div>
       </div>
     <div class="card tv-card">
       <div class="tv-head">
-        <h2>TV 信号（三账户聚合）</h2>
+        <h2>TV 信号（四账户聚合）</h2>
         <div class="tv-filters">
           <select id="tvAccount" onchange="loadTvSignals()">
             <option value="all">全部账户</option>
             <option value="B">B · 妈妈的币安账户</option>
             <option value="C">C · 我自己的币安账户</option>
             <option value="D">D · 我的币安子账户</option>
+            <option value="E">E · MARIO账户</option>
           </select>
           <select id="tvSymbol"><option value="">全部品种</option></select>
           <select id="tvActionFilter"><option value="">全部动作</option></select>
@@ -486,6 +487,7 @@
             <option value="B">B · 妈妈的币安账户</option>
             <option value="C">C · 我自己的币安账户</option>
             <option value="D">D · 我的币安子账户</option>
+            <option value="E">E · MARIO账户</option>
           </select>
         </div>
         <div class="manual-field"><label>品种</label><select id="mSymbol"></select></div>
@@ -544,6 +546,7 @@
             <option value="B">B · 妈妈的币安账户</option>
             <option value="C">C · 我自己的币安账户</option>
             <option value="D">D · 我的币安子账户</option>
+            <option value="E">E · MARIO账户</option>
           </select>
         </div>
         <div class="manual-field"><label>品种</label><select id="gSymbol"></select></div>
@@ -577,7 +580,7 @@
     <div id="page-watchdog" class="page hidden">
       <div class="page-head">
         <h1>监督狗日志</h1>
-        <div class="sub">watchdog 每 10 分钟独立巡检一次三账户实盘状态，异常直接发钉钉</div>
+        <div class="sub">watchdog 每 10 分钟独立巡检一次四账户实盘状态，异常直接发钉钉</div>
       </div>
     <div class="card tv-card">
       <div class="tv-head">
@@ -588,7 +591,7 @@
         </div>
       </div>
       <p style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px">
-        每轮检查：监控面板/网关/nginx 是否存活、VPS磁盘、三账户健康、幽灵挂单、
+        每轮检查：监控面板/网关/nginx 是否存活、VPS磁盘、四账户健康、幽灵挂单、
         裸仓（有仓位无止损）、雷达是否卡死、TV信号与实盘方向是否一致、真实ERROR日志。
         异常30分钟内同类去重才发钉钉，但这里每轮都完整展示，不会被去重吞掉细节。
       </p>
@@ -613,6 +616,7 @@ const ACCOUNTS_META = {
   B: {label: "妈妈的币安账户", port: 5007},
   C: {label: "我自己的币安账户", port: 5008},
   D: {label: "我的币安子账户", port: 5009},
+  E: {label: "MARIO账户", port: 5010},
 };
 
 function fmtTime(ts) {
@@ -852,7 +856,7 @@ async function loadTvMeta() {
 }
 
 const SRC_LABEL = {tv_direct: "直连", gateway: "经网关", console_replay: "控制台重放", console_manual: "控制台手动"};
-const ACCT_LABEL = {B: "B", C: "C", D: "D"};
+const ACCT_LABEL = {B: "B", C: "C", D: "D", E: "E"};
 
 function tvResultBadge(row) {
   if (row.http_status && row.http_status >= 400) return `<span class="res-badge err">拒绝${row.http_status}</span>`;
