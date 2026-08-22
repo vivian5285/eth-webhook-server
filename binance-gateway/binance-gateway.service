@@ -1,0 +1,21 @@
+[Unit]
+Description=Binance webhook broadcast gateway (1 TV alert -> fan out to B/C/D)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/binance-gateway
+EnvironmentFile=/root/binance-gateway/.env
+ExecStart=/usr/bin/python3 /root/binance-gateway/gateway.py
+# 2026-08-16：用户把全部TV警报切到本网关后单点风险升高，加固重启策略——
+# Restart=always（不只是on-failure，进程任何方式退出都拉起，本服务设计上
+# 永不该主动退出）；RestartSec=1（无状态纯转发，重启即用，不用等）；
+# StartLimit*给崩溃循环兜底，避免真出问题时无限重启刷屏，60秒内最多拉
+# 30次，超了就停下等人工介入。
+Restart=always
+RestartSec=1
+StartLimitIntervalSec=60
+StartLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target
