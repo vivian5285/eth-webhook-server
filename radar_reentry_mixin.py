@@ -122,6 +122,20 @@ MEGA_TREND_REFRESH_SEC = 240.0
 # 换成"TP1推进比例"（见reentry_profiles.py::RADAR_MEGA_STRONG_TP1_
 # PROGRESS顶部注释）。复用同一批_multi_tf_trend_signal已经拉到的K线算
 # 量能/裸K，不额外发REST请求。见_evaluate_radar_mega_strong。
+#
+# 2026-08-22回测修正：最初直接复用了MEGA_TREND_TIMEFRAMES(15m/1h/4h/1d)，
+# 用241笔历史TV真实开仓信号回放后发现——ATR锚点(OLD逻辑)通常在开仓后
+# 0~8小时内就被触及(样本里位数约2小时)，但4h/1d这两个周期的EMA快慢线
+# 结构往往要盘整/运行好几天才会重新排好，诊断脚本显示即使把"必须早于
+# OLD锚点触及"这个时间限制完全放开、看足信号有效期内10天，6个抽样tier2
+# 案例里5个最高score也只有2/4(15m/1h过、4h/1d全程没过)——等于这道门槛
+# 在实盘节奏下几乎不可能亮灯，是一条实际上永远不生效的"死代码"。改成
+# 5m/15m/1h/4h(整体周期下移一档，用更快的5m换掉太慢的1d)，同一批回测
+# 重跑验证过能在合理时间窗口内真正确认，见scratchpad/mega_strong_backtest.py。
+RADAR_MEGA_STRONG_TIMEFRAMES = ("5m", "15m", "1h", "4h")
+RADAR_MEGA_STRONG_ADX_THRESHOLD = 30.0  # 跟MEGA_TREND同一把尺子，只是换了周期组合
+RADAR_MEGA_STRONG_VOTE_MIN = 3  # 四选三，跟MEGA_TREND同一惯例
+RADAR_MEGA_STRONG_RSI_TF = "4h"  # 超买超卖过滤仍用组合里最长的周期，角色不变(原来是1d腾出的位置)
 RADAR_MEGA_STRONG_REFRESH_SEC = 240.0  # 复用MEGA_TREND同款节流，成本一致
 RADAR_MEGA_STRONG_VOLUME_RATIO_MIN = 1.3  # 近3根量 vs 更早均量，超30%才算放量
 RADAR_MEGA_STRONG_BODY_RATIO_MIN = 0.55  # 单根K线实体/全长比例阈值
@@ -1250,28 +1264,28 @@ class RadarReentryMixin:
         from market_engine import body_strength_score, volume_strength_ratio, wilder_rsi
 
         sig = self._multi_tf_trend_signal(
-            side, MEGA_TREND_TIMEFRAMES, adx_threshold=MEGA_TREND_ADX_THRESHOLD,
+            side, RADAR_MEGA_STRONG_TIMEFRAMES, adx_threshold=RADAR_MEGA_STRONG_ADX_THRESHOLD,
         )
         total = int(sig.get("total") or 0)
         score = int(sig.get("score") or 0)
-        if total <= 0 or score < MEGA_TREND_VOTE_MIN:
+        if total <= 0 or score < RADAR_MEGA_STRONG_VOTE_MIN:
             return False
 
-        bars_4h = (sig.get("4h") or {}).get("bars") or []
+        bars_rsi_tf = (sig.get(RADAR_MEGA_STRONG_RSI_TF) or {}).get("bars") or []
         try:
-            rsi_4h = float(wilder_rsi(bars_4h, 14)) if bars_4h else 0.0
+            rsi_v = float(wilder_rsi(bars_rsi_tf, 14)) if bars_rsi_tf else 0.0
         except Exception as e:
-            logger.debug(f"[{self.symbol}] 超强趋势确认4h RSI计算跳过: {e}")
-            rsi_4h = 0.0
-        if side == "LONG" and rsi_4h > MEGA_TREND_RSI_LONG_MAX:
+            logger.debug(f"[{self.symbol}] 超强趋势确认{RADAR_MEGA_STRONG_RSI_TF} RSI计算跳过: {e}")
+            rsi_v = 0.0
+        if side == "LONG" and rsi_v > MEGA_TREND_RSI_LONG_MAX:
             return False
-        if side == "SHORT" and rsi_4h < MEGA_TREND_RSI_SHORT_MIN:
+        if side == "SHORT" and rsi_v < MEGA_TREND_RSI_SHORT_MIN:
             return False
 
         counted = 0
         vol_miss = 0
         body_miss = 0
-        for tf in MEGA_TREND_TIMEFRAMES:
+        for tf in RADAR_MEGA_STRONG_TIMEFRAMES:
             bars = (sig.get(tf) or {}).get("bars") or []
             if not bars:
                 continue

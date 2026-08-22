@@ -780,10 +780,17 @@ def radar_gate_price_from_tps(
       （weak/mid维持1.5×ATR不变）——见该常量顶部注释，ZEC实盘复现5.5分钟
       内被打掉。
       v2.11（2026-08-22）：mega_strong=True(持仓期内多维度一致确认的超强
-      趋势，见RADAR_MEGA_STRONG_TP1_PROGRESS顶部注释)不再取ATR腿的min，
-      直接用RADAR_MEGA_STRONG_TP1_PROGRESS(60%)当唯一锚点——ATR倍数这条
-      路已经调过一轮还是不够，根因是"用ATR距离当锚点"本身不适合真正的
-      强趋势，需要换锚点而不是继续加大倍数。
+      趋势，见RADAR_MEGA_STRONG_TP1_PROGRESS顶部注释)额外算一条TP1推进
+      60%的锚点，跟正常三腿min取更宽(更晚)的那个——ATR倍数这条路已经
+      调过一轮还是不够，根因是"用ATR距离当锚点"本身不适合真正的强趋势，
+      需要多一条更晚的候选线，而不是继续加大倍数。
+      v2.12（2026-08-22回测发现）：v2.11最初是mega_strong=True时直接
+      用60%TP1锚点顶替掉正常三腿min，241笔历史TV信号回放后发现有反例
+      ——TP1设得比较紧的策略下，60%×TP1距离可能反而比tier的ATR腿更近
+      (更早触发)，直接顶替会让激活线不升反降，比不开mega_strong还差
+      (XAUUSDT实盘复现：mega_strong档提前止损，普通tier档同一笔信号
+      反而扛住了)。改成两条腿取更宽的那个，mega_strong只能让激活线更
+      晚、不能让它更早，任何情况下都不会比不开更差。
     - 重入开仓 reentry_attempt>=1：雷达激活价 = TP2（不变）
     - TP1 是否已成交仅作为日志核对项，不作为激活的阻塞条件
     """
@@ -798,9 +805,6 @@ def radar_gate_price_from_tps(
     if t1 <= 0 or t2 <= 0 or e <= 0:
         return 0.0
     direction = 1.0 if t1 >= e else -1.0
-    if mega_strong:
-        dist = RADAR_MEGA_STRONG_TP1_PROGRESS * abs(t1 - e)
-        return round(e + direction * dist, 4)
     dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
     a = float(atr or 0)
     try:
@@ -812,6 +816,9 @@ def radar_gate_price_from_tps(
     rp = float(return_pct or 0)
     dist_pct = rp * e if rp > 0 else dist_tp1
     dist = min(dist_tp1, dist_atr, dist_pct)
+    if mega_strong:
+        dist_mega = RADAR_MEGA_STRONG_TP1_PROGRESS * abs(t1 - e)
+        dist = max(dist, dist_mega)
     gate = e + direction * dist
     return round(gate, 4)
 
