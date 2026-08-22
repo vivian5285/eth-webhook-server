@@ -13633,6 +13633,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             f"payload.side={payload_side} ≠ 账本.current_side={self.current_side} "
                             f"| action={raw_action}"
                         )
+                        # 2026-08-22实盘复现(XMRUSDT)：TV发CLOSE_RSI_EXIT时
+                        # current_side=None(我们本来就没开过仓，这条信号在
+                        # 这里被当"过期指令"忽略)，但心跳(独立于这条平仓
+                        # 流水线，只在专门的HEARTBEAT payload才更新)依然
+                        # 停留在SHORT没被纠正，导致心跳追回系统对着一个TV
+                        # 早就明确说已经平掉的方向又白等了近1小时——这次
+                        # 侥幸是价格方向跟SHORT完全反着走、EMA确认没通过
+                        # 才没追进去，不是设计上有这层保护，行情反过来一样
+                        # 会被误导去追一个TV已经主动平掉的方向。这条CLOSE
+                        # 信号比任何积压的心跳都新、都权威——如果当前心跳
+                        # 还认为TV持有payload这个方向，直接原地纠正为FLAT，
+                        # 不用等TV自己那根K线收盘才发下一条心跳。
+                        if (
+                            self.current_side is None
+                            and str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+                            == payload_side
+                        ):
+                            logger.info(
+                                f"💓 [{self.symbol}] 心跳按最新CLOSE信号纠正为FLAT "
+                                f"| 原心跳={self.tv_heartbeat_side} | action={raw_action}"
+                            )
+                            try:
+                                self.record_tv_heartbeat({"tv_side": "FLAT"})
+                            except Exception as e:
+                                logger.debug(f"[{self.symbol}] CLOSE信号纠正心跳跳过: {e}")
                         return  # 不执行平仓，不告警（预期内正常情况）
                 else:
                     # 无 side 字段：旧格式 TV 警报，建议更新
