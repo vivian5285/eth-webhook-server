@@ -86,6 +86,41 @@ def _run(cmd: list, timeout: int = 20, cwd: str | None = None) -> str:
         return f"__ERR__{e}"
 
 
+# 2026-08-23：多品种账户(B/C/E各13个品种)重启后要逐品种核对TP/止损，实测
+# 单线程gunicorn(-w1 --threads1)重启恢复期间/health经常5分钟以上才能腾出
+# 手响应——check_health原有的"5次×3秒≈15秒"重试预算是很久以前只针对单一
+# 品种校准的，早就跟不上现在的品种数量。同一天两轮部署重启都在这个窗口
+# 里被watchdog误判成"健康异常"发钉钉，跟真故障混在一起容易让人脱敏。这
+# 里不是无脑加长重试预算(那样真故障也要多等好几分钟才会报警)，而是让
+# check_health能识别"是不是刚重启不久"，只有这种情况才放宽，真正长期
+# 无响应还是照样第一时间报。
+RESTART_GRACE_SEC = 480.0
+
+
+def _service_uptime_sec(service: str):
+    """服务自上次(re)start以来经过的秒数。用monotonic时钟(/proc/uptime +
+    ActiveEnterTimestampMonotonic)算，不解析systemctl的wall-clock时间戳
+    字符串——那个格式受locale/systemd版本影响，用strptime解析容易踩坑，
+    纯数字的monotonic时钟没有这个问题。取不到(systemctl不可用/服务不
+    存在)返回None，调用方必须按"不知道，保守当真异常处理"，不能因为
+    拿不到时间戳就悄悄放过真正的故障。"""
+    out = _run(["systemctl", "show", service, "--property=ActiveEnterTimestampMonotonic", "--value"])
+    if out.startswith("__ERR__"):
+        return None
+    try:
+        active_since_us = float(out.strip())
+    except (TypeError, ValueError):
+        return None
+    if active_since_us <= 0:
+        return None
+    try:
+        with open("/proc/uptime", "r") as f:
+            uptime_now_sec = float(f.read().split()[0])
+    except Exception:
+        return None
+    return uptime_now_sec - (active_since_us / 1_000_000.0)
+
+
 def check_health(acct: dict) -> dict:
     """
     2026-08-12：部署重启(systemctl restart)几秒内端口会短暂无响应，
@@ -95,6 +130,14 @@ def check_health(acct: dict) -> dict:
     校准时(单一/少量品种)更久，9s窗口有几次跟watchdog的10分钟轮询撞上，
     再次假警报——重试从3次/3s(9s)放宽到5次/3s(15s)，正常重启仍能扛住，
     真的挂了(>15s持续无响应)才报警。
+    2026-08-23：品种数量涨到13个之后，15s这个预算又不够了——单线程
+    gunicorn重启后要逐品种核对TP/止损，实测繁忙账户经常5分钟以上都还
+    在恢复中，两轮当天的部署重启都被当成"健康异常"发了钉钉，吓人还没用
+    (真相是重启在正常进行，不是故障)。不再无脑加长这15s的重试预算(那样
+    真故障也要多等好几分钟才会报警)，而是5次重试仍无响应时，额外查一下
+    这个服务是不是最近才(re)start的(_service_uptime_sec)——是的话判定
+    为"重启恢复中"，不算异常；查不到重启时间/重启已经超过宽限期还是没
+    响应，才当真异常处理。
     """
     out = ""
     for attempt in range(5):
@@ -104,7 +147,15 @@ def check_health(acct: dict) -> dict:
         if attempt < 4:
             time.sleep(3)
     if out.startswith("__ERR__") or not out.strip():
-        return {"ok": False, "detail": "无响应(重试5次仍失败)", "open_in_progress": {}}
+        uptime = _service_uptime_sec(acct["service"])
+        if uptime is not None and 0 <= uptime < RESTART_GRACE_SEC:
+            return {
+                "ok": False,
+                "restarting": True,
+                "detail": f"重启后{uptime:.0f}s仍无响应(判定为多品种核对中，非异常)",
+                "open_in_progress": {},
+            }
+        return {"ok": False, "restarting": False, "detail": "无响应(重试5次仍失败)", "open_in_progress": {}}
     try:
         data = json.loads(out)
     except Exception:
@@ -162,9 +213,21 @@ def check_nginx() -> dict:
     svc = _run(["systemctl", "is-active", "nginx"])
     if svc.strip() != "active":
         return {"ok": False, "detail": f"nginx服务未运行(is-active={svc.strip()})"}
-    # 走真实80端口代理路径核实，不直连127.0.0.1:5007，确保反代链路本身通畅
+    # 走真实80端口代理路径核实，不直连127.0.0.1:5007，确保反代链路本身通畅。
+    # 2026-08-23：这里本来只试一次、零重试——这条链路最终还是要打到B账户
+    # 自己的/health，B重启后逐品种核对期间本来就可能几分钟没空响应(见
+    # check_health同一天的修复注释)，单次curl零重试比check_health的"5次
+    # 重试"还脆弱，B一重启这里几乎必现误报。同样用_service_uptime_sec
+    # 判断B是不是刚重启不久，是的话不算异常。
     out = _run(["curl", "-sf", "--max-time", "5", "http://127.0.0.1/binance-b/health"])
     if out.startswith("__ERR__") or not out.strip():
+        b_acct = next((a for a in ACCOUNTS if a["name"] == "B"), None)
+        uptime = _service_uptime_sec(b_acct["service"]) if b_acct else None
+        if uptime is not None and 0 <= uptime < RESTART_GRACE_SEC:
+            return {
+                "ok": True,
+                "detail": f"反代目标B重启后{uptime:.0f}s仍无响应(判定为多品种核对中，非异常)",
+            }
         return {"ok": False, "detail": "nginx进程在跑，但反代/binance-b/health无响应"}
     return {"ok": True, "detail": ""}
 
@@ -463,6 +526,11 @@ def run_once() -> list:
         name = acct["name"]
         h = check_health(acct)
         if not h["ok"]:
+            if h.get("restarting"):
+                # 判定为重启恢复窗口内，不算异常也不发钉钉，但这轮仍然
+                # 没法拿到真实数据，照样跳过这个账户其它检查。
+                print(f"[跳过·重启中] {name}:health | {h.get('detail')}")
+                continue
             detail = h.get("detail") or f"trading_paused={h.get('paused_syms')}"
             anomalies.append({
                 "key": f"{name}:health",
