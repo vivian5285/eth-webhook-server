@@ -3318,6 +3318,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "grid_pending_entry_price": float(getattr(self, "_grid_pending_entry_price", 0) or 0),
                     "grid_pending_stop_price": float(getattr(self, "_grid_pending_stop_price", 0) or 0),
                     "grid_pending_tp_price": float(getattr(self, "_grid_pending_tp_price", 0) or 0),
+                    # 2026-08-24：系统限价开仓(控制台手动发单/编辑重放)同款重启失联
+                    # 修复——跟网格套利那次(commit 72fe697)同一个模式，这次连同
+                    # snap/sizing_meta/budget_txt/margin_usdt这包TV信号上下文也
+                    # 一起落盘，重启后才有材料调用_finalize_new_entry正常收尾，
+                    # 不必只靠"未登记来源"兜底。
+                    "limit_entry_pending": bool(getattr(self, "_limit_entry_pending", False)),
+                    "limit_entry_order_id": getattr(self, "_limit_entry_order_id", None),
+                    "limit_entry_action": getattr(self, "_limit_entry_action", None),
+                    "limit_entry_qty": float(getattr(self, "_limit_entry_qty", 0) or 0),
+                    "limit_entry_price": float(getattr(self, "_limit_entry_price", 0) or 0),
+                    "limit_entry_deadline_ts": float(getattr(self, "_limit_entry_deadline_ts", 0) or 0),
+                    "limit_entry_snap": getattr(self, "_limit_entry_snap", None),
+                    "limit_entry_sizing_meta": getattr(self, "_limit_entry_sizing_meta", None),
+                    "limit_entry_budget_txt": getattr(self, "_limit_entry_budget_txt", None),
+                    "limit_entry_margin_usdt": float(getattr(self, "_limit_entry_margin_usdt", 0) or 0),
                     "last_tv_side": self.last_tv_side,
                     "current_side": self.current_side,
                     "watched_qty": self.watched_qty,
@@ -15348,13 +15363,57 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 交给后台线程等成交/超时；_open_in_progress 保持 True 直到线程收尾，
         # 期间 enqueue_signal 会照常挡住同品种的新 LONG/SHORT 信号排队等待。
         self._limit_entry_pending = True
+        order_id = str(order.get("orderId") or tag)
+        # 2026-08-24：落盘这笔挂单的完整上下文，让重启后有材料能正常收尾
+        # （见_resume_pending_limit_entry），不再只能靠"未登记来源"兜底。
+        # snap/sizing_meta先做一次json可序列化自测——万一里面混进了非
+        # 基本类型（目前看下来都是str/float，但这是新引入的落盘路径，
+        # 稳妥起见先探一下），序列化失败就只落盘qty/action/price这些
+        # 标量，不落盘snap/sizing_meta/budget_txt，_resume_pending_
+        # limit_entry发现关键字段缺失会自己拒绝续接、安全交给通用兜底，
+        # 不会因为这里失败连累_save_state本身写坏其它字段。
+        try:
+            json.dumps(snap)
+            json.dumps(sizing_meta)
+            self._limit_entry_snap = snap
+            self._limit_entry_sizing_meta = sizing_meta
+            self._limit_entry_budget_txt = str(budget_txt or "")
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 限价开仓上下文不可序列化，重启续接将不可用: {e}")
+            self._limit_entry_snap = None
+            self._limit_entry_sizing_meta = None
+            self._limit_entry_budget_txt = None
+        self._limit_entry_order_id = order_id
+        self._limit_entry_action = action
+        self._limit_entry_qty = float(qty)
+        self._limit_entry_price = float(limit_price)
+        self._limit_entry_deadline_ts = time.time() + timeout_sec
+        self._limit_entry_margin_usdt = float(margin_usdt or 0)
+        self._save_state()
         threading.Thread(
             target=self._await_limit_entry_fill,
-            args=(order, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt),
+            args=(order_id, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt),
             daemon=True, name=f"limit-entry-{self.symbol}",
         ).start()
 
-    def _await_limit_entry_fill(self, order, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt):
+    def _clear_limit_entry_pending_state(self, save=True):
+        self._limit_entry_pending = False
+        self._limit_entry_order_id = None
+        self._limit_entry_action = None
+        self._limit_entry_qty = 0.0
+        self._limit_entry_price = 0.0
+        self._limit_entry_deadline_ts = 0.0
+        self._limit_entry_snap = None
+        self._limit_entry_sizing_meta = None
+        self._limit_entry_budget_txt = None
+        self._limit_entry_margin_usdt = 0.0
+        if save:
+            self._save_state()
+
+    def _await_limit_entry_fill(self, order_id, action, qty, limit_price, timeout_sec, snap, sizing_meta, budget_txt, margin_usdt):
+        """order_id只传订单号(不是完整order字典)：重启续接
+        (_resume_pending_limit_entry)时手头只有落盘的id字符串，跟网格
+        套利那次(_await_grid_entry_fill)同款处理。"""
         deadline = time.time() + timeout_sec
         poll_interval = 5.0  # 尽量少占用账号级 REST 预算，跟哨兵/雷达等其它轮询共用同一节流阀
         pos = None
@@ -15373,7 +15432,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # （交易所会返回"已不存在"，cancel_order 内部按已撤销处理）；
             # 没成交/只部分成交则撤掉挂着的剩余量，不留裸露的限价单在盘口。
             try:
-                binance_client.cancel_order(symbol=self.symbol, order=order)
+                binance_client.cancel_order(symbol=self.symbol, order_id=order_id)
             except Exception as e:
                 logger.debug(f"[{self.symbol}] 撤销限价开仓剩余挂单跳过: {e}")
 
@@ -15403,11 +15462,91 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 except Exception:
                     pass
         finally:
-            self._limit_entry_pending = False
+            self._clear_limit_entry_pending_state()
             self._open_in_progress = False
             self._takeover_price_skip = False
             if not getattr(self, "monitoring", False):
                 self._pending_atr_degrade = None
+
+    def _resume_pending_limit_entry(self) -> bool:
+        """VPS重启时续接停机前还没等到结果的系统限价开仓单(控制台手动
+        发单/编辑重放专用)。
+
+        2026-08-24新增：跟网格套利那次(commit 72fe697)同一个模式的坑——
+        _limit_entry_pending只是个内存标记，等待线程是进程内daemon线程，
+        重启后都会消失；如果限价单在停机期间悄悄成交，没人会走这里专用
+        的_finalize_new_entry收尾(绑TV防线/ATR/regime等)，只能等空闲巡检
+        的"未登记来源"兜底，套用比较粗糙的通用接管逻辑。这次连同snap/
+        sizing_meta/budget_txt/margin_usdt这包TV信号上下文一起落盘，
+        重启后才有材料正常收尾。
+
+        返回True表示已经在本函数内部完成收尾(成交接管)，调用方(recover_
+        state_on_startup)应直接return，不要再走后面那套通用持仓对账流程
+        重复处理同一笔仓位。返回False表示没有残留的限价开仓单，或者关键
+        字段缺了没法安全续接(这种情况会清空标记，让通用"未登记来源"兜底
+        接手，不会假装什么都没发生)。
+        """
+        order_id = getattr(self, "_limit_entry_order_id", None)
+        if not order_id or not getattr(self, "_limit_entry_pending", False):
+            return False
+        action = str(getattr(self, "_limit_entry_action", "") or "").upper()
+        qty = float(getattr(self, "_limit_entry_qty", 0) or 0)
+        limit_price = float(getattr(self, "_limit_entry_price", 0) or 0)
+        deadline = float(getattr(self, "_limit_entry_deadline_ts", 0) or 0)
+        snap = getattr(self, "_limit_entry_snap", None)
+        sizing_meta = getattr(self, "_limit_entry_sizing_meta", None)
+        budget_txt = getattr(self, "_limit_entry_budget_txt", None)
+        margin_usdt = float(getattr(self, "_limit_entry_margin_usdt", 0) or 0)
+        if (
+            action not in ("LONG", "SHORT")
+            or qty <= 0
+            or not isinstance(snap, dict)
+            or not isinstance(sizing_meta, dict)
+        ):
+            logger.warning(
+                f"⚠️ [{self.symbol}] 重启发现系统限价开仓残留(id={order_id})但关键字段缺失"
+                f"(action={action} qty={qty} snap_ok={isinstance(snap, dict)} "
+                f"sizing_meta_ok={isinstance(sizing_meta, dict)})，无法安全续接 → 清空放弃"
+            )
+            self._clear_limit_entry_pending_state()
+            return False
+
+        # 先无条件查一次实盘——停机这段时间可能已经成交，不能只靠"剩余
+        # 时间"判断(deadline若已过，_await_limit_entry_fill的轮询循环
+        # 一次都不会进，等于从没查过仓，会把"已成交但没人看见"误判成
+        # "没成交")。
+        try:
+            pos = self._get_active_position(force_rest=True)
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.symbol}] 重启续接限价开仓首次查仓失败: {e} → 稍后交给空闲巡检兜底")
+            return False
+        if pos == "QUERY_FAILED":
+            logger.warning(f"⚠️ [{self.symbol}] 重启续接限价开仓查仓返回QUERY_FAILED → 稍后交给空闲巡检兜底")
+            return False
+
+        if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
+            logger.warning(
+                f"🔄 [{self.symbol}] 重启发现系统限价开仓单在停机期间已成交 "
+                f"{pos.get('side')} {pos.get('size')} @ {pos.get('entry_price')} → 接管收尾"
+            )
+            self._open_in_progress = True
+            self._clear_limit_entry_pending_state(save=False)
+            self._finalize_new_entry(pos, qty, action, snap, budget_txt, sizing_meta, margin_usdt)
+            self._open_in_progress = False
+            return True
+
+        remaining = max(0.0, deadline - time.time())
+        logger.warning(
+            f"🔄 [{self.symbol}] 重启发现系统限价开仓单仍未成交(id={order_id})，"
+            f"剩余{remaining:.0f}s → 续接等待线程(0s表示已过期，会立即撤单收尾)"
+        )
+        self._open_in_progress = True
+        threading.Thread(
+            target=self._await_limit_entry_fill,
+            args=(order_id, action, qty, limit_price, remaining, snap, sizing_meta, budget_txt, margin_usdt),
+            daemon=True, name=f"limit-entry-resume-{self.symbol}",
+        ).start()
+        return False
 
     def _protect_and_monitor(self, qty, entry_price, budget_note="", target_qty=0.0, sizing_meta=None):
         """
@@ -18116,15 +18255,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     # 的"未登记来源"兜底、套用错误的止损形状——跟ETH心跳追回
                     # 那次同一类问题。这里真正读回来，下面_resume_pending_grid_
                     # entry()会据此续接（停机期间已成交/还没到期/已过期三种
-                    # 情况都处理）。"系统限价开仓"_open_position_limit_entry
-                    # 携带的TV信号上下文(snap/sizing_meta等)重建成本高得多，
-                    # 暂不在本次修复范围内，仍保留旧行为。
+                    # 情况都处理）。
                     self._grid_pending_order_id = s.get("grid_pending_order_id")
                     self._grid_pending_side = s.get("grid_pending_side")
                     self._grid_pending_deadline_ts = float(s.get("grid_pending_deadline_ts", 0) or 0)
                     self._grid_pending_entry_price = float(s.get("grid_pending_entry_price", 0) or 0)
                     self._grid_pending_stop_price = float(s.get("grid_pending_stop_price", 0) or 0)
                     self._grid_pending_tp_price = float(s.get("grid_pending_tp_price", 0) or 0)
+                    # 2026-08-24修复：同一个模式的第二例——"系统限价开仓"
+                    # (_open_position_limit_entry，控制台手动发单/编辑重放专用)
+                    # 之前也是重启即失联，_limit_entry_pending只是内存标记，
+                    # 等待线程消失后没人知道曾经挂过单。这次连同snap/sizing_
+                    # meta/budget_txt/margin_usdt这包TV信号上下文一起读回来，
+                    # 下面_resume_pending_limit_entry()会据此续接。
+                    self._limit_entry_pending = bool(s.get("limit_entry_pending", False))
+                    self._limit_entry_order_id = s.get("limit_entry_order_id")
+                    self._limit_entry_action = s.get("limit_entry_action")
+                    self._limit_entry_qty = float(s.get("limit_entry_qty", 0) or 0)
+                    self._limit_entry_price = float(s.get("limit_entry_price", 0) or 0)
+                    self._limit_entry_deadline_ts = float(s.get("limit_entry_deadline_ts", 0) or 0)
+                    self._limit_entry_snap = s.get("limit_entry_snap")
+                    self._limit_entry_sizing_meta = s.get("limit_entry_sizing_meta")
+                    self._limit_entry_budget_txt = s.get("limit_entry_budget_txt")
+                    self._limit_entry_margin_usdt = float(s.get("limit_entry_margin_usdt", 0) or 0)
                     self.current_side = s.get("current_side")
                     self.current_sl = s.get("current_sl", 0.0)
                     self.regime = s.get("regime", 3)
@@ -18347,6 +18500,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # _probe_position_for_recover 那套TV专属对账流程重复处理同一
             # 笔仓位（那套流程不知道网格的精确止损/一次性止盈该怎么摆）。
             if self._resume_pending_grid_entry():
+                return
+
+            # 同理续接系统限价开仓单（控制台手动发单/编辑重放专用）——
+            # 跟网格同一个模式，返回True(停机期间已成交、已接管收尾)才
+            # 提前return，避免被下面通用流程重复处理。
+            if self._resume_pending_limit_entry():
                 return
 
             # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
