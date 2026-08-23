@@ -387,8 +387,19 @@ class RadarReentryMixin:
             )
             self.breath_profile["breath_tp12"] = b12
             self.breath_profile["breath_tp23"] = b23
-        except Exception:
-            pass
+        except Exception as e:
+            # 2026-08-23：这里之前是纯pass静默吞异常——实盘复现(binanceB
+            # ETHUSDT)雷达止损卡在激活时的初始值25+分钟不推进、best_price
+            # 却正常在涨，全程没有一条error/exception日志，只能靠排除法
+            # 一步步查。这类静默吞异常如果恰好是这里(或下面呼吸空间缩放
+            # 那段)在出问题，会让breath_profile停留在陈旧/不完整状态，
+            # calculate_breath_stop用着这份坏掉的profile算出来的止损可能
+            # 永远算不出比当前值更高的新值——外层看起来就是"雷达卡死但
+            # 没有任何报错"。改成留痕但不改变原有"降级继续跑"的行为，
+            # 下次再复现能直接从日志定位，不用再靠整条链路排除。
+            logger.warning(
+                f"[{self.symbol}] 呼吸空间实时微调跳过(降级用离散档位值): {e}"
+            )
         # v2.6：呼吸空间（止损离最高点多远）按这笔单自己的TP1距离重新校准，
         # 见 reentry_profiles.tp_amplitude_scale 的docstring——同一品种不同
         # 账户可能接完全不同的TV策略(窄止盈TP1≈1×ATR / 宽止盈TP1≈6-9×ATR)，
@@ -424,7 +435,12 @@ class RadarReentryMixin:
                 else 1.0
             )
             self.breath_profile["tp3_confirm_atr"] = round(base_confirm_atr * scale, 4)
-        except Exception:
+        except Exception as e:
+            # 同上一处修复的理由：静默吞异常改成留痕，保留原有降级行为
+            # (scale退回1.0，不额外阻断)。
+            logger.warning(
+                f"[{self.symbol}] 呼吸空间TP1振幅缩放跳过(降级scale=1.0): {e}"
+            )
             self._tp_amplitude_scale = 1.0
 
     def _begin_open_radar_dormant(self, *, side, entry, tv_price, open_atr,

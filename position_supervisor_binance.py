@@ -16327,8 +16327,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         atr = self._get_locked_initial_atr()
         try:
             self._apply_tier_breath_overlay()
-        except Exception:
-            pass
+        except Exception as e:
+            # 2026-08-23：这里之前是纯pass静默吞异常——如果_apply_tier_
+            # breath_overlay顶部重建breath_profile那一步(apply_tier_to_
+            # breath_profile/get_reentry_profile)本身抛出，self.breath_
+            # profile会停留在调用前的陈旧/None状态，下面calculate_
+            # breath_stop用这份坏掉的profile算出来的止损可能永远算不出
+            # 比当前值更高的新值——实盘复现(binanceB ETHUSDT)：雷达止损
+            # 卡在激活初始值25+分钟不推进、best_price却在正常涨，全程零
+            # error/exception日志，只能靠排除法一步步查。改成留痕，下次
+            # 再复现能直接从日志定位根因。
+            logger.error(
+                f"[{self.symbol}] 呼吸档位叠加计算异常(breath_profile可能未刷新) : {e}",
+                exc_info=True,
+            )
         profile = getattr(self, "breath_profile", None)
         init = float(getattr(self, "initial_stop", 0) or 0)
         if init <= 0:
