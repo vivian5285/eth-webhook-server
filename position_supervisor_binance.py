@@ -505,6 +505,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._grid_pending_order_id = None
         self._grid_pending_side = None
         self._grid_pending_deadline_ts = 0.0
+        self._grid_pending_entry_price = 0.0
+        self._grid_pending_stop_price = 0.0
+        self._grid_pending_tp_price = 0.0
 
         self.state_file = os.path.join(
             _BASE_DIR, f'binance_vps_state_{self.symbol}.json'
@@ -3312,6 +3315,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "grid_pending_order_id": getattr(self, "_grid_pending_order_id", None),
                     "grid_pending_side": getattr(self, "_grid_pending_side", None),
                     "grid_pending_deadline_ts": float(getattr(self, "_grid_pending_deadline_ts", 0) or 0),
+                    "grid_pending_entry_price": float(getattr(self, "_grid_pending_entry_price", 0) or 0),
+                    "grid_pending_stop_price": float(getattr(self, "_grid_pending_stop_price", 0) or 0),
+                    "grid_pending_tp_price": float(getattr(self, "_grid_pending_tp_price", 0) or 0),
                     "last_tv_side": self.last_tv_side,
                     "current_side": self.current_side,
                     "watched_qty": self.watched_qty,
@@ -15043,6 +15049,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._grid_pending_side = side
         self._grid_pending_order_id = str(order.get("orderId") or tag)
         self._grid_pending_deadline_ts = time.time() + timeout_sec
+        # 2026-08-23：连同止损/止盈/限价一起落盘——之前只存了order_id/side/
+        # deadline，重启后这三个字段从来没被读回来过（只在_save_state里写，
+        # 没有对应的hydrate），停机期间万一这笔限价单悄悄成交了，没人会用
+        # 网格专属的"精确止损+一次性止盈"接管，只能等空闲巡检的"未登记
+        # 来源"兜底、套用TV那套止损/止盈形状——跟ETH心跳追回那次同一类
+        # 问题（成交检测跟不上，兜底用错误的形状接管）。现在补全落盘+
+        # recover_state_on_startup里的续接（见_resume_pending_grid_entry）。
+        self._grid_pending_entry_price = float(entry_price)
+        self._grid_pending_stop_price = float(stop_price)
+        self._grid_pending_tp_price = float(tp_price)
         self._save_state()
 
         logger.info(
@@ -15052,7 +15068,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         threading.Thread(
             target=self._await_grid_entry_fill,
-            args=(order, side, entry_price, stop_price, tp_price, timeout_sec),
+            args=(self._grid_pending_order_id, side, entry_price, stop_price, tp_price, timeout_sec),
             daemon=True, name=f"grid-entry-{self.symbol}",
         ).start()
         return {"ok": True, "message": "grid_order_placed", "qty": qty, "order_id": self._grid_pending_order_id}
@@ -15067,7 +15083,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._grid_pending_deadline_ts = time.time()
         return {"ok": True, "message": "cancel_requested"}
 
-    def _await_grid_entry_fill(self, order, side, entry_price, stop_price, tp_price, timeout_sec):
+    def _await_grid_entry_fill(self, order_id, side, entry_price, stop_price, tp_price, timeout_sec):
+        """order_id 只传订单号（不是完整order字典)：这样重启续接
+        (_resume_pending_grid_entry)时即便手头只有落盘的id字符串也能复用
+        同一份等待逻辑，不需要重建下单时那个完整的order响应对象。"""
         deadline = time.time() + timeout_sec
         poll_interval = 5.0
         pos = None
@@ -15083,7 +15102,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     pos = p
                     break
             try:
-                binance_client.cancel_order(symbol=self.symbol, order=order)
+                binance_client.cancel_order(symbol=self.symbol, order_id=order_id)
             except Exception as e:
                 logger.debug(f"[{self.symbol}] 撤销网格开仓剩余挂单跳过: {e}")
 
@@ -15107,10 +15126,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 except Exception:
                     pass
         finally:
-            self._grid_pending_order_id = None
-            self._grid_pending_side = None
-            self._grid_pending_deadline_ts = 0.0
-            self._save_state()
+            self._clear_grid_pending_state()
 
     def _finalize_grid_entry(self, pos, side, stop_price, tp_price):
         """网格开仓成交后：绑定精确止损(不加宽)+一次性止盈(不分批)+启动哨兵。"""
@@ -15189,6 +15205,98 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
         except Exception:
             pass
+
+    def _clear_grid_pending_state(self, save=True):
+        self._grid_pending_order_id = None
+        self._grid_pending_side = None
+        self._grid_pending_deadline_ts = 0.0
+        self._grid_pending_entry_price = 0.0
+        self._grid_pending_stop_price = 0.0
+        self._grid_pending_tp_price = 0.0
+        if save:
+            self._save_state()
+
+    def _resume_pending_grid_entry(self) -> bool:
+        """VPS重启时续接停机前还没等到结果的网格套利限价开仓单。
+
+        2026-08-23新增：之前_grid_pending_*字段只落盘、从没被读回来过，等
+        待线程又是进程内daemon线程，重启后不会自动恢复——如果限价单在
+        停机期间悄悄成交，没人会用网格专属"精确止损+一次性止盈"接管，
+        只能等空闲巡检"未登记来源"兜底、套用错误的止损形状。跟ETH心跳
+        追回那次是同一类根因(成交检测跟不上重启/状态转移)，这里补上。
+
+        返回True表示已经在本函数内部完成了收尾(成交接管或过期撤单)，
+        调用方(recover_state_on_startup)应直接return，不要再走后面那套
+        TV专属的持仓对账流程重复处理同一笔仓位。返回False表示没有残留
+        的网格挂单，调用方按原样继续正常流程。
+        """
+        order_id = getattr(self, "_grid_pending_order_id", None)
+        if not order_id:
+            return False
+        side = str(getattr(self, "_grid_pending_side", "") or "").upper()
+        entry_price = float(getattr(self, "_grid_pending_entry_price", 0) or 0)
+        stop_price = float(getattr(self, "_grid_pending_stop_price", 0) or 0)
+        tp_price = float(getattr(self, "_grid_pending_tp_price", 0) or 0)
+        deadline = float(getattr(self, "_grid_pending_deadline_ts", 0) or 0)
+        if side not in ("LONG", "SHORT") or stop_price <= 0 or tp_price <= 0:
+            logger.warning(
+                f"⚠️ [{self.symbol}] 重启发现网格挂单残留(id={order_id})但关键字段缺失"
+                f"(side={side} stop={stop_price} tp={tp_price})，无法安全续接 → 清空放弃"
+            )
+            self._clear_grid_pending_state()
+            return False
+
+        # 先无条件查一次实盘——停机这段时间可能已经成交，绝不能靠"剩余时间"
+        # 判断就直接跳过检查(deadline若已过，_await_grid_entry_fill的轮询
+        # 循环一次都不会进，等于从没查过仓，会把"已成交但没人看见"误判成
+        # "没成交")。
+        try:
+            pos = self._get_active_position(force_rest=True)
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.symbol}] 重启续接网格挂单首次查仓失败: {e} → 稍后交给空闲巡检兜底")
+            return False
+        if pos == "QUERY_FAILED":
+            logger.warning(f"⚠️ [{self.symbol}] 重启续接网格挂单查仓返回QUERY_FAILED → 稍后交给空闲巡检兜底")
+            return False
+
+        if isinstance(pos, dict) and float(pos.get("size") or 0) > 0 and str(pos.get("side") or "").upper() == side:
+            logger.warning(
+                f"🔄 [{self.symbol}] 重启发现网格限价单在停机期间已成交 {side} "
+                f"{pos.get('size')} @ {pos.get('entry_price')} → 按网格逻辑接管收尾"
+            )
+            try:
+                from strategy_engine import klines as _sk_klines
+                from strategy_engine import indicators as _sk_ind
+                bars = _sk_klines.get_bars(self.symbol, "15m", limit=60)
+                grid_atr = float(_sk_ind.wilder_atr(bars, 14)) if bars else 0.0
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] 网格套利重启续接ATR现算失败: {e}")
+                grid_atr = 0.0
+            self._tv_signal_atr = grid_atr
+            self._clear_grid_pending_state(save=False)
+            self._finalize_grid_entry(pos, side, stop_price, tp_price)
+            return True
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            logger.info(f"⏰ [{self.symbol}] 重启发现网格限价单已过期未成交(id={order_id}) → 撤单清空")
+            try:
+                binance_client.cancel_order(symbol=self.symbol, order_id=order_id)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 重启撤销过期网格挂单跳过: {e}")
+            self._clear_grid_pending_state()
+            return False
+
+        logger.warning(
+            f"🔄 [{self.symbol}] 重启发现网格限价单仍在等待成交(id={order_id})，"
+            f"剩余{remaining:.0f}s → 续接等待线程"
+        )
+        threading.Thread(
+            target=self._await_grid_entry_fill,
+            args=(order_id, side, entry_price, stop_price, tp_price, remaining),
+            daemon=True, name=f"grid-entry-resume-{self.symbol}",
+        ).start()
+        return False
 
     def _open_position_limit_entry(
         self, action, open_side, qty, limit_price, payload, snap,
@@ -18001,10 +18109,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.tv_heartbeat_tp2 = float(s.get("tv_heartbeat_tp2", 0) or 0)
                     self.tv_heartbeat_tp3 = float(s.get("tv_heartbeat_tp3", 0) or 0)
                     self.position_source = str(s.get("position_source", "TV") or "TV")
-                    # 网格挂单等待线程是进程内daemon线程，重启后不会自动恢复
-                    # 巡检/watcher——这里只加载展示用状态，不重新起线程（跟现有
-                    # "系统限价开仓"_open_position_limit_entry同款重启行为一致，
-                    # 不是新引入的缺口）。
+                    # 2026-08-23修复：网格挂单等待线程是进程内daemon线程，重启后
+                    # 不会自动恢复——旧注释说"只加载展示用状态"，但实际上这几个
+                    # 字段从来没被读回来过，停机期间万一限价单悄悄成交了，没人
+                    # 会用网格专属的"精确止损+一次性止盈"接管，只能等空闲巡检
+                    # 的"未登记来源"兜底、套用错误的止损形状——跟ETH心跳追回
+                    # 那次同一类问题。这里真正读回来，下面_resume_pending_grid_
+                    # entry()会据此续接（停机期间已成交/还没到期/已过期三种
+                    # 情况都处理）。"系统限价开仓"_open_position_limit_entry
+                    # 携带的TV信号上下文(snap/sizing_meta等)重建成本高得多，
+                    # 暂不在本次修复范围内，仍保留旧行为。
+                    self._grid_pending_order_id = s.get("grid_pending_order_id")
+                    self._grid_pending_side = s.get("grid_pending_side")
+                    self._grid_pending_deadline_ts = float(s.get("grid_pending_deadline_ts", 0) or 0)
+                    self._grid_pending_entry_price = float(s.get("grid_pending_entry_price", 0) or 0)
+                    self._grid_pending_stop_price = float(s.get("grid_pending_stop_price", 0) or 0)
+                    self._grid_pending_tp_price = float(s.get("grid_pending_tp_price", 0) or 0)
                     self.current_side = s.get("current_side")
                     self.current_sl = s.get("current_sl", 0.0)
                     self.regime = s.get("regime", 3)
@@ -18221,6 +18341,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         eq = binance_client.get_principal_wallet_balance()
                         if eq > 0:
                             self.sizing_principal = eq
+
+            # 热加载完成后先处理网格挂单续接：如果停机期间限价单已经成交，
+            # 这里直接按网格逻辑收尾并return，不让下面的"热加载stale状态"/
+            # _probe_position_for_recover 那套TV专属对账流程重复处理同一
+            # 笔仓位（那套流程不知道网格的精确止损/一次性止盈该怎么摆）。
+            if self._resume_pending_grid_entry():
+                return
 
             # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
             # 例如：进程重启前持仓已平但未调用 _reset_breath_ledger_on_flat
