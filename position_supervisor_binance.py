@@ -1234,6 +1234,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if self._finalize_tv_catchup_fill(pos, escalated=True):
                 return
 
+        # 2026-08-23实盘复现(ETHUSDT/MARIO)：限价追回同样有这个坑，只是没
+        # 撞上BNB那次的"查仓失败"分支——限价单在两次巡检之间悄悄成交，
+        # live_qty从0变为>0，下面`if live_qty<=0:`分支（追回tick的唯一
+        # 调用点）被跳过，成交检测self._progress_tv_catchup_cycle()永远
+        # 没机会运行，只能任由通用"未登记来源接管"分支代劳——它不知道
+        # catchup_stop_distance_frozen，会算出一个跟追回本意完全不一样、
+        # 通常宽得多的止损。这里补上跟market_pending_confirm对称的旁路。
+        if (
+            getattr(self, "catchup_phase", "") == "limit"
+            and live_qty > 0
+            and str(getattr(self, "catchup_side", "") or "").upper() == str(pos.get("side") or "").upper()
+        ):
+            logger.warning(f"🔄 [{self.symbol}] 巡检发现追回限价仓位已成交，补做成交收尾")
+            if self._finalize_tv_catchup_fill(pos, escalated=False):
+                return
+
         if live_qty <= 0:
             # TV心跳漏单检测：实盘确认空仓，跟TV心跳持仓状态比对（见
             # radar_reentry_mixin.py 里 record_tv_heartbeat 顶部注释）
