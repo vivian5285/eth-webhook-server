@@ -16381,6 +16381,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.early_be_done = bool(out.get("early_be_done") or early)
         meta = out.get("meta") or {}
         meta["breathing_coefficient"] = coeff
+        # 2026-08-23临时诊断：宝贝发现binanceB ETHUSDT雷达止损25+分钟卡在
+        # 激活初始值不推进(radar_step_count=0)、best_price却正常追高到
+        # 2469.85，重启也没能自愈，且上面新加的异常留痕日志一条都没有
+        # 触发——说明calculate_breath_stop本身没抛异常，是正常返回了一个
+        # 没有超过当前止损的new_stop。静态读代码排除了_open_in_progress/
+        # _should_radar_trail/silent-except三类假设都不是根因，这里先加
+        # 一次性的取值级诊断，直接打出calculate_breath_stop的关键入参和
+        # 结果，等下次(或这次持仓后续)再复现同类"卡死不推进"时能立刻从
+        # 日志读出到底是哪个入参不对，而不必再猜。只在"算出来没有改善"
+        # 这个可疑分支打印，正常推进的tick不受影响、不增加日常噪音。
+        if new_stop <= cur:
+            logger.warning(
+                f"🔍[诊断] [{self.symbol}] breath_stop未改善 new_stop={new_stop:.4f}<=cur={cur:.4f} | "
+                f"px={px:.4f} best={best:.4f} entry={entry:.4f} atr={atr:.4f} "
+                f"init={init:.4f} phase={phase} coeff={coeff:.4f} "
+                f"tp1={tp1_px:.4f} tp2={tp2_px:.4f} tp3={tp3_px:.4f} "
+                f"profile_name={(profile or {}).get('name') if isinstance(profile, dict) else profile} "
+                f"meta={meta}"
+            )
         breath_meta = getattr(self, "_breath_coeff_meta", None) or {}
         if breath_meta:
             meta["atr_1h"] = breath_meta.get("atr_1h")
