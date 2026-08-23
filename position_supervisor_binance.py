@@ -14112,6 +14112,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._clear_reentry_cycle(source="新TV·先平后开")
         except Exception as e:
             logger.debug(f"清再入周期跳过: {e}")
+        # 2026-08-24: 新TV信号到达时若该symbol还挂着TV心跳追回周期(catchup_
+        # active)，之前只在仓位确认归零后才被动清（_reset_breath_ledger_on_
+        # flat），这段窗口里追回周期自己的后台tick可能还在摸同一个symbol的
+        # 挂单/仓位，跟这里"先平后开"的撤单/平仓抢同一把_trade_lock_for(symbol)
+        # ——实测复现：MARIO账户ETH一笔追回残单撞上新TV开仓，先平后开卡了近
+        # 2分钟才真正平仓，期间价格走出去4点多滑点。这里提前主动清掉，把
+        # "两条流程抢锁"变成"确定性先后顺序"，函数本身幂等，没有追回周期
+        # 在跑时是安全空操作。
+        try:
+            self._clear_tv_catchup_cycle(source="新TV·先平后开")
+        except Exception as e:
+            logger.debug(f"清追回周期跳过: {e}")
         payload = payload or {}
         chain = bool(getattr(self, "_close_open_chain_active", False))
         reason = close_reason or "TV开仓·一律先平后开"
