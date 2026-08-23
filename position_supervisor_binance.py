@@ -311,6 +311,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.breath_profile["tick_size"] = 10 ** (-self.price_precision)
         self.monitoring = False
         self._lock = threading.Lock()
+        # 2026-08-24: "发现空仓"的统一原子闸门——见_ensure_flat_exit_classified
+        self._flat_classify_lock = threading.Lock()
 
         # 固定分腿 10/20/70；限价仅 TP1+TP2（TP3 交雷达）
         _leg = list(LEG_TP_RATIOS)
@@ -4699,6 +4701,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.warning(
                 f"🧹 [{self.symbol}] 强制核对：交易所已空仓 → 清本地 | {reason}"
             )
+            # 2026-08-24: 必须在下面几行清账本之前调用——统一分类闸门本身
+            # 靠self.monitoring的真实前值做原子判断(见_ensure_flat_exit_
+            # classified)，这里如果先把monitoring清了再调用，闸门会误判
+            # "已经被处理过"直接跳过，追单确认还是不会被武装。
+            self._ensure_flat_exit_classified(hint_reason=f"竞态核对·{reason}")
             self.watched_qty = 0.0
             self.monitoring = False
             self.current_side = None
@@ -8118,6 +8125,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"🛡️ [{self.symbol}] {reason} 挂单未成但复查仓位已归零 → "
                     f"仓位已由别的路径平仓，无需再挂硬止损"
                 )
+                # 2026-08-24: 别静默走人——这可能是本次事件第一个摸到"仓位
+                # 已经不在了"的路径，得先过统一分类闸门，不然追单确认永远
+                # 不会被武装(见_ensure_flat_exit_classified注释)
+                self._ensure_flat_exit_classified(hint_reason=f"{reason}·硬止损维护发现已平仓")
                 return True
         except Exception:
             pass
@@ -13220,6 +13231,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self._save_state()
                 except Exception:
                     pass
+                # 2026-08-24: 同上，先过统一分类闸门(见_ensure_flat_exit_classified)
+                self._ensure_flat_exit_classified(hint_reason="数量核对发现已平仓")
         return fallback_qty
 
     def _split_tp_quantities(self, qty: float, ratios: list) -> tuple:
@@ -14286,6 +14299,50 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._maybe_auto_clear_pause_when_flat(source=f"flat_reset:{source}")
         except Exception:
             pass
+
+    def _ensure_flat_exit_classified(self, hint_reason="", curr_px=0.0, close_meta=None):
+        """
+        2026-08-24新增：统一的"发现空仓"入口。
+
+        根因：_ensure_frozen_hard_sl/_resolve_live_qty/_force_reconcile_
+        position_vs_local 这几个函数各自独立发现"仓位其实已经不在了"时，
+        过去都是各自静默清账本(watched_qty/monitoring/current_side清零)，
+        完全不经过_handle_manual_flat_detected的退出分类——谁先发现，
+        哨兵循环自己那次判断(仅在_handle_manual_flat_detected之前会看
+        self.monitoring)就会因为monitoring已经被别人抢先置False而直接
+        "确认空仓待命"退出，永远不会评估要不要武装追单确认。实盘复现：
+        MARIO/妈妈账户ZEC同一次雷达止损触发，先被_ensure_frozen_hard_sl
+        发现→静默清零，哨兵36秒后才醒来发现monitoring已经是False，直接
+        跳过；同一时刻"我自己"账户走的是哨兵自己先发现的路径，正常完成
+        退出分类+武装追单确认——同一个系统、同一个事件，仅因为"谁先摸到
+        它"就产生了两种完全不同的后续处理，纯属竞态，不是设计差异。
+
+        修法：用self.monitoring本身当唯一原子闸门(加锁保证check-and-flip
+        不被并发穿透)——不新增需要在20多处开仓点手动重置的额外状态字段。
+        谁先调用这个函数，谁就真正触发退出分类；后到的调用者会看到
+        monitoring已经是False，直接跳过，不会重复分类。_handle_manual_
+        flat_detected内部(_snapshot_cycle_for_reentry)读取的是current_side
+        /watched_entry等字段，不依赖monitoring，所以先把monitoring占位
+        清掉不影响分类用到的数据仍然完整。
+        """
+        with self._flat_classify_lock:
+            if not self.monitoring:
+                return  # 已经被别的路径处理过，或者本来就不是活仓
+            self.monitoring = False  # 立刻占位，挡住并发的第二个发现者
+        curr_px = float(curr_px or 0.0)
+        if curr_px <= 0:
+            try:
+                curr_px = float(binance_client.get_current_price(self.symbol) or 0.0)
+            except Exception:
+                curr_px = 0.0
+        try:
+            self._handle_manual_flat_detected(
+                hint_reason or "仓位归零（统一分类入口）",
+                close_meta=close_meta,
+                curr_px=curr_px,
+            )
+        except Exception as e:
+            logger.error(f"[{self.symbol}] 统一退出分类失败: {e}")
 
     def _handle_manual_flat_detected(self, reason, close_meta=None, curr_px=0.0):
         """人工全平 / 止盈吃满 / 止损触发：智能复位账本 + 四标签收网钉钉 + 智能再入"""
@@ -17627,57 +17684,65 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                                     "哨兵宽限期：跳过空仓判定（防重启误清场）"
                                 )
                                 continue
-                            if float(self.watched_qty or 0) <= 0:
+                            # 2026-08-24: 判断依据从watched_qty改成monitoring——
+                            # watched_qty可能已经被_ensure_frozen_hard_sl/
+                            # _resolve_live_qty/_force_reconcile_position_vs_
+                            # local这几个独立路径抢先静默清零(它们发现空仓时
+                            # 只清账本，不做退出分类)，哨兵这里原本一看
+                            # watched_qty<=0就以为"已经处理过"直接退出，实际
+                            # 上退出分类(要不要武装追单确认)可能从没跑过。
+                            # 现在统一走_ensure_flat_exit_classified，它自己
+                            # 用monitoring做加锁的原子闸门，不管谁先摸到这次
+                            # 空仓事件，分类保证跑且只跑一次。
+                            if not self.monitoring:
                                 logger.info(
                                     f"📭 [{self.symbol}] 哨兵确认空仓待命 → 退出巡检"
                                 )
-                                self.monitoring = False
                                 try:
                                     self._save_state()
                                 except Exception:
                                     pass
                                 break
-                            if self.watched_qty > 0:
-                                self._purge_all_defense_orders_on_flat(
-                                    "哨兵感知空仓·抢先撤TP123",
+                            self._purge_all_defense_orders_on_flat(
+                                "哨兵感知空仓·抢先撤TP123",
+                            )
+                            if not self._confirm_position_flat():
+                                logger.warning(
+                                    "⚠️ [哨兵] 首次无仓但复核仍有持仓/查询失败 → 跳过误清场"
                                 )
-                                if not self._confirm_position_flat():
-                                    logger.warning(
-                                        "⚠️ [哨兵] 首次无仓但复核仍有持仓/查询失败 → 跳过误清场"
-                                    )
-                                    continue
-                                try:
-                                    flat_meta = self._infer_flat_close_meta(
-                                        curr_px=last_px,
-                                        hint_reason="",
-                                    )
-                                    # 禁止含糊「止盈/人工/止损」并列；归因结果写入 reason
-                                    src_lab = flat_meta.get("exit_source_label") or ""
-                                    note = flat_meta.get("tv_reason") or ""
-                                    if src_lab and src_lab not in note:
-                                        flat_meta["tv_reason"] = (
-                                            f"{src_lab} · {note}" if note else src_lab
-                                        )
-                                    elif not note:
-                                        flat_meta["tv_reason"] = (
-                                            src_lab or "仓位归零（来源未明·请查交易所成交）"
-                                        )
-                                except Exception as e:
-                                    logger.error(
-                                        f"⚠️ [哨兵] 空仓归因失败仍强制清账本: {e}"
-                                    )
-                                    flat_meta = {
-                                        "tv_reason": "仓位归零（归因异常·请查交易所成交）",
-                                        "close_type": "",
-                                    }
-                                self._handle_manual_flat_detected(
-                                    flat_meta.get(
-                                        "tv_reason",
-                                        "仓位归零（来源未明·请查交易所成交）",
-                                    ),
-                                    close_meta=flat_meta,
+                                continue
+                            try:
+                                flat_meta = self._infer_flat_close_meta(
                                     curr_px=last_px,
+                                    hint_reason="",
                                 )
+                                # 禁止含糊「止盈/人工/止损」并列；归因结果写入 reason
+                                src_lab = flat_meta.get("exit_source_label") or ""
+                                note = flat_meta.get("tv_reason") or ""
+                                if src_lab and src_lab not in note:
+                                    flat_meta["tv_reason"] = (
+                                        f"{src_lab} · {note}" if note else src_lab
+                                    )
+                                elif not note:
+                                    flat_meta["tv_reason"] = (
+                                        src_lab or "仓位归零（来源未明·请查交易所成交）"
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"⚠️ [哨兵] 空仓归因失败仍强制清账本: {e}"
+                                )
+                                flat_meta = {
+                                    "tv_reason": "仓位归零（归因异常·请查交易所成交）",
+                                    "close_type": "",
+                                }
+                            self._ensure_flat_exit_classified(
+                                flat_meta.get(
+                                    "tv_reason",
+                                    "仓位归零（来源未明·请查交易所成交）",
+                                ),
+                                curr_px=last_px,
+                                close_meta=flat_meta,
+                            )
                             break
 
                         if self.watched_qty > 0 and self._should_finalize_tp_victory(real_amt):
