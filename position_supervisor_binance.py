@@ -18559,36 +18559,51 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if self._resume_pending_limit_entry():
                 return
 
-            # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
-            # 例如：进程重启前持仓已平但未调用 _reset_breath_ledger_on_flat
-            if self._book_thinks_active():
-                live_qty = self._live_position_qty()
-                if live_qty is None:
-                    logger.warning(
-                        f"⚠️ [{self.symbol}] 热加载后交易所持仓查询失败，暂保留本地状态"
-                    )
-                elif live_qty <= 0:
-                    logger.warning(
-                        f"🧹 [{self.symbol}] 热加载stale状态已清除：交易所空仓但账本有仓 "
-                        f"(watched_qty={self.watched_qty} current_side={self.current_side})"
-                    )
-                    self._reset_breath_ledger_on_flat(source="load_state_stale_clean")
-
-            if self.base_qty <= 0 and os.path.exists(self.state_file):
-                last_open = self._load_last_journal_entry(None, kind="open")
-                if last_open:
-                    jq = float(last_open.get("qty", 0) or 0)
-                    if jq > 0:
-                        self.base_qty = jq
-                        logger.info(
-                            f"📖 恢复 base_qty 取自开仓日志 {jq} {self.unit_label}"
+            # 2026-08-24实盘复现(B/C两账户ZEC追单确认状态重启后不一致)：下面
+            # 这几步全都要靠REST(_live_position_qty/_confirm_position_flat
+            # 多轮重试)才能真正确认"盘口是不是真的空仓"，期间会让出GIL；
+            # watched_qty这时候还是重启前的旧值(没等_reset_breath_ledger_
+            # on_flat清零)，如果空闲巡检线程恰好在这个窗口里tick到追单确认
+            # (_check_chase_reentry_confirmation)，会把尚未清零的旧
+            # watched_qty当成"已经有仓位"，直接清掉正在等待的追单确认状态
+            # ——B命中了这个窗口、C没有，纯属时序运气。_recover_in_progress
+            # 已经是_run_idle_live_reconcile顶部现成的互斥闸门，之前只在更
+            # 后面的"接管持仓"分支才置位，这一整段"确认到底是不是真的空仓"
+            # 的对账完全没被这道闸门保护。这里补上，让空闲巡检整段期间让路。
+            self._recover_in_progress = True
+            try:
+                # 热加载后立即与交易所对账：防止旧状态文件残留stale watched_qty
+                # 例如：进程重启前持仓已平但未调用 _reset_breath_ledger_on_flat
+                if self._book_thinks_active():
+                    live_qty = self._live_position_qty()
+                    if live_qty is None:
+                        logger.warning(
+                            f"⚠️ [{self.symbol}] 热加载后交易所持仓查询失败，暂保留本地状态"
                         )
+                    elif live_qty <= 0:
+                        logger.warning(
+                            f"🧹 [{self.symbol}] 热加载stale状态已清除：交易所空仓但账本有仓 "
+                            f"(watched_qty={self.watched_qty} current_side={self.current_side})"
+                        )
+                        self._reset_breath_ledger_on_flat(source="load_state_stale_clean")
 
-            if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
-                return
+                if self.base_qty <= 0 and os.path.exists(self.state_file):
+                    last_open = self._load_last_journal_entry(None, kind="open")
+                    if last_open:
+                        jq = float(last_open.get("qty", 0) or 0)
+                        if jq > 0:
+                            self.base_qty = jq
+                            logger.info(
+                                f"📖 恢复 base_qty 取自开仓日志 {jq} {self.unit_label}"
+                            )
 
-            if self._recover_missed_flat_on_startup(was_monitoring=saved_monitoring):
-                return
+                if self._scan_and_sweep_dust_on_startup(was_monitoring=saved_monitoring):
+                    return
+
+                if self._recover_missed_flat_on_startup(was_monitoring=saved_monitoring):
+                    return
+            finally:
+                self._recover_in_progress = False
 
             # 强制 REST 多轮探测，禁止 WS 空缓存 / 共享锁导致漏接实盘
             pos = self._probe_position_for_recover()
