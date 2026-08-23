@@ -31,6 +31,17 @@
 稍慢——比如正在重启——TV就会先报"timed out"，即使实际后来还是转发
 成功了，也容易让人误以为丢单去手动补发，反而造成重复开平仓）。转发
 是否真的送达，继续靠原有的钉钉告警机制单独通知。
+
+2026-08-24：上面这个"先回TV、后台线程异步转发"的设计有个没堵上的口子——
+后台线程是daemon线程，进程一退出就被直接砍断，不会等它转发完。而
+gateway-heartbeat.timer每60秒探活一次，失败就会自愈式`systemctl
+restart`——如果探活失败的同时正好有一笔TV信号已经回了200但还卡在后台
+线程里没转发完，这次restart会把它连同转发结果一起悄悄抹掉：TV那边看
+到的是200成功，不会重试；后台线程被杀死，_alert_if_needed也没机会跑，
+钉钉不会报警。整条链路谁都不知道这笔信号丢了。现在补上优雅关闭：收到
+SIGTERM先停止接受新连接，再限时等所有还在跑的转发线程收尾（等不完也
+不无限拖，到点强制退出，不能让优雅关闭本身变成新的"进程还活着但不
+响应"）。
 """
 import base64
 import hashlib
@@ -38,6 +49,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 import threading
 import time
 import urllib.error
@@ -65,6 +77,47 @@ BACKENDS = [
 ]
 BACKEND_TIMEOUT_SEC = 8.0
 _SKIP_HEADERS = {"host", "content-length", "connection"}
+# 优雅关闭最多等这么久——留够BACKEND_TIMEOUT_SEC+2(单笔转发的join超时)一轮
+# 的余量，真等不完也不能让"优雅关闭"本身变成新的挂死，到点直接退出。
+GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 12.0
+
+# ── 优雅关闭：跟踪还没跑完的_forward_and_report后台线程 ──────────────────
+_inflight_lock = threading.Lock()
+_inflight_threads = []
+_server_ref = None  # main()里赋值，供信号处理函数调用shutdown()
+
+
+def _track_inflight(t):
+    with _inflight_lock:
+        _inflight_threads.append(t)
+        # 顺手清掉已经跑完的，避免列表无限增长
+        _inflight_threads[:] = [x for x in _inflight_threads if x.is_alive()]
+
+
+def _graceful_shutdown():
+    logger.info("收到停止信号，停止接受新连接，等待在途转发收尾...")
+    try:
+        if _server_ref is not None:
+            _server_ref.shutdown()
+    except Exception as e:
+        logger.warning(f"停止监听异常(不影响继续退出): {e}")
+    deadline = time.time() + GRACEFUL_SHUTDOWN_TIMEOUT_SEC
+    with _inflight_lock:
+        threads = list(_inflight_threads)
+    for t in threads:
+        remaining = max(0.0, deadline - time.time())
+        t.join(timeout=remaining)
+    still_alive = sum(1 for t in threads if t.is_alive())
+    if still_alive:
+        logger.warning(f"优雅关闭超时，仍有 {still_alive} 笔转发未收尾就退出")
+    else:
+        logger.info("优雅关闭完成，在途转发已全部收尾")
+    os._exit(0)
+
+
+def _handle_term_signal(signum, frame):
+    threading.Thread(target=_graceful_shutdown, daemon=True, name="graceful-shutdown").start()
+
 
 # ── 钉钉告警（复用watchdog同一个群，纯stdlib实现，不依赖requests）────────
 DINGTALK_WEBHOOK = os.getenv("WATCHDOG_DINGTALK_WEBHOOK", "")
@@ -199,9 +252,11 @@ class Handler(BaseHTTPRequestHandler):
         # 告警机制单独通知（部分/全部失败都会推送），不再依赖TV这次响应
         # 是否超时来判断有没有送达。
         self._reply(200, {"ok": True, "queued": True})
-        threading.Thread(
+        t = threading.Thread(
             target=self._forward_and_report, args=(body, headers), daemon=True,
-        ).start()
+        )
+        _track_inflight(t)
+        t.start()
 
     def _forward_and_report(self, body, headers):
         results = [None] * len(BACKENDS)
@@ -233,7 +288,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global _server_ref
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    _server_ref = server
+    signal.signal(signal.SIGTERM, _handle_term_signal)
+    signal.signal(signal.SIGINT, _handle_term_signal)
     logger.info(
         f"广播网关启动，监听127.0.0.1:{PORT}，转发目标={BACKENDS}，"
         f"钉钉告警={'已配置' if DINGTALK_WEBHOOK else '未配置'}"
