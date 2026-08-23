@@ -815,6 +815,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     getattr(self, "catchup_active", False)
                 ):
                     sleep_for = min(sleep_for, 15.0)  # 再入限价/心跳追回期加快巡检
+                # 2026-08-24：追单确认(_chase_watch_active)之前完全没在这个加速
+                # 名单里，还是走默认5分钟一档，实盘发现ZEC这类场景反应偏慢。
+                # 但不能直接照抄上面15秒——那是给"已经挂出限价单等成交"的场景
+                # 用的，追单确认这时候还没挂单，是在算_multi_tf_trend_confirmed
+                # (5m/15m/30m三档EMA+动量各一次REST)，而多周期确认的输入是
+                # 已收盘K线，5分钟内根本不会变，15秒轮询纯属浪费REST配额(一个
+                # 品种就能吃掉账户24/min预算的一半)。给它单独一档60秒——比默认
+                # 5分钟明显更灵敏，又不会跟已验证过的限流纪律打架。
+                if bool(getattr(self, "_chase_watch_active", False)):
+                    sleep_for = min(sleep_for, 60.0)
                 if now < backoff_until:
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
