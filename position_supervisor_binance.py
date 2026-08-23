@@ -178,6 +178,12 @@ SENTINEL_POLL_JITTER_SEC = 8.0
 IDLE_PATROL_INTERVAL_SEC = 300
 IDLE_PATROL_BACKOFF_SEC = 900
 IDLE_TAKEOVER_COOLDOWN_SEC = 60
+# 2026-08-24：多品种顺序启动恢复(recover_state_on_startup)跟每品种自己独立
+# 节奏的空闲巡检(_run_idle_live_reconcile)之间的竞态兜底阀——正常情况下
+# 顺序恢复清单跑完13个品种远用不到这么久，这个值只是防真出现更早品种卡死
+# 时后面品种永远等不到轮次；实盘复现见__init__里_startup_recovery_done
+# 的详细注释。
+STARTUP_RECOVERY_GRACE_SEC = 1200
 HELD_RECONCILE_INTERVAL_SEC = 300
 STATE_SNAPSHOT_INTERVAL_SEC = 120
 # 当日日亏/连亏/次数/回撤「拒开仓」闸门：暂时关闭（v15.9.2）。
@@ -346,6 +352,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._locked_initial_atr = LockedInitialAtr(strict=False)
         self._last_entry_signal = None
         self._recover_in_progress = False
+        # 2026-08-24实盘复现(B/C两账户ASMLUSDT被误市价平仓)：多品种启动
+        # 恢复清单是逐品种顺序处理的(见recover_state_on_startup里的"多品种
+        # 启动恢复清单"日志)，排在后面的品种(尤其最后一两个)轮到自己之前，
+        # initial_qty/watched_qty还是刚重启的默认值0——如果这时候恰好前面
+        # 某个品种(今天是OPENAI)因REST查询卡顿拖慢了整条队列，本品种自己
+        # 的空闲巡检(_run_idle_live_reconcile)完全独立于这条队列、按自己
+        # 节奏照常运行，会在"还没轮到我"的这段时间里就摸到真实持仓——
+        # _fresh_small这道"刚开仓小仓位不算蚂蚁仓"的护栏本身要靠initial_
+        # qty/watched_qty>0才能生效，此时二者都是0，护栏形同虚设，真仓位
+        # 被_is_dust_qty误判成残留蚂蚁仓，市价扫掉。用这个标记让空闲巡检
+        # 在本品种真正轮到自己的顺序恢复之前完全让路，不抢跑；
+        # STARTUP_RECOVERY_GRACE_SEC是防止顺序队列真的卡死在更早品种上
+        # 导致后面品种永远等不到轮次的兜底阀门，超时后空闲巡检照常介入
+        # (退回之前的安全网行为)。
+        self._startup_recovery_done = False
+        self._startup_recovery_deadline_ts = time.time() + STARTUP_RECOVERY_GRACE_SEC
         self._recover_tp_unconfirmed = False
         self._post_recover_radar_pulse = False
         self._takeover_price_skip = False
@@ -1204,6 +1226,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             return
         if getattr(self, "_open_in_progress", False):
             return
+        # 2026-08-24实盘复现(B/C两账户ASMLUSDT被误市价平仓)：多品种顺序
+        # 启动恢复清单还没轮到本品种时，initial_qty/watched_qty仍是重启
+        # 默认值0，蚂蚁仓扫尾的"刚开仓小仓位"护栏(_fresh_small)会失效，
+        # 真实小仓位可能被误判扫掉。本品种自己的recover_state_on_startup
+        # 真正跑过一次之前，让空闲巡检整体让路，不抢跑；超过宽限期
+        # (STARTUP_RECOVERY_GRACE_SEC)还没轮到，视为顺序队列可能卡在更早
+        # 品种上，退回巡检兜底介入。
+        if not getattr(self, "_startup_recovery_done", True):
+            if time.time() < float(getattr(self, "_startup_recovery_deadline_ts", 0) or 0):
+                return
+            logger.warning(
+                f"⚠️ [{self.symbol}] 顺序启动恢复超过{STARTUP_RECOVERY_GRACE_SEC:.0f}s仍未轮到 "
+                f"→ 空闲巡检不再让路，按兜底介入"
+            )
         # 智能再入限价：TTL 刷新 / 成交检测
         try:
             if bool(getattr(self, "reentry_active", False)):
@@ -18214,6 +18250,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def recover_state_on_startup(self):
         """重启闪电接管：对账 TV/开仓日志 → 核实实盘 → 智能补挂 TP123 → 恢复雷达"""
+        # 无条件先置位（哪怕下面走"跳过重复接管"分支）——只要这个函数真正
+        # 被调用过一次，就说明本品种已经有机会被顺序恢复流程照看到，空闲
+        # 巡检(_run_idle_live_reconcile)就不用再抢跑。见__init__里
+        # _startup_recovery_done的详细注释(2026-08-24 ASMLUSDT误平仓事故)。
+        self._startup_recovery_done = True
         if not self._try_acquire_recover_singleton():
             # 同品种其它 worker 已接管：本进程仍须启动哨兵，禁止漏盯实盘
             # 但必须先热加载账本，禁止用构造默认 ATR=30 发明宽止损互相打架
