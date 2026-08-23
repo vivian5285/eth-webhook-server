@@ -18550,14 +18550,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 这里直接按网格逻辑收尾并return，不让下面的"热加载stale状态"/
             # _probe_position_for_recover 那套TV专属对账流程重复处理同一
             # 笔仓位（那套流程不知道网格的精确止损/一次性止盈该怎么摆）。
-            if self._resume_pending_grid_entry():
-                return
+            # 2026-08-24：这两步内部各自会force_rest查一次实盘(_get_active_
+            # position(force_rest=True))，跟下面"确认空仓"那段同一类风险——
+            # 查仓结果出来前watched_qty还是旧值，空闲巡检可能撞见误清追单
+            # 确认。用try/finally包一层_recover_in_progress，两条分支
+            # (成交接管True/无残留False)都能正确复位，不会卡死。
+            self._recover_in_progress = True
+            try:
+                if self._resume_pending_grid_entry():
+                    return
 
-            # 同理续接系统限价开仓单（控制台手动发单/编辑重放专用）——
-            # 跟网格同一个模式，返回True(停机期间已成交、已接管收尾)才
-            # 提前return，避免被下面通用流程重复处理。
-            if self._resume_pending_limit_entry():
-                return
+                # 同理续接系统限价开仓单（控制台手动发单/编辑重放专用）——
+                # 跟网格同一个模式，返回True(停机期间已成交、已接管收尾)才
+                # 提前return，避免被下面通用流程重复处理。
+                if self._resume_pending_limit_entry():
+                    return
+            finally:
+                self._recover_in_progress = False
 
             # 2026-08-24实盘复现(B/C两账户ZEC追单确认状态重启后不一致)：下面
             # 这几步全都要靠REST(_live_position_qty/_confirm_position_flat
@@ -18605,7 +18614,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             finally:
                 self._recover_in_progress = False
 
-            # 强制 REST 多轮探测，禁止 WS 空缓存 / 共享锁导致漏接实盘
+            # 强制 REST 多轮探测，禁止 WS 空缓存 / 共享锁导致漏接实盘。
+            # 2026-08-24：跟上面"确认空仓"那段同一个坑——这里也是多轮REST，
+            # 结果出来前watched_qty还是旧值，此时_recover_in_progress还没
+            # 置位，空闲巡检一样可能撞见stale值误清追单确认。探测本身也
+            # 包进这道闸门；AMBIGUOUS/QUERY_FAILED分支虽然改走
+            # monitoring=True保护（_run_idle_live_reconcile顶部同样认这个
+            # 标记），但探测过程中还没到那一步，先兜住。
+            self._recover_in_progress = True
             pos = self._probe_position_for_recover()
             if pos == "AMBIGUOUS":
                 dingtalk.report_system_alert(
@@ -18615,6 +18631,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     suggestion="请在币安核对持仓；勿手动乱撤，等待哨兵对齐",
                 )
                 self.monitoring = True
+                self._recover_in_progress = False
                 self._ensure_sentinel_running_quiet()
                 self._last_idle_takeover_ts = 0.0
                 return
@@ -18625,6 +18642,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 )
                 self._on_position_query_failed("VPS重启·探测哨兵")
                 self.monitoring = True
+                self._recover_in_progress = False
                 self._ensure_sentinel_running_quiet()
                 self._last_idle_takeover_ts = 0.0
                 return
@@ -18662,6 +18680,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 旧 schema：禁止用 tv_sl/行情自动灌入伪装成新态
                 if old_schema:
                     self.monitoring = True
+                    self._recover_in_progress = False
                     self._ensure_sentinel_running_quiet()
                     return
                 # 禁止用交易所 ATR 回填 open_atr（白皮书：ATR 只信 TV）
@@ -19067,6 +19086,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"🔄 [{self.symbol}] 系统重启点火：REST确认无持仓，账本复位为空仓待命。"
                 )
                 self._reset_breath_ledger_on_flat(source="重启确认空仓")
+                # watched_qty已经清零，stale值风险解除，释放探测期的互斥闸门
+                self._recover_in_progress = False
                 self._open_regime_sticky = False
                 # 修复（v16.9.x）：重启确认空仓后必须清除 trading_paused，
                 # 避免 XAU 等上笔 CLOSE_THEN_OPEN_FAIL_ABORT 导致新 TV 永不开仓。
