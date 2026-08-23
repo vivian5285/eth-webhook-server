@@ -8085,6 +8085,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             # 永久防线：只确认仍挂着，禁止 purge hard
             if not self._ensure_frozen_hard_sl(live_qty, reason="TP后确认永久硬止损"):
+                # 2026-08-22修复：_ensure_frozen_hard_sl内部已经会在"仓位已经
+                # 空了"这种情况下主动返回False(禁止对空仓挂-4509止损单)，但
+                # 这里之前不分青红皂白一律记ERROR——实盘复查08-21全天日志，
+                # 抽查ANTHROPIC/XMR/ZEC三个真实案例，全部是TP/雷达止损刚好
+                # 在这一瞬间把仓位打平，止损确实"没必要挂"而不是"该挂却没
+                # 挂上"，但ERROR级别的报错刷了一整天屏，看着像裸仓风险，
+                # 实际全部安全收尾。这里补一次实时复查，区分"仓位真的还在
+                # 、止损没能补上"(继续ERROR)和"仓位已经没了、止损本来就不
+                # 需要"(降级INFO，不算失败)。
+                pos_now = self._get_active_position()
+                still_has_qty = (
+                    pos_now not in (None, "QUERY_FAILED")
+                    and isinstance(pos_now, dict)
+                    and float(pos_now.get("size") or 0) > 0
+                )
+                if not still_has_qty:
+                    logger.info(
+                        f"🫁 [{self._tag()}] TP后复查仓位已归零 → 硬止损本来就不需要补挂，非裸仓"
+                    )
+                    return True
                 logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败")
                 return False
             # 仅撤雷达腿（preserve_hard=True），再按剩余 qty 重挂雷达

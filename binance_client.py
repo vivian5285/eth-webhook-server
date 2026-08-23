@@ -2036,6 +2036,19 @@ class BinanceClient:
                     f"大概率仓位已在挂单瞬间平掉：{e}"
                 )
                 return None
+            # 2026-08-22：-2021"Order would immediately trigger"同样是这套竞态
+            # 的另一种表现——重试期间仓位/雷达止损已经往前推进过好几档，
+            # 上一档stop_price相对最新现价已经"该立刻触发"，说明大概率是
+            # 仓位已经被雷达/TP从别的路径打平(或者止损本身已经追上去过了)，
+            # 不是这次下单操作本身失败。08-21实盘复查(ANTHROPIC/XMR/ZEC)
+            # 确认每次都是仓位刚好在重试窗口内平掉，跟-4509同一类竞态，
+            # 同样降级WARNING，上层(_ensure_frozen_hard_sl等)会自己核实。
+            if "code=-2021" in str(e):
+                logger.warning(
+                    f"[止损单] {side} Stop @ {stop_price} 被拒(-2021 立即触发)，"
+                    f"大概率仓位/止损已经在重试期间被别的路径推进过：{e}"
+                )
+                return None
             logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             # -4130：已有同向 closePosition 止损单 → 写入本地缓存防止死循环重试
             if "code=-4130" in str(e):
