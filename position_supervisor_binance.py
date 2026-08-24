@@ -13452,6 +13452,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _infer_flat_close_meta(self, curr_px=0.0, hint_reason=""):
         """哨兵/重启推断全平类型 + exit_source（雷达 vs TP vs 硬止损一目了然）"""
+        # 2026-08-24修复：传入的curr_px通常是"发现空仓那一刻"的近似现价，
+        # 跟真实成交价之间可能因为发现延迟(哨兵/idle-patrol轮询间隔)差出
+        # 好几个点，刚好把_exit_px_near_hard的容差判断推过线，导致真硬
+        # 止损被误判成"来源未明"(实盘复现：B账户ETH，近似价2484.84 vs
+        # 真实成交2475.83)。这里优先问交易所要真实成交价，查不到才退回
+        # 调用方传入的近似值，不改变原有兜底行为。
+        try:
+            real_fill_px = float(binance_client.get_last_fill_price(self.symbol) or 0)
+        except Exception:
+            real_fill_px = 0.0
+        if real_fill_px > 0:
+            curr_px = real_fill_px
         exit_src, note = self._resolve_exit_source(curr_px, hint_reason)
         # 2026-08-21：TV心跳追回专用标记——只在真正判定为永久硬止损
         # (vps_hard_sl，距离=|TV价-TV.SL|×1.15，比TV自己的止损宽15%)时才

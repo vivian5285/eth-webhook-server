@@ -1200,6 +1200,38 @@ class BinanceClient:
             stale = self._get_ws_price(symbol, max_age=120)
             return stale or 0.0
 
+    def get_last_fill_price(self, symbol="ETHUSDT", lookback_sec=180):
+        """
+        2026-08-24新增：事后发现空仓、要归因退出原因(是不是碰到硬止损)时，
+        之前一直拿"发现那一刻的近似现价"当退出价——如果发现时机比真实成交
+        晚了几秒甚至十几秒(哨兵/idle-patrol轮询间隔)，这段时间价格已经走
+        出去一截，近似价跟真实成交价可能差出好几个点，刚好把"是否贴近硬
+        止损"这个容差判断(_exit_px_near_hard)推过线，导致真硬止损被误判成
+        "来源未明"(实盘复现：B账户ETH，近似价2484.84 vs 真实成交2475.83，
+        差9个点，误判后追回保护逻辑没能正确识别"已被硬止损扫过"该拒绝追回)。
+
+        这里改成直接问交易所"最近一笔真实成交是多少"——futures_account_
+        trades是只读查询，不影响任何挂单/持仓。查不到/查询失败就返回0，
+        调用方按老办法退回近似现价，不会因为这个新查询失败而卡住主流程。
+        """
+        sym = str(symbol or "").upper()
+        if self.ip_rate_limit_remaining() > 0:
+            return 0.0
+        try:
+            self._throttle_rest(sym)
+            start_ms = int((time.time() - max(lookback_sec, 5)) * 1000)
+            trades = self.client.futures_account_trades(
+                symbol=sym, startTime=start_ms, limit=20,
+            )
+            if not trades:
+                return 0.0
+            latest = max(trades, key=lambda t: int(t.get("time") or 0))
+            px = float(latest.get("price") or 0)
+            return px if px > 0 else 0.0
+        except Exception as e:
+            logger.debug(f"[真实成交价查询跳过] {sym}: {e}")
+            return 0.0
+
     def get_futures_account_summary(self, asset="USDT"):
         """合约账户概览：用于本金锚点，禁止用 depleted available 算档位额度"""
         asset = str(asset or "USDT")
