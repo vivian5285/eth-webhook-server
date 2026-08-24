@@ -620,6 +620,11 @@ class RadarReentryMixin:
         return {
             "side": getattr(self, "current_side", None),
             "entry": float(getattr(self, "watched_entry", 0) or 0),
+            # 2026-08-24: 平仓时self.tv_sl_ref会被_reset_breath_ledger_on_flat
+            # 清零——重入成交(_on_reentry_limit_filled)需要这个原始TV止损价
+            # 去重算新成交价下的永久硬止损，这里在清零之前先把它带进快照，
+            # 不然重入成交时会拿到0，直接裸奔(实盘复现：C账户ASML)
+            "tv_sl_ref": float(getattr(self, "tv_sl_ref", 0) or 0),
             "qty": float(
                 getattr(self, "initial_qty", 0)
                 or getattr(self, "watched_qty", 0)
@@ -2914,6 +2919,13 @@ class RadarReentryMixin:
             setattr(self, k, v)
 
         snap = dict(getattr(self, "_reentry_open_snap", None) or {})
+        # 2026-08-24: 恢复原始TV止损参考价——self.tv_sl_ref在出场那一刻已被
+        # _reset_breath_ledger_on_flat清零，_arm_temp_stop_and_tp12(下面会调)
+        # 需要这个值才能算出永久硬止损，不恢复的话会报"无有效TV.stop_loss"
+        # 直接裸奔(实盘复现：C账户ASML，重入成交后硬止损挂不出去)
+        snap_sl_ref = float(snap.get("tv_sl_ref") or 0)
+        if snap_sl_ref > 0:
+            self.tv_sl_ref = snap_sl_ref
         tv_tps = list(snap.get("tv_tps") or [0, 0, 0])
         atr = float(
             getattr(self, "cycle_open_atr", 0) or snap.get("atr") or 0
