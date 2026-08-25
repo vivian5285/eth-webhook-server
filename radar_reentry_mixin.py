@@ -1494,21 +1494,26 @@ class RadarReentryMixin:
             pass
 
     def _maybe_reevaluate_adx_tier(self):
-        """雷达休眠期(未激活)内周期性复评ADX档位——2026-08-26新增：开仓时
-        锁定的档位(TV.tier或开仓瞬间ADX反推)只是信号那一刻的快照，宝贝原话
-        "弱中强都有自己合适的激活时机...行情爆发也会在弱中趋势中启动，不
-        一定光是强趋势，我们的系统应该更加智能一些，根据币安的实时波动
-        走"——复用哨兵tick本就在维护的self.last_adx(_maybe_refresh_atr每
-        180s刷新，零额外REST成本)，双向调整(强弱都能变，不是mega_strong
-        那种只升不降)。
-        但档位是_radar_activation_price()的直接输入，来回横跳会让"什么
-        时候激活"的预期跟着抖——要求连续两次复评窗口(约8分钟)都指向同一个
-        新档位才提交，单次穿越阈值不算数，防止ADX贴着阈值来回蹭。
-        激活后不再有意义(_apply_tier_breath_overlay接管后档位在武装那一刻
-        自然冻结，不再调用本函数)，直接跳过。
+        """周期性复评ADX档位——2026-08-26新增：开仓时锁定的档位(TV.tier
+        或开仓瞬间ADX反推)只是信号那一刻的快照，宝贝原话"弱中强都有自己
+        合适的激活时机...行情爆发也会在弱中趋势中启动，不一定光是强趋势，
+        我们的系统应该更加智能一些，根据币安的实时波动走"——复用哨兵tick
+        本就在维护的self.last_adx(_maybe_refresh_atr每180s刷新，零额外
+        REST成本)，双向调整(强弱都能变，不是mega_strong那种只升不降)。
+        档位来回横跳会让下游预期跟着抖——要求连续两次复评窗口(约8分钟)都
+        指向同一个新档位才提交，单次穿越阈值不算数，防止ADX贴着阈值来回蹭。
+
+        2026-08-26扩展：雷达武装(radar_activated=True)后档位仍然继续复评，
+        但只影响_apply_tier_breath_overlay每tick读取的呼吸阶梯(step_
+        trigger_atr/step_advance_atr/min_mult/max_mult)，绝不触碰
+        radar_activation_price——那是"持仓期不漂移"的硬性不变量(见
+        _radar_activation_price顶部注释"已冻结且有效...已激活也保留
+        参考价")，武装后再去清零重算会破坏这个不变量。呼吸阶梯这边天然
+        安全：下游calculate_breath_stop已经有独立的"new_stop<=cur则跳过"
+        单调只紧不松闸门(哨兵日志里"breath_stop未改善"那一行)，跟档位给
+        出的step/mult参数无关，档位调宽只会让止损有更多空间跟着趋势跑，
+        调窄只会让止损收紧得更快，两个方向都不可能让已经锁住的止损后退。
         """
-        if bool(getattr(self, "radar_activated", False)):
-            return
         now = time.time()
         last = float(getattr(self, "_adx_tier_last_refresh_ts", 0) or 0)
         if last > 0 and (now - last) < ADX_TIER_REEVAL_SEC:
@@ -1528,10 +1533,22 @@ class RadarReentryMixin:
             return
         self._adx_tier_pending_candidate = None
         old_tier = current
-        old_gate = float(getattr(self, "radar_activation_price", 0) or 0)
+        activated = bool(getattr(self, "radar_activated", False))
         self.adx_tier = candidate
         self.radar_tier = candidate
         self._adx_tier_source = "动态实时"
+        if activated:
+            try:
+                self._save_state()
+            except Exception:
+                pass
+            logger.info(
+                f"📊 [{self.symbol}] ADX档动态调整(武装后·呼吸阶梯) "
+                f"T{old_tier}({tier_label(old_tier)})→T{candidate}({tier_label(candidate)}) "
+                f"实时ADX={live_adx:.1f}"
+            )
+            return
+        old_gate = float(getattr(self, "radar_activation_price", 0) or 0)
         self.radar_activation_price = 0.0  # 强制下面重算走"首次计算"分支
         new_gate = float(self._radar_activation_price() or 0)
         try:

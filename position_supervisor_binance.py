@@ -16941,6 +16941,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 logger.debug(f"[{self.symbol}] ADX档动态复评跳过: {e}")
             return None
         atr = self._get_locked_initial_atr()
+        # 2026-08-26扩展：武装后档位复评继续跑(同一节流/防抖状态)，只影响
+        # 下面_apply_tier_breath_overlay读到的呼吸阶梯，不碰radar_activation_
+        # price——见_maybe_reevaluate_adx_tier顶部注释。
+        try:
+            self._maybe_reevaluate_adx_tier()
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] ADX档动态复评跳过: {e}")
         try:
             self._apply_tier_breath_overlay()
         except Exception as e:
