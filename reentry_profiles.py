@@ -836,7 +836,13 @@ RADAR_GATE_ATR_MULT = 1.5  # 首次开仓：顺向浮盈达到 1.5×ATR 即激�
 # 该策略TP1拉得极宽，0.8×TP1恒大于ATR腿，实际由ATR腿单独决定激活点)。
 # 旧值1.0会让VPS雷达在TV自己都还没打算保护仓位时就先武装保本，
 # 造成"雷达已保本、TV仍持有"的错位（2026-08-10 5007端口ETH实盘现象）。
-RADAR_GATE_ATR_MULT_BY_TIER = {0: 1.5, 1: 1.5, 2: 2.0}
+RADAR_GATE_ATR_MULT_BY_TIER = {0: 1.5, 1: 1.5, 2: 2.5}
+# 2026-08-26：strong档从2.0再放宽到2.5——实盘复现08-22调到2.0之后，
+# 08-24 ZEC同一信号B/C/E三账户仍在几乎零盈亏(-0.02%~+0.05%)被打掉
+# (那次真正的瓶颈其实是ZEC专属的radar_gate_return_pct，见下方注释)；
+# GSUSDT(08-25新品种)也复现了同一模式(entry=1051.50→exit=1051.40,
+# pnl=0.00%)，GS没有return_pct腿，min(dist_tp1, dist_atr)里dist_atr
+# 是真正的瓶颈，这次放宽对GS这类品种是直接生效的。
 # 2026-08-22实盘复现(C账户ZEC)：entry=625.64，ATR腿算出的激活线只比entry高
 # 0.51(≈0.08%)，7:31:19激活、7:36:50(仅5.5分钟后)就被雷达止损打掉，同一条
 # TV信号在B账户扛了10小时都没被打过——固定1.5×ATR不看趋势强弱，强趋势档
@@ -928,7 +934,15 @@ def radar_gate_price_from_tps(
         tier_i = 1
     atr_mult = float(RADAR_GATE_ATR_MULT_BY_TIER.get(tier_i, RADAR_GATE_ATR_MULT))
     dist_atr = atr_mult * a if a > 0 else dist_tp1
-    rp = float(return_pct or 0)
+    # 2026-08-26修复：radar_gate_return_pct这条腿(08-19陆续加到ZEC/SNDK/
+    # SKHYNIX/XPD/ANTHROPIC/ASML/GS/MU/LITE共9个品种)不分强弱趋势档，
+    # 强趋势档(tier=2)本来ATR腿刚放宽到2.5×，但这条通常只有0.6~1.5%的
+    # 收益率线几乎总是三条里最紧的那条，实盘复现(08-24 ZEC三账户+
+    # 08-25 GS)强趋势单在触发前几乎零盈亏就被打掉——ATR腿的放宽形同虚设。
+    # 这条线当初是为了保护弱/中趋势档"浮盈在ATR线触发前被打回去"，对
+    # 弱/中档仍然有效、维持不变；强趋势档单独关闭这条腿，回归纯TP1/ATR
+    # 双触发，把已经放宽的ATR线真正用起来。
+    rp = float(return_pct or 0) if tier_i != 2 else 0.0
     dist_pct = rp * e if rp > 0 else dist_tp1
     dist = min(dist_tp1, dist_atr, dist_pct)
     if mega_strong:
