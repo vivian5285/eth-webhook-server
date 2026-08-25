@@ -3476,6 +3476,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "last_open_exec_ts": float(
                         getattr(self, "_last_open_exec_ts", 0) or 0
                     ),
+                    # 2026-08-26：雷达激活线跨账户互通(commit 2dacd17)的信任窗口
+                    # 起点——之前没落盘，进程一重启就丢成0，_radar_sync_touch_check
+                    # 的 open_ts<=0 直接短路返回None，姊妹账户已经摸线写的sync
+                    # 文件全程读不到，互通名存实亡（实盘复现：2026-08-25 GSUSDT，
+                    # C 16:01 自己摸线写了sync文件，B/E 15:57 重启后 open_ts 归零，
+                    # 一直等到 18:27/18:28 自己现价摸线才激活，中间2.5小时没吃到
+                    # 互通，只是这次没被硬止损打穿而已）。
+                    "radar_sync_open_ts": float(
+                        getattr(self, "_radar_sync_open_ts", 0) or 0
+                    ),
+                    "radar_activation_sticky": bool(
+                        getattr(self, "radar_activation_sticky", False)
+                    ),
                     "atr_last_update_ts": float(getattr(self, "_atr_last_update_ts", 0) or 0),
                     "tp_order_placed_ts": dict(getattr(self, "_tp_order_placed_ts", {}) or {}),
                     "defense_order_ids": dict(getattr(self, "_defense_order_ids", {}) or {}),
@@ -10000,6 +10013,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             self._last_open_exec_ts = float(
                 s.get("last_open_exec_ts", getattr(self, "_last_open_exec_ts", 0)) or 0
+            )
+            # 2026-08-26修复：跨账户互通信任窗口起点必须跟着落盘/热加载，
+            # 否则重启一次就归零，姊妹账户写好的sync文件永远读不到（详见
+            # _save_state 里同一字段的注释）。旧状态文件没有这个字段时，
+            # 退回 last_open_exec_ts（同一次开仓的执行时间，语义等价）。
+            self._radar_sync_open_ts = float(
+                s.get(
+                    "radar_sync_open_ts",
+                    s.get("last_open_exec_ts", getattr(self, "_radar_sync_open_ts", 0)),
+                ) or 0
+            )
+            self.radar_activation_sticky = bool(
+                s.get("radar_activation_sticky", False)
             )
             self.open_regime = int(s.get("open_regime", s.get("regime", 3)) or 3)
             self._last_applied_exchange_sl = float(
@@ -18766,6 +18792,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     )
                     self._last_open_exec_ts = float(
                         s.get("last_open_exec_ts", 0) or 0
+                    )
+                    # 2026-08-26修复：这是重启接管的主路径(单worker持仓，不走
+                    # _hydrate_ledger_from_state_file 那条"跳过重复接管"分支)，
+                    # 之前这里没读回 radar_sync_open_ts/radar_activation_sticky，
+                    # 跨账户互通(commit 2dacd17)的信任窗口起点每次重启都归零，
+                    # _radar_sync_touch_check 的 open_ts<=0 直接短路→姊妹账户
+                    # 写好的sync文件读不到（实盘复现见 _save_state 里同字段注释）。
+                    # 旧状态文件没有该字段时退回 last_open_exec_ts（同一次开仓
+                    # 的执行时间，语义等价）。
+                    self._radar_sync_open_ts = float(
+                        s.get("radar_sync_open_ts", s.get("last_open_exec_ts", 0)) or 0
+                    )
+                    self.radar_activation_sticky = bool(
+                        s.get("radar_activation_sticky", False)
                     )
                     # 旧 schema 识别：有 activated/stepCount 等旧字段，但缺 initialAtr/breakevenPhase/initial_stop
                     # → 禁止自动转换；后面有仓则暂停交易
