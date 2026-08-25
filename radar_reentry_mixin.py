@@ -2510,6 +2510,42 @@ class RadarReentryMixin:
         self._ensure_sentinel_running()
 
         sl_ok = self._ensure_frozen_hard_sl(qty, reason="TV心跳漏单追回·硬止损")
+        if not sl_ok:
+            # 2026-08-25修复：首次挂硬止损失败绝不能静默等下一次"雷达守护"
+            # 周期——那个周期的对齐安静期最长可达1小时(而且TP1/TP2如果
+            # 先成功了，会把"上次对齐OK"的时间戳标记刷新，导致硬止损这个
+            # 独立缺口被那次成功"搭便车"续了一小时安静期)。实盘复现：
+            # MARIO账户SKHYNIX追回成交那一刻硬止损静默失败(hung=0)，之后
+            # 整整1小时50分钟没有任何重试，watchdog报了10多次"疑似裸仓"
+            # 都没人/没有代码接住，直到下一次雷达守护周期才补上。这里改成
+            # 立刻原地重试，不寄希望于不确定什么时候才轮到的周期性检查。
+            for _retry in range(3):
+                time.sleep(2.0)
+                sl_ok = self._ensure_frozen_hard_sl(
+                    qty, reason=f"TV心跳漏单追回·硬止损·立即重试{_retry + 1}/3",
+                )
+                if sl_ok:
+                    break
+            if not sl_ok:
+                logger.error(
+                    f"🚨🚨 [{self.symbol}] 硬止损连续3次立即重试仍失败！"
+                    f"仓位{side} {qty}正在裸奔，需要人工立即核查！"
+                )
+                try:
+                    import dingtalk
+                    self._dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"🆘紧急：硬止损挂单失败 [{self.symbol}]",
+                        detail=(
+                            f"{side} {qty} @ {entry:.4f}（TV心跳追回成交）"
+                            f"硬止损连续重试仍未能挂出，仓位当前没有任何止损"
+                            f"保护，请立即人工到交易所核查并手动补挂止损！"
+                        ),
+                        level="紧急",
+                        immediate=True,
+                    )
+                except Exception:
+                    pass
         placed_tp = 0
         try:
             placed_tp = self._place_tp_levels_only(qty, retries=2)
@@ -2996,6 +3032,44 @@ class RadarReentryMixin:
                 self._strip_radar_stop_keep_hard(reason="再入后雷达仍休眠")
         except Exception as e:
             logger.error(f"[{self.symbol}] 再入后防线失败: {e}")
+
+        if not (hard_px > 0 and arm_ok):
+            # 2026-08-25修复：跟_finalize_tv_catchup_fill同一类问题——首次
+            # 挂硬止损/TP12失败不能只在通知文案里标个hard_sl_hung=False就
+            # 完事，得立刻原地重试，不能寄希望于"雷达守护"周期性检查(对齐
+            # 安静期最长1小时，实盘复现MARIO账户SKHYNIX裸奔1小时50分钟)。
+            for _retry in range(3):
+                time.sleep(2.0)
+                try:
+                    arm_ok = bool(self._arm_temp_stop_and_tp12(
+                        qty, entry, side,
+                        source=f"再入成交·立即重试{_retry + 1}/3",
+                    ))
+                    hard_px = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                except Exception as e:
+                    logger.error(f"[{self.symbol}] 再入硬止损立即重试异常: {e}")
+                if hard_px > 0 and arm_ok:
+                    break
+            if not (hard_px > 0 and arm_ok):
+                logger.error(
+                    f"🚨🚨 [{self.symbol}] 再入成交后硬止损连续3次立即重试仍失败！"
+                    f"仓位{side} {qty}正在裸奔，需要人工立即核查！"
+                )
+                try:
+                    import dingtalk
+                    self._dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"🆘紧急：再入硬止损挂单失败 [{self.symbol}]",
+                        detail=(
+                            f"{side} {qty} @ {entry:.4f}（重入限价成交）"
+                            f"硬止损连续重试仍未能挂出，仓位当前没有任何止损"
+                            f"保护，请立即人工到交易所核查并手动补挂止损！"
+                        ),
+                        level="紧急",
+                        immediate=True,
+                    )
+                except Exception:
+                    pass
 
         # 成交后检查点：硬止损 + TP12 必须已挂；钉钉实盘核实
         hard_hung = hard_px > 0 and arm_ok

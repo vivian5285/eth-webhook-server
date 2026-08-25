@@ -15785,9 +15785,48 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._nuclear_fail_streak = 0
 
             # ① 共同第一步：永久硬止损 + 仅 TP1+TP2（10/20）；TP3 不挂
-            self._arm_temp_stop_and_tp12(
+            _arm_ok = bool(self._arm_temp_stop_and_tp12(
                 live_qty, entry_live, self.current_side, source="开仓共同第一步",
-            )
+            ))
+            if not (_arm_ok and float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0):
+                # 2026-08-25修复：开仓这一步之前完全不检查返回值，静默失败
+                # 会一路带着假的frozen_hard_sl_px往下走，直到某次周期性
+                # 维护(对齐安静期最长1小时)才会发现——实盘复现：MARIO账户
+                # SKHYNIX裸奔1小时50分钟。这里立刻原地重试，不寄希望于
+                # 不确定什么时候才轮到的周期性检查。
+                for _retry in range(3):
+                    time.sleep(2.0)
+                    try:
+                        _arm_ok = bool(self._arm_temp_stop_and_tp12(
+                            live_qty, entry_live, self.current_side,
+                            source=f"开仓共同第一步·立即重试{_retry + 1}/3",
+                        ))
+                    except Exception as e:
+                        logger.error(f"[{self.symbol}] 开仓硬止损立即重试异常: {e}")
+                        _arm_ok = False
+                    if _arm_ok and float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0:
+                        break
+                if not (_arm_ok and float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0):
+                    logger.error(
+                        f"🚨🚨 [{self.symbol}] 开仓硬止损连续3次立即重试仍失败！"
+                        f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
+                    )
+                    try:
+                        import dingtalk
+                        self._call_dingtalk(
+                            dingtalk.report_system_alert,
+                            title=f"🆘紧急：开仓硬止损挂单失败 [{self.symbol}]",
+                            detail=(
+                                f"{self.current_side} {live_qty} @ {entry_live:.4f}"
+                                f"（新开仓）硬止损连续重试仍未能挂出，仓位当前"
+                                f"没有任何止损保护，请立即人工到交易所核查并"
+                                f"手动补挂止损！"
+                            ),
+                            level="紧急",
+                            immediate=True,
+                        )
+                    except Exception:
+                        pass
             try:
                 qm = self._split_remaining_tp_quantities(live_qty)
                 tps = list(self.tv_tps or [0, 0, 0])
