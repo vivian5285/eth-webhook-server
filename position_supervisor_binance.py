@@ -8199,8 +8199,40 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         f"🫁 [{self._tag()}] TP后复查仓位已归零 → 硬止损本来就不需要补挂，非裸仓"
                     )
                     return True
-                logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败")
-                return False
+                logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败，立即重试")
+                sl_ok = False
+                for _retry in range(3):
+                    time.sleep(2.0)
+                    try:
+                        sl_ok = bool(self._ensure_frozen_hard_sl(
+                            live_qty, reason=f"TP后确认永久硬止损·立即重试{_retry + 1}/3",
+                        ))
+                    except Exception as e:
+                        logger.error(f"[{self.symbol}] TP后硬止损立即重试异常: {e}")
+                        sl_ok = False
+                    if sl_ok:
+                        break
+                if not sl_ok:
+                    logger.error(
+                        f"🚨🚨 [{self._tag()}] TP后硬止损连续3次立即重试仍失败！"
+                        f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
+                    )
+                    try:
+                        import dingtalk
+                        self._call_dingtalk(
+                            dingtalk.report_system_alert,
+                            title=f"🆘紧急：TP后硬止损挂单失败 [{self.symbol}]",
+                            detail=(
+                                f"{self.current_side} {live_qty}（TP1/TP2后确认永久硬止损）"
+                                f"连续重试仍未能挂出，仓位当前没有任何止损保护，"
+                                f"请立即人工到交易所核查并手动补挂止损！"
+                            ),
+                            level="紧急",
+                            immediate=True,
+                        )
+                    except Exception:
+                        pass
+                    return False
             # 仅撤雷达腿（preserve_hard=True），再按剩余 qty 重挂雷达
             self._purge_all_protective_stops(preserve_hard=True)
             time.sleep(0.35)
@@ -15304,12 +15336,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         sl_ok = self._ensure_frozen_hard_sl(live_qty, reason="网格套利硬止损")
         if not sl_ok:
-            logger.error(f"🚨 [{self.symbol}] 网格套利硬止损挂单失败，需人工核查")
+            for _retry in range(3):
+                time.sleep(2.0)
+                try:
+                    sl_ok = bool(self._ensure_frozen_hard_sl(
+                        live_qty, reason=f"网格套利硬止损·立即重试{_retry + 1}/3",
+                    ))
+                except Exception as e:
+                    logger.error(f"[{self.symbol}] 网格套利硬止损立即重试异常: {e}")
+                    sl_ok = False
+                if sl_ok:
+                    break
+        if not sl_ok:
+            logger.error(f"🚨 [{self.symbol}] 网格套利硬止损连续3次立即重试仍失败，需人工核查")
             try:
                 dingtalk.report_system_alert(
                     f"网格套利硬止损挂单失败 [{self.symbol}]",
                     f"{side} {live_qty} @ {entry_px:.4f} 硬止损@{stop_price:.4f} "
-                    f"挂单失败，请立即人工核查！",
+                    f"连续重试仍未能挂出，请立即人工核查！",
                     level="紧急", immediate=True,
                 )
             except Exception:
