@@ -6248,10 +6248,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             live_qty if live_qty is not None else self.watched_qty or 0
         )
         place_n = self._effective_place_tp_levels()
+        # 2026-08-25实盘复现(ASML B/C两账户)：仓位太小时_normalize_tp_qty_map
+        # 会把某档的量并进另一档挂单(比如TP1本身0.009<min_qty=0.01，直接并
+        # 进TP2挂成0.03，TP1从头到尾都不该单独有挂单——这是设计内的正确
+        # 行为，不是漏挂)。但这里按self.tv_tps的原始价位逐档核对"限价单
+        # 是否存在"，不知道这档已经被并掉，每轮巡检都当成"限价消失但未
+        # 成交"反复报"不记账成交"，刷了46分钟日志，误导排查。这里预先算
+        # 一次跟实际挂单同一套逻辑的qty_map，量被并掉(=0)的档直接跳过，
+        # 不进入下面的价位核对。
+        try:
+            merged_qty_map = self._normalize_tp_qty_map(
+                self._split_remaining_tp_quantities(live_qty), live_qty,
+            )
+        except Exception:
+            merged_qty_map = {}
         consumed = []
         for lv in range(1, place_n + 1):
             if not self.tv_tps or lv - 1 >= len(self.tv_tps):
                 break
+            if float(merged_qty_map.get(lv, 1) or 0) <= 0:
+                continue
             px = float(self.tv_tps[lv - 1] or 0)
             if px <= 0:
                 break
