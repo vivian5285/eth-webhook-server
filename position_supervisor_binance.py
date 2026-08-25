@@ -15900,7 +15900,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
                     )
                     try:
-                        import dingtalk
                         self._call_dingtalk(
                             dingtalk.report_system_alert,
                             title=f"🆘紧急：开仓硬止损挂单失败 [{self.symbol}]",
