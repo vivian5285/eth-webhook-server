@@ -9029,6 +9029,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if not pending_levels:
                 break
             if attempt < max_attempts:
+                # 2026-08-25实盘复现(PAXGUSDT三账户同时)：TP还在重试的这
+                # 几秒内，仓位完全可能已经被自己的硬止损正常打平——ReduceOnly
+                # 挂单对一个已经不存在的仓位必然全部被交易所拒绝(-2022)，
+                # 继续重试只是白烧API配额、刷一堆吓人的失败日志。这里提前
+                # 复查一次，仓位已空就直接停止重试，不当成"挂单失败"。
+                pos_check = self._get_active_position()
+                if pos_check in (None, "QUERY_FAILED") or (
+                    isinstance(pos_check, dict) and float(pos_check.get("size") or 0) <= 0
+                ):
+                    logger.info(
+                        f"🧮 [{self.symbol}] TP重试期间仓位已归零 → 停止重试"
+                        f"（大概率已被自己的止损打平，非挂单故障）"
+                    )
+                    pending_levels = set()
+                    break
                 time.sleep(1.0)
         if pending_levels:
             logger.error(
