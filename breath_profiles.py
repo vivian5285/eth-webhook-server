@@ -124,24 +124,35 @@ BREATH_ZEC: Dict[str, Any] = {
 # 分页拉了4000根5m K线覆盖约14天，避免样本量太小），量了400根样本的
 # 回调分布：中位数≈2.88×ATR，75分位≈4.32×ATR，90分位≈5.46×ATR。
 # ATR%=0.33%。
+# 2026-08-25再次修正：用户把XAU策略从50分钟改回90分钟。用真实30m K线
+# 合成90分钟K线（分页拉了3950根30m原始K线覆盖约82天，同ASML/ANTHROPIC
+# 90分钟品种一致的合成比例），用真实摆动点识别(fractal pivot，±3根确认，
+# 跟08-18那批OPENAI/ANTHROPIC/ASML/SKHYNIX同方法)测了1316根合成K线、
+# 204个摆动回调样本的分布：中位数≈2.49×ATR，75分位≈4.10×ATR，90分位≈
+# 5.90×ATR。ATR%=0.50%。step_trigger_atr按现有7个已校准品种step_trigger/
+# breath_tp12比值的均值(≈0.375)推算，step_advance_atr=step_trigger×0.65
+# （这个比值在全部7个品种里高度一致，0.647~0.657，视为固定规律）；
+# min_mult按均值比例(max_mult×0.75)估，这项各品种实测差异较大(0.63~0.91)，
+# 没有统一公式，如后续实盘发现跟同期呼吸空间(breath_tp23)顶得太紧或太松，
+# 需要单独复核这一项。
 BREATH_XAU: Dict[str, Any] = {
     "name": "XAU",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.5,
     "early_be_atr": 0.0,  # 提前保本检查点已废除
-    "step_trigger_atr": 0.95,
-    "step_advance_atr": 0.62,
+    "step_trigger_atr": 0.93,
+    "step_advance_atr": 0.60,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.90,  # 覆盖实测中位数回调(2.88)
-    "breath_tp23": 4.30,  # 覆盖实测75分位回调
+    "breath_tp12": 2.49,  # 覆盖实测中位数回调(2.49)
+    "breath_tp23": 4.10,  # 覆盖实测75分位回调(4.10)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.0,
-    "max_mult": 6.3,      # 覆盖实测90分位回调(5.46)以上
+    "min_mult": 4.6,
+    "max_mult": 6.2,      # 覆盖实测90分位回调(5.90)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -283,24 +294,30 @@ BREATH_PAXG: Dict[str, Any] = {
 # 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样700根K线、128个摆动回调
 # 样本，中位数≈2.61×ATR，75分位≈3.73×ATR，90分位≈5.53×ATR——比08-15那版收窄
 # 12.3%~33.4%。
+# 2026-08-25再次修正：用户把SKHYNIX策略周期从150分钟改成101分钟（不能被
+# 5/15/30分钟整除，用真实1分钟K线×101合成，分页拉了66811根1m原始K线覆盖
+# 约46天），真实摆动点识别(fractal pivot，±3根确认，同08-18方法)测了661根
+# 合成K线、84个摆动回调样本：中位数≈2.71×ATR，75分位≈4.13×ATR，90分位≈
+# 6.35×ATR。ATR%=1.86%。step_trigger_atr/step_advance_atr推算方法同XAU
+# 08-25注释（跨品种均值比例，非本品种独立反推）。
 BREATH_SKHYNIX: Dict[str, Any] = {
     "name": "SKHYNIX",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.98,
-    "step_advance_atr": 0.64,
+    "step_trigger_atr": 1.02,
+    "step_advance_atr": 0.66,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.61,  # 08-18再校准：覆盖实测中位数回调(2.61)
-    "breath_tp23": 3.73,  # 08-18再校准：覆盖实测75分位回调(3.73)
+    "breath_tp12": 2.71,  # 08-25再校准(101min)：覆盖实测中位数回调(2.71)
+    "breath_tp23": 4.13,  # 08-25再校准(101min)：覆盖实测75分位回调(4.13)
     "phase2_trail_mult": 1.0,
-    "min_mult": 5.2,
-    "max_mult": 5.8,      # 08-18再校准：覆盖实测90分位回调(5.53)以上
+    "min_mult": 5.0,
+    "max_mult": 6.65,     # 08-25再校准(101min)：覆盖实测90分位回调(6.35)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

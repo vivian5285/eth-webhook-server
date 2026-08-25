@@ -52,10 +52,10 @@
     ]
   },
   "XAU": {
-    "tv_tf_sec": 3000,
-    "reentry_window_bars": 3,
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
     "reentry_zone_atr": 0.3,
-    "note": "2026-08-15：tv_tf_sec从2700(45min)修正为3000(50min)——用户当天把XAU策略周期从45分改成50分后，breath_profiles.py同步校准过，但这条reentry_profiles.py的tv_tf_sec表没跟着改，一直停在旧的45分钟没被发现，直到今天核对TV截图才挖出来。reentry_window_sec()=window_bars×tv_tf_sec，之前一直用错的45分钟在算重入窗口时长，3×45=135min，修正后3×50=150min，窗口本身变化不大，但数值终于跟真实周期对上了。",
+    "note": "2026-08-15：tv_tf_sec从2700(45min)修正为3000(50min)——用户当天把XAU策略周期从45分改成50分后，breath_profiles.py同步校准过，但这条reentry_profiles.py的tv_tf_sec表没跟着改，一直停在旧的45分钟没被发现，直到今天核对TV截图才挖出来。reentry_window_sec()=window_bars×tv_tf_sec，之前一直用错的45分钟在算重入窗口时长，3×45=135min，修正后3×50=150min，窗口本身变化不大，但数值终于跟真实周期对上了。2026-08-25再次修正：用户把XAU策略周期从50分改成90分，tv_tf_sec同步为5400；window_bars从3改成2——90分钟正好跟ETH/SNDK/ANTHROPIC/ASML同周期，照抄这几个品种的约定(2根=180min，对齐这几个月来~150-180min的窗口惯例)，不再沿用旧50分钟时代为凑150min窗口定的3根，否则3×90=270min会明显超出惯例。呼吸空间/阶梯保本的触发距离(step_trigger_atr×ATR)跟tv_tf_sec无关——ATR来自TV自己上报(atr_source=tv)，90分钟K线本身算出来的ATR自然比50分钟大，呼吸空间会跟着自动变宽，不需要单独适配周期。",
     "tiers": [
       {
         "name": "weak",
@@ -318,10 +318,10 @@
     ]
   },
   "SKHYNIX": {
-    "tv_tf_sec": 9000,
-    "reentry_window_bars": 1,
+    "tv_tf_sec": 6060,
+    "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种（币安新品类TRADIFI_PERPETUAL，韩国SK海力士股票代币化永续），跟XMR/SNDK/PAXG一起补齐_BY_SYMBOL，不再让新品种静默吃ETH的表。周期150m，reentry_window_bars同PAXG收到1根（150min接近ETH 2×90m=180min目标窗口）。step_trigger/step_advance按sqrt(SKHYNIX breath_profiles.py中位数回调2.97/ETH中位数回调3.26)≈0.955倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "note": "2026-08-15：新增品种（币安新品类TRADIFI_PERPETUAL，韩国SK海力士股票代币化永续），跟XMR/SNDK/PAXG一起补齐_BY_SYMBOL，不再让新品种静默吃ETH的表。周期150m，reentry_window_bars同PAXG收到1根（150min接近ETH 2×90m=180min目标窗口）。step_trigger/step_advance按sqrt(SKHYNIX breath_profiles.py中位数回调2.97/ETH中位数回调3.26)≈0.955倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-25修正：用户把SKHYNIX周期从150分钟改成101分钟，tv_tf_sec同步为6060；window_bars从1改成2——101分钟×1=101min明显短于~150-180min的窗口惯例，×2=202min更接近，改法同XAU这次的处理。tiers数组(weak/mid/strong三档reentry定价参数)暂未跟着101分钟重新测，仍是按ETH基线缩放的旧值，跟breath_profiles.py这次刚做的101分钟真实K线重新校准(BREATH_SKHYNIX)是两套独立参数面，后续如需要可以再补测。",
     "tiers": [
       {
         "name": "weak",
