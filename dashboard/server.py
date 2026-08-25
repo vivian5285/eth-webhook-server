@@ -38,7 +38,7 @@ from datetime import datetime
 
 from flask import Flask, jsonify, Response, request
 
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT"]
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT"]
 ACCOUNTS = [
     {"id": "B", "port": 5007, "label": "妈妈的币安账户", "user": "binanceB", "svc": "binanceB-engine"},
     {"id": "C", "port": 5008, "label": "我自己的币安账户", "user": "binanceC", "svc": "binanceC-engine"},
@@ -196,7 +196,10 @@ CLOSING_CHATTER_RE = re.compile(
     r"限价单失败.*ReduceOnly Order is rejected|"
     r"❌ (挂|补挂|UPDATE_TP 挂) TP\d|"
     r"核武轮.*补挂=0|"
-    r"止损 @[\d.]+ 已穿/贴市.*禁止推宽.*紧急平仓"
+    r"止损 @[\d.]+ 已穿/贴市.*禁止推宽.*紧急平仓|"
+    # 2026-08-24新增：跟watchdog同步——实盘复现(C账户PAXG)确认这条也是
+    # 同一类"平仓过程中TP刷新撞上仓位已经归零"的收尾噪音，不是真裸仓。
+    r"TV/账本/盘口均无有效 TP123"
 )
 
 FLAT_CONFIRM_RE = re.compile(
@@ -773,6 +776,9 @@ def api_strategy_signals(symbol):
 
 @app.route("/api/strategy/<symbol>/backtest", methods=["POST"])
 def api_strategy_backtest(symbol):
+    sym = str(symbol or "").strip().upper()
+    if sym not in SYMBOLS:
+        return jsonify({"status": "error", "message": "bad_symbol"}), 400
     body = request.get_json(silent=True) or {}
     try:
         days = max(1, min(int(body.get("days") or 30), 180))
@@ -781,7 +787,7 @@ def api_strategy_backtest(symbol):
     code = (
         "from strategy_engine.backtest_runner import run_backtest\n"
         "import json\n"
-        f"print(json.dumps(run_backtest({symbol!r}, days={days})))"
+        f"print(json.dumps(run_backtest({sym!r}, days={days})))"
     )
     result = _strategy_engine_call(code, timeout=60)
     return jsonify(result)

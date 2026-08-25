@@ -192,6 +192,8 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ANTHROPIC"
     if "ASML" in sym:
         return "ASML"
+    if "GS" in sym:
+        return "GS"
     if "ETH" in sym or "BNB" in sym:
         return "ETH"
     # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
@@ -223,6 +225,8 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ANTHROPIC"
     if "ASML" in ctx_s:
         return "ASML"
+    if "GS" in ctx_s:
+        return "GS"
     if "ETH" in ctx_s or "BNB" in ctx_s:
         return "ETH"
     return UNIT_LABEL
@@ -1808,7 +1812,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
 _CALIBRATED_SYMBOLS = (
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT",
     "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT",
-    "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT",
+    "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT",
 )
 
 

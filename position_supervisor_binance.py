@@ -19273,6 +19273,38 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self._post_recover_radar_pulse = True
             else:
                 # 确认空仓：禁止误平仓；完整清零雷达账本（禁止半清理残留 entry/sl/atr）
+                # 例外：重启前若有正在进行中的TV心跳追回周期(挂着真实限价单)，
+                # 不能当成"什么都没发生的空仓"直接清零+撤单重挂——先核实这笔
+                # 追回单是否还真的挂在交易所，还在的话原样接续，跳过下面的
+                # 清零/cancel_all（2026-08-25实盘发现：BNBUSDT重启时被无脑
+                # 清零，靠"重启前追回周期被清场流程带走→立即重新评估"这条
+                # 后备兜底才没酿成风险，但会造成一次不必要的撤单重挂）。
+                resumed_catchup = False
+                if bool(getattr(self, "catchup_active", False)) and getattr(
+                    self, "catchup_limit_order_id", None
+                ):
+                    try:
+                        open_orders = binance_client.get_open_orders(self.symbol)
+                        if open_orders != ORDERS_QUERY_FAILED:
+                            resumed_catchup = any(
+                                str(o.get("orderId")) == str(self.catchup_limit_order_id)
+                                for o in (open_orders or [])
+                            )
+                    except Exception as e:
+                        logger.debug(f"[{self.symbol}] 重启核实追回挂单跳过: {e}")
+                if resumed_catchup:
+                    logger.info(
+                        f"🚑 [{self.symbol}] 重启接续TV心跳追回：限价单"
+                        f"id={self.catchup_limit_order_id}仍挂在交易所，原样接续，不清零重挂"
+                    )
+                    self.monitoring = True
+                    self._recover_in_progress = False
+                    self._open_regime_sticky = False
+                    self.trading_paused = False
+                    self.trading_pause_reason = ""
+                    self._save_state()
+                    self._ensure_sentinel_running_quiet()
+                    return
                 logger.info(
                     f"🔄 [{self.symbol}] 系统重启点火：REST确认无持仓，账本复位为空仓待命。"
                 )

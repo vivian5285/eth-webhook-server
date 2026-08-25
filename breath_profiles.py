@@ -455,6 +455,40 @@ BREATH_ASML: Dict[str, Any] = {
     "exit_score": 2,
 }
 
+# GS 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟ASML/
+# SKHYNIX同类）。用真实30m K线合成90分钟K线（该品种2026-07-29才上线，只
+# 拉到1289根30m原始K线覆盖约26.8天，样本量比其它品种薄，后续需要按"周期性
+# 呼吸再校准"惯例尽快补测），真实摆动点识别(fractal pivot，±3根确认，同
+# 08-18那批方法)测了429根合成K线、61个摆动回调样本：中位数≈2.06×ATR，
+# 75分位≈2.99×ATR，90分位≈4.35×ATR。ATR%=0.45%——跟XAU(0.50%)/ASML(0.52%)
+# 同一量级，不算高波动品种。step_trigger_atr/step_advance_atr推算方法同
+# XAU/SKHYNIX 08-25注释（跨品种均值比例：step_trigger≈0.375×breath_tp12，
+# step_advance≈0.65×step_trigger）。
+BREATH_GS: Dict[str, Any] = {
+    "name": "GS",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.77,
+    "step_advance_atr": 0.50,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.06,  # 覆盖实测中位数回调(2.06)
+    "breath_tp23": 2.99,  # 覆盖实测75分位回调(2.99)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.4,
+    "max_mult": 4.65,     # 覆盖实测90分位回调(4.35)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,
@@ -469,6 +503,7 @@ _BY_BINANCE = {
     "OPENAIUSDT": BREATH_OPENAI,  # 2026-08-15：新增
     "ANTHROPICUSDT": BREATH_ANTHROPIC,  # 2026-08-15：新增
     "ASMLUSDT": BREATH_ASML,  # 2026-08-15：新增
+    "GSUSDT": BREATH_GS,  # 2026-08-25：新增
 }
 
 _BY_DEEPCOIN = {

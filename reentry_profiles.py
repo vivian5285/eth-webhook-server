@@ -165,6 +165,17 @@ _DEFAULT_ASML_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.37, "step_advance_atr": 0.68,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
+# 2026-08-25新增：sqrt(GS breath_profiles.py中位数回调2.06/ETH当前中位数回调
+# 2.70)≈0.874倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH
+# 同款，理由同ASML/ANTHROPIC。
+_DEFAULT_GS_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.87, "step_advance_atr": 0.44,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.05, "step_advance_atr": 0.52,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.22, "step_advance_atr": 0.61,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
 
 REENTRY_TIERS_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
@@ -260,6 +271,9 @@ ANTHROPIC_TIERS: List[Dict[str, float]] = list(
 ASML_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("ASML") or {}).get("tiers") or _DEFAULT_ASML_TIERS)
 )
+GS_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("GS") or {}).get("tiers") or _DEFAULT_GS_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 _BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
@@ -273,6 +287,7 @@ _XPD_ZONE = float((_CFG.get("XPD") or {}).get("reentry_zone_atr") or 0.5)
 _OPENAI_ZONE = float((_CFG.get("OPENAI") or {}).get("reentry_zone_atr") or 0.5)
 _ANTHROPIC_ZONE = float((_CFG.get("ANTHROPIC") or {}).get("reentry_zone_atr") or 0.5)
 _ASML_ZONE = float((_CFG.get("ASML") or {}).get("reentry_zone_atr") or 0.5)
+_GS_ZONE = float((_CFG.get("GS") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
 # 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
@@ -296,6 +311,8 @@ _OPENAI_WINDOW_BARS = int((_CFG.get("OPENAI") or {}).get("reentry_window_bars") 
 _ANTHROPIC_WINDOW_BARS = int((_CFG.get("ANTHROPIC") or {}).get("reentry_window_bars") or 2)
 # ASML(90m)同ETH/SNDK/ANTHROPIC沿用2根
 _ASML_WINDOW_BARS = int((_CFG.get("ASML") or {}).get("reentry_window_bars") or 2)
+# GS(90m)同ETH/SNDK/ANTHROPIC/ASML沿用2根
+_GS_WINDOW_BARS = int((_CFG.get("GS") or {}).get("reentry_window_bars") or 2)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
@@ -316,6 +333,7 @@ _XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
 _OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
 _ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 5400)
 _ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
+_GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)
 
 
 def make_reentry_client_order_id(
@@ -619,6 +637,27 @@ REENTRY_ASML: Dict[str, Any] = {
     "tick_size": 0.01,
 }
 
+REENTRY_GS: Dict[str, Any] = {
+    "name": "GS",
+    "tv_tf": "90m",
+    "tv_tf_sec": _GS_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    # 2026-08-25：GS ATR%=0.45%，1.5×ATR封顶≈0.68%，比1%还紧，沿用跟其它
+    # TradFi品种一致的1%（同OPENAI/ANTHROPIC/ASML/SKHYNIX惯例，未额外收紧）。
+    "radar_gate_return_pct": 0.01,
+    "tiers": GS_TIERS,
+    "reentry_zone_atr": _GS_ZONE,
+    "reentry_window_bars": _GS_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
@@ -633,6 +672,7 @@ _BY_SYMBOL = {
     "OPENAIUSDT": REENTRY_OPENAI,
     "ANTHROPICUSDT": REENTRY_ANTHROPIC,
     "ASMLUSDT": REENTRY_ASML,
+    "GSUSDT": REENTRY_GS,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }

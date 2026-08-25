@@ -163,6 +163,19 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "ASMLUSDT",
         "breath": "ASML",
     },
+    "GSUSDT": {
+        "symbol": "GSUSDT",
+        "unit": "GS",
+        "tag": "GS",
+        # 2026-08-25：币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，GS(高盛)
+        # 股票代币化永续，属于已上市正股类，跟ASML/SKHYNIX同类。90分钟周期。
+        "qty_step": 0.01,    # 实测LOT_SIZE stepSize
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,  # 实测PRICE_FILTER tickSize=0.01
+        "atr_fallback_symbol": "GSUSDT",
+        "breath": "GS",
+    },
 }
 
 # 深币 SWAP
@@ -275,6 +288,12 @@ _BINANCE_ALIASES = {
     "ASMLUSDT.P": "ASMLUSDT",
     "BINANCE:ASMLUSDT": "ASMLUSDT",
     "BINANCE:ASMLUSDT.P": "ASMLUSDT",
+    "GS": "GSUSDT",
+    "GSUSDT": "GSUSDT",
+    "GSUSD": "GSUSDT",
+    "GSUSDT.P": "GSUSDT",
+    "BINANCE:GSUSDT": "GSUSDT",
+    "BINANCE:GSUSDT.P": "GSUSDT",
 }
 
 _DEEPCOIN_ALIASES = {
@@ -352,14 +371,14 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 
 
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,SKHYNIXUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,ASMLUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,SKHYNIXUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,ASMLUSDT,GSUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT"]
+    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT"]
 
 
 def active_deepcoin_symbols():
@@ -404,6 +423,7 @@ def extract_symbol_from_payload(data):
         "OPENAIUSDT.P", "BINANCE:OPENAIUSDT", "OPENAIUSDT",
         "ANTHROPICUSDT.P", "BINANCE:ANTHROPICUSDT", "ANTHROPICUSDT",
         "ASMLUSDT.P", "BINANCE:ASMLUSDT", "ASMLUSDT",
+        "GSUSDT.P", "BINANCE:GSUSDT", "GSUSDT",
     ):
         if token in blob:
             return token
