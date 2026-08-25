@@ -8935,7 +8935,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if not prepared_by_level:
             return 0
 
-        # ── 并行挂单：TP1 + TP2 同时提交 ────────────────────
+        # ── 并行挂单：TP1 + TP2 同时提交，失败的档位按 retries 重试 ──
         def _place_single(level_num):
             q, px = prepared_by_level[level_num]
             res = self._place_defense_tp_limit(
@@ -8943,20 +8943,39 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
             return level_num, res
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {
-                executor.submit(_place_single, lv_num): lv_num
-                for lv_num in prepared_by_level
-            }
-            placed = 0
-            for future in as_completed(futures):
-                lv_num, res = future.result()
-                q, px = prepared_by_level[lv_num]
-                if res:
-                    placed += 1
-                    logger.info(f"📈 UPDATE_TP 挂 TP{lv_num} {q} @ {px:.2f}")
-                else:
-                    logger.error(f"❌ UPDATE_TP 挂 TP{lv_num} @ {px:.2f} 失败")
+        pending_levels = set(prepared_by_level.keys())
+        placed = 0
+        max_attempts = max(1, int(retries or 0) + 1)
+        for attempt in range(1, max_attempts + 1):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    executor.submit(_place_single, lv_num): lv_num
+                    for lv_num in pending_levels
+                }
+                succeeded_this_round = set()
+                for future in as_completed(futures):
+                    lv_num, res = future.result()
+                    q, px = prepared_by_level[lv_num]
+                    if res:
+                        placed += 1
+                        succeeded_this_round.add(lv_num)
+                        suffix = f"（第{attempt}次尝试）" if attempt > 1 else ""
+                        logger.info(f"📈 UPDATE_TP 挂 TP{lv_num} {q} @ {px:.2f}{suffix}")
+                    else:
+                        logger.error(
+                            f"❌ UPDATE_TP 挂 TP{lv_num} @ {px:.2f} 失败"
+                            f"（第{attempt}/{max_attempts}次）"
+                        )
+            pending_levels -= succeeded_this_round
+            if not pending_levels:
+                break
+            if attempt < max_attempts:
+                time.sleep(1.0)
+        if pending_levels:
+            logger.error(
+                f"🚨 [{self.symbol}] TP挂单连续{max_attempts}次尝试后仍失败: "
+                f"{sorted(pending_levels)}"
+            )
         return placed
 
 
