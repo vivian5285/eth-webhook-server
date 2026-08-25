@@ -8254,6 +8254,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if sl_ok:
                         break
                 if not sl_ok:
+                    # 2026-08-25实盘复现(ASML B/C两账户)：重试这几秒内仓位
+                    # 完全可能已经被自己的雷达/硬止损正常打平(exit_source=
+                    # sl_initial，pnl几乎打平)——_ensure_frozen_hard_sl对
+                    # 已经空的仓位本来就该返回False，连续3次"失败"里混进了
+                    # 这种"根本不需要挂了"的假阳性，发紧急裸仓告警之前必须
+                    # 再复查一次，跟上面第一次复查同一个道理。
+                    pos_final = self._get_active_position()
+                    still_has_qty_final = (
+                        pos_final not in (None, "QUERY_FAILED")
+                        and isinstance(pos_final, dict)
+                        and float(pos_final.get("size") or 0) > 0
+                    )
+                    if not still_has_qty_final:
+                        logger.info(
+                            f"🫁 [{self._tag()}] TP后硬止损重试期间仓位已归零 "
+                            f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                        )
+                        return True
                     logger.error(
                         f"🚨🚨 [{self._tag()}] TP后硬止损连续3次立即重试仍失败！"
                         f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
@@ -15408,6 +15426,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 if sl_ok:
                     break
         if not sl_ok:
+            # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假阳性)：
+            # 重试这几秒内仓位完全可能已经被别的路径平掉，发紧急裸仓告警
+            # 前必须先确认仓位真的还在。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
+            )
+            if not still_has_qty_final:
+                logger.info(
+                    f"🛡️ [{self.symbol}] 网格套利硬止损重试期间仓位已归零 "
+                    f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                )
+                sl_ok = True
+        if not sl_ok:
             logger.error(f"🚨 [{self.symbol}] 网格套利硬止损连续3次立即重试仍失败，需人工核查")
             try:
                 dingtalk.report_system_alert(
@@ -15911,25 +15945,43 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if _arm_ok and float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0:
                         break
                 if not (_arm_ok and float(getattr(self, "frozen_hard_sl_px", 0) or 0) > 0):
-                    logger.error(
-                        f"🚨🚨 [{self.symbol}] 开仓硬止损连续3次立即重试仍失败！"
-                        f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
+                    # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款
+                    # 假阳性)：重试这几秒内仓位完全可能已经被别的路径(比如
+                    # 紧接着来的反向TV信号先平后开)平掉，_ensure_frozen_hard_sl
+                    # 对已经空的仓位本来就该返回False，发紧急裸仓告警前
+                    # 必须先确认仓位真的还在。
+                    pos_final = self._get_active_position()
+                    still_has_qty_final = (
+                        pos_final not in (None, "QUERY_FAILED")
+                        and isinstance(pos_final, dict)
+                        and float(pos_final.get("size") or 0) > 0
                     )
-                    try:
-                        self._call_dingtalk(
-                            dingtalk.report_system_alert,
-                            title=f"🆘紧急：开仓硬止损挂单失败 [{self.symbol}]",
-                            detail=(
-                                f"{self.current_side} {live_qty} @ {entry_live:.4f}"
-                                f"（新开仓）硬止损连续重试仍未能挂出，仓位当前"
-                                f"没有任何止损保护，请立即人工到交易所核查并"
-                                f"手动补挂止损！"
-                            ),
-                            level="紧急",
-                            immediate=True,
+                    if not still_has_qty_final:
+                        logger.info(
+                            f"🛡️ [{self.symbol}] 开仓硬止损重试期间仓位已归零 "
+                            f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
                         )
-                    except Exception:
-                        pass
+                        _arm_ok = True
+                    else:
+                        logger.error(
+                            f"🚨🚨 [{self.symbol}] 开仓硬止损连续3次立即重试仍失败！"
+                            f"仓位{self.current_side} {live_qty}正在裸奔，需要人工立即核查！"
+                        )
+                        try:
+                            self._call_dingtalk(
+                                dingtalk.report_system_alert,
+                                title=f"🆘紧急：开仓硬止损挂单失败 [{self.symbol}]",
+                                detail=(
+                                    f"{self.current_side} {live_qty} @ {entry_live:.4f}"
+                                    f"（新开仓）硬止损连续重试仍未能挂出，仓位当前"
+                                    f"没有任何止损保护，请立即人工到交易所核查并"
+                                    f"手动补挂止损！"
+                                ),
+                                level="紧急",
+                                immediate=True,
+                            )
+                        except Exception:
+                            pass
             try:
                 qm = self._split_remaining_tp_quantities(live_qty)
                 tps = list(self.tv_tps or [0, 0, 0])

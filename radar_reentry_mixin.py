@@ -2527,6 +2527,22 @@ class RadarReentryMixin:
                 if sl_ok:
                     break
             if not sl_ok:
+                # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假
+                # 阳性)：重试这几秒内仓位完全可能已经被别的路径平掉，发
+                # 紧急裸仓告警前必须先确认仓位真的还在。
+                pos_final = self._get_active_position()
+                still_has_qty_final = (
+                    pos_final not in (None, "QUERY_FAILED")
+                    and isinstance(pos_final, dict)
+                    and float(pos_final.get("size") or 0) > 0
+                )
+                if not still_has_qty_final:
+                    logger.info(
+                        f"🛡️ [{self.symbol}] 硬止损重试期间仓位已归零 "
+                        f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                    )
+                    sl_ok = True
+            if not sl_ok:
                 logger.error(
                     f"🚨🚨 [{self.symbol}] 硬止损连续3次立即重试仍失败！"
                     f"仓位{side} {qty}正在裸奔，需要人工立即核查！"
@@ -3051,6 +3067,21 @@ class RadarReentryMixin:
                 if hard_px > 0 and arm_ok:
                     break
             if not (hard_px > 0 and arm_ok):
+                # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假
+                # 阳性)：重试这几秒内仓位完全可能已经被别的路径平掉，发
+                # 紧急裸仓告警前必须先确认仓位真的还在。
+                pos_final = self._get_active_position()
+                still_has_qty_final = (
+                    pos_final not in (None, "QUERY_FAILED")
+                    and isinstance(pos_final, dict)
+                    and float(pos_final.get("size") or 0) > 0
+                )
+                if not still_has_qty_final:
+                    logger.info(
+                        f"🛡️ [{self.symbol}] 再入硬止损重试期间仓位已归零 "
+                        f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                    )
+            if not (hard_px > 0 and arm_ok) and still_has_qty_final:
                 logger.error(
                     f"🚨🚨 [{self.symbol}] 再入成交后硬止损连续3次立即重试仍失败！"
                     f"仓位{side} {qty}正在裸奔，需要人工立即核查！"
