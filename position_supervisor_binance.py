@@ -7706,6 +7706,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if force_open:
                 self.radar_activated = False
                 self.radar_mega_strong = False
+                self._adx_tier_last_refresh_ts = 0.0
+                self._adx_tier_pending_candidate = None
                 self.radar_pending_arm = True
                 self.radar_activation_sticky = False
                 self._radar_sync_open_ts = time.time()
@@ -9973,6 +9975,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 s.get("tp_levels_radar_handoff", []) or []
             )
             self.radar_activated = bool(s.get("radar_activated", False))
+            # 2026-08-26：这里之前漏了adx_tier/last_adx——ADX档位动态复评
+            # 落地后，_maybe_reevaluate_adx_tier对休眠仓位实时调整的档位
+            # 会被这条热加载路径悄悄冲回__init__默认值(adx_tier=1)，跟
+            # 真正的重启恢复(recover_state_on_startup)行为不一致。
+            self.adx_tier = int(s.get("adx_tier", getattr(self, "adx_tier", 1)) or 1)
+            self.radar_tier = int(s.get("adx_tier", getattr(self, "radar_tier", 1)) or 1)
+            self.last_adx = float(s.get("last_adx", getattr(self, "last_adx", 0)) or 0)
             self._load_reentry_state_from_dict(s)
             self._load_tv_catchup_state_from_dict(s)
             self._load_chase_watch_state_from_dict(s)
@@ -14382,6 +14391,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.breakeven_phase = False
         self.radar_activated = False
         self.radar_mega_strong = False
+        self._adx_tier_last_refresh_ts = 0.0
+        self._adx_tier_pending_candidate = None
         self.radar_activation_sticky = False
         self._radar_sync_open_ts = time.time()
         self._ws_hard_sl_fill_hint = None
@@ -15867,6 +15878,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.breakeven_phase = False
         self.radar_activated = False
         self.radar_mega_strong = False
+        self._adx_tier_last_refresh_ts = 0.0
+        self._adx_tier_pending_candidate = None
         self.radar_pending_arm = True
         self.radar_activation_sticky = False
         self._radar_sync_open_ts = time.time()
@@ -16922,6 +16935,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._maybe_upgrade_radar_mega_strong()
             except Exception as e:
                 logger.debug(f"[{self.symbol}] 超强趋势升级检查跳过: {e}")
+            try:
+                self._maybe_reevaluate_adx_tier()
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] ADX档动态复评跳过: {e}")
             return None
         atr = self._get_locked_initial_atr()
         try:
