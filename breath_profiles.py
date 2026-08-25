@@ -489,6 +489,69 @@ BREATH_GS: Dict[str, Any] = {
     "exit_score": 2,
 }
 
+# MU 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟ASML/
+# GS同类）。用真实30m K线合成90分钟K线（分页拉了3950根30m原始K线覆盖约
+# 82天），真实摆动点识别(fractal pivot，±3根确认，同08-18/08-25那批方法)
+# 测了1316根合成K线、180个摆动回调样本：中位数≈2.62×ATR，75分位≈
+# 3.69×ATR，90分位≈6.83×ATR。ATR%=1.21%——比XAU/ASML/GS这几个稍高，
+# 尾部也更肥。step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS
+# 08-25注释（跨品种均值比例）。
+BREATH_MU: Dict[str, Any] = {
+    "name": "MU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.98,
+    "step_advance_atr": 0.64,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.62,  # 覆盖实测中位数回调(2.62)
+    "breath_tp23": 3.69,  # 覆盖实测75分位回调(3.69)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.3,
+    "max_mult": 7.1,      # 覆盖实测90分位回调(6.83)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# LITE 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟
+# ASML/GS/MU同类）。用真实30m K线合成90分钟K线（分页拉了3950根30m原始
+# K线覆盖约82天），真实摆动点识别(fractal pivot，±3根确认，同批方法)
+# 测了1316根合成K线、176个摆动回调样本：中位数≈2.71×ATR，75分位≈
+# 4.18×ATR，90分位≈6.56×ATR。ATR%=1.40%。step_trigger_atr/step_advance_atr
+# 推算方法同上。
+BREATH_LITE: Dict[str, Any] = {
+    "name": "LITE",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,
+    "step_advance_atr": 0.66,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.71,  # 覆盖实测中位数回调(2.71)
+    "breath_tp23": 4.18,  # 覆盖实测75分位回调(4.18)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.2,
+    "max_mult": 6.9,      # 覆盖实测90分位回调(6.56)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,
@@ -504,6 +567,8 @@ _BY_BINANCE = {
     "ANTHROPICUSDT": BREATH_ANTHROPIC,  # 2026-08-15：新增
     "ASMLUSDT": BREATH_ASML,  # 2026-08-15：新增
     "GSUSDT": BREATH_GS,  # 2026-08-25：新增
+    "MUUSDT": BREATH_MU,  # 2026-08-25：新增
+    "LITEUSDT": BREATH_LITE,  # 2026-08-25：新增
 }
 
 _BY_DEEPCOIN = {

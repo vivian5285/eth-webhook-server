@@ -194,6 +194,10 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ASML"
     if "GS" in sym:
         return "GS"
+    if "MU" in sym:
+        return "MU"
+    if "LITE" in sym:
+        return "LITE"
     if "ETH" in sym or "BNB" in sym:
         return "ETH"
     # 回退上下文（_call_dingtalk 注入）；禁止再递归读 context
@@ -227,6 +231,10 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ASML"
     if "GS" in ctx_s:
         return "GS"
+    if "MU" in ctx_s:
+        return "MU"
+    if "LITE" in ctx_s:
+        return "LITE"
     if "ETH" in ctx_s or "BNB" in ctx_s:
         return "ETH"
     return UNIT_LABEL
@@ -1812,7 +1820,7 @@ def report_shield_disarmed(side, live_qty, entry, cancelled_count, reason="",
 _CALIBRATED_SYMBOLS = (
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT",
     "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT",
-    "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT",
+    "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT",
 )
 
 

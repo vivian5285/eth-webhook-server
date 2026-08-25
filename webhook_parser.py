@@ -100,10 +100,11 @@ MIN_QTY_DEFAULT = 0.001
 # 品种 = 13倍权益。从12上调到13，继续精确对齐"全品种同时强趋势"这个
 # 理论极端场景，不多不少。
 # 2026-08-25：新增GS，活跃品种共14个，13→14同理由。
+# 2026-08-25：同日再新增MU/LITE，活跃品种共16个，14→16同理由。
 # 注意：以后再调TIER_NOTIONAL_MULT/SYMBOL_TIER_NOTIONAL_MULT里任何品种的
 # 强档倍数、或停用/启用某品种的TV、或再加新品种，这个值要跟着重算，否则
 # 要么裁过头要么裁不住。
-MAX_TOTAL_NOTIONAL_MULT = 14.0
+MAX_TOTAL_NOTIONAL_MULT = 16.0
 MAX_RISK_PCT_LIMIT = MAX_RISK_PCT
 VPS_REGIME_RISK_MULTIPLIERS = VPS_REGIME_SCALE
 

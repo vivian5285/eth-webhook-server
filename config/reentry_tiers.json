@@ -544,5 +544,81 @@
         "max_mult": 6.0
       }
     ]
+  },
+  "MU": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-25：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，MU美光科技股票代币化永续，已上市正股类跟ASML/GS同类）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(MU breath_profiles.py中位数回调2.62/ETH当前中位数回调2.70)≈0.985倍缩放ETH三档基线，几乎不用收紧；breath_tp12/23/min_mult/max_mult维持ETH同款。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按MU自身波动率(0.985倍)微收紧",
+        "step_trigger_atr": 0.99,
+        "step_advance_atr": 0.49,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按MU自身波动率(0.985倍)微收紧",
+        "step_trigger_atr": 1.18,
+        "step_advance_atr": 0.59,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按MU自身波动率(0.985倍)微收紧",
+        "step_trigger_atr": 1.38,
+        "step_advance_atr": 0.69,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "LITE": {
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-25：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，LITE股票代币化永续，已上市正股类跟ASML/GS/MU同类）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(LITE breath_profiles.py中位数回调2.71/ETH当前中位数回调2.70)≈1.00倍，LITE自身波动率跟ETH几乎一致，原样沿用ETH三档基线不缩放。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：跟ETH基线几乎重合，直接沿用",
+        "step_trigger_atr": 1.00,
+        "step_advance_atr": 0.50,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：跟ETH基线几乎重合，直接沿用",
+        "step_trigger_atr": 1.20,
+        "step_advance_atr": 0.60,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：跟ETH基线几乎重合，直接沿用",
+        "step_trigger_atr": 1.40,
+        "step_advance_atr": 0.70,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
   }
 }
