@@ -396,24 +396,31 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1150根K线、262个摆动回调
 # 样本，中位数≈2.22×ATR，75分位≈3.23×ATR，90分位≈5.23×ATR——比08-15那版全线
 # 收窄26.2%~34.3%，四个"美股"品种里漂移幅度最大的一个。
+# 2026-08-25再次修正：用户把ANTHROPIC策略周期从90分钟改成6小时（币安原生
+# 6h间隔，不用合成）。真实摆动点识别(fractal pivot，±3根确认，同批方法)拉了
+# 币安能给的全部337根原生6h K线(覆盖约84天，该品种上线较短，历史数据上限
+# 就这么多)，测了42个摆动回调样本：中位数≈1.85×ATR，75分位≈3.33×ATR，
+# 90分位≈5.47×ATR。ATR%=1.82%——6小时周期下波动率显著更高，用户说的"6h的
+# 因子更高"数据上成立。样本量比90分钟那版(262个)薄很多，是币安历史数据
+# 上限决定的，后续K线累积后需要重新校准加宽样本。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.99,
-    "step_advance_atr": 0.65,
+    "step_trigger_atr": 0.69,
+    "step_advance_atr": 0.45,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.22,  # 08-18再校准：覆盖实测中位数回调(2.22)
-    "breath_tp23": 3.23,  # 08-18再校准：覆盖实测75分位回调(3.23)
+    "breath_tp12": 1.85,  # 08-25再校准(6h)：覆盖实测中位数回调(1.85)
+    "breath_tp23": 3.33,  # 08-25再校准(6h)：覆盖实测75分位回调(3.33)
     "phase2_trail_mult": 1.0,
-    "min_mult": 5.0,
-    "max_mult": 5.5,      # 08-18再校准：覆盖实测90分位回调(5.23)以上
+    "min_mult": 4.3,
+    "max_mult": 5.8,      # 08-25再校准(6h)：覆盖实测90分位回调(5.47)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
