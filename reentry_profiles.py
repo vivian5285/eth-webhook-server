@@ -148,14 +148,12 @@ _DEFAULT_OPENAI_TIERS: List[Dict[str, float]] = [
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 # ANTHROPIC: sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961。
-# 2026-08-25：ANTHROPIC从90分钟改成6小时后，sqrt(1.85/2.70)≈0.828倍
-# 缩放ETH三档基线（原0.961倍是90分钟那版，已过期）。
 _DEFAULT_ANTHROPIC_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.83, "step_advance_atr": 0.41,
+    {"step_trigger_atr": 0.96, "step_advance_atr": 0.48,
      "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
-    {"step_trigger_atr": 0.99, "step_advance_atr": 0.50,
+    {"step_trigger_atr": 1.15, "step_advance_atr": 0.58,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.16, "step_advance_atr": 0.58,
+    {"step_trigger_atr": 1.35, "step_advance_atr": 0.67,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 # ASML: sqrt(ASML breath_profiles.py中位数回调3.10/ETH中位数回调3.26)≈0.975。
@@ -338,10 +336,7 @@ _SKHYNIX_WINDOW_BARS = int((_CFG.get("SKHYNIX") or {}).get("reentry_window_bars"
 _XPD_WINDOW_BARS = int((_CFG.get("XPD") or {}).get("reentry_window_bars") or 1)
 # OPENAI(150m)同PAXG/SKHYNIX/XPD收到1根；ANTHROPIC(90m)同ETH/SNDK沿用2根
 _OPENAI_WINDOW_BARS = int((_CFG.get("OPENAI") or {}).get("reentry_window_bars") or 1)
-# 2026-08-25：从90分钟改成6小时后window_bars从2改成1，同XMR/BCH等6h
-# 原生周期品种的惯例（1×360min=360min已经超出150-180min窗口惯例，但2根
-# 会拉到12小时，取更接近的1根）。
-_ANTHROPIC_WINDOW_BARS = int((_CFG.get("ANTHROPIC") or {}).get("reentry_window_bars") or 1)
+_ANTHROPIC_WINDOW_BARS = int((_CFG.get("ANTHROPIC") or {}).get("reentry_window_bars") or 2)
 # ASML(90m)同ETH/SNDK/ANTHROPIC沿用2根
 _ASML_WINDOW_BARS = int((_CFG.get("ASML") or {}).get("reentry_window_bars") or 2)
 # GS(90m)同ETH/SNDK/ANTHROPIC/ASML沿用2根
@@ -367,7 +362,7 @@ _PAXG_TF_SEC = int((_CFG.get("PAXG") or {}).get("tv_tf_sec") or 9000)
 _SKHYNIX_TF_SEC = int((_CFG.get("SKHYNIX") or {}).get("tv_tf_sec") or 9000)
 _XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
 _OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
-_ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 21600)
+_ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 5400)
 _ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
 _GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)
 _MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 5400)
@@ -637,7 +632,7 @@ REENTRY_OPENAI: Dict[str, Any] = {
 }
 REENTRY_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
-    "tv_tf": "6h",
+    "tv_tf": "90m",
     "tv_tf_sec": _ANTHROPIC_TF_SEC,
     "enabled": True,
     "arm_sl_atr": ARM_SL_ATR,

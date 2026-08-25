@@ -432,16 +432,16 @@
     ]
   },
   "ANTHROPIC": {
-    "tv_tf_sec": 21600,
-    "reentry_window_bars": 1,
+    "tv_tf_sec": 5400,
+    "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-25修正：用户把ANTHROPIC周期从90分钟改成6小时，tv_tf_sec同步为21600；window_bars从2改成1，同XMR/BCH等6h原生周期品种惯例（1×360min已超出150-180min窗口惯例，但2根会拉到12小时，取更接近的1根）。用币安原生6h K线（337根，上线较短历史上限就这么多）重新测：中位数回调1.85×ATR、75分位3.33×ATR、90分位5.47×ATR，ATR%从0.98%涨到1.82%——用户反馈的\"6h因子更高\"数据上成立。step_trigger/step_advance按sqrt(1.85/2.70)≈0.828倍重新缩放ETH三档基线。",
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：按ANTHROPIC 6h自身波动率(0.828倍)收紧",
-        "step_trigger_atr": 0.83,
-        "step_advance_atr": 0.41,
+        "note": "弱趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 0.96,
+        "step_advance_atr": 0.48,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -449,9 +449,9 @@
       },
       {
         "name": "mid",
-        "note": "中趋势：按ANTHROPIC 6h自身波动率(0.828倍)收紧",
-        "step_trigger_atr": 0.99,
-        "step_advance_atr": 0.50,
+        "note": "中趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.15,
+        "step_advance_atr": 0.58,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -459,9 +459,9 @@
       },
       {
         "name": "strong",
-        "note": "强趋势：按ANTHROPIC 6h自身波动率(0.828倍)收紧",
-        "step_trigger_atr": 1.16,
-        "step_advance_atr": 0.58,
+        "note": "强趋势：按ANTHROPIC自身波动率(0.961倍)微收紧",
+        "step_trigger_atr": 1.35,
+        "step_advance_atr": 0.67,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,
