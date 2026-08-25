@@ -6979,6 +6979,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 lv for lv in self._expected_tp_levels(live_qty)
                 if float(lv.get("price") or 0) > 0
             ]
+            # 2026-08-26修复：remaining为空时(全档已过/已挂满)placed之前完全
+            # 不赋值，下面第一轮日志行(f"...placed={placed}...")在r=0且remaining
+            # 为空时直接UnboundLocalError——实盘复现(binanceB GSUSDT重启接管，
+            # TP1刚好已全部消耗完)，主try和异常兜底路径(都会走到这里)双双炸掉，
+            # 靠仓位本身还留着的旧止损单硬扛，没有真正裸奔，但两条防线都失败
+            # 已经不是设计预期。
+            placed = 0
             if remaining:
                 placed = self._place_tp_levels_only(live_qty, retries=3)
             radar_sl = None
