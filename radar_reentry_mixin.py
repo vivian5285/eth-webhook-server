@@ -985,7 +985,7 @@ class RadarReentryMixin:
                 # 走不到）。
                 self._arm_chase_reentry_watch(
                     side=side, exit_px=exit_px, atr=atr, attempt=attempt,
-                    deadline_ts=window_ts,
+                    deadline_ts=window_ts, qty=float(snap.get("qty") or 0),
                 )
             return False
 
@@ -1103,6 +1103,10 @@ class RadarReentryMixin:
                 getattr(self, "_chase_watch_deadline_ts", 0) or 0
             ),
             "_chase_watch_armed_ts": float(getattr(self, "_chase_watch_armed_ts", 0) or 0),
+            # 2026-08-26新增：武装时锁定的重入数量，见_arm_chase_reentry_
+            # watch的注释——不落盘的话重启后这个值跟其它易失字段一样会
+            # 丢，追单确认过了也挂不出限价/市价单（无数量）。
+            "_chase_watch_qty": float(getattr(self, "_chase_watch_qty", 0) or 0),
             # 2026-08-22新增：限价优价重入子阶段（挂着真实交易所订单，理由
             # 同catchup_*的持久化——重启不能丢单，也不能丢观察窗口本身）
             "_chase_watch_phase": str(getattr(self, "_chase_watch_phase", "") or ""),
@@ -1127,6 +1131,7 @@ class RadarReentryMixin:
         self._chase_watch_attempt = int(s.get("_chase_watch_attempt", 0) or 0)
         self._chase_watch_deadline_ts = float(s.get("_chase_watch_deadline_ts", 0) or 0)
         self._chase_watch_armed_ts = float(s.get("_chase_watch_armed_ts", 0) or 0)
+        self._chase_watch_qty = float(s.get("_chase_watch_qty", 0) or 0)
         # 旧state文件没有这批限价子阶段字段时，getattr默认值(""/None/0)已经
         # 安全，不需要再单独判断key是否存在
         self._chase_watch_phase = str(s.get("_chase_watch_phase", "") or "")
@@ -1140,7 +1145,7 @@ class RadarReentryMixin:
         )
         self._chase_watch_order_tag = s.get("_chase_watch_order_tag")
 
-    def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt, deadline_ts=None):
+    def _arm_chase_reentry_watch(self, *, side, exit_px, atr, attempt, deadline_ts=None, qty=0):
         """武装追单确认观察窗——不下单，只记录状态，交给巡检周期性确认。
 
         2026-08-20：观察窗口从固定15分钟(_CHASE_CONFIRM_WINDOW_SEC)改为复用
@@ -1148,6 +1153,15 @@ class RadarReentryMixin:
         原始案例(ETH 09:39止损、13:00-15:00才冲起来)本身就横跨几个小时，
         固定15分钟根本盖不住这种"隔了大半天才确认"的真实行情，未传
         deadline_ts时才退回旧的15分钟兜底（防止有遗漏的调用点传漏）。
+
+        2026-08-26修复：qty必须在武装这一刻就存住——_reentry_open_snap只在
+        "直接重入"成功分支才写(见_maybe_start_smart_limit_reentry)，武装
+        追单这条分支从来没写过它；而base_qty在武装前已经被_reset_breath_
+        ledger_on_flat清零。之前_place_chase_limit要用到qty时两个来源全是
+        0，实盘复现：GSUSDT重启后追单多周期确认通过、无菌也过，最后一步
+        "追单限价无数量，放弃"——其实跟重启无关，不重启一样会摸到0（调用
+        方2·_place_reentry_limit里那条武装路径甚至会在武装后紧接着自己把
+        _reentry_open_snap清空）。现在武装时由调用方把qty原样传进来存好。
         """
         if bool(getattr(self, "_chase_watch_active", False)):
             return
@@ -1156,6 +1170,7 @@ class RadarReentryMixin:
         self._chase_watch_exit_px = float(exit_px or 0)
         self._chase_watch_atr = float(atr or 0)
         self._chase_watch_attempt = int(attempt or 0)
+        self._chase_watch_qty = float(qty or 0)
         self._chase_watch_armed_ts = time.time()
         self._chase_watch_phase = ""
         self._chase_watch_limit_order_id = None
@@ -1716,11 +1731,11 @@ class RadarReentryMixin:
             self._chase_watch_phase = ""
             return bool(self._execute_chase_reentry(side))
 
-        if not is_refresh:
-            qty = float((getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0)
-            if qty <= 0:
-                qty = float(getattr(self, "base_qty", 0) or 0)
-            self._chase_watch_qty = qty
+        # 2026-08-26：qty单一权威来源是_chase_watch_qty——武装那一刻
+        # (_arm_chase_reentry_watch)已经存好，重启也会从state文件原样恢复，
+        # 这里不再临时回退去凑_reentry_open_snap/base_qty，两者此刻必然
+        # 已经是空/零（前者只在直接重入分支写、后者平仓即清零），回退只会
+        # 制造"看似兜底、实则必空"的假安全感。
         qty = float(getattr(self, "_chase_watch_qty", 0) or 0)
         if qty <= 0:
             logger.error(f"🚨 [{self.symbol}] 追单限价无数量，放弃")
@@ -1833,9 +1848,9 @@ class RadarReentryMixin:
             return False
         from binance_client import binance_client
 
-        qty = float((getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0)
-        if qty <= 0:
-            qty = float(getattr(self, "base_qty", 0) or 0)
+        # _clear_chase_watch()不动_chase_watch_qty，武装时存好的值在这里
+        # 仍然有效；同款单一权威来源，理由见_place_chase_limit。
+        qty = float(getattr(self, "_chase_watch_qty", 0) or 0)
         if qty <= 0:
             logger.error(f"🚨 [{self.symbol}] 追单市价无数量，放弃")
             return False
@@ -2816,9 +2831,14 @@ class RadarReentryMixin:
                         deadline = float(
                             getattr(self, "reentry_window_deadline_ts", 0) or 0
                         )
+                        qty_now = float(
+                            (getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0
+                        )
+                        if qty_now <= 0:
+                            qty_now = float(getattr(self, "base_qty", 0) or 0)
                         self._arm_chase_reentry_watch(
                             side=side_now, exit_px=exit_px_now, atr=atr_now,
-                            attempt=attempt, deadline_ts=deadline,
+                            attempt=attempt, deadline_ts=deadline, qty=qty_now,
                         )
                 except Exception as e:
                     logger.debug(f"[{self.symbol}] 限价超限转追单确认跳过: {e}")
