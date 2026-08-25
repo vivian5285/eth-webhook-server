@@ -5900,6 +5900,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if isinstance(pos, dict) and float(pos.get("size") or 0) > 0:
             return False
 
+        # 例外：重启前若有正在进行中的TV心跳追回周期(挂着真实限价单)，
+        # 不能被这条"服务宕机期间已全平"的补发收网逻辑当成误伤对象——
+        # 追回单本来就是"仓位还没成交、REST查也是空仓"的正常中间状态，
+        # 而下面的had_active_book又有个"该symbol历史上开过仓就算数"的
+        # 兜底(_load_last_journal_entry)，对任何交易过的品种几乎总是True，
+        # 导致这里无条件撤单+清零追回账本（2026-08-25实盘复现：BNBUSDT
+        # 追回限价单挂着时重启，正是被这条路径拦下清零的，不是下面
+        # "确认空仓"分支那处——那处的同款保护根本没机会被走到）。
+        if bool(getattr(self, "catchup_active", False)) and getattr(
+            self, "catchup_limit_order_id", None
+        ):
+            try:
+                open_orders = binance_client.get_open_orders(self.symbol)
+                if open_orders != ORDERS_QUERY_FAILED and any(
+                    str(o.get("orderId")) == str(self.catchup_limit_order_id)
+                    for o in (open_orders or [])
+                ):
+                    logger.info(
+                        f"🚑 [{self.symbol}] 重启对账：TV心跳追回限价单"
+                        f"id={self.catchup_limit_order_id}仍挂在交易所，跳过补发收网清零"
+                    )
+                    return False
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 重启对账核实追回挂单跳过: {e}")
+
         prev_watched = float(self.watched_qty or 0)
         prev_initial = float(self.initial_qty or 0)
         prev_side = self.current_side
