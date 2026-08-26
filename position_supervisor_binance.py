@@ -3062,6 +3062,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             and int(audit.get("matched_full") or 0) < int(audit.get("expected") or 0)
         )
         if live_qty > 0 and (stop_missing or tp_incomplete):
+            # 2026-08-26修复：这个函数一路走下来做了TP价格修复/雷达解除/
+            # 陈旧成交对账/硬止损锁定等好几步，每步都有隐含的REST往返，
+            # 走到这里的live_qty是函数入口传进来的参数，从未在这条终检
+            # 前重新核实过——仓位完全可能在函数执行期间已经被自己的止损
+            # 打平，hung虽然是刚查的(第3058行)、真实反映"当前没有STOP"，
+            # 但那正好是"仓位已经不存在、没有STOP很正常"，不是"仓位还在
+            # 却没保护"。跟今天其它几处假阳性同一个模式，终检前先用当前
+            # 实时仓位复核一次。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
+            )
+            if not still_has_qty_final:
+                logger.info(
+                    f"🛡️ [{source}] 终检防线未齐检测期间仓位已归零 "
+                    f"→ 无需强制闭环，非裸仓，此前的判定是假阳性"
+                )
+                return {
+                    "audit": audit, "result": result, "health": health,
+                    "shield_ok": True, "notes": notes, "price_plan": price_plan,
+                }
             logger.error(
                 f"🚨 [{source}] 终检防线未齐 TP "
                 f"{audit.get('matched_full', 0)}/{audit.get('expected', 0)} "
@@ -8758,6 +8781,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "exchange_target": exchange_target, "purged": purged,
                     "reason": "verify_fail_but_protected",
                 }
+            # 2026-08-26修复：all_stops==0既可能是"真裸奔"，也可能是"仓位
+            # 已经通过自己的止损单成交而归零"（成交后那张STOP单自然就从
+            # 挂单列表里消失了，_count_protective_stops同样会数到0）——
+            # 上面那条"盘口已有STOP"分支只覆盖了前一种假阳性，没覆盖这种。
+            # 先直接查一次仓位是否还在，跟今天其它几处TP/止损假阳性同一
+            # 个模式。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
+            )
+            if not still_has_qty_final:
+                logger.info(
+                    f"🛡️ [{self.symbol}] 雷达目标核实失败但复查仓位已归零 "
+                    f"→ 无需补挂，非裸仓，此前的失败判定是假阳性 | {reason}"
+                )
+                self._record_shield_maintain(success=True)
+                return {
+                    "ok": True, "skipped": True, "target": ledger_target,
+                    "exchange_target": exchange_target, "purged": purged,
+                    "reason": "verify_fail_but_flat",
+                }
             logger.error(
                 f"❌ [{self.symbol}] HARD_SL_FAIL_ABORT 核实失败 "
                 f"@{exchange_target:.2f} | {reason}"
@@ -9239,10 +9285,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             curr_px=curr_px,
         )
         if not verified:
-            dingtalk.report_system_alert(
-                "UPDATE_TP 对齐未完成",
-                f"{self._format_audit_summary(audit)} | 哨兵将继续核对",
+            # 2026-08-26修复：UPDATE_TP撤旧挂新中间有真实窗口，仓位可能
+            # 已经被自己的止损打平——跟今天其它几处TP假阳性同一个模式，
+            # 报警前先复核一次仓位。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
             )
+            if still_has_qty_final:
+                dingtalk.report_system_alert(
+                    "UPDATE_TP 对齐未完成",
+                    f"{self._format_audit_summary(audit)} | 哨兵将继续核对",
+                )
+            else:
+                logger.info(
+                    f"[{self.symbol}] UPDATE_TP对齐检查期间仓位已归零 → "
+                    f"非裸仓，此前的未对齐判定是假阳性"
+                )
 
     def _shield_tier_prices(self, entry=None):
         px = self._shield_stop_price(entry)
@@ -10549,6 +10610,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             ).get("ok", False)
 
         if real_amt > 0 and not getattr(self, "_tv_sl_missing_alerted", False):
+            # 2026-08-26修复：real_amt是函数入口传进来的值，走到这里之前
+            # 已经经过好几轮REST往返(_ensure_frozen_hard_sl/_sync_exchange_
+            # stop等)，仓位完全可能在这期间已经被自己的止损打平——跟今天
+            # 其它几处TP/止损假阳性同一个模式，报"TV硬止损缺失"这种紧急
+            # 告警前先用当前实时仓位复核一次，而不是沿用入口时的旧值。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
+            )
+            if not still_has_qty_final:
+                logger.info(
+                    f"🛡️ [{self.symbol}] 维护硬止损失败但复查仓位已归零 "
+                    f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                )
+                return False
             logger.error(
                 f"维护硬止损失败：持仓 {real_amt} {self._unit()} | entry={self.watched_entry} "
                 f"| side={self.current_side} | regime={self.regime} | 盘口无STOP"
@@ -10900,7 +10978,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if res:
                 placed += 1
             else:
-                logger.error(f"  ❌ 补挂 TP{level} @ {px:.2f} 失败")
+                # 2026-08-26修复：TP补挂是典型的周期性对账动作，跟今天已经
+                # 修过的几处"重试/收缩撞上仓位已被自己止损打平"是同一类假
+                # 阳性——补挂失败时先查一次仓位是否还在，真归零就降级为
+                # INFO，不再无条件记ERROR。
+                pos_final = self._get_active_position()
+                still_has_qty_final = (
+                    pos_final not in (None, "QUERY_FAILED")
+                    and isinstance(pos_final, dict)
+                    and float(pos_final.get("size") or 0) > 0
+                )
+                if still_has_qty_final:
+                    logger.error(f"  ❌ 补挂 TP{level} @ {px:.2f} 失败")
+                else:
+                    logger.info(
+                        f"  🫁 补挂 TP{level} @ {px:.2f} 期间仓位已归零 → "
+                        f"无需补挂，非裸仓，此前的失败判定是假阳性"
+                    )
             time.sleep(0.4)
         return placed
 
@@ -11507,9 +11601,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 live_qty, entry, dynamic_sl=None, cancel_first=False,
             )
             if placed <= 0 and int(last_audit.get("expected") or 0) > 0:
-                logger.error(
-                    f"☢️ 核武轮 {r + 1} 补挂=0 → 清标签后紧急再补（防裸TP）"
+                # 2026-08-26修复：这一轮撤了全部TP限价单再重挂，是典型的
+                # 窄窗口race——重挂返回0很可能是因为仓位在撤单→重挂这
+                # 1秒多的间隙里已经被自己的止损打平，不一定是真的挂单
+                # 故障。先查一次仓位再决定记ERROR还是INFO，跟今天其它
+                # 几处TP补挂假阳性同一个模式；下面仍然会走_place_tp_
+                # levels_only兜底重试(它自己也有仓位归零就停止重试的
+                # 保护)，这里只是调整日志级别，不改变兜底逻辑本身。
+                pos_final = self._get_active_position()
+                still_has_qty_final = (
+                    pos_final not in (None, "QUERY_FAILED")
+                    and isinstance(pos_final, dict)
+                    and float(pos_final.get("size") or 0) > 0
                 )
+                if still_has_qty_final:
+                    logger.error(
+                        f"☢️ 核武轮 {r + 1} 补挂=0 → 清标签后紧急再补（防裸TP）"
+                    )
+                else:
+                    logger.info(
+                        f"☢️ 核武轮 {r + 1} 补挂=0，但复查仓位已归零 → "
+                        f"非裸仓，此前的失败判定是假阳性"
+                    )
                 self._gc_stale_pending_defense_tags(save=False)
                 for lv in (1, 2):
                     self._clear_pending_tags_for_kind(f"TP{lv}", save=False)
@@ -11955,14 +12068,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         new_audit = result["audit"]
         if new_audit["matched_full"] < new_audit["expected"]:
-            self._call_dingtalk(
-                dingtalk.report_system_alert,
-                title="雷达守护：止盈仍未对齐",
-                detail=(
-                    f"{self.current_side} {real_amt} {self._unit()} | "
-                    f"{self._format_audit_summary(new_audit)} | 请人工核查币安挂单"
-                ),
+            # 2026-08-26修复：_enforce_defense_alignment是撤旧挂新的对齐
+            # 动作，真实窗口内仓位可能已被自己的止损打平——跟今天其它
+            # 几处TP假阳性同一个模式，报警前先复核一次仓位。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
             )
+            if not still_has_qty_final:
+                logger.info(
+                    f"📡 [雷达守护] 止盈对齐检查期间仓位已归零 → 非裸仓，"
+                    f"此前的未对齐判定是假阳性"
+                )
+            else:
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title="雷达守护：止盈仍未对齐",
+                    detail=(
+                        f"{self.current_side} {real_amt} {self._unit()} | "
+                        f"{self._format_audit_summary(new_audit)} | 请人工核查币安挂单"
+                    ),
+                )
         elif self._defense_needs_immediate_fix(audit):
             logger.info(
                 f"📡 [雷达守护] 纠偏完成: "
@@ -15539,16 +15667,32 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             symbol=self.symbol, reduce_only=True, client_order_id=tp_tag,
         )
         if not tp_order:
-            logger.error(f"🚨 [{self.symbol}] 网格套利止盈挂单失败，需人工核查")
-            try:
-                dingtalk.report_system_alert(
-                    f"网格套利止盈挂单失败 [{self.symbol}]",
-                    f"{side} {live_qty} @ {entry_px:.4f} 止盈@{tp_price:.4f} "
-                    f"挂单失败，硬止损仍在保护，请人工核查",
-                    level="紧急", immediate=True,
+            # 2026-08-26修复：紧挨着上面的硬止损重试块(15521-15538)已经有
+            # 这个假阳性检查，这条TP挂单在同一个函数、同一段窄窗口内，
+            # 之前漏了同款保护——先确认仓位是否已经归零，真归零就不算
+            # 需要人工核查的紧急事件。
+            pos_final = self._get_active_position()
+            still_has_qty_final = (
+                pos_final not in (None, "QUERY_FAILED")
+                and isinstance(pos_final, dict)
+                and float(pos_final.get("size") or 0) > 0
+            )
+            if not still_has_qty_final:
+                logger.info(
+                    f"🛡️ [{self.symbol}] 网格套利止盈挂单期间仓位已归零 "
+                    f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
                 )
-            except Exception:
-                pass
+            else:
+                logger.error(f"🚨 [{self.symbol}] 网格套利止盈挂单失败，需人工核查")
+                try:
+                    dingtalk.report_system_alert(
+                        f"网格套利止盈挂单失败 [{self.symbol}]",
+                        f"{side} {live_qty} @ {entry_px:.4f} 止盈@{tp_price:.4f} "
+                        f"挂单失败，硬止损仍在保护，请人工核查",
+                        level="紧急", immediate=True,
+                    )
+                except Exception:
+                    pass
 
         self._ensure_sentinel_running()
         try:
@@ -18384,9 +18528,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 if res:
                     placed += 1
                 else:
-                    logger.error(
-                        f"❌ 挂 TP{lv['level']} 失败 {q} @ {px:.2f} {self.symbol}"
+                    # 2026-08-26修复：cancel_first撤光旧TP再重挂，中间有真实
+                    # 窗口让仓位被自己的硬止损打平——跟今天已经修过的几处
+                    # 同一类假阳性，补挂失败前先查一次仓位是否还在。
+                    pos_final = self._get_active_position()
+                    still_has_qty_final = (
+                        pos_final not in (None, "QUERY_FAILED")
+                        and isinstance(pos_final, dict)
+                        and float(pos_final.get("size") or 0) > 0
                     )
+                    if still_has_qty_final:
+                        logger.error(
+                            f"❌ 挂 TP{lv['level']} 失败 {q} @ {px:.2f} {self.symbol}"
+                        )
+                    else:
+                        logger.info(
+                            f"🫁 挂 TP{lv['level']} @ {px:.2f} {self.symbol} 期间"
+                            f"仓位已归零 → 无需补挂，非裸仓，此前的失败判定是假阳性"
+                        )
                 time.sleep(0.35)
 
         self._maintain_hard_shield(
