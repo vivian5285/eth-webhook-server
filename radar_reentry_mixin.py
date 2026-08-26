@@ -1528,7 +1528,18 @@ class RadarReentryMixin:
         单调只紧不松闸门(哨兵日志里"breath_stop未改善"那一行)，跟档位给
         出的step/mult参数无关，档位调宽只会让止损有更多空间跟着趋势跑，
         调窄只会让止损收紧得更快，两个方向都不可能让已经锁住的止损后退。
+
+        2026-08-26自查修复：网格套利仓位(position_source=="GRID")开仓时
+        故意把adx_tier锁定为用户手填的tv_open_tier(_finalize_grid_entry
+        里"self.adx_tier = self.open_regime")，这是有意的固定档位，不是
+        遗漏没锁。_apply_breath_stop_tick对GRID仓位没有单独短路，本函数
+        原来会跟普通TV仓位一样把它悄悄改成实时ADX算出来的档位——今天
+        新增功能范围本意只覆盖TV信号仓位，网格这条独立、故意固定的路径
+        应该排除在外，否则等于在没被要求的情况下悄悄改变了网格仓位的
+        既有行为。
         """
+        if str(getattr(self, "position_source", "TV") or "TV").upper() == "GRID":
+            return
         now = time.time()
         last = float(getattr(self, "_adx_tier_last_refresh_ts", 0) or 0)
         if last > 0 and (now - last) < ADX_TIER_REEVAL_SEC:
