@@ -8319,6 +8319,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             time.sleep(0.35)
             order = self._place_vps_hard_sl_order(live_qty, exchange_target)
             if not order:
+                # 2026-08-26修复：同一个函数里_ensure_frozen_hard_sl那条分支
+                # 08-22已经修过"仓位已经空了→非裸奔"的假阳性，这条雷达腿
+                # 重挂失败分支之前没有同款检查——实盘复现(binanceC LITEUSDT
+                # 16:26)：TP1刚成交触发这条数量收缩，同一瞬间仓位已经被
+                # 硬止损打平，_place_vps_hard_sl_order自然挂不出去(没仓位
+                # 可挂)，但代码不分青红皂白记ERROR，跟08-22那次是同一类
+                # "重试/收缩动作撞上仓位已被自己止损打平"的假阳性。
+                pos_final = self._get_active_position()
+                still_has_qty_final = (
+                    pos_final not in (None, "QUERY_FAILED")
+                    and isinstance(pos_final, dict)
+                    and float(pos_final.get("size") or 0) > 0
+                )
+                if not still_has_qty_final:
+                    logger.info(
+                        f"🫁 [{self._tag()}] 雷达止损数量收缩重挂期间仓位已归零 "
+                        f"→ 无需补挂，非裸仓，此前的失败判定是假阳性"
+                    )
+                    self._save_state()
+                    return True
                 # 雷达暂缺时硬止损仍在 → 非裸奔；继续告警由哨兵补雷达
                 logger.error(
                     f"🫁 [{self._tag()}] 雷达止损数量收缩重挂失败 @{stop:.2f} "
