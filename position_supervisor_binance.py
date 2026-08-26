@@ -122,6 +122,7 @@ from reentry_profiles import (
     adx_to_tier,
     arm_stop_price,
     get_reentry_profile,
+    looser_tier,
     tier_label,
 )
 from smart_reentry_engine import blank_reentry_state
@@ -4677,6 +4678,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.adx_tier = 1
             self.radar_tier = 1
             self.hard_sl_buffer = 1.15
+        # 2026-08-27修复：重入成交(_on_reentry_limit_filled→bump_after_
+        # reentry_fill)本来会先把radar_tier设成looser_tier(adx_tier)——
+        # "重入成功后雷达系数放宽一档"，这是2026-07-25(commit e11e489)就
+        # 有的既有设计，注释见reentry_profiles.py:16。但_arm_temp_stop_
+        # and_tp12是开仓/重入共用的"共同第一步"，上面_bind_adx_tier_on_
+        # open()不知道当前是重入，无条件把radar_tier重新绑定成跟adx_tier
+        # 一样——从功能引入那天起就把这个放宽悄悄吃掉了，重入的呼吸空间
+        # 从未真正比首次开仓更宽松过。这里按reentry_attempt补回同一个
+        # 放宽，用_bind_adx_tier_on_open()刚绑好的（可能是重入时TV带来的
+        # 新值）adx_tier做基准，比硬编到重入前的旧值更准确。
+        if int(getattr(self, "reentry_attempt", 0) or 0) >= 1:
+            self.radar_tier = looser_tier(int(getattr(self, "adx_tier", 1) or 1))
 
         temp_sl = self._temp_hard_stop_from_tv(entry, side)
         if temp_sl <= 0:
