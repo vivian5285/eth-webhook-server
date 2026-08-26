@@ -165,24 +165,29 @@ BREATH_XAU: Dict[str, Any] = {
 # 用真实XMR 6h K线（币安原生6h间隔，不用合成）重新量了500根样本的回调
 # 分布：中位数≈3.01×ATR，75分位≈3.79×ATR，90分位≈4.99×ATR。ATR%=2.07%。
 # （90分钟那版数值已作废，这版才是实际生效的）
+# 2026-08-26再校准：用户把XMR周期从6小时(360min)改成145分钟，tv_tf_sec同步。
+# 145分钟能被5分钟整除，用真实5m K线合成后测(scratch_calibrate_xmr_145.py，
+# 62天616根合成K线、96个回调样本)：中位数回调2.35×ATR、75分位3.14×ATR、
+# 90分位4.44×ATR，ATR%=2.03%。周期缩短后波动率标准化后的相对回调幅度
+# 也跟着变小，这版覆盖旧的6h时代数值。
 BREATH_XMR: Dict[str, Any] = {
     "name": "XMR",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 1.00,
-    "step_advance_atr": 0.65,
+    "step_trigger_atr": 2.35,
+    "step_advance_atr": 1.53,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 3.00,  # 覆盖实测中位数回调(3.01)
-    "breath_tp23": 3.80,  # 覆盖实测75分位回调
+    "breath_tp12": 2.35,  # 08-26再校准(145min)：覆盖实测中位数回调(2.35)
+    "breath_tp23": 3.14,  # 08-26再校准(145min)：覆盖实测75分位回调(3.14)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.0,
-    "max_mult": 5.8,      # 覆盖实测90分位回调(4.99)以上
+    "min_mult": 3.4,
+    "max_mult": 4.7,      # 08-26再校准(145min)：覆盖实测90分位回调(4.44)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
