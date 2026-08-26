@@ -204,16 +204,16 @@
     ]
   },
   "XMR": {
-    "tv_tf_sec": 8700,
+    "tv_tf_sec": 28800,
     "reentry_window_bars": 1,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种，此前_BY_SYMBOL遗漏XMR/SNDK/PAXG三个新品种，静默退回REENTRY_ETH（跟2026-08-11 BNB/ZEC/BCH那次死配置同类问题），本次一并接线修复。周期6h，原生K线偏长，reentry_window_bars从2根收到1根（1根已达360min，比ETH 2×90m=180min的窗口还长）。step_trigger/step_advance按sqrt(XMR breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍缩放ETH三档基线（两边用同一套breath_profiles.py校准方法测得，比原BNB/ZEC/BCH那次用的局部高点法样本更大更稳）；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH（ADX+动量已有连续插值）。2026-08-26修正：用户把XMR周期从6小时改成145分钟，tv_tf_sec同步为8700(145×60)；window_bars维持1——145min×1=145min已经很接近~150-200min的窗口惯例，×2=290min会明显偏长。step_trigger/step_advance按sqrt(XMR新测145分钟中位数回调2.35/ETH当前中位数回调2.70)≈0.933倍重新缩放ETH三档基线（scratch_calibrate_xmr_145.py，62天616根5m合成K线、96个回调样本，比旧的6h时代数据更贴近当前实际周期）。",
+    "note": "2026-08-15：新增品种，此前_BY_SYMBOL遗漏XMR/SNDK/PAXG三个新品种，静默退回REENTRY_ETH（跟2026-08-11 BNB/ZEC/BCH那次死配置同类问题），本次一并接线修复。2026-08-26同一天两次改周期：先改成145分钟(tv_tf_sec=8700，已作废)，后来用户确认XMR是替补品种、交易频率不用太高，最终定为8小时——tv_tf_sec改成28800(8×3600)；window_bars维持1(8h×1=480min，虽超出~150-200min的一般惯例，但8h原生周期本身就长，只能收到1根，同6h时代的处理一致，不能再往下收)。step_trigger/step_advance按sqrt(XMR新测8小时中位数回调2.33/ETH当前中位数回调2.70)≈0.929倍重新缩放ETH三档基线（scratch_calibrate_xmr_145.py同一套方法改参数复用，223天670根原生8h K线、115个回调样本，样本量比145分钟那版更大更稳）。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：按XMR新测145分钟波动率(0.933倍)缩放",
+        "note": "弱趋势：按XMR新测8小时波动率(0.929倍)缩放",
         "step_trigger_atr": 0.93,
-        "step_advance_atr": 0.47,
+        "step_advance_atr": 0.46,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -221,8 +221,8 @@
       },
       {
         "name": "mid",
-        "note": "中趋势：按XMR新测145分钟波动率(0.933倍)缩放",
-        "step_trigger_atr": 1.12,
+        "note": "中趋势：按XMR新测8小时波动率(0.929倍)缩放",
+        "step_trigger_atr": 1.11,
         "step_advance_atr": 0.56,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
@@ -231,8 +231,8 @@
       },
       {
         "name": "strong",
-        "note": "强趋势：按XMR新测145分钟波动率(0.933倍)缩放",
-        "step_trigger_atr": 1.31,
+        "note": "强趋势：按XMR新测8小时波动率(0.929倍)缩放",
+        "step_trigger_atr": 1.30,
         "step_advance_atr": 0.65,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
