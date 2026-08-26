@@ -6008,6 +6008,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"monitoring={was_monitoring}) 但盘口已全平 → 补发收网播报"
         )
         binance_client.cancel_all_open_orders(self.symbol)
+        # 2026-08-27修复：exit_source归因必须在_reset_breath_ledger_on_flat
+        # 清账本之前算好——_infer_flat_close_meta依赖current_sl/tv_sl_ref/
+        # _radar_was_armed()这些字段，晚一步调用会全部读到清零后的默认值，
+        # 把这条本来该有的"雷达/保本"归因错标成"来源未明"，纯属播报文案
+        # 退化（不影响仓位/资金安全），跟_handle_manual_flat_detected里
+        # "snap先于reset捕获"是同一条纪律，这里之前漏了。
+        recover_meta = self._infer_flat_close_meta(hint_reason="重启对账补发收网")
         # 完整清零：禁止只清 qty 留下 entry/sl/atr（此前半清理污染 HARD_SL）
         self._reset_breath_ledger_on_flat(source="重启对账补发收网")
         self._save_state()
@@ -6016,7 +6023,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"重启对账补发 | 原账本 {prev_watched} {self._unit()} {prev_side or ''} | "
             f"盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
         )
-        recover_meta = self._infer_flat_close_meta(hint_reason="重启对账补发收网")
         self._call_dingtalk(
             dingtalk.report_supervisor_close,
             reason=recover_meta.get("tv_reason", "仓位归零 (重启对账补发)"),
@@ -14585,6 +14591,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.breakeven_phase = False
         self.radar_activated = False
         self.radar_mega_strong = False
+        # 2026-08-27修复：本函数一直漏清_radar_handoff_done/_radar_armed_
+        # after_tp1——_radar_was_armed()三个来源里只有radar_activated在这
+        # 清零，这两个"曾经交棒过"的历史标记会原样带到下一次"发现空仓"
+        # (哪怕那次根本不是同一笔仓位，比如TV心跳追回限价单被撤销这种
+        # 从未成交过的挂单)，把_classify_flat_exit_source误判成radar_be，
+        # 进而让_maybe_start_smart_limit_reentry误武装追单确认，snap里
+        # entry/qty全是0也照样武装（实盘复现：C账户LITEUSDT 2026-08-26
+        # 17:24 重启接管期间一张从未成交的TV心跳追回限价单被判定"已撤"，
+        # 误判radar_be→武装追单确认→24分钟后确认通过想挂限价，才在
+        # _place_chase_limit发现_chase_watch_qty=0，报"追单限价无数量"）。
+        self._radar_armed_after_tp1 = False
+        self._radar_handoff_done = False
         self._adx_tier_last_refresh_ts = 0.0
         self._adx_tier_pending_candidate = None
         self.radar_activation_sticky = False

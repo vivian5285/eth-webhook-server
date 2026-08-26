@@ -976,6 +976,15 @@ class RadarReentryMixin:
                 and exit_src == "radar_be"
                 and not bool(snap.get("tp1_ever_filled"))
                 and attempt < int(get_reentry_profile(self.symbol).get("max_reentries") or 1)
+                # 2026-08-27修复：snap.qty<=0说明这次"发现空仓"根本不是一笔
+                # 真实成交过的仓位收尾(entry/qty从没被写入过，比如从未成交
+                # 的TV心跳追回限价单被撤销，却因_radar_was_armed()读到上一
+                # 笔仓位遗留的_radar_handoff_done/_radar_armed_after_tp1
+                # 误判成radar_be)——武装了也注定在_place_chase_limit那步
+                # 因为_chase_watch_qty<=0报"追单限价无数量"而放弃，不如
+                # 直接不武装，省一次必然失败的10800s观察窗+一条ERROR
+                # (实盘复现：C账户LITEUSDT 2026-08-26 17:24)。
+                and float(snap.get("qty") or 0) > 0
             ):
                 # 2026-08-20：不再要求adx_tier==2——开仓那一刻的静态tier快照
                 # 不代表后面行情走势，武装观察窗后交给多周期实时确认
