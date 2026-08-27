@@ -3071,7 +3071,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 但那正好是"仓位已经不存在、没有STOP很正常"，不是"仓位还在
             # 却没保护"。跟今天其它几处假阳性同一个模式，终检前先用当前
             # 实时仓位复核一次。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -8324,7 +8324,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     # 已经空的仓位本来就该返回False，连续3次"失败"里混进了
                     # 这种"根本不需要挂了"的假阳性，发紧急裸仓告警之前必须
                     # 再复查一次，跟上面第一次复查同一个道理。
-                    pos_final = self._get_active_position()
+                    pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                     still_has_qty_final = (
                         pos_final not in (None, "QUERY_FAILED")
                         and isinstance(pos_final, dict)
@@ -8368,7 +8368,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 硬止损打平，_place_vps_hard_sl_order自然挂不出去(没仓位
                 # 可挂)，但代码不分青红皂白记ERROR，跟08-22那次是同一类
                 # "重试/收缩动作撞上仓位已被自己止损打平"的假阳性。
-                pos_final = self._get_active_position()
+                pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                 still_has_qty_final = (
                     pos_final not in (None, "QUERY_FAILED")
                     and isinstance(pos_final, dict)
@@ -8806,7 +8806,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 上面那条"盘口已有STOP"分支只覆盖了前一种假阳性，没覆盖这种。
             # 先直接查一次仓位是否还在，跟今天其它几处TP/止损假阳性同一
             # 个模式。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -9141,7 +9141,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 挂单对一个已经不存在的仓位必然全部被交易所拒绝(-2022)，
                 # 继续重试只是白烧API配额、刷一堆吓人的失败日志。这里提前
                 # 复查一次，仓位已空就直接停止重试，不当成"挂单失败"。
-                pos_check = self._get_active_position()
+                pos_check = self._get_active_position(prefer_ws=False, force_rest=True)
                 if pos_check in (None, "QUERY_FAILED") or (
                     isinstance(pos_check, dict) and float(pos_check.get("size") or 0) <= 0
                 ):
@@ -9307,7 +9307,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 2026-08-26修复：UPDATE_TP撤旧挂新中间有真实窗口，仓位可能
             # 已经被自己的止损打平——跟今天其它几处TP假阳性同一个模式，
             # 报警前先复核一次仓位。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -10634,7 +10634,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # stop等)，仓位完全可能在这期间已经被自己的止损打平——跟今天
             # 其它几处TP/止损假阳性同一个模式，报"TV硬止损缺失"这种紧急
             # 告警前先用当前实时仓位复核一次，而不是沿用入口时的旧值。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -11001,7 +11001,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 修过的几处"重试/收缩撞上仓位已被自己止损打平"是同一类假
                 # 阳性——补挂失败时先查一次仓位是否还在，真归零就降级为
                 # INFO，不再无条件记ERROR。
-                pos_final = self._get_active_position()
+                pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                 still_has_qty_final = (
                     pos_final not in (None, "QUERY_FAILED")
                     and isinstance(pos_final, dict)
@@ -11627,7 +11627,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 几处TP补挂假阳性同一个模式；下面仍然会走_place_tp_
                 # levels_only兜底重试(它自己也有仓位归零就停止重试的
                 # 保护)，这里只是调整日志级别，不改变兜底逻辑本身。
-                pos_final = self._get_active_position()
+                pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                 still_has_qty_final = (
                     pos_final not in (None, "QUERY_FAILED")
                     and isinstance(pos_final, dict)
@@ -12090,7 +12090,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 2026-08-26修复：_enforce_defense_alignment是撤旧挂新的对齐
             # 动作，真实窗口内仓位可能已被自己的止损打平——跟今天其它
             # 几处TP假阳性同一个模式，报警前先复核一次仓位。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -15667,7 +15667,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假阳性)：
             # 重试这几秒内仓位完全可能已经被别的路径平掉，发紧急裸仓告警
             # 前必须先确认仓位真的还在。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -15702,7 +15702,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 这个假阳性检查，这条TP挂单在同一个函数、同一段窄窗口内，
             # 之前漏了同款保护——先确认仓位是否已经归零，真归零就不算
             # 需要人工核查的紧急事件。
-            pos_final = self._get_active_position()
+            pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
             still_has_qty_final = (
                 pos_final not in (None, "QUERY_FAILED")
                 and isinstance(pos_final, dict)
@@ -16206,7 +16206,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     # 紧接着来的反向TV信号先平后开)平掉，_ensure_frozen_hard_sl
                     # 对已经空的仓位本来就该返回False，发紧急裸仓告警前
                     # 必须先确认仓位真的还在。
-                    pos_final = self._get_active_position()
+                    pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                     still_has_qty_final = (
                         pos_final not in (None, "QUERY_FAILED")
                         and isinstance(pos_final, dict)
@@ -18562,7 +18562,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     # 2026-08-26修复：cancel_first撤光旧TP再重挂，中间有真实
                     # 窗口让仓位被自己的硬止损打平——跟今天已经修过的几处
                     # 同一类假阳性，补挂失败前先查一次仓位是否还在。
-                    pos_final = self._get_active_position()
+                    pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                     still_has_qty_final = (
                         pos_final not in (None, "QUERY_FAILED")
                         and isinstance(pos_final, dict)

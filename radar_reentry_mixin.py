@@ -2640,7 +2640,7 @@ class RadarReentryMixin:
                 # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假
                 # 阳性)：重试这几秒内仓位完全可能已经被别的路径平掉，发
                 # 紧急裸仓告警前必须先确认仓位真的还在。
-                pos_final = self._get_active_position()
+                pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                 still_has_qty_final = (
                     pos_final not in (None, "QUERY_FAILED")
                     and isinstance(pos_final, dict)
@@ -3185,7 +3185,7 @@ class RadarReentryMixin:
                 # 2026-08-25实盘复现(ASML _breath_resize_stop_on_tp同款假
                 # 阳性)：重试这几秒内仓位完全可能已经被别的路径平掉，发
                 # 紧急裸仓告警前必须先确认仓位真的还在。
-                pos_final = self._get_active_position()
+                pos_final = self._get_active_position(prefer_ws=False, force_rest=True)
                 still_has_qty_final = (
                     pos_final not in (None, "QUERY_FAILED")
                     and isinstance(pos_final, dict)
