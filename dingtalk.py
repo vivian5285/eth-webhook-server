@@ -194,6 +194,8 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ASML"
     if "TSLA" in sym:
         return "TSLA"
+    if "META" in sym:
+        return "META"
     if "GS" in sym:
         return "GS"
     if "MU" in sym:
@@ -233,6 +235,8 @@ def _resolve_unit(unit_label=None, symbol=None):
         return "ASML"
     if "TSLA" in ctx_s:
         return "TSLA"
+    if "META" in ctx_s:
+        return "META"
     if "GS" in ctx_s:
         return "GS"
     if "MU" in ctx_s:
@@ -1825,7 +1829,7 @@ _CALIBRATED_SYMBOLS = (
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT",
     "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT",
     "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT",
-    "TSLAUSDT",
+    "TSLAUSDT", "METAUSDT",
 )
 
 

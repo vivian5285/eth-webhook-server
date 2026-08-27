@@ -206,6 +206,16 @@ _DEFAULT_TSLA_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.57, "step_advance_atr": 0.79,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
+# 2026-08-27新增：sqrt(META breath_profiles.py中位数回调2.58/ETH当前中位数
+# 回调2.70)≈0.978倍微收紧ETH三档基线（154天924根原生4h K线、133个回调样本）。
+_DEFAULT_META_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 0.98, "step_advance_atr": 0.49,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.17, "step_advance_atr": 0.59,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.37, "step_advance_atr": 0.68,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
 
 REENTRY_TIERS_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
@@ -313,6 +323,9 @@ LITE_TIERS: List[Dict[str, float]] = list(
 TSLA_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("TSLA") or {}).get("tiers") or _DEFAULT_TSLA_TIERS)
 )
+META_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("META") or {}).get("tiers") or _DEFAULT_META_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 _BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
@@ -330,6 +343,7 @@ _GS_ZONE = float((_CFG.get("GS") or {}).get("reentry_zone_atr") or 0.5)
 _MU_ZONE = float((_CFG.get("MU") or {}).get("reentry_zone_atr") or 0.5)
 _LITE_ZONE = float((_CFG.get("LITE") or {}).get("reentry_zone_atr") or 0.5)
 _TSLA_ZONE = float((_CFG.get("TSLA") or {}).get("reentry_zone_atr") or 0.5)
+_META_ZONE = float((_CFG.get("META") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
 # 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
@@ -359,6 +373,7 @@ _GS_WINDOW_BARS = int((_CFG.get("GS") or {}).get("reentry_window_bars") or 2)
 _MU_WINDOW_BARS = int((_CFG.get("MU") or {}).get("reentry_window_bars") or 2)
 _LITE_WINDOW_BARS = int((_CFG.get("LITE") or {}).get("reentry_window_bars") or 2)
 _TSLA_WINDOW_BARS = int((_CFG.get("TSLA") or {}).get("reentry_window_bars") or 1)
+_META_WINDOW_BARS = int((_CFG.get("META") or {}).get("reentry_window_bars") or 1)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
@@ -383,6 +398,7 @@ _GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)
 _MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 5400)
 _LITE_TF_SEC = int((_CFG.get("LITE") or {}).get("tv_tf_sec") or 5400)
 _TSLA_TF_SEC = int((_CFG.get("TSLA") or {}).get("tv_tf_sec") or 21600)
+_META_TF_SEC = int((_CFG.get("META") or {}).get("tv_tf_sec") or 14400)
 
 
 def make_reentry_client_order_id(
@@ -767,6 +783,26 @@ REENTRY_TSLA: Dict[str, Any] = {
     "tick_size": 0.01,
 }
 
+REENTRY_META: Dict[str, Any] = {
+    "name": "META",
+    "tv_tf": "4h",
+    "tv_tf_sec": _META_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    # 2026-08-27：META ATR%=1.09%，沿用跟其它TradFi品种一致的1%惯例。
+    "radar_gate_return_pct": 0.01,
+    "tiers": META_TIERS,
+    "reentry_zone_atr": _META_ZONE,
+    "reentry_window_bars": _META_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
@@ -785,6 +821,7 @@ _BY_SYMBOL = {
     "MUUSDT": REENTRY_MU,
     "LITEUSDT": REENTRY_LITE,
     "TSLAUSDT": REENTRY_TSLA,
+    "METAUSDT": REENTRY_META,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }
