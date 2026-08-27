@@ -297,24 +297,28 @@ BREATH_SNDK: Dict[str, Any] = {
 # 0.58%接近），但回调分布尾巴很肥（金价类品种常见的慢速大幅度回撤特征），
 # 呼吸空间给得也相应更宽。保本激活门槛：1.5×ATR%≈0.82%，跟BNB/ETH/XAU
 # 同一量级，不需要像ZEC那样额外加百分比腿，用共用公式即可。
+# 2026-08-27再校准：用户把PAXG周期从150分钟改成130分钟。130分钟能被5分钟
+# 整除，用真实5m K线合成后测(61.8天685根合成K线、96个回调样本)：中位数
+# 回调3.03×ATR、75分位4.44×ATR、90分位6.44×ATR，ATR%=0.56%，覆盖旧的150
+# 分钟时代数值——周期缩短后相对回调幅度也跟着收窄。
 BREATH_PAXG: Dict[str, Any] = {
     "name": "PAXG",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 1.25,
-    "step_advance_atr": 0.81,
+    "step_trigger_atr": 3.03,
+    "step_advance_atr": 1.97,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 3.75,  # 覆盖实测中位数回调(3.75)
-    "breath_tp23": 6.20,  # 覆盖实测75分位回调(6.20)
+    "breath_tp12": 3.03,  # 08-27再校准(130min)：覆盖实测中位数回调(3.03)
+    "breath_tp23": 4.44,  # 08-27再校准(130min)：覆盖实测75分位回调(4.44)
     "phase2_trail_mult": 1.0,
-    "min_mult": 6.5,
-    "max_mult": 9.3,      # 覆盖实测90分位回调(8.88)以上
+    "min_mult": 4.8,
+    "max_mult": 6.7,      # 08-27再校准(130min)：覆盖实测90分位回调(6.44)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -437,24 +441,28 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1150根K线、262个摆动回调
 # 样本，中位数≈2.22×ATR，75分位≈3.23×ATR，90分位≈5.23×ATR——比08-15那版全线
 # 收窄26.2%~34.3%，四个"美股"品种里漂移幅度最大的一个。
+# 2026-08-27再校准：用户把ANTHROPIC周期从90分钟改成4小时。4小时是币安原生
+# 间隔，不用合成，直接拉K线测(86天516根原生4h K线、61个回调样本)：中位数
+# 回调2.24×ATR、75分位3.69×ATR、90分位5.47×ATR，ATR%=1.21%，覆盖旧的90
+# 分钟时代数值。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.99,
-    "step_advance_atr": 0.65,
+    "step_trigger_atr": 2.24,
+    "step_advance_atr": 1.46,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.22,  # 08-18再校准：覆盖实测中位数回调(2.22)
-    "breath_tp23": 3.23,  # 08-18再校准：覆盖实测75分位回调(3.23)
+    "breath_tp12": 2.24,  # 08-27再校准(4h)：覆盖实测中位数回调(2.24)
+    "breath_tp23": 3.69,  # 08-27再校准(4h)：覆盖实测75分位回调(3.69)
     "phase2_trail_mult": 1.0,
-    "min_mult": 5.0,
-    "max_mult": 5.5,      # 08-18再校准：覆盖实测90分位回调(5.23)以上
+    "min_mult": 4.2,
+    "max_mult": 5.8,      # 08-27再校准(4h)：覆盖实测90分位回调(5.47)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
