@@ -620,5 +620,43 @@
         "max_mult": 6.0
       }
     ]
+  },
+  "TSLA": {
+    "tv_tf_sec": 21600,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-08-27：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，TSLA特斯拉股票代币化永续，跟GS/MU/LITE同类）。周期6h，原生K线，reentry_window_bars收到1根（6h×1=360min，比ETH 2×90m=180min的窗口惯例长，但6h原生周期本身就长，只能收到1根，同XMR旧6h时代/8h最终版的处理一致，不能再往下收）。step_trigger/step_advance按sqrt(TSLA breath_profiles.py中位数回调3.40/ETH当前中位数回调2.70)≈1.122倍放宽ETH三档基线（scratch_calibrate_xmr_145.py同一套方法改参数复用，210.5天842根原生6h K线、120个回调样本，样本量充足）。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按TSLA自身波动率(1.122倍)放宽",
+        "step_trigger_atr": 1.12,
+        "step_advance_atr": 0.56,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按TSLA自身波动率(1.122倍)放宽",
+        "step_trigger_atr": 1.35,
+        "step_advance_atr": 0.67,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按TSLA自身波动率(1.122倍)放宽",
+        "step_trigger_atr": 1.57,
+        "step_advance_atr": 0.79,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
   }
 }

@@ -163,6 +163,19 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "ASMLUSDT",
         "breath": "ASML",
     },
+    "TSLAUSDT": {
+        "symbol": "TSLAUSDT",
+        "unit": "TSLA",
+        "tag": "TSLA",
+        # 2026-08-27：币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，TSLA
+        # (特斯拉)股票代币化永续，跟GS/MU/LITE同类。6小时周期。
+        "qty_step": 0.01,    # 实测LOT_SIZE stepSize
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,  # 实测PRICE_FILTER tickSize=0.01
+        "atr_fallback_symbol": "TSLAUSDT",
+        "breath": "TSLA",
+    },
     "GSUSDT": {
         "symbol": "GSUSDT",
         "unit": "GS",
@@ -315,6 +328,12 @@ _BINANCE_ALIASES = {
     "BINANCE:ASMLUSDT": "ASMLUSDT",
     "BINANCE:ASMLUSDT.P": "ASMLUSDT",
     "GS": "GSUSDT",
+    "TSLA": "TSLAUSDT",
+    "TSLAUSDT": "TSLAUSDT",
+    "TSLAUSD": "TSLAUSDT",
+    "TSLAUSDT.P": "TSLAUSDT",
+    "BINANCE:TSLAUSDT": "TSLAUSDT",
+    "BINANCE:TSLAUSDT.P": "TSLAUSDT",
     "GSUSDT": "GSUSDT",
     "GSUSD": "GSUSDT",
     "GSUSDT.P": "GSUSDT",
@@ -409,14 +428,14 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 
 
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,SKHYNIXUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,ASMLUSDT,GSUSDT,MUUSDT,LITEUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,SKHYNIXUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,ASMLUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT"]
+    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT"]
 
 
 def active_deepcoin_symbols():
@@ -464,6 +483,7 @@ def extract_symbol_from_payload(data):
         "GSUSDT.P", "BINANCE:GSUSDT", "GSUSDT",
         "MUUSDT.P", "BINANCE:MUUSDT", "MUUSDT",
         "LITEUSDT.P", "BINANCE:LITEUSDT", "LITEUSDT",
+        "TSLAUSDT.P", "BINANCE:TSLAUSDT", "TSLAUSDT",
     ):
         if token in blob:
             return token

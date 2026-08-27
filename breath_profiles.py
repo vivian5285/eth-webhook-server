@@ -201,6 +201,36 @@ BREATH_XMR: Dict[str, Any] = {
     "exit_score": 2,
 }
 
+# TSLA 基线（新增品种，2026-08-27，6小时周期，币安TRADIFI_PERPETUAL
+# underlyingType=EQUITY，特斯拉股票代币化永续，跟GS/MU/LITE同类）。
+# 6小时是币安原生间隔，不用合成，直接拉K线测(scratch_calibrate_xmr_145.py
+# 改参数复用，210.5天842根原生6h K线、120个回调样本)：中位数回调
+# 3.40×ATR、75分位4.36×ATR、90分位5.77×ATR，ATR%=1.35%。
+BREATH_TSLA: Dict[str, Any] = {
+    "name": "TSLA",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 3.40,
+    "step_advance_atr": 2.21,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 3.40,  # 覆盖实测中位数回调(3.40)
+    "breath_tp23": 4.36,  # 覆盖实测75分位回调(4.36)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.4,
+    "max_mult": 6.1,      # 覆盖实测90分位回调(5.77)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
 # BCH 基线（2026-08-14：用户重新启用BCH的TV，6小时周期，独立校准）
 # 用真实BCH 6h K线（币安原生6h间隔）量了500根样本的回调分布：
 # 中位数≈3.76×ATR，75分位≈4.51×ATR，90分位≈6.02×ATR。ATR%=1.56%。
@@ -580,6 +610,7 @@ _BY_BINANCE = {
     "GSUSDT": BREATH_GS,  # 2026-08-25：新增
     "MUUSDT": BREATH_MU,  # 2026-08-25：新增
     "LITEUSDT": BREATH_LITE,  # 2026-08-25：新增
+    "TSLAUSDT": BREATH_TSLA,  # 2026-08-27：新增
 }
 
 _BY_DEEPCOIN = {
