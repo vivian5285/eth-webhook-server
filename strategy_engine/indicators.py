@@ -104,6 +104,20 @@ def wilder_atr(bars: Sequence[dict], period: int = 14) -> float:
     return float(series[-1]) if series else 0.0
 
 
+def vwma_of_volume(bars: Sequence[dict], period: int = 20) -> List[float]:
+    """Pine `ta.vwma(volume, period)` 用在volume自己身上时的真实公式：
+    vwma(src,len) = sma(src*volume,len)/sma(volume,len)，src=volume时就是
+    sma(volume^2,len)/sma(volume,len)——不是普通SMA(volume)，是volume自
+    加权的量能均线，近期放量的K线权重更大。5套真实TV策略的量比判断
+    (量比=volume/该均线)都是照这个公式来的，不能用普通SMA代替。"""
+    vols = [_f(b.get("v")) for b in bars]
+    if len(vols) < period:
+        return []
+    num = sma([v * v for v in vols], period)
+    den = sma(vols, period)
+    return [n / d if d > 0 else 0.0 for n, d in zip(num, den)]
+
+
 def stoch_k(bars: Sequence[dict], period: int = 14, smooth: int = 3) -> List[float]:
     """随机指标%K，再做SMA(smooth)平滑——对齐真实TV Pine源码里的
     `ta.sma(ta.stoch(close, high, low, 14), 3)`（4份真实策略源码

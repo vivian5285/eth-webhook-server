@@ -48,19 +48,18 @@ from typing import Any, Dict, List, Optional
 from . import indicators as ind
 from . import klines
 from . import shadow_store
+from . import tv_symbol_params
 
 logger = logging.getLogger(__name__)
 
-# ── 打分制参数（照抄4份真实源码共用值）────────────────────────────────
-EMA_FAST_LEN = 15
-EMA_SLOW_LEN = 30
+# ── 打分制参数（RSI/StochK/ADX长度5套真实截图统一，EMA长度/门槛按品种
+# 走tv_symbol_params.py，不再是这里的全局常量）──────────────────────
 RSI_LEN = 14
 STOCH_LEN = 14
 STOCH_SMOOTH = 3
 ADX_LEN = 14
 MIN_ADX = 17.0
 ATR_PERIOD = 14
-ENTRY_SCORE_THRESHOLD = 2  # 满分6，源码默认门槛给得很低(1~2)，照抄
 EARLY_BODY_ATR_MULT = 0.5  # 照抄 earlyBodyThreshold
 
 # ── 4H裸K+放量反转出场参数（照抄grp_candlevol默认值）────────────────
@@ -91,80 +90,167 @@ def _tf_sec_to_interval(tf_sec: int) -> str:
     return f"{minutes}m"
 
 
-def compute_score(bars: List[dict], bars_4h: List[dict], bars_1d: List[dict]) -> Optional[Dict[str, Any]]:
+def compute_score(symbol: str, bars: List[dict], bars_4h: List[dict], bars_1d: List[dict]) -> Optional[Dict[str, Any]]:
     """用最新一根已闭合的本地K线 + 4H/日线EMA，算出跟真实TV源码同款的
-    bullScore/bearScore，外加ATR/现价/4H慢线EMA(用于方向确认)。"""
+    bullScore/bearScore——2026-08-29改成按品种真实参数(tv_symbol_params.py，
+    5套TV alert真实截图整理出来的)算，不再是全品种一刀切的固定值。
+    shape="gate"（01/02版本风格）：4H+日线+RSI+StochK+isVolatile+量比+KDJ
+      共7项，不含本地周期EMA点；方向确认看4H慢线EMA。
+    shape="trend"（03/04版本风格）：本地+4H+日线+RSI+StochK+ADX共6项，
+      不含isVolatile/量比/KDJ计分（这三个只当硬闸门，不加分）；方向确认
+      看本地慢线EMA。
+    isVolatile/量比闸门/KDJ闸门(kdj_on时)——不管哪个shape，都是真实源码
+    里entryCond的硬性AND条件，这里两个shape统一按硬闸门处理，只是
+    shape="gate"时这几个还会额外计分。"""
+    params = tv_symbol_params.get_symbol_params(symbol)
+    ema_fast_len = int(params["ema_fast"])
+    ema_slow_len = int(params["ema_slow"])
+    shape = params["shape"]
+
     closes = ind.closes(bars)
-    need = max(EMA_SLOW_LEN, ADX_LEN * 2 + 2, RSI_LEN + 1, STOCH_LEN) + 2
+    need = max(ema_slow_len, ADX_LEN * 2 + 2, RSI_LEN + 1, STOCH_LEN, 21) + 2
     if len(closes) < need:
         return None
 
-    ema_fast = ind.ema(closes, EMA_FAST_LEN)
-    ema_slow = ind.ema(closes, EMA_SLOW_LEN)
+    ema_fast = ind.ema(closes, ema_fast_len)
+    ema_slow = ind.ema(closes, ema_slow_len)
     if not ema_fast or not ema_slow:
         return None
     rsi_series = ind.rsi(closes, RSI_LEN)
     stoch_series = ind.stoch_k(bars, STOCH_LEN, STOCH_SMOOTH)
     adx = ind.wilder_adx(bars, ADX_LEN)
     atr = ind.wilder_atr(bars, ATR_PERIOD)
-    if not rsi_series or not stoch_series or atr <= 0:
+    vwma_series = ind.vwma_of_volume(bars, 20)
+    if not rsi_series or not stoch_series or atr <= 0 or not vwma_series:
         return None
 
-    ema_fast_4h = ind.ema(ind.closes(bars_4h), EMA_FAST_LEN) if bars_4h else []
-    ema_slow_4h = ind.ema(ind.closes(bars_4h), EMA_SLOW_LEN) if bars_4h else []
-    ema_fast_1d = ind.ema(ind.closes(bars_1d), EMA_FAST_LEN) if bars_1d else []
-    ema_slow_1d = ind.ema(ind.closes(bars_1d), EMA_SLOW_LEN) if bars_1d else []
+    ema_fast_4h = ind.ema(ind.closes(bars_4h), ema_fast_len) if bars_4h else []
+    ema_slow_4h = ind.ema(ind.closes(bars_4h), ema_slow_len) if bars_4h else []
+    ema_fast_1d = ind.ema(ind.closes(bars_1d), ema_fast_len) if bars_1d else []
+    ema_slow_1d = ind.ema(ind.closes(bars_1d), ema_slow_len) if bars_1d else []
 
     close = float(bars[-1]["c"])
     rsi_v = rsi_series[-1]
     stoch_v = stoch_series[-1]
     local_bull = ema_fast[-1] > ema_slow[-1]
     local_bear = ema_fast[-1] < ema_slow[-1]
+    bull_4h = bool(ema_fast_4h and ema_slow_4h and ema_fast_4h[-1] > ema_slow_4h[-1])
+    bear_4h = bool(ema_fast_4h and ema_slow_4h and ema_fast_4h[-1] < ema_slow_4h[-1])
+    bull_1d = bool(ema_fast_1d and ema_slow_1d and ema_fast_1d[-1] > ema_slow_1d[-1])
+    bear_1d = bool(ema_fast_1d and ema_slow_1d and ema_fast_1d[-1] < ema_slow_1d[-1])
+
+    is_volatile = (atr / close) > tv_symbol_params.VOL_THRESHOLD if close > 0 else False
+    vol_ratio = float(bars[-1]["v"]) / vwma_series[-1] if vwma_series[-1] > 0 else 0.0
+    volume_ok = vol_ratio > 1.1  # 量比阈值，5套截图统一默认1.1
+    kdj_bull_gate = (not params["kdj_on"]) or stoch_v > 50
+    kdj_bear_gate = (not params["kdj_on"]) or stoch_v < 50
 
     bull_score = 0
     bear_score = 0
-    if local_bull:
-        bull_score += 1
-    if local_bear:
-        bear_score += 1
-    if ema_fast_4h and ema_slow_4h:
-        if ema_fast_4h[-1] > ema_slow_4h[-1]:
+    if shape == "trend":
+        if local_bull:
             bull_score += 1
-        if ema_fast_4h[-1] < ema_slow_4h[-1]:
+        if local_bear:
             bear_score += 1
-    if ema_fast_1d and ema_slow_1d:
-        if ema_fast_1d[-1] > ema_slow_1d[-1]:
+        if bull_4h:
             bull_score += 1
-        if ema_fast_1d[-1] < ema_slow_1d[-1]:
+        if bear_4h:
             bear_score += 1
-    if rsi_v > 55:
-        bull_score += 1
-    if rsi_v < 45:
-        bear_score += 1
-    if stoch_v > 55:
-        bull_score += 1
-    if stoch_v < 45:
-        bear_score += 1
-    if adx > MIN_ADX:
-        bull_score += 1
-        bear_score += 1
+        if bull_1d:
+            bull_score += 1
+        if bear_1d:
+            bear_score += 1
+        if rsi_v > 55:
+            bull_score += 1
+        if rsi_v < 45:
+            bear_score += 1
+        if stoch_v > 55:
+            bull_score += 1
+        if stoch_v < 45:
+            bear_score += 1
+        if adx > MIN_ADX:
+            bull_score += 1
+            bear_score += 1
+    else:  # shape == "gate"
+        if bull_4h:
+            bull_score += 1
+        if bear_4h:
+            bear_score += 1
+        if bull_1d:
+            bull_score += 1
+        if bear_1d:
+            bear_score += 1
+        if rsi_v > 55:
+            bull_score += 1
+        if rsi_v < 45:
+            bear_score += 1
+        if stoch_v > 55:
+            bull_score += 1
+        if stoch_v < 45:
+            bear_score += 1
+        if is_volatile:
+            bull_score += 1
+            bear_score += 1
+        if volume_ok:
+            bull_score += 1
+            bear_score += 1
+        if params["kdj_on"] and stoch_v > 50:
+            bull_score += 1
+        if params["kdj_on"] and stoch_v < 50:
+            bear_score += 1
+
+    direction_ema = (ema_slow[-1] if shape == "trend" else (ema_slow_4h[-1] if ema_slow_4h else close))
+
+    # 入场裸K确认——照抄entryCandleBullConfirm/entryCandleBearConfirm：
+    # 触发入场判断的这根K线自己实体占比也要够(过滤十字星/长影线的犹豫
+    # K线)。只有Group A(entry_candle_confirm=True)真实开着，其余组OFF
+    # 时这两个恒为True，不影响判断。
+    last_bar = bars[-1]
+    o_last, h_last, l_last, c_last = (_f(last_bar[k]) for k in ("o", "h", "l", "c"))
+    rng_last = max(h_last - l_last, 1e-9)
+    body_ratio_last = abs(c_last - o_last) / rng_last
+    need_ratio = float(params.get("entry_candle_body_ratio") or 0.5)
+    if params.get("entry_candle_confirm"):
+        candle_bull_ok = c_last > o_last and body_ratio_last >= need_ratio
+        candle_bear_ok = c_last < o_last and body_ratio_last >= need_ratio
+    else:
+        candle_bull_ok = True
+        candle_bear_ok = True
 
     return {
         "bull_score": bull_score, "bear_score": bear_score,
         "close": close, "atr": atr, "adx": adx,
-        "ema_slow_4h": (ema_slow_4h[-1] if ema_slow_4h else close),
+        "direction_ema": direction_ema,
+        "is_volatile": is_volatile, "volume_ok": volume_ok,
+        "kdj_bull_gate": kdj_bull_gate, "kdj_bear_gate": kdj_bear_gate,
+        "candle_bull_ok": candle_bull_ok, "candle_bear_ok": candle_bear_ok,
+        "params": params,
         "bar_time": int(bars[-1]["t"]),
     }
 
 
 def decide_side(score: Dict[str, Any]) -> Optional[str]:
-    """分数过门槛 + 现价 vs 4H慢线EMA方向一致 -> 判定方向；否则None。
-    （对齐真实源码 longCond/shortCond 里的 close > emaSlow_4H 那道方向闸）"""
+    """分数过门槛(按品种真实门槛) + 现价vs方向确认EMA一致 + isVolatile/
+    量比/KDJ/裸K确认硬闸门全部通过 -> 判定方向；否则None。对齐真实源码
+    longCond/shortCond里除时间窗口外的全部AND条件。"""
     close = score["close"]
-    ema_slow_4h = score["ema_slow_4h"]
-    if score["bull_score"] >= ENTRY_SCORE_THRESHOLD and close > ema_slow_4h:
+    direction_ema = score["direction_ema"]
+    params = score["params"]
+    if not score["is_volatile"] or not score["volume_ok"]:
+        return None
+    if (
+        score["bull_score"] >= params["long_th"]
+        and close > direction_ema
+        and score["kdj_bull_gate"]
+        and score["candle_bull_ok"]
+    ):
         return "LONG"
-    if score["bear_score"] >= ENTRY_SCORE_THRESHOLD and close < ema_slow_4h:
+    if (
+        score["bear_score"] >= params["short_th"]
+        and close < direction_ema
+        and score["kdj_bear_gate"]
+        and score["candle_bear_ok"]
+    ):
         return "SHORT"
     return None
 
@@ -229,6 +315,7 @@ class ShadowPosition:
 
         self.tp1_done = False
         self.tp2_done = False
+        self.consec_adverse = 0  # 连续逆势K线计数——5套真实TV截图统一开着这条快速离场
         self.closed = False
         self.exit_price: Optional[float] = None
         self.exit_bar_time: Optional[int] = None
@@ -265,7 +352,7 @@ class ShadowPosition:
     def update_on_bar(self, bar: dict) -> bool:
         if self.closed:
             return True
-        h, l = float(bar["h"]), float(bar["l"])
+        o, h, l, c = float(bar["o"]), float(bar["h"]), float(bar["l"]), float(bar["c"])
 
         stop_hit = (l <= self.stop) if self.side == "LONG" else (h >= self.stop)
         tp1_hit = (not self.tp1_done) and ((h >= self.tp1_price) if self.side == "LONG" else (l <= self.tp1_price))
@@ -274,6 +361,15 @@ class ShadowPosition:
         if stop_hit:
             reason = "trail_stop" if self.tp2_done else ("tp1_stop" if self.tp1_done else "stop_loss")
             self.force_close(self.stop, int(bar["t"]), reason)
+            return True
+
+        # 连续逆势K线快速离场——照抄useConsecAdverseExit，5套真实TV截图
+        # 统一开着、都是2根。不看指标，纯数K线颜色：多单碰到连续N根收
+        # 阴线(或空单连续N根收阳线)立即按现价强平，比呼吸止损阶梯更快。
+        adverse = (c < o) if self.side == "LONG" else (c > o)
+        self.consec_adverse = self.consec_adverse + 1 if adverse else 0
+        if self.consec_adverse >= tv_symbol_params.CONSEC_ADVERSE_BARS:
+            self.force_close(c, int(bar["t"]), "consec_adverse")
             return True
 
         if tp1_hit:
@@ -394,7 +490,7 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
 
     bars_4h = klines.get_bars(symbol, "4h", limit=60)
     bars_1d = klines.get_bars(symbol, "1d", limit=60)
-    score = compute_score(bars, bars_4h, bars_1d)
+    score = compute_score(symbol, bars, bars_4h, bars_1d)
     if not score:
         return None
     side = decide_side(score)
