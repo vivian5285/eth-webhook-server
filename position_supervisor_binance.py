@@ -15262,43 +15262,54 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             except Exception:
                 pass
 
-            # 2026-08-28新增：市价前先"摸一口"盘口最优价（IOC限价打在对手
-            # 方最优价，能成交多少成交多少，未成交部分瞬间自动撤销，不
-            # 占用等待时间）——只堵"市价单直接吃穿好几档、付不必要滑点"
-            # 这一种真实浪费，不去博"等一会儿更好的价格"（那是心跳追回
-            # 机制的语义：TV仓位已经存在，多等几分钟代价小；正常开仓要
-            # 跟TV信号时机同步，宝贝已经确认过不能照搬追回那套"等分钟级"
-            # 逻辑，只做这种"零等待、只吃盘口最优一档"的轻量版）。取盘口
-            # 失败/IOC失败都不影响开仓，直接照原逻辑全额市价，绝不因为
-            # 这一步而拖慢或跳过开仓。
+            # 2026-08-29重新上线（v2）：市价前先"摸一口"盘口最优价。8-28
+            # 那版实盘复现BNBUSDT/OPENAIUSDT/PAXGUSDT三个品种、跨B/C/E
+            # 三账户精确翻倍——根因是直接相信了下单响应里的executedQty，
+            # 但那一刻交易所返回的是status=NEW而不是IOC本该同步给出的
+            # FILLED/EXPIRED终态，导致"以为没成交"又补了一次全量市价，
+            # 而那张本该被撤销的单子后来自己也成交了。
+            # 这版binance_client.place_ioc_limit_order内部已经改成主动
+            # 查+主动撤，不管交易所返回什么都会在下单后显式确认真实成交
+            # 量、显式撤掉未终结的挂单，再把确认过的filled_qty返回给这里
+            # ——不会再重演"信错了返回值"这类双开仓事故。
             market_qty = qty
-            ioc_order = None
-            # 2026-08-29紧急停用：实盘复现BNBUSDT/OPENAIUSDT/PAXGUSDT三个
-            # 品种、跨B/C/E三账户，目标qty全部被实际成交qty翻倍(比如
-            # 目标0.38实际0.76)。根因：futures_create_order传timeInForce=
-            # "IOC"后，交易所返回的status却是"NEW"、executedQty=0.00——
-            # 真正的IOC本该在同一次REST响应里就同步给出FILLED/EXPIRED终态，
-            # 返回"NEW"说明这张单实际上没有被交易所当成IOC处理(可能挂成
-            # 了普通单)，代码读到executedQty=0.00就认定"没成交，安全地
-            # 再市价补全量"，结果这张"IOC"单后来自己也成交了，两笔叠加
-            # 变成2倍仓位。在查清楚python-binance/交易所这边IOC参数具体
-            # 哪里不对之前，先整段跳过，直接全额市价——这是相对更安全的
-            # 已知行为，不能让还没修好的优化功能继续制造双倍仓位风险。
-            # 已影响的实盘仓位(BNB/OPENAI/PAXG，B/C/E多个账户)已经从数据
-            # 上核实清楚，交给宝贝决定要不要人工减仓，这里先止损这条代码
-            # 路径。
+            try:
+                bid, ask = binance_client.get_best_bid_ask(self.symbol)
+                touch_px = ask if action == "LONG" else bid
+                if touch_px > 0:
+                    filled_qty = binance_client.place_ioc_limit_order(
+                        open_side, qty, touch_px, symbol=self.symbol,
+                    )
+                    filled_qty = float(filled_qty or 0)
+                    if filled_qty > 0:
+                        market_qty = binance_client.format_quantity(
+                            max(qty - filled_qty, 0.0), self.symbol
+                        )
+                        logger.info(
+                            f"✅ [{self.symbol}] 摸盘口最优价确认成交 {filled_qty}/{qty} "
+                            f"@ {touch_px:.4f} | 剩余{market_qty}改市价补足"
+                        )
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] 摸盘口最优价跳过，直接市价: {e}")
+                market_qty = qty
 
+            # market_qty<=0说明摸盘口已经把全部意向量都确认成交了——这
+            # 种情况不该走市价、更不该被下面的重试/失败逻辑误判成"开仓
+            # 失败"（8-28那版没有这个分支时，market_qty=0会传给
+            # place_market_order直接被拒、进而触发限价兜底/彻底失败告警，
+            # 即便实盘仓位其实已经是对的）。
+            already_filled_by_ioc = market_qty <= 0
             order = (
                 binance_client.place_market_order(action, market_qty, symbol=self.symbol)
-                if market_qty > 0 else ioc_order
+                if not already_filled_by_ioc else None
             )
 
             # ── 开仓重试层（v16.17）：市价失败 → 等退避再重试 → 挂 TV 限价单 ─────
             OPEN_RETRY_DELAYS = (1.5, 3.0)   # 市价重试间隔（秒）
             last_err_text = ""
-            _order_placed = bool(order)
+            _order_placed = bool(order) or already_filled_by_ioc
 
-            if not order:
+            if not order and not already_filled_by_ioc:
                 for _retry_idx, _delay in enumerate(OPEN_RETRY_DELAYS, start=1):
                     logger.warning(
                         f"⚠️ [{self.symbol}] 市价开仓失败，重试 {_retry_idx}/{len(OPEN_RETRY_DELAYS)+1} "
@@ -15318,7 +15329,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         break
 
             # ── 开仓确认（v16.18）：市价成功后查持仓，防止 IP 冷却导致双重下单 ─────
-            if _order_placed and order:
+            # 2026-08-29修复：改成只看_order_placed，不再额外要求order真值
+            # ——摸盘口IOC已经把全部意向量确认成交时(already_filled_by_ioc)
+            # order恒为None，但_order_placed=True，这里如果继续要求
+            # order真值，会跳过确认步骤，导致watched_qty/entry/side这几个
+            # 本地账本字段没被写入，破坏后续TP/止损挂单依赖的状态。
+            if _order_placed:
                 time.sleep(0.5)  # 等待 Binance 成交确认
                 _ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
                 if _ip_rem > 0:
@@ -15348,8 +15364,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         f"⚠️ [{self.symbol}] 开仓疑似成功但无法确认持仓（QUERY_FAILED）"
                     )
 
-            if not order:
+            if not order and not already_filled_by_ioc:
                 # 市价全失败 → 按 TV 指导价挂限价开仓单（最后兜底）
+                # 2026-08-29：already_filled_by_ioc时order恒为None但仓位
+                # 其实已经通过摸盘口确认成交完毕，不该走到这条"市价彻底
+                # 失败"的限价兜底分支。
                 # 2026-08-28修复：这里此前用的是qty(原始总量)，若前面摸
                 # 盘口IOC已经先成交掉一部分(market_qty<qty)，会把已经
                 # 成交的这部分重复再下一遍单——改用market_qty(尚未成交

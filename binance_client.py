@@ -1769,47 +1769,92 @@ class BinanceClient:
     def place_ioc_limit_order(self, side, quantity, price, symbol="ETHUSDT",
                               reduce_only=False):
         """
-        2026-08-28新增：IOC(Immediate-Or-Cancel)限价单——挂在指定价格
-        (通常是盘口对手方最优价)，能立即成交多少就成交多少，未成交部分
-        瞬间自动撤销，不占用等待时间、不需要额外撤单。
+        2026-08-29重新设计（v2，取代8-28那版）：8-28版直接相信下单那一刻
+        交易所返回的executedQty，实盘复现BNBUSDT/OPENAIUSDT/PAXGUSDT三个
+        品种、跨B/C/E三账户精确翻倍——传timeInForce="IOC"后交易所那一刻
+        返回的是status=NEW、executedQty=0.00，不是IOC本该同步给出的
+        FILLED/EXPIRED终态；代码信了这个"0成交"就按全量market补单，
+        结果这张本该被自动撤销的"IOC"单后来自己也成交了，两笔叠加成2倍
+        仓位。
 
-        用途：开仓前先"摸一口"盘口最优价，只吃盘口最优这一档，避免市价
-        单直接吃穿好几档付不必要的滑点；未成交的剩余数量由调用方立即
-        改市价补足，全程只多一次查盘口+一次IOC尝试，不像追回机制那样
-        等待/刷新多轮——正常开仓要跟TV信号时机同步，不能靠"等更好价格"
-        拖慢，只堵"市价吃穿多档"这一种真实浪费。
+        这版不再信任下单响应里的任何字段——挂单后主动查一次真实状态，
+        不管查到什么，只要不是明确的终态(FILLED/CANCELED/EXPIRED/
+        REJECTED)就主动发一笔撤单(不指望交易所自己撤)，撤单后再查一次
+        拿最终真实成交量返回。全程比v1多1-2次接口往返、多约0.3~0.5秒，
+        换来的是：不管交易所这条IOC链路背后到底是什么时序问题，这边都
+        不可能因为"以为没成交、结果自己后来成交了"而产生双开仓。
+
+        返回：确认过的真实成交数量(float，0表示完全没成交/已撤干净)。
+        失败(下单本身报错等)一律返回0.0，调用方按"没吃到"处理，退回全
+        量市价——绝不因为这一步失败而拖慢或跳过开仓。
         """
         qty = self.format_quantity(quantity, symbol)
         px_str = self.format_price(price, symbol)
         if qty <= 0:
-            logger.error(f"[IOC限价跳过] 数量无效 {quantity}")
-            return None
+            logger.error(f"[摸盘口跳过] 数量无效 {quantity}")
+            return 0.0
 
-        def _do():
+        binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+
+        def _place():
             self._throttle_rest(symbol, kind="rest")
-            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
             params = {
                 "symbol": symbol, "side": binance_side, "type": "LIMIT",
                 "timeInForce": "IOC", "quantity": qty, "price": px_str,
             }
             if reduce_only:
                 params["reduceOnly"] = True
-            order = self.client.futures_create_order(**params)
-            filled = order.get("executedQty") if isinstance(order, dict) else "?"
-            status = order.get("status") if isinstance(order, dict) else "?"
-            logger.info(
-                f"[IOC摸盘口] {side} {qty} {symbol} @ {px_str} "
-                f"status={status} executedQty={filled}"
-            )
-            return order
+            return self.client.futures_create_order(**params)
 
         try:
-            return self._with_trade_retry(
-                symbol, "ioc_limit", _do, reduce_only=bool(reduce_only),
-            )
+            order = self._with_trade_retry(symbol, "ioc_limit", _place, reduce_only=bool(reduce_only))
         except Exception as e:
-            logger.warning(f"[IOC摸盘口跳过] {side} {qty} {symbol} @ {px_str}: {e}")
-            return None
+            logger.warning(f"[摸盘口跳过] {side} {qty} {symbol} @ {px_str}: {e}")
+            return 0.0
+
+        order_id = order.get("orderId") if isinstance(order, dict) else None
+        if not order_id:
+            logger.warning(f"[摸盘口] 下单响应无orderId，按未成交处理: {order}")
+            return 0.0
+
+        TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
+
+        def _query():
+            return self.client.futures_get_order(symbol=symbol, orderId=order_id)
+
+        time.sleep(0.3)
+        try:
+            real = self._with_trade_retry(symbol, "ioc_query", _query, reduce_only=True)
+        except Exception as e:
+            logger.warning(f"[摸盘口] 查单失败 orderId={order_id}: {e}")
+            real = None
+
+        status = (real or {}).get("status") or ""
+        filled = float((real or {}).get("executedQty") or 0)
+
+        if status not in TERMINAL:
+            # 不管交易所那边到底为什么还没进终态——主动撤，不指望它自己撤
+            def _cancel():
+                return self.client.futures_cancel_order(symbol=symbol, orderId=order_id)
+            try:
+                self._with_trade_retry(symbol, "ioc_cancel", _cancel, reduce_only=True)
+                logger.info(f"[摸盘口] 主动撤单确保清场 orderId={order_id} 撤前status={status}")
+            except Exception as e:
+                # 撤单失败很可能是因为这几百毫秒里它自己已经成交/取消了，
+                # 不是真故障——下面再查一次拿真实终态即可，不当成错误处理
+                logger.debug(f"[摸盘口] 撤单未成功(可能已自行终结): {e}")
+            time.sleep(0.2)
+            try:
+                real2 = self._with_trade_retry(symbol, "ioc_query2", _query, reduce_only=True)
+                filled = float((real2 or {}).get("executedQty") or filled)
+            except Exception as e:
+                logger.warning(f"[摸盘口] 撤单后复查失败 orderId={order_id}: {e}，按撤单前查到的{filled}处理")
+
+        logger.info(
+            f"[摸盘口] {side} {qty} {symbol} @ {px_str} 确认成交={filled} "
+            f"orderId={order_id}"
+        )
+        return filled
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT",
                           reduce_only=True, client_order_id=None):
