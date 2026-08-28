@@ -1751,6 +1751,66 @@ class BinanceClient:
             logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
 
+    def get_best_bid_ask(self, symbol="ETHUSDT"):
+        """
+        2026-08-28新增：开仓"先摸盘口最优价再补市价"用——返回(bid, ask)，
+        任一失败返回(0.0, 0.0)，调用方按0.0判断直接跳过摸盘口、走原有
+        市价路径，不阻塞开仓。
+        """
+        try:
+            r = self.client.futures_orderbook_ticker(symbol=symbol)
+            bid = float((r or {}).get("bidPrice") or 0)
+            ask = float((r or {}).get("askPrice") or 0)
+            return bid, ask
+        except Exception as e:
+            logger.warning(f"[盘口] 取买一卖一失败 {symbol}: {e}")
+            return 0.0, 0.0
+
+    def place_ioc_limit_order(self, side, quantity, price, symbol="ETHUSDT",
+                              reduce_only=False):
+        """
+        2026-08-28新增：IOC(Immediate-Or-Cancel)限价单——挂在指定价格
+        (通常是盘口对手方最优价)，能立即成交多少就成交多少，未成交部分
+        瞬间自动撤销，不占用等待时间、不需要额外撤单。
+
+        用途：开仓前先"摸一口"盘口最优价，只吃盘口最优这一档，避免市价
+        单直接吃穿好几档付不必要的滑点；未成交的剩余数量由调用方立即
+        改市价补足，全程只多一次查盘口+一次IOC尝试，不像追回机制那样
+        等待/刷新多轮——正常开仓要跟TV信号时机同步，不能靠"等更好价格"
+        拖慢，只堵"市价吃穿多档"这一种真实浪费。
+        """
+        qty = self.format_quantity(quantity, symbol)
+        px_str = self.format_price(price, symbol)
+        if qty <= 0:
+            logger.error(f"[IOC限价跳过] 数量无效 {quantity}")
+            return None
+
+        def _do():
+            self._throttle_rest(symbol, kind="rest")
+            binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
+            params = {
+                "symbol": symbol, "side": binance_side, "type": "LIMIT",
+                "timeInForce": "IOC", "quantity": qty, "price": px_str,
+            }
+            if reduce_only:
+                params["reduceOnly"] = True
+            order = self.client.futures_create_order(**params)
+            filled = order.get("executedQty") if isinstance(order, dict) else "?"
+            status = order.get("status") if isinstance(order, dict) else "?"
+            logger.info(
+                f"[IOC摸盘口] {side} {qty} {symbol} @ {px_str} "
+                f"status={status} executedQty={filled}"
+            )
+            return order
+
+        try:
+            return self._with_trade_retry(
+                symbol, "ioc_limit", _do, reduce_only=bool(reduce_only),
+            )
+        except Exception as e:
+            logger.warning(f"[IOC摸盘口跳过] {side} {qty} {symbol} @ {px_str}: {e}")
+            return None
+
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT",
                           reduce_only=True, client_order_id=None):
         """

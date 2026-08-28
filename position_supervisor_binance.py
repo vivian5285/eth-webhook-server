@@ -15261,7 +15261,44 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._pipeline_entry_submitted(action, qty)
             except Exception:
                 pass
-            order = binance_client.place_market_order(action, qty, symbol=self.symbol)
+
+            # 2026-08-28新增：市价前先"摸一口"盘口最优价（IOC限价打在对手
+            # 方最优价，能成交多少成交多少，未成交部分瞬间自动撤销，不
+            # 占用等待时间）——只堵"市价单直接吃穿好几档、付不必要滑点"
+            # 这一种真实浪费，不去博"等一会儿更好的价格"（那是心跳追回
+            # 机制的语义：TV仓位已经存在，多等几分钟代价小；正常开仓要
+            # 跟TV信号时机同步，宝贝已经确认过不能照搬追回那套"等分钟级"
+            # 逻辑，只做这种"零等待、只吃盘口最优一档"的轻量版）。取盘口
+            # 失败/IOC失败都不影响开仓，直接照原逻辑全额市价，绝不因为
+            # 这一步而拖慢或跳过开仓。
+            market_qty = qty
+            ioc_order = None
+            try:
+                bid, ask = binance_client.get_best_bid_ask(self.symbol)
+                touch_px = ask if action == "LONG" else bid
+                if touch_px > 0:
+                    ioc_order = binance_client.place_ioc_limit_order(
+                        open_side, qty, touch_px, symbol=self.symbol,
+                    )
+                    filled_qty = float(
+                        (ioc_order or {}).get("executedQty") or 0
+                    ) if isinstance(ioc_order, dict) else 0.0
+                    if filled_qty > 0:
+                        market_qty = binance_client.format_quantity(
+                            max(qty - filled_qty, 0.0), self.symbol
+                        )
+                        logger.info(
+                            f"✅ [{self.symbol}] 摸盘口最优价成交 {filled_qty}/{qty} "
+                            f"@ {touch_px:.4f} | 剩余{market_qty}改市价补足"
+                        )
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] 摸盘口最优价跳过，直接市价: {e}")
+                market_qty = qty
+
+            order = (
+                binance_client.place_market_order(action, market_qty, symbol=self.symbol)
+                if market_qty > 0 else ioc_order
+            )
 
             # ── 开仓重试层（v16.17）：市价失败 → 等退避再重试 → 挂 TV 限价单 ─────
             OPEN_RETRY_DELAYS = (1.5, 3.0)   # 市价重试间隔（秒）
@@ -15272,7 +15309,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 for _retry_idx, _delay in enumerate(OPEN_RETRY_DELAYS, start=1):
                     logger.warning(
                         f"⚠️ [{self.symbol}] 市价开仓失败，重试 {_retry_idx}/{len(OPEN_RETRY_DELAYS)+1} "
-                        f"| 等 {_delay}s 后再试 | qty={qty}"
+                        f"| 等 {_delay}s 后再试 | qty={market_qty}"
                     )
                     time.sleep(_delay)
                     # 市价前检查 IP 冷却
@@ -15281,7 +15318,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         _wait = min(_ip_rem, 20.0)
                         logger.warning(f"[{self.symbol}] 重试前 IP 冷却中，等 {_wait:.1f}s")
                         time.sleep(_wait)
-                    order = binance_client.place_market_order(action, qty, symbol=self.symbol)
+                    order = binance_client.place_market_order(action, market_qty, symbol=self.symbol)
                     if order:
                         logger.info(f"✅ [{self.symbol}] 市价重试第 {_retry_idx} 次成功")
                         _order_placed = True
@@ -15320,32 +15357,45 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
             if not order:
                 # 市价全失败 → 按 TV 指导价挂限价开仓单（最后兜底）
+                # 2026-08-28修复：这里此前用的是qty(原始总量)，若前面摸
+                # 盘口IOC已经先成交掉一部分(market_qty<qty)，会把已经
+                # 成交的这部分重复再下一遍单——改用market_qty(尚未成交
+                # 的剩余量)，跟IOC成交量互斥、不重复计仓。
                 _limit_px = curr_px
                 _direction = "做多" if action == "LONG" else "做空"
                 _limit_side = "BUY" if action == "LONG" else "SELL"
                 _limit_label = "LONG_LIMIT_OPEN" if action == "LONG" else "SHORT_LIMIT_OPEN"
                 logger.warning(
                     f"⚠️ [{self.symbol}] 市价开仓重试全部失败 → "
-                    f"按 TV 指导价挂限价单兜底: {_direction} {qty} {self.unit_label} @ {_limit_px:.2f}"
+                    f"按 TV 指导价挂限价单兜底: {_direction} {market_qty} {self.unit_label} @ {_limit_px:.2f}"
                 )
                 dingtalk.report_system_alert(
                     f"开仓降级限价兜底 [{self.symbol}]",
-                    f"TV {action} {qty} {self.unit_label} 市价重试失败，"
+                    f"TV {action} {market_qty} {self.unit_label}（总量{qty}）市价重试失败，"
                     f"按 TV 指导价 {_limit_px:.2f} 挂限价单（{_direction}），"
                     f"请关注是否成交",
                     level="紧急",
                 )
                 order = binance_client.place_limit_order(
-                    _limit_side, qty, _limit_px,
+                    _limit_side, market_qty, _limit_px,
                     symbol=self.symbol,
                     reduce_only=False,
                     client_order_id=_limit_label,
                 )
                 if not order:
                     # 限价单也挂失败 → 宣告开仓失败，钉钉高优告警
+                    # 2026-08-28修复：若前面摸盘口IOC已经先成交掉一部分
+                    # (market_qty<qty)，"当前已空仓"这句话就不准了——那部分
+                    # 已经是真实持仓，只是没能补齐到TV要求的总量，措辞
+                    # 按这两种情况分开，避免人工核查时被误导成完全空仓。
+                    _ioc_filled = round(max(qty - market_qty, 0.0), 8)
+                    _flat_note = (
+                        "当前已空仓" if _ioc_filled <= 0
+                        else f"摸盘口已成交{_ioc_filled}，剩余{market_qty}未能补齐"
+                    )
                     logger.error(
                         f"❌ [{self.symbol}] 开仓彻底失败：市价+限价兜底均未成功 | "
-                        f"TV {action} {qty} @ {_limit_px:.2f}"
+                        f"TV {action} {market_qty}(总量{qty}) @ {_limit_px:.2f} | {_flat_note}"
                     )
                     try:
                         self._pipeline_fail(Role.EXECUTION, "ENTRY_SUBMIT_FAIL")
@@ -15353,9 +15403,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         pass
                     dingtalk.report_system_alert(
                         f"开仓彻底失败 [{self.symbol}]",
-                        f"TV {action} {qty} {self.unit_label} | "
+                        f"TV {action} {market_qty} {self.unit_label}（总量{qty}） | "
                         f"市价重试 {len(OPEN_RETRY_DELAYS)} 次 + 限价兜底均失败 | "
-                        f"当前已空仓，请检查网络/限流后重发 TV 信号",
+                        f"{_flat_note}，请检查网络/限流后重发 TV 信号",
                         level="紧急",
                     )
                     return
