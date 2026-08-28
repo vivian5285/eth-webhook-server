@@ -17394,6 +17394,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             else:
                 self.current_sl = min(cur, new_stop) if cur > 0 else new_stop
             self.tv_sl = float(self.current_sl)
+        # 2026-08-29新增：反转信号主动锁盈——见radar_reentry_mixin.py
+        # REVERSAL_LOCK_*常量顶部注释。只朝有利方向棘轮，写在ladder自己的
+        # max/min棘轮之后，效果同样经self.current_sl持久化，不需要独立状态机。
+        try:
+            self.current_sl = self._maybe_lock_profit_on_reversal(px, float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 反转锁盈复评跳过: {e}")
         was_phase = phase
         self.breakeven_phase = new_phase
         # 激活状态由 _maybe_arm_radar_on_activation 控制，禁止 tick 强行打开

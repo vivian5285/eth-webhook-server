@@ -179,6 +179,28 @@ RADAR_MEGA_STRONG_EXTENSION_ATR_MAX = 3.0
 # 成本一致(self.last_adx本身已由_maybe_refresh_atr每180s刷新，这里零额外REST)。
 ADX_TIER_REEVAL_SEC = 240.0
 
+# 2026-08-29新增：反转信号触发的主动锁盈——宝贝原话"怕反弹回吐利润"跟"怕出
+# 得太早"是同一个天平的两端，找中间点：既有呼吸阶梯基线(按ATR距离正常推进)
+# 完全不动，只新增一道独立的安全网——浮盈已经积累到有意义的程度、且出现跟
+# 持仓方向相反的"决定性放量反转K线"时，把止损棘轮式地顶到至少保本+手续费
+# 缓冲价(initial_stop_price，雷达自己保本臂同一个价)，只保证"不会由盈转亏
+# 离场"这个底线，不直接市价清仓——后续走势仍交给正常呼吸阶梯/TP系统决定，
+# 这正是"中间点"：既不放任反弹吃掉全部浮盈，也不因为一根K线就武断斩仓。
+# 判据对齐真实TV源码h4_bearReversal/h4_bullReversal(4H裸K实体比+放量)，
+# 跟影子引擎strategy_engine/shadow_engine.py的check_reversal_exit同一套
+# 已验证阈值，固定用4H(不管品种自己的TV周期是多少，源码本身也是全品种统一4H)。
+REVERSAL_LOCK_ENABLED = True
+REVERSAL_LOCK_BODY_RATIO = 0.55
+REVERSAL_LOCK_VOL_MULT = 1.15
+REVERSAL_LOCK_VOL_PERIOD = 20
+# 浮盈门槛：至少积累这么多倍initial_atr的peak favorable excursion(best_price
+# 相对entry)才评估反转锁盈，避免刚开仓没多久的噪音区反复触发/锁在entry附近
+# 意义不大(那本来就是雷达保本臂自己在管的区间)。
+REVERSAL_LOCK_MIN_PROFIT_ATR = 1.0
+# 节流：4H K线本身只在收盘时才变化，5分钟足够及时捕捉新收盘K线，避免每次
+# tick(可能几秒一次)都发一次4H K线REST请求。
+REVERSAL_LOCK_REFRESH_SEC = 300.0
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -1595,6 +1617,127 @@ class RadarReentryMixin:
             f"→T{candidate}({tier_label(candidate)}) 实时ADX={live_adx:.1f} "
             f"激活线 {old_gate:.4f}→{new_gate:.4f}"
         )
+
+    def _maybe_lock_profit_on_reversal(self, curr_px: float, candidate_sl: float) -> float:
+        """反转信号触发的主动锁盈——见上方REVERSAL_LOCK_*常量顶部注释。
+        只在雷达已武装(_apply_breath_stop_tick非休眠分支)才会被调用到；
+        只朝有利方向棘轮candidate_sl，candidate_sl已经比锁盈价更优时原样
+        放行，绝不会让止损变差——跟文件里其余所有棘轮逻辑同一铁律。
+
+        故意锚定self.current_sl(调用方每次都把ladder刚算出的最新值传进来)
+        而不是自己维护一份独立记忆：这样效果天然经_apply_breath_stop_tick
+        写回self.current_sl持久化，重启后从状态文件恢复的current_sl已经
+        包含锁盈效果，不需要额外的catchup式状态机。"""
+        if not REVERSAL_LOCK_ENABLED:
+            return candidate_sl
+        side = str(getattr(self, "current_side", "") or "").upper()
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0:
+            return candidate_sl
+        atr = float(self._get_locked_initial_atr() or 0)
+        if atr <= 0:
+            return candidate_sl
+        best = float(getattr(self, "best_price", 0) or 0) or entry
+        profit_atr = abs(best - entry) / atr
+        if profit_atr < REVERSAL_LOCK_MIN_PROFIT_ATR:
+            return candidate_sl
+        now = time.time()
+        last_check = float(getattr(self, "_reversal_lock_last_check_ts", 0) or 0)
+        if last_check > 0 and (now - last_check) < REVERSAL_LOCK_REFRESH_SEC:
+            return candidate_sl
+        self._reversal_lock_last_check_ts = now
+        try:
+            from binance_client import binance_client
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 反转锁盈依赖导入跳过: {e}")
+            return candidate_sl
+        try:
+            bars4h = binance_client.fetch_klines(
+                self.symbol, interval="4h", limit=REVERSAL_LOCK_VOL_PERIOD + 3,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 反转锁盈取4H K线跳过: {e}")
+            return candidate_sl
+        if not bars4h or len(bars4h) < REVERSAL_LOCK_VOL_PERIOD + 2:
+            return candidate_sl
+        # fetch_klines最后一根是还没收盘的当前4H K线，跟chase-watch/mega_
+        # strong同款处理，只用已收盘的那根判断（对齐真实源码"用最新一根已
+        # 闭合的4H K线"）。
+        closed = bars4h[:-1] if len(bars4h) > 1 else bars4h
+        if len(closed) < REVERSAL_LOCK_VOL_PERIOD + 1:
+            return candidate_sl
+        last_bar = closed[-1]
+        try:
+            bar_time = int(last_bar[0])
+            o, h, l, c, v = (float(last_bar[i]) for i in (1, 2, 3, 4, 5))
+            vols = [float(b[5]) for b in closed[-REVERSAL_LOCK_VOL_PERIOD - 1:-1]]
+        except (TypeError, ValueError, IndexError):
+            return candidate_sl
+        if len(vols) < REVERSAL_LOCK_VOL_PERIOD:
+            return candidate_sl
+        vol_avg = sum(vols) / len(vols)
+        rng = max(h - l, 1e-9)
+        body_ratio = abs(c - o) / rng
+        decisive_bear = c < o and body_ratio >= REVERSAL_LOCK_BODY_RATIO
+        decisive_bull = c > o and body_ratio >= REVERSAL_LOCK_BODY_RATIO
+        high_vol = vol_avg > 0 and v > vol_avg * REVERSAL_LOCK_VOL_MULT
+        reversed_against = (
+            (side == "LONG" and decisive_bear and high_vol)
+            or (side == "SHORT" and decisive_bull and high_vol)
+        )
+        if not reversed_against:
+            return candidate_sl
+        try:
+            from breath_stop import initial_stop_price
+            lock_px = float(initial_stop_price(
+                side, entry, atr, profile=getattr(self, "breath_profile", None),
+            ) or 0)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 反转锁盈算保本价跳过: {e}")
+            return candidate_sl
+        if lock_px <= 0:
+            return candidate_sl
+        if side == "LONG":
+            improved = lock_px > candidate_sl
+            out = max(candidate_sl, lock_px)
+        else:
+            improved = lock_px < candidate_sl
+            out = min(candidate_sl, lock_px)
+        if not improved:
+            return candidate_sl
+        # 同一根4H K线只报警一次——REVERSAL_LOCK_REFRESH_SEC(5分钟)节流窗口
+        # 内本来就不会重复走到这里，这里额外按bar_time去重是为了防止节流
+        # 窗口之后同一根K线仍是"最新已收盘"时(4H K线本身要等4小时才换)反复
+        # 刷DingTalk——只在真正出现新的一次触发(新K线，或止损本来就已经追
+        # 上不再"improved")时才报警。
+        alerted_bar = int(getattr(self, "_reversal_lock_alerted_bar_time", 0) or 0)
+        if alerted_bar != bar_time:
+            self._reversal_lock_alerted_bar_time = bar_time
+            logger.warning(
+                f"🔄 [{self.symbol}] 4H反转K线({'空头' if decisive_bear else '多头'}"
+                f"放量·实体比{body_ratio:.2f}·量能{(v / vol_avg if vol_avg > 0 else 0):.2f}倍)"
+                f"逆持仓方向({side})出现·浮盈已达{profit_atr:.2f}×ATR → "
+                f"止损顶至保本锁盈价 {candidate_sl:.4f}→{out:.4f}"
+                f"(呼吸阶梯基线不变，仅新增这道安全网)"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"反转锁盈触发 [{self.symbol}]",
+                    detail=(
+                        f"{side} 持仓浮盈{profit_atr:.2f}×ATR，4H出现逆势放量反转K线"
+                        f"(实体比{body_ratio:.2f}/量能{(v / vol_avg if vol_avg > 0 else 0):.2f}倍)，"
+                        f"止损已顶到保本锁盈价{out:.4f}(entry={entry:.4f})，防止后续反打"
+                        f"把浮盈吃成亏损。呼吸阶梯基线不受影响，仍按原节奏跟踪；如果这次"
+                        f"判断错了、TV还在继续持有，心跳追回会在检测到心跳仍是{side}但实盘"
+                        f"已空仓时按老规矩自动尝试更优价格追回。"
+                    ),
+                    level="提示",
+                )
+            except Exception:
+                pass
+        return out
 
     def _check_chase_reentry_confirmation(self):
         """巡检周期性调用：观察窗口内确认真延续（非反转、非噪音）才追回。
