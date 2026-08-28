@@ -4438,6 +4438,46 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             or 0
         )
         min_atr_floor = 0.5  # 最小 0.5×ATR（兜底用固定值）
+
+        # 2026-08-28修复：ZECUSDT实盘复现——重入成交时tv_sl_ref完全缺失
+        # (tv_sl<=0，不是"给了但太窄")，此前直接落到下面hard_stop_price
+        # (tv_sl=0)算出非法值，上层_arm_temp_stop_and_tp12判定temp_sl<=0
+        # 后彻底拒绝挂止损（"禁止1.5×ATR兜底裸奔"）。下面min_dist_enforced
+        # 分支只覆盖"TV给了距离但太窄"，从未覆盖"TV压根没给"这种更常见
+        # 的情况——尤其是心跳追回/智能重入这类非原始TV开仓信号驱动的
+        # 成交路径，天生就可能拿不到tv_sl_ref。实盘后果：重入成交后连续
+        # 3次立即重试仍失败，仓位裸奔超过4小时才被人工/watchdog发现。
+        # 这里补一个独立分支：tv_sl完全缺失且有ATR可用时，直接用
+        # min_atr_floor×ATR做纯ATR应急止损（钉钉告警明确标注"非TV真实
+        # 值，仅防裸仓"，不悄悄冒充frozen_hard_sl_px本该有的TV权威性）。
+        # 只有在ATR也拿不到时才维持原有的彻底拒绝（fail-closed）。
+        if tv_sl <= 0 and side in ("LONG", "SHORT") and fill > 0 and atr > 0:
+            emergency_dist = max(min_atr_floor * atr, 2.0)
+            logger.warning(
+                f"⚠️ [{self.symbol}] TV.stop_loss完全缺失 → ATR应急止损 "
+                f"dist={emergency_dist:.2f}({min_atr_floor}×ATR={atr:.2f})，"
+                f"非TV真实值，仅防裸仓"
+            )
+            try:
+                import dingtalk
+                self._call_dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"⚠️TV止损缺失·已用ATR应急兜底 [{self.symbol}]",
+                    detail=(
+                        f"TV未提供止损参考（tv_sl_ref=0），已用"
+                        f"{min_atr_floor}×ATR={emergency_dist:.2f}应急兜底，"
+                        f"fill={fill:.2f}\n"
+                        f"⚠️ 这不是TV真实止损值，建议人工核实该仓位止损是否需要调整"
+                    ),
+                    level="警告",
+                )
+            except Exception:
+                pass
+            if side == "LONG":
+                return round(fill - emergency_dist, 2)
+            else:
+                return round(fill + emergency_dist, 2)
+
         actual_dist = abs(tv_entry - tv_sl)
         min_dist_required = min_atr_floor * atr if atr > 0 else 0.0
 

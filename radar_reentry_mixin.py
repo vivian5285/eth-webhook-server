@@ -2077,6 +2077,25 @@ class RadarReentryMixin:
         if first_seen <= 0 or now - first_seen < TV_HEARTBEAT_GAP_GRACE_SEC:
             return
 
+        # 2026-08-28修复(ZECUSDT实盘复现)：TV在22:30发过CLOSE_QUICK_EXIT
+        # 主动全平(正确执行、市价平仓成功)，但TV自己的心跳流(独立于
+        # webhook动作流，可能滞后)5分钟后仍报LONG——57分钟后追回把这笔
+        # TV已经明确要求平掉的仓位重新开了回来，而且这条重开链条一路
+        # 带着"无TV.stop_loss"的缺陷传到后续重入，最终裸奔超过4小时才
+        # 被人工发现。心跳只是周期性状态快照，webhook动作流才是TV最新
+        # 意图的权威来源：最近一次真实webhook如果是CLOSE类动作，说明TV
+        # 刚要求平仓，心跳还没跟上，不该被当成"漏单"去追。只有TV真发一
+        # 条新的OPEN类信号(action不再是CLOSE前缀)，或心跳自己先转FLAT、
+        # 再变LONG/SHORT形成全新episode，才重新允许追回。
+        last_sig = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
+        last_act = str(last_sig.get("action", "") or "").upper()
+        if last_act.startswith("CLOSE"):
+            logger.info(
+                f"🚫 [{self.symbol}] TV心跳漏单：最近一次真实TV信号是{last_act}"
+                f"(主动平仓) → 心跳仍报{hb_side}大概率是心跳流滞后，不追回"
+            )
+            return
+
         hb_entry = float(getattr(self, "tv_heartbeat_entry", 0) or 0)
         same_episode = (
             bool(getattr(self, "_catchup_episode_resolved", False))
