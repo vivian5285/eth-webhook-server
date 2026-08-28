@@ -15273,27 +15273,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 这一步而拖慢或跳过开仓。
             market_qty = qty
             ioc_order = None
-            try:
-                bid, ask = binance_client.get_best_bid_ask(self.symbol)
-                touch_px = ask if action == "LONG" else bid
-                if touch_px > 0:
-                    ioc_order = binance_client.place_ioc_limit_order(
-                        open_side, qty, touch_px, symbol=self.symbol,
-                    )
-                    filled_qty = float(
-                        (ioc_order or {}).get("executedQty") or 0
-                    ) if isinstance(ioc_order, dict) else 0.0
-                    if filled_qty > 0:
-                        market_qty = binance_client.format_quantity(
-                            max(qty - filled_qty, 0.0), self.symbol
-                        )
-                        logger.info(
-                            f"✅ [{self.symbol}] 摸盘口最优价成交 {filled_qty}/{qty} "
-                            f"@ {touch_px:.4f} | 剩余{market_qty}改市价补足"
-                        )
-            except Exception as e:
-                logger.warning(f"[{self.symbol}] 摸盘口最优价跳过，直接市价: {e}")
-                market_qty = qty
+            # 2026-08-29紧急停用：实盘复现BNBUSDT/OPENAIUSDT/PAXGUSDT三个
+            # 品种、跨B/C/E三账户，目标qty全部被实际成交qty翻倍(比如
+            # 目标0.38实际0.76)。根因：futures_create_order传timeInForce=
+            # "IOC"后，交易所返回的status却是"NEW"、executedQty=0.00——
+            # 真正的IOC本该在同一次REST响应里就同步给出FILLED/EXPIRED终态，
+            # 返回"NEW"说明这张单实际上没有被交易所当成IOC处理(可能挂成
+            # 了普通单)，代码读到executedQty=0.00就认定"没成交，安全地
+            # 再市价补全量"，结果这张"IOC"单后来自己也成交了，两笔叠加
+            # 变成2倍仓位。在查清楚python-binance/交易所这边IOC参数具体
+            # 哪里不对之前，先整段跳过，直接全额市价——这是相对更安全的
+            # 已知行为，不能让还没修好的优化功能继续制造双倍仓位风险。
+            # 已影响的实盘仓位(BNB/OPENAI/PAXG，B/C/E多个账户)已经从数据
+            # 上核实清楚，交给宝贝决定要不要人工减仓，这里先止损这条代码
+            # 路径。
 
             order = (
                 binance_client.place_market_order(action, market_qty, symbol=self.symbol)
