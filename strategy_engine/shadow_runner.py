@@ -30,7 +30,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TICK_INTERVAL_SEC = 120  # 巡检间隔——远小于最短TV周期(45m)，不会错过任何一根新收盘K线
+TICK_INTERVAL_SEC = 30  # 2026-08-29收紧(原120s)——盘中提前入场就是要抢时间，
+# 巡检间隔太长会让"当前还没走完的那根K线"实体已经冲过阈值却隔了一两分钟
+# 才发现，失去提前入场的意义；30s对18个品种、纯公开行情查询的负载完全
+# 可以接受，仍远小于最短TV周期(45m)，不会错过任何一根新收盘K线
 
 
 def _load_symbol_universe():

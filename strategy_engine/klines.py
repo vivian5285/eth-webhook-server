@@ -148,30 +148,42 @@ def to_ohlcv_dicts(raw_klines: List[list]) -> List[dict]:
 def fetch_klines_raw(
     symbol: str, interval: str, limit: int = 500,
     start_time_ms: Optional[int] = None, end_time_ms: Optional[int] = None,
-    timeout: float = 10.0,
+    timeout: float = 10.0, retries: int = 3,
 ) -> List[list]:
-    """公开端点，无需签名/API Key。失败返回空列表，绝不抛异常给调用方。"""
+    """
+    公开端点，无需签名/API Key。失败返回空列表，绝不抛异常给调用方。
+    瞬时网络/SSL错误（跟长跨度回测的多页请求撞在一起概率不低，2026-08-17
+    实测 SKHYNIXUSDT/ASMLUSDT 413天回测复现过 SSL EOF）重试几次再放弃，
+    4xx 之类确定性错误（品种名错等）不重试。
+    """
     params = {"symbol": symbol.upper(), "interval": interval, "limit": min(max(int(limit or 500), 1), 1500)}
     if start_time_ms:
         params["startTime"] = int(start_time_ms)
     if end_time_ms:
         params["endTime"] = int(end_time_ms)
     url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "strategy-engine-readonly"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logger.warning(f"[klines] {symbol} {interval} HTTP {e.code}: {e.reason}")
-        return []
-    except Exception as e:
-        logger.warning(f"[klines] {symbol} {interval} 拉取失败: {e}")
-        return []
+    last_err = None
+    for attempt in range(max(1, retries)):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "strategy-engine-readonly"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            logger.warning(f"[klines] {symbol} {interval} HTTP {e.code}: {e.reason}")
+            if e.code < 500:
+                return []
+            last_err = e
+        except Exception as e:
+            last_err = e
+        if attempt < retries - 1:
+            time.sleep(0.6 * (attempt + 1))
+    logger.warning(f"[klines] {symbol} {interval} 拉取失败(重试{retries}次): {last_err}")
+    return []
 
 
 def fetch_klines_paged(
     symbol: str, interval: str, total_limit: int,
-    end_time_ms: Optional[int] = None, max_pages: int = 20,
+    end_time_ms: Optional[int] = None, max_pages: int = 150,
 ) -> List[list]:
     """
     突破币安单次请求 1500 根的上限：从 end_time_ms（默认现在）往更早的时间
@@ -199,6 +211,52 @@ def fetch_klines_paged(
         if len(raw) < batch_limit:
             break  # 已经拉到交易所能给的最早数据了
     return all_raw
+
+
+def get_current_bar(symbol: str, interval: str) -> Optional[dict]:
+    """
+    2026-08-29新增：返回当前还没走完的那根K线（跟get_bars故意反过来——
+    那边为求"只用已闭合K线"主动扔掉最后一根未收盘的，这里专门要那一根，
+    给"盘中提前入场"用，照抄4份真实TV Pine源码(01-04版本)里
+    `barstate.isrealtime`那套——不等K线收盘，当前bar的open/high/low/
+    close(=现价)一直在变，早入场判断的就是这根还在走的K线。
+
+    原生周期(如"6h")：直接按该周期查询币安接口，接口本身最后一条就是
+    当前未走完的K线。非原生周期(如"90m"/"150m")：按目标周期真实的桶
+    开盘时间(跟get_bars合成逻辑同一套bucket_open_ms对齐)，从桶开盘时刻
+    拉源周期(5m/1m)K线聚合出"当前90m桶目前为止"的open/high/low/close/
+    volume——不是随手拿最新一根5m K线糊弄，是真的按目标周期自己的桶
+    边界重新聚合，跟TV图表上那根"还在走的K线"语义一致。
+    """
+    s = str(interval or "").strip().lower()
+    now_ms = int(time.time() * 1000)
+
+    if s in NATIVE_INTERVALS:
+        raw = fetch_klines_raw(symbol, s, limit=2, end_time_ms=now_ms)
+        bars = to_ohlcv_dicts(raw)
+        return bars[-1] if bars else None
+
+    target_minutes = _minutes_of(s)
+    if not target_minutes:
+        return None
+    target_period_ms = target_minutes * _MINUTE_MS
+    bucket_start = bucket_open_ms(now_ms, target_period_ms)
+
+    source_interval = resolve_source_interval(s)
+    raw = fetch_klines_raw(
+        symbol, source_interval, limit=1500, start_time_ms=bucket_start, end_time_ms=now_ms,
+    )
+    src_bars = to_ohlcv_dicts(raw)
+    if not src_bars:
+        return None
+    return {
+        "t": bucket_start,
+        "o": src_bars[0]["o"],
+        "h": max(b["h"] for b in src_bars),
+        "l": min(b["l"] for b in src_bars),
+        "c": src_bars[-1]["c"],
+        "v": sum(b["v"] for b in src_bars),
+    }
 
 
 def get_bars(

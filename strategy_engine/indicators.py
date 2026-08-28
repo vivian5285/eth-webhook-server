@@ -104,6 +104,23 @@ def wilder_atr(bars: Sequence[dict], period: int = 14) -> float:
     return float(series[-1]) if series else 0.0
 
 
+def stoch_k(bars: Sequence[dict], period: int = 14, smooth: int = 3) -> List[float]:
+    """随机指标%K，再做SMA(smooth)平滑——对齐真实TV Pine源码里的
+    `ta.sma(ta.stoch(close, high, low, 14), 3)`（4份真实策略源码
+    01-04版本共用的写法，2026-08-29核对）。"""
+    n = len(bars or [])
+    if n < period:
+        return []
+    raw_k = []
+    for i in range(period - 1, n):
+        window = bars[i - period + 1:i + 1]
+        hh = max(_f(b["h"]) for b in window)
+        ll = min(_f(b["l"]) for b in window)
+        c = _f(bars[i]["c"])
+        raw_k.append(100.0 * (c - ll) / max(hh - ll, 1e-9))
+    return sma(raw_k, smooth)
+
+
 def wilder_adx(bars: Sequence[dict], period: int = 14) -> float:
     """跟 market_engine.py:wilder_adx 同算法，dict 形状入参。"""
     n = len(bars or [])
