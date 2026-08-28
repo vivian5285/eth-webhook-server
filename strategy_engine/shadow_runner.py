@@ -36,15 +36,28 @@ TICK_INTERVAL_SEC = 30  # 2026-08-29收紧(原120s)——盘中提前入场就�
 # 可以接受，仍远小于最短TV周期(45m)，不会错过任何一根新收盘K线
 
 
+# 2026-08-29：宝贝确认XPDUSDT已经从TV那边撤下了("我的TV没有xpd了")，
+# 实盘也没在用。live引擎的active_binance_symbols()里暂时还留着(不影响
+# 真实交易——TV既然不会再发信号，留不留都不会触发真实开仓，改这个
+# 需要动4个账户的.env/watchdog/dashboard，属于更大范围的清理，先不碰)。
+# 但影子引擎不一样：它自己算信号，不看TV有没有发，留着XPD会一直凭空
+# 生成假信号，污染"跟TV并排对比"这个核心目的——这里单独排除，不影响
+# live交易那边的品种清单。
+SHADOW_EXCLUDE_SYMBOLS = {"XPDUSDT"}
+
+
 def _load_symbol_universe():
-    """TV现有18个品种 + 各自真实tv_tf_sec + breath配置 + ADX三档表。
-    直接读配置数据模块，不实例化任何position_supervisor对象。"""
+    """TV现有18个品种(减去SHADOW_EXCLUDE_SYMBOLS里已经不再实盘使用的) +
+    各自真实tv_tf_sec + breath配置 + ADX三档表。直接读配置数据模块，不
+    实例化任何position_supervisor对象。"""
     from symbol_config import active_binance_symbols, resolve_binance_symbol
     from reentry_profiles import get_reentry_profile
     from breath_profiles import get_breath_profile
 
     out = []
     for sym in active_binance_symbols():
+        if sym in SHADOW_EXCLUDE_SYMBOLS:
+            continue
         try:
             rp = get_reentry_profile(sym)
             bp = get_breath_profile(sym)
