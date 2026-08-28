@@ -4393,6 +4393,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             tv_entry = fill
         buf = float(self._defense_buffer_mult())
 
+        # 2026-08-28修复：本函数所有"兜底/应急"分支此前都锚定fill(开仓/
+        # 成交价)算距离，唯独没检查现价——仓位已经走出去很远时(ZECUSDT
+        # 实盘复现：智能重入成交后restart重新锚定，此时价格已经比entry
+        # 跌了近20点)，"entry-距离"算出来的止损价会落在现价的错误一侧，
+        # 挂单时被交易所拒单(-4130 already exists / 或方向本身就无效)，
+        # 静默失败、不会再重试出别的价位。现价才是决定一张止损单是否
+        # 合法、是否真的还能保护仓位的唯一权威参照——取一次备用，下面
+        # 每条应急路径统一用_valid_stop_vs_market()兜底校验/重新锚定。
+        try:
+            curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        except Exception:
+            curr_px = 0.0
+
+        def _valid_stop_vs_market(px, min_gap=0.0):
+            """确保候选止损价真的在现价合法一侧；现价拿不到时原样放行。"""
+            px = float(px or 0)
+            if px <= 0 or curr_px <= 0:
+                return px
+            gap = max(float(min_gap or 0), curr_px * 0.001, 0.01)
+            if side == "LONG" and px >= curr_px - gap:
+                return round(curr_px - gap, 2)
+            if side == "SHORT" and px <= curr_px + gap:
+                return round(curr_px + gap, 2)
+            return px
+
         # ── 根因一修复（v16.11.x）：方向校验 + ATR 最小距离兜底 ──────────
         STOP_SIDE_VALID = False
         direction_error = False
@@ -4473,10 +4498,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 )
             except Exception:
                 pass
-            if side == "LONG":
-                return round(fill - emergency_dist, 2)
-            else:
-                return round(fill + emergency_dist, 2)
+            raw_px = (
+                round(fill - emergency_dist, 2) if side == "LONG"
+                else round(fill + emergency_dist, 2)
+            )
+            return _valid_stop_vs_market(raw_px, min_gap=emergency_dist * 0.1)
 
         actual_dist = abs(tv_entry - tv_sl)
         min_dist_required = min_atr_floor * atr if atr > 0 else 0.0
@@ -4521,12 +4547,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # recompute: 使用 |fill - tv_sl| 方向，但距离不小于 min_dist
             raw_dist = abs(fill - tv_sl)
             enforced_dist = max(raw_dist, min_dist)
-            if side == "LONG":
-                return round(fill - enforced_dist, 2)
-            else:
-                return round(fill + enforced_dist, 2)
+            raw_px = (
+                round(fill - enforced_dist, 2) if side == "LONG"
+                else round(fill + enforced_dist, 2)
+            )
+            return _valid_stop_vs_market(raw_px, min_gap=enforced_dist * 0.1)
         # ── 正常路径 ───────────────────────────────────────────────────
-        return hard_stop_price(
+        normal_px = hard_stop_price(
             side,
             fill,
             tv_sl,
@@ -4534,6 +4561,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             tv_entry=tv_entry,
             fill_entry=fill,
         )
+        return _valid_stop_vs_market(normal_px)
 
     def _lock_frozen_hard_sl_from_tv(self, entry=None, side=None, source=""):
         """
