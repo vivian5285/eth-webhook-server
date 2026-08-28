@@ -48,6 +48,7 @@ def _init_db() -> None:
                 tier INTEGER NOT NULL,
                 adx REAL,
                 entry_bar_time INTEGER NOT NULL,
+                score_bar_time INTEGER,
                 last_bar_time INTEGER,
                 tp1_price REAL, tp2_price REAL,
                 stop REAL, last_ratchet_price REAL,
@@ -96,14 +97,14 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
             cur = conn.execute(
                 """INSERT INTO shadow_positions_v2
                    (symbol, strategy, timeframe, side, entry, atr0, tier, adx,
-                    entry_bar_time, last_bar_time, tp1_price, tp2_price,
+                    entry_bar_time, score_bar_time, last_bar_time, tp1_price, tp2_price,
                     stop, last_ratchet_price, tp1_done, tp2_done,
                     realized_frac, realized_pnl_atr_weighted, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
                 (
                     row["symbol"], row["strategy"], row["timeframe"], row["side"],
                     row["entry"], row["atr0"], row["tier"], row.get("adx"),
-                    row["entry_bar_time"], row["entry_bar_time"],
+                    row["entry_bar_time"], row.get("score_bar_time"), row["entry_bar_time"],
                     row.get("tp1_price"), row.get("tp2_price"),
                     row.get("stop"), row.get("last_ratchet_price"),
                     int(row.get("tp1_done") or 0), int(row.get("tp2_done") or 0),
@@ -174,6 +175,25 @@ def list_closed(symbol: Optional[str] = None, strategy: Optional[str] = None,
     except Exception as e:
         logger.warning(f"[shadow_store] list_closed 失败: {e}")
         return []
+
+
+def get_last_closed_meta(symbol: str, strategy: str) -> Optional[dict]:
+    """最近一次平仓记录的(side, entry_bar_time)——2026-08-29新增，用来
+    堵"同一根本地K线的同一个方向，平仓后立即用一模一样的旧数据重新
+    判定、重新开仓"这个死循环(实盘复现：4H反转正确平仓后，本地打分
+    用的还是没变过的那根旧K线，30秒后又原样开回去，来回抖了好几轮)。"""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT side, entry_bar_time, score_bar_time FROM shadow_positions_v2
+                   WHERE symbol=? AND strategy=? AND status='closed'
+                   ORDER BY id DESC LIMIT 1""",
+                (symbol, strategy),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.warning(f"[shadow_store] get_last_closed_meta 失败: {e}")
+        return None
 
 
 def list_open(strategy: Optional[str] = None) -> List[dict]:

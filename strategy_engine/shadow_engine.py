@@ -310,6 +310,10 @@ def _position_to_row(pos: "ShadowPosition") -> dict:
         "tp1_done": int(pos.tp1_done), "tp2_done": int(pos.tp2_done),
         "realized_frac": pos.realized_frac,
         "realized_pnl_atr_weighted": pos.realized_pnl_atr_weighted,
+        # 2026-08-29修复：close_row读updates.get("exit_price"/"exit_reason")，
+        # 这两个字段之前根本没放进row dict，导致平仓记录exit_price/exit_reason
+        # 永远是None（真实原因pos.exit_reason其实算对了，只是没存进去）。
+        "exit_price": pos.exit_price, "exit_reason": pos.exit_reason,
     }
 
 
@@ -329,11 +333,17 @@ def _row_to_position(row: dict, breath: dict, tier_cfg: dict) -> "ShadowPosition
     return pos
 
 
-def _open_row_from_position(pos: "ShadowPosition", interval: str, adx: float) -> dict:
+def _open_row_from_position(pos: "ShadowPosition", interval: str, adx: float, score_bar_time: int) -> dict:
     row = _position_to_row(pos)
     row["strategy"] = STRATEGY_NAME
     row["timeframe"] = str(interval)
     row["adx"] = adx
+    # score_bar_time：驱动这次开仓决策的那根已闭合K线时间——独立于
+    # entry_bar_time(实际成交/仓位生命周期用的bucket时间，提前入场时
+    # 是当前还没走完那根K线的桶开盘时间，跟score_bar_time不是同一根)。
+    # 专门给"同一份打分数据别重复开仓"去重用，见run_symbol_tick里的
+    # last_closed去重检查。
+    row["score_bar_time"] = int(score_bar_time)
     return row
 
 
@@ -391,6 +401,20 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
     if not side:
         return None
 
+    # 2026-08-29修复：同一根本地K线(entry_bar_time没变)、同一个方向，
+    # 如果上一次就是从这根K线开的仓、又被平掉了(不管什么原因)，说明
+    # 本地打分用的这份数据没有任何新信息——直接原样重开只会重演上次
+    # 的结果，实盘复现过4H反转刚平仓、下一轮巡检(30秒后)又用同一根K线
+    # 重新开回去，来回抖了6轮。只堵"完全相同的(方向,K线)"这一种，方向
+    # 变了或者本地K线真的收出新的一根，说明数据变了，不受影响。
+    last_closed = shadow_store.get_last_closed_meta(symbol, STRATEGY_NAME)
+    if (
+        last_closed
+        and str(last_closed.get("side")) == side
+        and int(last_closed.get("score_bar_time") or -1) == int(score["bar_time"])
+    ):
+        return None
+
     tier = 2 if score["adx"] > 30 else (0 if score["adx"] < 20 else 1)
     tier_cfg = tiers[tier] if tiers else {}
 
@@ -405,7 +429,7 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
         entry_mode = "close"
 
     pos = ShadowPosition(symbol, side, entry_px, score["atr"], tier, entry_bar_time, breath, tier_cfg)
-    row = _open_row_from_position(pos, interval, score["adx"])
+    row = _open_row_from_position(pos, interval, score["adx"], score["bar_time"])
     shadow_store.insert_open_row(row)
     logger.info(
         f"📥 [影子] {symbol} 开仓({entry_mode}) {side} @ {entry_px:.4f} "
