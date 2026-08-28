@@ -1974,6 +1974,32 @@ class BinanceClient:
                 symbol, "algo_stop", _do, reduce_only=True,
             )
         except Exception as e:
+            # 2026-08-28修复：跟下面place_stop_market_order同类竞态码
+            # (-4509仓位已平/-2021会立即触发/-4130同向已有closePosition
+            # 止损单)在这条Algo通道上此前完全没有特殊处理，一律落
+            # logger.error吓人——这几种码本质都是"仓位已经被别的路径
+            # 保护/平掉，这次挂单只是多余/慢了一步"，不是真正的挂单
+            # 故障，跟place_stop_market_order保持一致，降级WARNING。
+            es = str(e)
+            if "code=-4509" in es:
+                logger.warning(
+                    f"[Algo止损] {side} Stop @ {stop_price} 被拒(-4509 TIF "
+                    f"GTE需要持仓)，大概率仓位已在挂单瞬间平掉：{e}"
+                )
+                return None
+            if "code=-2021" in es:
+                logger.warning(
+                    f"[Algo止损] {side} Stop @ {stop_price} 被拒(-2021 立即"
+                    f"触发)，大概率仓位/止损已经在重试期间被别的路径推进过：{e}"
+                )
+                return None
+            if "code=-4130" in es:
+                logger.warning(
+                    f"[Algo止损] {side} Stop @ {stop_price} 被拒(-4130 同向"
+                    f"已有closePosition止损单)，仓位仍由已存在的那张止损单"
+                    f"保护，未能替换成新价位：{e}"
+                )
+                return None
             logger.error(f"[Algo止损失败] {side} Stop @ {stop_price}: {e}")
             return None
 
@@ -2081,12 +2107,27 @@ class BinanceClient:
                     f"大概率仓位/止损已经在重试期间被别的路径推进过：{e}"
                 )
                 return None
-            logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
-            # -4130：已有同向 closePosition 止损单 → 写入本地缓存防止死循环重试
+            # 2026-08-28修复：-4130(已有同向closePosition止损单存在)此前
+            # 落在下面的通用logger.error后面才特殊处理——先吓人报一次ERROR，
+            # 再补去重缓存，跟上面-4509/-2021两个同类"竞态/已有保护"场景
+            # 处理方式不一致。ZECUSDT实盘复现：系统想把已经生效的止损单
+            # (无论是本次修复新增的ATR应急止损、还是人工临时挂的)替换成
+            # 自己重算的新价位，但没有先撤旧单，导致每次尝试都撞见-4130，
+            # 刷了几十条ERROR——而这恰恰是最安全的一种"失败"：仓位从始至
+            # 终都有一张有效止损单在保护，只是这次没能把它换成更优的新
+            # 价位而已，不该跟"止损单挂不出去、仓位裸奔"同等级别报警。
+            # 提到-4509/-2021同一层级：WARNING+清晰说明+去重缓存，不落
+            # ERROR。
             if "code=-4130" in str(e):
                 with self._place_dedupe_lock:
                     self._recent_stop_place[key] = (time.time(), {"orderId": "EXISTING", "note": "4130-deduped"})
-                logger.warning(f"[止损单去重] -4130 已加入本地缓存 {side} @ {stop_price}")
+                logger.warning(
+                    f"[止损单] {side} Stop @ {stop_price} 被拒(-4130 同向已有"
+                    f"closePosition止损单)，仓位仍由已存在的那张止损单保护，"
+                    f"未能替换成新价位：{e}"
+                )
+                return None
+            logger.error(f"[止损单失败] {side} Stop @ {stop_price}: {e}")
             return None
 
     def place_stop_limit_order(self, side, quantity, stop_price, limit_price=None,
