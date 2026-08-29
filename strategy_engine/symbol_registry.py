@@ -31,8 +31,10 @@ SYMBOLS: Dict[str, dict] = {
     "PAXGUSDT":      {"strategy": _ZEC_STRATEGY, "timeframe": "150m", "mtf": _ZEC_MTF, "params": {}},
     "ZECUSDT":       {"strategy": _ZEC_STRATEGY, "timeframe": "150m", "mtf": _ZEC_MTF, "params": {}},
 
+    # ── 2026-08-20 接入真实策略：ETH版本（平开不互斥版），完整源码（非截图）──
+    "ETHUSDT":       {"strategy": "eth_pingkai_buhuchi", "timeframe": "90m", "mtf": ["4h", "1d"], "params": {}},
+
     # ── 占位，等用户提供其余品种的真实策略资料 ──────────────────────────
-    "ETHUSDT":       {"strategy": "_template", "timeframe": "90m",  "mtf": [], "params": {}},
     "XAUUSDT":       {"strategy": "_template", "timeframe": "50m",  "mtf": [], "params": {}},
     "BNBUSDT":       {"strategy": "_template", "timeframe": "150m", "mtf": [], "params": {}},
     "BCHUSDT":       {"strategy": "_template", "timeframe": "6h",   "mtf": [], "params": {}},

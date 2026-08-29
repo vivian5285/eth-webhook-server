@@ -80,7 +80,9 @@ def run_backtest(symbol: str, days: int = 30, warmup_bars: int = DEFAULT_WARMUP_
 
     minutes = klines.timeframe_to_minutes(timeframe) or 60
     bars_needed = int(days * 24 * 60 / minutes) + warmup_bars
-    all_base = klines.get_bars(symbol, timeframe, limit=min(bars_needed, 1500))
+    # get_bars内部会自动分页突破币安单次1500根上限，这里不能再额外clamp到1500，
+    # 否则超过~1500根的回测区间(比如跨度一年多)会被悄悄截断成最近那一小段。
+    all_base = klines.get_bars(symbol, timeframe, limit=bars_needed)
     if len(all_base) < warmup_bars + 5:
         return {"ok": False, "message": f"历史K线不足({len(all_base)}根)，无法回测"}
 
@@ -91,7 +93,7 @@ def run_backtest(symbol: str, days: int = 30, warmup_bars: int = DEFAULT_WARMUP_
         for tf in mtf:
             tf_minutes = klines.timeframe_to_minutes(tf) or 240
             tf_limit = int(span_ms / (tf_minutes * 60 * 1000)) + 50 if span_ms else 500
-            mtf_all[tf] = klines.get_bars(symbol, tf, limit=min(tf_limit, 1500), end_time_ms=all_base[-1]["t"] + 1)
+            mtf_all[tf] = klines.get_bars(symbol, tf, limit=tf_limit, end_time_ms=all_base[-1]["t"] + 1)
 
     run_id = f"{symbol}-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     open_pos: Optional[dict] = None
