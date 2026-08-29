@@ -112,14 +112,21 @@ def _close_position(key: tuple, exit_price: float, bar_time: int, reason: str) -
     )
 
 
-def _hydrate_open_positions_from_db(entries: List[dict]) -> None:
+def _hydrate_keys_from_db(keys: List[tuple]) -> None:
     """进程重启后从sqlite恢复内存态持仓——跟shadow_engine.py同类恢复逻辑
-    同一惯例，避免重启后"账本记得开过仓、内存不知道"导致重复开仓。"""
-    for e in entries:
-        key = (e["symbol"], e["strategy"])
+    同一惯例，避免重启后"账本记得开过仓、内存不知道"导致重复开仓。
+
+    2026-08-29修复：最初只传了single_symbol_roster的(symbol,strategy)
+    键，universe_roster(cross_momentum)的键完全没被恢复——实测复现：
+    服务重启后cross_momentum把DB里已经开着的8笔仓位当成"没有持仓"，
+    同一根K线用同样的价格重新开了一遍一模一样的仓位，产生完全重复的
+    行(id 11-18和19-26)。改成调用方把single+universe两边全部(symbol,
+    strategy)键都收集好一起传进来，不再分开处理。"""
+    for key in keys:
         if key in _open_positions:
             continue
-        row = shadow_store.get_open_row(e["symbol"], e["strategy"])
+        symbol, strategy = key
+        row = shadow_store.get_open_row(symbol, strategy)
         if row:
             row["stop_loss"] = row.get("stop")
             row["tp1"] = row.get("tp1_price")
@@ -211,7 +218,10 @@ def _tick_universe_entry(entry: dict) -> None:
 
 
 def run_comparison_once(single_roster: List[dict], universe_roster: List[dict]) -> None:
-    _hydrate_open_positions_from_db(single_roster)
+    keys = [(e["symbol"], e["strategy"]) for e in single_roster]
+    for u in universe_roster:
+        keys.extend((s, u["strategy"]) for s in u["symbols"])
+    _hydrate_keys_from_db(keys)
     for entry in single_roster:
         try:
             _tick_single_symbol_entry(entry)
