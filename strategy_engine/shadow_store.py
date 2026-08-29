@@ -211,6 +211,51 @@ def list_open(strategy: Optional[str] = None) -> List[dict]:
         return []
 
 
+def summary_by_strategy() -> List[dict]:
+    """每个策略跨全部品种汇总：已平仓笔数/胜率/累计盈亏(ATR加权)/当前
+    持仓数——2026-08-29新增，给控制面板"策略对比"顶层表用。跟
+    summary_by_symbol同一份realized_pnl_atr_weighted口径，只是分组维度
+    从品种换成策略，方便"turtle_breakout整体 vs connors_rsi2整体"这种
+    跨品种汇总对比，不用调用方自己在应用层再聚合一次。"""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
+                          ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
+                          ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr
+                   FROM shadow_positions_v2
+                   WHERE status='closed'
+                   GROUP BY strategy ORDER BY strategy"""
+            ).fetchall()
+            out = [dict(r) for r in rows]
+            open_counts = conn.execute(
+                """SELECT strategy, COUNT(*) AS open_count
+                   FROM shadow_positions_v2 WHERE status='open' GROUP BY strategy"""
+            ).fetchall()
+            open_map = {r["strategy"]: r["open_count"] for r in open_counts}
+            for row in out:
+                row["open_count"] = int(open_map.get(row["strategy"], 0))
+                trades = int(row["trades"] or 0)
+                row["win_rate"] = round(100.0 * (row["wins"] or 0) / trades, 1) if trades > 0 else None
+            # 只有持仓、没有任何已平仓记录的策略也该出现在列表里，不然
+            # 刚上线还没走完一轮的策略在对比表里会直接消失
+            for strat, cnt in open_map.items():
+                if not any(r["strategy"] == strat for r in out):
+                    out.append({
+                        "strategy": strat, "trades": 0, "wins": 0,
+                        "total_pnl_atr": 0.0, "avg_pnl_atr": None,
+                        "worst_trade_atr": None, "open_count": int(cnt),
+                        "win_rate": None,
+                    })
+            return out
+    except Exception as e:
+        logger.warning(f"[shadow_store] summary_by_strategy 失败: {e}")
+        return []
+
+
 def summary_by_symbol(strategy: str) -> List[dict]:
     """每个品种：已平仓模拟交易数、胜率、平均/累计blended_pnl_pct——
     汇报脚本/dashboard用。"""
