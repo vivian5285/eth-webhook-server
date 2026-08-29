@@ -17,7 +17,7 @@ from webhook_parser import (
 )
 from symbol_config import active_binance_symbols, resolve_binance_symbol
 from console_api import init_console
-from account_profiles import bootstrap_from_env, get_webhook_secret, get_active_sizing
+from account_profiles import bootstrap_from_env, get_webhook_secret, get_active_sizing, get_symbol_settings
 import webhook_log
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Binance: %(message)s')
@@ -150,6 +150,21 @@ def process_webhook_payload(raw_bytes, content_type, headers, remote_addr, ticke
 
     # 开仓必要字段：仅 price（ATR/ADX 由 VPS 行情引擎自算；webhook atr 仅调试比对）
     if raw_action in ("LONG", "SHORT"):
+        # 2026-08-26：账户级品种开关——例如该账户尚未在交易所端接受某品种
+        # 的前置协议（如币安代币化股票永续的TradFi-Perps agreement，
+        # 下单会直接被交易所拒-4411），下到这一步再报错只会一直产生失败
+        # 订单和噪音。这里提前拦截，Console里关掉即生效，不需要改代码/
+        # 重新部署，也不影响同一份代码部署的其它账户（各账户各自的
+        # data/symbol_settings.json独立）。
+        if not get_symbol_settings(sym).get("trading_enabled", True):
+            logger.warning(f"[Webhook] [{sym}] 该账户此品种交易已被手动关闭，跳过开仓")
+            _log(200, "symbol_trading_disabled")
+            return {
+                "status": "skipped",
+                "message": f"Trading disabled for {sym} on this account",
+                "symbol": sym,
+                "action": raw_action,
+            }, 200
         px = data.get("price")
         try:
             px_ok = px is not None and float(px) > 0
@@ -366,6 +381,59 @@ def admin_smoke_arm_radar(symbol):
         "radar_pending_arm": bool(getattr(sup, "radar_pending_arm", False)),
         "initial_stop": float(getattr(sup, "initial_stop", 0) or 0),
     }), 200 if ok else 500
+
+
+@app.route('/admin/abort_catchup/<path:symbol>', methods=['POST'])
+def admin_abort_catchup(symbol):
+    """
+    人工中止TV心跳漏单追回周期——撤掉追回限价/市价单、清catchup_*状态、
+    标记本次事件已消耗(不会同一事件重新触发)。2026-08-29新增：宝贝手动
+    平仓PAXG(看支撑位判断，怕反弹回吐)后，TV自己从没发过CLOSE，心跳追回
+    机制照常判定成"疑似漏单"自动挂单想追回——这是系统按自己既定逻辑正确
+    运行，但撞上了用户主动的判断，需要一个人工干预口子直接中止，不用等
+    重启。跟/admin/smoke_arm_radar同款WEBHOOK_SECRET鉴权，避免被外部误触发
+    (这条路由能撤掉真实追回挂单，影响真实资金路径)。
+    """
+    expected = str(os.getenv("WEBHOOK_SECRET") or "").strip()
+    data = request.get_json(silent=True) or {}
+    auth = str(
+        data.get("secret")
+        or request.form.get("secret")
+        or request.args.get("secret")
+        or request.headers.get("X-Webhook-Secret")
+        or ""
+    ).strip()
+    if not expected or auth != expected:
+        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+    meta = resolve_binance_symbol(symbol, default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({
+            "status": "error",
+            "message": f"Unknown symbol: {symbol}",
+            "allowed": active_binance_symbols(),
+        }), 400
+    sup = get_supervisor(sym)
+    was_active = bool(getattr(sup, "catchup_active", False))
+    if not was_active:
+        return jsonify({
+            "status": "ok", "symbol": sym, "was_active": False,
+            "message": "no active catchup cycle",
+        }), 200
+    reason = str(data.get("reason") or request.args.get("reason") or "人工中止(admin_abort_catchup)")
+    try:
+        sup._abort_tv_catchup_cycle(reason=reason)
+    except Exception as e:
+        logger.error(f"[admin/abort_catchup] {sym} 中止失败: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"abort_err:{e}"}), 500
+    logger.info(f"[admin/abort_catchup] {sym} 已人工中止追回周期 | {reason}")
+    return jsonify({
+        "status": "success",
+        "symbol": sym,
+        "was_active": True,
+        "catchup_active": bool(getattr(sup, "catchup_active", False)),
+        "reason": reason,
+    }), 200
 
 
 @app.route('/admin/reload_notify', methods=['POST'])

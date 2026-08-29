@@ -141,6 +141,7 @@ def api_overview():
             "leverage": float(entry.get("leverage", 5)),
             "principal_override": float(entry.get("principal_override") or 0) or None,
             "fixed_amount": float(entry.get("fixed_amount") or 0) or None,
+            "trading_enabled": bool(entry.get("trading_enabled", True)),
         }
 
     equity = None
@@ -377,6 +378,7 @@ def api_symbol_settings_list():
             "leverage": float(entry.get("leverage", 5)),
             "principal_override": float(entry.get("principal_override") or 0) or None,
             "fixed_amount": float(entry.get("fixed_amount") or 0) or None,
+            "trading_enabled": bool(entry.get("trading_enabled", True)),
         }
     return jsonify({"status": "ok", "symbols": result})
 
@@ -406,6 +408,7 @@ def api_symbol_settings_update(symbol):
         principal_override=body.get("principal_override"),
         mode=body.get("mode"),
         fixed_amount=body.get("fixed_amount"),
+        trading_enabled=body.get("trading_enabled"),
     )
     return jsonify({"status": "ok", "symbol": sym, **updated})
 

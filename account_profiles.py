@@ -193,6 +193,11 @@ def get_symbol_settings(symbol: str) -> Dict[str, Any]:
         "principal_override": float(entry.get("principal_override") or 0) or None,
         "mode": str(entry.get("mode", "risk")),  # "risk" | "fixed_amount"
         "fixed_amount": float(entry.get("fixed_amount", 0) or 0),
+        # 2026-08-26：账户级交易开关（如某账户尚未接受交易所对该品种的
+        # 前置协议，-4411 TradFi-Perps agreement 之类）。默认True不影响
+        # 现有行为；per-deployment的data/symbol_settings.json各账户独立，
+        # 关掉某账户某品种不影响同一份代码部署的其它账户。
+        "trading_enabled": bool(entry.get("trading_enabled", True)),
     }
 
 
@@ -210,6 +215,7 @@ def set_symbol_settings(
     principal_override: float = None,
     mode: str = None,
     fixed_amount: float = None,
+    trading_enabled: bool = None,
 ) -> Dict[str, Any]:
     """更新某币种的独立仓位设置。"""
     sym = str(symbol or "").upper()
@@ -235,6 +241,8 @@ def set_symbol_settings(
         entry["mode"] = str(mode) if mode in ("risk", "fixed_amount") else "risk"
     if fixed_amount is not None:
         entry["fixed_amount"] = max(0.0, float(fixed_amount))
+    if trading_enabled is not None:
+        entry["trading_enabled"] = bool(trading_enabled)
     with _LOCK:
         _save_symbol_settings_raw(data)
     return get_symbol_settings(sym)
