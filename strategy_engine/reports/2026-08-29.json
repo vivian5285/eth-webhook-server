@@ -1,0 +1,92 @@
+{
+  "generated_at_utc": "2026-08-29T07:18:48.560042+00:00",
+  "generated_at_epoch": 1787987928.5600593,
+  "strategy_summary": [
+    {
+      "strategy": "tv_multiscore_v1",
+      "trades": 3,
+      "wins": 0,
+      "total_pnl_atr": -2.2126,
+      "avg_pnl_atr": -0.7375,
+      "worst_trade_atr": -1.5498,
+      "open_count": 5,
+      "win_rate": 0.0,
+      "description": "TV镜像：完整复刻5套真实TradingView策略源码(评分入场+4H反转/连续逆势K线离场)，模拟VPS自己执行的完整TP1/TP2/TP3分批止盈+呼吸阶梯止损。回答'如果VPS用TV一样的信号、只是执行更快更优价，能多赚多少'。"
+    },
+    {
+      "strategy": "connors_rsi2",
+      "trades": 0,
+      "wins": 0,
+      "total_pnl_atr": 0.0,
+      "avg_pnl_atr": null,
+      "worst_trade_atr": null,
+      "open_count": 1,
+      "win_rate": null,
+      "description": "Connors RSI-2均值回归(Larry Connors公开发表)：只在SMA200方向顺势，专挑RSI(2)跌破10/涨破90的短线极端超卖超买入场，赌'大趋势没变、短线情绪会均值回归'。在股票类品种(TSLA/META等代币化股票)上验证最多。"
+    },
+    {
+      "strategy": "cross_momentum",
+      "trades": 0,
+      "wins": 0,
+      "total_pnl_atr": 0.0,
+      "avg_pnl_atr": null,
+      "worst_trade_atr": null,
+      "open_count": 8,
+      "win_rate": null,
+      "description": "跨品种动量因子(Jegadeesh-Titman学术动量异象)：把篮子里全部品种按近期涨跌幅排名，做多最强25%、做空最弱25%，排名跌出区间就离场。唯一一个看'相对强弱'而不是单品种自身形态的策略。"
+    }
+  ],
+  "by_symbol": {
+    "_template": [],
+    "bollinger_squeeze": [],
+    "connors_rsi2": [],
+    "cross_momentum": [],
+    "eth_pingkai_buhuchi": [],
+    "turtle_breakout": [],
+    "tv_multiscore_v1": [
+      {
+        "symbol": "BNBUSDT",
+        "trades": 1,
+        "wins": 0,
+        "total_pnl_pct": 0.0,
+        "avg_pnl_pct": 0.0
+      },
+      {
+        "symbol": "ETHUSDT",
+        "trades": 1,
+        "wins": 0,
+        "total_pnl_pct": -0.6628,
+        "avg_pnl_pct": -0.6628
+      },
+      {
+        "symbol": "ZECUSDT",
+        "trades": 1,
+        "wins": 0,
+        "total_pnl_pct": -1.5498,
+        "avg_pnl_pct": -1.5498
+      }
+    ],
+    "zec_pingkai_buhuchi": []
+  },
+  "service_health": [
+    {
+      "service": "strategy-engine.service",
+      "active": "active",
+      "error_count_24h": "0"
+    },
+    {
+      "service": "strategy-compare.service",
+      "active": "active",
+      "error_count_24h": "0"
+    }
+  ],
+  "registered_strategies": [
+    "_template",
+    "bollinger_squeeze",
+    "connors_rsi2",
+    "cross_momentum",
+    "eth_pingkai_buhuchi",
+    "turtle_breakout",
+    "zec_pingkai_buhuchi"
+  ]
+}
