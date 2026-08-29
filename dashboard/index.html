@@ -128,6 +128,7 @@
   .pnl-tag.up { background: var(--green-bg); color: var(--green); }
   .pnl-tag.down { background: var(--red-bg); color: var(--red); }
   .pnl-tag.na { background: rgba(31,41,55,0.05); color: var(--text-lo); font-weight: 500; }
+  .combo-usd { color: var(--text-lo); font-size: 12px; font-weight: 500; }
   .pos-grid {
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 14px;
     font-size: 12px; color: var(--text-mid);
@@ -614,11 +615,14 @@
           <button class="btn-mini" onclick="loadStrategyCompare()">刷新</button>
         </div>
       </div>
+      <p style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px">
+        金额是把ATR倍数按"每1×ATR波动=$100"折算出来的估算值，方便直观对比——这几套战法本身没有真实资金/真实仓位大小，不是任何账户的实际下单金额。
+      </p>
       <div class="tv-table-wrap">
         <table class="tv-table">
           <thead><tr>
-            <th>策略</th><th>已平仓笔数</th><th>胜率</th><th>累计盈亏(×ATR)</th>
-            <th>平均盈亏(×ATR)</th><th>最差单笔(×ATR)</th><th>当前持仓</th><th></th>
+            <th>策略</th><th>已平仓笔数</th><th>胜率</th><th>累计盈亏</th>
+            <th>平均盈亏</th><th>最差单笔</th><th>当前持仓</th><th></th>
           </tr></thead>
           <tbody id="strategyCompareBody"><tr><td colspan="8" class="tv-empty">加载中…</td></tr></tbody>
         </table>
@@ -639,16 +643,16 @@
       <p id="strategyDetailDesc" style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px"></p>
       <div class="tv-table-wrap" id="strategyDetailPositionsWrap">
         <table class="tv-table">
-          <thead><tr>
+          <thead id="strategyDetailPositionsHead"><tr>
             <th>品种</th><th>周期</th><th>方向</th><th>入场价</th><th>出场价</th>
-            <th>盈亏(×ATR)</th><th>出场原因</th><th>入场时间</th>
+            <th>盈亏</th><th>出场原因</th><th>入场时间</th>
           </tr></thead>
           <tbody id="strategyDetailPositionsBody"><tr><td colspan="8" class="tv-empty">点击上方策略行查看明细</td></tr></tbody>
         </table>
       </div>
       <div class="tv-table-wrap hidden" id="strategyDetailBySymbolWrap">
         <table class="tv-table">
-          <thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>累计盈亏(×ATR)</th><th>平均盈亏(×ATR)</th></tr></thead>
+          <thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>累计盈亏</th><th>平均盈亏</th></tr></thead>
           <tbody id="strategyDetailBySymbolBody"></tbody>
         </table>
       </div>
@@ -1290,7 +1294,8 @@ const STRATEGY_LABELS = {
   turtle_breakout: "Turtle海龟突破",
   cross_momentum: "跨品种动量因子",
   connors_rsi2: "Connors RSI-2均值回归",
-  bollinger_squeeze: "Bollinger squeeze突破",
+  bollinger_squeeze: "Bollinger squeeze突破(4h真实版)",
+  bollinger_squeeze_fast: "Bollinger squeeze突破(1h快版)",
 };
 
 function fmtAtr(v) {
@@ -1300,18 +1305,33 @@ function fmtAtr(v) {
   return `${sign}${n.toFixed(2)}`;
 }
 
+function fmtUsd(v) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  const sign = n >= 0 ? "+" : "-";
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
+// 同时展示ATR倍数(客观、跨品种可比)和估算美元(直观)两个数字。
+function fmtCombo(atr, usd) {
+  if (atr === null || atr === undefined) return "—";
+  return `${fmtAtr(atr)}×ATR <span class="combo-usd">(${fmtUsd(usd)})</span>`;
+}
+
 function renderStrategyCompareRow(row) {
   const label = STRATEGY_LABELS[row.strategy] || row.strategy;
   const pnlClass = row.total_pnl_atr > 0 ? "up" : (row.total_pnl_atr < 0 ? "down" : "");
   const winRate = row.win_rate === null || row.win_rate === undefined ? "—" : `${row.win_rate.toFixed(1)}%`;
+  const waiting = row.trades === 0 && row.open_count === 0
+    ? '<span class="pill" style="margin-left:8px;font-size:11px">等待首次触发</span>' : '';
   return `
     <tr class="strategy-row" onclick="openStrategyDetail('${row.strategy}')" style="cursor:pointer">
-      <td><b>${escapeHtml(label)}</b></td>
+      <td><b>${escapeHtml(label)}</b>${waiting}</td>
       <td>${row.trades}</td>
       <td>${winRate}</td>
-      <td class="${pnlClass}">${fmtAtr(row.total_pnl_atr)}</td>
-      <td>${fmtAtr(row.avg_pnl_atr)}</td>
-      <td>${fmtAtr(row.worst_trade_atr)}</td>
+      <td class="${pnlClass}">${fmtCombo(row.total_pnl_atr, row.total_pnl_usd)}</td>
+      <td>${fmtCombo(row.avg_pnl_atr, row.avg_pnl_usd)}</td>
+      <td>${fmtCombo(row.worst_trade_atr, row.worst_trade_usd)}</td>
       <td>${row.open_count}</td>
       <td><button class="btn-mini" onclick="event.stopPropagation();openStrategyDetail('${row.strategy}')">查看</button></td>
     </tr>`;
@@ -1354,7 +1374,7 @@ function switchStrategyDetailView(view) {
   loadStrategyDetail();
 }
 
-function renderStrategyPositionRow(p) {
+function renderStrategyClosedRow(p) {
   const pnl = p.realized_pnl_atr_weighted;
   const pnlClass = pnl > 0 ? "up" : (pnl < 0 ? "down" : "");
   const entryTime = p.entry_bar_time ? new Date(p.entry_bar_time).toLocaleString("zh-CN", {hour12: false}) : "—";
@@ -1365,8 +1385,25 @@ function renderStrategyPositionRow(p) {
       <td>${p.side === "LONG" ? "多" : "空"}</td>
       <td>${Number(p.entry).toFixed(4)}</td>
       <td>${p.exit_price !== null && p.exit_price !== undefined ? Number(p.exit_price).toFixed(4) : "—"}</td>
-      <td class="${pnlClass}">${fmtAtr(pnl)}</td>
+      <td class="${pnlClass}">${fmtCombo(pnl, p.pnl_usd)}</td>
       <td>${escapeHtml(p.exit_reason || "")}</td>
+      <td>${entryTime}</td>
+    </tr>`;
+}
+
+function renderStrategyOpenRow(p) {
+  const pnl = p.unrealized_pnl_atr;
+  const pnlClass = pnl > 0 ? "up" : (pnl < 0 ? "down" : "");
+  const entryTime = p.entry_bar_time ? new Date(p.entry_bar_time).toLocaleString("zh-CN", {hour12: false}) : "—";
+  return `
+    <tr>
+      <td>${escapeHtml(p.symbol)}</td>
+      <td>${escapeHtml(p.timeframe || "")}</td>
+      <td>${p.side === "LONG" ? "多" : "空"}</td>
+      <td>${Number(p.entry).toFixed(4)}</td>
+      <td>${p.current_price !== null && p.current_price !== undefined ? Number(p.current_price).toFixed(4) : "获取中…"}</td>
+      <td class="${pnlClass}">${fmtCombo(pnl, p.unrealized_pnl_usd)}</td>
+      <td>${p.stop !== null && p.stop !== undefined ? Number(p.stop).toFixed(4) : "—"}</td>
       <td>${entryTime}</td>
     </tr>`;
 }
@@ -1379,8 +1416,8 @@ function renderStrategyBySymbolRow(r) {
       <td>${escapeHtml(r.symbol)}</td>
       <td>${r.trades}</td>
       <td>${winRate}</td>
-      <td class="${pnlClass}">${fmtAtr(r.total_pnl_atr)}</td>
-      <td>${fmtAtr(r.avg_pnl_atr)}</td>
+      <td class="${pnlClass}">${fmtCombo(r.total_pnl_atr, r.total_pnl_usd)}</td>
+      <td>${fmtCombo(r.avg_pnl_atr, r.avg_pnl_usd)}</td>
     </tr>`;
 }
 
@@ -1389,12 +1426,17 @@ async function loadStrategyDetail() {
   const strategy = _strategyActiveDetail;
   if (_strategyDetailView === "positions") {
     const status = document.getElementById("strategyDetailStatus").value;
+    const head = document.getElementById("strategyDetailPositionsHead");
     const body = document.getElementById("strategyDetailPositionsBody");
+    head.innerHTML = status === "open"
+      ? `<tr><th>品种</th><th>周期</th><th>方向</th><th>入场价</th><th>现价</th><th>浮动盈亏</th><th>止损价</th><th>入场时间</th></tr>`
+      : `<tr><th>品种</th><th>周期</th><th>方向</th><th>入场价</th><th>出场价</th><th>盈亏</th><th>出场原因</th><th>入场时间</th></tr>`;
     body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载中…</td></tr>`;
     try {
       const d = await (await fetch(`api/strategy/compare/${encodeURIComponent(strategy)}/positions?status=${status}&limit=200`)).json();
       const rows = d.positions || [];
-      body.innerHTML = rows.length ? rows.map(renderStrategyPositionRow).join("") : `<tr><td colspan="8" class="tv-empty">暂无记录</td></tr>`;
+      const renderer = status === "open" ? renderStrategyOpenRow : renderStrategyClosedRow;
+      body.innerHTML = rows.length ? rows.map(renderer).join("") : `<tr><td colspan="8" class="tv-empty">暂无记录</td></tr>`;
     } catch (e) {
       body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败</td></tr>`;
     }

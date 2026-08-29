@@ -810,6 +810,43 @@ SHADOW_V2_DB_PATH = f"{STRATEGY_ENGINE_DIR}/strategy_engine/data/shadow_v2.db"
 
 _descriptions_cache = {"ts": 0, "data": None}
 _DESCRIPTIONS_CACHE_TTL_SEC = 300
+_roster_cache = {"ts": 0, "data": None}
+_ROSTER_CACHE_TTL_SEC = 300
+
+# 2026-08-29新增：把realized_pnl_atr_weighted(价格波动的ATR倍数，波动率
+# 归一化过、不受品种价格量级影响，方便跨品种比较)统一按"每1×ATR波动=
+# 这么多美元"的口径换算成一个具体金额，纯粹是给对比面板一个直观数字，
+# 不是任何真实仓位的实际下单金额(这几套战法本身就没有真实资金/真实
+# 仓位大小概念)。放在展示层做换算而不是写进数据库——数据源头永远是
+# 客观的ATR倍数，换算系数以后想调整/给用户可配置都不用动历史数据。
+USD_PER_ATR_UNIT = 100.0
+
+
+def _atr_to_usd(v):
+    return round(v * USD_PER_ATR_UNIT, 2) if v is not None else None
+
+
+def _get_comparison_strategy_names():
+    """对比面板要展示的完整策略名单——不是shadow_v2.db里已经有记录的
+    策略，是comparison_roster.py里配置在跑的全部策略(哪怕还一单都没
+    触发过也要显示"0笔·等待中"，而不是从列表里消失，宝贝反馈过看不到
+    还没触发的策略会以为它们没在跑)。tv_multiscore_v1不在这个roster里
+    (它是shadow_engine.py自己独立的TV镜像循环)，单独补上。"""
+    now = time.time()
+    if _roster_cache["data"] is not None and now - _roster_cache["ts"] < _ROSTER_CACHE_TTL_SEC:
+        return _roster_cache["data"]
+    code = (
+        "from strategy_engine.comparison_roster import SINGLE_SYMBOL_ROSTER, UNIVERSE_ROSTER\n"
+        "import json\n"
+        "names = sorted(set([e['strategy'] for e in SINGLE_SYMBOL_ROSTER] + [e['strategy'] for e in UNIVERSE_ROSTER]))\n"
+        "print(json.dumps(names))"
+    )
+    result = _strategy_engine_call(code, timeout=10)
+    names = result if isinstance(result, list) else []
+    names = sorted(set(names) | {"tv_multiscore_v1"})
+    _roster_cache["ts"] = now
+    _roster_cache["data"] = names
+    return names
 
 
 def _shadow_v2_query(sql, params=()):
@@ -844,8 +881,11 @@ def _get_strategy_descriptions():
 
 @app.route("/api/strategy/compare")
 def api_strategy_compare():
-    """跨策略顶层对比表：已平仓笔数/胜率/累计盈亏(ATR加权)/当前持仓数 +
-    每个策略的人话说明。"""
+    """跨策略顶层对比表：已平仓笔数/胜率/累计盈亏(ATR倍数+估算美元)/
+    当前持仓数 + 每个策略的人话说明。2026-08-29修复：改成以
+    comparison_roster.py里配置的完整策略名单为基准(不是"shadow_v2.db里
+    已经有记录的策略")，还没触发过任何一单的策略也会显示"0笔·等待中"，
+    不会从列表里消失。"""
     rows = _shadow_v2_query("""
         SELECT strategy,
                COUNT(*) AS trades,
@@ -861,7 +901,7 @@ def api_strategy_compare():
     """)
     open_map = {r["strategy"]: r["open_count"] for r in open_counts}
     by_strategy = {r["strategy"]: r for r in rows}
-    for strat, cnt in open_map.items():
+    for strat in _get_comparison_strategy_names():
         by_strategy.setdefault(strat, {
             "strategy": strat, "trades": 0, "wins": 0,
             "total_pnl_atr": 0.0, "avg_pnl_atr": None, "worst_trade_atr": None,
@@ -876,9 +916,12 @@ def api_strategy_compare():
             "open_count": int(open_map.get(strat, 0)),
             "win_rate": round(100.0 * wins / trades, 1) if trades > 0 else None,
             "description": descriptions.get(strat, ""),
+            "total_pnl_usd": _atr_to_usd(row.get("total_pnl_atr")),
+            "avg_pnl_usd": _atr_to_usd(row.get("avg_pnl_atr")),
+            "worst_trade_usd": _atr_to_usd(row.get("worst_trade_atr")),
         })
     out.sort(key=lambda r: r["strategy"])
-    return jsonify({"status": "ok", "strategies": out})
+    return jsonify({"status": "ok", "strategies": out, "usd_per_atr_unit": USD_PER_ATR_UNIT})
 
 
 @app.route("/api/strategy/compare/<strategy>/positions")
@@ -893,7 +936,30 @@ def api_strategy_compare_positions(strategy):
         f"ORDER BY {order} LIMIT ?",
         (strategy, status, limit),
     )
-    return jsonify({"status": "ok", "positions": rows})
+    if status == "open":
+        # 持仓中的模拟仓没有realized_pnl(还没平仓)，宝贝要看的是"现在
+        # 浮盈浮亏多少"——现价用跟账户总览同一个公开行情接口(fetch_live_
+        # prices，无需API key)现算，跟已平仓记录用同一个ATR倍数换算美元
+        # 的口径统一展示。
+        prices = fetch_live_prices()
+        for r in rows:
+            px = prices.get(r["symbol"])
+            atr0 = float(r.get("atr0") or 0)
+            entry = float(r.get("entry") or 0)
+            if px is not None and atr0 > 0 and entry > 0:
+                direction = 1.0 if r.get("side") == "LONG" else -1.0
+                unrealized_atr = round(direction * (px - entry) / atr0, 4)
+                r["current_price"] = px
+                r["unrealized_pnl_atr"] = unrealized_atr
+                r["unrealized_pnl_usd"] = _atr_to_usd(unrealized_atr)
+            else:
+                r["current_price"] = None
+                r["unrealized_pnl_atr"] = None
+                r["unrealized_pnl_usd"] = None
+    else:
+        for r in rows:
+            r["pnl_usd"] = _atr_to_usd(r.get("realized_pnl_atr_weighted"))
+    return jsonify({"status": "ok", "positions": rows, "usd_per_atr_unit": USD_PER_ATR_UNIT})
 
 
 @app.route("/api/strategy/compare/<strategy>/by_symbol")
@@ -912,7 +978,9 @@ def api_strategy_compare_by_symbol(strategy):
         trades = int(r.get("trades") or 0)
         wins = int(r.get("wins") or 0)
         r["win_rate"] = round(100.0 * wins / trades, 1) if trades > 0 else None
-    return jsonify({"status": "ok", "by_symbol": rows})
+        r["total_pnl_usd"] = _atr_to_usd(r.get("total_pnl_atr"))
+        r["avg_pnl_usd"] = _atr_to_usd(r.get("avg_pnl_atr"))
+    return jsonify({"status": "ok", "by_symbol": rows, "usd_per_atr_unit": USD_PER_ATR_UNIT})
 
 
 WATCHDOG_RUN_LINE_RE = re.compile(r"^(\S+) \S+ python\[\d+\]: (.*)$")
