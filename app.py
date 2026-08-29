@@ -386,13 +386,26 @@ def admin_smoke_arm_radar(symbol):
 @app.route('/admin/abort_catchup/<path:symbol>', methods=['POST'])
 def admin_abort_catchup(symbol):
     """
-    人工中止TV心跳漏单追回周期——撤掉追回限价/市价单、清catchup_*状态、
-    标记本次事件已消耗(不会同一事件重新触发)。2026-08-29新增：宝贝手动
-    平仓PAXG(看支撑位判断，怕反弹回吐)后，TV自己从没发过CLOSE，心跳追回
-    机制照常判定成"疑似漏单"自动挂单想追回——这是系统按自己既定逻辑正确
+    人工中止TV心跳漏单追回周期——撤掉追回限价/市价单(如果还挂着)、清
+    catchup_*状态、标记本次episode已消耗(同一episode不会重新触发；TV
+    真发一条新OPEN信号、或心跳先转FLAT再变LONG/SHORT形成全新episode，
+    仍会正常评估追回，不影响未来)。2026-08-29新增：宝贝手动平仓PAXG
+    (看支撑位判断，怕反弹回吐)后，TV自己从没发过CLOSE，心跳追回机制
+    照常判定成"疑似漏单"自动挂单想追回——这是系统按自己既定逻辑正确
     运行，但撞上了用户主动的判断，需要一个人工干预口子直接中止，不用等
     重启。跟/admin/smoke_arm_radar同款WEBHOOK_SECRET鉴权，避免被外部误触发
     (这条路由能撤掉真实追回挂单，影响真实资金路径)。
+
+    2026-08-29修复：最初写成"catchup_active已经是False就直接提前返回，
+    什么都不做"——实盘发现这样不够：常规重启对账本身就可能已经把
+    catchup_active清成False(先于人工调用这条路由)，但_catchup_episode_
+    resolved从来没被设过，_maybe_start_tv_heartbeat_catchup的同一episode
+    判定没被打上，只要心跳还是同一个方向/entry、下一轮多周期动量一旦
+    确认，会重新武装一次一模一样的追回——完全没达到"人工中止"的效果。
+    改成不管catchup_active当前是不是True都无条件标记episode已消耗
+    (用当前心跳的side/entry，心跳已转FLAT则退回原来挂单时冻结的
+    catchup_side/catchup_tv_entry_frozen)，真正做到"这一段TV持仓不会
+    再被追回"，而不是"只不多这一次"。
     """
     expected = str(os.getenv("WEBHOOK_SECRET") or "").strip()
     data = request.get_json(silent=True) or {}
@@ -415,23 +428,38 @@ def admin_abort_catchup(symbol):
         }), 400
     sup = get_supervisor(sym)
     was_active = bool(getattr(sup, "catchup_active", False))
-    if not was_active:
-        return jsonify({
-            "status": "ok", "symbol": sym, "was_active": False,
-            "message": "no active catchup cycle",
-        }), 200
     reason = str(data.get("reason") or request.args.get("reason") or "人工中止(admin_abort_catchup)")
     try:
-        sup._abort_tv_catchup_cycle(reason=reason)
+        if was_active:
+            sup._abort_tv_catchup_cycle(reason=reason)
+        else:
+            hb_side = str(getattr(sup, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+            if hb_side in ("LONG", "SHORT"):
+                ep_side = hb_side
+                ep_entry = float(getattr(sup, "tv_heartbeat_entry", 0) or 0)
+            else:
+                ep_side = str(getattr(sup, "catchup_side", "") or "").upper()
+                ep_entry = float(getattr(sup, "catchup_tv_entry_frozen", 0) or 0)
+            sup._catchup_episode_side = ep_side
+            sup._catchup_episode_entry = ep_entry
+            sup._catchup_episode_resolved = True
+            sup._save_state()
+            logger.warning(
+                f"🛑 [{sym}] TV心跳追回episode人工标记已消耗(未武装状态) "
+                f"side={ep_side} entry={ep_entry} | {reason}"
+            )
     except Exception as e:
         logger.error(f"[admin/abort_catchup] {sym} 中止失败: {e}", exc_info=True)
         return jsonify({"status": "error", "message": f"abort_err:{e}"}), 500
-    logger.info(f"[admin/abort_catchup] {sym} 已人工中止追回周期 | {reason}")
+    logger.info(f"[admin/abort_catchup] {sym} 已人工中止追回周期 | was_active={was_active} | {reason}")
     return jsonify({
         "status": "success",
         "symbol": sym,
-        "was_active": True,
+        "was_active": was_active,
         "catchup_active": bool(getattr(sup, "catchup_active", False)),
+        "episode_side": str(getattr(sup, "_catchup_episode_side", "") or ""),
+        "episode_entry": float(getattr(sup, "_catchup_episode_entry", 0) or 0),
+        "episode_resolved": bool(getattr(sup, "_catchup_episode_resolved", False)),
         "reason": reason,
     }), 200
 
