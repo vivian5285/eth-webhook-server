@@ -135,6 +135,37 @@ def stoch_k(bars: Sequence[dict], period: int = 14, smooth: int = 3) -> List[flo
     return sma(raw_k, smooth)
 
 
+def donchian_high_low(bars: Sequence[dict], period: int) -> List[tuple]:
+    """Donchian通道：每个点对应"不含当前这根"的过去period根的最高高点/
+    最低低点(经典海龟规则用昨天收盘时已知的通道，不把当前这根自己的高低
+    点算进自己的突破判断，否则每根K线都会自我突破)。返回[(hh, ll), ...]，
+    从第period+1个输入点开始对齐(需要period根历史 + 当前这根)。"""
+    n = len(bars or [])
+    if n < period + 1:
+        return []
+    out = []
+    for i in range(period, n):
+        window = bars[i - period:i]  # 不含bars[i]自己
+        hh = max(_f(b["h"]) for b in window)
+        ll = min(_f(b["l"]) for b in window)
+        out.append((hh, ll))
+    return out
+
+
+def stdev(values: Sequence[float], period: int) -> List[float]:
+    """滚动标准差(总体标准差，跟大多数图表软件的布林带口径一致)。"""
+    n = len(values or [])
+    if period <= 0 or n < period:
+        return []
+    out = []
+    for i in range(period - 1, n):
+        window = values[i - period + 1:i + 1]
+        m = sum(window) / period
+        var = sum((v - m) ** 2 for v in window) / period
+        out.append(var ** 0.5)
+    return out
+
+
 def wilder_adx(bars: Sequence[dict], period: int = 14) -> float:
     """跟 market_engine.py:wilder_adx 同算法，dict 形状入参。"""
     n = len(bars or [])

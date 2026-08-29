@@ -46,9 +46,81 @@ except Exception as _e:  # 某个策略模块坏了不该拖垮整个注册表�
     import logging
     logging.getLogger(__name__).error(f"[strategies] zec_pingkai_buhuchi 加载失败: {_e}")
 
+try:
+    from strategy_engine.strategies import eth_pingkai_buhuchi
+    STRATEGIES["eth_pingkai_buhuchi"] = eth_pingkai_buhuchi.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] eth_pingkai_buhuchi 加载失败: {_e}")
+
+# 2026-08-29新增：4套公开、有真实资历考证的知名战法，接入影子引擎多策略
+# 并行对比(跟tv_multiscore_v1平行跑，不影响它)。挑选标准见跟宝贝的讨论：
+# 排除"网红独家指标"这类查无实据的东西，只要有公开发表规则+可考证真实
+# track record的。STRATEGY_DESCRIPTIONS给控制面板"策略对比"页面用，人话
+# 说明每个策略在赌什么，不是甩参数。
+try:
+    from strategy_engine.strategies import turtle_breakout
+    STRATEGIES["turtle_breakout"] = turtle_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] turtle_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import cross_momentum
+    STRATEGIES["cross_momentum"] = cross_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] cross_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import connors_rsi2
+    STRATEGIES["connors_rsi2"] = connors_rsi2.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] connors_rsi2 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import bollinger_squeeze
+    STRATEGIES["bollinger_squeeze"] = bollinger_squeeze.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] bollinger_squeeze 加载失败: {_e}")
+
+
+STRATEGY_DESCRIPTIONS: Dict[str, str] = {
+    "_template": "占位示例：双EMA交叉+ATR止损止盈，验证链路用，不是真实策略。",
+    "zec_pingkai_buhuchi": "ZEC真实TV策略复刻：平开不互斥版，多维度评分入场。",
+    "eth_pingkai_buhuchi": "ETH真实TV策略复刻：平开不互斥版，多维度评分入场。",
+    "turtle_breakout": (
+        "Turtle海龟突破(Richard Dennis 1980s公开系统)：Donchian(20)通道"
+        "突破入场，ATR定义止损距离(2N)，反向10日通道破位主动离场。不用"
+        "任何震荡指标确认——趋势本身就是理由。适合PAXG/XAU等趋势性品种。"
+    ),
+    "cross_momentum": (
+        "跨品种动量因子(Jegadeesh-Titman学术动量异象)：把篮子里全部品种"
+        "按近期涨跌幅排名，做多最强25%、做空最弱25%，排名跌出区间就离场。"
+        "唯一一个看'相对强弱'而不是单品种自身形态的策略。"
+    ),
+    "connors_rsi2": (
+        "Connors RSI-2均值回归(Larry Connors公开发表)：只在SMA200方向"
+        "顺势，专挑RSI(2)跌破10/涨破90的短线极端超卖超买入场，赌'大趋势"
+        "没变、短线情绪会均值回归'。在股票类品种(TSLA/META等代币化股票)"
+        "上验证最多。"
+    ),
+    "bollinger_squeeze": (
+        "Bollinger Band Squeeze突破(John Bollinger本人提出)：布林带带宽"
+        "收缩到近120根最低点后，带量突破上/下轨入场，回落穿越中轨离场。"
+        "纯波动率结构信号，不挑资产类别。"
+    ),
+}
+
 
 def get_strategy(name: str):
     fn = STRATEGIES.get(str(name or "").strip())
     if fn is None:
         raise KeyError(f"未注册的策略: {name!r}，已注册: {sorted(STRATEGIES.keys())}")
     return fn
+
+
+def get_strategy_description(name: str) -> str:
+    return STRATEGY_DESCRIPTIONS.get(str(name or "").strip(), "")
