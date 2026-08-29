@@ -251,7 +251,16 @@ def list_signals(
     symbol: Optional[str] = None,
     action: Optional[str] = None,
     source: Optional[str] = None,
+    exclude_actions: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """
+    2026-08-29新增exclude_actions：宝贝反馈——TV信号日志页是给他看细节、
+    决定要不要重放/编辑重放用的，跟心跳(HEARTBEAT，专门喂实盘对账/追回
+    用，不是给人看的)是两回事，混在一起会被心跳刷屏淹没(心跳按品种每根
+    收盘K线发一条，频率远高于真实的开平仓动作)。传exclude_actions=
+    ["HEARTBEAT"]时按action NOT IN(...)排除，不影响symbol/action精确
+    过滤这两条既有路径(两者可以同时用：比如只看某品种的非心跳记录)。
+    """
     limit = max(1, min(500, int(limit or 50)))
     offset = max(0, int(offset or 0))
     where = []
@@ -265,6 +274,10 @@ def list_signals(
     if source:
         where.append("source=?")
         params.append(str(source))
+    if exclude_actions:
+        placeholders = ",".join("?" for _ in exclude_actions)
+        where.append(f"action NOT IN ({placeholders})")
+        params.extend(str(a) for a in exclude_actions)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     try:
         with _connect() as conn:
