@@ -49,6 +49,7 @@ from . import indicators as ind
 from . import klines
 from . import shadow_store
 from . import tv_symbol_params
+from .position_sizing import compute_qty
 
 logger = logging.getLogger(__name__)
 
@@ -463,14 +464,19 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
         tier_cfg = tiers[max(0, min(2, int(open_row["tier"])))] if tiers else {}
         pos = _row_to_position(open_row, breath, tier_cfg)
 
+        qty = float(open_row.get("qty") or 0)
+
         for b in new_bars:
             done = pos.update_on_bar(b)
             if done:
                 shadow_store.close_row(open_row["id"], _position_to_row(pos), int(b["t"]))
+                new_equity = shadow_store.settle_trade_on_equity(
+                    STRATEGY_NAME, pos.realized_pnl_atr_weighted, pos.atr0, qty,
+                )
                 logger.info(
                     f"✅ [影子] {symbol} 平仓 {pos.side} entry={pos.entry:.4f} "
                     f"exit={pos.exit_price:.4f}({pos.exit_reason}) "
-                    f"blended_pnl={pos.realized_pnl_atr_weighted:.3f}%"
+                    f"blended_pnl={pos.realized_pnl_atr_weighted:.3f}% 净值→${new_equity:.2f}"
                 )
                 return pos.to_summary()
             shadow_store.update_row(open_row["id"], _position_to_row(pos), int(b["t"]))
@@ -481,10 +487,13 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
                 curr_px = float(bars[-1]["c"])
                 pos.force_close(curr_px, int(bars[-1]["t"]), "4h_reversal")
                 shadow_store.close_row(open_row["id"], _position_to_row(pos), int(bars[-1]["t"]))
+                new_equity = shadow_store.settle_trade_on_equity(
+                    STRATEGY_NAME, pos.realized_pnl_atr_weighted, pos.atr0, qty,
+                )
                 logger.info(
                     f"✅ [影子] {symbol} 4H裸K放量反转平仓 {pos.side} "
                     f"entry={pos.entry:.4f} exit={curr_px:.4f} "
-                    f"blended_pnl={pos.realized_pnl_atr_weighted:.3f}%"
+                    f"blended_pnl={pos.realized_pnl_atr_weighted:.3f}% 净值→${new_equity:.2f}"
                 )
         return pos.to_summary()
 
@@ -526,6 +535,11 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
 
     pos = ShadowPosition(symbol, side, entry_px, score["atr"], tier, entry_bar_time, breath, tier_cfg)
     row = _open_row_from_position(pos, interval, score["adx"], score["bar_time"])
+    # 2026-08-29新增：qty按实盘真实公式(position_sizing.compute_qty)算，
+    # 用这套策略自己当前的模拟净值(从1000 USDT起步、按已平仓盈亏复利)，
+    # 不是每笔都固定1000重算——这样"最终战绩"才是真实的净值曲线，不是
+    # 一堆互相独立、看不出复利效果的单笔快照。
+    row["qty"] = compute_qty(shadow_store.get_equity(STRATEGY_NAME), entry_px, pos.stop, tier)
     shadow_store.insert_open_row(row)
     logger.info(
         f"📥 [影子] {symbol} 开仓({entry_mode}) {side} @ {entry_px:.4f} "

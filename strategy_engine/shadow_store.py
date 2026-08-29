@@ -65,6 +65,23 @@ def _init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sp2_open "
             "ON shadow_positions_v2 (symbol, strategy, status)"
         )
+        # 2026-08-29新增：qty(开仓数量，按position_sizing.compute_qty用
+        # 开仓那一刻的模拟净值+档位+止损距离算出来，照抄实盘真实公式)。
+        # 老表没有这一列，ALTER TABLE ADD COLUMN在列已存在时会报错，
+        # sqlite没有IF NOT EXISTS语法，用try/except吞掉"已存在"这一种
+        # 情况，其它异常正常抛出。
+        try:
+            conn.execute("ALTER TABLE shadow_positions_v2 ADD COLUMN qty REAL")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_equity (
+                strategy TEXT PRIMARY KEY,
+                equity REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
         conn.commit()
 
 
@@ -74,6 +91,57 @@ _UPDATABLE_FIELDS = (
     "tp1_price", "tp2_price", "stop", "last_ratchet_price",
     "tp1_done", "tp2_done", "realized_frac", "realized_pnl_atr_weighted",
 )
+
+DEFAULT_STARTING_EQUITY = 1000.0
+
+
+def get_equity(strategy: str) -> float:
+    """策略当前模拟净值——2026-08-29新增，每套策略独立从
+    DEFAULT_STARTING_EQUITY(1000 USDT)起步，按实际已平仓盈亏复利/回撤，
+    不是每笔都用固定1000起始金额重新算(那样看不出'最终战绩'，只有单笔
+    表现)。"""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT equity FROM strategy_equity WHERE strategy=?", (strategy,),
+            ).fetchone()
+            return float(row["equity"]) if row else DEFAULT_STARTING_EQUITY
+    except Exception as e:
+        logger.warning(f"[shadow_store] get_equity 失败，回退起始净值: {e}")
+        return DEFAULT_STARTING_EQUITY
+
+
+def set_equity(strategy: str, value: float) -> None:
+    try:
+        with _lock, _connect() as conn:
+            conn.execute(
+                """INSERT INTO strategy_equity (strategy, equity, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(strategy) DO UPDATE SET equity=excluded.equity, updated_at=excluded.updated_at""",
+                (strategy, float(value), time.time()),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[shadow_store] set_equity 跳过: {e}")
+
+
+def settle_trade_on_equity(strategy: str, pnl_atr_weighted: float, atr0: float, qty: float) -> float:
+    """一笔交易完全平仓后，把这笔的真实美元盈亏(pnl_atr_weighted×atr0×qty，
+    单位换算见position_sizing.py顶部注释)结算进策略的模拟净值，返回结算
+    后的新净值。调用方(multi_strategy_runner.py的_close_position/
+    shadow_engine.py的力度close/handoff路径)在仓位状态变成'closed'的
+    那一刻调用一次，不是每次部分止盈都调——qty是开仓时按对应那一刻净值
+    算好的，realized_pnl_atr_weighted本身已经是"相对完整仓位qty"的加权
+    盈亏(见shadow_engine.py::ShadowPosition的LEG_RATIOS分批止盈账本)，
+    不需要跟着分批止盈逐次结算。"""
+    try:
+        pnl_usd = float(pnl_atr_weighted or 0) * float(atr0 or 0) * float(qty or 0)
+    except (TypeError, ValueError):
+        pnl_usd = 0.0
+    equity = get_equity(strategy)
+    new_equity = equity + pnl_usd
+    set_equity(strategy, new_equity)
+    return new_equity
 
 
 def get_open_row(symbol: str, strategy: str) -> Optional[dict]:
@@ -99,8 +167,8 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                    (symbol, strategy, timeframe, side, entry, atr0, tier, adx,
                     entry_bar_time, score_bar_time, last_bar_time, tp1_price, tp2_price,
                     stop, last_ratchet_price, tp1_done, tp2_done,
-                    realized_frac, realized_pnl_atr_weighted, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                    realized_frac, realized_pnl_atr_weighted, qty, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
                 (
                     row["symbol"], row["strategy"], row["timeframe"], row["side"],
                     row["entry"], row["atr0"], row["tier"], row.get("adx"),
@@ -109,6 +177,7 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                     row.get("stop"), row.get("last_ratchet_price"),
                     int(row.get("tp1_done") or 0), int(row.get("tp2_done") or 0),
                     row.get("realized_frac") or 0, row.get("realized_pnl_atr_weighted") or 0,
+                    row.get("qty") or 0.0,
                     time.time(),
                 ),
             )
@@ -212,11 +281,19 @@ def list_open(strategy: Optional[str] = None) -> List[dict]:
 
 
 def summary_by_strategy() -> List[dict]:
-    """每个策略跨全部品种汇总：已平仓笔数/胜率/累计盈亏(ATR加权)/当前
-    持仓数——2026-08-29新增，给控制面板"策略对比"顶层表用。跟
-    summary_by_symbol同一份realized_pnl_atr_weighted口径，只是分组维度
-    从品种换成策略，方便"turtle_breakout整体 vs connors_rsi2整体"这种
-    跨品种汇总对比，不用调用方自己在应用层再聚合一次。"""
+    """每个策略跨全部品种汇总：已平仓笔数/胜率/累计盈亏(ATR加权+真实
+    美元)/当前持仓数/当前模拟净值——2026-08-29新增，给控制面板"策略对比"
+    顶层表用。跟summary_by_symbol同一份realized_pnl_atr_weighted口径，
+    只是分组维度从品种换成策略，方便"turtle_breakout整体 vs
+    connors_rsi2整体"这种跨品种汇总对比，不用调用方自己在应用层再聚合
+    一次。
+
+    2026-08-29扩展：total_pnl_usd = SUM(realized_pnl_atr_weighted×atr0×
+    qty)，是从1000 USDT起始净值、按position_sizing.compute_qty同一套
+    实盘公式(风险20%×5倍杠杆×档位系数)算出来的真实美元盈亏，不再是
+    "每1×ATR=$100"那种粗略折算。qty是开仓那一刻按当时净值算的，NULL
+    (老数据，加这一列之前开的仓)会被SUM()自动跳过，不影响新数据。
+    """
     try:
         with _connect() as conn:
             rows = conn.execute(
@@ -225,7 +302,8 @@ def summary_by_strategy() -> List[dict]:
                           SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
                           ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
                           ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
-                          ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr
+                          ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr,
+                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd
                    FROM shadow_positions_v2
                    WHERE status='closed'
                    GROUP BY strategy ORDER BY strategy"""
@@ -247,9 +325,15 @@ def summary_by_strategy() -> List[dict]:
                     out.append({
                         "strategy": strat, "trades": 0, "wins": 0,
                         "total_pnl_atr": 0.0, "avg_pnl_atr": None,
-                        "worst_trade_atr": None, "open_count": int(cnt),
-                        "win_rate": None,
+                        "worst_trade_atr": None, "total_pnl_usd": 0.0,
+                        "open_count": int(cnt), "win_rate": None,
                     })
+            for row in out:
+                equity = get_equity(row["strategy"])
+                row["equity"] = round(equity, 2)
+                row["equity_return_pct"] = round(
+                    100.0 * (equity - DEFAULT_STARTING_EQUITY) / DEFAULT_STARTING_EQUITY, 2,
+                )
             return out
     except Exception as e:
         logger.warning(f"[shadow_store] summary_by_strategy 失败: {e}")
@@ -266,7 +350,8 @@ def summary_by_symbol(strategy: str) -> List[dict]:
                           COUNT(*) AS trades,
                           SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
                           ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_pct,
-                          ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_pct
+                          ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_pct,
+                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd
                    FROM shadow_positions_v2
                    WHERE status='closed' AND strategy=?
                    GROUP BY symbol ORDER BY symbol""",

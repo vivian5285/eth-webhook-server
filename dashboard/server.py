@@ -813,17 +813,27 @@ _DESCRIPTIONS_CACHE_TTL_SEC = 300
 _roster_cache = {"ts": 0, "data": None}
 _ROSTER_CACHE_TTL_SEC = 300
 
-# 2026-08-29新增：把realized_pnl_atr_weighted(价格波动的ATR倍数，波动率
-# 归一化过、不受品种价格量级影响，方便跨品种比较)统一按"每1×ATR波动=
-# 这么多美元"的口径换算成一个具体金额，纯粹是给对比面板一个直观数字，
-# 不是任何真实仓位的实际下单金额(这几套战法本身就没有真实资金/真实
-# 仓位大小概念)。放在展示层做换算而不是写进数据库——数据源头永远是
-# 客观的ATR倍数，换算系数以后想调整/给用户可配置都不用动历史数据。
-USD_PER_ATR_UNIT = 100.0
+# 2026-08-29修订：最初是把realized_pnl_atr_weighted按"每1×ATR=$100"的
+# 粗略比例换算成金额，宝贝要求改成"每套策略从1000 USDT模拟净值起步，
+# 按实盘同一套额度配比公式(风险20%×5倍杠杆×ADX档位系数，见strategy_
+# engine/position_sizing.py)算真实开仓数量qty"——现在qty已经在开仓时
+# 存进shadow_positions_v2.qty列，真实美元盈亏 = realized_pnl_atr_weighted
+# ×atr0×qty，直接在SQL里算，不再是拍脑袋的固定比例。DEFAULT_STARTING_
+# EQUITY跟strategy_engine.shadow_store.DEFAULT_STARTING_EQUITY保持一致
+# (两边都是常量、不共享导入，改动时两处一起改)。
+#
+# 老数据缺口：这套qty机制上线之前已经平仓的几笔交易(qty列是NULL)，
+# SUM(...×qty)里NULL会被自动跳过，不会拉低/污染新口径的总数，只是那
+# 几笔不会计入美元合计——ATR倍数合计(total_pnl_atr)不受影响，仍然完整。
+DEFAULT_STARTING_EQUITY = 1000.0
 
 
-def _atr_to_usd(v):
-    return round(v * USD_PER_ATR_UNIT, 2) if v is not None else None
+def _get_strategy_equities():
+    """直接读shadow_v2.db的strategy_equity表(跟持仓表同一个sqlite文件，
+    没有额外一层subprocess调用的必要)。返回{strategy: equity}，没有
+    记录的策略视为还没结算过任何一笔，净值等于起始值。"""
+    rows = _shadow_v2_query("SELECT strategy, equity FROM strategy_equity")
+    return {r["strategy"]: float(r["equity"]) for r in rows}
 
 
 def _get_comparison_strategy_names():
@@ -892,7 +902,10 @@ def api_strategy_compare():
                SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
                ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
                ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
-               ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr
+               ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr,
+               ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd,
+               ROUND(AVG(realized_pnl_atr_weighted * atr0 * qty), 2) AS avg_pnl_usd,
+               ROUND(MIN(realized_pnl_atr_weighted * atr0 * qty), 2) AS worst_trade_usd
         FROM shadow_positions_v2 WHERE status='closed' GROUP BY strategy
     """)
     open_counts = _shadow_v2_query("""
@@ -900,28 +913,33 @@ def api_strategy_compare():
         FROM shadow_positions_v2 WHERE status='open' GROUP BY strategy
     """)
     open_map = {r["strategy"]: r["open_count"] for r in open_counts}
+    equities = _get_strategy_equities()
     by_strategy = {r["strategy"]: r for r in rows}
     for strat in _get_comparison_strategy_names():
         by_strategy.setdefault(strat, {
             "strategy": strat, "trades": 0, "wins": 0,
             "total_pnl_atr": 0.0, "avg_pnl_atr": None, "worst_trade_atr": None,
+            "total_pnl_usd": 0.0, "avg_pnl_usd": None, "worst_trade_usd": None,
         })
     descriptions = _get_strategy_descriptions()
     out = []
     for strat, row in by_strategy.items():
         trades = int(row.get("trades") or 0)
         wins = int(row.get("wins") or 0)
+        equity = equities.get(strat, DEFAULT_STARTING_EQUITY)
         out.append({
             **row,
             "open_count": int(open_map.get(strat, 0)),
             "win_rate": round(100.0 * wins / trades, 1) if trades > 0 else None,
             "description": descriptions.get(strat, ""),
-            "total_pnl_usd": _atr_to_usd(row.get("total_pnl_atr")),
-            "avg_pnl_usd": _atr_to_usd(row.get("avg_pnl_atr")),
-            "worst_trade_usd": _atr_to_usd(row.get("worst_trade_atr")),
+            "equity": round(equity, 2),
+            "equity_return_pct": round(100.0 * (equity - DEFAULT_STARTING_EQUITY) / DEFAULT_STARTING_EQUITY, 2),
         })
     out.sort(key=lambda r: r["strategy"])
-    return jsonify({"status": "ok", "strategies": out, "usd_per_atr_unit": USD_PER_ATR_UNIT})
+    return jsonify({
+        "status": "ok", "strategies": out,
+        "starting_equity": DEFAULT_STARTING_EQUITY,
+    })
 
 
 @app.route("/api/strategy/compare/<strategy>/positions")
@@ -938,28 +956,32 @@ def api_strategy_compare_positions(strategy):
     )
     if status == "open":
         # 持仓中的模拟仓没有realized_pnl(还没平仓)，宝贝要看的是"现在
-        # 浮盈浮亏多少"——现价用跟账户总览同一个公开行情接口(fetch_live_
-        # prices，无需API key)现算，跟已平仓记录用同一个ATR倍数换算美元
-        # 的口径统一展示。
+        # 浮盈浮亏多少美元"——现价用跟账户总览同一个公开行情接口
+        # (fetch_live_prices，无需API key)现算，美元金额用这笔仓位开仓
+        # 时按实盘公式算好、存在qty列里的真实开仓数量(不是估算比例)。
         prices = fetch_live_prices()
         for r in rows:
             px = prices.get(r["symbol"])
             atr0 = float(r.get("atr0") or 0)
             entry = float(r.get("entry") or 0)
+            qty = float(r.get("qty") or 0)
             if px is not None and atr0 > 0 and entry > 0:
                 direction = 1.0 if r.get("side") == "LONG" else -1.0
                 unrealized_atr = round(direction * (px - entry) / atr0, 4)
                 r["current_price"] = px
                 r["unrealized_pnl_atr"] = unrealized_atr
-                r["unrealized_pnl_usd"] = _atr_to_usd(unrealized_atr)
+                r["unrealized_pnl_usd"] = round(unrealized_atr * atr0 * qty, 2) if qty > 0 else None
             else:
                 r["current_price"] = None
                 r["unrealized_pnl_atr"] = None
                 r["unrealized_pnl_usd"] = None
     else:
         for r in rows:
-            r["pnl_usd"] = _atr_to_usd(r.get("realized_pnl_atr_weighted"))
-    return jsonify({"status": "ok", "positions": rows, "usd_per_atr_unit": USD_PER_ATR_UNIT})
+            atr0 = float(r.get("atr0") or 0)
+            qty = float(r.get("qty") or 0)
+            pnl_atr = r.get("realized_pnl_atr_weighted")
+            r["pnl_usd"] = round(float(pnl_atr or 0) * atr0 * qty, 2) if (qty > 0 and pnl_atr is not None) else None
+    return jsonify({"status": "ok", "positions": rows})
 
 
 @app.route("/api/strategy/compare/<strategy>/by_symbol")
@@ -970,17 +992,17 @@ def api_strategy_compare_by_symbol(strategy):
                COUNT(*) AS trades,
                SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
                ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
-               ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr
+               ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
+               ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd,
+               ROUND(AVG(realized_pnl_atr_weighted * atr0 * qty), 2) AS avg_pnl_usd
         FROM shadow_positions_v2 WHERE status='closed' AND strategy=?
-        GROUP BY symbol ORDER BY total_pnl_atr DESC
+        GROUP BY symbol ORDER BY total_pnl_usd DESC
     """, (strategy,))
     for r in rows:
         trades = int(r.get("trades") or 0)
         wins = int(r.get("wins") or 0)
         r["win_rate"] = round(100.0 * wins / trades, 1) if trades > 0 else None
-        r["total_pnl_usd"] = _atr_to_usd(r.get("total_pnl_atr"))
-        r["avg_pnl_usd"] = _atr_to_usd(r.get("avg_pnl_atr"))
-    return jsonify({"status": "ok", "by_symbol": rows, "usd_per_atr_unit": USD_PER_ATR_UNIT})
+    return jsonify({"status": "ok", "by_symbol": rows})
 
 
 WATCHDOG_RUN_LINE_RE = re.compile(r"^(\S+) \S+ python\[\d+\]: (.*)$")

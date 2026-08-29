@@ -616,15 +616,15 @@
         </div>
       </div>
       <p style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px">
-        金额是把ATR倍数按"每1×ATR波动=$100"折算出来的估算值，方便直观对比——这几套战法本身没有真实资金/真实仓位大小，不是任何账户的实际下单金额。
+        每套策略各自从1000 USDT模拟净值起步，开仓额度配比跟实盘同一套公式(风险20%×5倍杠杆×ADX档位系数)，金额是按这套公式真实算出来的开仓数量推出来的，不是拍脑袋估的比例——净值曲线才是"最终战绩"，单笔的×ATR倍数留着做跨品种/跨价格量级的信号质量对比。
       </p>
       <div class="tv-table-wrap">
         <table class="tv-table">
           <thead><tr>
-            <th>策略</th><th>已平仓笔数</th><th>胜率</th><th>累计盈亏</th>
+            <th>策略</th><th>当前净值</th><th>已平仓笔数</th><th>胜率</th><th>累计盈亏</th>
             <th>平均盈亏</th><th>最差单笔</th><th>当前持仓</th><th></th>
           </tr></thead>
-          <tbody id="strategyCompareBody"><tr><td colspan="8" class="tv-empty">加载中…</td></tr></tbody>
+          <tbody id="strategyCompareBody"><tr><td colspan="9" class="tv-empty">加载中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -1324,9 +1324,13 @@ function renderStrategyCompareRow(row) {
   const winRate = row.win_rate === null || row.win_rate === undefined ? "—" : `${row.win_rate.toFixed(1)}%`;
   const waiting = row.trades === 0 && row.open_count === 0
     ? '<span class="pill" style="margin-left:8px;font-size:11px">等待首次触发</span>' : '';
+  const equityClass = row.equity_return_pct > 0 ? "up" : (row.equity_return_pct < 0 ? "down" : "");
+  const equitySign = row.equity_return_pct >= 0 ? "+" : "";
+  const equityHtml = `$${row.equity.toFixed(2)} <span class="combo-usd">(${equitySign}${row.equity_return_pct.toFixed(2)}%)</span>`;
   return `
     <tr class="strategy-row" onclick="openStrategyDetail('${row.strategy}')" style="cursor:pointer">
       <td><b>${escapeHtml(label)}</b>${waiting}</td>
+      <td class="${equityClass}"><b>${equityHtml}</b></td>
       <td>${row.trades}</td>
       <td>${winRate}</td>
       <td class="${pnlClass}">${fmtCombo(row.total_pnl_atr, row.total_pnl_usd)}</td>
@@ -1342,15 +1346,15 @@ async function loadStrategyCompare() {
   if (!body) return;
   try {
     const d = await (await fetch("api/strategy/compare")).json();
-    if (d.status !== "ok") { body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败</td></tr>`; return; }
+    if (d.status !== "ok") { body.innerHTML = `<tr><td colspan="9" class="tv-empty">加载失败</td></tr>`; return; }
     const rows = d.strategies || [];
     _strategyDescriptions = {};
     rows.forEach(r => { _strategyDescriptions[r.strategy] = r.description; });
     body.innerHTML = rows.length
       ? rows.map(renderStrategyCompareRow).join("")
-      : `<tr><td colspan="8" class="tv-empty">暂无数据</td></tr>`;
+      : `<tr><td colspan="9" class="tv-empty">暂无数据</td></tr>`;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 

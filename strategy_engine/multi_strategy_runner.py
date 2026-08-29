@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from strategy_engine import klines, shadow_store
 from strategy_engine.strategies import get_strategy
+from strategy_engine.position_sizing import compute_qty
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +74,18 @@ def _pnl_atr_weighted(pos: dict, exit_price: float) -> float:
 
 
 def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> Optional[int]:
+    tier = int(sig.get("tier") or 1)
+    equity = shadow_store.get_equity(strategy)
+    qty = compute_qty(equity, float(sig["price"]), sig.get("stop_loss"), tier)
     row = {
         "symbol": symbol, "strategy": strategy, "timeframe": timeframe,
         "side": sig["action"], "entry": float(sig["price"]), "atr0": float(sig.get("atr") or 0),
-        "tier": int(sig.get("tier") or 1), "adx": None,
+        "tier": tier, "adx": None,
         "entry_bar_time": int(sig["bar_time"]), "score_bar_time": int(sig["bar_time"]),
         "tp1_price": sig.get("tp1"), "tp2_price": None,
         "stop": sig.get("stop_loss"), "last_ratchet_price": None,
         "tp1_done": 0, "tp2_done": 0,
-        "realized_frac": 0, "realized_pnl_atr_weighted": 0,
+        "realized_frac": 0, "realized_pnl_atr_weighted": 0, "qty": qty,
     }
     pid = shadow_store.insert_open_row(row)
     if pid is None:
@@ -93,7 +97,7 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
     _open_positions[(symbol, strategy)] = mem
     logger.info(
         f"📈 [多策略][{strategy}][{symbol}] 开仓 {sig['action']} @ {sig['price']:.6f} "
-        f"stop={sig.get('stop_loss')} tp1={sig.get('tp1')}"
+        f"qty={qty:.6f}(净值${equity:.2f}·T{tier}) stop={sig.get('stop_loss')} tp1={sig.get('tp1')}"
     )
     return pid
 
@@ -110,9 +114,13 @@ def _close_position(key: tuple, exit_price: float, bar_time: int, reason: str) -
         bar_time,
     )
     symbol, strategy = key
+    new_equity = shadow_store.settle_trade_on_equity(
+        strategy, pnl, float(pos.get("atr0") or 0), float(pos.get("qty") or 0),
+    )
+    pnl_usd = pnl * float(pos.get("atr0") or 0) * float(pos.get("qty") or 0)
     logger.info(
         f"📉 [多策略][{strategy}][{symbol}] 平仓 @ {exit_price:.6f} "
-        f"pnl={pnl:+.2f}×ATR | {reason}"
+        f"pnl={pnl:+.2f}×ATR(${pnl_usd:+.2f}) 净值→${new_equity:.2f} | {reason}"
     )
 
 
