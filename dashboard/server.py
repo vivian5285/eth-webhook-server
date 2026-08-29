@@ -22,6 +22,16 @@ strategy_engine 自己维护的 sqlite 文件，跟读账户 state 文件是同�
 读别的服务落盘产物"的模式，不需要额外起HTTP层）；"跑回测"这个唯一的
 写操作，走跟 close_position 一样的 subprocess 调用模式——调 strategy_engine
 自己venv里的python跑一次性脚本，dashboard进程本身不import它的任何代码。
+
+2026-08-29 新增：策略对比面板——数据来自同一个 strategy_engine 服务新增的
+第二条独立线（multi_strategy_runner.py + strategy-compare.service）：把
+Turtle海龟突破/跨品种动量/Connors RSI-2/Bollinger squeeze 这4套公开知名
+战法跟原有的 tv_multiscore_v1(TV镜像)并排跑模拟仓，写进另一张表
+shadow_positions_v2（跟老的 shadow.db/shadow_positions 完全不同的库文件，
+按 strategy 字段分组，天然支持多策略共存）。读法跟上面的策略/回测面板
+同一个模式——直接开 shadow_v2.db 只读查询，不额外起HTTP层；策略的人话
+说明(STRATEGY_DESCRIPTIONS)走 subprocess 一次性调用 strategy_engine 自己
+venv 的 python 取，缓存 5 分钟避免每次刷新面板都开一次子进程。
 """
 import http.cookiejar
 import json
@@ -791,6 +801,118 @@ def api_strategy_backtest(symbol):
     )
     result = _strategy_engine_call(code, timeout=60)
     return jsonify(result)
+
+
+# ── 策略对比面板：4套公开知名战法 vs tv_multiscore_v1，同一套"直接读sqlite
+# +subprocess取一次性数据"模式，见上方2026-08-29注释 ─────────────────────
+
+SHADOW_V2_DB_PATH = f"{STRATEGY_ENGINE_DIR}/strategy_engine/data/shadow_v2.db"
+
+_descriptions_cache = {"ts": 0, "data": None}
+_DESCRIPTIONS_CACHE_TTL_SEC = 300
+
+
+def _shadow_v2_query(sql, params=()):
+    if not os.path.exists(SHADOW_V2_DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(SHADOW_V2_DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"[strategy_compare] shadow_v2.db 查询失败: {e}", flush=True)
+        return []
+
+
+def _get_strategy_descriptions():
+    now = time.time()
+    if _descriptions_cache["data"] is not None and now - _descriptions_cache["ts"] < _DESCRIPTIONS_CACHE_TTL_SEC:
+        return _descriptions_cache["data"]
+    code = (
+        "from strategy_engine.strategies import STRATEGY_DESCRIPTIONS\n"
+        "import json\n"
+        "print(json.dumps(STRATEGY_DESCRIPTIONS))"
+    )
+    result = _strategy_engine_call(code, timeout=10)
+    data = result if isinstance(result, dict) and not (result.get("ok") is False) else {}
+    _descriptions_cache["ts"] = now
+    _descriptions_cache["data"] = data
+    return data
+
+
+@app.route("/api/strategy/compare")
+def api_strategy_compare():
+    """跨策略顶层对比表：已平仓笔数/胜率/累计盈亏(ATR加权)/当前持仓数 +
+    每个策略的人话说明。"""
+    rows = _shadow_v2_query("""
+        SELECT strategy,
+               COUNT(*) AS trades,
+               SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
+               ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
+               ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
+               ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr
+        FROM shadow_positions_v2 WHERE status='closed' GROUP BY strategy
+    """)
+    open_counts = _shadow_v2_query("""
+        SELECT strategy, COUNT(*) AS open_count
+        FROM shadow_positions_v2 WHERE status='open' GROUP BY strategy
+    """)
+    open_map = {r["strategy"]: r["open_count"] for r in open_counts}
+    by_strategy = {r["strategy"]: r for r in rows}
+    for strat, cnt in open_map.items():
+        by_strategy.setdefault(strat, {
+            "strategy": strat, "trades": 0, "wins": 0,
+            "total_pnl_atr": 0.0, "avg_pnl_atr": None, "worst_trade_atr": None,
+        })
+    descriptions = _get_strategy_descriptions()
+    out = []
+    for strat, row in by_strategy.items():
+        trades = int(row.get("trades") or 0)
+        wins = int(row.get("wins") or 0)
+        out.append({
+            **row,
+            "open_count": int(open_map.get(strat, 0)),
+            "win_rate": round(100.0 * wins / trades, 1) if trades > 0 else None,
+            "description": descriptions.get(strat, ""),
+        })
+    out.sort(key=lambda r: r["strategy"])
+    return jsonify({"status": "ok", "strategies": out})
+
+
+@app.route("/api/strategy/compare/<strategy>/positions")
+def api_strategy_compare_positions(strategy):
+    status = request.args.get("status", "closed")
+    limit = int(request.args.get("limit", 200))
+    if status not in ("open", "closed"):
+        status = "closed"
+    order = "entry_bar_time DESC" if status == "closed" else "entry_bar_time ASC"
+    rows = _shadow_v2_query(
+        f"SELECT * FROM shadow_positions_v2 WHERE strategy=? AND status=? "
+        f"ORDER BY {order} LIMIT ?",
+        (strategy, status, limit),
+    )
+    return jsonify({"status": "ok", "positions": rows})
+
+
+@app.route("/api/strategy/compare/<strategy>/by_symbol")
+def api_strategy_compare_by_symbol(strategy):
+    """单个策略按品种拆开的胜率/盈亏——对比表点开某个策略后的下钻视图。"""
+    rows = _shadow_v2_query("""
+        SELECT symbol,
+               COUNT(*) AS trades,
+               SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
+               ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
+               ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr
+        FROM shadow_positions_v2 WHERE status='closed' AND strategy=?
+        GROUP BY symbol ORDER BY total_pnl_atr DESC
+    """, (strategy,))
+    for r in rows:
+        trades = int(r.get("trades") or 0)
+        wins = int(r.get("wins") or 0)
+        r["win_rate"] = round(100.0 * wins / trades, 1) if trades > 0 else None
+    return jsonify({"status": "ok", "by_symbol": rows})
 
 
 WATCHDOG_RUN_LINE_RE = re.compile(r"^(\S+) \S+ python\[\d+\]: (.*)$")

@@ -423,6 +423,9 @@
       <button class="nav-item" data-page="watchdog" onclick="switchPage('watchdog')">
         <span class="ico">🐕</span>监督狗日志
       </button>
+      <button class="nav-item" data-page="strategycompare" onclick="switchPage('strategycompare')">
+        <span class="ico">🏆</span>策略对比
+      </button>
       <div class="sidebar-footer">
         <div class="pill" id="lastUpdated">加载中…</div>
         <div class="pill" id="anomalyPill">异常 0</div>
@@ -596,6 +599,59 @@
         异常30分钟内同类去重才发钉钉，但这里每轮都完整展示，不会被去重吞掉细节。
       </p>
       <div id="watchdogList"><div class="tv-empty">加载中…</div></div>
+    </div>
+    </div>
+
+    <div id="page-strategycompare" class="page hidden">
+      <div class="page-head">
+        <h1>策略对比</h1>
+        <div class="sub">影子引擎并行模拟仓：TV镜像策略 vs 4套公开知名战法，纯模拟不碰真实资金</div>
+      </div>
+    <div class="card tv-card">
+      <div class="tv-head">
+        <h2>策略总览</h2>
+        <div class="tv-filters">
+          <button class="btn-mini" onclick="loadStrategyCompare()">刷新</button>
+        </div>
+      </div>
+      <div class="tv-table-wrap">
+        <table class="tv-table">
+          <thead><tr>
+            <th>策略</th><th>已平仓笔数</th><th>胜率</th><th>累计盈亏(×ATR)</th>
+            <th>平均盈亏(×ATR)</th><th>最差单笔(×ATR)</th><th>当前持仓</th><th></th>
+          </tr></thead>
+          <tbody id="strategyCompareBody"><tr><td colspan="8" class="tv-empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card tv-card hidden" id="strategyDetailCard">
+      <div class="tv-head">
+        <h2 id="strategyDetailTitle">策略详情</h2>
+        <div class="tv-filters">
+          <select id="strategyDetailStatus" onchange="loadStrategyDetail()">
+            <option value="open">当前持仓</option>
+            <option value="closed" selected>已平仓记录</option>
+          </select>
+          <button class="btn-mini" onclick="switchStrategyDetailView('positions')" id="btnViewPositions">明细</button>
+          <button class="btn-mini" onclick="switchStrategyDetailView('bysymbol')" id="btnViewBySymbol">按品种拆分</button>
+        </div>
+      </div>
+      <p id="strategyDetailDesc" style="font-size:12px;color:var(--text-lo);margin:-6px 0 14px"></p>
+      <div class="tv-table-wrap" id="strategyDetailPositionsWrap">
+        <table class="tv-table">
+          <thead><tr>
+            <th>品种</th><th>周期</th><th>方向</th><th>入场价</th><th>出场价</th>
+            <th>盈亏(×ATR)</th><th>出场原因</th><th>入场时间</th>
+          </tr></thead>
+          <tbody id="strategyDetailPositionsBody"><tr><td colspan="8" class="tv-empty">点击上方策略行查看明细</td></tr></tbody>
+        </table>
+      </div>
+      <div class="tv-table-wrap hidden" id="strategyDetailBySymbolWrap">
+        <table class="tv-table">
+          <thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>累计盈亏(×ATR)</th><th>平均盈亏(×ATR)</th></tr></thead>
+          <tbody id="strategyDetailBySymbolBody"></tbody>
+        </table>
+      </div>
     </div>
     </div>
 
@@ -1225,11 +1281,143 @@ async function loadWatchdogLogs() {
   }
 }
 
+// ── 策略对比 ────────────────────────────────────────────────────────────
+let _strategyActiveDetail = null; // {strategy, description}
+let _strategyDetailView = "positions";
+
+const STRATEGY_LABELS = {
+  tv_multiscore_v1: "TV镜像(tv_multiscore_v1)",
+  turtle_breakout: "Turtle海龟突破",
+  cross_momentum: "跨品种动量因子",
+  connors_rsi2: "Connors RSI-2均值回归",
+  bollinger_squeeze: "Bollinger squeeze突破",
+};
+
+function fmtAtr(v) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(2)}`;
+}
+
+function renderStrategyCompareRow(row) {
+  const label = STRATEGY_LABELS[row.strategy] || row.strategy;
+  const pnlClass = row.total_pnl_atr > 0 ? "up" : (row.total_pnl_atr < 0 ? "down" : "");
+  const winRate = row.win_rate === null || row.win_rate === undefined ? "—" : `${row.win_rate.toFixed(1)}%`;
+  return `
+    <tr class="strategy-row" onclick="openStrategyDetail('${row.strategy}')" style="cursor:pointer">
+      <td><b>${escapeHtml(label)}</b></td>
+      <td>${row.trades}</td>
+      <td>${winRate}</td>
+      <td class="${pnlClass}">${fmtAtr(row.total_pnl_atr)}</td>
+      <td>${fmtAtr(row.avg_pnl_atr)}</td>
+      <td>${fmtAtr(row.worst_trade_atr)}</td>
+      <td>${row.open_count}</td>
+      <td><button class="btn-mini" onclick="event.stopPropagation();openStrategyDetail('${row.strategy}')">查看</button></td>
+    </tr>`;
+}
+
+async function loadStrategyCompare() {
+  const body = document.getElementById("strategyCompareBody");
+  if (!body) return;
+  try {
+    const d = await (await fetch("api/strategy/compare")).json();
+    if (d.status !== "ok") { body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败</td></tr>`; return; }
+    const rows = d.strategies || [];
+    _strategyDescriptions = {};
+    rows.forEach(r => { _strategyDescriptions[r.strategy] = r.description; });
+    body.innerHTML = rows.length
+      ? rows.map(renderStrategyCompareRow).join("")
+      : `<tr><td colspan="8" class="tv-empty">暂无数据</td></tr>`;
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+let _strategyDescriptions = {};
+
+function openStrategyDetail(strategy) {
+  _strategyActiveDetail = strategy;
+  document.getElementById("strategyDetailCard").classList.remove("hidden");
+  document.getElementById("strategyDetailTitle").textContent = `策略详情：${STRATEGY_LABELS[strategy] || strategy}`;
+  document.getElementById("strategyDetailDesc").textContent = _strategyDescriptions[strategy] || "";
+  switchStrategyDetailView("positions");
+  loadStrategyDetail();
+}
+
+function switchStrategyDetailView(view) {
+  _strategyDetailView = view;
+  document.getElementById("strategyDetailPositionsWrap").classList.toggle("hidden", view !== "positions");
+  document.getElementById("strategyDetailBySymbolWrap").classList.toggle("hidden", view !== "bysymbol");
+  document.getElementById("btnViewPositions").classList.toggle("active", view === "positions");
+  document.getElementById("btnViewBySymbol").classList.toggle("active", view === "bysymbol");
+  loadStrategyDetail();
+}
+
+function renderStrategyPositionRow(p) {
+  const pnl = p.realized_pnl_atr_weighted;
+  const pnlClass = pnl > 0 ? "up" : (pnl < 0 ? "down" : "");
+  const entryTime = p.entry_bar_time ? new Date(p.entry_bar_time).toLocaleString("zh-CN", {hour12: false}) : "—";
+  return `
+    <tr>
+      <td>${escapeHtml(p.symbol)}</td>
+      <td>${escapeHtml(p.timeframe || "")}</td>
+      <td>${p.side === "LONG" ? "多" : "空"}</td>
+      <td>${Number(p.entry).toFixed(4)}</td>
+      <td>${p.exit_price !== null && p.exit_price !== undefined ? Number(p.exit_price).toFixed(4) : "—"}</td>
+      <td class="${pnlClass}">${fmtAtr(pnl)}</td>
+      <td>${escapeHtml(p.exit_reason || "")}</td>
+      <td>${entryTime}</td>
+    </tr>`;
+}
+
+function renderStrategyBySymbolRow(r) {
+  const pnlClass = r.total_pnl_atr > 0 ? "up" : (r.total_pnl_atr < 0 ? "down" : "");
+  const winRate = r.win_rate === null || r.win_rate === undefined ? "—" : `${r.win_rate.toFixed(1)}%`;
+  return `
+    <tr>
+      <td>${escapeHtml(r.symbol)}</td>
+      <td>${r.trades}</td>
+      <td>${winRate}</td>
+      <td class="${pnlClass}">${fmtAtr(r.total_pnl_atr)}</td>
+      <td>${fmtAtr(r.avg_pnl_atr)}</td>
+    </tr>`;
+}
+
+async function loadStrategyDetail() {
+  if (!_strategyActiveDetail) return;
+  const strategy = _strategyActiveDetail;
+  if (_strategyDetailView === "positions") {
+    const status = document.getElementById("strategyDetailStatus").value;
+    const body = document.getElementById("strategyDetailPositionsBody");
+    body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载中…</td></tr>`;
+    try {
+      const d = await (await fetch(`api/strategy/compare/${encodeURIComponent(strategy)}/positions?status=${status}&limit=200`)).json();
+      const rows = d.positions || [];
+      body.innerHTML = rows.length ? rows.map(renderStrategyPositionRow).join("") : `<tr><td colspan="8" class="tv-empty">暂无记录</td></tr>`;
+    } catch (e) {
+      body.innerHTML = `<tr><td colspan="8" class="tv-empty">加载失败</td></tr>`;
+    }
+  } else {
+    const body = document.getElementById("strategyDetailBySymbolBody");
+    body.innerHTML = `<tr><td colspan="5" class="tv-empty">加载中…</td></tr>`;
+    try {
+      const d = await (await fetch(`api/strategy/compare/${encodeURIComponent(strategy)}/by_symbol`)).json();
+      const rows = d.by_symbol || [];
+      body.innerHTML = rows.length ? rows.map(renderStrategyBySymbolRow).join("") : `<tr><td colspan="5" class="tv-empty">暂无记录</td></tr>`;
+    } catch (e) {
+      body.innerHTML = `<tr><td colspan="5" class="tv-empty">加载失败</td></tr>`;
+    }
+  }
+}
+
 loadTvMeta();
 loadTvSignals();
 loadWatchdogLogs();
+loadStrategyCompare();
 setInterval(loadTvSignals, 20000);
 setInterval(loadWatchdogLogs, 60000);
+setInterval(loadStrategyCompare, 60000);
 </script>
 </body>
 </html>

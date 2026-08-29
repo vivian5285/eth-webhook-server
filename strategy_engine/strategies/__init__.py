@@ -88,6 +88,14 @@ except Exception as _e:
 
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
+    # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
+    # 独立评分引擎，不走generate_signal接口)，但对比面板需要它的说明，
+    # 直接在这个查表字典里补一条，不强求跟STRATEGIES一一对应。
+    "tv_multiscore_v1": (
+        "TV镜像：完整复刻5套真实TradingView策略源码(评分入场+4H反转/连续"
+        "逆势K线离场)，模拟VPS自己执行的完整TP1/TP2/TP3分批止盈+呼吸阶梯"
+        "止损。回答'如果VPS用TV一样的信号、只是执行更快更优价，能多赚多少'。"
+    ),
     "_template": "占位示例：双EMA交叉+ATR止损止盈，验证链路用，不是真实策略。",
     "zec_pingkai_buhuchi": "ZEC真实TV策略复刻：平开不互斥版，多维度评分入场。",
     "eth_pingkai_buhuchi": "ETH真实TV策略复刻：平开不互斥版，多维度评分入场。",
