@@ -6,18 +6,26 @@
 对比谁更强，这个品种要额外跑哪几套公开知名战法的模拟仓"(可以多套并存，
 且完全不影响symbol_registry/backtest_runner那条线的既有行为)。
 
-品种分配按"这套战法本来就是在什么资产类别上验证出来的"来配，不是全品种
-一刀切：
-- turtle_breakout：贵金属+大市值加密货币这类趋势性强的品种（海龟系统
-  本来就是商品期货上验证出来的）
-- connors_rsi2：代币化股票品种为主（均值回归在股票市场验证最多），
-  搭一个ETH做跨资产对照
-- bollinger_squeeze：全品种（纯波动率结构信号，不挑资产类别）
-- cross_momentum：全品种作为一个篮子整体参与排名，不是逐品种配置
+2026-08-29修订：周期不再全部一刀切4h——那是最初图省事的简化。改成按
+"每套战法自己发表时的天然节奏"分别定，跟品种资产类别无关(不是"这个
+品种该用什么周期"，是"这套战法该用什么周期")，也不照抄TV各品种自己的
+分钟级周期(那是给TV自己的EMA/RSI/ADX阈值调的，跟这几套完全不同的战法
+没有原理关联)：
+  - turtle_breakout：保持4h。趋势跟随系统，4h在加密货币上已经是"日线"
+    的合理代理，实测样本健康(5个月43-46次开仓)，没有理由改。
+  - connors_rsi2：改成1d。原始设计就是日线级别的短线均值回归，4h会把
+    "2日RSI跌到极值"这个概念稀释掉；候选品种又以代币化股票为主，日线
+    最贴近原始验证场景。
+  - bollinger_squeeze：保留4h作为"真实版"(高质量、触发天然稀有)，另外
+    新增bollinger_squeeze_fast跑在1h(同一套代码，注册成独立策略名，见
+    strategies/__init__.py)，squeeze_lookback按比例放大到480根保持
+    跟4h版同样约20天的日历回看窗口——不是猜哪个周期更好，是两个都跑，
+    用真实数据说话。
+  - cross_momentum：暂不动(4h/20根≈3.3天回看)。学术原版用3-12个月周期，
+    这里是有意识地为加密货币更快的行情节奏做的适配，先观察这个"快版"
+    表现，不是失误。
 """
 from __future__ import annotations
-
-TIMEFRAME = "4h"
 
 _ALL_SYMBOLS = [
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT",
@@ -31,18 +39,24 @@ _RSI2_SYMBOLS = [
     "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ETHUSDT",
 ]
 
-# 单品种战法：{symbol, strategy, timeframe} 三元组列表
+# bollinger_squeeze_fast(1h)的参数覆盖：squeeze_lookback从120(4h版，
+# ~20天)按比例放大到480(1h版，同样~20天)，vol_len保留20不额外放大(20小时
+# 量能均线本身仍是合理窗口，不需要跟着4倍放大)。
+_SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
+
+# 单品种战法：{symbol, strategy, timeframe, params?}
 SINGLE_SYMBOL_ROSTER = (
-    [{"symbol": s, "strategy": "turtle_breakout", "timeframe": TIMEFRAME} for s in _TURTLE_SYMBOLS]
-    + [{"symbol": s, "strategy": "connors_rsi2", "timeframe": TIMEFRAME} for s in _RSI2_SYMBOLS]
-    + [{"symbol": s, "strategy": "bollinger_squeeze", "timeframe": TIMEFRAME} for s in _ALL_SYMBOLS]
+    [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
+    + [{"symbol": s, "strategy": "connors_rsi2", "timeframe": "1d"} for s in _RSI2_SYMBOLS]
+    + [{"symbol": s, "strategy": "bollinger_squeeze", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "bollinger_squeeze_fast", "timeframe": "1h", "params": _SQUEEZE_FAST_PARAMS} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
 UNIVERSE_ROSTER = [
     {
         "strategy": "cross_momentum",
-        "timeframe": TIMEFRAME,
+        "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
     },

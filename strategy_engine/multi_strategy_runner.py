@@ -36,8 +36,12 @@ from strategy_engine.strategies import get_strategy
 
 logger = logging.getLogger(__name__)
 
-COMPARISON_TICK_INTERVAL_SEC = 300  # 全部用4h K线，5分钟一轮足够及时捕捉新收盘K线
-BARS_LIMIT = 300
+COMPARISON_TICK_INTERVAL_SEC = 300  # 5分钟一轮，足够及时捕捉最快周期(1h)的新收盘K线
+# 2026-08-29：各战法周期不再统一4h(见comparison_roster.py顶部注释)，最长的
+# connors_rsi2(1d, SMA200)需要至少201根；bollinger_squeeze_fast(1h)为了
+# 跟4h版本口径上保持同样的"日历天数"回看窗口，squeeze_lookback按比例放大
+# 到480根(~20天)。550给两边都留出安全余量。
+BARS_LIMIT = 550
 
 # in-process内存态：每个(symbol, strategy)当前是否有模拟持仓，避免每个
 # tick都查一次sqlite——跟shadow_engine.py的ShadowPosition内存态同一惯例，
@@ -135,6 +139,7 @@ def _hydrate_keys_from_db(keys: List[tuple]) -> None:
 
 def _tick_single_symbol_entry(entry: dict) -> None:
     symbol, strategy, timeframe = entry["symbol"], entry["strategy"], entry["timeframe"]
+    params = entry.get("params") or {}
     fn = get_strategy(strategy)
     bars = klines.get_bars(symbol, timeframe, limit=BARS_LIMIT)
     if len(bars) < 30:
@@ -151,7 +156,7 @@ def _tick_single_symbol_entry(entry: dict) -> None:
         if hit_tp:
             _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")
             return
-        sig = fn({"base": bars}, {}, {
+        sig = fn({"base": bars}, params, {
             "side": pos["side"], "entry_price": pos["entry"],
             "entry_bar_time": pos["entry_bar_time"],
         })
@@ -159,7 +164,7 @@ def _tick_single_symbol_entry(entry: dict) -> None:
             _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
         return
 
-    sig = fn({"base": bars}, {}, None)
+    sig = fn({"base": bars}, params, None)
     if sig and sig.get("action") in ("LONG", "SHORT"):
         _open_from_signal(symbol, strategy, timeframe, sig)
 

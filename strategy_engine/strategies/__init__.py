@@ -82,6 +82,14 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import bollinger_squeeze
     STRATEGIES["bollinger_squeeze"] = bollinger_squeeze.generate_signal
+    # 2026-08-29新增：同一份代码注册第二个策略名，跑在更快的周期上(1h，
+    # comparison_roster.py里配了对应放大过的squeeze_lookback参数，保持
+    # 跟4h版本同样的日历天数回看窗口)。squeeze条件本来就设计得很挑剔，
+    # 4h上样本积累太慢，两个周期并排跑，用真实数据判断"更快的周期是否
+    # 仍然有边际"，而不是猜。用不同的策略名(不是同一个entry换周期)是为了
+    # 让shadow_positions_v2按(symbol,strategy)分组时两边互不冲突，面板上
+    # 也能独立看到两条数据线。
+    STRATEGIES["bollinger_squeeze_fast"] = bollinger_squeeze.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] bollinger_squeeze 加载失败: {_e}")
@@ -116,9 +124,14 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "上验证最多。"
     ),
     "bollinger_squeeze": (
-        "Bollinger Band Squeeze突破(John Bollinger本人提出)：布林带带宽"
-        "收缩到近120根最低点后，带量突破上/下轨入场，回落穿越中轨离场。"
-        "纯波动率结构信号，不挑资产类别。"
+        "Bollinger Band Squeeze突破(John Bollinger本人提出)：4H周期真实版，"
+        "带宽收缩到近20天最低点后带量突破，回落穿中轨离场。squeeze条件本身"
+        "设计得挑剔，触发频率天然低，是刻意保留的高质量慢版。"
+    ),
+    "bollinger_squeeze_fast": (
+        "Bollinger Band Squeeze突破——1H快版，跟'bollinger_squeeze'同一套"
+        "逻辑/同样的日历天数回看窗口，只是周期更快，纯粹为了更快积累样本、"
+        "用真实数据检验'更快的周期squeeze是否还有边际'，不是猜测哪个更好。"
     ),
 }
 
