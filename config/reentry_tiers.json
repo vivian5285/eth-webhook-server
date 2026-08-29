@@ -15,39 +15,40 @@
   },
   "hard_sl_buffer_mult": 1.15,
   "ETH": {
-    "tv_tf_sec": 5400,
-    "reentry_window_bars": 2,
+    "tv_tf_sec": 9000,
+    "reentry_window_bars": 1,
     "reentry_zone_atr": 0.5,
+    "note": "2026-08-29：用户把ETH策略周期从90分钟改成150分钟，tv_tf_sec同步为9000(150×60)；window_bars从2改成1——150min×1=150min接近~150-200min的窗口惯例，×2=300min会明显偏长，跟PAXG/SKHYNIX(同为150m原生周期)的处理方式保持一致。呼吸阶梯/tier数值的真实重新校准结果见下方tiers各档note，用真实150分钟K线(30m合成×5，123天1182根，173个回调样本)测出来的，不是套用旧90分钟时代的数字。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：呼吸宽松，允许行情充分跑动（v2.2再放宽：2026-08-10实盘验证v2.1步进仍偏紧，阶梯跟出的止损常年比同期呼吸空间breath_tp12紧一大截，导致呼吸空间的改进被更紧的阶梯抢先卡住不生效）",
-        "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.50,
-        "breath_tp12": 1.50,
-        "breath_tp23": 2.00,
-        "min_mult": 2.5,
-        "max_mult": 3.5
+        "note": "2026-08-29重新校准(150分钟周期，123天1182根K线，173个回调样本，fractal pivot±3根确认)：中档P50/P75/P90=2.55/3.48/4.96×ATR，弱档按weak:mid:strong=0.833:1.0:1.167(全库step_trigger_atr的固定内部比例)从中档缩放。step_advance_atr=step_trigger_atr×0.5(同ETH原有惯例，未采用校准脚本自己建议的0.65倍——那是没有既定惯例品种的兜底建议，ETH/XMR/TSLA等已确立0.5倍惯例优先)。breath_tp12/breath_tp23/min_mult/max_mult同样按新测数据的P50/P75/P90直接重新定，不再沿用90分钟时代的旧值。",
+        "step_trigger_atr": 2.12,
+        "step_advance_atr": 1.06,
+        "breath_tp12": 2.12,
+        "breath_tp23": 2.90,
+        "min_mult": 3.2,
+        "max_mult": 4.4
       },
       {
         "name": "mid",
-        "note": "中趋势：平衡配置（v2.2再放宽，理由同上）",
-        "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.60,
-        "breath_tp12": 2.00,
-        "breath_tp23": 2.80,
-        "min_mult": 3.0,
-        "max_mult": 4.5
+        "note": "2026-08-29重新校准：直接对应真实测出的中位数(P50=2.55×ATR，breath_tp23对应P75=3.48，max_mult对应P90+0.3=5.3的常规套算方式)。",
+        "step_trigger_atr": 2.55,
+        "step_advance_atr": 1.28,
+        "breath_tp12": 2.55,
+        "breath_tp23": 3.48,
+        "min_mult": 3.8,
+        "max_mult": 5.3
       },
       {
         "name": "strong",
-        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（v2.2再放宽，理由同上）",
-        "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.70,
-        "breath_tp12": 2.50,
-        "breath_tp23": 3.50,
-        "min_mult": 4.0,
-        "max_mult": 6.0
+        "note": "2026-08-29重新校准：强档按weak:mid:strong=0.833:1.0:1.167固定内部比例从中档放宽。",
+        "step_trigger_atr": 2.98,
+        "step_advance_atr": 1.49,
+        "breath_tp12": 2.98,
+        "breath_tp23": 4.06,
+        "min_mult": 4.5,
+        "max_mult": 6.2
       }
     ]
   },
