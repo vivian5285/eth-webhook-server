@@ -2368,6 +2368,46 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             out["note"] = f"溯源探测失败: {e}"
         return out
 
+    def _recover_tv_tps_from_journal(self, entry, side):
+        """接管/恢复时本地tv_tps不足两个有效值——在报"人工确认"警报前，
+        先按入场价+方向去匹配本地tv日志(_record_tv_signal写入，kind="tv"，
+        覆盖控制台手动发单/TV webhook等一切开仓来源，字段沿用历史命名
+        不代表来源限定TV)。2026-08-31实盘复现：仓位开仓时tp1/tp2/tp3
+        其实随信号一起送达并已经成功挂到交易所，只是VPS在落盘保存前
+        就重启，本地state丢了这份记录——日志里其实一直都在，只是没人
+        去读。
+
+        容差复用_probe_position_provenance里TV分支同一把尺子(入场价差
+        ≤max(2.0, entry*0.3%))，防止张冠李戴匹配到无关的旧记录。只有
+        方向也一致才算数。匹配成功则直接把self.tv_tps设成日志里的真实
+        值，返回日志里的tv_sl(没有则返回0.0，调用方据此决定要不要清零
+        tv_sl_ref)；匹配不上返回0.0，不改动self.tv_tps，交给上层报警。"""
+        try:
+            tv = self._load_last_journal_entry(None, kind="tv") or {}
+        except Exception:
+            return 0.0
+        tv_side = str(tv.get("side") or tv.get("action") or "").upper()
+        tv_px = float(tv.get("price") or 0)
+        if tv_side not in ("LONG", "SHORT") or tv_side != str(side or "").upper():
+            return 0.0
+        if tv_px <= 0 or entry <= 0 or abs(tv_px - entry) > max(2.0, entry * 0.003):
+            return 0.0
+        tps = [
+            float(tv.get("tv_tp1") or 0),
+            float(tv.get("tv_tp2") or 0),
+            float(tv.get("tv_tp3") or 0),
+        ]
+        if sum(1 for t in tps if t > 0) < 2:
+            return 0.0
+        self.tv_tps = tps
+        tv_sl = float(tv.get("tv_sl") or 0)
+        logger.info(
+            f"🛡️ [{self.symbol}] 接管/恢复：本地tv_tps丢失，按入场价"
+            f"{entry:.4f}匹配本地tv日志(@{tv_px:.4f})回填 TP={tps} "
+            f"SL={tv_sl or '—'}"
+        )
+        return tv_sl
+
     def _hydrate_tv_defense_context(self, pos, link_historical_tv=True):
         """
         接管补全防线上下文。
@@ -2395,13 +2435,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if float(getattr(self, "open_atr", 0) or 0) <= 0:
                 self.open_atr = float(getattr(self, "current_atr", 0) or 0)
             # v2.1: TP 必须来自 TV 字段，禁止无 TV 关联时用 ATR 本地重算 TP。
+            # 2026-08-31实盘复现(C账户XMR)：仓位刚开仓(控制台手动发单，
+            # tp1/tp2/tp3随开仓一起送进来并已成功挂到交易所)就撞上VPS
+            # 重启，本地state还没来得及落盘保存tv_tps，重启接管时以为
+            # "从没关联过信号"，报警要求人工确认——但_record_tv_signal
+            # 其实早把这笔单的tp1/tp2/tp3/stop_loss写进了本地tv日志
+            # (kind="tv"，覆盖控制台手动发单/TV webhook所有来源，只是
+            # 字段沿用历史命名，不代表来源限定TV)，只是没人去读它。
+            # 先按入场价+方向匹配日志(跟_probe_position_provenance用
+            # 同一把容差尺子)，匹配上就直接回填，而不是让仓位在没有
+            # 真正数据缺失的情况下一直挂着"人工确认"的警报。
+            recovered_sl = 0.0
+            if sum(1 for t in (self.tv_tps or []) if t > 0) < 2:
+                recovered_sl = self._recover_tv_tps_from_journal(entry, side)
             if sum(1 for t in (self.tv_tps or []) if t > 0) < 2:
                 logger.error(
                     f"🚨 [{self.symbol}] 接管/恢复未关联 TV 信号且 tv_tps 不足，"
                     f"已禁止 entry+ATR 本地重算 TP。请人工补挂 TP 或确认 TV 日志。"
                 )
-            # 禁止写入历史 tv_sl_ref 冒充本仓 TV 硬止损
-            self.tv_sl_ref = 0.0
+            # 禁止写入历史 tv_sl_ref 冒充本仓 TV 硬止损——除非上面按入场价
+            # 精确匹配到了这笔仓自己的记录且里面确实带了stop_loss，那种
+            # 情况下recovered_sl>0，用真实值；否则一律清零，不留任何
+            # 跟当前这笔仓无关的旧值。
+            self.tv_sl_ref = float(recovered_sl or 0.0)
             if entry > 0 and side in ("LONG", "SHORT"):
                 atr_lock = float(
                     getattr(self, "open_atr", 0)
