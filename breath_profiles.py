@@ -50,16 +50,18 @@ BREATH_ETH: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.0,      # 2026-08-13：3.0→4.0
     "max_mult": 5.8,      # 2026-08-13：4.5→5.8，覆盖实测90分位回调(5.58)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测显示ETH受益，但ETH真实
+    # 生产周期是90分钟——用30m合成90分钟K线重新回测后发现：只有min_mult
+    # (最冷/最不常见的低波动状态)差值为正，mid_mult/max_mult(更常见的
+    # 正常/高波动状态)差值持续为负，即使把阈值收紧两档(1.5/0.45/0.60→
+    # 2.0/0.55/0.65)依然负(-0.08~-0.56×ATR/笔)。说明4H近似掩盖了ETH
+    # 真实短周期上"深回调后仍常继续走"的特性，故意不启用，不要再照抄
+    # 别的品种加上，除非用ETH自己90分钟K线重新测出正收益。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
-    # 2026-08-31新增：利润回吐刹车——见radar_reentry_mixin.py
-    # GIVEBACK_BRAKE_DEFAULT顶部注释。用EMA50金叉/死叉+真实250天4H K线
-    # 回测过，ETH在min/mid/max三档trail_mult下差值均为正(+0.30~+0.47×ATR
-    # /笔)，明确受益，故启用。
-    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
 # BNB 基线（150分钟周期）
@@ -92,8 +94,10 @@ BREATH_BNB: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
-    # 2026-08-31新增：利润回吐刹车，回测三档trail_mult差值均为正
-    # (+0.22~+0.80×ATR/笔)，明确受益，启用（同ETH阈值）。
+    # 2026-08-31新增：利润回吐刹车。最初用4H K线近似回测三档trail_mult
+    # 差值均为正(+0.22~+0.80×ATR/笔)，启用；随后用BNB真实生产周期(150min，
+    # 30m合成)重新回测复核，三档差值不降反升(+0.91~+1.06×ATR/笔)，比4H
+    # 近似更强，确认启用没有问题。
     "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
@@ -119,15 +123,17 @@ BREATH_ZEC: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 3.8,
     "max_mult": 6.0,      # 覆盖实测90分位回调(5.89)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本转正/打平(+0.52/+0.12/-0.08×ATR/笔)，一度启用；
+    # 随后用ZEC真实生产周期(150min，30m合成)重新回测复核，三档差值全部
+    # 转为明确负值(-0.33~-0.39×ATR/笔，触发子集更差达-0.69×ATR/笔)——
+    # 4H近似在ZEC身上是误导性的，真实周期上ZEC回调深但更常继续走，跟
+    # XAU/PAXG是同一类特性。故意不启用，不要照抄别的品种加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
-    # 2026-08-31新增：利润回吐刹车——原始阈值(1.0/0.35/0.55)在mid/max
-    # trail_mult下测出负收益，收紧到(1.5/0.45/0.60)后三档差值转为
-    # +0.52/+0.12/-0.08×ATR/笔，基本转正/打平，用收紧后的阈值启用。
-    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
 }
 
 # XAU 基线
@@ -215,10 +221,10 @@ BREATH_XMR: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
-    # 2026-08-31新增：利润回吐刹车——收紧阈值(1.5/0.45/0.60)后三档差值
-    # +0.18/-0.07/+0.03×ATR/笔，基本打平微正，启用。注意：本次回测用4H
-    # K线做近似(XMR实盘是8H周期)，跟真实周期不完全一致，下次呼吸阶梯
-    # 例行重新校准时应该用真实8H K线重新跑一遍这个阈值再确认。
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本打平微正(+0.18/-0.07/+0.03×ATR/笔)，一度启用；
+    # 随后用XMR真实生产周期(8H原生K线)重新回测复核，三档差值全部转为
+    # 明确正值(+0.30~+0.43×ATR/笔)，比4H近似更强，确认启用没有问题。
     "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
 }
 
@@ -303,9 +309,10 @@ BREATH_BCH: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.3,
     "max_mult": 6.8,      # 覆盖实测90分位回调(6.02)以上
-    # 2026-08-31新增：利润回吐刹车，回测三档trail_mult差值均为正
-    # (+0.27~+0.69×ATR/笔)，明确受益，启用（同ETH阈值）。用4H K线近似
-    # (BCH实盘是6H周期)，下次例行重新校准时用真实6H K线复核。
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测三档差值均为正
+    # (+0.27~+0.69×ATR/笔)，启用；随后用BCH真实生产周期(6H原生K线)重新
+    # 回测复核，三档差值不降反升(+0.41~+0.60×ATR/笔)，比4H近似更强，
+    # 确认启用没有问题。
     "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
