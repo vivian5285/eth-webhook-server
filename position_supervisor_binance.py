@@ -17439,6 +17439,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.tv_sl = float(self.current_sl)
         except Exception as e:
             logger.debug(f"[{self.symbol}] 大赢家利润地板复评跳过: {e}")
+        # 2026-08-31新增：利润回吐刹车——见radar_reentry_mixin.py
+        # "2026-08-31新增"顶部注释。按品种配置(giveback_brake)，只朝有利
+        # 方向棘轮，写在大赢家地板之后，三个棘轮谁锁得更紧生效谁的，
+        # 调用顺序不影响最终结果。
+        try:
+            self.current_sl = self._maybe_tighten_on_profit_giveback(px, float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 利润回吐刹车复评跳过: {e}")
         was_phase = phase
         self.breakeven_phase = new_phase
         # 激活状态由 _maybe_arm_radar_on_activation 控制，禁止 tick 强行打开

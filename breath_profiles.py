@@ -55,6 +55,11 @@ BREATH_ETH: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车——见radar_reentry_mixin.py
+    # GIVEBACK_BRAKE_DEFAULT顶部注释。用EMA50金叉/死叉+真实250天4H K线
+    # 回测过，ETH在min/mid/max三档trail_mult下差值均为正(+0.30~+0.47×ATR
+    # /笔)，明确受益，故启用。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
 # BNB 基线（150分钟周期）
@@ -87,6 +92,9 @@ BREATH_BNB: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车，回测三档trail_mult差值均为正
+    # (+0.22~+0.80×ATR/笔)，明确受益，启用（同ETH阈值）。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
 # ZEC 基线（150分钟周期）
@@ -116,6 +124,10 @@ BREATH_ZEC: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车——原始阈值(1.0/0.35/0.55)在mid/max
+    # trail_mult下测出负收益，收紧到(1.5/0.45/0.60)后三档差值转为
+    # +0.52/+0.12/-0.08×ATR/笔，基本转正/打平，用收紧后的阈值启用。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
 }
 
 # XAU 基线
@@ -153,6 +165,10 @@ BREATH_XAU: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.6,
     "max_mult": 6.2,      # 覆盖实测90分位回调(5.90)以上
+    # 2026-08-31：利润回吐刹车方案回测过XAU，三档trail_mult差值全部
+    # 显著为负(-0.85~-1.03×ATR/笔)——XAU趋势内深回调后继续走的概率明显
+    # 更高，提前收紧反而砍断真实趋势。故意不加giveback_brake，以后
+    # 校准/重构时不要顺手照抄别的品种把这个加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -199,6 +215,11 @@ BREATH_XMR: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车——收紧阈值(1.5/0.45/0.60)后三档差值
+    # +0.18/-0.07/+0.03×ATR/笔，基本打平微正，启用。注意：本次回测用4H
+    # K线做近似(XMR实盘是8H周期)，跟真实周期不完全一致，下次呼吸阶梯
+    # 例行重新校准时应该用真实8H K线重新跑一遍这个阈值再确认。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
 }
 
 # META 基线（新增品种，2026-08-27，4小时周期，币安TRADIFI_PERPETUAL
@@ -282,6 +303,10 @@ BREATH_BCH: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.3,
     "max_mult": 6.8,      # 覆盖实测90分位回调(6.02)以上
+    # 2026-08-31新增：利润回吐刹车，回测三档trail_mult差值均为正
+    # (+0.27~+0.69×ATR/笔)，明确受益，启用（同ETH阈值）。用4H K线近似
+    # (BCH实盘是6H周期)，下次例行重新校准时用真实6H K线复核。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -349,6 +374,9 @@ BREATH_PAXG: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.8,
     "max_mult": 6.7,      # 08-27再校准(130min)：覆盖实测90分位回调(6.44)以上
+    # 2026-08-31：利润回吐刹车方案回测过PAXG，三档trail_mult差值全部
+    # 显著为负(-1.03~-1.31×ATR/笔，跟同为贵金属类的XAU结论一致)——故意
+    # 不加giveback_brake，以后不要顺手照抄别的品种加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -663,6 +691,17 @@ def get_breath_profile(symbol: str, exchange: str = "binance") -> Dict[str, Any]
     if exchange == "deepcoin":
         return dict(_BY_DEEPCOIN.get(sym) or BREATH_ETH)
     return dict(_BY_BINANCE.get(sym) or BREATH_ETH)
+
+
+def get_giveback_brake_config(symbol: str, exchange: str = "binance") -> Optional[Dict[str, float]]:
+    """2026-08-31新增：按品种查"利润回吐刹车"参数，见各BREATH_*里
+    giveback_brake字段的校准注释。没有这个key = 该品种未启用(默认关闭，
+    例如XAU/PAXG经回测证明会伤害趋势捕获，故意不给)。"""
+    profile = get_breath_profile(symbol, exchange)
+    cfg = profile.get("giveback_brake")
+    if isinstance(cfg, dict) and cfg.get("min_peak_atr") and cfg.get("trigger_frac") and cfg.get("retain_frac"):
+        return cfg
+    return None
 
 
 def trail_distance_multiplier(ratio: float, profile: Optional[Dict[str, Any]] = None) -> float:

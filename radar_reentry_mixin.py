@@ -214,6 +214,28 @@ REVERSAL_LOCK_REFRESH_SEC = 300.0
 BIG_WIN_ATR_THRESHOLD = 3.0
 BIG_WIN_RETAIN_FRAC = 0.65
 
+# 2026-08-31新增：利润回吐刹车——宝贝指出雷达跟踪系数(min_mult~max_mult，
+# 常见4-6倍ATR)太宽，XMR/ETH这类"峰值利润还没到大赢家门槛(3倍ATR)"的
+# 中等赢家，回调过程完全没有保护，等真正触发默认跟踪止损时利润已经被
+# 吐掉一大半。这里补一道更早、更窄的中间档地板：不是预测"会不会反转"
+# (那套量能+EMA+支撑压力位三合一的预测型信号，用真实K线回测过，边际
+# 是负的，宝贝已经决定不上，见对话记录)，而是纯粹对"已经发生的事实"
+# 反应——峰值浮盈已经吐回去了一定比例，说明这段回调不是正常呼吸，直接
+# 把止损顶紧，只朝有利方向棘轮，逻辑上跟大赢家地板是同一个族谱，只是
+# 门槛更低、更早介入。
+#
+# 用EMA50金叉/死叉(客观趋势跟随，不用真实TV信号避免用结果反推)在真实
+# 250天4H K线上跑过对照回测：这套刹车对ETH/BNB/BCH三档trail_mult
+# (min/mid/max)下差值全部为正(+0.22~+0.80×ATR/笔)，明确受益；XMR/ZEC
+# 用收紧后的阈值也基本转正/打平；但XAU/PAXG这类回调深但趋势内继续走
+# 概率更高的品种，全部三档差值显著为负(-0.85~-1.31×ATR/笔)——提前收紧
+# 反而砍断真实趋势，跟"不能错过强趋势"这条要求冲突。所以这不是一个
+# 全局常量，是跟min_mult/max_mult一样的按品种校准参数，存在各BREATH_*
+# 的giveback_brake字段里(get_giveback_brake_config)，没配置的品种默认
+# 不启用(不去猜没测过的品种)。三个回测用的是4H K线近似，多数品种真实
+# 周期跟4H不完全一致(ETH 90min/BNB+ZEC 150min/XMR 8h/BCH 6h)，各品种
+# 阈值先作为初版上线，下次例行呼吸阶梯重新校准时应该用真实周期K线复核。
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -1813,6 +1835,93 @@ class RadarReentryMixin:
                         f"吐回。呼吸阶梯基线不受影响，价格继续走高地板会跟着继续"
                         f"上移(只朝有利方向)；如果这次判断错了、TV还在继续持有，"
                         f"心跳追回会按老规矩自动尝试更优价格追回。"
+                    ),
+                    level="提示",
+                )
+            except Exception:
+                pass
+        return out
+
+    def _maybe_tighten_on_profit_giveback(self, curr_px: float, candidate_sl: float) -> float:
+        """利润回吐刹车——见上方"2026-08-31新增"顶部注释。按品种从
+        self.breath_profile.giveback_brake读参数，没配置的品种直接原样
+        返回(默认不启用)。反应的是"已经回吐了多少"这个既成事实，不是
+        对后续走势的预测，所以不需要K线/量能/EMA信号，可以每tick都算。
+        跟大赢家地板一样只朝有利方向棘轮，互不依赖，谁锁得更紧生效谁的。
+        curr_px由调用方传入(跟_maybe_lock_profit_on_reversal同款签名)，
+        不从self上取——本类没有一个统一维护的"当前价"属性。"""
+        profile = getattr(self, "breath_profile", None)
+        cfg = profile.get("giveback_brake") if isinstance(profile, dict) else None
+        if not isinstance(cfg, dict):
+            return candidate_sl
+        min_peak_atr = float(cfg.get("min_peak_atr") or 0)
+        trigger_frac = float(cfg.get("trigger_frac") or 0)
+        retain_frac = float(cfg.get("retain_frac") or 0)
+        if min_peak_atr <= 0 or trigger_frac <= 0 or retain_frac <= 0:
+            return candidate_sl
+
+        side = str(getattr(self, "current_side", "") or "").upper()
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0:
+            return candidate_sl
+        atr = float(self._get_locked_initial_atr() or 0)
+        if atr <= 0:
+            return candidate_sl
+        best = float(getattr(self, "best_price", 0) or 0) or entry
+        px = float(curr_px or 0) or best
+
+        if side == "LONG":
+            peak_profit = best - entry
+        else:
+            peak_profit = entry - best
+        if peak_profit <= 0 or peak_profit / atr < min_peak_atr:
+            return candidate_sl
+
+        if side == "LONG":
+            current_profit = px - entry
+        else:
+            current_profit = entry - px
+        giveback = peak_profit - current_profit
+        if giveback <= 0 or giveback / peak_profit < trigger_frac:
+            return candidate_sl
+
+        retain_profit = peak_profit * retain_frac
+        if side == "LONG":
+            floor_px = entry + retain_profit
+            improved = floor_px > candidate_sl
+            out = max(candidate_sl, floor_px)
+        else:
+            floor_px = entry - retain_profit
+            improved = floor_px < candidate_sl
+            out = min(candidate_sl, floor_px)
+        if not improved:
+            return candidate_sl
+
+        # 按best_price去重(逻辑同大赢家地板)：同一个峰值只报一次，峰值
+        # 创新高后地板重新计算才算新事件，避免同一根K线内反复报警。
+        alerted_best = float(getattr(self, "_giveback_brake_alerted_best", 0) or 0)
+        if abs(alerted_best - best) > 1e-9:
+            self._giveback_brake_alerted_best = best
+            giveback_frac_now = giveback / peak_profit
+            logger.warning(
+                f"🛑 [{self.symbol}] 利润回吐刹车触发 峰值浮盈{peak_profit/atr:.2f}×ATR "
+                f"已回吐{giveback_frac_now*100:.0f}%(≥{trigger_frac*100:.0f}%门槛) → "
+                f"止损顶至保住峰值{retain_frac*100:.0f}% {candidate_sl:.4f}→{out:.4f} "
+                f"(entry={entry:.4f} best={best:.4f} 现价={px:.4f})"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"利润回吐刹车触发 [{self.symbol}]",
+                    detail=(
+                        f"{side} 峰值浮盈{peak_profit/atr:.2f}×ATR后已回吐"
+                        f"{giveback_frac_now*100:.0f}%，止损顶到保住峰值"
+                        f"{retain_frac*100:.0f}%的地板{out:.4f}(entry={entry:.4f} "
+                        f"best={best:.4f} 现价={px:.4f})，避免呼吸阶梯默认跟踪"
+                        f"太宽、回调吃掉大半利润才触发。只朝有利方向棘轮，价格"
+                        f"继续创新高地板会继续上移；如果这次判断错了，心跳追回"
+                        f"会按老规矩自动尝试更优价格追回。"
                     ),
                     level="提示",
                 )
