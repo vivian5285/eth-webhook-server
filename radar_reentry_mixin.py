@@ -201,6 +201,19 @@ REVERSAL_LOCK_MIN_PROFIT_ATR = 1.0
 # tick(可能几秒一次)都发一次4H K线REST请求。
 REVERSAL_LOCK_REFRESH_SEC = 300.0
 
+# 2026-08-30新增：大赢家利润保护地板——宝贝实盘复现：XMRUSDT峰值浮盈冲到
+# 3.47倍initial_atr，最终止损离场只保住峰值的38%；ETHUSDT峰值4.88倍ATR，
+# 保住61%。跟上面的反转锁盈(REVERSAL_LOCK_*，只保证"不由盈转亏"这一条
+# 底线)是两回事——这里管的是"已经积累了一大段浮盈之后，别把大头都吐
+# 回去"，不需要额外引入3-5分钟裸K反转或RSI/KDJ超买超卖这类更短周期、
+# 更容易被噪音打脸的新信号(宝贝原话提议过，讨论后决定这次先用更保守、
+# 不依赖新信号的版本)：纯粹按"峰值浮盈达到initial_atr的多少倍"这一个
+# ATR倍数门槛，达标后止损棘轮式地顶到"保住峰值这么多比例的利润"这条
+# 地板，只在真正的大赢家身上生效(3倍ATR门槛，正常仓位不受影响)，跟
+# 反转锁盈一样只朝有利方向收紧，不撤真实反转/继续加速判断的空间。
+BIG_WIN_ATR_THRESHOLD = 3.0
+BIG_WIN_RETAIN_FRAC = 0.65
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -1732,6 +1745,74 @@ class RadarReentryMixin:
                         f"把浮盈吃成亏损。呼吸阶梯基线不受影响，仍按原节奏跟踪；如果这次"
                         f"判断错了、TV还在继续持有，心跳追回会在检测到心跳仍是{side}但实盘"
                         f"已空仓时按老规矩自动尝试更优价格追回。"
+                    ),
+                    level="提示",
+                )
+            except Exception:
+                pass
+        return out
+
+    def _maybe_lock_profit_on_big_win(self, candidate_sl: float) -> float:
+        """大赢家利润地板——见上方BIG_WIN_ATR_THRESHOLD/BIG_WIN_RETAIN_FRAC
+        顶部注释。不依赖任何K线/指标信号，纯粹按"峰值浮盈是initial_atr的
+        多少倍"这一个已经在账本里的数字判断，零额外REST成本，可以每
+        tick都算，不需要像反转锁盈那样5分钟节流一次。
+
+        故意跟_maybe_lock_profit_on_reversal是两个独立函数、各自只朝
+        有利方向棘轮candidate_sl，互不依赖——两个都不触发就原样返回，
+        两个都触发就都会生效(谁锁得更紧，max/min天然会保留更紧的那个)，
+        调用顺序不影响最终结果。"""
+        if not BIG_WIN_ATR_THRESHOLD or not BIG_WIN_RETAIN_FRAC:
+            return candidate_sl
+        side = str(getattr(self, "current_side", "") or "").upper()
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0:
+            return candidate_sl
+        atr = float(self._get_locked_initial_atr() or 0)
+        if atr <= 0:
+            return candidate_sl
+        best = float(getattr(self, "best_price", 0) or 0) or entry
+        peak_profit = abs(best - entry)
+        peak_profit_atr = peak_profit / atr
+        if peak_profit_atr < BIG_WIN_ATR_THRESHOLD:
+            return candidate_sl
+
+        retain_profit = peak_profit * BIG_WIN_RETAIN_FRAC
+        if side == "LONG":
+            floor_px = entry + retain_profit
+            improved = floor_px > candidate_sl
+            out = max(candidate_sl, floor_px)
+        else:
+            floor_px = entry - retain_profit
+            improved = floor_px < candidate_sl
+            out = min(candidate_sl, floor_px)
+        if not improved:
+            return candidate_sl
+
+        # 按best_price取整去重(不是按tick去重)——peak_profit_atr只会随
+        # best_price刷新才变，同一个best_price重复触发没有新信息，只在
+        # 峰值真的创新高、地板真的需要跟着上移时才报警一次。
+        alerted_best = float(getattr(self, "_big_win_alerted_best", 0) or 0)
+        if abs(alerted_best - best) > 1e-9:
+            self._big_win_alerted_best = best
+            logger.warning(
+                f"🏆 [{self.symbol}] 大赢家利润地板触发 峰值浮盈{peak_profit_atr:.2f}×ATR"
+                f"(≥{BIG_WIN_ATR_THRESHOLD:.1f}倍门槛) → 止损顶至保住峰值"
+                f"{BIG_WIN_RETAIN_FRAC*100:.0f}% {candidate_sl:.4f}→{out:.4f} "
+                f"(entry={entry:.4f} best={best:.4f})"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"大赢家利润地板触发 [{self.symbol}]",
+                    detail=(
+                        f"{side} 峰值浮盈已达{peak_profit_atr:.2f}×ATR，止损顶到"
+                        f"保住峰值{BIG_WIN_RETAIN_FRAC*100:.0f}%的地板{out:.4f}"
+                        f"(entry={entry:.4f} best={best:.4f})，防止大段浮盈被大比例"
+                        f"吐回。呼吸阶梯基线不受影响，价格继续走高地板会跟着继续"
+                        f"上移(只朝有利方向)；如果这次判断错了、TV还在继续持有，"
+                        f"心跳追回会按老规矩自动尝试更优价格追回。"
                     ),
                     level="提示",
                 )

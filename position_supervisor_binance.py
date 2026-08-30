@@ -17431,6 +17431,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.tv_sl = float(self.current_sl)
         except Exception as e:
             logger.debug(f"[{self.symbol}] 反转锁盈复评跳过: {e}")
+        # 2026-08-30新增：大赢家利润地板——见radar_reentry_mixin.py
+        # BIG_WIN_ATR_THRESHOLD/BIG_WIN_RETAIN_FRAC顶部注释。跟反转锁盈
+        # 是两个独立的棘轮，都只朝有利方向收紧，先后顺序不影响结果。
+        try:
+            self.current_sl = self._maybe_lock_profit_on_big_win(float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 大赢家利润地板复评跳过: {e}")
         was_phase = phase
         self.breakeven_phase = new_phase
         # 激活状态由 _maybe_arm_radar_on_activation 控制，禁止 tick 强行打开
