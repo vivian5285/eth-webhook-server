@@ -8375,7 +8375,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败，立即重试")
                 sl_ok = False
                 for _retry in range(3):
-                    time.sleep(2.0)
+                    # 2026-08-30同批修复：固定2秒重试间隔一样扛不住60秒IP
+                    # 冷却窗口，跟8666行雷达止损重试同一个根因，补同一个
+                    # "冷却中先等冷却结束再打REST"的guard。
+                    ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                    if ip_rem > 0:
+                        time.sleep(min(ip_rem, 20.0))
+                    else:
+                        time.sleep(2.0)
                     try:
                         sl_ok = bool(self._ensure_frozen_hard_sl(
                             live_qty, reason=f"TP后确认永久硬止损·立即重试{_retry + 1}/3",
@@ -8670,6 +8677,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             ):
                 ok = True
                 break
+            # 2026-08-30修复：这3次重试原来只在两次尝试之间固定睡0.45/0.7秒，
+            # 完全不看是不是正撞在IP限流的60秒冷却窗口里——实盘复现(MARIO
+            # 账户GSUSDT)：3次重试全部挤在同一秒内、全部落在同一个60秒冷却
+            # 窗口内，注定全部失败，等于白重试，直接触发HARD_SL_FAIL_ABORT
+            # 报"裸仓"紧急告警(所幸更宽的永久硬止损全程还在，没有真的裸奔，
+            # 但雷达自己的止损收紧确实白白晚了将近1分钟)。照抄
+            # _ensure_flat_before_open(4040行)已经在用、已经验证有效的同款
+            # 模式：重试前先看还剩多少冷却时间，剩多少等多少(封顶20秒，避免
+            # 极端情况下把这一次调用阻塞太久)，冷却结束后再打这一发REST，
+            # 而不是明知会失败也硬打。
+            ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                wait_s = min(ip_rem, 20.0)
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达止损挂单·IP冷却中等候 {wait_s:.1f}s "
+                    f"(remaining {ip_rem:.0f}s) | 尝试 {attempt + 1}/3"
+                )
+                time.sleep(wait_s)
             res = self._place_vps_hard_sl_order(
                 live_qty, exchange_target, use_stop_limit=False,
             )
@@ -15783,7 +15808,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         sl_ok = self._ensure_frozen_hard_sl(live_qty, reason="网格套利硬止损")
         if not sl_ok:
             for _retry in range(3):
-                time.sleep(2.0)
+                # 2026-08-30：同批修复，见8377行雷达止损重试同款注释。
+                ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                time.sleep(min(ip_rem, 20.0) if ip_rem > 0 else 2.0)
                 try:
                     sl_ok = bool(self._ensure_frozen_hard_sl(
                         live_qty, reason=f"网格套利硬止损·立即重试{_retry + 1}/3",
@@ -16319,7 +16346,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # SKHYNIX裸奔1小时50分钟。这里立刻原地重试，不寄希望于
                 # 不确定什么时候才轮到的周期性检查。
                 for _retry in range(3):
-                    time.sleep(2.0)
+                    # 2026-08-30：同批修复，见8377行雷达止损重试同款注释。
+                    ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                    time.sleep(min(ip_rem, 20.0) if ip_rem > 0 else 2.0)
                     try:
                         _arm_ok = bool(self._arm_temp_stop_and_tp12(
                             live_qty, entry_live, self.current_side,
