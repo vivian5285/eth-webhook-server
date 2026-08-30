@@ -8231,6 +8231,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         ) or hard), 2)
         if self._has_stop_sl_near(exchange_target, exclude_shield=False):
             return True
+        # 2026-08-31实盘复现(E账户BCH/ZEC)：IP冷却期间_has_stop_sl_near的
+        # 挂单查询失败，它只信"本地120秒内刚挂同价"这个窄窗口——永久硬止损
+        # 一旦成功挂过就"永不改价、永不替换"(本函数docstring)，往往是几
+        # 小时前挂的，早过了120秒窗口，于是被误判"缺失"，触发一次根本
+        # 没必要的补挂尝试；补挂请求本身又撞上同一个冷却窗口失败，纯粹
+        # 制造ERROR噪音，不解决任何问题(直接查交易所验证过，止损全程都
+        # 在，从没真的缺失过)。这里换一个更贴合"永久硬止损从不主动替换"
+        # 这条设计前提的信任来源：只在冷却期间生效，只信_defense_order_ids
+        # 里persisted的hard_stop记录(证明历史上确实成功挂过、且仓位从那
+        # 以后没变过空——一变空_defense_order_ids就会被清空，见_clear_
+        # defense_order_ids调用点)，冷却结束后下一次tick用真实REST结果
+        # 覆盖这个假设，不会永久跳过验证。
+        if float(binance_client.ip_rate_limit_remaining() or 0) > 0:
+            ids = dict(getattr(self, "_defense_order_ids", None) or {})
+            if ids.get("hard_stop"):
+                logger.info(
+                    f"🛡️ [{self.symbol}] {reason} IP冷却中查不到盘口，但本次"
+                    f"持仓历史上成功挂过永久硬止损(tag记录仍在) → 先信任仍然"
+                    f"有效，跳过本次补挂尝试，冷却结束后下次核实"
+                )
+                return True
         if not self._orders_book_readable():
             logger.error(
                 f"🛡️ [{self.symbol}] {reason} 中止：挂单不可读且无本地缓存 "
