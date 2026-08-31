@@ -94,6 +94,29 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] bollinger_squeeze 加载失败: {_e}")
 
+# 2026-08-31新增三套：跟现有4套同一个准入门槛(有真实公开发表历史/验证
+# 战绩，不是网红自创指标)，参照comparison_roster.py顶部同批注释。
+try:
+    from strategy_engine.strategies import volatility_breakout
+    STRATEGIES["volatility_breakout"] = volatility_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] volatility_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import dual_momentum
+    STRATEGIES["dual_momentum"] = dual_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import time_series_momentum
+    STRATEGIES["time_series_momentum"] = time_series_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] time_series_momentum 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -132,6 +155,28 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "Bollinger Band Squeeze突破——1H快版，跟'bollinger_squeeze'同一套"
         "逻辑/同样的日历天数回看窗口，只是周期更快，纯粹为了更快积累样本、"
         "用真实数据检验'更快的周期squeeze是否还有边际'，不是猜测哪个更好。"
+    ),
+    "volatility_breakout": (
+        "Volatility Breakout波动率突破(Larry Williams公开发表，1987年靠"
+        "这套战法拿下Robbins World Cup Trading Championship实盘冠军)："
+        "今日开盘±k×昨日振幅设突破位，收盘价突破即入场，只留一根K线的"
+        "极短持仓就主动离场。跟海龟同属'突破流派'，但海龟看的是慢节奏的"
+        "结构性通道突破，这个看的是单根K线级别的波动率突破，两者对照。"
+    ),
+    "dual_momentum": (
+        "Dual Momentum双重动量(Gary Antonacci《Dual Momentum Investing》"
+        "2014年公开发表)：跟'cross_momentum'用同一套相对排名，唯一区别是"
+        "多加一道'绝对动量'过滤——候选池里的品种，还必须自己这段时间真的"
+        "是同方向涨跌，不是'矮子里拔将军'。回答'多这道过滤到底是减少假"
+        "信号还是错过真实机会'，直接对照cross_momentum就是最干净的实验。"
+    ),
+    "time_series_momentum": (
+        "Time Series Momentum时间序列动量(Moskowitz-Ooi-Pedersen 2012年"
+        "发表于Journal of Financial Economics，58个全球期货市场25年数据"
+        "验证过)：只看品种自己这段时间涨跌了多少，跟篮子里其它品种完全"
+        "无关(不像cross_momentum/dual_momentum要跨品种排名)。跟'turtle_"
+        "breakout'同属纯趋势跟随，但一个看价格结构突破、一个看收益率"
+        "本身，两种不同信号来源的趋势跟随对照组。"
     ),
 }
 

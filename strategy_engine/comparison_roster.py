@@ -24,6 +24,22 @@
   - cross_momentum：暂不动(4h/20根≈3.3天回看)。学术原版用3-12个月周期，
     这里是有意识地为加密货币更快的行情节奏做的适配，先观察这个"快版"
     表现，不是失误。
+
+2026-08-31新增三套(宝贝要求"多一些没关系"，同一个准入门槛：有真实
+公开发表历史/验证战绩，不是网红自创指标——Twitter/YouTube上的内容
+明确排除，理由跟本文件开头一致)：
+  - volatility_breakout：1d。Larry Williams原始设计就是"今日开盘±k×
+    昨日振幅"，需要真实的日线open/high/low/close，只有1d周期能对上
+    这个原始定义，没有更短周期的"快版"可做(改用更细的周期会破坏
+    "昨日振幅"这个核心概念本身)。
+  - dual_momentum：跟cross_momentum完全同款周期/lookback(4h/20根)，
+    这是刻意的——两者除了"要不要多一道绝对动量过滤"这一个变量外，
+    其余全部保持一致，才是干净的对照实验，能公平比较这道过滤到底
+    有没有用。
+  - time_series_momentum：1d/20根(~20天)，跟cross_momentum的4h/20根
+    (~3.3天)拉开明显差异，同时也是论文原版"月度再平衡"周期针对加密
+    货币更快节奏的压缩版——不用跟cross_momentum抢同一个周期，能看出
+    "换一个明显更慢的周期，纯时间序列动量表现如何"这个独立问题。
 """
 from __future__ import annotations
 
@@ -50,12 +66,20 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "connors_rsi2", "timeframe": "1d"} for s in _RSI2_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_squeeze", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_squeeze_fast", "timeframe": "1h", "params": _SQUEEZE_FAST_PARAMS} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "volatility_breakout", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "time_series_momentum", "timeframe": "1d"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
 UNIVERSE_ROSTER = [
     {
         "strategy": "cross_momentum",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+    },
+    {
+        "strategy": "dual_momentum",
         "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
