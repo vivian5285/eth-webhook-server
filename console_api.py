@@ -449,13 +449,23 @@ def _call_local_webhook(payload: dict, extra_headers: dict):
 @console_bp.route("/api/console/tv_signals", methods=["GET"])
 @require_login
 def api_tv_signals_list():
+    """
+    2026-08-29修复：默认排除HEARTBEAT——这个日志页是给宝贝看TV真实开平仓
+    细节、决定要不要重放/编辑重放用的，心跳(每品种每根收盘K线一条，专门
+    喂实盘对账/心跳追回用，不是人看的)混在里面会把真实信号刷没。传
+    include_heartbeat=1才会看到心跳(留个后门，万一哪天要单独排查心跳
+    本身)。
+    """
     import webhook_log
+    include_heartbeat = str(request.args.get("include_heartbeat") or "").strip() in ("1", "true", "yes")
+    explicit_action = request.args.get("action") or None
     rows = webhook_log.list_signals(
         limit=request.args.get("limit") or 50,
         offset=request.args.get("offset") or 0,
         symbol=request.args.get("symbol") or None,
-        action=request.args.get("action") or None,
+        action=explicit_action,
         source=request.args.get("source") or None,
+        exclude_actions=None if (include_heartbeat or explicit_action) else ["HEARTBEAT"],
     )
     return jsonify({"status": "ok", "signals": rows})
 

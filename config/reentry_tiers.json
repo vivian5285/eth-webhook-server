@@ -432,16 +432,16 @@
     ]
   },
   "ANTHROPIC": {
-    "tv_tf_sec": 14400,
-    "reentry_window_bars": 1,
+    "tv_tf_sec": 6300,
+    "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-27修正：用户把ANTHROPIC周期从90分钟改成4小时，tv_tf_sec同步为14400；window_bars从2改成1——4h×1=240min已经比~150-200min的窗口惯例略长，×2=480min会明显过长，只能收到1根（同XMR/TSLA等原生长周期品种的处理一致）。step_trigger/step_advance按sqrt(ANTHROPIC新测4小时中位数回调2.24/ETH当前中位数回调2.70)≈0.911倍重新缩放ETH三档基线（86天516根原生4h K线、61个回调样本）。",
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-27修正：用户把ANTHROPIC周期从90分钟改成4小时，tv_tf_sec同步为14400；window_bars从2改成1——4h×1=240min已经比~150-200min的窗口惯例略长，×2=480min会明显过长，只能收到1根（同XMR/TSLA等原生长周期品种的处理一致）。step_trigger/step_advance按sqrt(ANTHROPIC新测4小时中位数回调2.24/ETH当前中位数回调2.70)≈0.911倍重新缩放ETH三档基线（86天516根原生4h K线、61个回调样本）。2026-08-31再次修正：用户把ANTHROPIC周期从4小时改成105分钟，tv_tf_sec同步为6300；window_bars从1改回2——105min×2=210min重新落回~150-210min的窗口惯例区间(比4h×1=240min更贴合)，同ETH/XAU/SNDK/ASML等90-105min一带品种的处理一致。step_trigger/step_advance按sqrt(ANTHROPIC新测105分钟中位数回调2.38/ETH当前中位数回调2.70)≈0.939倍重新缩放ETH三档基线（90天1234根15m合成105min K线、170个真实摆动点回调样本，fractal pivot±3根确认法，同XAU/SKHYNIX一套方法）；breath_tp12/23/min_mult/max_mult继续维持ETH同款不变。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：按ANTHROPIC新测4小时波动率(0.911倍)缩放",
-        "step_trigger_atr": 0.91,
-        "step_advance_atr": 0.46,
+        "note": "弱趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
+        "step_trigger_atr": 0.94,
+        "step_advance_atr": 0.47,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -449,9 +449,9 @@
       },
       {
         "name": "mid",
-        "note": "中趋势：按ANTHROPIC新测4小时波动率(0.911倍)缩放",
-        "step_trigger_atr": 1.09,
-        "step_advance_atr": 0.55,
+        "note": "中趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
+        "step_trigger_atr": 1.13,
+        "step_advance_atr": 0.56,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -459,9 +459,9 @@
       },
       {
         "name": "strong",
-        "note": "强趋势：按ANTHROPIC新测4小时波动率(0.911倍)缩放",
-        "step_trigger_atr": 1.28,
-        "step_advance_atr": 0.64,
+        "note": "强趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
+        "step_trigger_atr": 1.31,
+        "step_advance_atr": 0.66,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,

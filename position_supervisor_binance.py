@@ -2368,6 +2368,46 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             out["note"] = f"溯源探测失败: {e}"
         return out
 
+    def _recover_tv_tps_from_journal(self, entry, side):
+        """接管/恢复时本地tv_tps不足两个有效值——在报"人工确认"警报前，
+        先按入场价+方向去匹配本地tv日志(_record_tv_signal写入，kind="tv"，
+        覆盖控制台手动发单/TV webhook等一切开仓来源，字段沿用历史命名
+        不代表来源限定TV)。2026-08-31实盘复现：仓位开仓时tp1/tp2/tp3
+        其实随信号一起送达并已经成功挂到交易所，只是VPS在落盘保存前
+        就重启，本地state丢了这份记录——日志里其实一直都在，只是没人
+        去读。
+
+        容差复用_probe_position_provenance里TV分支同一把尺子(入场价差
+        ≤max(2.0, entry*0.3%))，防止张冠李戴匹配到无关的旧记录。只有
+        方向也一致才算数。匹配成功则直接把self.tv_tps设成日志里的真实
+        值，返回日志里的tv_sl(没有则返回0.0，调用方据此决定要不要清零
+        tv_sl_ref)；匹配不上返回0.0，不改动self.tv_tps，交给上层报警。"""
+        try:
+            tv = self._load_last_journal_entry(None, kind="tv") or {}
+        except Exception:
+            return 0.0
+        tv_side = str(tv.get("side") or tv.get("action") or "").upper()
+        tv_px = float(tv.get("price") or 0)
+        if tv_side not in ("LONG", "SHORT") or tv_side != str(side or "").upper():
+            return 0.0
+        if tv_px <= 0 or entry <= 0 or abs(tv_px - entry) > max(2.0, entry * 0.003):
+            return 0.0
+        tps = [
+            float(tv.get("tv_tp1") or 0),
+            float(tv.get("tv_tp2") or 0),
+            float(tv.get("tv_tp3") or 0),
+        ]
+        if sum(1 for t in tps if t > 0) < 2:
+            return 0.0
+        self.tv_tps = tps
+        tv_sl = float(tv.get("tv_sl") or 0)
+        logger.info(
+            f"🛡️ [{self.symbol}] 接管/恢复：本地tv_tps丢失，按入场价"
+            f"{entry:.4f}匹配本地tv日志(@{tv_px:.4f})回填 TP={tps} "
+            f"SL={tv_sl or '—'}"
+        )
+        return tv_sl
+
     def _hydrate_tv_defense_context(self, pos, link_historical_tv=True):
         """
         接管补全防线上下文。
@@ -2395,13 +2435,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             if float(getattr(self, "open_atr", 0) or 0) <= 0:
                 self.open_atr = float(getattr(self, "current_atr", 0) or 0)
             # v2.1: TP 必须来自 TV 字段，禁止无 TV 关联时用 ATR 本地重算 TP。
+            # 2026-08-31实盘复现(C账户XMR)：仓位刚开仓(控制台手动发单，
+            # tp1/tp2/tp3随开仓一起送进来并已成功挂到交易所)就撞上VPS
+            # 重启，本地state还没来得及落盘保存tv_tps，重启接管时以为
+            # "从没关联过信号"，报警要求人工确认——但_record_tv_signal
+            # 其实早把这笔单的tp1/tp2/tp3/stop_loss写进了本地tv日志
+            # (kind="tv"，覆盖控制台手动发单/TV webhook所有来源，只是
+            # 字段沿用历史命名，不代表来源限定TV)，只是没人去读它。
+            # 先按入场价+方向匹配日志(跟_probe_position_provenance用
+            # 同一把容差尺子)，匹配上就直接回填，而不是让仓位在没有
+            # 真正数据缺失的情况下一直挂着"人工确认"的警报。
+            recovered_sl = 0.0
+            if sum(1 for t in (self.tv_tps or []) if t > 0) < 2:
+                recovered_sl = self._recover_tv_tps_from_journal(entry, side)
             if sum(1 for t in (self.tv_tps or []) if t > 0) < 2:
                 logger.error(
                     f"🚨 [{self.symbol}] 接管/恢复未关联 TV 信号且 tv_tps 不足，"
                     f"已禁止 entry+ATR 本地重算 TP。请人工补挂 TP 或确认 TV 日志。"
                 )
-            # 禁止写入历史 tv_sl_ref 冒充本仓 TV 硬止损
-            self.tv_sl_ref = 0.0
+            # 禁止写入历史 tv_sl_ref 冒充本仓 TV 硬止损——除非上面按入场价
+            # 精确匹配到了这笔仓自己的记录且里面确实带了stop_loss，那种
+            # 情况下recovered_sl>0，用真实值；否则一律清零，不留任何
+            # 跟当前这笔仓无关的旧值。
+            self.tv_sl_ref = float(recovered_sl or 0.0)
             if entry > 0 and side in ("LONG", "SHORT"):
                 atr_lock = float(
                     getattr(self, "open_atr", 0)
@@ -4990,6 +5046,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"→ 拒挂 TP{level}（防查不到单狂挂）"
             )
             return None
+        # 2026-08-31实盘复现：调用方常常是"发现TP限价从盘口消失但现价/best
+        # 未达→大概率不是真成交，补挂回去"这条路径，但仓位完全可能在这一
+        # 瞬间已经被别的路径(硬止损/雷达)真实打平——补挂reduceOnly单撞上
+        # 空仓，交易所必然拒(-2022 ReduceOnly Order is rejected)，还会
+        # 走满3次IP限流感知重试，纯粹浪费。这里用轻量WS优先读一次仓位
+        # (不强制REST，不额外增加权重开销)，确认已空就直接跳过整个下单+
+        # 重试流程，交给已有的"确认空仓"收尾逻辑处理，不在这里制造噪音。
+        try:
+            precheck_pos = self._get_active_position(prefer_ws=True)
+            if precheck_pos is None or (
+                precheck_pos != "QUERY_FAILED"
+                and isinstance(precheck_pos, dict)
+                and float(precheck_pos.get("size") or 0) <= 0
+            ):
+                logger.info(
+                    f"🛡️ [{self.symbol}] TP{level} 补挂前复查仓位已归零 → "
+                    f"跳过下单，非裸仓（TP本来就不需要）"
+                )
+                return None
+        except Exception:
+            pass
         # 防御性检查：IP冷却/查单失败时走本地轻量状态，避免崩溃
         # 修复（v16.10.x）：加 try/except 兜底，防止旧版 binance_client
         # 缺少 defensive_orders_look_ok 方法导致 AttributeError
@@ -8094,14 +8171,35 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 market_blocked = True
         # 贴市时先检查是否已有止损单，避免误判已挂单为失败
         if market_blocked:
+            # 2026-08-31实盘复现(B/C/E三账户ASML同时急跌)：这个分支每次
+            # 判定都正确(target已经被现价越过，确实不该挂)，但哨兵每隔
+            # 几秒就重新调用一次_breath_resize_stop_on_tp，只要target
+            # 没变、行情没回来，这里必然连续判定同一个结果——6分钟内
+            # 连续判了50次，每次都打一条WARNING+一次_has_stop_sl_near
+            # REST查询，纯粹重复劳动，还额外消耗IP权重(今晚一直在治的
+            # 那个问题)。target价格不变、20秒内已经判过"贴市"的，直接
+            # 复用上次结论，不再重复打WARNING/REST——上层调用方自己的
+            # "仓位是否还在"复查(_get_active_position)完全不受影响，
+            # 该tick该查还是查，只省掉这里注定失败的REST。target价格
+            # 一旦变化(雷达重新算出新数)或超过20秒，照常重新判定。
+            now = time.time()
+            same_block = (
+                abs(float(getattr(self, "_radar_stop_market_blocked_px", 0) or 0) - trigger_px) < 1e-6
+                and (now - float(getattr(self, "_radar_stop_market_blocked_ts", 0) or 0)) < 20.0
+            )
+            if same_block:
+                return None
             if self._has_stop_sl_near(
                 trigger_px, tolerance=2.0, exclude_shield=False,
                 exclude_close_position=True,
             ):
+                self._radar_stop_market_blocked_ts = 0.0
                 logger.info(
                     f"✅ [{self.symbol}] 雷达止损 @{trigger_px:.2f} 贴市但盘口已有 → 视为已挂"
                 )
                 return trigger_px
+            self._radar_stop_market_blocked_px = trigger_px
+            self._radar_stop_market_blocked_ts = now
             logger.warning(
                 f"🚨 [{self.symbol}] {self.current_side} 止损 @{trigger_px:.2f} "
                 f"已穿/贴市 {curr_px:.2f} → 禁止推宽，交紧急平仓"
@@ -8231,6 +8329,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         ) or hard), 2)
         if self._has_stop_sl_near(exchange_target, exclude_shield=False):
             return True
+        # 2026-08-31实盘复现(E账户BCH/ZEC)：IP冷却期间_has_stop_sl_near的
+        # 挂单查询失败，它只信"本地120秒内刚挂同价"这个窄窗口——永久硬止损
+        # 一旦成功挂过就"永不改价、永不替换"(本函数docstring)，往往是几
+        # 小时前挂的，早过了120秒窗口，于是被误判"缺失"，触发一次根本
+        # 没必要的补挂尝试；补挂请求本身又撞上同一个冷却窗口失败，纯粹
+        # 制造ERROR噪音，不解决任何问题(直接查交易所验证过，止损全程都
+        # 在，从没真的缺失过)。这里换一个更贴合"永久硬止损从不主动替换"
+        # 这条设计前提的信任来源：只在冷却期间生效，只信_defense_order_ids
+        # 里persisted的hard_stop记录(证明历史上确实成功挂过、且仓位从那
+        # 以后没变过空——一变空_defense_order_ids就会被清空，见_clear_
+        # defense_order_ids调用点)，冷却结束后下一次tick用真实REST结果
+        # 覆盖这个假设，不会永久跳过验证。
+        if float(binance_client.ip_rate_limit_remaining() or 0) > 0:
+            ids = dict(getattr(self, "_defense_order_ids", None) or {})
+            if ids.get("hard_stop"):
+                logger.info(
+                    f"🛡️ [{self.symbol}] {reason} IP冷却中查不到盘口，但本次"
+                    f"持仓历史上成功挂过永久硬止损(tag记录仍在) → 先信任仍然"
+                    f"有效，跳过本次补挂尝试，冷却结束后下次核实"
+                )
+                return True
         if not self._orders_book_readable():
             logger.error(
                 f"🛡️ [{self.symbol}] {reason} 中止：挂单不可读且无本地缓存 "
@@ -8375,7 +8494,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 logger.error(f"🫁 [{self._tag()}] TP后永久硬止损缺失且补挂失败，立即重试")
                 sl_ok = False
                 for _retry in range(3):
-                    time.sleep(2.0)
+                    # 2026-08-30同批修复：固定2秒重试间隔一样扛不住60秒IP
+                    # 冷却窗口，跟8666行雷达止损重试同一个根因，补同一个
+                    # "冷却中先等冷却结束再打REST"的guard。
+                    ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                    if ip_rem > 0:
+                        time.sleep(min(ip_rem, 20.0))
+                    else:
+                        time.sleep(2.0)
                     try:
                         sl_ok = bool(self._ensure_frozen_hard_sl(
                             live_qty, reason=f"TP后确认永久硬止损·立即重试{_retry + 1}/3",
@@ -8670,6 +8796,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             ):
                 ok = True
                 break
+            # 2026-08-30修复：这3次重试原来只在两次尝试之间固定睡0.45/0.7秒，
+            # 完全不看是不是正撞在IP限流的60秒冷却窗口里——实盘复现(MARIO
+            # 账户GSUSDT)：3次重试全部挤在同一秒内、全部落在同一个60秒冷却
+            # 窗口内，注定全部失败，等于白重试，直接触发HARD_SL_FAIL_ABORT
+            # 报"裸仓"紧急告警(所幸更宽的永久硬止损全程还在，没有真的裸奔，
+            # 但雷达自己的止损收紧确实白白晚了将近1分钟)。照抄
+            # _ensure_flat_before_open(4040行)已经在用、已经验证有效的同款
+            # 模式：重试前先看还剩多少冷却时间，剩多少等多少(封顶20秒，避免
+            # 极端情况下把这一次调用阻塞太久)，冷却结束后再打这一发REST，
+            # 而不是明知会失败也硬打。
+            ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                wait_s = min(ip_rem, 20.0)
+                logger.warning(
+                    f"🛡️ [{self.symbol}] 雷达止损挂单·IP冷却中等候 {wait_s:.1f}s "
+                    f"(remaining {ip_rem:.0f}s) | 尝试 {attempt + 1}/3"
+                )
+                time.sleep(wait_s)
             res = self._place_vps_hard_sl_order(
                 live_qty, exchange_target, use_stop_limit=False,
             )
@@ -15783,7 +15927,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         sl_ok = self._ensure_frozen_hard_sl(live_qty, reason="网格套利硬止损")
         if not sl_ok:
             for _retry in range(3):
-                time.sleep(2.0)
+                # 2026-08-30：同批修复，见8377行雷达止损重试同款注释。
+                ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                time.sleep(min(ip_rem, 20.0) if ip_rem > 0 else 2.0)
                 try:
                     sl_ok = bool(self._ensure_frozen_hard_sl(
                         live_qty, reason=f"网格套利硬止损·立即重试{_retry + 1}/3",
@@ -16319,7 +16465,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # SKHYNIX裸奔1小时50分钟。这里立刻原地重试，不寄希望于
                 # 不确定什么时候才轮到的周期性检查。
                 for _retry in range(3):
-                    time.sleep(2.0)
+                    # 2026-08-30：同批修复，见8377行雷达止损重试同款注释。
+                    ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+                    time.sleep(min(ip_rem, 20.0) if ip_rem > 0 else 2.0)
                     try:
                         _arm_ok = bool(self._arm_temp_stop_and_tp12(
                             live_qty, entry_live, self.current_side,
@@ -17402,6 +17550,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.tv_sl = float(self.current_sl)
         except Exception as e:
             logger.debug(f"[{self.symbol}] 反转锁盈复评跳过: {e}")
+        # 2026-08-30新增：大赢家利润地板——见radar_reentry_mixin.py
+        # BIG_WIN_ATR_THRESHOLD/BIG_WIN_RETAIN_FRAC顶部注释。跟反转锁盈
+        # 是两个独立的棘轮，都只朝有利方向收紧，先后顺序不影响结果。
+        try:
+            self.current_sl = self._maybe_lock_profit_on_big_win(float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 大赢家利润地板复评跳过: {e}")
+        # 2026-08-31新增：利润回吐刹车——见radar_reentry_mixin.py
+        # "2026-08-31新增"顶部注释。按品种配置(giveback_brake)，只朝有利
+        # 方向棘轮，写在大赢家地板之后，三个棘轮谁锁得更紧生效谁的，
+        # 调用顺序不影响最终结果。
+        try:
+            self.current_sl = self._maybe_tighten_on_profit_giveback(px, float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 利润回吐刹车复评跳过: {e}")
         was_phase = phase
         self.breakeven_phase = new_phase
         # 激活状态由 _maybe_arm_radar_on_activation 控制，禁止 tick 强行打开

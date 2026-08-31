@@ -464,6 +464,60 @@ def admin_abort_catchup(symbol):
     }), 200
 
 
+@app.route('/admin/cancel_chase_watch/<path:symbol>', methods=['POST'])
+def admin_cancel_chase_watch(symbol):
+    """
+    人工中止追单确认观察窗(_chase_watch_active)——撤掉已挂的追单限价(如果
+    有)、清chase_watch_*状态。2026-08-29新增：XAUUSDT实盘场景——宝贝看
+    4H KDJ见底+周末无量，主动平仓锁盈，平仓价刚好贴近雷达自己的止损线
+    附近，被_resolve_exit_source的价格贴近判定误归类成"疑似雷达提前出局"，
+    自动武装了3小时追单确认观察窗(不是心跳追回，是追单确认chase-watch，
+    两套完全独立的机制)——虽然chase-watch本身有多周期EMA+动量确认+反转
+    检测两道门槛，大概率会在宝贝判断对的情况下自然确认失败、超时放弃，
+    但宝贝明确要求直接尊重自己的判断、不留这个不确定性。
+
+    跟/admin/abort_catchup不同：chase-watch只在"检测到那一次qualifying
+    退出"时才会武装一次，不是心跳追回那种每轮idle-patrol都会重新评估
+    触发条件——清掉_chase_watch_active后不会重新武装同一次退出事件，
+    不需要额外标记"episode已消耗"这层概念。
+    """
+    expected = str(os.getenv("WEBHOOK_SECRET") or "").strip()
+    data = request.get_json(silent=True) or {}
+    auth = str(
+        data.get("secret")
+        or request.form.get("secret")
+        or request.args.get("secret")
+        or request.headers.get("X-Webhook-Secret")
+        or ""
+    ).strip()
+    if not expected or auth != expected:
+        return jsonify({"status": "error", "message": "Invalid secret"}), 403
+    meta = resolve_binance_symbol(symbol, default="")
+    sym = meta.get("symbol") or ""
+    if not sym or sym not in set(active_binance_symbols()):
+        return jsonify({
+            "status": "error",
+            "message": f"Unknown symbol: {symbol}",
+            "allowed": active_binance_symbols(),
+        }), 400
+    sup = get_supervisor(sym)
+    was_active = bool(getattr(sup, "_chase_watch_active", False))
+    reason = str(data.get("reason") or request.args.get("reason") or "人工中止(admin_cancel_chase_watch)")
+    try:
+        sup._clear_chase_watch(reason=reason, save=True)
+    except Exception as e:
+        logger.error(f"[admin/cancel_chase_watch] {sym} 中止失败: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"cancel_err:{e}"}), 500
+    logger.info(f"[admin/cancel_chase_watch] {sym} 已人工中止追单确认窗口 | was_active={was_active} | {reason}")
+    return jsonify({
+        "status": "success",
+        "symbol": sym,
+        "was_active": was_active,
+        "chase_watch_active": bool(getattr(sup, "_chase_watch_active", False)),
+        "reason": reason,
+    }), 200
+
+
 @app.route('/admin/reload_notify', methods=['POST'])
 def admin_reload_notify():
     """热加载 Telegram/钉钉环境变量，无需重启交易服务。"""

@@ -50,6 +50,13 @@ BREATH_ETH: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.0,      # 2026-08-13：3.0→4.0
     "max_mult": 5.8,      # 2026-08-13：4.5→5.8，覆盖实测90分位回调(5.58)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测显示ETH受益，但ETH真实
+    # 生产周期是90分钟——用30m合成90分钟K线重新回测后发现：只有min_mult
+    # (最冷/最不常见的低波动状态)差值为正，mid_mult/max_mult(更常见的
+    # 正常/高波动状态)差值持续为负，即使把阈值收紧两档(1.5/0.45/0.60→
+    # 2.0/0.55/0.65)依然负(-0.08~-0.56×ATR/笔)。说明4H近似掩盖了ETH
+    # 真实短周期上"深回调后仍常继续走"的特性，故意不启用，不要再照抄
+    # 别的品种加上，除非用ETH自己90分钟K线重新测出正收益。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -87,6 +94,11 @@ BREATH_BNB: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车。最初用4H K线近似回测三档trail_mult
+    # 差值均为正(+0.22~+0.80×ATR/笔)，启用；随后用BNB真实生产周期(150min，
+    # 30m合成)重新回测复核，三档差值不降反升(+0.91~+1.06×ATR/笔)，比4H
+    # 近似更强，确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
 # ZEC 基线（150分钟周期）
@@ -111,6 +123,12 @@ BREATH_ZEC: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 3.8,
     "max_mult": 6.0,      # 覆盖实测90分位回调(5.89)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本转正/打平(+0.52/+0.12/-0.08×ATR/笔)，一度启用；
+    # 随后用ZEC真实生产周期(150min，30m合成)重新回测复核，三档差值全部
+    # 转为明确负值(-0.33~-0.39×ATR/笔，触发子集更差达-0.69×ATR/笔)——
+    # 4H近似在ZEC身上是误导性的，真实周期上ZEC回调深但更常继续走，跟
+    # XAU/PAXG是同一类特性。故意不启用，不要照抄别的品种加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -153,6 +171,10 @@ BREATH_XAU: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.6,
     "max_mult": 6.2,      # 覆盖实测90分位回调(5.90)以上
+    # 2026-08-31：利润回吐刹车方案回测过XAU，三档trail_mult差值全部
+    # 显著为负(-0.85~-1.03×ATR/笔)——XAU趋势内深回调后继续走的概率明显
+    # 更高，提前收紧反而砍断真实趋势。故意不加giveback_brake，以后
+    # 校准/重构时不要顺手照抄别的品种把这个加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -199,6 +221,11 @@ BREATH_XMR: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本打平微正(+0.18/-0.07/+0.03×ATR/笔)，一度启用；
+    # 随后用XMR真实生产周期(8H原生K线)重新回测复核，三档差值全部转为
+    # 明确正值(+0.30~+0.43×ATR/笔)，比4H近似更强，确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
 }
 
 # META 基线（新增品种，2026-08-27，4小时周期，币安TRADIFI_PERPETUAL
@@ -282,6 +309,11 @@ BREATH_BCH: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.3,
     "max_mult": 6.8,      # 覆盖实测90分位回调(6.02)以上
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测三档差值均为正
+    # (+0.27~+0.69×ATR/笔)，启用；随后用BCH真实生产周期(6H原生K线)重新
+    # 回测复核，三档差值不降反升(+0.41~+0.60×ATR/笔)，比4H近似更强，
+    # 确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -349,6 +381,9 @@ BREATH_PAXG: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.8,
     "max_mult": 6.7,      # 08-27再校准(130min)：覆盖实测90分位回调(6.44)以上
+    # 2026-08-31：利润回吐刹车方案回测过PAXG，三档trail_mult差值全部
+    # 显著为负(-1.03~-1.31×ATR/笔，跟同为贵金属类的XAU结论一致)——故意
+    # 不加giveback_brake，以后不要顺手照抄别的品种加上。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -475,24 +510,30 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 间隔，不用合成，直接拉K线测(86天516根原生4h K线、61个回调样本)：中位数
 # 回调2.24×ATR、75分位3.69×ATR、90分位5.47×ATR，ATR%=1.21%，覆盖旧的90
 # 分钟时代数值。
+# 2026-08-31再校准：用户把ANTHROPIC周期从4小时改成105分钟。105分钟不能被
+# 30整除，能被15整除(15m×7)，用真实15m K线合成105分钟K线测(90天1234根
+# 合成K线、170个真实摆动点识别(fractal pivot±3根确认)回调样本)：中位数
+# 回调2.38×ATR、75分位3.41×ATR、90分位5.27×ATR，ATR%=0.74%，覆盖旧的4
+# 小时时代数值。跟以往同批(XAU/SKHYNIX/OpenAI/ASML等)周期变更后的重校准
+# 用同一套方法(scratch_calibrate_xau_skhynix.py::run_symbol)。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 2.24,
-    "step_advance_atr": 1.46,
+    "step_trigger_atr": 2.38,
+    "step_advance_atr": 1.55,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.24,  # 08-27再校准(4h)：覆盖实测中位数回调(2.24)
-    "breath_tp23": 3.69,  # 08-27再校准(4h)：覆盖实测75分位回调(3.69)
+    "breath_tp12": 2.38,  # 08-31再校准(105min)：覆盖实测中位数回调(2.38)
+    "breath_tp23": 3.41,  # 08-31再校准(105min)：覆盖实测75分位回调(3.41)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.2,
-    "max_mult": 5.8,      # 08-27再校准(4h)：覆盖实测90分位回调(5.47)以上
+    "min_mult": 4.0,
+    "max_mult": 5.6,      # 08-31再校准(105min)：覆盖实测90分位回调(5.27)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -527,6 +568,14 @@ BREATH_ASML: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.9,
     "max_mult": 6.5,      # 08-18再校准：覆盖实测90分位回调(6.18)以上
+    # 2026-08-31新增：利润回吐刹车——起因是当天ASML在B/C/E三账户同时
+    # 遭遇急跌(SHORT)，雷达自己的跟踪腿被现价越过、连续重挂失败50次，
+    # 靠更宽的永久硬止损才接住(全程没有裸奔，但暴露出中等赢家在这段
+    # 反转初期完全没有比永久硬止损更早介入的保护)。用ASML真实90分钟
+    # 周期(30m合成×3)回测两组阈值，三档trail_mult下差值全部明确为正，
+    # 收紧版(同XMR/ZEC)比宽松版(同ETH/BNB)更强(+0.86~+1.43 vs +0.82~
+    # +1.18×ATR/笔)，用收紧版启用。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -663,6 +712,17 @@ def get_breath_profile(symbol: str, exchange: str = "binance") -> Dict[str, Any]
     if exchange == "deepcoin":
         return dict(_BY_DEEPCOIN.get(sym) or BREATH_ETH)
     return dict(_BY_BINANCE.get(sym) or BREATH_ETH)
+
+
+def get_giveback_brake_config(symbol: str, exchange: str = "binance") -> Optional[Dict[str, float]]:
+    """2026-08-31新增：按品种查"利润回吐刹车"参数，见各BREATH_*里
+    giveback_brake字段的校准注释。没有这个key = 该品种未启用(默认关闭，
+    例如XAU/PAXG经回测证明会伤害趋势捕获，故意不给)。"""
+    profile = get_breath_profile(symbol, exchange)
+    cfg = profile.get("giveback_brake")
+    if isinstance(cfg, dict) and cfg.get("min_peak_atr") and cfg.get("trigger_frac") and cfg.get("retain_frac"):
+        return cfg
+    return None
 
 
 def trail_distance_multiplier(ratio: float, profile: Optional[Dict[str, Any]] = None) -> float:
