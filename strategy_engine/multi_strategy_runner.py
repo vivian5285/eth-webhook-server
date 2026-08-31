@@ -124,6 +124,27 @@ def _close_position(key: tuple, exit_price: float, bar_time: int, reason: str) -
     )
 
 
+def _same_bar_reentry_blocked(symbol: str, strategy: str, sig: dict) -> bool:
+    """跟shadow_engine.py同一套2026-08-29的修复口径(shadow_store.
+    get_last_closed_meta本身就是那次修复新增的，但当时只接进了
+    shadow_engine.py，multi_strategy_runner.py这条线漏接了)：同一根
+    本地K线(bar_time没变)、同一方向，如果上一次就是从这根K线开仓又被
+    平掉的，说明这份行情数据没有任何新信息——直接重开只会原样重演
+    上次的结果。2026-08-31实盘复现：turtle_breakout在XMRUSDT用一根
+    单K线内触发突破入场+2N止损的极端行情，5分钟一轮的巡检在这根K线
+    仍是"最新已收盘K线"的整个窗口期内(最长能撑到下一根4h/1d收盘)反复
+    开平了24次，把回测口径的真实成交频率硬生生撑高了几十倍——
+    cross_momentum同一晚也复现了3组，82.6%的"成交"是这个bug刷出来的
+    重复行，不是真实信号质量。只堵"完全相同的(方向,K线)"，方向变了
+    或者K线真收出新的一根都不受影响。"""
+    last_closed = shadow_store.get_last_closed_meta(symbol, strategy)
+    return bool(
+        last_closed
+        and str(last_closed.get("side")) == str(sig.get("action"))
+        and int(last_closed.get("entry_bar_time") or -1) == int(sig["bar_time"])
+    )
+
+
 def _hydrate_keys_from_db(keys: List[tuple]) -> None:
     """进程重启后从sqlite恢复内存态持仓——跟shadow_engine.py同类恢复逻辑
     同一惯例，避免重启后"账本记得开过仓、内存不知道"导致重复开仓。
@@ -173,7 +194,7 @@ def _tick_single_symbol_entry(entry: dict) -> None:
         return
 
     sig = fn({"base": bars}, params, None)
-    if sig and sig.get("action") in ("LONG", "SHORT"):
+    if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
         _open_from_signal(symbol, strategy, timeframe, sig)
 
 
@@ -226,7 +247,7 @@ def _tick_universe_entry(entry: dict) -> None:
             continue
 
         sig = fn({"base": bars}, params, None)
-        if sig and sig.get("action") in ("LONG", "SHORT"):
+        if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
             _open_from_signal(symbol, strategy, timeframe, sig)
 
 
