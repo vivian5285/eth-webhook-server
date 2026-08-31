@@ -189,7 +189,7 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                     realized_frac, realized_pnl_atr_weighted, qty,
                     pair_key, pair_base_price, pair_formation_mean, pair_formation_std,
                     status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
                 (
                     row["symbol"], row["strategy"], row["timeframe"], row["side"],
                     row["entry"], row["atr0"], row["tier"], row.get("adx"),
