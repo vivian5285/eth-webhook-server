@@ -874,9 +874,9 @@ def _get_comparison_strategy_names():
     if _roster_cache["data"] is not None and now - _roster_cache["ts"] < _ROSTER_CACHE_TTL_SEC:
         return _roster_cache["data"]
     code = (
-        "from strategy_engine.comparison_roster import SINGLE_SYMBOL_ROSTER, UNIVERSE_ROSTER\n"
+        "from strategy_engine.comparison_roster import SINGLE_SYMBOL_ROSTER, UNIVERSE_ROSTER, PAIRS_ROSTER\n"
         "import json\n"
-        "names = sorted(set([e['strategy'] for e in SINGLE_SYMBOL_ROSTER] + [e['strategy'] for e in UNIVERSE_ROSTER]))\n"
+        "names = sorted(set([e['strategy'] for e in SINGLE_SYMBOL_ROSTER] + [e['strategy'] for e in UNIVERSE_ROSTER] + [e['strategy'] for e in PAIRS_ROSTER]))\n"
         "print(json.dumps(names))"
     )
     result = _strategy_engine_call(code, timeout=10)

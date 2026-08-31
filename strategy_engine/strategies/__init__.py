@@ -178,6 +178,19 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "breakout'同属纯趋势跟随，但一个看价格结构突破、一个看收益率"
         "本身，两种不同信号来源的趋势跟随对照组。"
     ),
+    # pairs_trading不在STRATEGIES注册表里(它两条腿绑定同开同平，接口
+    # 跟单品种generate_signal不兼容，走multi_strategy_runner.py专门写的
+    # 配对调度)，但对比面板需要它的说明，直接在这查表字典里补一条，
+    # 不强求跟STRATEGIES一一对应，跟tv_multiscore_v1同样的处理方式。
+    "pairs_trading": (
+        "Pairs Trading配对交易·距离法(Gatev-Goetzmann-Rouwenhorst 2006年"
+        "发表于Review of Financial Studies，1962-2002年美股数据验证)："
+        "唯一一个不押方向的战法。把篮子里每个品种归一化成累计收益曲线，"
+        "找出走势最贴合的一对，价差偏离历史均值超过2个标准差就开仓——"
+        "做多走弱的那一腿、做空走强的那一腿，价差收敛就平仓。两条腿盈亏"
+        "方向相反，市场中性，对冲掉大盘本身涨跌，跟其余8套(清一色趋势/"
+        "动量类)相关性极低。"
+    ),
 }
 
 

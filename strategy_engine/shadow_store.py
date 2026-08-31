@@ -75,6 +75,25 @@ def _init_db() -> None:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+        # 2026-08-31新增：pairs_trading(配对交易)专用字段——这套战法两条腿
+        # 绑定同开同平，跟其余单品种/篮子排名类战法不一样，需要额外记住
+        # "这行属于哪一对配对"(pair_key，恢复重启时按这个字段找回搭档腿)、
+        # "这一腿自己的形成期起点价"(pair_base_price)、以及配对共用的
+        # "形成期价差均值/标准差"(pair_formation_mean/std，两条腿这两个
+        # 值完全一样，各自都存一份，查询时不用再联表)。同样用
+        # try/except吞掉"已存在"这一种情况，其它策略的行这4列全部是NULL，
+        # 不受影响。
+        for col, coltype in (
+            ("pair_key", "TEXT"),
+            ("pair_base_price", "REAL"),
+            ("pair_formation_mean", "REAL"),
+            ("pair_formation_std", "REAL"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE shadow_positions_v2 ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         conn.execute("""
             CREATE TABLE IF NOT EXISTS strategy_equity (
                 strategy TEXT PRIMARY KEY,
@@ -167,8 +186,10 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                    (symbol, strategy, timeframe, side, entry, atr0, tier, adx,
                     entry_bar_time, score_bar_time, last_bar_time, tp1_price, tp2_price,
                     stop, last_ratchet_price, tp1_done, tp2_done,
-                    realized_frac, realized_pnl_atr_weighted, qty, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                    realized_frac, realized_pnl_atr_weighted, qty,
+                    pair_key, pair_base_price, pair_formation_mean, pair_formation_std,
+                    status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
                 (
                     row["symbol"], row["strategy"], row["timeframe"], row["side"],
                     row["entry"], row["atr0"], row["tier"], row.get("adx"),
@@ -178,6 +199,8 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                     int(row.get("tp1_done") or 0), int(row.get("tp2_done") or 0),
                     row.get("realized_frac") or 0, row.get("realized_pnl_atr_weighted") or 0,
                     row.get("qty") or 0.0,
+                    row.get("pair_key"), row.get("pair_base_price"),
+                    row.get("pair_formation_mean"), row.get("pair_formation_std"),
                     time.time(),
                 ),
             )
@@ -186,6 +209,22 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
     except Exception as e:
         logger.warning(f"[shadow_store] insert_open_row 跳过: {e}")
         return None
+
+
+def get_open_pair_legs(pair_key: str) -> List[dict]:
+    """按pair_key找回配对交易的两条腿(status='open')——重启恢复用，
+    跟get_open_row(单腿战法用)是平行的两条查询路径。"""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM shadow_positions_v2
+                   WHERE pair_key=? AND status='open'""",
+                (pair_key,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.warning(f"[shadow_store] get_open_pair_legs 失败: {e}")
+        return []
 
 
 def update_row(position_id: int, updates: Dict[str, Any], bar_time: int) -> None:

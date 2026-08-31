@@ -85,3 +85,23 @@ UNIVERSE_ROSTER = [
         "lookback_bars": 20,
     },
 ]
+
+# 配对交易(distance method)——两条腿绑定同开同平，接口/调度都跟上面两类
+# 不一样，单独一份roster。2026-08-31应用户要求新增：此前8套战法清一色
+# 趋势/动量方向性打法，完全没有"不押方向"的统计套利。formation_bars=60/
+# max_hold_bars=30(4h周期下分别约10天/5天)，是Gatev-Goetzmann-Rouwenhorst
+# 原始论文12个月形成期/6个月交易期针对加密货币更快节奏的压缩版，跟
+# cross_momentum/time_series_momentum同一贯做法，不是瞎猜。当前版本一次
+# 只做一笔配对(最贴合的那一对)，不追求全篮子两两组合都开——原始论文本来
+# 就是"从篮子里选出最贴合的若干对"，不是每一对都交易。
+PAIRS_ROSTER = [
+    {
+        "strategy": "pairs_trading",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "formation_bars": 60,
+        "entry_std_mult": 2.0,
+        "exit_std_mult": 0.0,
+        "max_hold_bars": 30,
+    },
+]
