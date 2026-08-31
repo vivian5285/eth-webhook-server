@@ -510,24 +510,30 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 间隔，不用合成，直接拉K线测(86天516根原生4h K线、61个回调样本)：中位数
 # 回调2.24×ATR、75分位3.69×ATR、90分位5.47×ATR，ATR%=1.21%，覆盖旧的90
 # 分钟时代数值。
+# 2026-08-31再校准：用户把ANTHROPIC周期从4小时改成105分钟。105分钟不能被
+# 30整除，能被15整除(15m×7)，用真实15m K线合成105分钟K线测(90天1234根
+# 合成K线、170个真实摆动点识别(fractal pivot±3根确认)回调样本)：中位数
+# 回调2.38×ATR、75分位3.41×ATR、90分位5.27×ATR，ATR%=0.74%，覆盖旧的4
+# 小时时代数值。跟以往同批(XAU/SKHYNIX/OpenAI/ASML等)周期变更后的重校准
+# 用同一套方法(scratch_calibrate_xau_skhynix.py::run_symbol)。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 2.24,
-    "step_advance_atr": 1.46,
+    "step_trigger_atr": 2.38,
+    "step_advance_atr": 1.55,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.24,  # 08-27再校准(4h)：覆盖实测中位数回调(2.24)
-    "breath_tp23": 3.69,  # 08-27再校准(4h)：覆盖实测75分位回调(3.69)
+    "breath_tp12": 2.38,  # 08-31再校准(105min)：覆盖实测中位数回调(2.38)
+    "breath_tp23": 3.41,  # 08-31再校准(105min)：覆盖实测75分位回调(3.41)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.2,
-    "max_mult": 5.8,      # 08-27再校准(4h)：覆盖实测90分位回调(5.47)以上
+    "min_mult": 4.0,
+    "max_mult": 5.6,      # 08-31再校准(105min)：覆盖实测90分位回调(5.27)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
