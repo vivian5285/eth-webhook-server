@@ -2670,6 +2670,42 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         tp_list = tp_list if tp_list is not None else (self.tv_tps or [])
         return validate_tp_prices_for_side(side, entry, tp_list)
 
+    def _synthesize_fallback_tp_from_atr(self, side, entry):
+        """2026-08-31新增：TV/账本/盘口三方都拿不到有效TP123时的真正兜底
+        （此前_ensure_tp123_prices_from_tv走到这一步只会把tv_tps清零、
+        永久裸奔等雷达——16362行注释早就写着"必须用实盘entry+ATR合成TP价，
+        禁止expected=0裸奔"，但那份实现从没真正写出来）。
+
+        实盘复现：2026-08-31 IP限流风暴延迟了MUUSDT的市价成交，等真正
+        成交时价格已经涨过TV原本给的TP1参考价，"方向不符"校验正确拦下了
+        这份陈旧TV价，但拦下之后没有兜底，C/E两个账户的MUUSDT仓位变成
+        只剩硬止损、没有任何TP1/TP2分批止盈单。
+
+        只在这条绝路上触发（TV原价+日志重载+盘口现读三条路都试过仍失败），
+        正常路径100%由TV数据决定，不受任何影响。倍数复用breath_profiles.py
+        该品种自己的tp1_atr/tp2_atr（跟雷达呼吸空间同一套已校准数值，不是
+        凭空发明的新参数），ATR用本仓位开仓时锁定的open_atr。TP3不挂限价
+        (v16.4.0起PLACE_TP_LEVELS恒=2)，给个tp2_atr×1.4的延伸值只为价位
+        显示完整，不影响实际挂单。
+        """
+        side = str(side or "").strip().upper()
+        entry = float(entry or 0)
+        atr = float(getattr(self, "open_atr", 0) or getattr(self, "current_atr", 0) or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0 or atr <= 0:
+            return None
+        profile = getattr(self, "breath_profile", None) or {}
+        tp1_atr = float(profile.get("tp1_atr") or 1.35)
+        tp2_atr = float(profile.get("tp2_atr") or 2.5)
+        direction = 1.0 if side == "LONG" else -1.0
+        tps = [
+            round(entry + direction * atr * tp1_atr, 6),
+            round(entry + direction * atr * tp2_atr, 6),
+            round(entry + direction * atr * tp2_atr * 1.4, 6),
+        ]
+        if not validate_tp_prices_for_side(side, entry, tps):
+            return None
+        return tps
+
     def _reload_tv_tp_prices_from_sources(self, side, entry):
         """从 TV 信源重载 TP123；拒绝方向错误或陈旧价位"""
         entry = float(entry or 0)
@@ -2749,7 +2785,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return self._adopt_tp_prices_from_open_orders(entry)
 
     def _ensure_tp123_prices_from_tv(self, entry):
-        """以 TV 信源/账本为准确保 TP123 三价齐全；禁止用 entry+ATR 重算覆盖 TV 价格。"""
+        """以 TV 信源/账本为准确保 TP123 三价齐全；正常路径禁止用 entry+ATR
+        重算覆盖 TV 价格。2026-08-31起：仅当 TV 信源/日志重载/盘口现读三条路
+        全部失败(TV 价因执行延迟等原因已失效/方向不符)时，才落到
+        _synthesize_fallback_tp_from_atr 这条最后兜底，绝不是常规路径。"""
         side = self.current_side
         entry = float(entry or self.watched_entry or 0)
         if self._tp_prices_valid_for_side(side, entry):
@@ -2774,6 +2813,30 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"⚠️ 陈旧 TP 价位与 {side} @ {entry:.2f} 方向不符 → 丢弃"
             )
             self.tv_tps = [0.0, 0.0, 0.0]
+
+        # 2026-08-31新增：TV/日志/盘口三条路都试过仍失败时的真正兜底——
+        # 用实际成交价+该品种自己的呼吸ATR倍数现算一版TP，而不是永久裸奔
+        # 等雷达。只在这条绝路上触发，正常路径不受影响（详见
+        # _synthesize_fallback_tp_from_atr顶部注释，2026-08-31 MUUSDT
+        # IP限流延迟成交事件复现过没有兜底的问题）。
+        synthesized = self._synthesize_fallback_tp_from_atr(side, entry)
+        if synthesized:
+            self.tv_tps = synthesized
+            self._save_state()
+            logger.warning(
+                f"🩹 [{self.symbol}] TV/账本/盘口三方均无效 → 用实际成交价+ATR "
+                f"现算兜底TP @ entry={entry:.2f} atr={float(getattr(self, 'open_atr', 0) or 0):.4f} "
+                f"→ {self.tv_tps}"
+            )
+            try:
+                dingtalk.report_system_alert(
+                    f"TP兜底现算 [{self.symbol}]",
+                    f"{side} entry={entry:.2f} → 兜底TP={self.tv_tps}"
+                    f"（TV原价因执行延迟已失效，改用实际成交价+ATR现算，非TV原始信号）",
+                )
+            except Exception:
+                pass
+            return True
 
         logger.error(
             f"🚨 [{self.symbol}] TV/账本/盘口均无有效 TP123，且已禁止 entry+ATR "
