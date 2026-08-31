@@ -240,6 +240,11 @@ BIG_WIN_RETAIN_FRAC = 0.65
 # 全局常量，是跟min_mult/max_mult一样的按品种校准参数，存在各BREATH_*
 # 的giveback_brake字段里(get_giveback_brake_config)，没配置的品种默认
 # 不启用(不去猜没测过的品种)。
+#
+# 2026-08-31追加：ASML在B/C/E三账户同时遭遇急跌，暴露出中等赢家(峰值
+# 未到大赢家门槛)在雷达跟踪腿被现价越过之后、靠永久硬止损接住之前，
+# 完全没有更早一层保护的空隙。用ASML真实90分钟周期回测，三档trail_mult
+# 差值全部明确为正，加入启用名单(BNB/XMR/BCH/ASML)。
 
 
 class RadarReentryMixin:

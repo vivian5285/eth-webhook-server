@@ -562,6 +562,14 @@ BREATH_ASML: Dict[str, Any] = {
     "phase2_trail_mult": 1.0,
     "min_mult": 4.9,
     "max_mult": 6.5,      # 08-18再校准：覆盖实测90分位回调(6.18)以上
+    # 2026-08-31新增：利润回吐刹车——起因是当天ASML在B/C/E三账户同时
+    # 遭遇急跌(SHORT)，雷达自己的跟踪腿被现价越过、连续重挂失败50次，
+    # 靠更宽的永久硬止损才接住(全程没有裸奔，但暴露出中等赢家在这段
+    # 反转初期完全没有比永久硬止损更早介入的保护)。用ASML真实90分钟
+    # 周期(30m合成×3)回测两组阈值，三档trail_mult下差值全部明确为正，
+    # 收紧版(同XMR/ZEC)比宽松版(同ETH/BNB)更强(+0.86~+1.43 vs +0.82~
+    # +1.18×ATR/笔)，用收紧版启用。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

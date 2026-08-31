@@ -5046,6 +5046,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"→ 拒挂 TP{level}（防查不到单狂挂）"
             )
             return None
+        # 2026-08-31实盘复现：调用方常常是"发现TP限价从盘口消失但现价/best
+        # 未达→大概率不是真成交，补挂回去"这条路径，但仓位完全可能在这一
+        # 瞬间已经被别的路径(硬止损/雷达)真实打平——补挂reduceOnly单撞上
+        # 空仓，交易所必然拒(-2022 ReduceOnly Order is rejected)，还会
+        # 走满3次IP限流感知重试，纯粹浪费。这里用轻量WS优先读一次仓位
+        # (不强制REST，不额外增加权重开销)，确认已空就直接跳过整个下单+
+        # 重试流程，交给已有的"确认空仓"收尾逻辑处理，不在这里制造噪音。
+        try:
+            precheck_pos = self._get_active_position(prefer_ws=True)
+            if precheck_pos is None or (
+                precheck_pos != "QUERY_FAILED"
+                and isinstance(precheck_pos, dict)
+                and float(precheck_pos.get("size") or 0) <= 0
+            ):
+                logger.info(
+                    f"🛡️ [{self.symbol}] TP{level} 补挂前复查仓位已归零 → "
+                    f"跳过下单，非裸仓（TP本来就不需要）"
+                )
+                return None
+        except Exception:
+            pass
         # 防御性检查：IP冷却/查单失败时走本地轻量状态，避免崩溃
         # 修复（v16.10.x）：加 try/except 兜底，防止旧版 binance_client
         # 缺少 defensive_orders_look_ok 方法导致 AttributeError
@@ -8150,14 +8171,35 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 market_blocked = True
         # 贴市时先检查是否已有止损单，避免误判已挂单为失败
         if market_blocked:
+            # 2026-08-31实盘复现(B/C/E三账户ASML同时急跌)：这个分支每次
+            # 判定都正确(target已经被现价越过，确实不该挂)，但哨兵每隔
+            # 几秒就重新调用一次_breath_resize_stop_on_tp，只要target
+            # 没变、行情没回来，这里必然连续判定同一个结果——6分钟内
+            # 连续判了50次，每次都打一条WARNING+一次_has_stop_sl_near
+            # REST查询，纯粹重复劳动，还额外消耗IP权重(今晚一直在治的
+            # 那个问题)。target价格不变、20秒内已经判过"贴市"的，直接
+            # 复用上次结论，不再重复打WARNING/REST——上层调用方自己的
+            # "仓位是否还在"复查(_get_active_position)完全不受影响，
+            # 该tick该查还是查，只省掉这里注定失败的REST。target价格
+            # 一旦变化(雷达重新算出新数)或超过20秒，照常重新判定。
+            now = time.time()
+            same_block = (
+                abs(float(getattr(self, "_radar_stop_market_blocked_px", 0) or 0) - trigger_px) < 1e-6
+                and (now - float(getattr(self, "_radar_stop_market_blocked_ts", 0) or 0)) < 20.0
+            )
+            if same_block:
+                return None
             if self._has_stop_sl_near(
                 trigger_px, tolerance=2.0, exclude_shield=False,
                 exclude_close_position=True,
             ):
+                self._radar_stop_market_blocked_ts = 0.0
                 logger.info(
                     f"✅ [{self.symbol}] 雷达止损 @{trigger_px:.2f} 贴市但盘口已有 → 视为已挂"
                 )
                 return trigger_px
+            self._radar_stop_market_blocked_px = trigger_px
+            self._radar_stop_market_blocked_ts = now
             logger.warning(
                 f"🚨 [{self.symbol}] {self.current_side} 止损 @{trigger_px:.2f} "
                 f"已穿/贴市 {curr_px:.2f} → 禁止推宽，交紧急平仓"
