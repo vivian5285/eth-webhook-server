@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -30,11 +31,16 @@ ACCOUNTS = [
     {"name": "E", "port": 5010, "dir": "/home/binanceE/binance-engine", "service": "binanceE-engine"},
 ]
 MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT"]
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
 ALERT_DEDUPE_SEC = 30 * 60
-HEARTBEAT_HOURS = {8, 20}  # VPS本地时区(UTC)的整点小时
+HEARTBEAT_HOURS = {0, 6, 12, 18}  # UTC整点小时
+# 2026-08-24：原来一天只在8点/20点发两次"监控正常运行中"，用户反馈
+# 从来没刚好在这两个时间点看到过，纯告警式监控有个经典盲区——健康的
+# 时候完全沉默，用户没法区分"系统真没事"和"watchdog自己挂了没人管"。
+# 改成每6小时一次(0/6/12/18 UTC)，不是无脑调密(避免刷屏)，是在"够勤快
+# 让人放心"和"别变成骚扰"之间找一个更合理的点。
 # 2026-08-20：TV心跳失联二级监控——只对"以前真的收到过心跳"的品种生效，
 # 阈值故意给得很宽松(24小时)，够盖住所有品种(哪怕BCH/XMR这种6小时一根
 # K线的)正常的心跳间隔，不会跟任何品种的正常节奏撞车误报，真出问题
@@ -57,6 +63,19 @@ NOISE_ERROR_PATTERNS = (
     # 还失败)才算真的通知不出去，需要保留上报。
     "notify fail channel=telegram attempt=1/",
     "notify fail channel=telegram attempt=2/",
+    # 2026-08-29：宝贝反馈watchdog"老是说异常"——当天3次IP限流(11:10单
+    # 账户/13:02单账户/15:14三账户同时)追查下来全部是良性、自愈的：
+    # "🧊 [IP限流] REST全局冷却"本身只是纯提示("接下来60秒暂停REST"，
+    # 不代表任何操作失败)；"[获取挂单失败]...preemptive_weight_limit"
+    # 是只读查询被限流，代码自己会退回用非空缓存(见binance_client.py同一
+    # 批日志里紧跟着的"仅用非空缓存")，不影响实际保护。这两类当噪音过滤，
+    # 别再跟真正的失败一起刷屏，读的人会脱敏。
+    # 刻意不过滤"[止损单失败]"/"[开仓失败]"/"[平仓失败]"这类写操作失败——
+    # 15:14那次C账户止损单确实先失败后来重试成功了(人工核实过交易所
+    # 真实止损单还在)，但"先失败"这件事本身值得留一条痕迹，万一哪次
+    # 重试没成功，这条线是唯一的报警来源，不能跟着一起被吞掉。
+    "🧊 [IP限流] REST 全局冷却至",
+    "preemptive_weight_limit",
 )
 
 
@@ -154,18 +173,31 @@ def check_health(acct: dict) -> dict:
                 "restarting": True,
                 "detail": f"重启后{uptime:.0f}s仍无响应(判定为多品种核对中，非异常)",
                 "open_in_progress": {},
+                "catchup_active": {},
+                "chase_watch_active": {},
             }
-        return {"ok": False, "restarting": False, "detail": "无响应(重试5次仍失败)", "open_in_progress": {}}
+        return {
+            "ok": False, "restarting": False, "detail": "无响应(重试5次仍失败)",
+            "open_in_progress": {}, "catchup_active": {}, "chase_watch_active": {},
+        }
     try:
         data = json.loads(out)
     except Exception:
-        return {"ok": False, "detail": "响应无法解析", "open_in_progress": {}}
+        return {
+            "ok": False, "detail": "响应无法解析",
+            "open_in_progress": {}, "catchup_active": {}, "chase_watch_active": {},
+        }
     paused = data.get("trading_paused") or {}
     paused_syms = [s for s, v in paused.items() if v]
     return {
         "ok": data.get("status") == "ok" and not paused_syms,
         "paused_syms": paused_syms,
         "open_in_progress": data.get("open_in_progress") or {},
+        # 2026-08-24: 幽灵单检测要用——追回/追单确认武装期间，仓位本来
+        # 就是空的(qty=0)但会挂着一张真实限价单等成交，这是设计内的正常
+        # 状态，不该被当"幽灵单"报警
+        "catchup_active": data.get("catchup_active") or {},
+        "chase_watch_active": data.get("chase_watch_active") or {},
     }
 
 
@@ -269,10 +301,13 @@ def fetch_positions_and_orders(acct: dict) -> dict:
         "from binance_client import binance_client\n"
         "all_pos = binance_client._refresh_all_positions(force=True) or {}\n"
         "all_orders = list(binance_client.client.futures_get_open_orders() or [])\n"
+        "_rate_limited = float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
         "try:\n"
         "    algo_raw = binance_client.client._request_futures_api('get', 'openAlgoOrders', signed=True, data={}) or []\n"
         "except Exception:\n"
         "    algo_raw = []\n"
+        "    _rate_limited = True\n"
+        "_rate_limited = _rate_limited or float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
         "for a in algo_raw:\n"
         "    all_orders.append({'symbol': a.get('symbol'), 'type': a.get('orderType') or a.get('type') or '', 'orderId': a.get('algoId')})\n"
         "orders_by_sym = {}\n"
@@ -316,6 +351,7 @@ def fetch_positions_and_orders(acct: dict) -> dict:
         "        'hb_side': hb_side,\n"
         "        'hb_ts': hb_ts,\n"
         "    }\n"
+        "out['__rate_limited__'] = _rate_limited\n"
         "print(json.dumps(out))\n"
     )
     out = _run(
@@ -355,12 +391,46 @@ def fetch_last_tv_signals_all(acct: dict, minutes: int = 15) -> dict:
     return last_by_sym
 
 
+TV_CLOSE_RE = re.compile(r"\[Webhook\] \[(\w+USDT)\] TV .*?【(CLOSE_QUICK_EXIT|CLOSE\w*)】")
+
+
+def fetch_recent_tv_closes(acct: dict, seconds: int = 60) -> set:
+    """
+    2026-08-26：TV主动平仓(CLOSE_QUICK_EXIT等)是"先撤单再市价平仓"两步走，
+    实盘复现(XMRUSDT/C、BCHUSDT/E)撤单成功到市价平仓成功之间有~10-13秒的
+    正常过渡窗口——这段时间里仓位qty还在但止损单已经被撤掉，会被裸仓检查
+    误判。跟TV_SIGNAL_RE故意分开一条独立正则+独立短窗口query：TV_SIGNAL_RE
+    只认LONG/SHORT给"信号vs实盘方向"核对用，若直接把CLOSE_QUICK_EXIT塞进
+    那条正则的返回值里，会让side_mismatch检查把"TV信号=CLOSE_QUICK_EXIT"
+    误判成跟仓位方向不一致，引入新的一类误报。
+    返回最近seconds秒内收到过TV主动平仓信号的品种集合。
+    """
+    out = _run([
+        "journalctl", "-u", acct["service"], "--no-pager", "-S", f"{seconds} sec ago",
+    ], timeout=20)
+    syms = set()
+    for line in out.splitlines():
+        if "[Webhook]" not in line:
+            continue
+        m = TV_CLOSE_RE.search(line)
+        if m:
+            syms.add(m.group(1))
+    return syms
+
+
 CLOSING_CHATTER_RE = re.compile(
     r"止损单失败.*Order would immediately trigger|"
     r"TP后永久硬止损缺失且补挂失败|"
     r"限价单失败.*ReduceOnly Order is rejected|"
     r"❌ (挂|补挂|UPDATE_TP 挂) TP\d|"
-    r"核武轮.*补挂=0"
+    r"核武轮.*补挂=0|"
+    r"止损 @[\d.]+ 已穿/贴市.*禁止推宽.*紧急平仓|"
+    # 2026-08-24新增：实盘复现(C账户PAXG)确认这条也是同一类"平仓过程中
+    # TP刷新撞上仓位已经归零"的收尾噪音——跟"确认空仓：WS+REST均为0"
+    # 几乎同一秒出现，不是真裸奔。跟其它几条一样，仍然只有能在FLAT_CONFIRM_
+    # WINDOW_SEC/DEFENSE_RESTORED_WINDOW_SEC内找到自愈证据才降级，真正长时间
+    # 缺TP123的情况不受影响，照常报警。
+    r"TV/账本/盘口均无有效 TP123"
 )
 FLAT_CONFIRM_RE = re.compile(
     r"确认空仓：WS\+REST均为0|"
@@ -546,8 +616,25 @@ def run_once() -> list:
             })
             continue
 
+        # 2026-08-29修复：_refresh_all_positions(force=True)撞上IP限流/
+        # preemptive_weight_limit时会静默返回空dict而不是报错，导致这一
+        # 整轮全部品种的持仓都读成"空仓"，而挂单查询走的是另一条REST、
+        # 未必同时被限流——两边一凑就变成"仓位空但挂单还在"的幽灵单假
+        # 阳性，而且是一整个账户所有品种同时假阳性(实盘复现：B/C/E三
+        # 账户各自7个持仓品种同时报幽灵单，全是这个原因，不是真的同时
+        # 出事)。fetch_positions_and_orders现在会把子进程查询那一刻的
+        # ip_rate_limit_remaining()状态一起带出来，这里限流时直接跳过
+        # 这一整个账户本轮的幽灵单/裸仓检测(数据不可信，宁可漏检一轮
+        # 也不误报一整批)，等下一轮限流解除后自然恢复正常检测。
+        if pos_data.get("__rate_limited__"):
+            print(f"[跳过·IP限流] {name}:position_checks | 本轮持仓数据可能不可信，跳过幽灵单/裸仓检测")
+            continue
+
         open_in_progress = h.get("open_in_progress") or {}
+        catchup_active = h.get("catchup_active") or {}
+        chase_watch_active = h.get("chase_watch_active") or {}
         tv_signals = fetch_last_tv_signals_all(acct, minutes=15)
+        tv_recent_closes = fetch_recent_tv_closes(acct, seconds=60)
 
         for sym in SYMBOLS:
             info = pos_data.get(sym) or {}
@@ -556,8 +643,15 @@ def run_once() -> list:
             orders_n = info.get("orders", -1)
             has_stop = bool(info.get("has_stop"))
 
-            # 幽灵单：仓位空但挂单在
-            if side is None and orders_n and orders_n > 0:
+            # 幽灵单：仓位空但挂单在——2026-08-24修复：TV心跳追回/追单确认
+            # 武装期间，仓位本来就是空的(等成交)但会挂着一张真实限价单，
+            # 这是设计内的正常状态(实盘复现：C账户ASML追回限价TTL刷新那
+            # 一刻被误判成幽灵单)，不是残留，跳过不报
+            if (
+                side is None and orders_n and orders_n > 0
+                and not catchup_active.get(sym)
+                and not chase_watch_active.get(sym)
+            ):
                 anomalies.append({
                     "key": f"{name}:{sym}:ghost_order",
                     "text": f"👻 {name}账户 {sym} 仓位已空但还有{orders_n}张挂单未清",
@@ -566,11 +660,15 @@ def run_once() -> list:
             # 裸仓：有真实仓位但一张止损单都没有——最高优先级检查，
             # 跳过正在开仓执行中的品种(open_in_progress)，避免撞上
             # 开仓成交到止损挂出之间那几百毫秒的正常过渡窗口误报。
+            # 2026-08-26新增：TV主动平仓(CLOSE_QUICK_EXIT)是"先撤单再市价
+            # 平仓"两步走，撤单成功到市价平仓成交之间实测有~10-13秒正常
+            # 过渡窗口，此时止损已撤但仓位还没完全平掉，同理跳过不报。
             if (
                 side is not None
                 and qty > MIN_QTY_DUST
                 and not has_stop
                 and not open_in_progress.get(sym, False)
+                and sym not in tv_recent_closes
             ):
                 anomalies.append({
                     "key": f"{name}:{sym}:naked",
@@ -643,7 +741,15 @@ def run_once() -> list:
         for e in errs:
             # 用错误文本前60字符做key，避免同一类错误刷屏但不同参数被当成新异常
             snippet = e[-120:] if len(e) > 120 else e
-            key = f"{name}:error:{hash(snippet[:60]) % 100000}"
+            # 2026-08-24修复：内置hash()按进程加了随机种子(PYTHONHASHSEED
+            # 默认random)，每次hash(相同字符串)在不同Python进程里返回不同值。
+            # check.py是每轮独立起进程的oneshot服务，这行key每次运行都会变，
+            # 30分钟去重窗口形同虚设——同一条还在12分钟回看窗口内的历史ERROR，
+            # 每轮都被当成"新异常"重新发送，钉钉反复刷同一件事(实盘复现：
+            # 同一条PAXGUSDT错误11:49和11:59两轮都被判定为"新发送")。改用
+            # hashlib.md5，同一段文本在任何进程里结果都一样，去重窗口才能
+            # 真正生效。
+            key = f"{name}:error:{hashlib.md5(snippet[:60].encode('utf-8')).hexdigest()[:8]}"
             anomalies.append({"key": key, "text": f"🚨 {name}账户 真实ERROR: {snippet}"})
 
     return anomalies
@@ -656,8 +762,19 @@ def maybe_send_heartbeat(state: dict) -> None:
         lines = [f"【watchdog心跳】{now.strftime('%Y-%m-%d %H:%M UTC')}"]
         for acct in MONITORED_ACCOUNTS:
             pos_data = fetch_positions_and_orders(acct)
-            held = [s for s, i in (pos_data or {}).items() if i.get("side")]
-            if held:
+            # 2026-08-29修复：__rate_limited__是fetch_positions_and_orders
+            # 新带出来的账户级标记(bool)，不是品种数据——直接扔进
+            # i.get("side")会因为bool没有.get()方法崩掉；限流时这轮持仓
+            # 数据也不可信，干脆整个账户这行显示"数据暂不可靠"，不要拿
+            # 误判的"空仓"糊弄进心跳汇总里。
+            rate_limited = bool((pos_data or {}).get("__rate_limited__"))
+            held = [
+                s for s, i in (pos_data or {}).items()
+                if s != "__rate_limited__" and i.get("side")
+            ]
+            if rate_limited:
+                lines.append(f"  {acct['name']}: 本轮IP限流，持仓数据暂不可靠")
+            elif held:
                 lines.append(f"  {acct['name']}: 持仓 {', '.join(held)}")
             else:
                 lines.append(f"  {acct['name']}: 空仓")
