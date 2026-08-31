@@ -178,7 +178,19 @@ NOISE_RE = re.compile(
     # Telegram单次超时(还有重试机会)不算真失败，只有attempt=3/3才算真的
     # 通知不出去
     r"notify fail channel=telegram attempt=1/|"
-    r"notify fail channel=telegram attempt=2/"
+    r"notify fail channel=telegram attempt=2/|"
+    # 2026-08-31：跟watchdog/check.py的NOISE_ERROR_PATTERNS同步——本面板
+    # 独立解析同一份journalctl这件事本身就是08-20那条注释警告过的坑，这次
+    # 复现了：watchdog那边08-29就加过这三条(用户反馈"老是说异常"追查出来
+    # 的)，本面板一直没跟上，导致"异常N"角标常年虚高。实测这次核对：
+    # 22条异常里有16条(73%)是这三类+下面的裸仓negation误判，真正的账户
+    # 逻辑问题只有1条。"🧊 [IP限流] REST全局冷却"是纯提示(接下来60秒暂停
+    # REST，不代表任何操作失败)；"preemptive_weight_limit"是只读查询被
+    # 限流，代码自己退回用非空缓存；"ORDERS_QUERY_FAILED"这条消息原文自己
+    # 就写着"禁止据此当空盘补挂/核武"，是代码自己声明的不可作为判据。
+    r"🧊 \[IP限流\] REST 全局冷却至|"
+    r"preemptive_weight_limit|"
+    r"ORDERS_QUERY_FAILED"
 )
 
 KNOWN_HARMLESS_ERROR_RE = re.compile(
@@ -192,7 +204,13 @@ KNOWN_HARMLESS_ERROR_RE = re.compile(
 # 撤单，撤单本身成功，只是事后验证查询被限流，日志原话就是"已确认无
 # 持仓→不暂停交易"）。单独分一类，进事件流但不进异常计数。
 SELF_HEALED_RE = re.compile(
-    r"已确认无持仓.*不暂停交易|平仓完成但.*查询失败.*不暂停交易"
+    r"已确认无持仓.*不暂停交易|平仓完成但.*查询失败.*不暂停交易|"
+    # 2026-08-31：跟上面NOISE_RE同一批发现的问题——"anomaly"规则里的
+    # "裸仓"是纯子串匹配，"此前的失败判定是假阳性"/"非裸仓"这类原文
+    # 已经明确写着"不是裸仓"的自愈消息，会被"裸仓"这个子串反向命中，
+    # 变成"系统说没事却被当成异常"这种矛盾展示。这两条文案是代码自己
+    # 声明的否定句，不是新的噪音类别猜测，直接按原文匹配。
+    r"此前的失败判定是假阳性|非裸仓"
 )
 
 # 2026-08-12：实盘复现两次（B账户XAU、D账户ETH+XAU）——行情插针直接
