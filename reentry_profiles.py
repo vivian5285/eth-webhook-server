@@ -956,6 +956,7 @@ def radar_gate_price_from_tps(
     return_pct: float = 0.0,
     adx_tier: int = 1,
     mega_strong: bool = False,
+    side: str = "",
     **kwargs,
 ) -> float:
     """
@@ -1006,8 +1007,26 @@ def radar_gate_price_from_tps(
     e = float(entry or 0)
     if t1 <= 0 or t2 <= 0 or e <= 0:
         return 0.0
-    direction = 1.0 if t1 >= e else -1.0
-    dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e)
+    # 2026-08-31修复：direction此前直接拿t1跟e比大小推方向——正常情况下
+    # TV给的TP1本来就该在盈利方向，这个推断成立；但TP1因为执行延迟/滑点
+    # 变成"陈旧价位"(比如MUUSDT那次IP限流导致成交价已经越过TV原始TP1)
+    # 时，t1<e会把LONG的方向反着算成-1，激活线直接算到entry下方——相当于
+    # 开仓瞬间就"已经到激活线"，雷达立刻武装、几乎零呼吸空间，稍微一回落
+    # 就被打平仓(实盘复现：SNDK/MUUSDT当天)。方向必须认持仓方向本身，不能
+    # 反过来用可能已经失效的TP1去猜方向。side不传时保留旧的推断兜底，
+    # 不影响其它调用方。
+    side_u = str(side or "").strip().upper()
+    if side_u == "LONG":
+        direction = 1.0
+    elif side_u == "SHORT":
+        direction = -1.0
+    else:
+        direction = 1.0 if t1 >= e else -1.0
+    # TP1本身方向不对(陈旧/失效)时，这条腿不再拿来当min()候选——一个指向
+    # 错误方向的目标，它的"20%进度距离"没有意义，宁可只信ATR/收益率两条
+    # 独立于TP1的腿。
+    tp1_side_ok = (direction > 0 and t1 > e) or (direction < 0 and t1 < e)
+    dist_tp1 = RADAR_GATE_TP1_PROGRESS * abs(t1 - e) if tp1_side_ok else float("inf")
     a = float(atr or 0)
     try:
         tier_i = int(adx_tier)
@@ -1034,6 +1053,11 @@ def radar_gate_price_from_tps(
     if mega_strong:
         dist_mega = RADAR_MEGA_STRONG_TP1_PROGRESS * abs(t1 - e)
         dist = max(dist, dist_mega)
+    if not (dist > 0) or dist == float("inf"):
+        # TP1方向失效、又没有ATR/收益率兜底腿可用——三条腿全部失效，没有
+        # 任何靠谱依据算激活线，返回0.0交给调用方按"暂不可用"处理，不能
+        # 硬凑一个inf/0距离出来当真实激活价。
+        return 0.0
     gate = e + direction * dist
     return round(gate, 4)
 

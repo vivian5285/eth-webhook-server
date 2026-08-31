@@ -17459,6 +17459,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 expect = radar_gate_price_from_tps(
                     tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
                     return_pct=return_pct, adx_tier=locked_tier, mega_strong=mega_strong,
+                    side=self.current_side,
                 )
                 if expect > 0 and abs(frozen - expect) / max(expect, 1e-9) > 0.002:
                     self.radar_activation_price = expect
@@ -17470,6 +17471,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             px = radar_gate_price_from_tps(
                 tp1_px, tp2_px, attempt, entry=entry_px, atr=atr_v,
                 return_pct=return_pct, adx_tier=locked_tier, mega_strong=mega_strong,
+                side=self.current_side,
             )
             if px > 0:
                 self.radar_activation_price = px
