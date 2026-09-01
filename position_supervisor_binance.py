@@ -19256,7 +19256,41 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         prev_side = self.current_side
 
         # ── 并行平仓 + 撤单 ──
-        parallel = self._flat_close_parallel(reason or "强平")
+        # 2026-09-01修复(B/C/E三账户BNBUSDT实盘复现)：这里原来只发一次
+        # _flat_close_parallel，撞上IP限流直接失败就没有下文了——跟开仓
+        # 路径_ensure_flat_before_open早就有的6次重试完全不对称：同一晚
+        # 一批6个TV信号一起到达，触发的IP风暴刚好盖住了这条CLOSE_QUICK_
+        # EXIT，市价平仓单次下单失败(ip_rate_limited)，账本继续显示持仓，
+        # TV早就要求平掉的仓位就这么晾在那里，没有任何自动补救，只发了
+        # 一条"平仓后盘口未净"告警。这里改用跟开仓一致的重试节奏(6次、
+        # IP冷却中等待冷却结束再打REST、线性退避)，只有position genuine
+        # 确认为空或者反复重试仍失败才跳出循环，交给下面既有的收尾逻辑
+        # (蚂蚁仓扫尾/告警)处理。
+        max_attempts = 6
+        parallel = {"closed": False, "pos": None}
+        for attempt in range(1, max_attempts + 1):
+            ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                wait_s = min(ip_rem, 20.0)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 强平·IP冷却中等候 {wait_s:.1f}s "
+                    f"(remaining {ip_rem:.0f}s) | 尝试 {attempt}/{max_attempts}"
+                )
+                time.sleep(wait_s)
+            parallel = self._flat_close_parallel(
+                f"{reason or '强平'}·尝试{attempt}/{max_attempts}"
+            )
+            if parallel.get("closed", False):
+                break
+            # 未成功(下单失败/IP冷却/查询失败都算)：继续重试，不提前判死——
+            # 真正彻底不可用的兜底交给循环耗尽后走到的现有query_failed分支。
+            if attempt < max_attempts:
+                delay = float(1.0 + (attempt - 1) * 2.0)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 强平失败 {attempt}/{max_attempts}，"
+                    f"间隔 {delay:.0f}s 后继续重试 | {reason}"
+                )
+                time.sleep(delay)
         closed_successfully = parallel.get("closed", False)
         query_failed = parallel.get("pos") is None and not closed_successfully
 
