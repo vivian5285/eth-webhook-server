@@ -43,6 +43,17 @@ TRAIL_DIST_WEAK_ATR = 1.2
 TRAIL_DIST_STRONG_ATR = 2.5
 ADX_FALLBACK = 25.0
 
+# 2026-09-01新增：雷达动态止损硬地板——宝贝跟今晚GSUSDT实盘复现之后，
+# 明确要求给"雷达追多紧"设一条最终底线，不再依赖一个个具体触发场景
+# (TP1过期/首次武装跳档/进场延迟吃空间/重启时序……)分别打补丁——那些
+# 补丁解决的都是"ATR阶梯猜错空间"的某一种具体成因，成因永远列不完；
+# 但TV自己的止损空间是已知确切数字，不用猜。硬止损那条线早就锚定了
+# 这个数字(|TV价-TV止损|×1.15)，雷达的动态追踪止损从来没有——这条
+# 地板补上这个缺口：不管ATR阶梯/呼吸系数怎么算，雷达止损离最优价的
+# 距离永远不能小于TV自己止损空间的TV_STOP_FLOOR_FRAC——比例定多宽是
+# 宝贝的风险偏好判断，跟宝贝确认后先设0.5(雷达最多只能比TV自己紧一半)。
+TV_STOP_FLOOR_FRAC = 0.5
+
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(profile, dict) and profile:
@@ -256,6 +267,7 @@ def calculate_stop_long(
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
     prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -347,6 +359,17 @@ def calculate_stop_long(
     elif f1 > 0 and zone == "tp1_tp2":
         candidate = max(candidate, entry_price + f1 * initial_atr)
 
+    # 2026-09-01新增：TV止损空间硬地板——见TV_STOP_FLOOR_FRAC顶部注释。
+    # 不管上面阶梯/呼吸算出的candidate有多紧，离最高价的距离都不能小于
+    # TV自己止损空间的TV_STOP_FLOOR_FRAC；candidate比这条地板还紧(还高)
+    # 就拉回地板本身。tv_stop_dist<=0(缺TV止损参考)时不设限，安全跳过。
+    if tv_stop_dist > 0:
+        tv_floor = new_highest - TV_STOP_FLOOR_FRAC * float(tv_stop_dist)
+        if candidate > 0:
+            candidate = min(candidate, tv_floor)
+        else:
+            candidate = tv_floor
+
     new_stop = candidate
     return (
         round(float(new_stop), 2),
@@ -370,6 +393,7 @@ def calculate_stop_short(
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
     prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -445,6 +469,16 @@ def calculate_stop_short(
         floor = entry_price - f1 * initial_atr
         candidate = min(candidate, floor) if candidate > 0 else floor
 
+    # 2026-09-01新增：TV止损空间硬地板，SHORT对称版——见calculate_stop_long
+    # 对应注释+TV_STOP_FLOOR_FRAC顶部注释。candidate比这条地板还紧(还低)
+    # 就拉回地板本身。tv_stop_dist<=0时不设限。
+    if tv_stop_dist > 0:
+        tv_floor = new_lowest + TV_STOP_FLOOR_FRAC * float(tv_stop_dist)
+        if candidate > 0:
+            candidate = max(candidate, tv_floor)
+        else:
+            candidate = tv_floor
+
     new_stop = candidate
     return (
         round(float(new_stop), 2),
@@ -469,6 +503,7 @@ def calculate_breath_stop(
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
     prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -500,12 +535,15 @@ def calculate_breath_stop(
         "phase": "trail" if zone == "tp3_plus" else "ladder",
         "step_count": 0,
         "early_be_done": bool(early_be_done),
+        "tv_stop_dist": float(tv_stop_dist or 0),
+        "tv_floor_frac": TV_STOP_FLOOR_FRAC,
     }
     if side == "SHORT":
         stop, best, phase, step_count, early = calculate_stop_short(
             px, entry, atr, initial_stop, current_stop, best_price,
             breakeven_phase, breathing_coefficient=coeff, profile=p,
             early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
+            tv_stop_dist=float(tv_stop_dist or 0),
             tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
         )
     else:
@@ -513,6 +551,7 @@ def calculate_breath_stop(
             px, entry, atr, initial_stop, current_stop, best_price,
             breakeven_phase, breathing_coefficient=coeff, profile=p,
             early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
+            tv_stop_dist=float(tv_stop_dist or 0),
             tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
         )
     meta["step_count"] = int(step_count)

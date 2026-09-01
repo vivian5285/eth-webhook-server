@@ -17723,6 +17723,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 台阶保护，防止雷达重新武装/久未评估时一次性把已跑出去的距离
             # 全部兑现成止损收紧(GSUSDT实盘复现)。
             prev_step_count=int(getattr(self, "radar_step_count", 0) or 0),
+            # 2026-09-01新增：TV止损空间硬地板——宝贝要求的"最优解"，见
+            # breath_stop.py TV_STOP_FLOOR_FRAC顶部注释。tv_price/tv_sl_ref
+            # 缺一个就传0，函数内部会安全跳过这条地板(不设限)。
+            tv_stop_dist=abs(
+                float(getattr(self, "tv_price", 0) or 0)
+                - float(getattr(self, "tv_sl_ref", 0) or 0)
+            ) if (
+                float(getattr(self, "tv_price", 0) or 0) > 0
+                and float(getattr(self, "tv_sl_ref", 0) or 0) > 0
+            ) else 0.0,
             tp1_px=tp1_px,
             tp2_px=tp2_px,
             tp3_px=tp3_px,
