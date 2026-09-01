@@ -3843,6 +3843,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.warning(f"🔄 [{self.symbol}] 重启挂单探测失败: {e}")
             orders = []
         if orders:
+            # 2026-09-01修复(C账户PAXGUSDT实盘复现)：_recover_missed_flat_
+            # on_startup已经有"活跃TV心跳追回限价单不算冲突"这道保护
+            # (跳过补发收网清零)，但那道保护只挡住它自己那条路径——它
+            # return False后，恢复流程照样往下走到这里，这里完全不知道
+            # catchup_limit_order_id这回事，把同一笔挂单当成"来路不明的
+            # 挂单"再报一次AMBIGUOUS，交给哨兵接力，哨兵自己的孤儿单清理
+            # 逻辑又把这笔追回单当垃圾撤了——上游那道保护形同虚设。实盘
+            # 复现：C账户PAXGUSDT追回限价单挂着时撞上宝贝这次重启，被这里
+            # 误撤，账本清零成"人工/异动清仓·来源未明"，还一度拒绝再入场，
+            # 靠独立的心跳漏单检测8分钟后重新发现才自愈——过程里发了一条
+            # 没必要的"重启仓位探测冲突"告警。
+            catchup_id = str(getattr(self, "catchup_limit_order_id", "") or "")
+            if catchup_id and any(
+                str(o.get("orderId")) == catchup_id for o in orders
+            ):
+                logger.info(
+                    f"🚑 [{self.symbol}] 重启：盘口挂单是活跃TV心跳追回单"
+                    f"id={catchup_id}，不算冲突 → 保留，不交哨兵接力"
+                )
+                return None
             logger.error(
                 f"🚨 [{self.symbol}] 重启：REST 仓位为空但盘口仍有 {len(orders)} 笔挂单 "
                 f"→ 禁止空仓清场，交哨兵接力"
