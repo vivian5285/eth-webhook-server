@@ -15455,10 +15455,41 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self._touch_entry_signal_signature(action)
             return
 
-        pos = self._get_active_position()
+        # 2026-09-01修复(B/C/E三账户TSLAUSDT/ETHUSDT实盘复现)：这一步原来
+        # 单次查询失败就直接拒绝开仓，跟_close_all/_ensure_flat_before_
+        # open早就有的"IP冷却中等冷却结束再重试"完全不对称——真实TV信号
+        # 撞上短暂IP限流(今晚大多数情况是几秒到几十秒)本来能扛过去，却
+        # 因为这里零重试直接被放弃。给一个有限的重试预算(4次，跟平仓/
+        # 净场用同一套"冷却中等待、非冷却线性退避"节奏)，扛得住短暂限流；
+        # 真遇到长时间封禁(比如今晚TSLAUSDT撞上的570s)重试预算内还是会
+        # 耗尽，跟原来一样拒绝+告警，不是无限等待。
+        pos = None
+        pos_max_attempts = 4
+        for _pos_attempt in range(1, pos_max_attempts + 1):
+            ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                wait_s = min(ip_rem, 20.0)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 开仓前持仓核对·IP冷却中等候 {wait_s:.1f}s "
+                    f"(remaining {ip_rem:.0f}s) | 尝试 {_pos_attempt}/{pos_max_attempts}"
+                )
+                time.sleep(wait_s)
+            pos = self._get_active_position()
+            if pos != "QUERY_FAILED":
+                break
+            if _pos_attempt < pos_max_attempts:
+                delay = float(1.0 + (_pos_attempt - 1) * 2.0)
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 开仓前持仓核对失败 {_pos_attempt}/{pos_max_attempts}，"
+                    f"间隔 {delay:.0f}s 后继续重试"
+                )
+                time.sleep(delay)
         if pos == "QUERY_FAILED":
             self._on_position_query_failed("开仓前持仓核对")
-            logger.error(f"🚫 [{self.symbol}] 开仓拒绝：持仓查询失败，状态未知 [{action}]")
+            logger.error(
+                f"🚫 [{self.symbol}] 开仓拒绝：持仓查询失败，状态未知 [{action}] "
+                f"| 重试{pos_max_attempts}次仍未恢复"
+            )
             return
         live_sz = float((pos or {}).get("size", 0) or 0)
         live_side = (pos or {}).get("side")
