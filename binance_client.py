@@ -1496,8 +1496,10 @@ class BinanceClient:
 
         返回 dict：
           {
-            "pos":      pos_dict | None | "QUERY_FAILED",
-            "orders":   list | "QUERY_FAILED",
+            "pos":      pos_dict | None | POSITION_QUERY_FAILED(dict哨兵，
+                        is_position_query_failed识别),
+            "orders":   list | ORDERS_QUERY_FAILED(空list子类哨兵，
+                        is_orders_query_failed识别，for循环安全空转),
             "algo_orders": list | None,
             "failed":    bool,   # 任一查询失败时为 True
           }
@@ -1505,7 +1507,19 @@ class BinanceClient:
         sym = str(symbol or "ETHUSDT").upper()
 
         # ── 联合持仓查询 ──────────────────────────────────────────────
-        pos_result = "QUERY_FAILED"
+        # 2026-09-01修复(B/C/E三账户"信号处理异常: 'str' object has no
+        # attribute 'get'"实盘复现)：这里的失败哨兵之前是裸字符串
+        # "QUERY_FAILED"，跟全文件其它地方公认的哨兵形态(dict形态的
+        # POSITION_QUERY_FAILED/is_position_query_failed只认dict、
+        # list子类形态的ORDERS_QUERY_FAILED/is_orders_query_failed同样
+        # 只认这两种形态)不是同一套——is_position_query_failed对裸字符串
+        # 会静默返回False(isinstance(pos, dict)先判False)，调用方以为
+        # 查询成功、直接pos_data.get(...)，撞上AttributeError整个信号
+        # 处理直接崩溃丢弃(_signal_worker_loop外层try/except吞掉异常，
+        # 这条TV信号等于石沉大海)。改成复用全文件统一的哨兵实例，
+        # is_position_query_failed/is_orders_query_failed才能正确识别，
+        # 调用方按fail-closed分支正常处理，不再崩溃。
+        pos_result = dict(POSITION_QUERY_FAILED)
         try:
             if self.ip_rate_limit_remaining() > 0 and not force_rest:
                 cached = self._get_pos_cache(sym, max_age=300.0)
@@ -1529,7 +1543,10 @@ class BinanceClient:
             pass
 
         # ── 联合挂单查询（普通单 + Algo 条件单，共 1~2 次 REST）────────
-        orders_result = "QUERY_FAILED"
+        # 2026-09-01修复：同上，改用统一的list子类哨兵，for循环安全空转
+        # 且is_orders_query_failed能正确识别（原来的裸字符串同样会被
+        # is_orders_query_failed静默判False）。
+        orders_result = ORDERS_QUERY_FAILED
         algo_result = None
         try:
             if self.ip_rate_limit_remaining() > 0:
@@ -1573,7 +1590,7 @@ class BinanceClient:
         except Exception:
             pass
 
-        failed = pos_result == "QUERY_FAILED" or orders_result == "QUERY_FAILED"
+        failed = is_position_query_failed(pos_result) or is_orders_query_failed(orders_result)
         return {
             "pos": pos_result,
             "orders": orders_result,
