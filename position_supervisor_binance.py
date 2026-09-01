@@ -17718,6 +17718,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             breathing_coefficient=coeff,
             profile=profile,
             early_be_done=early,
+            # 2026-09-01修复：见breath_stop.py calculate_stop_long/short顶部
+            # 同日期注释——传上次持久化的step_count做"每次最多前进一档"的
+            # 台阶保护，防止雷达重新武装/久未评估时一次性把已跑出去的距离
+            # 全部兑现成止损收紧(GSUSDT实盘复现)。
+            prev_step_count=int(getattr(self, "radar_step_count", 0) or 0),
             tp1_px=tp1_px,
             tp2_px=tp2_px,
             tp3_px=tp3_px,

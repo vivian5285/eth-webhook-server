@@ -255,6 +255,7 @@ def calculate_stop_long(
     adx_val: float = ADX_FALLBACK,
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
+    prev_step_count: int = 0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -298,6 +299,22 @@ def calculate_stop_long(
     # 阶梯跟进：价格每涨 step_trigger，止损上移 step_advance（从保本位推进）
     step_trigger = step_trig * initial_atr
     step_count = max(0, int((price - entry_price) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01修复(B账户GSUSDT实盘复现，宝贝直接点破"雷达跟得太紧"这个
+    # 判断)：一开始以为只是重启时序问题，深挖发现是全局性的——雷达激活线
+    # 本来就设在(TP1+TP2)/2这个离entry已经很远的价位(首次开仓设计如此，
+    # 等有像样浮盈才武装)，所以*任何*一笔单子只要走到激活线、雷达第一次
+    # 开始算止损，(price-entry)/step_trigger当场就会算出好几档(GSUSDT这次
+    # 是3档)，止损瞬间从保本位跳到贴近best_price——中间跳过的那些台阶从没
+    # 被逐档确认过，等于开局就把整段浮盈的呼吸空间一次性收紧掉，跟着一次
+    # 稀松平常的回调就把仓扫了。实盘复现：GSUSDT同一晚三个账户武装雷达时
+    # 都独立算出了这种激进跳档(B落地1008.83只剩0.84×ATR，C落地1011.06，
+    # E算到1003.73更紧、只是挂单被IP限流打失败才侥幸没生效)——不是巧合，
+    # 是这条公式在"雷达刚武装、上一档记录是0"这个必经阶段的通病。
+    # 修复：不管是刚武装(prev=0)还是运行中评估，止损这一次最多只能比上次
+    # 持久化的step_count前进一档，多出来的台阶留到后面的tick一档一档补——
+    # 正常逐tick运行时价格很难一次跑完一整档，这条封顶几乎不生效；只有
+    # "激活瞬间/久未评估"这种一次性追平一大截的场景才会被真正拦住。
+    step_count = min(step_count, int(prev_step_count) + 1)
     step_stop = initial_stop + step_count * step_adv * initial_atr
     # v2.10（2026-08-11）：阶梯止损不能收得比当前呼吸空间(trail_floor)更紧——
     # 阶梯是阶段一的稳定过渡保护，步进节奏不跟TP振幅缩放（今天专门拆开的，
@@ -352,6 +369,7 @@ def calculate_stop_short(
     adx_val: float = ADX_FALLBACK,
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
+    prev_step_count: int = 0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -396,6 +414,13 @@ def calculate_stop_short(
 
     step_trigger = step_trig * initial_atr
     step_count = max(0, int((entry_price - price) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01修复(B账户GSUSDT实盘复现，SHORT对称版)：同calculate_stop_
+    # long顶部注释——雷达激活线本来就设在离entry已经很远的价位，任何一笔
+    # 单子第一次武装雷达时(prev_step_count=0这个必经阶段)，(entry-price)/
+    # step_trigger当场就会算出好几档，止损瞬间跳到贴近best_price，中间的
+    # 台阶从没被逐档确认过。每次最多比上次持久化的step_count前进一档，
+    # 刚武装(prev=0)时同样适用(最多先给1档)，多出来的留到下个tick补。
+    step_count = min(step_count, int(prev_step_count) + 1)
     step_stop = initial_stop - step_count * step_adv * initial_atr
     # v2.10：SHORT对称版——阶梯不能比trail_ceil(呼吸空间上限)更紧，
     # 理由同LONG侧，见calculate_stop_long对应注释。
@@ -443,6 +468,7 @@ def calculate_breath_stop(
     adx_val: float = ADX_FALLBACK,
     profile: Optional[Dict[str, Any]] = None,
     early_be_done: bool = False,
+    prev_step_count: int = 0,
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
@@ -479,14 +505,14 @@ def calculate_breath_stop(
         stop, best, phase, step_count, early = calculate_stop_short(
             px, entry, atr, initial_stop, current_stop, best_price,
             breakeven_phase, breathing_coefficient=coeff, profile=p,
-            early_be_done=early_be_done,
+            early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
             tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
         )
     else:
         stop, best, phase, step_count, early = calculate_stop_long(
             px, entry, atr, initial_stop, current_stop, best_price,
             breakeven_phase, breathing_coefficient=coeff, profile=p,
-            early_be_done=early_be_done,
+            early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
             tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
         )
     meta["step_count"] = int(step_count)
