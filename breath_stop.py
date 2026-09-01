@@ -310,7 +310,18 @@ def calculate_stop_long(
 
     # 阶梯跟进：价格每涨 step_trigger，止损上移 step_advance（从保本位推进）
     step_trigger = step_trig * initial_atr
-    step_count = max(0, int((price - entry_price) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01再修复(B账户LITEUSDT实盘复现，宝贝抓到"有的账户还持有，
+    # 有的莫名其妙被平仓")：这里原来用price(当前这一tick的实时价)算已经
+    # 走了几档，不是用new_highest(本轮持仓的最高价棘轮)。价格从entry一路
+    # 推到best后正常回撤(entry=870.81→best=857.71，浮盈13点/1.03×ATR，
+    # 之后价格回撤到864~867区间)，这段时间(price-entry)算出来的档位又
+    # 缩回0——已经用real best换来的那一档"记忆"凭空消失，止损公式全程
+    # 卡在保本位一步没推进，回撤把entry附近的初始止损打中，白白平仓
+    # (退出时pnl仅+0.04%，本该锁住至少1档的浮盈)。价格总会有正常回撤，
+    # 阶梯"已经走了几档"这个判断必须钉在new_highest(只进不退的棘轮)上，
+    # 跟best_price/trail_floor用的是同一个基准，不能拿会来回摆动的实时价
+    # 去算这本该单调递增的量。
+    step_count = max(0, int((new_highest - entry_price) / step_trigger)) if step_trigger > 0 else 0
     # 2026-09-01修复(B账户GSUSDT实盘复现，宝贝直接点破"雷达跟得太紧"这个
     # 判断)：一开始以为只是重启时序问题，深挖发现是全局性的——雷达激活线
     # 本来就设在(TP1+TP2)/2这个离entry已经很远的价位(首次开仓设计如此，
@@ -437,7 +448,14 @@ def calculate_stop_short(
     new_phase = zone == "tp3_plus" or (phase_sw > 0 and mfe_atr >= phase_sw)
 
     step_trigger = step_trig * initial_atr
-    step_count = max(0, int((entry_price - price) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01再修复(B账户LITEUSDT实盘复现，SHORT对称版)：同calculate_
+    # stop_long顶部同日期注释——用new_lowest(本轮持仓最低价棘轮，只进不退)
+    # 算已经走了几档，不能用price(会随正常回撤来回摆动的实时价)，否则价格
+    # 从best回撤后，已经用best换来的档位记忆凭空消失，止损全程卡在保本位，
+    # 正常回撤就把entry附近的初始止损打中，白白平仓（实盘复现：entry=
+    # 870.81，best一度到857.71/浮盈1.03×ATR，回撤到864~867区间时step_
+    # count被现价重新算成0，止损从头到尾没推进过，退出时pnl仅+0.04%）。
+    step_count = max(0, int((entry_price - new_lowest) / step_trigger)) if step_trigger > 0 else 0
     # 2026-09-01修复(B账户GSUSDT实盘复现，SHORT对称版)：同calculate_stop_
     # long顶部注释——雷达激活线本来就设在离entry已经很远的价位，任何一笔
     # 单子第一次武装雷达时(prev_step_count=0这个必经阶段)，(entry-price)/
