@@ -2272,49 +2272,6 @@ class RadarReentryMixin:
         side = str((data or {}).get("tv_side") or "FLAT").strip().upper()
         if side not in ("LONG", "SHORT", "FLAT"):
             side = "FLAT"
-
-        # 2026-09-01修复(MARIO账户LITEUSDT漏单复现)：B/C两个账户当时都在
-        # 正常持有由最近一次真实TV OPEN信号(last_tv_signal)开出的仓位，
-        # 却在同一时刻收到了同一品种的假FLAT心跳(tv_side缺失/异常时旧
-        # 逻辑直接默认FLAT；也可能是TV自己心跳计算的瞬时误判)——B/C因为
-        # 早已持仓、不看心跳执行，这条假FLAT只是静静写进state file没
-        # 造成后果；但MARIO当时还没开仓、正靠这条心跳追回，一条假FLAT
-        # 直接冲掉冻结的entry/stop/tp、误判"TV已变化"，把本该成功的
-        # 追回周期错误中止。真实交易动作流(webhook OPEN/CLOSE)比心跳流
-        # 权威——心跳报FLAT，但最近一次真实TV信号仍是未见CLOSE的OPEN
-        # 方向时，先不采信这次FLAT(只刷新时间戳防止被判"过期"，状态原样
-        # 保留)，给TV一个心跳自愈的机会；矛盾持续超过_tv_heartbeat_stale_
-        # sec()(同一套已有的"心跳多久不新鲜"阈值，不新增独立参数)才放弃
-        # 抵抗、改为采信FLAT——避免TV如果哪天真提前平仓、只是没来得及发
-        # 独立CLOSE信号，我们永远卡在旧方向上出不来。
-        if side == "FLAT":
-            last_sig = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
-            last_act = str(last_sig.get("action", "") or "").upper()
-            prev_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
-            if prev_side in ("LONG", "SHORT") and last_act in ("LONG", "SHORT"):
-                first_seen = float(getattr(self, "_hb_flat_contradiction_first_seen_ts", 0) or 0)
-                now_ts = time.time()
-                if first_seen <= 0:
-                    first_seen = now_ts
-                    self._hb_flat_contradiction_first_seen_ts = first_seen
-                if now_ts - first_seen < self._tv_heartbeat_stale_sec():
-                    logger.warning(
-                        f"📛 [{self.symbol}] 心跳报FLAT但最近一次真实TV信号仍是"
-                        f"{last_act}(未见CLOSE) → 疑似心跳误报，保留原心跳"
-                        f"{prev_side}不采信，仅刷新时间戳 | 矛盾持续"
-                        f"{now_ts - first_seen:.0f}s"
-                    )
-                    self.tv_heartbeat_ts = now_ts
-                    try:
-                        self._save_state()
-                    except Exception:
-                        pass
-                    return
-                logger.warning(
-                    f"📛 [{self.symbol}] 心跳报FLAT与真实信号{last_act}矛盾已持续"
-                    f"{now_ts - first_seen:.0f}s，超过容忍窗口 → 改为采信FLAT"
-                )
-        self._hb_flat_contradiction_first_seen_ts = 0.0
         self.tv_heartbeat_side = side
         self.tv_heartbeat_ts = time.time()
         # 收到任意一条新心跳(不管LONG/SHORT/FLAT)都代表"当下不算过期"，

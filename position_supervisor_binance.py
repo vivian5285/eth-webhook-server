@@ -520,11 +520,6 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._tv_gap_alerted = False
         self._tv_dir_mismatch_alerted = False
         self.tv_closed_vps_holding = False
-        # 2026-09-01(MARIO账户LITEUSDT漏单复现)：一条心跳报FLAT但跟最近
-        # 一次真实TV动作信号矛盾时，先不采信，见record_tv_heartbeat顶部
-        # 注释——这个字段记录"矛盾从什么时候开始"，只活在内存里，重启
-        # 自然清零(给benefit of doubt)，不落盘。
-        self._hb_flat_contradiction_first_seen_ts = 0.0
 
         # 2026-08-20：网格套利（区间震荡）手动交易模式——独立于TV驱动的开仓
         # 流程，只在真正空仓、TV暂时没信号时由控制台手动触发。position_source
