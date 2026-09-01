@@ -325,9 +325,29 @@ def fetch_positions_and_orders(acct: dict) -> dict:
     code = (
         "import json\n"
         "from binance_client import binance_client\n"
-        "all_pos = binance_client._refresh_all_positions(force=True) or {}\n"
-        "all_orders = list(binance_client.client.futures_get_open_orders() or [])\n"
-        "_rate_limited = float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
+        # 2026-09-01修复(E账户实盘复现)：这一行原来没包try/except——
+        # _refresh_all_positions(force=True)撞上IP限流(-1003)时如果是
+        # 直接抛异常(而不是内部吞掉返回空dict)，整个子进程在算出
+        # _rate_limited标记之前就崩了，走不到下面futures_get_open_
+        # orders/algo那两条早就有的异常兜底，run_once()收到的是完全
+        # 空的{}，被当成"query_failed·可能venv/凭证问题"这种更吓人的
+        # 误报，而不是正确的"IP限流，跳过本轮"。B/C同一轮撞上同样的
+        # 限流窗口，只是这一行没炸，靠下面已有的_rate_limited判定正常
+        # 识别成IP限流——纯粹是时序运气，不是账户之间逻辑不一样。
+        "try:\n"
+        "    all_pos = binance_client._refresh_all_positions(force=True) or {}\n"
+        "    _pos_rate_limited = False\n"
+        "except Exception:\n"
+        "    all_pos = {}\n"
+        "    _pos_rate_limited = True\n"
+        # 同一次修复：这一行也是裸调用，同样的-1003会同样炸穿子进程，
+        # 一并包上try/except，跟上面all_pos那条用同一套兜底方式。
+        "try:\n"
+        "    all_orders = list(binance_client.client.futures_get_open_orders() or [])\n"
+        "except Exception:\n"
+        "    all_orders = []\n"
+        "    _pos_rate_limited = True\n"
+        "_rate_limited = _pos_rate_limited or float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
         "try:\n"
         "    algo_raw = binance_client.client._request_futures_api('get', 'openAlgoOrders', signed=True, data={}) or []\n"
         "except Exception:\n"
