@@ -326,6 +326,41 @@ class BinanceClient:
                 self._open_orders_cache = {}
             self._open_orders_cache[sym] = (time.time(), list(orders or []))
 
+    _ORDER_TERMINAL_STATUSES = frozenset({
+        "FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED",
+        "EXPIRED_IN_MATCH",
+    })
+
+    def _apply_ws_order_update(self, sym, order_id, status, order_row):
+        """2026-09-01新增：用WS推送的ORDER_TRADE_UPDATE事件直接维护挂单
+        缓存，而不是只当"该重新查一次REST了"的触发信号——今天一整天
+        限流风暴的核心成本就是"每次开平仓过程里，每一步状态变化后都要
+        REST核实一遍"，但订单状态变化(成交/撤销/新挂)本来就是WS User
+        Data Stream实时推送的，之前只用它来置"哨兵该醒了"这几个标记，
+        实际状态确认还是走REST，等于WS推送的信息被浪费了。
+
+        只做"增量更新一个已存在的缓存快照"，绝不凭单条WS事件平地起高楼
+        造一份缓存——没有缓存基础(比如刚重启、还没做过一次REST全量
+        查询)时什么都不做，保持"没有缓存就必须走fail-closed"这条既有
+        铁律完全不变，只是让缓存在已经存在之后能被WS实时维护得更准、
+        更久不过期，减少同一个45s窗口内的重复REST。"""
+        sym = str(sym or "").upper()
+        oid = str(order_id or "")
+        if not sym or not oid:
+            return
+        with getattr(self, "_open_orders_cache_lock", threading.Lock()):
+            if not hasattr(self, "_open_orders_cache"):
+                self._open_orders_cache = {}
+            row = self._open_orders_cache.get(sym)
+            if row is None:
+                return  # 没有缓存基础，不凭空造一份
+            _ts, orders = row
+            remaining = [o for o in orders if str(o.get("orderId")) != oid]
+            status_u = str(status or "").upper()
+            if status_u not in self._ORDER_TERMINAL_STATUSES and order_row is not None:
+                remaining.append(order_row)
+            self._open_orders_cache[sym] = (time.time(), remaining)
+
     def register_order_reject_hook(self, cb):
         """开仓/关键挂单被拒（保证金等）回调：cb(symbol, err_text)。不自动重试。"""
         if not hasattr(self, "_order_reject_hooks"):
@@ -1096,6 +1131,28 @@ class BinanceClient:
                             sym, pa,
                             o.get("ap") or o.get("avgPrice") or 0,
                         )
+                    # 2026-09-01新增：同一条WS推送顺手拿来直接维护挂单缓存
+                    # (见_apply_ws_order_update顶部注释)，只增量更新已有
+                    # 缓存快照，没有缓存基础时什么都不做，不改变既有的
+                    # fail-closed铁律。
+                    try:
+                        oid = o.get("i")
+                        status = o.get("X")
+                        order_row = {
+                            "orderId": oid,
+                            "symbol": sym,
+                            "status": status,
+                            "type": o.get("o"),
+                            "side": o.get("S"),
+                            "price": o.get("p"),
+                            "origQty": o.get("q"),
+                            "reduceOnly": bool(o.get("R")),
+                            "closePosition": bool(o.get("cp")),
+                            "stopPrice": o.get("sp"),
+                        }
+                        self._apply_ws_order_update(sym, oid, status, order_row)
+                    except Exception as _cache_e:
+                        logger.debug(f"UD WS 挂单缓存维护跳过: {_cache_e}")
                 elif et == "listenKeyExpired":
                     logger.warning("listenKey 已过期，准备重建")
                     self._listen_key = None
