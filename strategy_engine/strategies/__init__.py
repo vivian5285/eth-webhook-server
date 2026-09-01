@@ -117,6 +117,13 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] time_series_momentum 加载失败: {_e}")
 
+try:
+    from strategy_engine.strategies import bollinger_rsi_contrarian
+    STRATEGIES["bollinger_rsi_contrarian"] = bollinger_rsi_contrarian.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] bollinger_rsi_contrarian 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -177,6 +184,16 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "无关(不像cross_momentum/dual_momentum要跨品种排名)。跟'turtle_"
         "breakout'同属纯趋势跟随，但一个看价格结构突破、一个看收益率"
         "本身，两种不同信号来源的趋势跟随对照组。"
+    ),
+    "bollinger_rsi_contrarian": (
+        "Bollinger+RSI逆势均值回归——2026-09-01根据宝贝从QuantConnect克隆"
+        "的真实项目源码复现(诚实说明：源码本身真实完整可复现，但回测区间"
+        "跟'2025 Q3夺冠'那次公告对不上，大概率是同类型的另一个公开策略，"
+        "不是标榜的那个具体冠军)。收盘价触及布林带(20,2)极值+RSI(14)超卖"
+        "超买+SMA50确认趋势方向才进场，回到中轨就离场，止损固定多5%/空"
+        "3%(源码原样，不对称)。跟connors_rsi2同属逆势均值回归但机制不同"
+        "(RSI(14)+布林带双重确认 vs RSI(2)+SMA200)，跟bollinger_squeeze"
+        "同用布林带但方向相反(逆势回归 vs 突破延续)。"
     ),
     # pairs_trading不在STRATEGIES注册表里(它两条腿绑定同开同平，接口
     # 跟单品种generate_signal不兼容，走multi_strategy_runner.py专门写的

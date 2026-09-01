@@ -40,6 +40,11 @@
     (~3.3天)拉开明显差异，同时也是论文原版"月度再平衡"周期针对加密
     货币更快节奏的压缩版——不用跟cross_momentum抢同一个周期，能看出
     "换一个明显更慢的周期，纯时间序列动量表现如何"这个独立问题。
+
+2026-09-01新增：
+  - bollinger_rsi_contrarian：1d，跟源码(QuantConnect项目，Resolution.
+    Daily)完全一致的周期，用真实项目的原生周期，不做任何压缩改动——
+    这套源码本身给的就是日线级别的信号，没有理由改成别的周期。
 """
 from __future__ import annotations
 
@@ -68,6 +73,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "bollinger_squeeze_fast", "timeframe": "1h", "params": _SQUEEZE_FAST_PARAMS} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "volatility_breakout", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "time_series_momentum", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
