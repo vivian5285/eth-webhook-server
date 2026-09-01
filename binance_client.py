@@ -1550,8 +1550,17 @@ class BinanceClient:
         algo_result = None
         try:
             if self.ip_rate_limit_remaining() > 0:
+                # 2026-09-01修复(B账户ANTHROPICUSDT实盘复现·手动开仓连续
+                # 3次"先平后开"终检失败被中止)：_get_open_orders_cached
+                # 本身已经正确区分None(完全没缓存)和[](缓存新鲜且确认
+                # 挂单为空)——但这里多加了个len(cached)>0，把"确认为空"
+                # 也当成"没缓存"处理，倒回失败哨兵。对一个本来就是真实
+                # 空仓、真实零挂单的品种，它的挂单缓存内容永远是空list，
+                # 这条多余的长度判断等于让这类品种在冷却期内永远拿不到
+                # 一次"确认无挂单"的通过，"先平后开"终检反复判定"挂单
+                # 不可读"直接拒绝开仓——真开不了仓，不是撞上真的查询失败。
                 cached = self._get_open_orders_cached(sym, max_age=300.0)
-                if cached is not None and len(cached) > 0:
+                if cached is not None:
                     orders_result = cached
             else:
                 self._throttle_rest(sym, kind="rest")
