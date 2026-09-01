@@ -15,39 +15,40 @@
   },
   "hard_sl_buffer_mult": 1.15,
   "ETH": {
-    "tv_tf_sec": 5400,
+    "tv_tf_sec": 9000,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
+    "note": "2026-09-01再校准：用户把ETH周期从90分钟改成150分钟，tv_tf_sec同步为9000。ETH是其它多个品种三档步进缩放比例的参照基准本身，不是靠sqrt(own/ETH)公式缩放出来的——它的weak/mid/strong数值历史上是v2.1/v2.2两轮'步进大幅放宽'实盘调出来的(不是从P50/P75/P90机械换算)，那份调优经验值得保留。这次重新用ETH真实150分钟K线测出mid档新基线(P50=2.55×ATR/P75=3.53×ATR/P90=5.01×ATR，方法同breath_profiles.py::BREATH_ETH同一条注释)，再按旧90分钟三档之间原有的比例关系(weak≈0.8×mid，strong≈1.25×mid，取旧数据weak/mid/strong在5个字段上的平均比例约0.78/1.0/1.27，取整成0.8/1.0/1.25)套到新基线上，既用上了真实新周期的数据，也没有丢掉之前实盘调优出来的三档相对结构。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：呼吸宽松，允许行情充分跑动（v2.2再放宽：2026-08-10实盘验证v2.1步进仍偏紧，阶梯跟出的止损常年比同期呼吸空间breath_tp12紧一大截，导致呼吸空间的改进被更紧的阶梯抢先卡住不生效）",
-        "step_trigger_atr": 1.00,
-        "step_advance_atr": 0.50,
-        "breath_tp12": 1.50,
-        "breath_tp23": 2.00,
-        "min_mult": 2.5,
-        "max_mult": 3.5
+        "note": "弱趋势：呼吸宽松，允许行情充分跑动（2026-09-01按150分钟新基线×0.8重新缩放，比例关系继承v2.2放宽后的结构）",
+        "step_trigger_atr": 2.04,
+        "step_advance_atr": 1.33,
+        "breath_tp12": 2.04,
+        "breath_tp23": 2.82,
+        "min_mult": 3.0,
+        "max_mult": 4.2
       },
       {
         "name": "mid",
-        "note": "中趋势：平衡配置（v2.2再放宽，理由同上）",
-        "step_trigger_atr": 1.20,
-        "step_advance_atr": 0.60,
-        "breath_tp12": 2.00,
-        "breath_tp23": 2.80,
-        "min_mult": 3.0,
-        "max_mult": 4.5
+        "note": "中趋势：直接取150分钟新实测中位数回调基线(step_trigger/breath_tp12=P50=2.55，breath_tp23=P75=3.53，min/max_mult覆盖P90=5.01附近)",
+        "step_trigger_atr": 2.55,
+        "step_advance_atr": 1.66,
+        "breath_tp12": 2.55,
+        "breath_tp23": 3.53,
+        "min_mult": 3.8,
+        "max_mult": 5.3
       },
       {
         "name": "strong",
-        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（v2.2再放宽，理由同上）",
-        "step_trigger_atr": 1.40,
-        "step_advance_atr": 0.70,
-        "breath_tp12": 2.50,
-        "breath_tp23": 3.50,
-        "min_mult": 4.0,
-        "max_mult": 6.0
+        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（2026-09-01按150分钟新基线×1.25重新缩放，比例关系继承v2.2放宽后的结构）",
+        "step_trigger_atr": 3.19,
+        "step_advance_atr": 2.08,
+        "breath_tp12": 3.19,
+        "breath_tp23": 4.41,
+        "min_mult": 4.8,
+        "max_mult": 6.6
       }
     ]
   },
