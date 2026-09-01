@@ -1176,23 +1176,64 @@ function onMOrderTypeChange() {
     : "限价（LONG/SHORT开仓价）";
 }
 
+// 2026-09-01新增：宝贝实盘复现——从TV警报界面复制出来的原始JSON文本
+// 偶尔会带着结构性损坏(开头"{\""被压成单个"["、结尾"}"被换成别的字符)，
+// 疑似TV那边的字体/复制机制在个别标点组合上出问题，不是宝贝打错。这里
+// 只做"结构性"修复(补/删标点)，绝不猜测/编造任何字段的值——修不好就
+// 如实报错，不会为了"看起来能用"而悄悄塞进错的数字。
+function tryRepairRawJson(text) {
+  const attempts = [text];
+  const trimmed = text.trim();
+  // 已知复现1：开头"{\""被压缩成单个"["（比如 [secret":"...） → 补回"{\""
+  if (/^\[\s*[A-Za-z_][A-Za-z0-9_]*"\s*:/.test(trimmed)) {
+    attempts.push('{"' + trimmed.slice(1));
+  }
+  // 对每个候选，尝试原样解析，再尝试从末尾逐字符裁掉0~20个字符(只删
+  // 不加内容)、并且都分别再试一次"裁完后补一个}"（只补花括号这个纯
+  // 结构字符，不编造数据）——找到第一个(裁得最少的)能解析成真正对象、
+  // 且带着action/symbol这类TV警报特征字段的结果就采信。
+  for (const base of attempts) {
+    const b = base.trim();
+    for (let cut = 0; cut <= 20 && cut < b.length; cut++) {
+      const core = cut === 0 ? b : b.slice(0, -cut);
+      for (const candidate of [core, core + "}"]) {
+        try {
+          const obj = JSON.parse(candidate);
+          if (obj && typeof obj === "object" && !Array.isArray(obj)
+              && ("action" in obj || "side" in obj) && ("symbol" in obj || "ticker" in obj)) {
+            return {ok: true, obj, fixedText: candidate, changed: candidate !== text};
+          }
+        } catch (e) { /* keep trying */ }
+      }
+    }
+  }
+  return {ok: false};
+}
+
 function confirmRawTvSend() {
   const raw = document.getElementById("rawTvJson").value.trim();
   const target = document.getElementById("rawTvTarget").value;
-  const resultEl = document.getElementById("rawTvResult");
   if (!raw) { alert("先粘贴 TV 原始 JSON"); return; }
-  let parsed;
+  let parsed, sendText = raw, repairNote = "";
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    alert("不是合法的 JSON：" + e.message);
-    return;
+    const fix = tryRepairRawJson(raw);
+    if (!fix.ok) {
+      alert("不是合法的 JSON，且无法自动识别出结构性修复方式：" + e.message
+        + "\n\n可能是从 TV 界面复制时丢了个别标点，请检查开头是否是 { 开头、结尾是否是 } 结尾。");
+      return;
+    }
+    parsed = fix.obj;
+    sendText = fix.fixedText;
+    repairNote = "\n\n⚠️ 检测到粘贴内容有结构性损坏，已自动修复为：\n" + JSON.stringify(parsed, null, 2)
+      + "\n（只修了花括号/引号这类标点，没有改动任何字段的值——发送前请核对一遍再确认）";
   }
   const action = parsed.action || parsed.side || "?";
   const symbol = parsed.symbol || parsed.ticker || "?";
   const targetLabel = target === "GATEWAY" ? "网关（广播 B/C/E）" : `账户 ${target}`;
-  if (!confirm(`即将原样转发这条【${action} ${symbol}】信号给${targetLabel}，等效于目标收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓。\n确认发送？`)) return;
-  doRawTvSend(raw, target);
+  if (!confirm(`即将原样转发这条【${action} ${symbol}】信号给${targetLabel}，等效于目标收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓。${repairNote}\n确认发送？`)) return;
+  doRawTvSend(sendText, target);
 }
 
 async function doRawTvSend(raw, target) {
