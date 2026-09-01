@@ -833,18 +833,41 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
                 if self.monitoring:
-                    # 2026-09-01新增：这个循环本来在monitoring=True时什么都不做
-                    # (持仓期的监督全交给_sentinel_loop)——但如果哨兵线程本身
-                    # 已经意外死掉(见_ensure_sentinel_running顶部同一次修复的
-                    # 注释)，monitoring还是True，没有任何现成的周期性检查会
-                    # 发现这件事，只能等进程重启。这个循环本来就每个品种独立
-                    # 常驻、不受monitoring影响照样醒着，顺手在这里补一道"哨兵
-                    # 真的还活着吗"的自愈检查，不需要新起一个线程。
-                    try:
-                        self._ensure_sentinel_running()
-                    except Exception as e:
-                        logger.debug(f"[{self.symbol}] 哨兵自愈检查跳过: {e}")
-                    continue
+                    # 2026-09-01修复(D账户monitoring全品种卡死True复现)：
+                    # monitoring=True但账本根本没有真实仓位(current_side为
+                    # 空/watched_qty<=0)是一个自锁死状态——本循环下面的
+                    # _run_idle_live_reconcile(真正能发现"账本有仓、实盘
+                    # 空仓"并纠正的地方)在monitoring=True时压根不会被调用
+                    # (见本函数下方"if self.monitoring: continue")，卡死
+                    # 的品种永远没有机会自愈，只能等进程重启才可能被
+                    # recover_state_on_startup重新评估（而根因之一就出在
+                    # 那个函数的"跳过重复接管"分支，同一批修复过）。这里先
+                    # 做一次轻量一致性自检，发现内部矛盾就纠正回False，
+                    # 不continue，让本轮循环继续往下走正常巡检对账。
+                    has_real_position = (
+                        str(getattr(self, "current_side", "") or "").upper() in ("LONG", "SHORT")
+                        and float(getattr(self, "watched_qty", 0) or 0) > 0
+                    )
+                    if not has_real_position:
+                        logger.warning(
+                            f"🔧 [{self.symbol}] 自愈：monitoring=True但账本无真实"
+                            f"仓位(current_side={self.current_side!r} watched_qty="
+                            f"{self.watched_qty}) → 纠正为False，转入正常空闲巡检"
+                        )
+                        self.monitoring = False
+                    else:
+                        # 2026-09-01新增：这个循环本来在monitoring=True时什么都不做
+                        # (持仓期的监督全交给_sentinel_loop)——但如果哨兵线程本身
+                        # 已经意外死掉(见_ensure_sentinel_running顶部同一次修复的
+                        # 注释)，monitoring还是True，没有任何现成的周期性检查会
+                        # 发现这件事，只能等进程重启。这个循环本来就每个品种独立
+                        # 常驻、不受monitoring影响照样醒着，顺手在这里补一道"哨兵
+                        # 真的还活着吗"的自愈检查，不需要新起一个线程。
+                        try:
+                            self._ensure_sentinel_running()
+                        except Exception as e:
+                            logger.debug(f"[{self.symbol}] 哨兵自愈检查跳过: {e}")
+                        continue
                 # 空仓待命：尝试解除可恢复暂停（防 flat 后仍卡 pause）
                 try:
                     self._maybe_auto_clear_pause_when_flat(source="idle_patrol")
@@ -1247,6 +1270,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _run_idle_live_reconcile(self):
         """VPS 空仓/待命时周期性对账实盘：全场景生产级应对"""
+        # 2026-09-01修复(D账户monitoring全品种卡死True复现)：monitoring=True
+        # 但账本根本没有真实仓位(current_side为空/watched_qty<=0)是一个
+        # 自锁死状态——本函数下面"交易所空仓且账本有仓→强制清零stale状态"
+        # 那条自愈分支永远跑不到，因为函数一开头就因monitoring=True提前
+        # return了。这里先做一次轻量、不碰交易所的一致性自检，发现这种
+        # 内部矛盾就地纠正回False，让本轮巡检能正常往下走完成真正的对账，
+        # 不依赖某一次具体触发路径不再犯同样的错(根因已在recover_state_
+        # on_startup的"跳过重复接管"分支修过，这里是额外一道不依赖具体
+        # 触发点的通用保险)。
+        if self.monitoring:
+            has_real_position = (
+                str(getattr(self, "current_side", "") or "").upper() in ("LONG", "SHORT")
+                and float(getattr(self, "watched_qty", 0) or 0) > 0
+            )
+            if not has_real_position:
+                logger.warning(
+                    f"🔧 [{self.symbol}] 自愈：monitoring=True但账本无真实仓位"
+                    f"(current_side={self.current_side!r} watched_qty="
+                    f"{self.watched_qty}) → 纠正为False，交本轮巡检正常对账"
+                )
+                self.monitoring = False
         if self.monitoring or getattr(self, "_recover_in_progress", False):
             return
         if getattr(self, "_open_in_progress", False):
@@ -19261,7 +19305,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"哨兵只巡检，禁止 invent/改挂止损"
                 )
                 self._stop_write_blocked = True
-            self.monitoring = True
+            # 2026-09-01修复(D账户monitoring全品种卡死True复现)：以前这里
+            # 不论热加载有没有真的读出一笔仓位，都无条件把monitoring顶成
+            # True——而_run_idle_live_reconcile第一行就是"if self.monitoring:
+            # return"，一旦这里误置位，唯一能发现"账本认为有仓、实盘其实
+            # 空仓"并自愈的巡检逻辑反而永远跑不到，卡死成本品种再也回不去
+            # False的死锁。现在只有热加载真的读出一笔仓位(current_side+
+            # watched_qty都有)才置monitoring=True；没有真实仓位时保持
+            # False，让空闲巡检正常接管、有能力自己纠正。
+            has_real_position = (
+                str(getattr(self, "current_side", "") or "").upper() in ("LONG", "SHORT")
+                and float(getattr(self, "watched_qty", 0) or 0) > 0
+            )
+            self.monitoring = bool(has_real_position)
+            if not has_real_position:
+                logger.info(
+                    f"🔄 [{self.symbol}] 跳过重复接管·热加载未发现真实仓位 → "
+                    f"monitoring保持False，交空闲巡检正常接管"
+                )
             self._ensure_sentinel_running_quiet()
             return
         try:
