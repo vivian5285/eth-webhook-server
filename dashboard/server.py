@@ -721,6 +721,60 @@ def api_tv_manual_send():
     return jsonify(data), (code or 502)
 
 
+GATEWAY_WEBHOOK_URL = "http://127.0.0.1:5006/webhook"
+
+
+@app.route("/api/tv_raw_send", methods=["POST"])
+def api_tv_raw_send():
+    """2026-09-01新增：宝贝要求——TV自己后台(或警报历史)复制出来的原始
+    JSON文本，直接原样POST给目标(网关广播B/C/E，或指定单个账户自己的
+    /webhook)，不经过tv_manual_send那套"表单字段重新拼payload"的改写，
+    完全复刻TV真实发来的样子(包括payload自带的secret——账户/网关自己
+    按各自既有逻辑校验，本接口不做任何额外解析/改写/鉴权，纯转发)。
+    网关本身就是纯转发、无鉴权(binance-gateway/gateway.py顶部注释)，
+    直发账户端口同样靠payload自带的secret，两条路径都不需要走console
+    登录会话。"""
+    body = request.get_json(force=True, silent=True) or {}
+    target = str(body.get("target") or "").strip().upper()
+    raw_text = body.get("raw")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return jsonify({"status": "error", "message": "empty_raw"}), 400
+    try:
+        raw_obj = json.loads(raw_text)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"invalid_json: {e}"}), 400
+    if not isinstance(raw_obj, dict):
+        return jsonify({"status": "error", "message": "json_must_be_object"}), 400
+
+    if target == "GATEWAY":
+        url = GATEWAY_WEBHOOK_URL
+    else:
+        acct = _find_account(target)
+        if not acct:
+            return jsonify({"status": "error", "message": "bad_target"}), 400
+        url = f"http://127.0.0.1:{acct['port']}/webhook"
+
+    data = json.dumps(raw_obj).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            code = resp.status
+            resp_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        code = e.code
+        resp_text = e.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"send_failed: {e}"}), 502
+    try:
+        upstream = json.loads(resp_text)
+    except Exception:
+        upstream = resp_text
+    print(f"[TV_RAW_SEND] target={target} payload={raw_obj} -> {code} {upstream}", flush=True)
+    return jsonify({"status": "ok", "target": target, "upstream_status": code, "upstream": upstream}), 200
+
+
 # ── 策略/回测面板：直接读 strategy_engine 自己维护的 sqlite，"跑回测"走
 # subprocess 调用它自己venv的python（跟 close_position 同一种模式）──────────
 

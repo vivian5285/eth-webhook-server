@@ -210,7 +210,7 @@
   .tv-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
   .tv-head h2 { font-size: 15px; font-weight: 700; margin: 0; }
   .tv-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  select, input[type=text], input[type=number] {
+  select, input[type=text], input[type=number], textarea {
     font-family: inherit; font-size: 12.5px; padding: 7px 10px; border-radius: 10px;
     border: 1px solid rgba(31,41,55,0.14); background: rgba(255,255,255,0.7); color: var(--text-hi);
   }
@@ -271,7 +271,7 @@
   .manual-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px; }
   @media (max-width: 900px) { .manual-grid { grid-template-columns: repeat(2, 1fr); } }
   .manual-field label { display: block; font-size: 11px; color: var(--text-lo); margin-bottom: 4px; font-weight: 700; }
-  .manual-field select, .manual-field input { width: 100%; }
+  .manual-field select, .manual-field input, .manual-field textarea { width: 100%; }
   .warn-bar {
     background: var(--red-bg); border: 1px solid rgba(224,57,47,0.25); color: var(--red);
     border-radius: 12px; padding: 10px 14px; font-size: 12px; font-weight: 600; margin-bottom: 14px;
@@ -491,7 +491,33 @@
         <div class="sub">等效于收到一笔真实 TradingView 警报，会直接触发实盘下单 / 平仓</div>
       </div>
     <div class="card tv-card">
-      <div class="tv-head"><h2>手动发单</h2></div>
+      <div class="tv-head"><h2>粘贴 TV 原始 JSON 直发</h2></div>
+      <div class="warn-bar">⚠️ 原样转发给目标，不做任何字段改写，等效于目标收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓。选"网关"会像真实 TV 警报一样广播给 B/C/E 三个账户；选具体账户只发那一个（D 也可以，D 不接网关广播但能直发）。</div>
+      <div class="manual-grid" style="grid-template-columns:1fr">
+        <div class="manual-field">
+          <label>从 TV 警报历史复制的原始 JSON</label>
+          <textarea id="rawTvJson" rows="5" placeholder='{"secret":"...","action":"SHORT","symbol":"GSUSDT.P","price":1013.93,"atr":3.63,"stop_loss":1018.65,"tp1":1007.39,"tp2":1002.31,"tp3":995.77,"tier":2,...}' style="width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;resize:vertical"></textarea>
+        </div>
+      </div>
+      <div class="manual-grid">
+        <div class="manual-field"><label>发送目标</label>
+          <select id="rawTvTarget">
+            <option value="GATEWAY">网关（广播 B/C/E）</option>
+            <option value="B">B · 妈妈的币安账户</option>
+            <option value="C">C · 我自己的币安账户</option>
+            <option value="D">D · 我的币安子账户</option>
+            <option value="E">E · MARIO账户</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-mini primary" onclick="confirmRawTvSend()">解析并发送</button>
+      </div>
+      <div id="rawTvResult" class="tv-detail-box" style="display:none;margin-top:12px"></div>
+    </div>
+
+    <div class="card tv-card">
+      <div class="tv-head"><h2>手动发单（表单）</h2></div>
       <div class="warn-bar">⚠️ 等效于该账户收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓，发送前请核对账户与参数。LONG/SHORT 默认按限价挂单开仓（不吃市价滑点，超时未成交自动撤单）；选"市价"立即按现价成交，吃滑点换即时性。平仓永远是市价，不受此选项影响。</div>
       <div class="manual-grid">
         <div class="manual-field"><label>账户</label>
@@ -1148,6 +1174,42 @@ function onMOrderTypeChange() {
   document.getElementById("mPriceLabel").textContent = isMarket
     ? "参考价（市价单，仅记账用，不影响成交价）"
     : "限价（LONG/SHORT开仓价）";
+}
+
+function confirmRawTvSend() {
+  const raw = document.getElementById("rawTvJson").value.trim();
+  const target = document.getElementById("rawTvTarget").value;
+  const resultEl = document.getElementById("rawTvResult");
+  if (!raw) { alert("先粘贴 TV 原始 JSON"); return; }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    alert("不是合法的 JSON：" + e.message);
+    return;
+  }
+  const action = parsed.action || parsed.side || "?";
+  const symbol = parsed.symbol || parsed.ticker || "?";
+  const targetLabel = target === "GATEWAY" ? "网关（广播 B/C/E）" : `账户 ${target}`;
+  if (!confirm(`即将原样转发这条【${action} ${symbol}】信号给${targetLabel}，等效于目标收到一笔真实 TradingView 警报，会直接触发实盘下单/平仓。\n确认发送？`)) return;
+  doRawTvSend(raw, target);
+}
+
+async function doRawTvSend(raw, target) {
+  const resultEl = document.getElementById("rawTvResult");
+  resultEl.style.display = "";
+  resultEl.textContent = "发送中…";
+  try {
+    const res = await fetch("api/tv_raw_send", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({raw, target}),
+    });
+    const d = await res.json();
+    resultEl.textContent = JSON.stringify(d, null, 2);
+    loadTvSignals();
+  } catch (e) {
+    resultEl.textContent = "发送失败: " + e;
+  }
 }
 
 function confirmManualSend() {
