@@ -124,6 +124,13 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] bollinger_rsi_contrarian 加载失败: {_e}")
 
+try:
+    from strategy_engine.strategies import adx_regime_switch
+    STRATEGIES["adx_regime_switch"] = adx_regime_switch.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] adx_regime_switch 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -207,6 +214,18 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "做多走弱的那一腿、做空走强的那一腿，价差收敛就平仓。两条腿盈亏"
         "方向相反，市场中性，对冲掉大盘本身涨跌，跟其余8套(清一色趋势/"
         "动量类)相关性极低。"
+    ),
+    "adx_regime_switch": (
+        "ADX市场状态切换·趋势+震荡自适应——2026-09-01应宝贝要求新增"
+        "(擂台里大多数是1D，缺一套真正的波段+趋势自适应战法)。用ADX(14)"
+        "本身教科书级别的经典用法(Wilder发明ADX时就明确说过它能判断"
+        "'该用趋势系统还是震荡系统')做状态开关：ADX≥25判定趋势市，走"
+        "EMA(10/30)金叉死叉；ADX≤18判定震荡市，走布林带(20,2)极值+"
+        "RSI(2)超买超卖均值回归；两者之间不开新仓。离场同样看**当前**"
+        "ADX重新判断走哪条离场规则，不是死守开仓时的状态——同一品种"
+        "自己根据实时市场状态换打法，是本擂台唯一一套这样做的战法，跟"
+        "turtle_breakout/time_series_momentum(纯趋势)、connors_rsi2/"
+        "bollinger_rsi_contrarian(纯均值回归)分别有交集但不重合。4H周期。"
     ),
 }
 

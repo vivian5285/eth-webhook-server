@@ -45,6 +45,11 @@
   - bollinger_rsi_contrarian：1d，跟源码(QuantConnect项目，Resolution.
     Daily)完全一致的周期，用真实项目的原生周期，不做任何压缩改动——
     这套源码本身给的就是日线级别的信号，没有理由改成别的周期。
+  - adx_regime_switch：4h。宝贝指出擂台里大多数是1D，缺一套真正的
+    "波段+趋势"、能自动识别震荡期/趋势期切换开平仓逻辑的战法——用ADX
+    做趋势/震荡状态开关是Wilder本人发明ADX时就明确的经典公开用法，
+    不是新发明指标。4h是这套自适应逻辑(ADX+EMA金叉死叉+布林带RSI(2))
+    比较经典的适用周期，比1d更贴近"波段"节奏，又比1h噪声小。
 """
 from __future__ import annotations
 
@@ -74,6 +79,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "volatility_breakout", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "time_series_momentum", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
