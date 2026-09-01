@@ -246,6 +246,30 @@ BIG_WIN_RETAIN_FRAC = 0.65
 # 完全没有更早一层保护的空隙。用ASML真实90分钟周期回测，三档trail_mult
 # 差值全部明确为正，加入启用名单(BNB/XMR/BCH/ASML)。
 
+# 2026-09-01新增：TV已平仓滞涨刹车——宝贝MARIO账户LITEUSDT那次发现的
+# 真实缺口：TV自己的追踪止盈止损平仓经常不会有对应的CLOSE类webhook
+# 动作(Pine这类内部退出路径常常没绑alertcondition/alert())，只体现在
+# 周期性心跳(HEARTBEAT)转FLAT上；而VPS雷达一旦开仓就完全按自己的呼吸
+# 止损独立管理，压根不会再看后续心跳，TV已经不想要这笔单了VPS却浑然
+# 不知，继续按自己更宽的呼吸阶梯跟踪——如果价格从此滞涨/滞跌，可能把
+# TV已经落袋的利润又吐回去。跟大赢家地板/回吐刹车同一个族谱(都是对
+# "已经发生的事实"反应，不预测走势)，只朝有利方向棘轮；区别是触发
+# 前提多一条"TV心跳已转FLAT"，动作是"收紧到接近现价"而不是"保住峰值
+# 的百分比"——跟宝贝讨论确认：不直接平仓(这条心跳不是100%确定TV已经
+# 彻底不要这笔单，万一后续价格继续走、心跳追回本身也还有兜底)，收紧
+# 后价格自己决定要不要把我们震出去。
+TV_EXIT_STALL_ENABLED = True
+# 至少要有这么多倍initial_atr的峰值浮盈才评估(跟giveback_brake/反转
+# 锁盈同一个尺度)，避免刚开仓没多久还没走出行情就被这条棘轮提前锁死。
+TV_EXIT_STALL_MIN_PEAK_ATR = 0.5
+# "滞涨/滞跌"判定：best_price连续N根K线(按该品种自己的TV周期tv_tf_sec
+# 换算成时长，不新增独立K线拉取)都没能创新高/新低。3根沿用本季多处
+# 已用过的"至少3次确认"惯例(比如Williams Fractal摆动点±3根确认)。
+TV_EXIT_STALL_BARS = 3
+# 收紧到"现价 - 这么多倍ATR"(多头)/"现价 + 这么多倍ATR"(空头)，留一点
+# 呼吸空间避免刚收紧就被微小噪音扫损，不是收紧到现价本身。
+TV_EXIT_STALL_TIGHT_ATR = 0.3
+
 
 class RadarReentryMixin:
     """递进激活 + 限价再入场。依赖宿主的 binance_client / dingtalk / breath 方法。"""
@@ -1932,6 +1956,114 @@ class RadarReentryMixin:
                         f"太宽、回调吃掉大半利润才触发。只朝有利方向棘轮，价格"
                         f"继续创新高地板会继续上移；如果这次判断错了，心跳追回"
                         f"会按老规矩自动尝试更优价格追回。"
+                    ),
+                    level="提示",
+                )
+            except Exception:
+                pass
+        return out
+
+    def _maybe_tighten_on_tv_exit_stall(self, curr_px: float, candidate_sl: float) -> float:
+        """TV已平仓滞涨刹车——见上方TV_EXIT_STALL_*常量顶部注释。跟其余
+        三个锁盈棘轮(反转/大赢家/回吐刹车)同一套写法、互不依赖，谁锁得
+        更紧生效谁的，调用顺序不影响最终结果。curr_px由调用方传入，
+        跟其余几个棘轮同款签名。"""
+        if not TV_EXIT_STALL_ENABLED:
+            return candidate_sl
+        hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
+        if hb_side != "FLAT":
+            # TV心跳还在跟我们同方向(或压根还没收到过心跳)，没有"TV已
+            # 平仓"这个前提，滞涨计时器归零，不触发。
+            self._tv_exit_stall_since_ts = 0.0
+            return candidate_sl
+
+        side = str(getattr(self, "current_side", "") or "").upper()
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        if side not in ("LONG", "SHORT") or entry <= 0:
+            return candidate_sl
+
+        # 心跳必须曾经真实同步过这段持仓自己的方向(last_tv_signal是这段
+        # 持仓的开仓信号本身)，才能把"心跳现在是FLAT"解读成"TV已经平掉
+        # 了我们这一笔"——避免冷启动/从未收到过心跳这类边界情况被误判。
+        last_sig = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
+        last_act = str(last_sig.get("action", "") or "").upper()
+        if last_act != side:
+            return candidate_sl
+
+        best = float(getattr(self, "best_price", 0) or 0) or entry
+        if side == "LONG":
+            peak_profit = best - entry
+        else:
+            peak_profit = entry - best
+        if peak_profit <= 0:
+            return candidate_sl
+        atr = float(self._get_locked_initial_atr() or 0)
+        if atr <= 0 or peak_profit / atr < TV_EXIT_STALL_MIN_PEAK_ATR:
+            return candidate_sl
+
+        now = time.time()
+        stall_best_seen = float(getattr(self, "_tv_exit_stall_best_seen", 0) or 0)
+        if abs(stall_best_seen - best) > 1e-9:
+            # best_price比上次检查时又创了新高/新低，说明还没真滞涨/
+            # 滞跌，计时器归零重开。
+            self._tv_exit_stall_best_seen = best
+            self._tv_exit_stall_since_ts = now
+            return candidate_sl
+        since = float(getattr(self, "_tv_exit_stall_since_ts", 0) or 0)
+        if since <= 0:
+            self._tv_exit_stall_since_ts = now
+            return candidate_sl
+
+        tv_tf_sec = 0
+        try:
+            tv_tf_sec = int(get_reentry_profile(self.symbol).get("tv_tf_sec") or 0)
+        except Exception:
+            tv_tf_sec = 0
+        if tv_tf_sec <= 0:
+            return candidate_sl
+        stall_window_sec = tv_tf_sec * TV_EXIT_STALL_BARS
+        if now - since < stall_window_sec:
+            return candidate_sl
+
+        px = float(curr_px or 0) or best
+        tight_dist = atr * TV_EXIT_STALL_TIGHT_ATR
+        if side == "LONG":
+            floor_px = px - tight_dist
+            improved = floor_px > candidate_sl
+            out = max(candidate_sl, floor_px)
+        else:
+            floor_px = px + tight_dist
+            improved = floor_px < candidate_sl
+            out = min(candidate_sl, floor_px)
+        if not improved:
+            return candidate_sl
+
+        # 按best_price去重(逻辑同大赢家地板/回吐刹车)：同一个滞涨事件
+        # 只报一次，best_price重新推进后计时器和去重标记都会自然翻篇。
+        alerted_best = float(getattr(self, "_tv_exit_stall_alerted_best", 0) or 0)
+        if abs(alerted_best - best) > 1e-9:
+            self._tv_exit_stall_alerted_best = best
+            stall_min = (now - since) / 60.0
+            logger.warning(
+                f"🛑 [{self.symbol}] TV已平仓滞涨刹车触发 心跳FLAT+"
+                f"best_price已{stall_min:.0f}分钟未创新高/低(≥{TV_EXIT_STALL_BARS}根"
+                f"{tv_tf_sec}s周期K线) → 止损收紧至现价附近 "
+                f"{candidate_sl:.4f}→{out:.4f} (entry={entry:.4f} best={best:.4f} "
+                f"现价={px:.4f} 峰值浮盈{peak_profit/atr:.2f}×ATR)"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"TV已平仓滞涨刹车触发 [{self.symbol}]",
+                    detail=(
+                        f"{side} TV心跳已转FLAT(大概率TV自己的追踪止盈止损已"
+                        f"平仓，只是这类退出路径没有对应CLOSE信号)，我们的雷达"
+                        f"还在按自己的呼吸止损独立持有，price已{stall_min:.0f}"
+                        f"分钟未创新高/低，止损收紧到现价附近{out:.4f}(entry="
+                        f"{entry:.4f} best={best:.4f} 现价={px:.4f} 峰值浮盈"
+                        f"{peak_profit/atr:.2f}×ATR)，不直接平仓——价格继续走"
+                        f"止损会跟着推进，回调会被这道更紧的止损接住。"
                     ),
                     level="提示",
                 )
