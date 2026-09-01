@@ -452,6 +452,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._init_reentry_runtime()
         self.breakeven_phase = False  # 雷达动态追踪阶段
         self.initial_stop = 0.0       # 雷达初始止损基准（与永久硬止损分离）
+        # 2026-09-01新增：进场延迟呼吸补偿——见_arm_temp_stop_and_tp12顶部
+        # 注释。默认1.0=不补偿，只在成交价已经吃掉TV止损空间时才>1.0。
+        self.entry_delay_widen_mult = 1.0
         # 规格 v2.0：提前保本检查点已废除
         self._early_be_checkpoint_done = True  # 直接标记为完成，等效禁用
         # v15.9.1：TP3↔雷达退出路径所有权 + 防御单本地标签
@@ -3661,6 +3664,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "adx_tier": int(getattr(self, "adx_tier", 1) or 1),
                     "tv_open_tier": getattr(self, "tv_open_tier", None),
                     "hard_sl_buffer": float(getattr(self, "hard_sl_buffer", 1.15) or 1.15),
+                    "entry_delay_widen_mult": float(
+                        getattr(self, "entry_delay_widen_mult", 1.0) or 1.0
+                    ),
                     "remaining_qty_pct": float(getattr(self, "remaining_qty_pct", 1.0) or 1.0),
                     "breathing_coefficient": float(
                         getattr(self, "breathing_coefficient", 1.0) or 1.0
@@ -4960,6 +4966,40 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"actual_dist={meta.get('final'):.2f} "
             f"→ @{temp_sl:.2f}"
         )
+        # 2026-09-01新增：进场延迟呼吸补偿（宝贝2026-09-01实盘复现GS/海力士
+        # 因为咱们自己的bug拖了近20分钟才成交，明确要求"不能因为自己进场
+        # 晚了，反而雷达追得更紧，导致呼吸空间不够、错过趋势盈利"）。
+        # 硬止损这条线已经天然补偿了(actual_dist锚定实际成交价，宝贝进场
+        # 越晚硬止损离场也跟着越远)，但雷达阶梯/呼吸空间(breath_stop.py
+        # calculate_stop_long/short)的step_trigger/trail_dist只按ATR算，
+        # 跟"这笔单子成交时TV原始止损空间已经被行情吃掉多少"完全无关——
+        # 一笔严重滞后成交、开仓瞬间就已经站在TV止损附近的单子，雷达呼吸
+        # 空间跟一笔准时成交的单子完全一样宽，正常回调就可能把它扫出去，
+        # 事后还要指望TV心跳追回来补救，等于自己给自己找事。
+        # 这里只算"逆向消耗比例"：若成交价已经比TV参考价更差(消耗了TV
+        # 止损空间的一部分)，按消耗比例加宽呼吸系数；若成交价比TV参考价
+        # 更好(比如今晚GSUSDT这次，滑点方向对我们有利)，比例算出来是0，
+        # 不加宽也不缩窄——只补偿吃亏的方向，不因为占了便宜就反过来收紧。
+        widen_mult = 1.0
+        try:
+            tv_entry_ref = float(getattr(self, "tv_price", 0) or 0)
+            tv_dist_ref = float(meta.get("tv_implied", 0) or 0) / max(buf, 1e-9)
+            if tv_entry_ref > 0 and tv_dist_ref > 0:
+                if side == "LONG":
+                    consumed = max(0.0, tv_entry_ref - entry)
+                else:
+                    consumed = max(0.0, entry - tv_entry_ref)
+                consumed_frac = min(1.0, consumed / tv_dist_ref)
+                widen_mult = 1.0 + consumed_frac
+                if consumed_frac > 0.01:
+                    logger.info(
+                        f"🌬️ [{self.symbol}] 进场延迟呼吸补偿: TV参考={tv_entry_ref:.4f} "
+                        f"实际成交={entry:.4f} 已消耗TV止损空间{consumed_frac:.0%} "
+                        f"→ 雷达呼吸系数×{widen_mult:.2f}"
+                    )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 进场延迟呼吸补偿计算跳过: {e}")
+        self.entry_delay_widen_mult = float(widen_mult)
         self._atr_scenario = 0
         self._temp_stop_active = True
         self._tp3_fallback_active = False
@@ -14936,6 +14976,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.initial_stop = 0.0
         self.frozen_hard_sl_px = 0.0
         self.open_atr = 0.0
+        self.entry_delay_widen_mult = 1.0
         self.position_source = "TV"
         try:
             self._locked_initial_atr.clear_on_flat()
@@ -17596,6 +17637,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 logger.debug(f"[{self.symbol}] ADX档动态复评跳过: {e}")
             return None
         atr = self._get_locked_initial_atr()
+        # 2026-09-01新增：进场延迟呼吸补偿——见_arm_temp_stop_and_tp12顶部
+        # 注释。只放大雷达阶梯/呼吸空间用的ATR(trail_dist=trail_mult×atr、
+        # step_trigger=step_trig×atr都从这个atr派生)，不碰硬止损(那条线
+        # 在_arm_temp_stop_and_tp12里已经单独按实际成交价锚定过了)。默认
+        # 1.0时这里等于原样不变，只有确认成交价已经吃掉TV止损空间才生效。
+        widen = float(getattr(self, "entry_delay_widen_mult", 1.0) or 1.0)
+        if widen > 1.0:
+            atr = float(atr) * widen
         # 2026-08-26扩展：武装后档位复评继续跑(同一节流/防抖状态)，只影响
         # 下面_apply_tier_breath_overlay读到的呼吸阶梯，不碰radar_activation_
         # price——见_maybe_reevaluate_adx_tier顶部注释。
@@ -19482,6 +19531,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.adx_tier = int(s.get("adx_tier", 1) or 1)
                     self.tv_open_tier = s.get("tv_open_tier")
                     self.hard_sl_buffer = float(s.get("hard_sl_buffer", 1.15) or 1.15)
+                    self.entry_delay_widen_mult = float(
+                        s.get("entry_delay_widen_mult", 1.0) or 1.0
+                    )
                     self.remaining_qty_pct = float(s.get("remaining_qty_pct", 1.0) or 1.0)
                     self.breathing_coefficient = float(
                         s.get("breathing_coefficient", 1.0) or 1.0
