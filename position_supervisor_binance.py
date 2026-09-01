@@ -6051,7 +6051,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # dust_qty短路进来的，绕开了下面那道"一档都没吃掉不算"的老防线）。
         if not consumed and ref > 0 and real_amt >= ref * 0.98:
             return False
-        if self._is_dust_qty(real_amt):
+        # 2026-09-01修复(B/C两账户SNDKUSDT实盘复现，宝贝当场抓到"TV还在
+        # 跟踪、我们却被扫了")：dust_qty是绝对数量阈值(SNDKUSDT配的是
+        # 0.05)，TP1+TP2刚吃完(消耗30%)剩下的TP3那70%——本来就该继续
+        # 交给雷达骑仓，不是残留蚂蚁仓——但weak档0.1x仓位下这70%的份额
+        # 本身可能就只有0.04，比这个绝对阈值还小，直接被当"可收网"市价
+        # 全平了。跟08-18那次(TP一档都没吃、整仓被当蚂蚁仓)是同一类
+        # bug，只是这次consumed非空所以那道旧防线没拦住。下面本来就有
+        # 更准确的比例判定(TP_COMPLETE_RESIDUAL_RATIO=12%)，只是被这条
+        # 绝对阈值短路抢先拦截了——加一个比例上限，只有确实小到符合比例
+        # 判定的量，或者ref干脆不可用时，才信这条绝对阈值。
+        if self._is_dust_qty(real_amt) and (
+            ref <= 0 or real_amt <= ref * TP_COMPLETE_RESIDUAL_RATIO
+        ):
             return True
         if self._collect_limit_tp_prices():
             return False
