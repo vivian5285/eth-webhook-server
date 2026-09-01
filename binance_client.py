@@ -760,17 +760,27 @@ class BinanceClient:
         """
         symbol = str(symbol or "ETHUSDT").upper()
         # 冷却期：绝不进入 REST（连 throttle sleep 都不走）
-        # 铁律：限流/冷却下「空缓存」≠ 盘口无单 → 必须 ORDERS_QUERY_FAILED，
+        # 铁律：限流/冷却下「完全没缓存」≠ 盘口无单 → 必须 ORDERS_QUERY_FAILED，
         # 禁止上层当成 0 挂单去核武撤挂 / 狂补（今日实盘：回退缓存 0 笔 → 裸奔）。
+        # 2026-09-01修复(B账户GSUSDT/ANTHROPICUSDT实盘复现·手动+TV真实开仓
+        # 都被连续3次"先平后开"终检失败中止)：以前这里(及下方两处同款
+        # 分支)额外要求len(cached)>0才采信缓存——但_get_open_orders_cached
+        # 自己的返回值本来就已经区分了None(完全没缓存过，真的不知道)和
+        # []([]是TTL窗口内某次REST真的查到过零挂单，是确凿证据不是"没
+        # 查过")。多加的len>0条件把这两种情况混为一谈，导致一个真实空仓、
+        # 真实零挂单的品种，只要还在IP冷却/节流窗口内，就永远拿不到一次
+        # "确认挂单为空"的通过，"先平后开"终检反复判定"挂单不可读"直接
+        # 拒绝开仓——不是查询真的失败，是这条判断自己太保守。改成只看
+        # cached is not None，跟_get_open_orders_cached自己的语义对齐。
         if self.ip_rate_limit_remaining() > 0:
             cached = self._get_open_orders_cached(symbol, max_age=300.0)
-            if cached is not None and len(cached) > 0:
+            if cached is not None:
                 logger.warning(
-                    f"[获取挂单] {symbol}: IP冷却 → 仅用非空缓存 ({len(cached)} 笔)"
+                    f"[获取挂单] {symbol}: IP冷却 → 用缓存 ({len(cached)} 笔)"
                 )
                 return cached
             logger.warning(
-                f"[获取挂单] {symbol}: IP冷却且缓存空/无 → ORDERS_QUERY_FAILED"
+                f"[获取挂单] {symbol}: IP冷却且完全没缓存 → ORDERS_QUERY_FAILED"
             )
             return ORDERS_QUERY_FAILED
         if prefer_cache:
@@ -781,13 +791,13 @@ class BinanceClient:
             self._throttle_rest(symbol, kind="rest_probe")
         except IpRateLimitedError:
             cached = self._get_open_orders_cached(symbol, max_age=300.0)
-            if cached is not None and len(cached) > 0:
+            if cached is not None:
                 logger.warning(
-                    f"[获取挂单] {symbol}: 节流阀 → 回退非空缓存 ({len(cached)} 笔)"
+                    f"[获取挂单] {symbol}: 节流阀 → 回退缓存 ({len(cached)} 笔)"
                 )
                 return cached
             logger.warning(
-                f"[获取挂单] {symbol}: 节流阀且缓存空/无 → ORDERS_QUERY_FAILED"
+                f"[获取挂单] {symbol}: 节流阀且完全没缓存 → ORDERS_QUERY_FAILED"
             )
             return ORDERS_QUERY_FAILED
         try:
@@ -796,7 +806,7 @@ class BinanceClient:
             self._note_api_error(e, symbol)
             logger.error(f"[获取挂单失败] {symbol}: {e}")
             cached = self._get_open_orders_cached(symbol, max_age=300.0)
-            if cached is not None and len(cached) > 0:
+            if cached is not None:
                 return cached
             return ORDERS_QUERY_FAILED
         if not include_algo:
