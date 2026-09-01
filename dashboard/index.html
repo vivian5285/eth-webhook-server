@@ -1181,17 +1181,46 @@ function onMOrderTypeChange() {
 // 疑似TV那边的字体/复制机制在个别标点组合上出问题，不是宝贝打错。这里
 // 只做"结构性"修复(补/删标点)，绝不猜测/编造任何字段的值——修不好就
 // 如实报错，不会为了"看起来能用"而悄悄塞进错的数字。
+function tvAlertShapeOk(obj) {
+  return obj && typeof obj === "object" && !Array.isArray(obj)
+    && ("action" in obj || "side" in obj) && ("symbol" in obj || "ticker" in obj);
+}
+
+// 2026-09-01追加：宝贝要求"别卡标点符号，智能一点"——比"猜哪个括号丢了"
+// 更通用的做法：不管外层花括号/引号乱成什么样，直接在整段文本里扫描
+// 一个个"键:值"(key:"string"/数字/true/false/null)这种独立、自成一体
+// 的片段，把扫到的原样拼成一个新对象。这个方法不依赖任何特定的损坏
+// 模式，键值对内部的引号/冒号只要没坏，不管外面丢了几个括号、多了
+// 几个杂字符都不影响——因为根本不看外层结构，只认"键:值"这个最小
+// 单元。依然不编造任何数据：正则匹配不到的字段就是没有，不会拿旧值
+// 或猜测填。
+function extractKeyValuePairs(text) {
+  const re = /"?([A-Za-z_][A-Za-z0-9_]*)"?\s*:\s*(?:"((?:[^"\\]|\\.)*)"|(-?\d+\.?\d*(?:[eE][-+]?\d+)?)|(true|false)|(null))/g;
+  const obj = {};
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const key = m[1];
+    if (m[2] !== undefined) obj[key] = m[2];
+    else if (m[3] !== undefined) obj[key] = Number(m[3]);
+    else if (m[4] !== undefined) obj[key] = m[4] === "true";
+    else obj[key] = null;
+  }
+  return obj;
+}
+
 function tryRepairRawJson(text) {
+  // 第一层：原样直接解析
+  try {
+    const obj = JSON.parse(text);
+    if (tvAlertShapeOk(obj)) return {ok: true, obj, fixedText: text, changed: false, method: "exact"};
+  } catch (e) { /* fall through */ }
+
+  // 第二层：几种已知的结构性损坏模式(缺花括号/多余尾字符)，只补删标点
   const attempts = [text];
   const trimmed = text.trim();
-  // 已知复现1：开头"{\""被压缩成单个"["（比如 [secret":"...） → 补回"{\""
   if (/^\[\s*[A-Za-z_][A-Za-z0-9_]*"\s*:/.test(trimmed)) {
     attempts.push('{"' + trimmed.slice(1));
   }
-  // 对每个候选，尝试原样解析，再尝试从末尾逐字符裁掉0~20个字符(只删
-  // 不加内容)、并且都分别再试一次"裁完后补一个}"（只补花括号这个纯
-  // 结构字符，不编造数据）——找到第一个(裁得最少的)能解析成真正对象、
-  // 且带着action/symbol这类TV警报特征字段的结果就采信。
   for (const base of attempts) {
     const b = base.trim();
     for (let cut = 0; cut <= 20 && cut < b.length; cut++) {
@@ -1199,14 +1228,21 @@ function tryRepairRawJson(text) {
       for (const candidate of [core, core + "}"]) {
         try {
           const obj = JSON.parse(candidate);
-          if (obj && typeof obj === "object" && !Array.isArray(obj)
-              && ("action" in obj || "side" in obj) && ("symbol" in obj || "ticker" in obj)) {
-            return {ok: true, obj, fixedText: candidate, changed: candidate !== text};
+          if (tvAlertShapeOk(obj)) {
+            return {ok: true, obj, fixedText: candidate, changed: candidate !== text, method: "structural"};
           }
         } catch (e) { /* keep trying */ }
       }
     }
   }
+
+  // 第三层：不管外层结构，直接逐个提取"键:值"重建——覆盖第二层没预料
+  // 到的损坏形状，仍然只提取文本里字面存在的键值对，不猜测/编造。
+  const extracted = extractKeyValuePairs(text);
+  if (tvAlertShapeOk(extracted)) {
+    return {ok: true, obj: extracted, fixedText: JSON.stringify(extracted), changed: true, method: "extracted"};
+  }
+
   return {ok: false};
 }
 
@@ -1226,8 +1262,11 @@ function confirmRawTvSend() {
     }
     parsed = fix.obj;
     sendText = fix.fixedText;
+    const methodNote = fix.method === "extracted"
+      ? "（这次是逐个字段从文本里提取重建的，损坏比较多，务必格外仔细核对每个数字）"
+      : "（只修了花括号/引号这类标点，没有改动任何字段的值——发送前请核对一遍再确认）";
     repairNote = "\n\n⚠️ 检测到粘贴内容有结构性损坏，已自动修复为：\n" + JSON.stringify(parsed, null, 2)
-      + "\n（只修了花括号/引号这类标点，没有改动任何字段的值——发送前请核对一遍再确认）";
+      + "\n" + methodNote;
   }
   const action = parsed.action || parsed.side || "?";
   const symbol = parsed.symbol || parsed.ticker || "?";
