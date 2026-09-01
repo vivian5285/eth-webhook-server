@@ -91,6 +91,17 @@ NOISE_ERROR_PATTERNS = (
     # 问题，见2026-09-01当天C账户XPDUSDT的排查)，NOISE_ERROR_PATTERNS
     # 是纯子串匹配(见下方any(p in line))，泛化的"反转保护"会连它一起吞掉。
     "挂单查询失败(IP限流)",
+    # 2026-09-01第三批：宝贝反馈"隔一会又几十条"——跟dashboard/server.py
+    # 同一批修复。"ip_rate_limited remaining=Ns"是IpRateLimitedError
+    # 专用固定文案(binance_client.py唯一出处)，只在代码自己主动拒绝
+    # REST时抛出，从不代表交易所真的报错，各种操作([撤单失败]/[止损单
+    # 失败]/[限价单失败]/[Algo止损失败]等)外面套的都是同一个信号，用
+    # 这条通用子串一次性覆盖。"不可确认（禁止谎称已有）"：挂单查询
+    # 失败时宁可如实说"不确认"也不敢谎称"已经有止损了"，原文自己就是
+    # 保守声明，不是故障。
+    "ip_rate_limited remaining=",
+    "不可确认（禁止谎称已有）",
+    "接管上下文补全: 挂单查询失败",
 )
 
 
