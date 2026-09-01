@@ -1191,11 +1191,30 @@ class BinanceClient:
 
         backoff = 1.0
         while self._ud_ws_running:
+            # 2026-09-01修复(今晚06:44-06:45那次长达32分钟IP封禁的真实根因)：
+            # _create_listen_key()是全文件唯一不检查ip_rate_limit_remaining()
+            # 就直接打REST的地方——账户已经被-1003封禁的窗口里，这个循环
+            # 还在每隔几秒重试创建listenKey，每次都被交易所拒绝，且实测
+            # 每次拒绝都会把封禁解除时间往后顺延(真实日志：06:44:51封禁至
+            # …6291574，06:44:56顺延至…6411589，06:45:01又顺延至…7016686，
+            # 相当于WS自己的重连逻辑在不断给自己延长刑期)。这里补上跟
+            # 全文件其它REST调用一致的冷却检查，冷却没结束就先等，不硬打。
+            ip_rem = float(self.ip_rate_limit_remaining() or 0)
+            if ip_rem > 0:
+                logger.warning(f"⏸️ [私有WS] listenKey创建等IP冷却 {min(ip_rem, 60.0):.0f}s")
+                time.sleep(min(ip_rem, 60.0))
+                continue
             key = self._listen_key or self._create_listen_key()
             if not key:
-                time.sleep(min(backoff, 5))
+                # 2026-09-01修复：这里原来写的是min(backoff, 5)——backoff变量
+                # 明明按1→2→4→8…翻倍到60，但实际sleep永远被5秒封顶，等于
+                # "指数退避"完全没生效，连续失败时还是每5秒左右重打一次，
+                # 上面这次事故正是这样在32分钟里反复重试、反复被拒、反复
+                # 延长封禁。改成min(backoff, 60)，真正让退避随失败次数变长。
+                time.sleep(min(backoff, 60.0))
                 backoff = min(backoff * 2.0, 60.0)
                 continue
+            backoff = 1.0  # 成功创建后重置，下次独立的断线不会继承旧的退避
             self._listen_key = key
             url = f"{WS_PRIVATE_BASE}/{key}"
             try:
@@ -1209,6 +1228,11 @@ class BinanceClient:
                     while self._ud_ws_running and self._listen_key == key:
                         time.sleep(20)
                         if time.time() - last_keepalive >= 25 * 60:
+                            # 2026-09-01：跟上面listenKey创建同一批修复——冷却期内
+                            # 先跳过这次续期(20秒后自然会再检查一次)，不硬打，
+                            # 25分钟的续期窗口本身很宽松，晚个几十秒不影响。
+                            if float(self.ip_rate_limit_remaining() or 0) > 0:
+                                continue
                             if self._keepalive_listen_key():
                                 last_keepalive = time.time()
                             else:
