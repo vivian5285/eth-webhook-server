@@ -1549,8 +1549,10 @@ class BinanceClient:
                         pos_result = raw
                     else:
                         pos_result = None
-        except Exception:
-            pass
+        except Exception as e:
+            # 2026-09-01：跟下面挂单查询同一批修复——以前也是纯净except:
+            # pass，同样加一条日志，避免持仓这一侧的真实异常也无声无息。
+            logger.warning(f"[联合查询] {sym} 持仓查询异常: {e}")
 
         # ── 联合挂单查询（普通单 + Algo 条件单，共 1~2 次 REST）────────
         # 2026-09-01修复：同上，改用统一的list子类哨兵，for循环安全空转
@@ -1604,10 +1606,18 @@ class BinanceClient:
                 else:
                     orders_result = raw_orders
                 self._set_open_orders_cache(sym, orders_result)
-        except IpRateLimitedError:
-            pass
-        except Exception:
-            pass
+        except IpRateLimitedError as e:
+            logger.warning(f"[联合查询] {sym} 挂单查询撞IP限流: {e}")
+        except Exception as e:
+            # 2026-09-01修复(B账户GSUSDT/SKHYNIXUSDT实盘复现·"先平后开"终检
+            # 连续多次判定"挂单不可读"，即使IP限流已经解除也一样)：这里
+            # 以前是纯净的except:pass，任何真实REST异常(不只是IP限流)
+            # 都被完全静默吞掉——orders_result原地保持失败哨兵，外面一层
+            # 一层调用方(_sterile_flat_gate→_collect_tp_limit_orders)拿到
+            # 的都是这个哨兵，压根查不到到底是什么在报错，日志里连一条
+            # "获取挂单失败"都留不下，没法排查。补上这条日志，下次再复现
+            # 能直接看到真实异常是什么。
+            logger.warning(f"[联合查询] {sym} 挂单查询异常(非IP限流): {e}")
 
         failed = is_position_query_failed(pos_result) or is_orders_query_failed(orders_result)
         return {
