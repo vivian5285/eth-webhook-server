@@ -243,6 +243,13 @@
     border-radius: 10px; padding: 10px; max-height: 220px; overflow: auto;
   }
   .tv-empty { padding: 18px; text-align: center; color: var(--text-lo); font-size: 12px; }
+  /* 2026-09-01新增：刷新失败时的不打断视觉提示条(保留上一次数据不清空)，
+     跟.warn-bar(真实交易警示)故意区分开——这里只是"稍后会自动重试"的
+     轻量提示，不应该跟"这会下真实订单"用同一种刺眼样式。 */
+  .tv-load-status {
+    font-size: 11.5px; color: var(--text-lo); padding: 4px 2px 10px;
+  }
+  .tv-load-status.hidden { display: none; }
 
   /* ── 监督狗日志 ── */
   .wd-run {
@@ -465,6 +472,7 @@
           <button class="btn-mini" onclick="loadTvSignals()">刷新</button>
         </div>
       </div>
+      <div id="tvLoadStatus" class="tv-load-status hidden"></div>
       <div class="tv-table-wrap">
         <table class="tv-table">
           <thead><tr>
@@ -933,6 +941,14 @@ function escapeHtml(s) {
   return (s || "").toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function setTvLoadStatus(text) {
+  const el = document.getElementById("tvLoadStatus");
+  if (!el) return;
+  if (!text) { el.classList.add("hidden"); el.textContent = ""; return; }
+  el.textContent = text;
+  el.classList.remove("hidden");
+}
+
 async function loadTvSignals() {
   if (!tvMetaLoaded) await loadTvMeta();
   const acct = document.getElementById("tvAccount").value;
@@ -945,11 +961,26 @@ async function loadTvSignals() {
   params.set("limit", "80");
   const body = document.getElementById("tvBody");
   try {
-    const d = await (await fetch("api/tv_signals?" + params.toString())).json();
+    const res = await fetch("api/tv_signals?" + params.toString());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
     tvCache = d.signals || [];
     renderTvSignals();
+    setTvLoadStatus("");
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="10" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    // 2026-09-01修复：宝贝反馈"tv信号日志经常刷新看不见，加载失败"——
+    // 部署重启的那几秒窗口内偶尔连不上后台，之前一旦这次20秒轮询失败
+    // 就把整张表清空换成刺眼的错误提示，把上一次明明还有效的数据也
+    // 一起冲掉，下一轮(20秒后)恢复正常，体验上就是"经常刷新看不见"。
+    // 改成失败时保留上一次成功渲染的表格不动，只在表格上方用一条不
+    // 打断视觉的小字提示"本次刷新失败，会自动重试"；只有本来就还没
+    // 拿到过任何数据(比如页面刚打开就撞上)，才退回表格内的提示行。
+    console.warn("TV信号刷新失败", e);
+    if (!tvCache.length) {
+      body.innerHTML = `<tr><td colspan="10" class="tv-empty">加载失败: ${escapeHtml(e.message)}，20秒后自动重试</td></tr>`;
+    } else {
+      setTvLoadStatus(`⚠️ 本次刷新失败(${escapeHtml(e.message)})，显示上一次数据，20秒后自动重试`);
+    }
   }
 }
 
@@ -1270,18 +1301,29 @@ function renderWatchdogRun(run) {
     </div>`;
 }
 
+let watchdogHasData = false;
 async function loadWatchdogLogs() {
   const list = document.getElementById("watchdogList");
   const pill = document.getElementById("watchdogTimerPill");
   try {
-    const d = await (await fetch("api/watchdog/logs?limit=60")).json();
-    if (d.status !== "ok") { list.innerHTML = `<div class="tv-empty">加载失败</div>`; return; }
+    const res = await fetch("api/watchdog/logs?limit=60");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    if (d.status !== "ok") throw new Error(d.message || "bad_status");
     pill.textContent = d.timer_active ? "巡检定时器运行中" : "⚠️ 巡检定时器未运行";
     pill.className = "pill" + (d.timer_active ? "" : " alert");
     const runs = d.runs || [];
     list.innerHTML = runs.length ? runs.map(renderWatchdogRun).join("") : `<div class="tv-empty">暂无记录</div>`;
+    watchdogHasData = true;
   } catch (e) {
-    list.innerHTML = `<div class="tv-empty">加载失败: ${escapeHtml(e.message)}</div>`;
+    // 2026-09-01修复：同TV信号——部署重启的几秒窗口内偶尔连不上，之前
+    // 会把已经渲染好的巡检记录清空换成错误提示，60秒后恢复又正常，
+    // 体验上就是"经常刷新看不见"。已有数据时保留不动，只在还从没
+    // 成功加载过时才显示错误占位。
+    console.warn("监督狗日志刷新失败", e);
+    if (!watchdogHasData) {
+      list.innerHTML = `<div class="tv-empty">加载失败: ${escapeHtml(e.message)}，60秒后自动重试</div>`;
+    }
   }
 }
 
@@ -1347,20 +1389,30 @@ function renderStrategyCompareRow(row) {
     </tr>`;
 }
 
+let strategyCompareHasData = false;
 async function loadStrategyCompare() {
   const body = document.getElementById("strategyCompareBody");
   if (!body) return;
   try {
-    const d = await (await fetch("api/strategy/compare")).json();
-    if (d.status !== "ok") { body.innerHTML = `<tr><td colspan="9" class="tv-empty">加载失败</td></tr>`; return; }
+    const res = await fetch("api/strategy/compare");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    if (d.status !== "ok") throw new Error(d.message || "bad_status");
     const rows = d.strategies || [];
     _strategyDescriptions = {};
     rows.forEach(r => { _strategyDescriptions[r.strategy] = r.description; });
     body.innerHTML = rows.length
       ? rows.map(renderStrategyCompareRow).join("")
       : `<tr><td colspan="9" class="tv-empty">暂无数据</td></tr>`;
+    strategyCompareHasData = true;
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="9" class="tv-empty">加载失败: ${escapeHtml(e.message)}</td></tr>`;
+    // 2026-09-01修复：同TV信号/监督狗日志——已有数据时保留不动，只在
+    // 还从没成功加载过时才显示错误占位，避免部署重启几秒窗口把已经
+    // 渲染好的擂台数据清空成一片"加载失败"。
+    console.warn("策略对比刷新失败", e);
+    if (!strategyCompareHasData) {
+      body.innerHTML = `<tr><td colspan="9" class="tv-empty">加载失败: ${escapeHtml(e.message)}，60秒后自动重试</td></tr>`;
+    }
   }
 }
 
