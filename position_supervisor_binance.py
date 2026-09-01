@@ -4215,12 +4215,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
     def _ensure_flat_before_open(self, reason_tag="开仓前"):
         """
         开仓前一律无菌净场（有仓强平+撤单；空仓也清残留挂单）。
-        平仓/净场失败：重试 3 次；IP 冷却期内等待冷却结束再重试，避免限流拦截。
+        平仓/净场失败：重试 6 次；IP 冷却期内等待冷却结束再重试，避免限流拦截。
         仍失败 → CLOSE_THEN_OPEN_FAIL_ABORT
         （放弃本笔开仓 + 高优钉钉 + 暂停该 symbol 自动开仓，需人工 /admin/resume）。
+
+        2026-09-01：原3次重试实盘复现(GSUSDT/SKHYNIXUSDT/ANTHROPICUSDT，
+        同一天连续撞上)总预算只有大约30秒到2分钟(取决于IP冷却剩余时长)，
+        跟今天异常持久的IP限流窗口(单次持续超过2分钟)比明显不够——不是
+        账本/挂单真的读不出来，是重试次数耗尽得太快，真实TV开仓信号被
+        直接放弃。改成6次，同样的退避公式(1+（次数-1)×2秒，外加每次最多
+        20秒的IP冷却等待)让总预算大致翻倍，更能扛住持续性的限流风暴，
+        仍然有限次数、仍然会在真正长期卡死时中止+报警，不是无限重试。
         """
         tag = reason_tag or "开仓前"
-        max_attempts = 3
+        max_attempts = 6
         last_detail = ""
         for attempt in range(1, max_attempts + 1):
             # ── 重试前：若 IP 仍在冷却，等冷却结束再打 REST ──────────────
