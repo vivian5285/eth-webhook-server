@@ -102,6 +102,16 @@ CATCHUP_MAX_CONCURRENT_PER_ACCOUNT = 2  # 2026-08-21实盘复现：同一账户�
                                          # 仓位一样走保守克制的路子，不追求一次
                                          # 吃满所有机会。
 
+# 2026-09-01新增：追回止损距离ATR下限——宝贝XPDUSDT实盘复现：TV心跳给的
+# tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
+# TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
+# 心跳这条数据流本身没有任何校验(见record_tv_heartbeat)，异常值会原样
+# 传下来。不是不信TV——正常情况TV给的距离就该原样用，只是给一道兜底：
+# 距离小于该品种自己ATR的这个倍数时，大概率是心跳数据本身有问题(不是
+# TV真的想要这么紧的止损)，退回用ATR算一个更合理的距离，不让一条异常
+# 心跳数据把止损做成摆设。
+TV_CATCHUP_MIN_STOP_ATR_MULT = 0.3
+
 # 2026-08-20新增：多周期趋势强度确认——ETH那次雷达保本止损出局后TV仍持有，
 # 价格继续了一大段单边行情，VPS却没能跟上，根因是现有呼吸空间/雷达跟随
 # 距离即使判定"强趋势档"也有固定上限，遇到真正多周期共振的大趋势不够宽。
@@ -3090,6 +3100,18 @@ class RadarReentryMixin:
         # 止损：按TV止损"空间"(距离)重新锚定到实际成交价，两条分支(限价
         # 优价/市价兜底)统一公式，只是fill_px不同——不硬搬TV原始止损绝对价
         distance = float(getattr(self, "catchup_stop_distance_frozen", 0) or 0)
+        # 2026-09-01新增：见TV_CATCHUP_MIN_STOP_ATR_MULT顶部注释——TV心跳
+        # 给的距离小于该品种自己ATR的这个倍数时，大概率是心跳数据本身
+        # 异常(不是TV真的想要这么紧)，退回用ATR算一个更合理的下限，避免
+        # 挂一个一根插针就打穿的形同虚设止损。
+        min_distance = atr * TV_CATCHUP_MIN_STOP_ATR_MULT if atr > 0 else 0.0
+        if min_distance > 0 and distance < min_distance:
+            logger.warning(
+                f"⚠️ [{self.symbol}] TV心跳止损距离{distance:.4f}小于"
+                f"{TV_CATCHUP_MIN_STOP_ATR_MULT}倍ATR({min_distance:.4f})，"
+                f"疑似TV心跳数据异常 → 改用ATR下限锚定硬止损，不完全信TV原始距离"
+            )
+            distance = min_distance
         hard_sl = (entry - distance) if side == "LONG" else (entry + distance)
         self.frozen_hard_sl_px = round(float(hard_sl), 2)
         self.initial_stop = self.frozen_hard_sl_px
