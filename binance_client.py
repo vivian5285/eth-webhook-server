@@ -1600,7 +1600,7 @@ class BinanceClient:
                     orders_result = cached
             else:
                 self._throttle_rest(sym, kind="rest")
-                raw_orders = list(self.client.futures_get_open_orders(sym) or [])
+                raw_orders = list(self.client.futures_get_open_orders(symbol=sym) or [])
                 # ── Algo 条件单（独立 REST；若冷却则跳过，调用方用普通单判断）──
                 algo_orders = None
                 if not self.ip_rate_limit_remaining():
