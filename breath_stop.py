@@ -54,6 +54,13 @@ ADX_FALLBACK = 25.0
 # 宝贝的风险偏好判断，跟宝贝确认后先设0.5(雷达最多只能比TV自己紧一半)。
 TV_STOP_FLOOR_FRAC = 0.5
 
+# 2026-09-02新增：pre_tp1区呼吸空间地板——见_zone_trail_atr内pre_tp1
+# 分支顶部同日期注释。不管ADX档位把呼吸空间收窄到多少，pre_tp1区最少
+# 要给到TV自己TP1目标距离的这个比例，不能小于这个数。跟TV_STOP_FLOOR_
+# FRAC同一个"别让判断依据以外的因素(这里是tier档位)顺带收紧了本不该
+# 它管的空间"的思路，取同样的0.5起步。
+PRE_TP1_TP1_DIST_FRAC = 0.5
+
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(profile, dict) and profile:
@@ -381,6 +388,24 @@ def calculate_stop_long(
         else:
             candidate = tv_floor
 
+    # 2026-09-02新增(B/C两账户BNBUSDT实盘复现，宝贝直接指出"雷达普遍跟
+    # 得太紧，90%以上都是TV还持有、实盘先没了")：TV_STOP_FLOOR_FRAC那条
+    # 地板锚定的是TV止损空间，但pre_tp1区真正该参照的是"离TP1还有多远"
+    # ——BNBUSDT这次TV止损空间只有4.87点，TP1却在30点开外，光靠TV止损
+    # 空间这条地板根本护不到"还没到TP1就被阶梯提前收网"这件事。之前
+    # 试过把这条地板做进_zone_trail_atr/trail_floor那条路径，结果撞上
+    # trail_floor棘轮的另一层保护，反而把地板变成摆设(本地测试当场
+    # 暴露、已改用这里这种跟TV_STOP_FLOOR_FRAC完全同款的独立最终夹取，
+    # 不再经过trail_floor那条路)。只在pre_tp1区生效，tp1_px缺失时不
+    # 设限、安全跳过；过了TP1之后TV_STOP_FLOOR_FRAC和阶梯/呼吸自身的
+    # 逻辑接管，不再需要这条地板。
+    if zone == "pre_tp1" and tp1_px > 0:
+        pre_tp1_floor = new_highest - PRE_TP1_TP1_DIST_FRAC * abs(tp1_px - entry_price)
+        if candidate > 0:
+            candidate = min(candidate, pre_tp1_floor)
+        else:
+            candidate = pre_tp1_floor
+
     new_stop = candidate
     return (
         round(float(new_stop), 2),
@@ -496,6 +521,16 @@ def calculate_stop_short(
             candidate = max(candidate, tv_floor)
         else:
             candidate = tv_floor
+
+    # 2026-09-02新增：pre_tp1区TP1距离地板，SHORT对称版——见calculate_
+    # stop_long同日期注释(BNBUSDT实盘复现，B/C两账户)。只在pre_tp1区
+    # 生效，tp1_px缺失时不设限。
+    if zone == "pre_tp1" and tp1_px > 0:
+        pre_tp1_floor = new_lowest + PRE_TP1_TP1_DIST_FRAC * abs(tp1_px - entry_price)
+        if candidate > 0:
+            candidate = max(candidate, pre_tp1_floor)
+        else:
+            candidate = pre_tp1_floor
 
     new_stop = candidate
     return (
