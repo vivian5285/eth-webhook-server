@@ -15490,6 +15490,52 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 f"🚫 [{self.symbol}] 开仓拒绝：持仓查询失败，状态未知 [{action}] "
                 f"| 重试{pos_max_attempts}次仍未恢复"
             )
+            # 2026-09-02新增(TSLAUSDT实盘复现，宝贝要求"能不能自己补开，但
+            # 要非常合理强壮的条件和逻辑，参考重入/心跳追回")：重试预算耗尽
+            # 真放弃后，不能就这么把这条信号彻底扔掉——原来只能指望TV心跳
+            # 独立地、可能过很久才刷新一次，才会重新发现"心跳有仓我们没有"
+            # 从而触发追回，TSLAUSDT这次实盘复现足足空等了32分钟。这里改成
+            # 直接用这条刚失败的信号自己的数据(比心跳快照更精确、更新鲜)
+            # 去喂现成的TV心跳追回引擎——不新写一套价格纪律，原样复用
+            # _maybe_start_tv_heartbeat_catchup已经具备的全部强壮条件：
+            # 多周期EMA+动量一致确认(_multi_tf_trend_confirmed)、账户级
+            # 并发武装上限、同一事件去重(_catchup_episode_resolved)、近期
+            # 被永久硬止损扫过则不追、trading_paused/reentry_active/
+            # chase_watch_active让位——一条都不放松。record_tv_heartbeat
+            # 把这条失败信号的方向/价格"喂"成心跳，让_tv_catchup_precheck_
+            # still_valid(限价/市价下单前都会复核)能通过；_tv_gap_first_
+            # seen_ts直接回拨到宽限期之外，跳过原本还要再等180秒才会开始
+            # 评估的空窗——这个回拨手法在bootstrap_supervisors里"重启前
+            # 追回周期被清场流程带走"那个场景已经用过，不是新手法。
+            try:
+                tv_tp1 = self._safe_float(
+                    payload.get("tv_tp1") or payload.get("tp1"), 0,
+                )
+                tv_tp2 = self._safe_float(
+                    payload.get("tv_tp2") or payload.get("tp2"), 0,
+                )
+                tv_tp3 = self._safe_float(
+                    payload.get("tv_tp3") or payload.get("tp3"), 0,
+                )
+                self.record_tv_heartbeat({
+                    "tv_side": action,
+                    "tv_entry": tv_px,
+                    "tv_stop": tv_sl,
+                    "tv_tp1": tv_tp1,
+                    "tv_tp2": tv_tp2,
+                    "tv_tp3": tv_tp3,
+                })
+                self._tv_gap_first_seen_ts = (
+                    time.time() - TV_HEARTBEAT_GAP_GRACE_SEC - 1.0
+                )
+                logger.warning(
+                    f"🚑 [{self.symbol}] 开仓失败已喂给TV心跳追回引擎，"
+                    f"跳过宽限期立即评估 side={action} tv_entry={tv_px:.4f} "
+                    f"tv_stop={tv_sl:.4f}"
+                )
+                self._maybe_start_tv_heartbeat_catchup()
+            except Exception as e:
+                logger.error(f"[{self.symbol}] 开仓失败转追回评估异常: {e}")
             return
         live_sz = float((pos or {}).get("size", 0) or 0)
         live_side = (pos or {}).get("side")
