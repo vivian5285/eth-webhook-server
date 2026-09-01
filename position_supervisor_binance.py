@@ -349,6 +349,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
         self._signal_worker_started = False
         self._sentinel_active = False
+        self._sentinel_thread = None
         self._sentinel_start_lock = threading.Lock()
         self.open_regime = 3
         self.open_atr = 30.0  # 展示默认；真开仓后由 LockedInitialAtr 锁定
@@ -832,6 +833,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
                 if self.monitoring:
+                    # 2026-09-01新增：这个循环本来在monitoring=True时什么都不做
+                    # (持仓期的监督全交给_sentinel_loop)——但如果哨兵线程本身
+                    # 已经意外死掉(见_ensure_sentinel_running顶部同一次修复的
+                    # 注释)，monitoring还是True，没有任何现成的周期性检查会
+                    # 发现这件事，只能等进程重启。这个循环本来就每个品种独立
+                    # 常驻、不受monitoring影响照样醒着，顺手在这里补一道"哨兵
+                    # 真的还活着吗"的自愈检查，不需要新起一个线程。
+                    try:
+                        self._ensure_sentinel_running()
+                    except Exception as e:
+                        logger.debug(f"[{self.symbol}] 哨兵自愈检查跳过: {e}")
                     continue
                 # 空仓待命：尝试解除可恢复暂停（防 flat 后仍卡 pause）
                 try:
@@ -14723,17 +14735,37 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         )
 
     def _ensure_sentinel_running(self):
-        """单一哨兵：先占位 _sentinel_active 再起线程，禁止竞态多启。"""
+        """单一哨兵：先占位 _sentinel_active 再起线程，禁止竞态多启。
+
+        2026-09-01新增自愈：_sentinel_active只是个"我已经起过线程"的占位
+        标记，从来没验证过那个线程是否真的还活着。实盘复现(C账户
+        LITEUSDT)：_sentinel_loop顶部_ensure_price_ws()在try/except保护
+        范围之外，一旦这一步抛异常，线程直接死掉但finally块(负责把
+        _sentinel_active复位)根本没机会跑到——_sentinel_active永远卡在
+        True，之后这个品种哪怕仓位还在，也再没有任何一次_ensure_sentinel_
+        running能真正起新线程，静默失踪，只有整个进程重启才能恢复。
+        改成额外记住Thread对象本身，占位判断时用thread.is_alive()真正核实，
+        发现"占位说活着、线程其实已经死了"就自愈重启，不再依赖那个可能
+        没跑到的finally。"""
         if not self.monitoring:
             return
         with self._sentinel_start_lock:
+            existing = getattr(self, "_sentinel_thread", None)
             if self._sentinel_active:
-                return
+                if existing is not None and existing.is_alive():
+                    return
+                logger.error(
+                    f"🚨 [{self.symbol}] 哨兵自愈：_sentinel_active=True但线程已死"
+                    f"(疑似启动阶段未捕获异常崩溃) → 强制重启"
+                )
+                self._sentinel_active = False
             self._sentinel_active = True
-            threading.Thread(
+            t = threading.Thread(
                 target=self._sentinel_loop, daemon=True,
                 name=f"sentinel-{self.symbol}",
-            ).start()
+            )
+            self._sentinel_thread = t
+            t.start()
 
     def _full_reentry(self, action, close_reason, payload=None):
         """
@@ -18446,7 +18478,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """哨兵：持仓/TP 防线 + 雷达止损追踪（WS推送优先，轮询兜底）。
         启动前调用方已置 _sentinel_active=True（占位防双启）。
         """
-        self._ensure_price_ws()
+        # 2026-09-01修复：_ensure_price_ws此前在下面的try/finally保护范围
+        # 之外——WS只是"优先"通道，REST轮询本来就是兜底，WS启动失败不该
+        # 让整个哨兵线程直接崩掉(崩掉还会导致_sentinel_active卡死在True，
+        # 见_ensure_sentinel_running顶部注释同一次修复)。失败只记警告，
+        # 照常进入下面主循环，靠REST轮询兜底继续工作。
+        try:
+            self._ensure_price_ws()
+        except Exception as e:
+            logger.warning(f"🛡️ [{self.symbol}] WS启动失败，降级纯REST轮询: {e}")
         last_px = 0.0
         try:
             while self.monitoring:
