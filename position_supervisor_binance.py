@@ -497,6 +497,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.trading_pause_reason = ""
         self.api_monitor_only = False
         self._state_old_schema = False
+        # 2026-09-02修复(C账户TSLAUSDT实盘复现)：TV真实发了CLOSE_QUICK_EXIT，
+        # 但当晚撞上一次874秒的超长IP冷却，_close_all的6次重试(~145秒)根本
+        # 扛不到冷却结束就耗尽放弃，只留一条"人工清盘"告警——此后这个"还欠
+        # 一次平仓"的意图完全没有持久化，纯内存/纯日志，一旦期间发生任何重
+        # 启(哪怕只是为了上线别的修复重启)，recover_state_on_startup发现
+        # 交易所上仓位真的还在，就直接当成一笔正常持仓接管、雷达开始正常
+        # 管理止损——完全不知道TV早就喊了平仓，这笔仓位卡了3小时45分钟没
+        # 人管这件事。这里补上持久化：只要_close_all被调用过、且最终没能
+        # confirmed flat，就把"必须平掉"这个意图落盘，重启后recover_state_
+        # on_startup优先续追平仓(见该函数内新增分支)，仓位仍处monitoring=
+        # True期间_sentinel_loop每轮tick也会优先续追(见该循环内新增分支)，
+        # 直到真正确认空仓才清除标记。
+        self.pending_forced_close = False
+        self.pending_forced_close_reason = ""
+        self.pending_forced_close_started_ts = 0.0
         self._last_bar_time_ms = 0  # 最近处理过的 bar_time（乱序/过期兜底）
         self._atr_div_streak = 0
         self.atr_source = "tv"  # 规格 v1.0：ATR 全程只用 TV webhook.atr
@@ -3701,6 +3716,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "trading_paused": bool(getattr(self, "trading_paused", False)),
                     "api_monitor_only": bool(getattr(self, "api_monitor_only", False)),
                     "trading_pause_reason": str(getattr(self, "trading_pause_reason", "") or ""),
+                    "pending_forced_close": bool(getattr(self, "pending_forced_close", False)),
+                    "pending_forced_close_reason": str(
+                        getattr(self, "pending_forced_close_reason", "") or ""
+                    ),
+                    "pending_forced_close_started_ts": float(
+                        getattr(self, "pending_forced_close_started_ts", 0) or 0
+                    ),
                     "atr_div_streak": int(getattr(self, "_atr_div_streak", 0) or 0),
                     "atr_source": str(getattr(self, "atr_source", "vps") or "vps"),
                     "atr_degraded": bool(getattr(self, "atr_degraded", False)),
@@ -18774,6 +18796,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             label=f"IP限流冷却剩 {ip_rem:.0f}s·禁止REST",
                         )
                         continue
+                    # 2026-09-02修复(C账户TSLAUSDT实盘复现，见__init__里
+                    # pending_forced_close字段注释)：IP冷却已经放行到这里，
+                    # 说明现在可以打REST了——如果还欠着一次没兑现的强平意图
+                    # (通常是上一次_close_all 6次重试全被同一波IP风暴盖住)，
+                    # 优先续追这一次，不要用这轮tick去正常维护止损/TP（那样
+                    # 等于把"TV早就喊平仓"的仓位当成正常持仓继续伺候）。不占
+                    # 用self._lock：_close_all/_flat_close_parallel内部不抢
+                    # 这把锁，放在锁外调用避免长达~145秒的重试期间把哨兵其它
+                    # 职责一起卡住。
+                    if bool(getattr(self, "pending_forced_close", False)):
+                        logger.warning(
+                            f"🚑 [{self.symbol}] 哨兵续追未兑现的强平意图"
+                            f"({self.pending_forced_close_reason})"
+                        )
+                        self._close_all(
+                            reason=self.pending_forced_close_reason or "哨兵续追平仓",
+                            reset_state=True,
+                        )
+                        continue
                     if not self._lock.acquire(timeout=2.0):
                         time.sleep(0.5)
                         continue
@@ -19344,6 +19385,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         """并行双发市价全平+撤单；持仓 QUERY_FAILED → fail-closed 返回 False。"""
         prev_side = self.current_side
 
+        # 2026-09-02修复(C账户TSLAUSDT实盘复现，见__init__里pending_forced_
+        # close字段注释)：一进函数就把"必须平掉"的意图落盘，不等重试跑完。
+        # 保留最早一次的started_ts(同一轮意图被反复续追时不重置计时)。
+        if not bool(getattr(self, "pending_forced_close", False)):
+            self.pending_forced_close_started_ts = time.time()
+        self.pending_forced_close = True
+        self.pending_forced_close_reason = str(reason or "强平")
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
         # ── 并行平仓 + 撤单 ──
         # 2026-09-01修复(B/C/E三账户BNBUSDT实盘复现)：这里原来只发一次
         # _flat_close_parallel，撞上IP限流直接失败就没有下文了——跟开仓
@@ -19424,6 +19477,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     if not residual or abs(float(residual.get("positionAmt", 0) or 0)) < 0.001:
                         logger.info(f"[蚂蚁仓复核] {self.symbol} 已无仓，安全退出")
                         closed_successfully = True
+                        # 这条早退分支绕过了函数末尾统一清pending_forced_close
+                        # 的地方，这里已经REST复核确认真实空仓，一并清掉。
+                        self.pending_forced_close = False
+                        self.pending_forced_close_reason = ""
+                        self.pending_forced_close_started_ts = 0.0
                         time.sleep(1.0)
                         return self._verify_flat()
                     residual_amt = float(residual.get("positionAmt", 0))
@@ -19452,6 +19510,15 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     "强平未完全归零",
                     f"6 轮市价平仓后仍剩 {residual_sz} {self._unit()}，请人工核查币安盘口",
                 )
+
+        # 平仓意图真正兑现，清掉持久化标记——不挂在reset_state下面（那个
+        # 参数目前实际只有默认True一种用法，但语义上是两件独立的事）；只
+        # 有这里才清，6次重试耗尽仍未确认flat时必须保持True，交给重启接管
+        # /哨兵续追(见__init__里pending_forced_close字段注释)。
+        if closed_successfully:
+            self.pending_forced_close = False
+            self.pending_forced_close_reason = ""
+            self.pending_forced_close_started_ts = 0.0
 
         if reset_state:
             if closed_successfully:
@@ -19779,6 +19846,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.trading_pause_reason = str(
                         s.get("trading_pause_reason", "") or ""
                     )
+                    self.pending_forced_close = bool(s.get("pending_forced_close", False))
+                    self.pending_forced_close_reason = str(
+                        s.get("pending_forced_close_reason", "") or ""
+                    )
+                    self.pending_forced_close_started_ts = float(
+                        s.get("pending_forced_close_started_ts", 0) or 0
+                    )
                     self._atr_div_streak = int(s.get("atr_div_streak", 0) or 0)
                     self.atr_source = str(s.get("atr_source", "vps") or "vps")
                     self.atr_degraded = bool(s.get("atr_degraded", False))
@@ -19887,6 +19961,39 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     return
             finally:
                 self._recover_in_progress = False
+
+            # 2026-09-02修复(C账户TSLAUSDT实盘复现，见__init__里pending_
+            # forced_close字段注释)：上面_recover_missed_flat_on_startup
+            # 已经证实了"盘口不是空仓"(否则它自己会return True收尾)，如果
+            # 账本还留着一个未兑现的强平意图，绝不能落进下面"探测→当正常
+            # 持仓接管→雷达开始管理"的通用流程——那正是TSLAUSDT那次3小时45
+            # 分钟没人管的根因。这里优先续追一次平仓；这次仍失败也不要紧，
+            # pending_forced_close在_close_all里保持True，下面启动哨兵后
+            # _sentinel_loop每轮tick会继续追(不必等下一次重启)。
+            if bool(getattr(self, "pending_forced_close", False)):
+                logger.warning(
+                    f"🚑 [{self.symbol}] 重启接管：发现未兑现的强平意图"
+                    f"({self.pending_forced_close_reason}) → 优先续追平仓，"
+                    f"禁止当正常持仓接管"
+                )
+                self._recover_in_progress = True
+                try:
+                    closed = self._close_all(
+                        reason=self.pending_forced_close_reason or "重启续追平仓",
+                        reset_state=True,
+                    )
+                finally:
+                    self._recover_in_progress = False
+                if closed:
+                    return
+                logger.error(
+                    f"❌ [{self.symbol}] 重启续追平仓仍未成功，"
+                    f"交idle-patrol持续重试，先启哨兵盯盘"
+                )
+                self.monitoring = True
+                self._ensure_sentinel_running_quiet()
+                self._last_idle_takeover_ts = 0.0
+                return
 
             # 强制 REST 多轮探测，禁止 WS 空缓存 / 共享锁导致漏接实盘。
             # 2026-08-24：跟上面"确认空仓"那段同一个坑——这里也是多轮REST，
