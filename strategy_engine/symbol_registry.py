@@ -9,6 +9,18 @@ ZECUSDT 四个，共用同一套逻辑（strategies/zec_pingkai_buhuchi.py）+ �
 参数（该文件 DEFAULT_PARAMS，未逐项覆盖）。其余 9 个品种仍是占位的
 `_template`（双EMA交叉），等用户陆续提供资料后逐个替换。
 
+2026-09-03新增：宝贝发来"02版本.txt"("XAU加仓最小改动版+平开独立不
+互斥")，确认XAUUSDT用的正是ETH那套Trillion_God_v6.5_Pro_Light"平开
+不互斥版"(拉宽TP版，见eth_pingkai_buhuchi.py顶部2026-09-03更新注释)，
+不再是_template占位——两个品种参数完全一致，直接复用同一个策略名，
+不新建模块。
+
+⚠️ 已知缺口：BNBUSDT/BCHUSDT/XMRUSDT/SNDKUSDT/XPDUSDT/OPENAIUSDT/
+ANTHROPICUSDT仍是_template占位，且GSUSDT/MUUSDT/LITEUSDT/TSLAUSDT/
+METAUSDT这5个实盘在跑的品种本文件里压根没登记(这份注册表建立时它们
+还没上线)——"每个品种用哪套TV策略"这张完整对照表还没拿全，下次宝贝
+再给到哪个品种的真实源码，按下面"接入步骤"逐个补。
+
 用户提供某个品种的真实资料后接入步骤：
   1. strategies/ 下新增模块，照抄真实策略逻辑
   2. strategies/__init__.py 的 STRATEGIES 里登记
@@ -32,10 +44,13 @@ SYMBOLS: Dict[str, dict] = {
     "ZECUSDT":       {"strategy": _ZEC_STRATEGY, "timeframe": "150m", "mtf": _ZEC_MTF, "params": {}},
 
     # ── 2026-08-20 接入真实策略：ETH版本（平开不互斥版），完整源码（非截图）──
+    # 2026-09-03：DEFAULT_PARAMS已按"01版本.txt"更新为拉宽TP版，见该文件docstring。
     "ETHUSDT":       {"strategy": "eth_pingkai_buhuchi", "timeframe": "90m", "mtf": ["4h", "1d"], "params": {}},
 
+    # ── 2026-09-03 接入真实策略：XAU版本（平开不互斥版，跟ETH同一套参数）──
+    "XAUUSDT":       {"strategy": "eth_pingkai_buhuchi", "timeframe": "50m", "mtf": ["4h", "1d"], "params": {}},
+
     # ── 占位，等用户提供其余品种的真实策略资料 ──────────────────────────
-    "XAUUSDT":       {"strategy": "_template", "timeframe": "50m",  "mtf": [], "params": {}},
     "BNBUSDT":       {"strategy": "_template", "timeframe": "150m", "mtf": [], "params": {}},
     "BCHUSDT":       {"strategy": "_template", "timeframe": "6h",   "mtf": [], "params": {}},
     "XMRUSDT":       {"strategy": "_template", "timeframe": "6h",   "mtf": [], "params": {}},
