@@ -1,0 +1,440 @@
+//@version=5
+strategy("ETH（平开不互斥版）修复警报 + 盘中提前入场锁", overlay=true, initial_capital=1000, default_qty_type=strategy.fixed, default_qty_value=1000, currency=currency.USDT)
+
+// ======================== Webhook 固定参数（VPS适配，未做任何改动） ========================
+bot_id = "Trillion_God_v6.5_Pro_Light"
+secret = "528586"
+
+// 定义退出JSON（用于止盈消息，VPS只需知道平仓）
+// exit_json已删除，TP1/TP2/TP3不再往外发送协议外的通用CLOSE消息——
+// VPS开仓时已用payload里的tp1/tp2/stop_loss/atr字段独立挂好止盈止损雷达，全程不需要TV再通知。
+
+// ======================== 控制面板参数 ========================
+// ---- 回测时间 ----
+startDate = input.time(timestamp("2020-01-01"), "回测开始日期")
+endDate   = input.time(timestamp("2030-01-01"), "回测结束日期")
+inTimeRange = time >= startDate and time <= endDate
+
+// ---- 入场/出场评分阈值 ----
+longEntryScore  = input.int(1, "多头入场分", minval=0, maxval=6, step=1)
+shortEntryScore = input.int(1, "空头入场分", minval=0, maxval=6, step=1)
+quickExitScore  = input.int(2, "快速平仓分数阈值", minval=1, maxval=3, step=1)
+quickExitConfirmBars = input.int(2, "反转确认所需连续K线数（防止单根K线噪音触发，1=不要求连续，等于原逻辑）", minval=1, maxval=5)
+rsiExitLevel    = input.int(50, "RSI反转平仓阈值", minval=30, maxval=70, step=1)
+
+// ---- 真正的KDJ金叉/死叉，作为快速平仓的额外确认门槛（不是数值越线，是交叉事件；默认关闭） ----
+useKDJExitConfirm = input.bool(false, "🔧 反转平仓需KDJ同步确认（K在D下方才平多/K在D上方才平空，更严格）", group="反转确认（评分系统）")
+kdjLen = input.int(9, "KDJ RSV长度", group="反转确认（评分系统）")
+kdjSmoothK = input.int(3, "K平滑长度", group="反转确认（评分系统）")
+kdjSmoothD = input.int(3, "D平滑长度", group="反转确认（评分系统）")
+
+// ---- 裸K+量能快速反转触发 ----
+grp_candlevol = "===== 裸K+量能反转（4H级别） ====="
+exitModeSelect = input.string("混合(评分OR 4H，任一满足即出)", "反转出场模式", options=["纯评分系统(原版)", "4H裸K+量能主导(完全取代评分)", "混合(评分OR 4H，任一满足即出)"], group=grp_candlevol)
+candleBodyRatio = input.float(0.55, "决定性K线实体占比阈值（实体/K线全长，越大要求K线越干净利落）", minval=0.3, maxval=0.95, step=0.05, group=grp_candlevol)
+candleVolMultiplier = input.float(1.15, "反转确认所需放量倍数（相对20周期均量）", minval=1.0, step=0.05, group=grp_candlevol)
+
+// ---- 【新增·方案一】TP2阶段分级放行：价格已突破TP2距离后，收窄允许触发平仓的信号种类 ----
+useStagedExitGate = input.bool(true, "🔧【新增-方案一】价格突破TP2距离后，关闭评分反转/RSI反转/连续逆势K线，只保留4H裸K放量反转", group=grp_candlevol)
+
+// ---- 入场裸K确认闸 ----
+grp_entryconfirm = "===== 入场裸K确认闸 ====="
+useEntryCandleConfirm = input.bool(false, "🔧 入场需裸K确认（触发入场的K线本身也要有方向性决心，过滤十字星/长影线的犹豫入场）", group=grp_entryconfirm)
+entryCandleBodyRatio = input.float(0.5, "入场确认所需实体占比阈值（实体/K线全长）", minval=0.2, maxval=0.95, step=0.05, group=grp_entryconfirm)
+
+// ---- 连续逆势K线快速离场 ----
+grp_consec = "===== 连续逆势K线快速离场 ====="
+useConsecAdverseExit = input.bool(false, "🔧 启用连续逆势K线快速离场（不看指标，纯粹数K线颜色，比RSI更快）", group=grp_consec)
+consecAdverseBars = input.int(3, "连续几根逆势K线后触发离场", minval=2, maxval=6, group=grp_consec)
+
+// ---- 大周期趋势评分（可勾选） ----
+use_4H_trend   = input.bool(true, "使用 4H EMA 趋势")
+use_12H_trend  = input.bool(false, "使用 12H EMA 趋势")
+use_1D_trend   = input.bool(true, "使用 日线 EMA 趋势")
+
+// ---- 过滤开关（KDJ + 量能） ----
+use_kdj_filter   = input.bool(true, "启用 KDJ 过滤（K>D 做多 / K<D 做空）")
+use_volume_filter = input.bool(true, "启用量能过滤（量比 > 阈值）")
+volume_threshold = input.float(1.1, "量比阈值", step=0.1, minval=1.0)
+
+// ---- 原版核心参数 ----
+emaFastLen = input.int(15, "快线 EMA")
+emaSlowLen = input.int(30, "慢线 EMA")
+adxLen = input.int(14, "ADX 趋势长度")
+rsiLen = input.int(14, "RSI 动能长度")
+minADX = input.float(17, "最小 ADX 趋势阈值")
+
+// ---- 实盘风控 ----
+baseRiskPercent = input.float(1.45, "基础风险占比 %", step=0.1, minval=0.3, maxval=2.0)
+maxLeverage = input.float(3.0, "单笔最大允许杠杆倍数", minval=1, maxval=5)
+
+// ---- 弱/中/强三档的止损+TP距离系数 ----
+grp_tier_th = "===== 档位划分阈值 ====="
+adxWeakThreshold   = input.float(20, "弱/中趋势分界ADX值（低于此值=弱趋势）", group=grp_tier_th)
+adxStrongThreshold = input.float(30, "中/强趋势分界ADX值（高于此值=强趋势）", group=grp_tier_th)
+globalSLMultiplier = input.float(1.0, "🔧 全局硬止损系数（在三档基础上整体缩放）", minval=0.3, maxval=3.0, step=0.05, group=grp_tier_th)
+
+grp_weak = "===== 弱趋势档位 ====="
+weakSLMult  = input.float(1.0, "弱趋势 止损ATR倍数", group=grp_weak)
+weakTP1Mult = input.float(1.0, "弱趋势 TP1 ATR倍数", group=grp_weak)
+weakTP2Mult = input.float(1.8, "弱趋势 TP2 ATR倍数", group=grp_weak)
+weakTP3Mult = input.float(2.6, "弱趋势 TP3 ATR倍数", group=grp_weak)
+
+grp_mid = "===== 中等趋势档位 ====="
+midSLMult  = input.float(1.3, "中等趋势 止损ATR倍数", group=grp_mid)
+midTP1Mult = input.float(1.35, "中等趋势 TP1 ATR倍数", group=grp_mid)
+midTP2Mult = input.float(2.5, "中等趋势 TP2 ATR倍数", group=grp_mid)
+midTP3Mult = input.float(3.6, "中等趋势 TP3 ATR倍数", group=grp_mid)
+
+grp_strong = "===== 强趋势档位 ====="
+strongSLMult  = input.float(1.3, "强趋势 止损ATR倍数", group=grp_strong)
+strongTP1Mult = input.float(1.8, "强趋势 TP1 ATR倍数", group=grp_strong)
+strongTP2Mult = input.float(3.2, "强趋势 TP2 ATR倍数", group=grp_strong)
+strongTP3Mult = input.float(5.0, "强趋势 TP3 ATR倍数", group=grp_strong)
+
+// ---- 分批止盈占比 ----
+tp1Pct = input.int(10, "TP1 占比%")
+tp2Pct = input.int(20, "TP2 占比%（TP3自动=100-TP1-TP2）")
+
+// ---- 极端行情保护 ----
+maxDailyLossPercent = input.float(5.5, "单日最大亏损 % 熔断", step=0.5, minval=2, maxval=10)
+volThreshold = input.float(0.0028, "波动率过滤门槛", step=0.0002, minval=0.001, maxval=0.005)
+
+// ---- 追踪止盈紧度 ----
+trailTight = input.float(0.65, "追踪止盈紧度系数 (越小越紧)", step=0.05, minval=0.3, maxval=1.2)
+
+// ======================== 【新增】盘中提前入场（大阳/大阴不用等收盘） ========================
+grp_early = "===== 盘中提前入场（大阳/大阴及时进场） ====="
+useEarlyEntry = input.bool(true, "🔓 启用盘中提前入场（配合防闪烁锁，安全）", group=grp_early)
+earlyBodyThreshold = input.float(0.5, "提前入场实体最小ATR倍数（0.3激进~0.8保守）", minval=0.2, maxval=1.5, step=0.05, group=grp_early)
+
+// ======================== 指标计算 ========================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsi = ta.rsi(close, rsiLen)
+atr = ta.atr(14)
+stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
+volAvg = ta.vwma(volume, 20)
+volFilter = volume > volAvg * volume_threshold
+isVolatile = (atr / close) > volThreshold
+
+// ---- 大周期 EMA ----
+emaFast_4H  = request.security(syminfo.tickerid, "240", ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
+emaSlow_4H  = request.security(syminfo.tickerid, "240", ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+emaFast_12H = request.security(syminfo.tickerid, "720", ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
+emaSlow_12H = request.security(syminfo.tickerid, "720", ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+emaFast_1D  = request.security(syminfo.tickerid, "D", ta.ema(close, emaFastLen), lookahead=barmerge.lookahead_off)
+emaSlow_1D  = request.security(syminfo.tickerid, "D", ta.ema(close, emaSlowLen), lookahead=barmerge.lookahead_off)
+
+// ---- ADX 计算 ----
+adxCalc(len) =>
+    tr = ta.rma(ta.tr(true), len)
+    up = high - high[1]
+    down = low[1] - low
+    plusDI = 100 * ta.rma(up > down and up > 0 ? up : 0, len) / tr
+    minusDI = 100 * ta.rma(down > up and down > 0 ? down : 0, len) / tr
+    ta.rma(100 * math.abs(plusDI - minusDI) / (plusDI + minusDI + 0.0001), len)
+adxVal = adxCalc(adxLen)
+
+// ======================== 【关键修复】防数据修正锁定 ========================
+rsi_c     = request.security(syminfo.tickerid, timeframe.period, rsi, lookahead=barmerge.lookahead_off)
+stochK_c  = request.security(syminfo.tickerid, timeframe.period, stochK, lookahead=barmerge.lookahead_off)
+adxVal_c  = request.security(syminfo.tickerid, timeframe.period, adxVal, lookahead=barmerge.lookahead_off)
+emaFast_c = request.security(syminfo.tickerid, timeframe.period, emaFast, lookahead=barmerge.lookahead_off)
+emaSlow_c = request.security(syminfo.tickerid, timeframe.period, emaSlow, lookahead=barmerge.lookahead_off)
+close_c   = request.security(syminfo.tickerid, timeframe.period, close, lookahead=barmerge.lookahead_off)
+open_c    = request.security(syminfo.tickerid, timeframe.period, open, lookahead=barmerge.lookahead_off)
+high_c    = request.security(syminfo.tickerid, timeframe.period, high, lookahead=barmerge.lookahead_off)
+low_c     = request.security(syminfo.tickerid, timeframe.period, low, lookahead=barmerge.lookahead_off)
+isVolatile_c = request.security(syminfo.tickerid, timeframe.period, isVolatile, lookahead=barmerge.lookahead_off)
+volFilter_c  = request.security(syminfo.tickerid, timeframe.period, volFilter, lookahead=barmerge.lookahead_off)
+
+// ---- 综合打分 ----
+bullScore = 0
+if emaFast_c > emaSlow_c
+    bullScore := bullScore + 1
+if use_4H_trend and emaFast_4H > emaSlow_4H
+    bullScore := bullScore + 1
+if use_12H_trend and emaFast_12H > emaSlow_12H
+    bullScore := bullScore + 1
+if use_1D_trend and emaFast_1D > emaSlow_1D
+    bullScore := bullScore + 1
+if rsi_c > 55
+    bullScore := bullScore + 1
+if stochK_c > 55
+    bullScore := bullScore + 1
+if adxVal_c > minADX
+    bullScore := bullScore + 1
+
+bearScore = 0
+if emaFast_c < emaSlow_c
+    bearScore := bearScore + 1
+if use_4H_trend and emaFast_4H < emaSlow_4H
+    bearScore := bearScore + 1
+if use_12H_trend and emaFast_12H < emaSlow_12H
+    bearScore := bearScore + 1
+if use_1D_trend and emaFast_1D < emaSlow_1D
+    bearScore := bearScore + 1
+if rsi_c < 45
+    bearScore := bearScore + 1
+if stochK_c < 45
+    bearScore := bearScore + 1
+if adxVal_c > minADX
+    bearScore := bearScore + 1
+
+// ---- KDJ 过滤（原有，用于入场） ----
+kdj_filter_long  = use_kdj_filter ? (stochK_c > 50) : true
+kdj_filter_short = use_kdj_filter ? (stochK_c < 50) : true
+
+// ---- 真正的KDJ指标（K/D交叉体系，用于反转确认） ----
+kdjLowest = ta.lowest(low, kdjLen)
+kdjHighest = ta.highest(high, kdjLen)
+rsv = (close - kdjLowest) / math.max(kdjHighest - kdjLowest, syminfo.mintick) * 100
+kdjK = ta.sma(rsv, kdjSmoothK)
+kdjD = ta.sma(kdjK, kdjSmoothD)
+kdjK_c = request.security(syminfo.tickerid, timeframe.period, kdjK, lookahead=barmerge.lookahead_off)
+kdjD_c = request.security(syminfo.tickerid, timeframe.period, kdjD, lookahead=barmerge.lookahead_off)
+kdjBearishState = kdjK_c < kdjD_c
+kdjBullishState = kdjK_c > kdjD_c
+
+// ---- 4H级别裸K实体强度 + 放量判断 ----
+[h4_open, h4_high, h4_low, h4_close, h4_volume, h4_volAvg] = request.security(syminfo.tickerid, "240",
+     [open[1], high[1], low[1], close[1], volume[1], ta.sma(volume, 20)[1]], lookahead=barmerge.lookahead_off)
+
+h4_range = h4_high - h4_low
+h4_body = math.abs(h4_close - h4_open)
+h4_bodyRatio = h4_body / math.max(h4_range, syminfo.mintick)
+h4_isDecisiveBear = h4_close < h4_open and h4_bodyRatio >= candleBodyRatio
+h4_isDecisiveBull = h4_close > h4_open and h4_bodyRatio >= candleBodyRatio
+h4_isHighVolume = h4_volume > h4_volAvg * candleVolMultiplier
+h4_bearReversal = h4_isDecisiveBear and h4_isHighVolume
+h4_bullReversal = h4_isDecisiveBull and h4_isHighVolume
+
+// ---- 动态风控 ----
+var float dayStartEquity = na
+if ta.change(time("D")) or na(dayStartEquity)
+    dayStartEquity := strategy.equity
+dailySafe = ((dayStartEquity - strategy.equity) / dayStartEquity * 100) < maxDailyLossPercent
+
+var float peakEquity = 0.0
+peakEquity := math.max(peakEquity, strategy.equity)
+currentDD = (peakEquity - strategy.equity) / peakEquity * 100
+riskMult = currentDD > 14 ? 0.2 : (currentDD > 10 ? 0.5 : (currentDD > 6 ? 0.8 : 1.0))
+sharpeEst = ta.sma(rsi, 14) / math.max(ta.stdev(rsi, 14), 0.001)
+finalRisk = math.min(baseRiskPercent * sharpeEst * riskMult, 3.5)
+riskAmount = strategy.equity * finalRisk / 100
+
+getQtyPrecision(price) =>
+    price >= 10000 ? 3 : price >= 1000 ? 2 : price >= 100 ? 1 : price >= 10 ? 1 : 2
+
+calcQty(stop) =>
+    dist = math.max(math.abs(close - stop), syminfo.mintick)
+    rawQty = riskAmount / dist
+    maxAllowedQty = (strategy.equity * maxLeverage) / close
+    qty = math.min(rawQty, maxAllowedQty)
+    precision = getQtyPrecision(close)
+    factor = math.pow(10, precision)
+    math.floor(qty * factor) / factor
+
+// ---- 主动止损上移 ----
+var float activeStop = na
+var int current_tier = 1
+
+// ---- 【新增·方案一】TP2阶段判定 ----
+var bool pastTP2Stage = false
+tierTP2MultEarly = current_tier == 0 ? weakTP2Mult : current_tier == 2 ? strongTP2Mult : midTP2Mult
+tp2DistEarly = atr * tierTP2MultEarly
+if strategy.position_size > 0 and high >= strategy.position_avg_price + tp2DistEarly
+    pastTP2Stage := true
+if strategy.position_size < 0 and low <= strategy.position_avg_price - tp2DistEarly
+    pastTP2Stage := true
+if strategy.position_size == 0
+    pastTP2Stage := false
+stagedGateOpen = not useStagedExitGate or not pastTP2Stage
+
+// ---- 档位文字标签 ----
+tierLabel(t) =>
+    t == 0 ? "弱" : t == 2 ? "强" : "中"
+
+// ---- 反转确认持续性计数 ----
+adxBonus = adxVal_c > minADX ? 1 : 0
+currentEMABull = emaFast_c > emaSlow_c ? 1 : 0
+currentEMABear = emaFast_c < emaSlow_c ? 1 : 0
+exitBullScore = bullScore - adxBonus - currentEMABull
+exitBearScore = bearScore - adxBonus - currentEMABear
+
+var int bearStreak = 0
+var int bullStreak = 0
+bearStreak := exitBearScore >= quickExitScore ? bearStreak + 1 : 0
+bullStreak := exitBullScore >= quickExitScore ? bullStreak + 1 : 0
+
+var int consecBearCandles = 0
+var int consecBullCandles = 0
+consecBearCandles := close_c < open_c ? consecBearCandles + 1 : 0
+consecBullCandles := close_c > open_c ? consecBullCandles + 1 : 0
+
+consecAdverseLongExit  = useConsecAdverseExit and stagedGateOpen and strategy.position_size > 0 and consecBearCandles >= consecAdverseBars
+consecAdverseShortExit = useConsecAdverseExit and stagedGateOpen and strategy.position_size < 0 and consecBullCandles >= consecAdverseBars
+
+entryCandleRange = high_c - low_c
+entryCandleBody = math.abs(close_c - open_c)
+entryBodyRatio = entryCandleBody / math.max(entryCandleRange, syminfo.mintick)
+entryCandleBullConfirm = close_c > open_c and entryBodyRatio >= entryCandleBodyRatio
+entryCandleBearConfirm = close_c < open_c and entryBodyRatio >= entryCandleBodyRatio
+
+// ======================== 统一警报出口的状态变量 ========================
+entryFired = false
+entryPayload = ""
+closeFired = false
+closePayload = ""
+
+// ======================== 【修改】防闪烁锁（每K线只允许发一次信号） ========================
+var int signalLockBar = na
+
+// ======================== 【修改】入场条件（盘中提前 + 收盘保底，共用锁） ========================
+volume_filter = use_volume_filter ? volFilter_c : true
+longCond  = (bullScore >= longEntryScore) and (close_c > emaSlow_c) and inTimeRange and dailySafe and isVolatile_c and volume_filter and kdj_filter_long and strategy.position_size <= 0 and (not useEntryCandleConfirm or entryCandleBullConfirm)
+shortCond = (bearScore >= shortEntryScore) and (close_c < emaSlow_c) and inTimeRange and dailySafe and isVolatile_c and volume_filter and kdj_filter_short and strategy.position_size >= 0 and (not useEntryCandleConfirm or entryCandleBearConfirm)
+
+canEnter = na(signalLockBar) or signalLockBar != bar_index   // 本K线未发过信号才允许入场
+
+// 盘中提前入场（仅实时K线有效，回测自动跳过）
+earlyLong = useEarlyEntry and barstate.isrealtime and longCond and (close - open) > atr * earlyBodyThreshold
+earlyShort = useEarlyEntry and barstate.isrealtime and shortCond and (open - close) > atr * earlyBodyThreshold
+
+// 收盘入场（原逻辑保底，但受锁控制）
+closeLong = barstate.isconfirmed and longCond and canEnter
+closeShort = barstate.isconfirmed and shortCond and canEnter
+
+finalLong = earlyLong or closeLong
+finalShort = earlyShort or closeShort
+
+// ---- 开多 ----
+if (finalLong)
+    signalLockBar := bar_index   // 🔒 立即上锁
+    current_tier := adxVal_c >= adxStrongThreshold ? 2 : (adxVal_c < adxWeakThreshold ? 0 : 1)
+    slMult = (current_tier == 0 ? weakSLMult : current_tier == 2 ? strongSLMult : midSLMult) * globalSLMultiplier
+    tp1Mult = current_tier == 0 ? weakTP1Mult : current_tier == 2 ? strongTP1Mult : midTP1Mult
+    tp2Mult = current_tier == 0 ? weakTP2Mult : current_tier == 2 ? strongTP2Mult : midTP2Mult
+    tp3Mult = current_tier == 0 ? weakTP3Mult : current_tier == 2 ? strongTP3Mult : midTP3Mult
+    qty = calcQty(close - atr * slMult)
+    sl = close - atr * slMult
+    if qty > 0
+        strategy.entry("多", strategy.long, qty=qty, comment="开多")
+        activeStop := sl
+        entryPayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"LONG\",\"symbol\":\"" + syminfo.ticker + "\",\"price\":" + str.tostring(close) + ",\"atr\":" + str.tostring(atr) + ",\"stop_loss\":" + str.tostring(sl) + ",\"tp1\":" + str.tostring(close + atr*tp1Mult) + ",\"tp2\":" + str.tostring(close + atr*tp2Mult) + ",\"tp3\":" + str.tostring(close + atr*tp3Mult) + ",\"tier\":" + str.tostring(current_tier) + ",\"tier_label\":\"" + tierLabel(current_tier) + "\",\"bot_id\":\"" + bot_id + "\"}"
+        entryFired := true
+
+// ---- 开空 ----
+if (finalShort)
+    signalLockBar := bar_index
+    current_tier := adxVal_c >= adxStrongThreshold ? 2 : (adxVal_c < adxWeakThreshold ? 0 : 1)
+    slMultS = (current_tier == 0 ? weakSLMult : current_tier == 2 ? strongSLMult : midSLMult) * globalSLMultiplier
+    tp1MultS = current_tier == 0 ? weakTP1Mult : current_tier == 2 ? strongTP1Mult : midTP1Mult
+    tp2MultS = current_tier == 0 ? weakTP2Mult : current_tier == 2 ? strongTP2Mult : midTP2Mult
+    tp3MultS = current_tier == 0 ? weakTP3Mult : current_tier == 2 ? strongTP3Mult : midTP3Mult
+    qty = calcQty(close + atr * slMultS)
+    sl = close + atr * slMultS
+    if qty > 0
+        strategy.entry("空", strategy.short, qty=qty, comment="开空")
+        activeStop := sl
+        entryPayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"SHORT\",\"symbol\":\"" + syminfo.ticker + "\",\"price\":" + str.tostring(close) + ",\"atr\":" + str.tostring(atr) + ",\"stop_loss\":" + str.tostring(sl) + ",\"tp1\":" + str.tostring(close - atr*tp1MultS) + ",\"tp2\":" + str.tostring(close - atr*tp2MultS) + ",\"tp3\":" + str.tostring(close - atr*tp3MultS) + ",\"tier\":" + str.tostring(current_tier) + ",\"tier_label\":\"" + tierLabel(current_tier) + "\",\"bot_id\":\"" + bot_id + "\"}"
+        entryFired := true
+
+// ======================== 【修改】平仓条件全部去掉 barstate.isconfirmed，改用锁 ========================
+tierSLMult  = (current_tier == 0 ? weakSLMult  : current_tier == 2 ? strongSLMult  : midSLMult) * globalSLMultiplier
+tierTP1Mult = current_tier == 0 ? weakTP1Mult : current_tier == 2 ? strongTP1Mult : midTP1Mult
+tierTP2Mult = current_tier == 0 ? weakTP2Mult : current_tier == 2 ? strongTP2Mult : midTP2Mult
+tierTP3Mult = current_tier == 0 ? weakTP3Mult : current_tier == 2 ? strongTP3Mult : midTP3Mult
+tp1Dist = atr * tierTP1Mult
+
+// 快速平仓（评分反转 + 裸K放量反转）
+scoreExitLongTrigger  = stagedGateOpen and bearStreak >= quickExitConfirmBars and (not useKDJExitConfirm or kdjBearishState)
+scoreExitShortTrigger = stagedGateOpen and bullStreak >= quickExitConfirmBars and (not useKDJExitConfirm or kdjBullishState)
+
+baseExitLongTrigger  = exitModeSelect == "4H裸K+量能主导(完全取代评分)" ? h4_bearReversal : exitModeSelect == "混合(评分OR 4H，任一满足即出)" ? (scoreExitLongTrigger or h4_bearReversal) : scoreExitLongTrigger
+baseExitShortTrigger = exitModeSelect == "4H裸K+量能主导(完全取代评分)" ? h4_bullReversal : exitModeSelect == "混合(评分OR 4H，任一满足即出)" ? (scoreExitShortTrigger or h4_bullReversal) : scoreExitShortTrigger
+
+exitLongTrigger  = baseExitLongTrigger or consecAdverseLongExit
+exitShortTrigger = baseExitShortTrigger or consecAdverseShortExit
+
+exitLongReasonText  = consecAdverseLongExit and not baseExitLongTrigger   ? "连续逆势K线" : h4_bearReversal and not scoreExitLongTrigger  ? (pastTP2Stage ? "TP2后-4H裸K放量反转" : "4H裸K放量反转") : "评分反转"
+exitShortReasonText = consecAdverseShortExit and not baseExitShortTrigger ? "连续逆势K线" : h4_bullReversal and not scoreExitShortTrigger ? (pastTP2Stage ? "TP2后-4H裸K放量反转" : "4H裸K放量反转") : "评分反转"
+
+canClose = na(signalLockBar) or signalLockBar != bar_index   // 平仓优先，先检查锁
+
+// 快速平多
+if (strategy.position_size > 0 and exitLongTrigger and canClose)
+    signalLockBar := bar_index
+    strategy.close("多", comment="快速平多")
+    closePayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"CLOSE_QUICK_EXIT\",\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"LONG\",\"price\":" + str.tostring(close) + ",\"reason\":\"" + exitLongReasonText + "\",\"bot_id\":\"" + bot_id + "\"}"
+    closeFired := true
+
+// 快速平空
+if (strategy.position_size < 0 and exitShortTrigger and canClose)
+    signalLockBar := bar_index
+    strategy.close("空", comment="快速平空")
+    closePayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"CLOSE_QUICK_EXIT\",\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"SHORT\",\"price\":" + str.tostring(close) + ",\"reason\":\"" + exitShortReasonText + "\",\"bot_id\":\"" + bot_id + "\"}"
+    closeFired := true
+
+// ======================== 【修改】RSI 反转平仓（去掉了 barstate.isconfirmed） ========================
+if (strategy.position_size < 0 and stagedGateOpen and rsi_c > rsiExitLevel and rsi_c[1] <= rsiExitLevel and canClose)
+    signalLockBar := bar_index
+    strategy.close("空", comment="RSI平空")
+    closePayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"CLOSE_RSI_EXIT\",\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"SHORT\",\"price\":" + str.tostring(close) + ",\"reason\":\"RSI超卖反弹\",\"bot_id\":\"" + bot_id + "\"}"
+    closeFired := true
+
+if (strategy.position_size > 0 and stagedGateOpen and rsi_c < (100 - rsiExitLevel) and rsi_c[1] >= (100 - rsiExitLevel) and canClose)
+    signalLockBar := bar_index
+    strategy.close("多", comment="RSI平多")
+    closePayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"CLOSE_RSI_EXIT\",\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"LONG\",\"price\":" + str.tostring(close) + ",\"reason\":\"RSI超买回落\",\"bot_id\":\"" + bot_id + "\"}"
+    closeFired := true
+
+// ======================== 【修改】统一警报出口（改为实时发送，freq_once_per_bar） ========================
+// 由于锁的存在，同一K线内 closeFired 和 entryFired 不会同时为真，但保留数组逻辑以防边界情况
+if closeFired and entryFired
+    alert("[" + closePayload + "," + entryPayload + "]", alert.freq_once_per_bar)
+else if closeFired
+    alert(closePayload, alert.freq_once_per_bar)
+else if entryFired
+    alert(entryPayload, alert.freq_once_per_bar)
+
+// ======================== 主动止损上移 ========================
+if (strategy.position_size > 0 and high >= strategy.position_avg_price + tp1Dist * 0.9)
+    activeStop := math.max(activeStop, strategy.position_avg_price + syminfo.mintick * 8)
+
+if (strategy.position_size < 0 and low <= strategy.position_avg_price - tp1Dist * 0.8)
+    activeStop := math.min(activeStop, strategy.position_avg_price - syminfo.mintick * 8)
+
+// ======================== 动态追踪参数 ========================
+trailFactor = trailTight * (adxVal > 25 ? 0.85 : 1.1)
+
+// ======================== 分批止盈（qty_percent 10/20/70） ========================
+strategy.exit("TP1", qty_percent=tp1Pct, 
+     limit = strategy.position_avg_price + (strategy.position_size > 0 ? atr*tierTP1Mult : -atr*tierTP1Mult),
+     stop = activeStop, comment="TP1", comment_loss="止损")
+
+strategy.exit("TP2", qty_percent=tp2Pct, 
+     limit = strategy.position_avg_price + (strategy.position_size > 0 ? atr*tierTP2Mult : -atr*tierTP2Mult),
+     stop = activeStop, 
+     trail_points = atr * trailFactor * 0.7, 
+     trail_offset = atr * trailFactor * 0.35, 
+     comment="TP2", comment_loss="止损", comment_trailing="TP2")
+
+strategy.exit("TP3", qty_percent=100 - tp1Pct - tp2Pct, 
+     stop = activeStop, 
+     trail_points = atr * trailFactor * 1.1, 
+     trail_offset = atr * trailFactor * 0.5, 
+     comment="TP3", comment_loss="止损", comment_trailing="TP3")
+
+// ======================== 绘图 ========================
+plot(emaFast, "快线 EMA", color=color.blue, linewidth=2)
+plot(emaSlow, "慢线 EMA", color=color.orange, linewidth=2)
+plot(strategy.position_size != 0 ? activeStop : na, "止损线", color=color.yellow, linewidth=2, style=plot.style_linebr)
+bgcolor(useStagedExitGate and pastTP2Stage and strategy.position_size != 0 ? color.new(color.blue, 92) : na, title="已过TP2阶段-快速反转已收紧")
+
+// ---- 图表上直接标注当前档位 ----
+var label tierLabelPlot = na
+if barstate.islast
+    label.delete(tierLabelPlot)
+    tierLabelPlot := label.new(bar_index, high, "当前档位: " + tierLabel(current_tier), style=label.style_label_down, color=color.new(color.blue, 20), textcolor=color.white, size=size.normal)
