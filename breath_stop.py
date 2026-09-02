@@ -134,21 +134,35 @@ PRE_TP1_BREATH_FLOOR_FRAC = 0.65
 # 这不是新参数、不是调系数，是把「连续价距追踪」在深盈段替换成「宽追踪
 # +只认4H形态反转」——比逐场景打补丁更本质。
 #
-# 2026-09-04纠正范围：上面移植依据的"eth_pingkai_buhuchi.py设定
-# use_staged_exit_gate=True[截图确认]"这个前提，核对后发现来源是
-# 2026-08-20对另一份更早ETH源码的截图，不是TV实际在用的01/02版本。把
-# 01~04版本+BNB共5份TV Pine源码全部读完+grep核对，真实"TP2分级放行"
-# 机制只存在于03版本(META/LITE/MU/GS/OPENAI/SKHYNIX/SNDK共7个品种)，
-# 01/02(ETH/XAU/XMR/BCH/XPD)/04(TSLA/ANTHROPIC/PAXG/ZEC)/BNB都没有——
-# 详见 strategy_engine/strategies/eth_pingkai_buhuchi.py 文件头
-# (2026-09-04重建) 和 project_tv_strategy_symbol_mapping_20260903 记忆。
-# 因此把 tp2_patience 收窄成按品种生效：breath_profiles.py 每个品种的
-# profile 新增 has_staged_exit_gate 字段(默认False，只有那7个品种为
-# True)，_zone_trail_atr() 只在该品种确实有真实TV机制时才会进入
-# tp2_patience；没有的品种(含ETH/BNB/XAU等)照旧走tp2_tp3/tp3_confirm/
-# tp3_plus既有阶梯——不是新逻辑，是恢复移植之前、这些品种本来就在用的
-# 行为。三条0.65地板(TV_STOP_FLOOR_FRAC等)、反转锁盈、大赢家地板都是
-# 通用机制，不受这次收窄影响，继续对全部17个品种生效。
+# 2026-09-04纠正范围（第一次，当天已撤回，见下面v2说明）：上面移植依据
+# 的"eth_pingkai_buhuchi.py设定use_staged_exit_gate=True[截图确认]"这个
+# 前提，核对后发现来源是2026-08-20对另一份更早ETH源码的截图，不是TV实际
+# 在用的01/02版本。把01~04版本+BNB共5份TV Pine源码全部读完+grep核对，
+# 真实"TP2分级放行"机制只存在于03版本(META/LITE/MU/GS/OPENAI/SKHYNIX/
+# SNDK共7个品种)，01/02(ETH/XAU/XMR/BCH/XPD)/04(TSLA/ANTHROPIC/PAXG/
+# ZEC)/BNB都没有。据此曾经把tp2_patience收窄成只对这7个品种生效
+# (breath_profiles.py加has_staged_exit_gate字段做门槛)。
+#
+# 2026-09-04撤回收窄(v2)：宝贝当天反馈——ETH/XAU/XMR/BCH/XPD/BNB/TSLA/
+# ANTHROPIC/PAXG/ZEC这10个品种"很多时候就是出现实盘被止损，TV还持有的
+# 情况"，需要放宽，不认同收窄。复核后确认这次是我自己混淆了两件不同的
+# 事：①shadow_engine自己重新实现TV评分/出场逻辑时，"TV是否真的会忽略
+# 自己的评分/RSI/连续逆势信号"这件事必须跟真实源码一致——这个判断只对
+# strategy_engine/strategies/eth_pingkai_buhuchi.py这类"重新实现TV自己
+# 怎么判断"的代码成立，has_staged_exit_gate在那边继续按真实情况区分。
+# ②但live radar的耐心模式从来没有"拦截TV真实信号"这回事——TV发真实
+# CLOSE(CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT)永远立即_close_all()，耐心模式
+# 只改雷达自己的追踪距离宽窄+giveback刹车/tv-exit-stall刹车这两个"雷达
+# 自己多紧"的独立决策，从没有替TV做过"这条信号该不该理"的判断。既然雷达
+# 的耐心宽窄本来就是雷达自己的风险取舍(不是在模仿TV有没有对应机制)，用
+# "TV是否真有这个开关"卡live radar这半天走窄了——宝贝的真实交易观察(这
+# 10个品种照样反复出现"TV还持有、雷达先打掉")才是live radar该不该放宽
+# 唯一该看的证据，不是TV源码里有没有对应的input.bool。所以撤回
+# _zone_trail_atr里has_staged_exit_gate那道门槛，tp2_patience宽追踪恢复
+# 对全部17个品种生效；has_staged_exit_gate字段保留在breath_profiles.py
+# 里(纯文档/供eth_pingkai_buhuchi.py等shadow策略参考用)，但live radar
+# 这条路径不再读它。三条0.65地板、反转锁盈、大赢家地板一直是通用机制，
+# 从未受这两轮改动影响。
 
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -312,10 +326,11 @@ def _zone_trail_atr(
     永久成立（正常回撤不退出），移植 TV use_staged_exit_gate「过TP2后只认
     4H形态反转、不理正常回撤」的哲学。
 
-    2026-09-04收窄：只在 profile["has_staged_exit_gate"] 为真时才会进入
-    tp2_patience——核实后这个TV机制只有7个品种(META/LITE/MU/GS/OPENAI/
-    SKHYNIX/SNDK)真实存在，其余品种没有这个开关，触过TP2一样照旧走
-    tp2_tp3/tp3_confirm/tp3_plus（见顶部2026-09-04纠正注释）。
+    2026-09-04：曾经加过"只在profile['has_staged_exit_gate']为真时才进
+    tp2_patience"的门槛，当天已撤回——雷达自己的追踪宽窄是雷达自己的风险
+    取舍，从不代表"在模仿TV有没有对应机制"，TV真实CLOSE信号从来不受这里
+    影响，宝贝的真实持仓反馈(这10个品种一样反复出现"TV还持有、雷达先打
+    掉")才是该不该放宽的证据。对全部17个品种统一生效（见顶部v2说明）。
     """
     side_u = str(side or "").upper()
     b12 = float(profile.get("breath_tp12") or 1.2)
@@ -359,10 +374,9 @@ def _zone_trail_atr(
             tp1_px <= 0 and price <= entry - tp1_a * atr
         )
 
-    # 2026-09-04：只有真实TV源码里确认有use_staged_exit_gate的品种才允许
-    # 进入tp2_patience（见本函数docstring + 顶部2026-09-04纠正注释）。
-    has_staged_gate = bool(profile.get("has_staged_exit_gate"))
-    patience_engaged = has_staged_gate and past_tp2_sticky
+    # 2026-09-04：has_staged_exit_gate门槛当天已撤回（见顶部v2说明）——
+    # 触过TP2直接进耐心宽追踪，对全部17个品种统一生效。
+    patience_engaged = past_tp2_sticky
 
     if past_tp3_confirmed:
         return float(coeff), "tp3_plus"

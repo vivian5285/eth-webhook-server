@@ -17915,19 +17915,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 整体让位、"TV已平仓滞涨刹车"据此改成只收紧到耐心距离。见 breath_stop.py
         # 顶部同日期注释。
         #
-        # 2026-09-04修正：tp3_confirm/tp3_plus 其实是早于耐心模式就存在的
-        # 独立阶梯区(纯price-past-TP3判定，跟有没有触过TP2/有没有
-        # has_staged_exit_gate完全无关)——单看zone会把"没有真实TV分级放行
-        # 机制的品种，只是价格走得够深撞进tp3_plus"误判成耐心模式，让
-        # giveback刹车/tv-exit-stall刹车对这些品种也整体让位/软化，这不是
-        # 移植TV哲学的本意(那10个品种的TV策略在TP3之后一样会被评分反转/
-        # RSI反转/连续逆势/4H反转正常打出，从没有"深盈后不理会这些信号"这
-        # 回事)。加一个has_staged_exit_gate门槛：不是这7个品种，_patience_
-        # active 永远是False，giveback/tv-exit-stall刹车照旧正常触发，跟
-        # 移植耐心模式之前完全一样。
-        _has_gate = bool((profile or {}).get("has_staged_exit_gate"))
+        # 2026-09-04：这里曾经加过has_staged_exit_gate门槛(不是7个真有TV
+        # 分级放行的品种，_patience_active强制False)，当天已撤回——宝贝
+        # 反馈这10个品种(ETH/XAU/XMR/BCH/XPD/BNB/TSLA/ANTHROPIC/PAXG/ZEC)
+        # 一样反复出现"TV还持有、雷达先打掉"，需要放宽。复核后确认：这里
+        # 门槛的论证站不住脚——live radar的耐心模式从来没有"拦截TV真实
+        # 信号"这回事(TV发真实CLOSE永远立即_close_all()，见下面
+        # TestRealCloseNotShielded同款约束)，giveback刹车/tv-exit-stall
+        # 刹车让位/软化只是雷达自己的追踪紧度决策，不是在替TV判断"这条
+        # 信号该不该理"，不需要TV源码里真有对应开关才能生效。has_staged_
+        # exit_gate字段留在breath_profiles.py里给shadow_engine自己重新
+        # 实现TV评分逻辑时用（那边"TV是否真的会忽略自己的信号"才是需要
+        # 跟真实源码一致的判断），live radar这条路径不再读它。
         self._patience_active = bool(
-            _has_gate and (meta or {}).get("zone") in ("tp2_patience", "tp3_confirm", "tp3_plus")
+            (meta or {}).get("zone") in ("tp2_patience", "tp3_confirm", "tp3_plus")
         )
         self._patience_trail_dist = (
             float(meta.get("trail_distance") or 0) if self._patience_active else 0.0

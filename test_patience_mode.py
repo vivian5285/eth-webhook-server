@@ -49,12 +49,11 @@ from breath_profiles import default_breath_profile  # noqa: E402
 import position_supervisor_binance as psb  # noqa: E402
 
 FIX = json.load(open(os.path.join(ROOT, "patience_klines_fixture.json")))
-PROF = default_breath_profile()  # = dict(BREATH_ETH)，has_staged_exit_gate=False（真实）
-# 2026-09-04：tp2_patience收窄成按品种生效（真实TV源码核实后，
-# use_staged_exit_gate只存在于META/LITE/MU/GS/OPENAI/SKHYNIX/SNDK这7个
-# 品种）。PROF_GATE模拟"确实有这个TV机制"的品种，PROF(=ETH基线)保持
-# 它真实的False，两者对照测试这道新开关本身。
-PROF_GATE = dict(PROF, has_staged_exit_gate=True)
+PROF = default_breath_profile()  # = dict(BREATH_ETH)
+# 2026-09-04：tp2_patience曾经短暂按has_staged_exit_gate收窄过、当天已
+# 撤回（宝贝反馈没有真实TV分级放行机制的品种一样反复出现"TV还持有、
+# 雷达先打掉"）——live radar的耐心模式对全部17个品种统一生效，跟品种是
+# 否真有TV的use_staged_exit_gate无关，PROF(=ETH基线)照样会进tp2_patience。
 B23 = float(PROF["breath_tp23"])
 TP1M = float(PROF["tp1_atr"])
 TP2M = float(PROF["tp2_atr"])
@@ -85,9 +84,7 @@ def _mk_supervisor(symbol="ETHUSDT"):
 
 
 class TestZoneEngage(unittest.TestCase):
-    """tp2_patience 触发口径 + 宽度 + 粘性。用PROF_GATE(模拟确实有
-    use_staged_exit_gate的品种，例如META)——机制本身的行为跟哪个具体
-    品种无关，只跟has_staged_exit_gate这个开关有关。"""
+    """tp2_patience 触发口径 + 宽度 + 粘性。"""
 
     ENTRY = 2000.0
     ATR = 30.0
@@ -98,7 +95,7 @@ class TestZoneEngage(unittest.TestCase):
         tp3 = self.ENTRY + (TP2M + 1.0) * self.ATR if tp3 is None else tp3
         return BS._zone_trail_atr(
             side="LONG", price=price, entry=self.ENTRY, atr=self.ATR,
-            profile=profile or PROF_GATE, coeff=coeff, tp1_px=tp1, tp2_px=tp2, tp3_px=tp3, best=best,
+            profile=profile or PROF, coeff=coeff, tp1_px=tp1, tp2_px=tp2, tp3_px=tp3, best=best,
         )
 
     def test_not_past_tp2_no_patience(self):
@@ -142,19 +139,6 @@ class TestZoneEngage(unittest.TestCase):
         mult, zone = self._zone(price=price, best=best, coeff=5.0)
         self.assertEqual(zone, "tp3_plus")
 
-    def test_no_gate_symbol_never_enters_patience(self):
-        # 2026-09-04新增：品种没有真实TV的use_staged_exit_gate(用PROF=ETH
-        # 基线，has_staged_exit_gate=False)——即便best真实突破TV TP2一大截，
-        # 也绝不能进tp2_patience，必须照旧走tp2_tp3/tp3_confirm既有阶梯。
-        best = self.ENTRY + (TP2M + 2.0) * self.ATR
-        mult, zone = self._zone(price=best, best=best, coeff=5.0, profile=PROF)
-        self.assertNotEqual(zone, "tp2_patience")
-        self.assertIn(zone, ("tp2_tp3", "tp3_confirm", "tp3_plus"))
-        # 现价大幅回撤到TP2以下——没有耐心模式的粘性，应该退回tp1_tp2/pre_tp1
-        price_back = self.ENTRY + 0.5 * self.ATR
-        mult2, zone2 = self._zone(price=price_back, best=best, coeff=5.0, profile=PROF)
-        self.assertNotEqual(zone2, "tp2_patience")
-
     def test_zone_sticky_invariant_after_tp2(self):
         # 一旦 best 触过 TP2，不管现价回撤到多低，zone 永远是耐心三区之一——
         # 这就是 _apply_breath_stop_tick 里 "_patience_active = zone in 三区"
@@ -177,7 +161,7 @@ class TestRealPathPatienceVsNoPatience(unittest.TestCase):
     COEFF = 5.0
 
     def _replay(self, seg, entry, atr, tp1, tp2, tp3, profile=None):
-        prof = profile or PROF_GATE
+        prof = profile or PROF
         init_stop = BS.initial_stop_price("LONG", entry, atr, profile=prof)
         arm_line = (tp1 + tp2) / 2.0
         cur, best, psc, armed, last_zone = init_stop, entry, 0, False, "?"
@@ -223,23 +207,6 @@ class TestRealPathPatienceVsNoPatience(unittest.TestCase):
         self.assertIn(on["zone"], ("tp2_patience", "tp3_plus"))
         # 耐心模式的止损确实更松（更低）
         self.assertLess(on["stop"], off["stop"])
-
-    def test_no_gate_symbol_same_pullback_gets_stopped(self):
-        # 2026-09-04新增：同一段真实回撤、同一个真实TV TP2(不artificial推远)，
-        # 唯一区别是profile=PROF(ETH基线，has_staged_exit_gate=False，真实
-        # 情况)——这个品种没有TV的分级放行机制，应该跟对照组一样被打止损，
-        # 不能因为best曾经过TP2就意外获得耐心（回归防守：确保收窄生效）。
-        b4 = FIX["ETHUSDT_4h"]
-        atr = wilder_atr(b4[self.START - 15:self.START], 14)
-        seg = b4[self.START:self.START + 50]
-        entry = seg[0]["c"]
-        tp1 = entry + TP1M * atr
-        tp2 = entry + TP2M * atr
-        tp3 = entry + (TP2M + 1.0) * atr
-
-        no_gate = self._replay(seg, entry, atr, tp1, tp2, tp3, profile=PROF)
-        self.assertTrue(no_gate["stopped"], "没有真实TV分级放行机制的品种，不该获得耐心，该正常止损")
-        self.assertNotIn(no_gate["zone"], ("tp2_patience",))
 
 
 class TestReversalLockInPatience(unittest.TestCase):
@@ -446,31 +413,16 @@ class TestNoPatienceRegression(unittest.TestCase):
         self.assertEqual(zone2, "pre_tp1")
 
     def test_short_side_symmetry(self):
-        # 用PROF_GATE(模拟有真实use_staged_exit_gate的品种)——机制对称性
-        # 本身跟"哪个品种"无关，只跟has_staged_exit_gate开着与否有关。
         entry = self.ENTRY
         tp2 = entry - TP2M * self.ATR
         best = entry - (TP2M + 0.05) * self.ATR  # 空单 best=lowest 跌破 TP2
-        mult, zone = BS._zone_trail_atr(
-            side="SHORT", price=best, entry=entry, atr=self.ATR, profile=PROF_GATE,
-            coeff=5.0, tp1_px=entry - TP1M * self.ATR, tp2_px=tp2,
-            tp3_px=entry - (TP2M + 1.0) * self.ATR, best=best,
-        )
-        self.assertEqual(zone, "tp2_patience")
-        self.assertAlmostEqual(mult, max(5.0, B23), places=6)
-
-    def test_short_side_no_gate_stays_ladder(self):
-        # 2026-09-04新增：SHORT方向同样验证——没有真实TV机制的品种(PROF=ETH
-        # 基线)，即使空单best跌破TV TP2，也不能进tp2_patience。
-        entry = self.ENTRY
-        tp2 = entry - TP2M * self.ATR
-        best = entry - (TP2M + 0.05) * self.ATR
         mult, zone = BS._zone_trail_atr(
             side="SHORT", price=best, entry=entry, atr=self.ATR, profile=PROF,
             coeff=5.0, tp1_px=entry - TP1M * self.ATR, tp2_px=tp2,
             tp3_px=entry - (TP2M + 1.0) * self.ATR, best=best,
         )
-        self.assertNotEqual(zone, "tp2_patience")
+        self.assertEqual(zone, "tp2_patience")
+        self.assertAlmostEqual(mult, max(5.0, B23), places=6)
 
 
 if __name__ == "__main__":

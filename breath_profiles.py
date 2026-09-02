@@ -65,11 +65,14 @@ BREATH_ETH: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
-    # 2026-09-04：breath_stop.py::_zone_trail_atr 的 tp2_patience（深度盈利
-    # 耐心模式）只在这个字段为True时才生效。ETH真实TV源码(01版本.pine)里
-    # 没有use_staged_exit_gate这个开关(全文读完+grep核对，零匹配)，所以是
-    # False——这也是default_breath_profile()的默认值来源(=dict(BREATH_ETH))，
-    # 没单独配profile的品种同样默认关闭，不会误开耐心模式。
+    # 2026-09-04：ETH真实TV源码(01版本.pine)里没有use_staged_exit_gate这个
+    # 开关(全文读完+grep核对，零匹配)，所以是False——纯记录TV源码里的真实
+    # 情况，给strategy_engine/strategies/eth_pingkai_buhuchi.py这类"重新
+    # 实现TV自己评分/出场逻辑"的shadow策略引用用。**当天验证过、live radar
+    # (breath_stop.py::_zone_trail_atr / position_supervisor_binance.py::
+    # _apply_breath_stop_tick)不再读这个字段**——雷达自己的追踪宽窄是雷达
+    # 自己的风险取舍，不代表"在模仿TV有没有对应机制"，宝贝反馈这些品种一样
+    # 有"TV还持有、雷达先打掉"，耐心模式对live radar已恢复全品种统一生效。
     "has_staged_exit_gate": False,
 }
 
@@ -698,9 +701,15 @@ BREATH_LITE: Dict[str, Any] = {
 
 # 2026-09-04：has_staged_exit_gate=True 只标在这7个品种上（META/LITE/MU/
 # GS/OPENAI/SKHYNIX/SNDK，全是03版本.pine"平开不互斥版"家族）——核实过
-# 真实TV Pine源码只有这7个有useStagedExitGate。其余全部False（含ETH/XAU/
-# XMR/BCH/XPD/BNB/TSLA/ANTHROPIC/PAXG/ZEC/ASML），breath_stop.py::
-# _zone_trail_atr 靠这个字段决定要不要给"深度盈利耐心模式"开门。
+# 真实TV Pine源码只有这7个有useStagedExitGate，其余全部False（含ETH/XAU/
+# XMR/BCH/XPD/BNB/TSLA/ANTHROPIC/PAXG/ZEC/ASML）。**这个字段只是记录TV
+# 源码里的真实情况，供shadow_engine自己重新实现TV评分/出场逻辑时引用**
+# （比如eth_pingkai_buhuchi.py的use_staged_exit_gate要不要=True，需要跟
+# 这里一致）。live radar(breath_stop.py::_zone_trail_atr / position_
+# supervisor_binance.py::_apply_breath_stop_tick)当天试过用这个字段卡
+# "深度盈利耐心模式"要不要对某品种生效，但宝贝反馈没有这个TV机制的品种
+# 一样反复出现"TV还持有、雷达先打掉"，撤回了这道门槛——live radar现在
+# 不读这个字段，耐心模式对全部17个品种统一生效。
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,
