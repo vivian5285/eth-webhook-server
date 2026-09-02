@@ -13,10 +13,17 @@ Donchian通道突破入场 + ATR("N")定义的仓位/止损单位，不用任何
 经典规则(System 1简化版，本模块用20日突破入场+10日反向突破离场)：
   - entry_period(默认20)日Donchian通道突破 → 开仓方向
   - N = ATR(atr_len,默认20) → 止损距离 = entry ± atr_stop_mult(默认2)×N
-  - exit_period(默认10)日反向通道突破 → 主动离场(不等止损/止盈)
-  - tp1/tp2/tp3按1N/2N/3N分档，是为了适配本仓库通用的分批止盈框架，
-    不是海龟原始规则的一部分——原始系统只有"反向通道破位"和"2N止损"
-    两种离场方式，没有分批止盈。
+  - exit_period(默认10)日反向通道突破 → 主动离场(不等止损)
+  - 离场方式只有两种：反向10日通道破位、2N硬止损。没有固定止盈。
+
+2026-09-02修正：此前给了tp1/tp2/tp3 = 1N/2N/3N的固定止盈占位，本意是
+适配通用runner的字段结构，但multi_strategy_runner是"整仓进出"模型、
+_check_stop_tp只认tp1——结果价格一碰到+1N就整仓平掉，把每一个赢家都
+在+1N封了顶(实盘10笔复现：6个赢家无一例外全部"触及止盈"@+1N，4个输家
+却完整吃到-2N止损或反向通道破位的-1.5N，60%胜率照样整体巨亏)，跟海龟
+"让利润奔跑、亏损止住"的核心哲学完全相反。改成不再返回任何tp字段，
+彻底回归原始System 1：赢家一路持有，直到反向10日通道破位或2N止损，
+才是海龟系统真正的、也是唯一的离场机制。
 
 品种覆盖：适合本账户里趋势性强的品种(PAXG/XAUUSDT等贵金属系，历史上
 海龟系统本来就是在商品期货上验证出来的)，不适合频繁震荡的品种。
@@ -54,7 +61,8 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
 
     if position:
         # 持仓中：只处理"反向短通道破位主动离场"这一种提前离场信号——
-        # 止损/止盈价格本身的触碰由通用runner逻辑处理(价格穿过就平仓)。
+        # 2N硬止损的触碰由通用runner逻辑处理(价格穿过stop_loss就平仓)，
+        # 本策略不设固定止盈，赢家一路持有到反向通道破位。
         side = str(position.get("side") or "").upper()
         exit_ch = indicators.donchian_high_low(bars, exit_period)
         if not exit_ch:
@@ -99,9 +107,10 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - direction * n * float(p["atr_stop_mult"]), 6),
-        "tp1": round(price + direction * n * 1.0, 6),
-        "tp2": round(price + direction * n * 2.0, 6),
-        "tp3": round(price + direction * n * 3.0, 6),
+        # 刻意不返回tp1/tp2/tp3：海龟原始System 1没有固定止盈，赢家一路
+        # 持有到反向10日通道破位或2N止损。runner的_open_from_signal对
+        # sig.get("tp1")缺省为None、_check_stop_tp对tp1 is None直接跳过
+        # 止盈判定，行为正是我们想要的。
         "tier": 1,
         "bar_time": bar_time,
     }
