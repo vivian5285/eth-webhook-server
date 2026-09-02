@@ -10,9 +10,13 @@
 不是网红自创黑箱指标"这条准入线，但确实不像Turtle/Connors RSI-2那样
 有一篇可具名引用的论文或个人公开发表的实盘战绩可查，这点如实告知。
 
-核心结构(跟视频里的参数完全一致)：两组EMA分别形成两条"隧道"(tunnel)——
+核心结构(跟视频里的参数完全一致，源码见宝贝分享的Pulu's Moving
+Averages指标——纯画图指标，没有信号逻辑，但确认了这几组EMA周期是
+官方默认值)：三组EMA各自形成一条"隧道"(tunnel)——
   - 近隧道(第一组)：EMA144 + EMA169，代表中期趋势的动态支撑/压力
-  - 远隧道(第二组)：EMA576 + EMA676，代表长期趋势方向，很少被突破，
+  - 中隧道(第二组，2026-09-02新增)：EMA288 + EMA338，介于近/远隧道
+    之间，用来确认三条隧道是否按趋势该有的顺序"顺排"排列
+  - 远隧道(第三组)：EMA576 + EMA676，代表长期趋势方向，很少被突破，
     是这套系统的主结构性过滤器
   - 触发线：EMA12，用来判断"价格回踩隧道后是否已经真正止跌/止涨转向"
 
@@ -20,23 +24,30 @@
   1. 趋势方向：收盘价站在远隧道(576/676)上方 → 多头结构；站在下方 →
      空头结构；夹在隧道里面 → 结构不明确，不开新仓(已持仓的继续按当前
      结构管理)。
-  2. 回踩确认：最近pullback_lookback(默认6)根K线内，最低价(多)/最高价
+  2. 顺排确认(2026-09-02新增，多一层过滤)：近隧道中点 > 中隧道中点 >
+     远隧道中点(多头；空头反向)，且收盘价也站在中隧道(288/338)上方
+     (空头反向)——这是经典的"均线丝带顺排"(MA ribbon alignment)判断，
+     确认三层隧道真的按趋势该有的快慢顺序排开，不是纠缠打结的震荡期
+     里凑巧价格摸到远隧道那一侧。中隧道没有单独的止损/离场用途(价格
+     跌破中隧道之前一定先跌破更靠近价格的近隧道，那条离场条件早就会
+     先触发)，纯粹用作入场前的结构质量过滤。
+  3. 回踩确认：最近pullback_lookback(默认6)根K线内，最低价(多)/最高价
      (空)曾经触及或跌入/涨入近隧道(144/169)——这是"真的发生过一次回调"
      的证据，不是价格从头到尾都在远处、隧道形同虚设。
-  3. 入场触发：EMA12从近隧道内/外侧重新穿越回近隧道边界之外(多：EMA12
+  4. 入场触发：EMA12从近隧道内/外侧重新穿越回近隧道边界之外(多：EMA12
      升破近隧道上沿；空：EMA12跌破近隧道下沿)——这是视频里"用快线确认
      回调结束、趋势恢复"那一步的量化版本。
-  4. 止损：紧贴近隧道另一侧(跌破隧道就说明这次回踩没守住、结构已经变了)，
+  5. 止损：紧贴近隧道另一侧(跌破隧道就说明这次回踩没守住、结构已经变了)，
      外扩atr_stop_buffer_mult×ATR的缓冲，防止刚好卡在隧道边界被扫。
-  5. 离场：远隧道趋势方向反转(收盘价越过远隧道到另一侧) → 长期结构
+  6. 离场：远隧道趋势方向反转(收盘价越过远隧道到另一侧) → 长期结构
      本身变了，主动离场；或者收盘价重新跌破/突破近隧道(不只是碰到，
      是真正站到隧道另一侧) → 这轮回踩确认失败，趋势结构被破坏，同样
      主动离场。止损/TP123价格本身的触碰由通用runner逻辑处理。
 
-跟本仓库其余战法的关键区别：唯一一套用"两层不同速度的EMA隧道"做结构
-判断的战法，近隧道给回调空间、远隧道给长期方向定调，这个"结构分层"
-思路跟turtle_breakout(单一Donchian通道)、adx_regime_switch(状态开关)
-都不一样。
+跟本仓库其余战法的关键区别：唯一一套用"多层不同速度的EMA隧道"做结构
+判断的战法，近隧道给回调空间、中隧道验证顺排质量、远隧道给长期方向
+定调，这个"结构分层"思路跟turtle_breakout(单一Donchian通道)、
+adx_regime_switch(状态开关)都不一样。
 
 数据要求：EMA676最少需要676根K线才能算出第一个值，为了让均线真正收敛
 (不是刚好卡着热身期的边缘值)、并留出pullback_lookback的回看空间，
@@ -57,6 +68,8 @@ DEFAULT_PARAMS = {
     "ema_trigger": 12,
     "ema_tunnel1_fast": 144,
     "ema_tunnel1_slow": 169,
+    "ema_tunnel_mid_fast": 288,
+    "ema_tunnel_mid_slow": 338,
     "ema_tunnel2_fast": 576,
     "ema_tunnel2_slow": 676,
     "pullback_lookback": 6,
@@ -71,11 +84,13 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     t_len = int(p["ema_trigger"])
     f1_len = int(p["ema_tunnel1_fast"])
     s1_len = int(p["ema_tunnel1_slow"])
+    fm_len = int(p["ema_tunnel_mid_fast"])
+    sm_len = int(p["ema_tunnel_mid_slow"])
     f2_len = int(p["ema_tunnel2_fast"])
     s2_len = int(p["ema_tunnel2_slow"])
     lookback = int(p["pullback_lookback"])
     atr_len = int(p["atr_len"])
-    need = max(t_len, f1_len, s1_len, f2_len, s2_len, atr_len) + lookback + 5
+    need = max(t_len, f1_len, s1_len, fm_len, sm_len, f2_len, s2_len, atr_len) + lookback + 5
     if len(bars) < need:
         return None
 
@@ -83,9 +98,11 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     ema_t = indicators.ema(cs, t_len)
     ema_f1 = indicators.ema(cs, f1_len)
     ema_s1 = indicators.ema(cs, s1_len)
+    ema_fm = indicators.ema(cs, fm_len)
+    ema_sm = indicators.ema(cs, sm_len)
     ema_f2 = indicators.ema(cs, f2_len)
     ema_s2 = indicators.ema(cs, s2_len)
-    if not ema_t or not ema_f1 or not ema_s1 or not ema_f2 or not ema_s2:
+    if not ema_t or not ema_f1 or not ema_s1 or not ema_fm or not ema_sm or not ema_f2 or not ema_s2:
         return None
     if len(ema_t) < 2 or len(ema_f1) < lookback + 2 or len(ema_s1) < lookback + 2:
         return None
@@ -98,6 +115,8 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     tunnel2_lo = min(ema_f2[-1], ema_s2[-1])
     tunnel1_hi = max(ema_f1[-1], ema_s1[-1])
     tunnel1_lo = min(ema_f1[-1], ema_s1[-1])
+    tunnel_mid_hi = max(ema_fm[-1], ema_sm[-1])
+    tunnel_mid_lo = min(ema_fm[-1], ema_sm[-1])
 
     if price > tunnel2_hi:
         bias = "LONG"
@@ -105,6 +124,22 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         bias = "SHORT"
     else:
         bias = None
+
+    # 顺排确认(2026-09-02新增，多一层过滤)：近隧道中点>中隧道中点>远隧道
+    # 中点(多头，空头反向)，且收盘价也真的站在中隧道上方——不是价格
+    # 凑巧摸到远隧道那一侧，而是三层隧道确实按趋势该有的快慢顺序排开。
+    # 中隧道本身不参与止损/离场(价格跌破它之前一定先跌破更靠近价格的
+    # 近隧道，那条离场条件早就先触发了)，纯粹是入场前的结构质量过滤。
+    if bias is not None:
+        mid1 = (tunnel1_hi + tunnel1_lo) / 2.0
+        midm = (tunnel_mid_hi + tunnel_mid_lo) / 2.0
+        mid2 = (tunnel2_hi + tunnel2_lo) / 2.0
+        if bias == "LONG":
+            stacked = mid1 > midm > mid2 and price > tunnel_mid_hi
+        else:
+            stacked = mid1 < midm < mid2 and price < tunnel_mid_lo
+        if not stacked:
+            bias = None
 
     if position:
         side = str(position.get("side") or "").upper()
@@ -184,6 +219,6 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         "bar_time": bar_time,
         "reason": (
             f"远隧道(576/676)确认{'多' if bias == 'LONG' else '空'}头结构 + "
-            f"近隧道(144/169)回踩确认 + EMA12回破触发"
+            f"中隧道(288/338)顺排确认 + 近隧道(144/169)回踩确认 + EMA12回破触发"
         ),
     }
