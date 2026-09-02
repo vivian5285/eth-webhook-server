@@ -26,13 +26,26 @@
 入场锁")+"02版本.txt"("XAU加仓最小改动版+平开独立不互斥")——是比这份
 2026-08-20源码更新的版本，弱/中/强三档TP1/TP2/TP3系数从窄值(1.0/1.8/
 2.6等)被大幅拉宽到6.0/10.0/16.0、7.0/12.0/20.0、9.0/15.0/25.0("本版
-宽止盈，系数大幅拉宽"，SL系数/评分/离场逻辑全部未变)。已按新版本更新
-下面DEFAULT_PARAMS的tier字典，旧的窄系数见"03版本.txt"/"04版本.txt"
-(04是"KDJ豁免温和版"的入场侧变体，TP系数跟03一样是旧窄值，已被01取代)。
+宽止盈，系数大幅拉宽")。已按新版本更新下面DEFAULT_PARAMS的tier字典。
 
 关键：这套新系数(01/02版本)在ETH和XAU上完全一致，所以XAU不再是
 symbol_registry.py里的_template占位——直接复用这个策略名注册即可，
-不需要单独建xau_pingkai_buhuchi.py(逻辑/参数完全相同，只是品种不同)。
+不需要单独建xau_pingkai_buhuchi.py。
+
+2026-09-03大重组：本模块 = 家族①"心跳版ETH·加仓最小改动"/"心跳版XAU
+加仓最小改动版"，服务 ETHUSDT/XAUUSDT/**XMRUSDT/BCHUSDT/XPDUSDT**
+(后三个这次补登记，见 symbol_registry.py)。窄TP 的 03/04 版本("平开不
+互斥版"/"KDJ豁免温和版")已单独接入 eth_pingkai_buhuchi_narrow.py /
+eth_kdj_exempt_narrow.py，不再共用本模块。
+
+⚠️ 已知差异（待办，不在 2026-09-03 这次重组范围）：本模块的
+generate_signal 目前是 2026-09-03 仓促按"只改宽 TP 系数、评分/离场逻辑
+不变"做的，评分仍是旧的 **trend 形态**（本地EMA点 + ADX加分、方向看
+本地慢线 EMA）。但 01/02 版本真实源码用的是 **gate 形态**（满分7项：
+4H+日线趋势+RSI+StochK+isVolatile+量比+KDJ，无本地EMA点/无ADX加分，
+方向看 4H 慢线 EMA——见 tv_symbol_params.py 2026-08-29 的 shape=gate
+说明，以及 bnb_heartbeat_real_reversal.py 里已如实实现的 gate 形态)。
+把本模块也重建成 gate 形态 = 单独一个待办。
 
 这次更新只影响停用中的擂台赛/回测引擎的准确度——**实盘雷达用的TP1/2/3
 永远是TV每笔信号自己发来的真实payload字段，不读这份参考参数**，不受

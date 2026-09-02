@@ -53,6 +53,33 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] eth_pingkai_buhuchi 加载失败: {_e}")
 
+# 2026-09-03 接入宝贝逐字发来的 03/04/BNB 三份真实 TV Pine 源码
+# （strategy_engine/tv_pine_sources/ 下，宝贝确认"这就是 TV 在用的策略"），
+# 按 2026-09-03 的 17 品种→策略家族对照重新分组 symbol_registry.py。
+#   eth_pingkai_buhuchi_narrow = 03版本"心跳版ETH(平开不互斥版)"，窄TP
+#   eth_kdj_exempt_narrow      = 04版本"心跳版ETH(KDJ豁免温和版)" = 03 + KDJ豁免开关
+#   bnb_heartbeat_real_reversal= BNB"心跳版本ETH(4H+日线·宽止盈等真反转版)"，gate形态宽TP
+try:
+    from strategy_engine.strategies import eth_pingkai_buhuchi_narrow
+    STRATEGIES["eth_pingkai_buhuchi_narrow"] = eth_pingkai_buhuchi_narrow.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] eth_pingkai_buhuchi_narrow 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import eth_kdj_exempt_narrow
+    STRATEGIES["eth_kdj_exempt_narrow"] = eth_kdj_exempt_narrow.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] eth_kdj_exempt_narrow 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import bnb_heartbeat_real_reversal
+    STRATEGIES["bnb_heartbeat_real_reversal"] = bnb_heartbeat_real_reversal.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] bnb_heartbeat_real_reversal 加载失败: {_e}")
+
 # 2026-08-29新增：4套公开、有真实资历考证的知名战法，接入影子引擎多策略
 # 并行对比(跟tv_multiscore_v1平行跑，不影响它)。挑选标准见跟宝贝的讨论：
 # 排除"网红独家指标"这类查无实据的东西，只要有公开发表规则+可考证真实
@@ -154,8 +181,37 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "止损。回答'如果VPS用TV一样的信号、只是执行更快更优价，能多赚多少'。"
     ),
     "_template": "占位示例：双EMA交叉+ATR止损止盈，验证链路用，不是真实策略。",
-    "zec_pingkai_buhuchi": "ZEC真实TV策略复刻：平开不互斥版，多维度评分入场。",
-    "eth_pingkai_buhuchi": "ETH真实TV策略复刻：平开不互斥版，多维度评分入场。",
+    "zec_pingkai_buhuchi": (
+        "【2026-09-03起已无品种使用】早期按 2026-08-17 ZEC 控制面板截图复刻"
+        "的 03版本'平开不互斥版'。ZEC/SKHYNIX/PAXG 已按宝贝 2026-09-03 新对照"
+        "改归 eth_pingkai_buhuchi_narrow / eth_kdj_exempt_narrow，本条保留作"
+        "历史参考。"
+    ),
+    "eth_pingkai_buhuchi": (
+        "ETH真实TV策略复刻：01/02版本'心跳版ETH·加仓最小改动'/'心跳版XAU"
+        "加仓最小改动版'——宽止盈(TP1/2/3=6/10/16起)，多维度评分入场，"
+        "TP2阶段分级放行。品种：ETH/XAU/XMR/BCH/XPD。"
+    ),
+    "eth_pingkai_buhuchi_narrow": (
+        "03版本'心跳版ETH(平开不互斥版)'真实TV源码复刻——窄止盈"
+        "(TP1/2/3=1.0/1.8/2.6起，未被01版本那批宽止盈改动拉宽)，trend形态"
+        "评分(本地EMA+4H+日线+RSI+StochK+ADX加分)，TP2阶段分级放行。"
+        "品种：META/LITE/MU/GS/OPENAI/SKHYNIX/SNDK。"
+    ),
+    "eth_kdj_exempt_narrow": (
+        "04版本'心跳版ETH(VPS适配·KDJ豁免温和版)'真实TV源码复刻——"
+        "= 03版本(eth_pingkai_buhuchi_narrow)逐字一致，只多一个开关：评分"
+        "明显超标(超门槛≥2分)时豁免 KDJ 硬门槛，捕捉趋势刚启动、StochK 还"
+        "没过50的早期机会。品种：TSLA/ANTHROPIC/PAXG/ZEC。"
+    ),
+    "bnb_heartbeat_real_reversal": (
+        "BNB真实TV策略复刻：'心跳版本ETH(4H+日线·宽止盈等真反转版)'——"
+        "01版本的简化版(去掉加仓/评分骤降/评分新鲜度)，宽止盈系数跟01/02"
+        "一致，gate形态评分(4H+日线+RSI+StochK+isVolatile+量比+KDJ 共7项，"
+        "方向看4H慢线)。出场就是标准三条(评分反转 OR 4H反转 OR 连续逆势"
+        "K线)，名字里的'等真反转'是描述宽TP的自然结果，不是独立机制。"
+        "品种：BNB。"
+    ),
     "turtle_breakout": (
         "Turtle海龟突破(Richard Dennis 1980s公开系统)：Donchian(20)通道"
         "突破入场，ATR定义止损距离(2N)，反向10日通道破位主动离场。不用"

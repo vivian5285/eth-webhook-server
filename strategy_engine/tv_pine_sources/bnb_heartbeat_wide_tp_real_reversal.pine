@@ -384,6 +384,16 @@ if (strategy.position_size > 0 and rsi < (100 - rsiExitLevel) and rsi[1] >= (100
     closePayload := "{" + "\"secret\":\"" + secret + "\",\"action\":\"CLOSE_RSI_EXIT\",\"symbol\":\"" + syminfo.ticker + "\",\"side\":\"LONG\",\"price\":" + str.tostring(close) + ",\"reason\":\"RSI超买回落\",\"bot_id\":\"" + bot_id + "\"}"
     closeFired := true
 
+// ======================== 关于TP1/TP2/TP3/止损/保本止损：明确不发webhook ========================
+// strategy.exit()里的limit(止盈)、stop(止损，含保本移动止损activeStop)都是TV自己内部模拟账本的结算，
+// 和VPS真实持仓的止损/止盈是两套完全独立的机制（VPS用实际成交价×1.15算硬止损、TP1/TP2是独立真实限价单、
+// TP3之后交给雷达按ATR跟踪，触发价格和时机不会和TV这边的模拟值对齐）。
+// 曾经尝试过在这里加一道"仓位缩小即发CLOSE_AUTO_FILL"的兜底检测，同步TV自己的止损/保本止损/TP成交，
+// 但这类消息无法区分具体是TP1/TP2/TP3/止损/保本止损中的哪一种，且会让TV内部的保本移动止损
+// 和VPS自己的"提前保本检查点"变成两套并行的保本逻辑，与既定架构标准冲突，已明确移除，不再保留。
+// VPS开仓时已用entryPayload里的tp1/tp2/tp3/stop_loss/atr/tier字段独立挂好止盈止损和雷达，
+// 全程不需要TV再通知，TV这边TP/止损自动成交完全不产生webhook。
+
 // ======================== 【修改】统一警报出口（改为实时发送，freq_once_per_bar） ========================
 // 三段式判断：平仓和开仓同时触发则合并数组发送，否则单独发送
 if closeFired and entryFired
@@ -404,21 +414,21 @@ if (strategy.position_size < 0 and low <= strategy.position_avg_price - atr * be
 trailFactor = trailTight * (adxVal > 25 ? 0.85 : 1.1)
 
 // ======================== 分批止盈（qty_percent 10/20/70，未改动） ========================
-strategy.exit("TP1", qty_percent=tp1Pct,
+strategy.exit("TP1", qty_percent=tp1Pct, 
      limit = strategy.position_avg_price + (strategy.position_size > 0 ? atr*tierTP1Mult : -atr*tierTP1Mult),
      stop = activeStop, comment="TP1", comment_loss="止损")
 
-strategy.exit("TP2", qty_percent=tp2Pct,
+strategy.exit("TP2", qty_percent=tp2Pct, 
      limit = strategy.position_avg_price + (strategy.position_size > 0 ? atr*tierTP2Mult : -atr*tierTP2Mult),
-     stop = activeStop,
-     trail_points = atr * trailFactor * 0.7,
-     trail_offset = atr * trailFactor * 0.35,
+     stop = activeStop, 
+     trail_points = atr * trailFactor * 0.7, 
+     trail_offset = atr * trailFactor * 0.35, 
      comment="TP2", comment_loss="止损", comment_trailing="TP2")
 
-strategy.exit("TP3", qty_percent=100 - tp1Pct - tp2Pct,
-     stop = activeStop,
-     trail_points = atr * trailFactor * 1.1,
-     trail_offset = atr * trailFactor * 0.5,
+strategy.exit("TP3", qty_percent=100 - tp1Pct - tp2Pct, 
+     stop = activeStop, 
+     trail_points = atr * trailFactor * 1.1, 
+     trail_offset = atr * trailFactor * 0.5, 
      comment="TP3", comment_loss="止损", comment_trailing="TP3")
 
 // ======================== 绘图（未改动） ========================

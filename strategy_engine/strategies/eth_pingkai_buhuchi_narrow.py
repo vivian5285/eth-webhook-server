@@ -1,41 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-⚠️ 2026-09-03 起本模块已无任何品种指向——保留作历史参考，不要新接品种。
-   宝贝 2026-09-03 给了完整的品种→策略家族对照 + 5 份真实源码，据此：
-     - SKHYNIXUSDT → 家族"心跳版ETH（平开不互斥版）"，改用 eth_pingkai_buhuchi_narrow
-     - PAXGUSDT / ZECUSDT → 家族"心跳版ETH（VPS适配·KDJ豁免温和版）"，改用 eth_kdj_exempt_narrow
-     - ASMLUSDT → 宝贝说已取消（胜率一直不高），symbol_registry.py 里已注释掉
-   本模块 = 早期按 2026-08-17 ZEC 那张控制面板截图逐项覆盖过 DEFAULT_PARAMS
-   的 03版本"平开不互斥版"。新的 eth_pingkai_buhuchi_narrow.py 是同一份 03
-   源码、但 DEFAULT_PARAMS 用脚本 input() 默认值（因为新分组的那批品种没有
-   各自的面板截图）。这份 ZEC 面板截图的逐项标注仍有参考价值，故保留文件，
-   也仍在 strategies/__init__.py 里注册（无害，只是没品种用）。
+照抄用户 TradingView 上实跑的 Pine 策略"ETH（平开不互斥版）修复警报 + 盘中
+提前入场锁"（bot_id=Trillion_God_v6.5_Pro_Light）。
 
-────────────────────────────────────────────────────────────────────────
-照抄用户 TradingView 上实跑的 Pine 策略"ZEC版本（平开不互斥版）"
-（bot_id=Trillion_God_v6.5_Pro_Light）。2026-08-17 用户提供完整源码 +
-参数面板截图，当时应用品种：ASMLUSDT(90m) / SKHYNIXUSDT(150m) /
-PAXGUSDT(150m) / ZECUSDT(150m)，四个品种共用同一套逻辑+同一套参数
-（具体每个品种的 timeframe 在 symbol_registry.py 里各自配置）。
+来源：`strategy_engine/tv_pine_sources/eth_pingkai_buhuchi_narrow_v03.pine`
+（= 宝贝 Desktop 的"03版本.txt"，2026-09-03 逐字发来并确认"这就是 TV 在用
+的策略"）。宝贝 2026-09-03 的品种→策略家族对照里把这一族叫做
+**"心跳版ETH（平开不互斥版）"**——名字里的"心跳版"只是指后来统一给告警加了
+一条 HEARTBEAT 持仓对账消息（纯 alert 层，见 BNB 源码尾部那段），**入场/出场
+判定逻辑跟这份 03 源码完全一致，本文件不需要实现心跳那段就能对齐信号**。
 
-DEFAULT_PARAMS 里每一项都标注了是"截图确认的真实覆盖值"还是"脚本
-input()默认值、未经用户逐项核对"——截图只滚动到"快线EMA"那一屏，后面
-（慢线EMA长度、ADX/RSI周期、分档止损止盈ATR倍数等）都是沿用脚本默认值，
-如果实际面板不一样，回头改这个文件的 DEFAULT_PARAMS 即可，不用动其它
-任何逻辑。
+应用品种（2026-09-03 分组，见 symbol_registry.py）：
+  METAUSDT / LITEUSDT / MUUSDT / GSUSDT / OPENAIUSDT / SKHYNIXUSDT / SNDKUSDT
 
-刻意跳过的部分（原因见 strategy_engine/README.md 回测口径说明，这是
-整个 shadow 框架的既有简化，不是这个策略特有的）：
-- 账户级动态仓位/熔断（riskMult/sharpeEst/dailySafe/单日熔断）——只影响
-  下单量大小和是否暂停，不影响"这一根K线该不该开平仓"这个方向性判断
-- TP2/TP3 分批止盈 + 摸到TP1/TP2后的移动止损精确路径——框架统一只用
-  "摸到止损价或TP1价就整仓离场"这个简化模型
-- 评分反转出场(scoreExitLongTrigger/scoreExitShortTrigger)的"连续N根
-  达标"部分简化成"只看当前这一根是否达标"——当前四个品种的
-  exit_mode 都是"4h_only"（4H裸K放量反转独占出场，不含评分反转），
-  这条分支目前不会被触发，先用近似实现占位，以后如果哪个品种改用
-  score_only/mixed 模式再精确补上这段
+跟 `eth_pingkai_buhuchi.py`（"心跳版ETH·加仓最小改动"，01/02版本，宽TP）
+同源同结构，关键区别只有一个：**本族是"窄TP"**——弱/中/强三档 TP1/TP2/TP3
+的 ATR 倍数是旧的窄值（1.0/1.8/2.6、1.35/2.5/3.6、1.8/3.2/5.0），没有被
+01 版本那一批"宽止盈"改动拉宽。评分口径、裸K反转、staged gate、连续逆势
+K线、RSI 反转全部一致。
+
+跟旧的 `zec_pingkai_buhuchi.py` 是**同一份 03 源码**，只是那个文件里的
+DEFAULT_PARAMS 是按 2026-08-17 ZEC 那张控制面板截图逐项覆盖过的
+（use_kdj_filter/use_staged_exit_gate/consec 都改过），而本文件的
+DEFAULT_PARAMS 用的是 **03 源码 input() 脚本默认值**——因为 META/LITE/…
+这一批没有各自的面板截图，脚本默认值是目前能拿到的最可靠口径。ZEC 本身
+2026-09-03 已经改归"KDJ豁免温和版"家族，不再用 zec_pingkai_buhuchi.py。
+
+额外支持一个 03 源码里没有、但 04 源码（"KDJ豁免温和版"）新增的开关
+`use_kdj_relax`：评分明显超标时豁免 KDJ 硬门槛。默认 False 时 100% 等同
+03 源码原版；`eth_kdj_exempt_narrow.py` 只是把这个开关默认打开的薄封装。
+
+跟整个 shadow 框架的既有简化一致（见 strategy_engine/README.md）：
+- 不模拟账户级动态仓位/熔断（riskMult/sharpeEst/dailySafe）
+- 不模拟 TP1/TP2/TP3 分批止盈 + 移动止损精确路径，统一用"摸到止损价或
+  TP1 价就整仓离场"的简化模型（runner 通用逻辑处理）
+- 评分反转出场的"连续N根达标"streak 简化成"只看当前这一根是否达标"
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from typing import Dict, List, Optional
 from strategy_engine import indicators
 
 DEFAULT_PARAMS = {
-    # ---- 入场/出场评分阈值（截图确认，跟脚本默认一致）----
+    # ---- 入场/出场评分阈值（03源码脚本默认）----
     "long_entry_score": 1,
     "short_entry_score": 1,
     "quick_exit_score": 2,
@@ -55,54 +55,56 @@ DEFAULT_PARAMS = {
     "kdj_smooth_k": 3,
     "kdj_smooth_d": 3,
 
-    # ---- 裸K+量能反转（4H级别）----
-    # ⚠️ 截图确认的真实覆盖值：出场模式选的是纯"4H裸K+量能主导"
-    # （脚本input()默认是"混合(评分OR 4H)"，面板实际选的不是默认项）
-    "exit_mode": "4h_only",  # "score_only" | "4h_only" | "mixed"
-    "candle_body_ratio": 0.55,       # 截图确认，跟默认一致
-    "candle_vol_multiplier": 1.15,   # 截图确认，跟默认一致
-    # ⚠️ 截图确认的真实覆盖值：这个开关是关闭的（脚本默认开启）
-    "use_staged_exit_gate": False,
+    # ---- 裸K+量能反转（4H级别，03源码脚本默认）----
+    "exit_mode": "mixed",  # 03源码默认"混合(评分OR 4H)"；"score_only" | "4h_only" | "mixed"
+    "candle_body_ratio": 0.55,
+    "candle_vol_multiplier": 1.15,
+    # TP2阶段分级放行——03源码 input.bool 默认 true
+    "use_staged_exit_gate": True,
 
-    # ---- 入场裸K确认闸（截图确认：开关关闭，下面这个阈值不生效但如实记录）----
+    # ---- 入场裸K确认闸（03源码默认关闭）----
     "use_entry_candle_confirm": False,
-    "entry_candle_body_ratio": 0.3,
+    "entry_candle_body_ratio": 0.5,
 
-    # ---- 连续逆势K线快速离场 ----
-    # ⚠️ 截图确认的真实覆盖值：开启（脚本默认关闭），2根触发（脚本默认3根）
-    "use_consec_adverse_exit": True,
-    "consec_adverse_bars": 2,
+    # ---- 连续逆势K线快速离场（03源码默认关闭、3根）----
+    "use_consec_adverse_exit": False,
+    "consec_adverse_bars": 3,
 
-    # ---- 大周期趋势（截图确认，跟默认一致）----
+    # ---- 大周期趋势（03源码默认：4H+日线开，12H关）----
     "use_4h_trend": True,
     "use_12h_trend": False,
     "use_1d_trend": True,
 
-    # ---- KDJ + 量能过滤（截图确认，跟默认一致）----
+    # ---- KDJ + 量能过滤（03源码默认都开）----
     "use_kdj_filter": True,
     "use_volume_filter": True,
     "volume_threshold": 1.1,
 
-    # ---- 核心参数：截图只到这里，后面全部是脚本默认值，未经用户核对 ----
-    "ema_fast_len": 15,   # 截图确认
-    "ema_slow_len": 30,   # 脚本默认，未核对
-    "adx_len": 14,         # 脚本默认，未核对
-    "rsi_len": 14,         # 脚本默认，未核对
-    "min_adx": 17,         # 脚本默认，未核对
+    # ---- 【04源码新增开关】KDJ门槛豁免（评分强度分层）----
+    # 默认 False = 100% 等同 03 源码原版。eth_kdj_exempt_narrow.py 把它默认打开。
+    "use_kdj_relax": False,
+    "score_margin_for_skip_kdj": 2,
 
-    # ---- 档位划分阈值（脚本默认，未核对）----
+    # ---- 核心参数（03源码脚本默认）----
+    "ema_fast_len": 15,
+    "ema_slow_len": 30,
+    "adx_len": 14,
+    "rsi_len": 14,
+    "min_adx": 17,
+
+    # ---- 档位划分阈值 ----
     "adx_weak_threshold": 20,
     "adx_strong_threshold": 30,
     "global_sl_multiplier": 1.0,
-    "weak":   {"sl": 1.0, "tp1": 1.0, "tp2": 1.8, "tp3": 2.6},
+    # 本族"窄TP"：03/04 源码的旧窄系数，未被 01/02 版本那批"宽止盈"改动。
+    "weak":   {"sl": 1.0, "tp1": 1.0,  "tp2": 1.8, "tp3": 2.6},
     "mid":    {"sl": 1.3, "tp1": 1.35, "tp2": 2.5, "tp3": 3.6},
-    "strong": {"sl": 1.3, "tp1": 1.8, "tp2": 3.2, "tp3": 5.0},
+    "strong": {"sl": 1.3, "tp1": 1.8,  "tp2": 3.2, "tp3": 5.0},
 
-    "vol_threshold": 0.0028,  # 波动率过滤门槛，脚本默认，未核对
+    "vol_threshold": 0.0028,
 }
 
-# 需要的额外周期（除了品种自己的图表周期"base"外）：4H 用于裸K放量反转判断+
-# 大周期趋势打分，日线用于大周期趋势打分。12H 默认关闭，不强制拉取。
+# 4H 用于裸K放量反转 + 大周期趋势打分，日线用于大周期趋势打分。
 REQUIRED_MTF = ("4h", "1d")
 
 
@@ -120,7 +122,6 @@ def _tier_mults(tier: int, p: dict) -> dict:
 
 
 def _stoch_k_series(bars: List[dict], length: int) -> List[float]:
-    """跟 Pine 的 ta.stoch(close,high,low,len) 同公式：(close-最低)/(最高-最低)*100。"""
     if len(bars) < length:
         return []
     out = []
@@ -133,21 +134,7 @@ def _stoch_k_series(bars: List[dict], length: int) -> List[float]:
     return out
 
 
-def _kdj_kd(bars: List[dict], length: int, smooth_k: int, smooth_d: int):
-    rsv = _stoch_k_series(bars, length)  # RSV跟stochK同一个公式
-    if not rsv:
-        return None, None
-    k_series = indicators.sma(rsv, smooth_k)
-    if not k_series:
-        return None, None
-    d_series = indicators.sma(k_series, smooth_d)
-    if not d_series:
-        return None, None
-    return k_series[-1], d_series[-1]
-
-
 def _consec_color(bars: List[dict], bearish: bool) -> int:
-    """从最新一根往回数，连续几根K线颜色一致（阴线/阳线）。"""
     count = 0
     for b in reversed(bars):
         is_match = (b["c"] < b["o"]) if bearish else (b["c"] > b["o"])
@@ -159,8 +146,6 @@ def _consec_color(bars: List[dict], bearish: bool) -> int:
 
 
 def _decisive_reversal(h4_bars: List[dict], body_ratio: float, vol_mult: float):
-    """4H裸K+放量反转：h4_bars最后一根是最新已收盘的4H K线（对应Pine里[1]偏移
-    的效果——我们传进来的K线全部已经是收盘K线，不需要再手动shift）。"""
     if len(h4_bars) < 21:
         return False, False
     bar = h4_bars[-1]
@@ -175,21 +160,37 @@ def _decisive_reversal(h4_bars: List[dict], body_ratio: float, vol_mult: float):
     return (is_bear and is_high_vol), (is_bull and is_high_vol)
 
 
-def _score_exit_trigger_approx(bull_or_bear_score: int, adx_val: float, ema_fast_c: float, ema_slow_c: float, p: dict, bearish: bool) -> bool:
-    """
-    评分反转出场的近似实现——只看当前这一根是否达标，不做"连续N根都达标"的
-    streak判断（Pine原版是streak）。当前四个品种exit_mode都是4h_only，这个
-    分支实际不会被调用；以后如果改成score_only/mixed模式，这里需要精确补上
-    streak逻辑（用bars_by_tf["base"]往回遍历重算每根K线的分数）。
-    """
+def _score_exit_trigger_approx(score: int, adx_val: float, ema_fast_c: float, ema_slow_c: float, p: dict, bearish: bool) -> bool:
     adx_bonus = 1 if adx_val > p["min_adx"] else 0
-    if bearish:
-        current_ema = 1 if ema_fast_c < ema_slow_c else 0
-        exit_score = bull_or_bear_score - adx_bonus - current_ema
-    else:
-        current_ema = 1 if ema_fast_c > ema_slow_c else 0
-        exit_score = bull_or_bear_score - adx_bonus - current_ema
-    return exit_score >= p["quick_exit_score"]
+    current_ema = 1 if ((ema_fast_c < ema_slow_c) if bearish else (ema_fast_c > ema_slow_c)) else 0
+    return (score - adx_bonus - current_ema) >= p["quick_exit_score"]
+
+
+def _tier_at_entry(base: List[dict], entry_bar_time: int, p: dict):
+    """入场那一刻的ADX档位——TP2距离要按开仓时锁定的档位算，不能用现在的ADX重算。"""
+    idx = None
+    for i, b in enumerate(base):
+        if int(b["t"]) == int(entry_bar_time):
+            idx = i
+            break
+    if idx is None:
+        return None
+    window = base[: idx + 1]
+    if len(window) < p["adx_len"] * 2 + 2:
+        return None
+    adx_at_entry = indicators.wilder_adx(window, p["adx_len"])
+    return _tier_for_adx(adx_at_entry, p), idx
+
+
+def _past_tp2_stage(base: List[dict], entry_idx: int, side: str, entry_price: float, tp2_dist: float) -> bool:
+    if tp2_dist <= 0:
+        return False
+    since_entry = base[entry_idx:]
+    if side == "LONG":
+        target = entry_price + tp2_dist
+        return any(float(b["h"]) >= target for b in since_entry)
+    target = entry_price - tp2_dist
+    return any(float(b["l"]) <= target for b in since_entry)
 
 
 def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = None, position: Optional[dict] = None) -> Optional[dict]:
@@ -229,7 +230,6 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return None
     stoch_k_c = stoch_k_series[-1]
 
-    # ---- 4H / 1D 大周期EMA趋势 ----
     h4_closes = indicators.closes(h4)
     h4_fast = indicators.ema(h4_closes, p["ema_fast_len"])
     h4_slow = indicators.ema(h4_closes, p["ema_slow_len"])
@@ -247,7 +247,6 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             bull_1d = d1_fast[-1] > d1_slow[-1]
             bear_1d = d1_fast[-1] < d1_slow[-1]
 
-    # ---- 综合打分（跟Pine逐项对应）----
     bull_score = 0
     bear_score = 0
     if ema_fast_c > ema_slow_c:
@@ -274,8 +273,13 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         bull_score += 1
         bear_score += 1
 
+    # ---- KDJ 硬门槛 + 【04源码新增】评分超标豁免 ----
     kdj_filter_long = (stoch_k_c > 50) if p["use_kdj_filter"] else True
     kdj_filter_short = (stoch_k_c < 50) if p["use_kdj_filter"] else True
+    kdj_gate_required_long = (not p["use_kdj_relax"]) or bull_score < (p["long_entry_score"] + p["score_margin_for_skip_kdj"])
+    kdj_gate_required_short = (not p["use_kdj_relax"]) or bear_score < (p["short_entry_score"] + p["score_margin_for_skip_kdj"])
+    kdj_ok_long = (not kdj_gate_required_long) or kdj_filter_long
+    kdj_ok_short = (not kdj_gate_required_short) or kdj_filter_short
 
     volume_ok = True
     if p["use_volume_filter"]:
@@ -293,17 +297,28 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     # ==================== 持仓中：先判断要不要提前离场 ====================
     if position:
         side = str(position.get("side") or "").upper()
+        entry_price = float(position.get("entry_price") or 0)
+        entry_bar_time = position.get("entry_bar_time")
+
+        staged_gate_open = True
+        if p["use_staged_exit_gate"] and entry_price > 0 and entry_bar_time is not None:
+            tier_info = _tier_at_entry(base, entry_bar_time, p)
+            if tier_info is not None:
+                entry_tier, entry_idx = tier_info
+                tp2_dist = atr * _tier_mults(entry_tier, p)["tp2"]
+                if _past_tp2_stage(base, entry_idx, side, entry_price, tp2_dist):
+                    staged_gate_open = False
 
         h4_bear_rev, h4_bull_rev = _decisive_reversal(h4, p["candle_body_ratio"], p["candle_vol_multiplier"])
         consec_bear = _consec_color(base, bearish=True)
         consec_bull = _consec_color(base, bearish=False)
-        consec_adverse_long = p["use_consec_adverse_exit"] and side == "LONG" and consec_bear >= p["consec_adverse_bars"]
-        consec_adverse_short = p["use_consec_adverse_exit"] and side == "SHORT" and consec_bull >= p["consec_adverse_bars"]
+        consec_adverse_long = staged_gate_open and p["use_consec_adverse_exit"] and side == "LONG" and consec_bear >= p["consec_adverse_bars"]
+        consec_adverse_short = staged_gate_open and p["use_consec_adverse_exit"] and side == "SHORT" and consec_bull >= p["consec_adverse_bars"]
 
         exit_mode = p["exit_mode"]
 
         if side == "LONG":
-            score_exit = _score_exit_trigger_approx(bear_score, adx_val, ema_fast_c, ema_slow_c, p, bearish=True)
+            score_exit = staged_gate_open and _score_exit_trigger_approx(bear_score, adx_val, ema_fast_c, ema_slow_c, p, bearish=True)
             if exit_mode == "4h_only":
                 base_exit = h4_bear_rev
             elif exit_mode == "score_only":
@@ -313,10 +328,10 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             if base_exit or consec_adverse_long:
                 reason = "连续逆势K线" if (consec_adverse_long and not base_exit) else ("4H裸K放量反转" if h4_bear_rev else "评分反转")
                 return {"action": "CLOSE_QUICK_EXIT", "price": price, "reason": reason, "bar_time": bar_time}
-            if rsi_prev <= p["rsi_exit_level"] < rsi_c:
+            if staged_gate_open and rsi_prev <= p["rsi_exit_level"] < rsi_c:
                 return {"action": "CLOSE_RSI_EXIT", "price": price, "reason": "RSI超买回落", "bar_time": bar_time}
         elif side == "SHORT":
-            score_exit = _score_exit_trigger_approx(bull_score, adx_val, ema_fast_c, ema_slow_c, p, bearish=False)
+            score_exit = staged_gate_open and _score_exit_trigger_approx(bull_score, adx_val, ema_fast_c, ema_slow_c, p, bearish=False)
             if exit_mode == "4h_only":
                 base_exit = h4_bull_rev
             elif exit_mode == "score_only":
@@ -326,9 +341,9 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             if base_exit or consec_adverse_short:
                 reason = "连续逆势K线" if (consec_adverse_short and not base_exit) else ("4H裸K放量反转" if h4_bull_rev else "评分反转")
                 return {"action": "CLOSE_QUICK_EXIT", "price": price, "reason": reason, "bar_time": bar_time}
-            if rsi_prev >= (100 - p["rsi_exit_level"]) > rsi_c:
+            if staged_gate_open and rsi_prev >= (100 - p["rsi_exit_level"]) > rsi_c:
                 return {"action": "CLOSE_RSI_EXIT", "price": price, "reason": "RSI超卖反弹", "bar_time": bar_time}
-        return None  # 持仓中没有触发主动离场条件；止损/TP1由runner通用价格触碰逻辑接管
+        return None  # 止损/TP1由runner通用价格触碰逻辑接管
 
     # ==================== 空仓：判断入场 ====================
     long_cond = (
@@ -336,14 +351,14 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         and price > ema_slow_c
         and is_volatile
         and volume_ok
-        and kdj_filter_long
+        and kdj_ok_long
     )
     short_cond = (
         bear_score >= p["short_entry_score"]
         and price < ema_slow_c
         and is_volatile
         and volume_ok
-        and kdj_filter_short
+        and kdj_ok_short
     )
     if not long_cond and not short_cond:
         return None
