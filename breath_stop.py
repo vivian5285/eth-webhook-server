@@ -61,6 +61,33 @@ TV_STOP_FLOOR_FRAC = 0.5
 # 它管的空间"的思路，取同样的0.5起步。
 PRE_TP1_TP1_DIST_FRAC = 0.5
 
+# 2026-09-02新增：pre_tp1区"起步呼吸地板"——LITEUSDT实盘复现：雷达武装
+# 那一刻价格刚走了1.03×ATR，还没攒够第一整档(step_trigger_atr门槛更高)，
+# step_count=0；这一档的止损公式是"起步锚点(保本价)+0步进度=保本价本身"，
+# 完全没有任何呼吸空间参与——因为pre_tp1区的呼吸空间上限(trail_ceil/
+# trail_floor)在2026-08-17那次修复里被故意排除在阶梯封顶之外(那次是为了
+# 修"阶梯被摁在保本位永远推进不了"，见_zone_trail_atr内pre_tp1分支/
+# calculate_stop_long顶部同日期注释)。那次修复本身没错，但副作用是
+# step_count=0这个必经的起步瞬间，呼吸空间对止损零参与，只剩裸保本——
+# 跟TV_STOP_FLOOR_FRAC/PRE_TP1_TP1_DIST_FRAC两条地板一样，起步瞬间数值
+# 上已经比它们都更松，两条地板都拉不动，LITEUSDT这次870.81进场、最优价
+# 857.71(浮盈13.1点/1.03×ATR)，止损焊死在870.10(仅0.71点耐心)，价格
+# 正常回撤到870附近就止损离场(+0.04%，TV止损885.61远没到)。
+# 修复：给pre_tp1区起步止损再补一条独立地板，参照的是这个品种/这个
+# 价位区间自己的呼吸空间宽度(trail_dist，即zone本该给的呼吸空间，比如
+# LITE这次是28.86点)本身，取其PRE_TP1_BREATH_FLOOR_FRAC。跟宝贝确认过
+# 这里有取舍：系数越大，允许武装后价格倒退越多才止损，包括可能倒退
+# 过entry变成小额浮亏(不再绝对保证"武装后绝不倒亏")；宝贝选择要更多
+# 耐心、接受这个代价，取0.5(半份呼吸空间)——LITE这次会变成
+# 857.71+0.5×28.86≈872.14，允许价格倒退到entry之上一点点(约1.33点
+# 浮亏空间)才止损，而不是一回到entry附近就出局。跟前两条地板同样，
+# 只做加宽、不做收紧的独立最终夹取，不经过trail_floor/trail_ceil/
+# step_stop那条内部管道(教训见PRE_TP1_TP1_DIST_FRAC顶部注释)。只在
+# step_count==0时生效——一旦阶梯已经用best/lowest棘轮真实累进过至少
+# 一档，说明价格已经合法赚到了比这条地板更紧的进度，必须让位，不能
+# 反过来把已经赚到的进度重新拉松(本地测试已覆盖这个回归场景)。
+PRE_TP1_BREATH_FLOOR_FRAC = 0.5
+
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(profile, dict) and profile:
@@ -406,6 +433,21 @@ def calculate_stop_long(
         else:
             candidate = pre_tp1_floor
 
+    # 2026-09-02新增：pre_tp1区起步呼吸地板——见PRE_TP1_BREATH_FLOOR_FRAC
+    # 顶部注释(LITEUSDT实盘复现)。只在step_count==0(一步都还没攒够，含
+    # 刚武装那一刻)时生效——这是唯一真正的空洞：这个状态下step_stop=
+    # initial_stop(裸保本)，上面两条地板锚定的TV止损空间/TP1距离数值上
+    # 又可能比裸保本更紧、拉不动，起步止损就会原样焊死在保本价。一旦
+    # step_count>=1(阶梯已经真实累进过至少一档)，说明价格已经用best/
+    # lowest棘轮换来了合法的进度，这条地板必须让位，不能反过来把已经
+    # 更紧、已经合法赚到的进度重新拉松(测试用例已验证过这个回归场景)。
+    if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
+        breath_floor = new_highest - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if candidate > 0:
+            candidate = min(candidate, breath_floor)
+        else:
+            candidate = breath_floor
+
     new_stop = candidate
     return (
         round(float(new_stop), 2),
@@ -531,6 +573,18 @@ def calculate_stop_short(
             candidate = max(candidate, pre_tp1_floor)
         else:
             candidate = pre_tp1_floor
+
+    # 2026-09-02新增：pre_tp1区起步呼吸地板，SHORT对称版——见calculate_
+    # stop_long同日期注释+PRE_TP1_BREATH_FLOOR_FRAC顶部注释(LITEUSDT
+    # 实盘复现：870.81进场、最优价857.71、step_count=0，起步止损焊死
+    # 870.10只有0.71点耐心，正常回撤即出局)。只在step_count==0时生效，
+    # 已合法累进至少一档后必须让位，不倒退已经赚到的进度。
+    if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
+        breath_floor = new_lowest + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if candidate > 0:
+            candidate = max(candidate, breath_floor)
+        else:
+            candidate = breath_floor
 
     new_stop = candidate
     return (
