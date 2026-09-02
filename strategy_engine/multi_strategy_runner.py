@@ -177,7 +177,11 @@ def _tick_single_symbol_entry(entry: dict) -> None:
     symbol, strategy, timeframe = entry["symbol"], entry["strategy"], entry["timeframe"]
     params = entry.get("params") or {}
     fn = get_strategy(strategy)
-    bars = klines.get_bars(symbol, timeframe, limit=BARS_LIMIT)
+    # 2026-09-02新增：单条roster条目可选覆盖默认BARS_LIMIT(550)——
+    # vegas_tunnel需要EMA676，550根连算出第一个值都不够，其它战法不传
+    # 这个字段时行为完全不变(仍用全局默认值)。
+    bars_limit = int(entry.get("bars_limit") or BARS_LIMIT)
+    bars = klines.get_bars(symbol, timeframe, limit=bars_limit)
     if len(bars) < 30:
         return
     key = (symbol, strategy)

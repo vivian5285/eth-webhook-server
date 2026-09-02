@@ -50,6 +50,14 @@
     做趋势/震荡状态开关是Wilder本人发明ADX时就明确的经典公开用法，
     不是新发明指标。4h是这套自适应逻辑(ADX+EMA金叉死叉+布林带RSI(2))
     比较经典的适用周期，比1d更贴近"波段"节奏，又比1h噪声小。
+
+2026-09-02新增：
+  - vegas_tunnel：1h，"Vegas H1隧道法"里最经典的原始周期。EMA676最少
+    需要676根K线才能算出第一个值，为了让均线真正收敛(不是刚好卡着热身
+    期边缘)、并留出回踩回看空间，单独给这条roster配了远超其它战法默认
+    值(550，见multi_strategy_runner.BARS_LIMIT)的bars_limit=1400(约58
+    天历史)——通过roster条目新增的bars_limit字段覆盖，不影响其它战法
+    的默认拉取量(2026-09-01之前的战法都不传这个字段，行为不变)。
 """
 from __future__ import annotations
 
@@ -70,7 +78,12 @@ _RSI2_SYMBOLS = [
 # 量能均线本身仍是合理窗口，不需要跟着4倍放大)。
 _SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
 
-# 单品种战法：{symbol, strategy, timeframe, params?}
+# vegas_tunnel需要EMA676，默认BARS_LIMIT(550)连算出第一个值都不够，
+# 单独给这条roster覆盖更大的拉取量(见multi_strategy_runner._tick_
+# single_symbol_entry新增的bars_limit字段支持)。
+_VEGAS_BARS_LIMIT = 1400
+
+# 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?}
 SINGLE_SYMBOL_ROSTER = (
     [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
     + [{"symbol": s, "strategy": "connors_rsi2", "timeframe": "1d"} for s in _RSI2_SYMBOLS]
@@ -80,6 +93,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "time_series_momentum", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

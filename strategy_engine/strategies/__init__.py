@@ -131,6 +131,18 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] adx_regime_switch 加载失败: {_e}")
 
+# 2026-09-02新增：宝贝分享一段讲解视频要求加入——维加斯隧道法(Vegas
+# Tunnel)。诚实说明：不是某人独家专利指标，是外汇/加密圈流传二十多年
+# 的公开经典EMA叠加系统，符合"有公开可考规则、不是网红自创黑箱"的准入
+# 线，但不像Turtle/Connors RSI-2那样有可具名引用的论文/个人实盘战绩，
+# 见vegas_tunnel.py顶部注释。
+try:
+    from strategy_engine.strategies import vegas_tunnel
+    STRATEGIES["vegas_tunnel"] = vegas_tunnel.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] vegas_tunnel 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -226,6 +238,17 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "自己根据实时市场状态换打法，是本擂台唯一一套这样做的战法，跟"
         "turtle_breakout/time_series_momentum(纯趋势)、connors_rsi2/"
         "bollinger_rsi_contrarian(纯均值回归)分别有交集但不重合。4H周期。"
+    ),
+    "vegas_tunnel": (
+        "维加斯隧道交易法(Vegas Tunnel/Vegas H1隧道法)——2026-09-02宝贝"
+        "分享讲解视频要求加入。诚实说明：外汇/加密圈流传二十多年的公开"
+        "经典EMA叠加系统，不是黑箱指标，但不像Turtle/Connors RSI-2那样"
+        "有可具名引用的论文/实盘战绩。近隧道EMA(144/169)标中期支撑压力，"
+        "远隧道EMA(576/676)标长期趋势方向(主结构过滤器)，EMA12做回踩后"
+        "转向的触发确认。远隧道方向反转或近隧道被真正跌破/突破才离场。"
+        "唯一一套用'两层不同速度EMA隧道'做结构分层判断的战法，跟"
+        "turtle_breakout(单一Donchian通道)、adx_regime_switch(状态开关)"
+        "都不一样。1H周期(该系统最经典的原始周期)。"
     ),
 }
 
