@@ -103,6 +103,37 @@ PRE_TP1_TP1_DIST_FRAC = 0.65
 # 顶部注释。
 PRE_TP1_BREATH_FLOOR_FRAC = 0.65
 
+# 2026-09-02新增：深度盈利耐心模式(架构级移植TV的use_staged_exit_gate
+# 「分级放行」)——今晚"TV还持有、实盘已经没了"这个模式在BNB/LITE/XAU/
+# ANTHROPIC等反复出现，三轮地板式调宽(上面三条0.65)治标不治本。宝贝直接
+# 翻了TV真实Pine源码复刻eth_pingkai_buhuchi.py，查到根本性哲学差异：
+#   · TV的_past_tp2_stage()：价格(用K线high/low极值判断)一旦突破过TP2
+#     距离，staged_gate_open=False，直接关掉「评分反转/RSI反转/连续逆势
+#     K线」三条快速离场，只留_decisive_reversal()「4H裸K放量反转」一条
+#     ——TV深度盈利之后变得极度有耐心，正常回撤/短线噪音完全不理会。
+#   · VPS雷达一直是「连续价距追踪」：不管盈利多深，止损始终是"离best多远"
+#     的连续逻辑，哲学上跟TV「事件/形态触发、赚多了更有耐心」完全不同。
+# 移植方案(2026-09-02跟宝贝逐条确认，见radar_reentry_mixin.py同日期注释)：
+#   1) 触发：粘性判定best(多=highest/空=lowest，只进不退)是否触过TP2价
+#      (tv_tps[1]，缺失回退entry±tp2_atr×atr)。一旦触过永久成立，正常
+#      回撤不退出——跟_past_tp2_stage用极值判断的口径一致。
+#   2) 命中后：追踪区当tp3_plus处理，zone="tp2_patience"，用最宽的coeff
+#      追踪距离(live_tp3_trail_mult按ADX/动量插值、已按品种校准，约4-6×
+#      ATR)，取max(coeff, breath_tp23)保证永远不比旧的tp2_tp3/tp3_confirm
+#      更紧(只放宽、不收紧)。下游既有的 min(step_stop, trail_floor) 封顶
+#      会自然把阶梯压到这条宽线上 = 阶梯冻结，不需要单独写冻结代码。
+#   3) 「4H裸K放量反转」那一半TV哲学：radar_reentry_mixin.py::_maybe_lock_
+#      profit_on_reversal(2026-08-29已上线，判据本就跟_decisive_reversal
+#      同款：实体比≥0.55+量≥近20根均量×1.15，用已收盘4H K线)原样接管，
+#      不新增检测代码。
+#   4) 耐心模式下「利润回吐刹车」(_maybe_tighten_on_profit_giveback)让位
+#      ——它min_peak_atr低到1.0、专门设计成比宽追踪更早更紧地收网，正好是
+#      耐心模式的反面；「TV已平仓滞涨刹车」改成只收紧到耐心距离、不再贴
+#      现价；「反转锁盈」「大赢家地板」原样保留。真实TV CLOSE信号仍立即
+#      平仓(宝贝："按照TV的平仓")，耐心模式不拦真实CLOSE。
+# 这不是新参数、不是调系数，是把「连续价距追踪」在深盈段替换成「宽追踪
+# +只认4H形态反转」——比逐场景打补丁更本质。
+
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if isinstance(profile, dict) and profile:
@@ -248,6 +279,7 @@ def _zone_trail_atr(
     tp1_px: float = 0.0,
     tp2_px: float = 0.0,
     tp3_px: float = 0.0,
+    best: float = 0.0,
 ) -> Tuple[float, str]:
     """
     按价格相对 TP 进度返回呼吸空间（×ATR）与区名。
@@ -257,6 +289,12 @@ def _zone_trail_atr(
     抢单——那条路 v15.9.0 试过，两条腿都在场时有实打实的竞态成交风险，
     v16.4.0 已经把它连同竞态处理代码一起删掉了）；
     确认走出这段缓冲、真延续了 → tp3_plus，放开到 coeff(min~max)。
+
+    2026-09-02新增 tp2_patience（深度盈利耐心模式，见顶部同日期注释）：best
+    极值(多=highest/空=lowest，调用方传入，只进不退)一旦触过 TP2 价，就把
+    追踪区当 tp3_plus 处理——用 max(coeff, breath_tp23) 的宽追踪距离，粘性
+    永久成立（正常回撤不退出），移植 TV use_staged_exit_gate「过TP2后只认
+    4H形态反转、不理正常回撤」的哲学。
     """
     side_u = str(side or "").upper()
     b12 = float(profile.get("breath_tp12") or 1.2)
@@ -269,11 +307,18 @@ def _zone_trail_atr(
         else TP3_CONFIRM_ATR
     )
 
-    # 优先 TV 价；否则用 ATR 倍数估进度
+    # 深度盈利耐心模式：best极值(只进不退)是否触过TP2——粘性，一旦触过
+    # 永久成立，正常回撤不退出（tp2_px缺失回退 entry±tp2_atr×atr）。
+    b = float(best or 0)
+    # 耐心追踪距离取 max(coeff, breath_tp23)：保证永远不比旧的 tp2_tp3/
+    # tp3_confirm(都用 b23)更紧，只放宽不收紧。
+    patience_mult = max(float(coeff), b23)
     if side_u == "LONG":
         tp3_ref = tp3_px if tp3_px > 0 else entry + (tp2_a + 1.0) * atr
         past_tp3 = price >= tp3_ref
         past_tp3_confirmed = price >= tp3_ref + confirm_atr * atr
+        tp2_ref_sticky = tp2_px if tp2_px > 0 else entry + tp2_a * atr
+        past_tp2_sticky = b > 0 and tp2_ref_sticky > 0 and b >= tp2_ref_sticky
         past_tp2 = (tp2_px > 0 and price >= tp2_px) or (
             tp2_px <= 0 and price >= entry + tp2_a * atr
         )
@@ -284,6 +329,8 @@ def _zone_trail_atr(
         tp3_ref = tp3_px if tp3_px > 0 else entry - (tp2_a + 1.0) * atr
         past_tp3 = price <= tp3_ref
         past_tp3_confirmed = price <= tp3_ref - confirm_atr * atr
+        tp2_ref_sticky = tp2_px if tp2_px > 0 else entry - tp2_a * atr
+        past_tp2_sticky = b > 0 and tp2_ref_sticky > 0 and b <= tp2_ref_sticky
         past_tp2 = (tp2_px > 0 and price <= tp2_px) or (
             tp2_px <= 0 and price <= entry - tp2_a * atr
         )
@@ -294,7 +341,11 @@ def _zone_trail_atr(
     if past_tp3_confirmed:
         return float(coeff), "tp3_plus"
     if past_tp3:
-        return b23, "tp3_confirm"
+        # 假突破防御仍用 b23；但若已在粘性耐心模式，不允许比耐心宽度更紧
+        return (patience_mult, "tp2_patience") if past_tp2_sticky else (b23, "tp3_confirm")
+    if past_tp2_sticky:
+        # 触过TP2 → 深度盈利耐心模式：宽追踪，阶梯经既有 trail_floor 封顶自然冻结
+        return patience_mult, "tp2_patience"
     if past_tp2:
         return b23, "tp2_tp3"
     if past_tp1:
@@ -348,14 +399,15 @@ def calculate_stop_long(
         side="LONG", price=price, entry=entry_price, atr=initial_atr,
         profile=p, coeff=coeff,
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=new_highest,
     )
     trail_dist = trail_mult * initial_atr
     # 分区呼吸：止损不得远落后于最高价超过 trail_dist（先算出来，阶梯要用它封顶）
     trail_floor = new_highest - trail_dist
-    # 浮盈≥phase_switch → 动态追踪阶段；或已过 TP3
+    # 浮盈≥phase_switch → 动态追踪阶段；或已过 TP3；或已进入深度盈利耐心模式
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
     mfe_atr = (new_highest - entry_price) / initial_atr if initial_atr > 0 else 0.0
-    new_phase = zone == "tp3_plus" or (phase_sw > 0 and mfe_atr >= phase_sw)
+    new_phase = zone in ("tp3_plus", "tp2_patience") or (phase_sw > 0 and mfe_atr >= phase_sw)
 
     # 阶梯跟进：价格每涨 step_trigger，止损上移 step_advance（从保本位推进）
     step_trigger = step_trig * initial_atr
@@ -522,12 +574,13 @@ def calculate_stop_short(
         side="SHORT", price=price, entry=entry_price, atr=initial_atr,
         profile=p, coeff=coeff,
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=new_lowest,
     )
     trail_dist = trail_mult * initial_atr
     trail_ceil = new_lowest + trail_dist
     phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
     mfe_atr = (entry_price - new_lowest) / initial_atr if initial_atr > 0 else 0.0
-    new_phase = zone == "tp3_plus" or (phase_sw > 0 and mfe_atr >= phase_sw)
+    new_phase = zone in ("tp3_plus", "tp2_patience") or (phase_sw > 0 and mfe_atr >= phase_sw)
 
     step_trigger = step_trig * initial_atr
     # 2026-09-01再修复(B账户LITEUSDT实盘复现，SHORT对称版)：同calculate_
@@ -646,6 +699,7 @@ def calculate_breath_stop(
     trail_mult, zone = _zone_trail_atr(
         side=side, price=px, entry=entry, atr=atr, profile=p, coeff=coeff,
         tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=float(best_price or 0),
     )
     meta = {
         "trail_atr": trail_mult,
@@ -654,7 +708,7 @@ def calculate_breath_stop(
         "profile": p.get("name") or "ETH",
         "adx": float(adx_val or 0),
         "zone": zone,
-        "phase": "trail" if zone == "tp3_plus" else "ladder",
+        "phase": "trail" if zone in ("tp3_plus", "tp2_patience") else "ladder",
         "step_count": 0,
         "early_be_done": bool(early_be_done),
         "tv_stop_dist": float(tv_stop_dist or 0),

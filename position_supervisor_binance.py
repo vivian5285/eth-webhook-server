@@ -17908,6 +17908,48 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             meta["atr_1h"] = breath_meta.get("atr_1h")
             meta["smooth_ratio"] = breath_meta.get("smooth_ratio")
 
+        # 2026-09-02新增：深度盈利耐心模式状态刷新——唯一真相来源是 breath_stop
+        # 的 zone。best极值粘性触过TP2后，_zone_trail_atr 只会返回 tp2_patience/
+        # tp3_confirm/tp3_plus 三者之一（永不再退回 tp1_tp2/pre_tp1），所以
+        # "zone in 这三者" 本身就是粘性判据。下面四条棘轮里"利润回吐刹车"据此
+        # 整体让位、"TV已平仓滞涨刹车"据此改成只收紧到耐心距离。见 breath_stop.py
+        # 顶部同日期注释。
+        self._patience_active = bool(
+            (meta or {}).get("zone") in ("tp2_patience", "tp3_confirm", "tp3_plus")
+        )
+        self._patience_trail_dist = (
+            float(meta.get("trail_distance") or 0) if self._patience_active else 0.0
+        )
+        if self._patience_active:
+            # 每笔持仓(side|entry)只在首次进入耐心模式时播报一次——不依赖任何
+            # 跨持仓重置，新持仓自然是新 key。
+            _pk = f"{side}|{entry:.6f}"
+            if getattr(self, "_patience_alerted_key", None) != _pk:
+                self._patience_alerted_key = _pk
+                logger.info(
+                    f"🧘 [{self._tag()}] 进入深度盈利耐心模式 | best={best:.4f} 已过TP2 → "
+                    f"追踪距离 {self._patience_trail_dist:.4f}"
+                    f"(coeff={coeff:.2f}·zone={meta.get('zone')}) · 阶梯冻结 · 利润回吐刹车让位 · "
+                    f"只认4H放量反转/大赢家地板/真实TV CLOSE"
+                )
+                try:
+                    import dingtalk
+                    self._dingtalk(
+                        dingtalk.report_system_alert,
+                        title=f"深度盈利耐心模式启动 [{self.symbol}]",
+                        detail=(
+                            f"{side} 持仓 best={best:.4f} 已触过 TP2，雷达切入深度盈利"
+                            f"耐心模式（移植 TV 分级放行）：追踪距离放宽到 "
+                            f"{self._patience_trail_dist:.4f}（约{self._patience_trail_dist / max(atr, 1e-9):.2f}×ATR），"
+                            f"阶梯冻结、利润回吐刹车让位、TV已平仓滞涨刹车只收紧到耐心距离。"
+                            f"正常回撤/短线噪音不再打出，只有 4H 裸K放量反转（反转锁盈）、"
+                            f"大赢家地板、或 TV 真实 CLOSE 信号才离场。entry={entry:.4f}"
+                        ),
+                        level="提示",
+                    )
+                except Exception:
+                    pass
+
         if new_best > 0:
             self.best_price = new_best
         if new_stop > 0:

@@ -300,6 +300,12 @@ class RadarReentryMixin:
             setattr(self, k, v)
         self._reentry_open_snap = None
         self._reentry_cycle_aborted = False
+        # 深度盈利耐心模式（见 breath_stop.py 顶部同日期注释）：每个雷达tick由
+        # _apply_breath_stop_tick 从 calculate_breath_stop 返回的 zone 刷新，
+        # 唯一真相来源是 breath_stop 的 tp2_patience 区，本类不重复判定。
+        self._patience_active = False
+        self._patience_trail_dist = 0.0
+        self._patience_alerted_key = None
         self._base_breath_profile = dict(getattr(self, "breath_profile", None) or {})
         self._clear_chase_watch(save=False)  # 进程初始化阶段，state文件还没加载完，禁止提前落盘覆盖
         self._init_tv_catchup_runtime()
@@ -1903,7 +1909,16 @@ class RadarReentryMixin:
         对后续走势的预测，所以不需要K线/量能/EMA信号，可以每tick都算。
         跟大赢家地板一样只朝有利方向棘轮，互不依赖，谁锁得更紧生效谁的。
         curr_px由调用方传入(跟_maybe_lock_profit_on_reversal同款签名)，
-        不从self上取——本类没有一个统一维护的"当前价"属性。"""
+        不从self上取——本类没有一个统一维护的"当前价"属性。
+
+        2026-09-02：深度盈利耐心模式(best粘性触过TP2，见 breath_stop.py 顶部
+        同日期注释)下这条棘轮整体让位——它 min_peak_atr 低到 1.0、设计目的
+        就是比宽追踪"更早、更紧"地接住中等赢家，正好是耐心模式的反面。移植
+        TV 分级放行的核心就是"过TP2后正常回撤不打出、只认4H形态反转"，这条
+        刹车会直接违背它(BNB 今晚就是又一次复现，BNB 恰好是启用回吐刹车的
+        品种)。让位只影响已触过TP2的深盈段；没触过TP2一切照旧。"""
+        if bool(getattr(self, "_patience_active", False)):
+            return candidate_sl
         profile = getattr(self, "breath_profile", None)
         cfg = profile.get("giveback_brake") if isinstance(profile, dict) else None
         if not isinstance(cfg, dict):
@@ -2046,15 +2061,34 @@ class RadarReentryMixin:
             return candidate_sl
 
         px = float(curr_px or 0) or best
-        tight_dist = atr * TV_EXIT_STALL_TIGHT_ATR
-        if side == "LONG":
-            floor_px = px - tight_dist
-            improved = floor_px > candidate_sl
-            out = max(candidate_sl, floor_px)
+        # 2026-09-02：深度盈利耐心模式(best粘性触过TP2)下，心跳转FLAT本就是
+        # 预期状态(TV在它自己TP3追踪止盈平了，我们故意继续独立持有)，这条
+        # 刹车不再收紧到"现价±0.3ATR"那么贴，改成最多只收紧到"耐心距离"
+        # (best∓_patience_trail_dist，即雷达宽追踪线本身)，永远不比它更紧。
+        # 实际上这等于让宽追踪线自己接管，这条刹车在耐心模式下近乎 no-op，
+        # 只在宽追踪线因某种原因滞后 best 时才补一手。见 breath_stop.py 顶部
+        # 同日期注释。没触过TP2一切照旧(现价±TV_EXIT_STALL_TIGHT_ATR)。
+        patience_on = bool(getattr(self, "_patience_active", False))
+        patience_dist = float(getattr(self, "_patience_trail_dist", 0) or 0)
+        if patience_on and patience_dist > 0:
+            if side == "LONG":
+                floor_px = best - patience_dist
+                improved = floor_px > candidate_sl
+                out = max(candidate_sl, floor_px)
+            else:
+                floor_px = best + patience_dist
+                improved = floor_px < candidate_sl
+                out = min(candidate_sl, floor_px)
         else:
-            floor_px = px + tight_dist
-            improved = floor_px < candidate_sl
-            out = min(candidate_sl, floor_px)
+            tight_dist = atr * TV_EXIT_STALL_TIGHT_ATR
+            if side == "LONG":
+                floor_px = px - tight_dist
+                improved = floor_px > candidate_sl
+                out = max(candidate_sl, floor_px)
+            else:
+                floor_px = px + tight_dist
+                improved = floor_px < candidate_sl
+                out = min(candidate_sl, floor_px)
         if not improved:
             return candidate_sl
 
