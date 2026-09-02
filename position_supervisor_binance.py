@@ -17914,8 +17914,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # "zone in 这三者" 本身就是粘性判据。下面四条棘轮里"利润回吐刹车"据此
         # 整体让位、"TV已平仓滞涨刹车"据此改成只收紧到耐心距离。见 breath_stop.py
         # 顶部同日期注释。
+        #
+        # 2026-09-04修正：tp3_confirm/tp3_plus 其实是早于耐心模式就存在的
+        # 独立阶梯区(纯price-past-TP3判定，跟有没有触过TP2/有没有
+        # has_staged_exit_gate完全无关)——单看zone会把"没有真实TV分级放行
+        # 机制的品种，只是价格走得够深撞进tp3_plus"误判成耐心模式，让
+        # giveback刹车/tv-exit-stall刹车对这些品种也整体让位/软化，这不是
+        # 移植TV哲学的本意(那10个品种的TV策略在TP3之后一样会被评分反转/
+        # RSI反转/连续逆势/4H反转正常打出，从没有"深盈后不理会这些信号"这
+        # 回事)。加一个has_staged_exit_gate门槛：不是这7个品种，_patience_
+        # active 永远是False，giveback/tv-exit-stall刹车照旧正常触发，跟
+        # 移植耐心模式之前完全一样。
+        _has_gate = bool((profile or {}).get("has_staged_exit_gate"))
         self._patience_active = bool(
-            (meta or {}).get("zone") in ("tp2_patience", "tp3_confirm", "tp3_plus")
+            _has_gate and (meta or {}).get("zone") in ("tp2_patience", "tp3_confirm", "tp3_plus")
         )
         self._patience_trail_dist = (
             float(meta.get("trail_distance") or 0) if self._patience_active else 0.0

@@ -65,6 +65,12 @@ BREATH_ETH: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    # 2026-09-04：breath_stop.py::_zone_trail_atr 的 tp2_patience（深度盈利
+    # 耐心模式）只在这个字段为True时才生效。ETH真实TV源码(01版本.pine)里
+    # 没有use_staged_exit_gate这个开关(全文读完+grep核对，零匹配)，所以是
+    # False——这也是default_breath_profile()的默认值来源(=dict(BREATH_ETH))，
+    # 没单独配profile的品种同样默认关闭，不会误开耐心模式。
+    "has_staged_exit_gate": False,
 }
 
 # BNB 基线（150分钟周期）
@@ -259,6 +265,7 @@ BREATH_META: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(META)
 }
 
 # TSLA 基线（新增品种，2026-08-27，6小时周期，币安TRADIFI_PERPETUAL
@@ -353,6 +360,7 @@ BREATH_SNDK: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SNDK)
 }
 
 # PAXG 基线（新增品种，2026-08-14，150分钟周期）
@@ -436,6 +444,7 @@ BREATH_SKHYNIX: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SKHYNIX)
 }
 
 # XPD 基线（新增品种，2026-08-15，150分钟周期，钯金）
@@ -500,6 +509,7 @@ BREATH_OPENAI: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(OPENAI)
 }
 
 # ANTHROPIC 基线（新增品种，2026-08-15，90分钟周期，PREMARKET未上市股权盘前品种）
@@ -618,6 +628,7 @@ BREATH_GS: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(GS)
 }
 
 # MU 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟ASML/
@@ -650,6 +661,7 @@ BREATH_MU: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(MU)
 }
 
 # LITE 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟
@@ -681,8 +693,14 @@ BREATH_LITE: Dict[str, Any] = {
     "tick_size": 0.01,
     "entry_score": 3,
     "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(LITE)
 }
 
+# 2026-09-04：has_staged_exit_gate=True 只标在这7个品种上（META/LITE/MU/
+# GS/OPENAI/SKHYNIX/SNDK，全是03版本.pine"平开不互斥版"家族）——核实过
+# 真实TV Pine源码只有这7个有useStagedExitGate。其余全部False（含ETH/XAU/
+# XMR/BCH/XPD/BNB/TSLA/ANTHROPIC/PAXG/ZEC/ASML），breath_stop.py::
+# _zone_trail_atr 靠这个字段决定要不要给"深度盈利耐心模式"开门。
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,

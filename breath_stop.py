@@ -133,6 +133,22 @@ PRE_TP1_BREATH_FLOOR_FRAC = 0.65
 #      平仓(宝贝："按照TV的平仓")，耐心模式不拦真实CLOSE。
 # 这不是新参数、不是调系数，是把「连续价距追踪」在深盈段替换成「宽追踪
 # +只认4H形态反转」——比逐场景打补丁更本质。
+#
+# 2026-09-04纠正范围：上面移植依据的"eth_pingkai_buhuchi.py设定
+# use_staged_exit_gate=True[截图确认]"这个前提，核对后发现来源是
+# 2026-08-20对另一份更早ETH源码的截图，不是TV实际在用的01/02版本。把
+# 01~04版本+BNB共5份TV Pine源码全部读完+grep核对，真实"TP2分级放行"
+# 机制只存在于03版本(META/LITE/MU/GS/OPENAI/SKHYNIX/SNDK共7个品种)，
+# 01/02(ETH/XAU/XMR/BCH/XPD)/04(TSLA/ANTHROPIC/PAXG/ZEC)/BNB都没有——
+# 详见 strategy_engine/strategies/eth_pingkai_buhuchi.py 文件头
+# (2026-09-04重建) 和 project_tv_strategy_symbol_mapping_20260903 记忆。
+# 因此把 tp2_patience 收窄成按品种生效：breath_profiles.py 每个品种的
+# profile 新增 has_staged_exit_gate 字段(默认False，只有那7个品种为
+# True)，_zone_trail_atr() 只在该品种确实有真实TV机制时才会进入
+# tp2_patience；没有的品种(含ETH/BNB/XAU等)照旧走tp2_tp3/tp3_confirm/
+# tp3_plus既有阶梯——不是新逻辑，是恢复移植之前、这些品种本来就在用的
+# 行为。三条0.65地板(TV_STOP_FLOOR_FRAC等)、反转锁盈、大赢家地板都是
+# 通用机制，不受这次收窄影响，继续对全部17个品种生效。
 
 
 def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -295,6 +311,11 @@ def _zone_trail_atr(
     追踪区当 tp3_plus 处理——用 max(coeff, breath_tp23) 的宽追踪距离，粘性
     永久成立（正常回撤不退出），移植 TV use_staged_exit_gate「过TP2后只认
     4H形态反转、不理正常回撤」的哲学。
+
+    2026-09-04收窄：只在 profile["has_staged_exit_gate"] 为真时才会进入
+    tp2_patience——核实后这个TV机制只有7个品种(META/LITE/MU/GS/OPENAI/
+    SKHYNIX/SNDK)真实存在，其余品种没有这个开关，触过TP2一样照旧走
+    tp2_tp3/tp3_confirm/tp3_plus（见顶部2026-09-04纠正注释）。
     """
     side_u = str(side or "").upper()
     b12 = float(profile.get("breath_tp12") or 1.2)
@@ -338,12 +359,17 @@ def _zone_trail_atr(
             tp1_px <= 0 and price <= entry - tp1_a * atr
         )
 
+    # 2026-09-04：只有真实TV源码里确认有use_staged_exit_gate的品种才允许
+    # 进入tp2_patience（见本函数docstring + 顶部2026-09-04纠正注释）。
+    has_staged_gate = bool(profile.get("has_staged_exit_gate"))
+    patience_engaged = has_staged_gate and past_tp2_sticky
+
     if past_tp3_confirmed:
         return float(coeff), "tp3_plus"
     if past_tp3:
         # 假突破防御仍用 b23；但若已在粘性耐心模式，不允许比耐心宽度更紧
-        return (patience_mult, "tp2_patience") if past_tp2_sticky else (b23, "tp3_confirm")
-    if past_tp2_sticky:
+        return (patience_mult, "tp2_patience") if patience_engaged else (b23, "tp3_confirm")
+    if patience_engaged:
         # 触过TP2 → 深度盈利耐心模式：宽追踪，阶梯经既有 trail_floor 封顶自然冻结
         return patience_mult, "tp2_patience"
     if past_tp2:
