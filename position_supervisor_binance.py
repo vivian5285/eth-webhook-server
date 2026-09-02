@@ -847,6 +847,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 5分钟明显更灵敏，又不会跟已验证过的限流纪律打架。
                 if bool(getattr(self, "_chase_watch_active", False)):
                     sleep_for = min(sleep_for, 60.0)
+                # 2026-09-02修复(B账户ETHUSDT/XAUUSDT实盘复现，宝贝要求"彻底
+                # 杜绝TV到了不开仓")：开仓失败后喂给追回引擎评估、但还没触发
+                # 挂单(catchup_active还是False)这段"待评估"窗口，之前只能走
+                # 默认5分钟一档——当晚IP拥堵期间，_multi_tf_trend_confirmed
+                # 好几次撞上REST被冷却、拿到空K线，本该只是"这轮凑巧没拉到
+                # 数据"，却被当成"评估过、没通过"，只能干等到下一次5分钟巡检
+                # 才有机会用真数据重新评估，XAUUSDT这次因此多等了近20分钟。
+                # 心跳缺口存在(TV心跳有仓、账本却空仓)期间，跟chase_watch同一
+                # 档60秒——同样是"输入是已收盘K线，加快到15秒纯属浪费"的
+                # 场景，但60秒比默认5分钟明显更灵敏，能在IP刚恢复的窗口里
+                # 更快撞上一次拿到真实数据的评估，不用干等到下个5分钟整点。
+                if not (
+                    bool(getattr(self, "reentry_active", False))
+                    or bool(getattr(self, "catchup_active", False))
+                ):
+                    _hb_side_patrol = str(
+                        getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT"
+                    ).upper()
+                    _has_pos_patrol = (
+                        str(getattr(self, "current_side", "") or "").upper()
+                        in ("LONG", "SHORT")
+                        and float(getattr(self, "watched_qty", 0) or 0) > 0
+                    )
+                    if _hb_side_patrol in ("LONG", "SHORT") and not _has_pos_patrol:
+                        sleep_for = min(sleep_for, 60.0)
                 if now < backoff_until:
                     sleep_for = max(sleep_for, backoff_until - now)
                 time.sleep(max(1.0, sleep_for))
@@ -15481,12 +15506,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 单次查询失败就直接拒绝开仓，跟_close_all/_ensure_flat_before_
         # open早就有的"IP冷却中等冷却结束再重试"完全不对称——真实TV信号
         # 撞上短暂IP限流(今晚大多数情况是几秒到几十秒)本来能扛过去，却
-        # 因为这里零重试直接被放弃。给一个有限的重试预算(4次，跟平仓/
-        # 净场用同一套"冷却中等待、非冷却线性退避"节奏)，扛得住短暂限流；
-        # 真遇到长时间封禁(比如今晚TSLAUSDT撞上的570s)重试预算内还是会
-        # 耗尽，跟原来一样拒绝+告警，不是无限等待。
+        # 因为这里零重试直接被放弃。给一个有限的重试预算，跟平仓/净场用
+        # 同一套"冷却中等待、非冷却线性退避"节奏，扛得住短暂限流；真遇到
+        # 长时间封禁(比如TSLAUSDT撞上的570s)重试预算内还是会耗尽，跟原来
+        # 一样拒绝+告警，不是无限等待。
+        # 2026-09-02调宽(B账户ETHUSDT/XAUUSDT同一晚再次实盘复现，宝贝要求
+        # "彻底杜绝TV到了不开仓")：4次(约90秒预算)跟_close_all/_ensure_
+        # flat_before_open早就用的6次(约145秒)不对称——平仓这条命脉级别的
+        # 操作值得更长的重试预算，开仓同样是"TV到了必须能开"的命脉操作，
+        # 没理由预算更短。调到6次，两条路径对齐。
         pos = None
-        pos_max_attempts = 4
+        pos_max_attempts = 6
         for _pos_attempt in range(1, pos_max_attempts + 1):
             ip_rem = float(binance_client.ip_rate_limit_remaining() or 0)
             if ip_rem > 0:
