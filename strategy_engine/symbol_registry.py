@@ -73,7 +73,7 @@ _BNB = "bnb_heartbeat_real_reversal"
 
 SYMBOLS: Dict[str, dict] = {
     # ── 家族① 加仓最小改动（宽TP）：ETH / XMR / BCH / XAU / XPD ─────────────
-    "ETHUSDT":       {"strategy": _ADD_ON, "timeframe": "90m",  "mtf": _MTF, "params": {}},
+    "ETHUSDT":       {"strategy": _ADD_ON, "timeframe": "150m", "mtf": _MTF, "params": {}},  # 2026-09-04：宝贝确认ETH图表周期已从90m改成150m
     "XMRUSDT":       {"strategy": _ADD_ON, "timeframe": "6h",   "mtf": _MTF, "params": {}},
     "BCHUSDT":       {"strategy": _ADD_ON, "timeframe": "6h",   "mtf": _MTF, "params": {}},
     "XAUUSDT":       {"strategy": _ADD_ON, "timeframe": "50m",  "mtf": _MTF, "params": {}},
