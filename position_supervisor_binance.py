@@ -512,6 +512,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.pending_forced_close = False
         self.pending_forced_close_reason = ""
         self.pending_forced_close_started_ts = 0.0
+        # 2026-09-04修复(E账户MARIO XMRUSDT实盘复现)：_close_all()本身和
+        # 哨兵循环里"续追未兑现的强平意图"那条分支(见上面pending_forced_
+        # close注释里提到的_sentinel_loop分支)，两条路径都会独立调用
+        # _close_all()，彼此之间完全没有互斥——刻意"不占用self._lock"是
+        # 为了不让_close_all内部~145秒的重试期间卡住哨兵的其它职责，但这
+        # 也意味着"主线程正在处理TV先平后开、_close_all还没退出、
+        # pending_forced_close还没来得及清"这个窗口期里，哨兵每轮tick看到
+        # pending_forced_close仍是True，会自己再调一次_close_all——如果
+        # 主线程这时已经平完旧仓、开出了新的反向仓位，哨兵这次"续追"会把
+        # 刚开出来的合法新仓当成还没兑现的旧平仓意图，直接市价平掉，还触
+        # 发_sweep_orphan_reverse_after_flat的"超卖变反向"最高级暂停——
+        # 2026-09-03深夜XMRUSDT在E账户上完整复现：TV发SHORT反转信号，主
+        # 线程"先平后开"平掉旧LONG、开出新SHORT，几乎同时哨兵续追平仓命中
+        # 竞态，把刚开的SHORT自己平了、暂停了交易，本该持有的SHORT仓位空
+        # 仓挂了5.5小时（且当晚同一时间段Telegram连接超时，相关告警全部
+        # 没发出去，没人知道）。修复：给_close_all()整个函数体加一把独立
+        # 于self._lock的专用非阻塞锁——同一时刻只允许一次_close_all()真正
+        # 在跑，抢不到锁的调用方（通常是哨兵的机会性续追）直接原地退让、
+        # 不重复关闭已经被别的路径正确处理掉的仓位，下一轮tick再看
+        # pending_forced_close是否还True（真被遗弃的平仓意图，主线程那次
+        # 早就已经退出了，届时锁必然抢得到，续追机制本身完全不受影响）。
+        self._close_all_lock = threading.Lock()
         self._last_bar_time_ms = 0  # 最近处理过的 bar_time（乱序/过期兜底）
         self._atr_div_streak = 0
         self.atr_source = "tv"  # 规格 v1.0：ATR 全程只用 TV webhook.atr
@@ -15658,6 +15680,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     or pause_r.startswith("restart_")
                     or pause_r.startswith("INCIDENT_")
                     or "PENDING_RESUME" in pause_r
+                    # 2026-09-04修复(E账户MARIO XMRUSDT实盘复现)：
+                    # reverse_open_after_flat("超卖变反向")之前不在这份
+                    # 名单里，导致下一笔TV新开仓信号一来就静默清掉这条暂
+                    # 停、直接照常开仓——原意"暂停自动化，需人工核对盘口"
+                    # 从没真正生效过。补进来，跟_close_all_impl重启路径
+                    # 那条同日期修复保持一致。
+                    or pause_r.startswith("reverse_open_after_flat")
                 )
                 if sticky:
                     logger.error(
@@ -19467,6 +19496,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
     def _close_all(self, reason="", force_align=None, reset_state=True, close_meta=None,
                    force_verify_note=""):
+        """_close_all_impl的加锁外壳。2026-09-04修复(E账户MARIO XMRUSDT实盘
+        复现，详细背景见__init__里_close_all_lock字段注释)：同一时刻只允许
+        一次真正执行——非阻塞抢self._close_all_lock，抢不到说明另一条路径
+        （通常是主线程正在处理TV先平后开）已经在跑，直接原地退让返回False，
+        不重复关闭刚被别的路径正确处理掉的仓位；不影响哨兵续追机制本身，
+        真正被遗弃的强平意图，抢锁那次早就退出了，下一轮tick必然抢得到。"""
+        if not self._close_all_lock.acquire(blocking=False):
+            logger.info(
+                f"⏭️ [{self.symbol}] _close_all 已在其它路径执行中，本次退让 | {reason}"
+            )
+            return False
+        try:
+            return self._close_all_impl(
+                reason=reason, force_align=force_align, reset_state=reset_state,
+                close_meta=close_meta, force_verify_note=force_verify_note,
+            )
+        finally:
+            self._close_all_lock.release()
+
+    def _close_all_impl(self, reason="", force_align=None, reset_state=True, close_meta=None,
+                   force_verify_note=""):
         """并行双发市价全平+撤单；持仓 QUERY_FAILED → fail-closed 返回 False。"""
         prev_side = self.current_side
 
@@ -20590,8 +20640,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 # 修复（v16.9.x）：重启确认空仓后必须清除 trading_paused，
                 # 避免 XAU 等上笔 CLOSE_THEN_OPEN_FAIL_ABORT 导致新 TV 永不开仓。
                 # 重启恢复逻辑已确认 REST 报空仓，可安全清除。
-                self.trading_paused = False
-                self.trading_pause_reason = ""
+                # 2026-09-04修复(E账户MARIO XMRUSDT实盘复现)：上面这条对
+                # CLOSE_THEN_OPEN_FAIL_ABORT这类"卡在半途、确认空仓就等于
+                # 危险解除"的暂停原因成立，但对reverse_open_after_flat
+                # ("超卖变反向"，_sweep_orphan_reverse_after_flat触发，见
+                # 该函数注释)不成立——那条暂停的意义是"发生过一次未预期的
+                # 方向翻转，需要人工核对是不是真故障"，空仓本身不能证明翻
+                # 转那一下是安全的，"确认空仓"这个理由套在这条暂停原因上
+                # 是错的。2026-09-03深夜XMRUSDT在E账户复现：这条暂停被这里
+                # 无差别清掉，之后没人知道自动化已经悄悄恢复、也没人真的
+                # 复核过。改成按暂停原因区分：reverse_open_after_flat保持
+                # 暂停，其余原因维持v16.9.x原有的"确认空仓即清"行为不变。
+                if str(getattr(self, "trading_pause_reason", "") or "").startswith(
+                    "reverse_open_after_flat"
+                ):
+                    logger.warning(
+                        f"🛡️ [{self.symbol}] 重启确认空仓，但trading_paused原因是"
+                        f"reverse_open_after_flat（超卖变反向）→ 保持暂停，"
+                        f"仍需人工核对后手动resume，不随重启自动清除"
+                    )
+                else:
+                    self.trading_paused = False
+                    self.trading_pause_reason = ""
                 self._save_state()
                 flat_ok = self._wait_verify(
                     lambda: self._get_active_position(prefer_ws=False) is None,

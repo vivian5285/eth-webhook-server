@@ -8,6 +8,7 @@ import hmac
 import hashlib
 import base64
 import html
+import json
 import urllib.parse
 import logging
 import contextvars
@@ -510,10 +511,126 @@ def _build_tg_text(title, data_dict):
     return text
 
 
+# 2026-09-04新增(E账户MARIO XMRUSDT+全账户OPENAI大赢家地板+TSLA止损等
+# 一批告警实盘复现)：2026-09-03深夜Telegram连续超时约10分钟，send_telegram
+# 原有的3次重试(间隔3s，全程不到35秒)远远扛不过这种长一点的抽风，几十条
+# 告警(包括E账户那次"超卖变反向"最高级告警本身)全部静默丢失、没人知道。
+# 补一个落盘补发队列：重试耗尽的消息不再直接丢弃，写进本地jsonl文件；
+# 之后任意一次send_telegram成功发出新消息时，顺手补发队列里积压的旧消息
+# (每次最多_DRAIN_MAX_ITEMS条、间隔节流，不拖慢主流程)。纯本地文件，
+# 各账户/引擎进程各自独立一份，不需要额外服务。
+NOTIFY_QUEUE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "notify_retry_queue.jsonl"
+)
+_NOTIFY_QUEUE_MAX_AGE_SEC = 6 * 3600  # 超过6小时的旧告警不再补发，避免早上一次性炸出几十条过期消息
+_NOTIFY_QUEUE_MAX_LINES = 300  # 硬上限，极端长时间断线也不让文件无限增长
+_DRAIN_MAX_ITEMS = 5  # 每次顺带补发最多几条，避免一次性把主流程拖住太久
+_DRAIN_MIN_INTERVAL_SEC = 20  # 补发节流：至少间隔这么久才再尝试一轮
+_drain_lock = threading.Lock()
+_last_drain_ts = 0.0
+
+
+def _enqueue_failed_notify(message, parse_mode=None):
+    """重试耗尽后落盘，而不是直接丢弃。队列本身出错绝不能影响主流程。"""
+    try:
+        with open(NOTIFY_QUEUE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(
+                {"message": str(message or ""), "parse_mode": parse_mode, "ts": time.time()},
+                ensure_ascii=False,
+            ) + "\n")
+    except Exception as e:
+        logger.debug("notify queue 落盘失败(不影响主流程): %s", e)
+
+
+def _send_telegram_once(message, parse_mode=None, timeout=8):
+    """单次尝试，不重试。供send_telegram的重试循环和补发队列共用。"""
+    token = (TELEGRAM_BOT_TOKEN or "").strip()
+    chat_id = (TELEGRAM_CHAT_ID or "").strip()
+    if not token or not chat_id:
+        return False, "not_configured"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    mode = parse_mode if parse_mode is not None else TELEGRAM_PARSE_MODE
+    payload = {"chat_id": chat_id, "text": str(message or "")}
+    if mode:
+        payload["parse_mode"] = mode
+        payload["disable_web_page_preview"] = True
+    try:
+        r = requests.post(url, json=payload, timeout=timeout)
+        body = {}
+        try:
+            body = r.json() if r.text else {}
+        except Exception:
+            body = {}
+        if r.status_code == 200 and body.get("ok"):
+            return True, ""
+        return False, f"HTTP {r.status_code} {str(body)[:160]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _drain_notify_queue():
+    """尝试补发队列里积压的失败通知。节流+每次限量，只在确认信道刚刚
+    发送成功(说明连接大概率恢复)之后调用。单条只试1次，仍失败或太旧的
+    分别丢弃/保留，不在这里再走完整重试(避免拖慢主流程)。"""
+    global _last_drain_ts
+    if not os.path.exists(NOTIFY_QUEUE_FILE):
+        return
+    if not _drain_lock.acquire(blocking=False):
+        return  # 已经有一次补发在跑，本次跳过，不重复
+    try:
+        now = time.time()
+        if now - _last_drain_ts < _DRAIN_MIN_INTERVAL_SEC:
+            return
+        _last_drain_ts = now
+        try:
+            with open(NOTIFY_QUEUE_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception:
+            return
+        if not lines:
+            return
+        remaining = []
+        processed = 0
+        for line in lines[-_NOTIFY_QUEUE_MAX_LINES:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue  # 坏行直接丢弃，不影响其它条目
+            age = now - float(item.get("ts") or 0)
+            if age > _NOTIFY_QUEUE_MAX_AGE_SEC:
+                continue  # 太旧不再补发
+            if processed >= _DRAIN_MAX_ITEMS:
+                remaining.append(line)
+                continue
+            processed += 1
+            ok, _ = _send_telegram_once(item.get("message", ""), item.get("parse_mode"))
+            if ok:
+                logger.info(
+                    "notify ok channel=telegram(补发) preview=%s",
+                    str(item.get("message", ""))[:72],
+                )
+            else:
+                remaining.append(line)
+        try:
+            if remaining:
+                with open(NOTIFY_QUEUE_FILE, "w", encoding="utf-8") as f:
+                    f.write("\n".join(remaining) + "\n")
+            else:
+                os.remove(NOTIFY_QUEUE_FILE)
+        except Exception:
+            pass
+    finally:
+        _drain_lock.release()
+
+
 def send_telegram(message, parse_mode=None):
     """
     发送 Telegram 消息。失败重试 TELEGRAM_RETRY_MAX 次、间隔 TELEGRAM_RETRY_SEC。
-    绝不抛到调用方；返回 True/False。
+    绝不抛到调用方；返回 True/False。重试耗尽后落盘补发队列，不直接丢弃
+    (2026-09-04新增，见NOTIFY_QUEUE_FILE顶部注释)。
     """
     token = (TELEGRAM_BOT_TOKEN or "").strip()
     chat_id = (TELEGRAM_CHAT_ID or "").strip()
@@ -523,38 +640,29 @@ def send_telegram(message, parse_mode=None):
             str(message)[:72],
         )
         return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    mode = parse_mode if parse_mode is not None else TELEGRAM_PARSE_MODE
-    payload = {"chat_id": chat_id, "text": str(message or "")}
-    if mode:
-        payload["parse_mode"] = mode
-        payload["disable_web_page_preview"] = True
     last_err = ""
     attempts = max(1, int(TELEGRAM_RETRY_MAX or 3))
     delay = float(TELEGRAM_RETRY_SEC or 3)
     for i in range(attempts):
-        try:
-            r = requests.post(url, json=payload, timeout=8)
-            body = {}
+        ok, err = _send_telegram_once(message, parse_mode)
+        if ok:
+            logger.info(
+                "notify ok channel=telegram chat=%s attempt=%s/%s preview=%s",
+                chat_id, i + 1, attempts, str(message)[:72],
+            )
             try:
-                body = r.json() if r.text else {}
+                _drain_notify_queue()
             except Exception:
-                body = {}
-            if r.status_code == 200 and body.get("ok"):
-                logger.info(
-                    "notify ok channel=telegram chat=%s attempt=%s/%s preview=%s",
-                    chat_id, i + 1, attempts, str(message)[:72],
-                )
-                return True
-            last_err = f"HTTP {r.status_code} {str(body)[:160]}"
-        except Exception as e:
-            last_err = str(e)
+                pass
+            return True
+        last_err = err
         logger.error(
             "notify fail channel=telegram attempt=%s/%s err=%s preview=%s",
             i + 1, attempts, last_err, str(message)[:72],
         )
         if i < attempts - 1:
             time.sleep(delay)
+    _enqueue_failed_notify(message, parse_mode)
     return False
 
 
