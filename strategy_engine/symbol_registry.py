@@ -31,6 +31,13 @@
     擂台赛追踪（宝贝在 AskUserQuestion 里没最终拍板"删除 vs 暂停"，取
     可逆的一档：留着 + 注释，随时能改回或删掉）。
 
+【2026-09-04追加】宝贝最终确认：ASMLUSDT + SKHYNIXUSDT 胜率都太低，"以后
+不做他们了，删除"——四个真实账户(B/C/D/E)已核实空仓+零挂单，②家族从
+7 个品种收窄到 6 个（META/LITE/MU/GS/OPENAI/SNDK）。跟实盘一致：
+symbol_config.py::active_binance_symbols() 和各账户 .env 的
+BINANCE_SYMBOLS 也同步去掉了这两个品种，往后 TV 就算误发这两个品种的信号
+也会被 webhook 入口直接拒绝。
+
 ⚠️ timeframe 说明：已在表里的品种沿用原值；本次新登记的 5 个品种
 （META/LITE/MU/GS/TSLA）的图表周期**没有拿到宝贝的控制面板截图**，按同
 家族已知品种的常见周期先填占位（下面逐个标了 [占位]），宝贝核实后直接改
@@ -78,8 +85,12 @@ SYMBOLS: Dict[str, dict] = {
     "MUUSDT":        {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},  # [占位] 待宝贝核实图表周期
     "GSUSDT":        {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},  # [占位] 待宝贝核实图表周期
     "OPENAIUSDT":    {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
-    "SKHYNIXUSDT":   {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
     "SNDKUSDT":      {"strategy": _NARROW, "timeframe": "90m",  "mtf": _MTF, "params": {}},
+    # SKHYNIXUSDT：2026-09-04 宝贝确认"胜率太低，以后不做他们了，删除"（跟
+    # ASMLUSDT同一批决定）——四个账户(B/C/D/E)都已核实空仓+零挂单，注释掉
+    # 而不物理删这一行，保留可逆性；如需恢复追踪，取消注释即可，原属家族②
+    # （平开不互斥版）。
+    # "SKHYNIXUSDT": {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
 
     # ── 家族③ KDJ豁免温和版（窄TP + KDJ豁免）：TSLA / ANTHROPIC / PAXG / ZEC ─
     "TSLAUSDT":      {"strategy": _KDJ_EXEMPT, "timeframe": "90m",  "mtf": _MTF, "params": {}},  # [占位] 待宝贝核实图表周期
@@ -90,10 +101,11 @@ SYMBOLS: Dict[str, dict] = {
     # ── 家族④ BNB 宽止盈等真反转版 ────────────────────────────────────────
     "BNBUSDT":       {"strategy": _BNB, "timeframe": "150m", "mtf": _MTF, "params": {}},
 
-    # ── ASMLUSDT：宝贝 2026-09-03 说"已取消（胜率一直不高）"。保留条目但不
-    #    建议擂台赛继续追踪；宝贝没最终拍板删除，先留可逆的一档。若确认彻底
-    #    下线，直接删掉这一行即可（其它文件无引用依赖）。原属家族②（平开不
-    #    互斥版），如需临时恢复追踪把 strategy 指回 _NARROW。
+    # ── ASMLUSDT：2026-09-03 宝贝先说"已取消（胜率一直不高）"，2026-09-04
+    #    确认最终决定"删除，以后不做他们了"（跟SKHYNIXUSDT同一批）。四个
+    #    账户(B/C/D/E)已核实空仓+零挂单。仍然保留注释而不物理删这一行——
+    #    其它文件无引用依赖，取消注释即可恢复追踪，原属家族②（平开不互斥
+    #    版）。
     # "ASMLUSDT":    {"strategy": _NARROW, "timeframe": "90m", "mtf": _MTF, "params": {}},
 }
 

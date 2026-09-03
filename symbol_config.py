@@ -446,15 +446,20 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
     return meta
 
 
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率一直太低，"以后不做他们了，
+# 删除"——两个账户确认过全部四个账户(B/C/D/E)都是空仓+零挂单，删除干净。
+# 只从这里(活跃品种默认清单)和各账户.env的BINANCE_SYMBOLS里去掉，没有动
+# BINANCE_SYMBOL_META/别名解析表——那些是静态参考数据，留着无害，以后万一
+# 要恢复直接把这两个symbol重新加回下面两处清单即可，不用改别的代码。
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,SKHYNIXUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,ASMLUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 
 
 def active_deepcoin_symbols():
