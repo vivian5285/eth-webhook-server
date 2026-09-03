@@ -61,15 +61,20 @@
 """
 from __future__ import annotations
 
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
+# active_binance_symbols()删除（commit e45383d），跟dashboard/server.py、
+# watchdog/check.py同一天发现的同一类问题——这份擂台赛品种清单当时也漏改
+# 了。这个引擎本身已停用(systemctl stop strategy-engine/strategy-compare)、
+# 不碰真实资金，这里只是顺手保持一致，不是紧急修复。
 _ALL_SYMBOLS = [
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT",
-    "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "OPENAIUSDT", "ANTHROPICUSDT",
-    "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
+    "SNDKUSDT", "PAXGUSDT", "OPENAIUSDT", "ANTHROPICUSDT",
+    "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
 ]
 
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
 _RSI2_SYMBOLS = [
-    "TSLAUSDT", "METAUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT",
+    "TSLAUSDT", "METAUSDT", "GSUSDT", "MUUSDT",
     "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ETHUSDT",
 ]
 

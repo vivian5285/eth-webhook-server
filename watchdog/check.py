@@ -31,7 +31,14 @@ ACCOUNTS = [
     {"name": "E", "port": 5010, "dir": "/home/binanceE/binance-engine", "service": "binanceE-engine"},
 ]
 MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
+# active_binance_symbols()和各账户.env删除（commit e45383d）。watchdog自己
+# 独立维护的这份SYMBOLS清单当时漏改了——导致这两个品种的TV心跳(我们已经
+# 不再监听/处理，本来就该"没有更新")被误判成"心跳失效"持续报异常
+# (heartbeat_silent)，宝贝发现"监督狗可能还不知道我们删除了一些币"，
+# 一猜就中。这里同步删掉，跟dashboard/server.py那次(同一天，同一类问题)
+# 是完全一样的根因。
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
 ALERT_DEDUPE_SEC = 30 * 60
