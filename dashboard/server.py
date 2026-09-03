@@ -48,7 +48,14 @@ from datetime import datetime
 
 from flask import Flask, jsonify, Response, request
 
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "SKHYNIXUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "ASMLUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
+# active_binance_symbols()和各账户.env删除（commit e45383d）——这份dashboard
+# 自己独立维护的SYMBOLS清单当时漏改了，导致这两个品种的旧状态文件(哪怕已经
+# 空仓/不再更新)还在被面板轮询显示，SKHYNIX的"TV心跳追回"卡片一直卡在
+# 陈旧状态出不去就是因为这个。这里同步删掉，不需要额外改动——旧的
+# binance_vps_state_{ASMLUSDT,SKHYNIXUSDT}.json文件留着无害，本来就不会
+# 再被更新，只是这个清单不再读它们。
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 ACCOUNTS = [
     {"id": "B", "port": 5007, "label": "妈妈的币安账户", "user": "binanceB", "svc": "binanceB-engine"},
     {"id": "C", "port": 5008, "label": "我自己的币安账户", "user": "binanceC", "svc": "binanceC-engine"},
@@ -457,10 +464,27 @@ def parse_raw(raw):
                 "deadline_ts": float(s.get("catchup_limit_deadline_ts", 0) or 0),
                 "refreshes": int(s.get("catchup_unfilled_refreshes", 0) or 0),
             })
-        elif str(s.get("tv_heartbeat_side") or "FLAT").upper() in ("LONG", "SHORT"):
+        elif (
+            str(s.get("tv_heartbeat_side") or "FLAT").upper() in ("LONG", "SHORT")
+            and not str(
+                (s.get("last_tv_signal") or {}).get("action", "") or ""
+            ).upper().startswith("CLOSE")
+        ):
             # 还没武装(可能还在180秒宽限期内，或者EMA多周期还没一起确认)——
             # 心跳显示TV仍持仓、本地却空仓，这个组合本身就值得让宝贝随时
             # 看到，不用等追回真正挂单才显示。
+            # 2026-09-04修复(宝贝发现XMR/META明明已经平仓——XMR宝贝手动
+            # 平的、META是TV真实平仓的——面板却一直卡在"等待条件确认中"
+            # 不消失)：心跳(HEARTBEAT，每根收盘K线才发一次，天然滞后)不等
+            # 于TV最新意图，radar_reentry_mixin.py::_maybe_start_tv_
+            # heartbeat_catchup早就有这个判断——最近一次真实TV webhook
+            # 信号(last_tv_signal，跟HEARTBEAT是两条独立的流)如果已经是
+            # CLOSE类，说明TV自己已经明确要求平仓，心跳还没来得及跟上，
+            # 引擎自己内部已经判定"不追回"、只是没有暴露给面板看。这里
+            # 面板复用同一份已经持久化的last_tv_signal字段做一样的判断，
+            # 不新增任何状态、不碰引擎决策逻辑，纯只读展示层修复——判定为
+            # "已知心跳滞后"的不再显示成"等待条件确认中"，等TV下一次心跳
+            # 刷新成FLAT后，这条判断本身也会自然跟着消失。
             result[acct]["catchup_status"].append({
                 "symbol": sym,
                 "phase": "watching",
