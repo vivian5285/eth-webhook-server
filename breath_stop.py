@@ -548,8 +548,33 @@ def calculate_stop_long(
     # step_count>=1(阶梯已经真实累进过至少一档)，说明价格已经用best/
     # lowest棘轮换来了合法的进度，这条地板必须让位，不能反过来把已经
     # 更紧、已经合法赚到的进度重新拉松(测试用例已验证过这个回归场景)。
+    #
+    # 2026-09-04修正锚点(GSUSDT实盘复现，B/C/E三个账户同一晚)：原公式
+    # 锚在new_highest(最优价)上——但pre_tp1区按定义价格离entry的距离
+    # 天生有限(最多到tp1_px)，而trail_dist是给"过了TP1"整个追踪阶段
+    # 校准的宽度，量级通常比entry→tp1这一小段更大。GSUSDT这次trail_dist
+    # =7.90点，entry→tp1只有4.98点，new_highest最多摸到6.0点(还没到tp1)
+    # ——new_highest−0.65×7.90算出来的地板落在entry+0.87附近，比裸保本
+    # (entry+0.84)只多松0.03点，等于形同虚设，跟没修一样：价格从best回撤
+    # 一点点就直接把裸保本打穿，止损全程没跟progress挪动分毫，被一次
+    # 稀松平常的回撤打掉——TV自己止损(1030.70)远没到，白白磨损。
+    # 根子是锚点选错：这条地板的本意是"给entry往下留出trail_dist的一部分
+    # 空间"，锚在new_highest上会被"new_highest已经比entry高出多少"这个
+    # 跟地板初衷无关的量倒扣掉，pre_tp1区新高本来就没走远，扣完所剩无几。
+    # 改锚点到entry_price——不随new_highest抬高被稀释，从武装那一刻起就
+    # 给到entry−0.65×trail_dist这个真实空间，值不变(0.65，之前批准过)，
+    # 只是让这个值第一次真正生效。
+    #
+    # 安全上限：entry−0.65×trail_dist单独算，在trail_dist明显比TV止损
+    # 空间更宽的品种上(GSUSDT这次trail_dist=13.43点，是tv_stop_dist=
+    # 6.52点的2倍多)可能比TV自己的止损空间(entry−tv_stop_dist)还松——
+    # 雷达给的耐心不该超过TV自己愿意承担的风险。tv_stop_dist>0时用
+    # entry−tv_stop_dist(TV止损空间100%，不是TV_STOP_FLOOR_FRAC那65%)
+    # 兜底夹一次，两条地板哪个更紧(更靠近价格)取哪个。
     if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
-        breath_floor = new_highest - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        breath_floor = entry_price - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if tv_stop_dist > 0:
+            breath_floor = max(breath_floor, entry_price - float(tv_stop_dist))
         if candidate > 0:
             candidate = min(candidate, breath_floor)
         else:
@@ -687,8 +712,18 @@ def calculate_stop_short(
     # 实盘复现：870.81进场、最优价857.71、step_count=0，起步止损焊死
     # 870.10只有0.71点耐心，正常回撤即出局)。只在step_count==0时生效，
     # 已合法累进至少一档后必须让位，不倒退已经赚到的进度。
+    #
+    # 2026-09-04修正锚点，SHORT对称版——见calculate_stop_long同日期注释
+    # (GSUSDT实盘复现)。原锚点new_lowest同样的问题：pre_tp1区价格离
+    # entry的距离天生有限，new_lowest+0.65×trail_dist几乎必然落在裸保本
+    # 附近，地板形同虚设。改锚点到entry_price，真正给到entry+0.65×
+    # trail_dist这个空间，不再被"new_lowest已经比entry低出多少"倒扣掉。
+    #
+    # 安全上限，SHORT对称版——见calculate_stop_long同日期注释。
     if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
-        breath_floor = new_lowest + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        breath_floor = entry_price + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if tv_stop_dist > 0:
+            breath_floor = min(breath_floor, entry_price + float(tv_stop_dist))
         if candidate > 0:
             candidate = max(candidate, breath_floor)
         else:
