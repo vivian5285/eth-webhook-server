@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.error
@@ -178,6 +179,90 @@ def api_compare_positions(strategy):
     else:
         rows = shadow_store.list_closed(strategy=strategy, limit=limit)
         rows.sort(key=lambda r: r.get("closed_at") or 0, reverse=True)
+    return jsonify({"status": "ok", "positions": rows})
+
+
+# ── 链上数据策略：聪明钱地址监察(chain_sniper) ───────────────────────────
+# 2026-09-04新增。宝贝原话："旧的vps上面有一套观察链上数据的项目...搬到
+# 新的vps继续监察链上地址...一起加入擂台策略分类，区别在于一个是中心化
+# 交易所的策略，一个是链上数据策略"。chain_sniper是完全独立的项目(见
+# /root/chain_sniper/README.md)，跟本文件上半部分的CEX擂台没有任何代码
+# 耦合——只读它自己的sqlite(chain_sniper.db)，走文件级只读ACL授权
+# (stratroster用户对/root/chain_sniper/data有r-x，对.env所在的上层目录
+# 只有x无r，私钥/API Key文件本身仍然读不到，只开放了数据库这一个文件)。
+# 现阶段(2026-09-04迁移时)chain_sniper还在DRY_RUN=true、私钥未配置的
+# 骨架/空跑阶段，这里展示的是模拟观察/模拟持仓数据，不是真实下单记录。
+CHAIN_DB_PATH = "/root/chain_sniper/data/chain_sniper.db"
+
+
+def _chain_query(sql, params=()):
+    """只读连接(mode=ro)——就算sqlite层面出于某种原因想写(不应该发生，
+    这里全部是SELECT)，也会在文件系统ACL层面被拒绝，双重保险。文件不
+    存在/权限问题/查询失败都静默返回空列表，不让链上面板的故障影响CEX
+    擂台主体功能。"""
+    if not os.path.exists(CHAIN_DB_PATH):
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{CHAIN_DB_PATH}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[roster_dashboard] chain_sniper.db 查询失败: {e}")
+        return []
+
+
+@app.route("/api/chain/overview")
+def api_chain_overview():
+    wallets = _chain_query("SELECT COUNT(*) AS n FROM watched_wallets WHERE active=1")
+    open_rows = _chain_query("SELECT COUNT(*) AS n FROM positions WHERE status='OPEN'")
+    closed_rows = _chain_query(
+        "SELECT COUNT(*) AS n, SUM(realized_pnl_usd) AS total_pnl, "
+        "SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) AS wins "
+        "FROM positions WHERE status='CLOSED'"
+    )
+    ks = _chain_query("SELECT active, reason FROM kill_switch WHERE id=1")
+    closed = closed_rows[0] if closed_rows else {}
+    trades = int(closed.get("n") or 0)
+    return jsonify({
+        "status": "ok",
+        "available": os.path.exists(CHAIN_DB_PATH),
+        "watched_wallets": (wallets[0]["n"] if wallets else 0),
+        "open_positions": (open_rows[0]["n"] if open_rows else 0),
+        "closed_trades": trades,
+        "win_rate": round(100.0 * (closed.get("wins") or 0) / trades, 1) if trades > 0 else None,
+        "total_pnl_usd": round(float(closed.get("total_pnl") or 0), 2),
+        "kill_switch_active": bool(ks[0]["active"]) if ks else False,
+    })
+
+
+@app.route("/api/chain/wallets")
+def api_chain_wallets():
+    wallets = _chain_query(
+        "SELECT address, chain, label, added_at, active FROM watched_wallets ORDER BY added_at DESC"
+    )
+    for w in wallets:
+        ev = _chain_query(
+            "SELECT COUNT(*) AS n, MAX(ts) AS last_ts FROM wallet_events WHERE wallet=? AND chain=?",
+            (w["address"], w["chain"]),
+        )
+        w["event_count"] = ev[0]["n"] if ev else 0
+        w["last_event_ts"] = ev[0]["last_ts"] if ev else None
+    return jsonify({"status": "ok", "wallets": wallets})
+
+
+@app.route("/api/chain/positions")
+def api_chain_positions():
+    status = request.args.get("status", "open").upper()
+    if status not in ("OPEN", "CLOSED"):
+        status = "OPEN"
+    limit = max(1, min(int(request.args.get("limit", 100) or 100), 500))
+    order = "opened_at DESC" if status == "OPEN" else "closed_at DESC"
+    rows = _chain_query(
+        f"SELECT * FROM positions WHERE status=? ORDER BY {order} LIMIT ?",
+        (status, limit),
+    )
     return jsonify({"status": "ok", "positions": rows})
 
 

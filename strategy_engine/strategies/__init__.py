@@ -170,6 +170,18 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vegas_tunnel 加载失败: {_e}")
 
+# 2026-09-04新增：宝贝要求"EMA快慢线7和30，金叉死叉"——双EMA交叉，技术
+# 分析里最古老最公开的趋势跟随系统之一，没有单一发明人可考证归属，但
+# 规则本身透明到任何人拿收盘价都能手算复现，符合本擂台准入线。见
+# ema_cross_7_30.py顶部注释(含跟adx_regime_switch内置的EMA(10/30)子
+# 状态的区别说明)。
+try:
+    from strategy_engine.strategies import ema_cross_7_30
+    STRATEGIES["ema_cross_7_30"] = ema_cross_7_30.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema_cross_7_30 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -305,6 +317,19 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "唯一一套用'两层不同速度EMA隧道'做结构分层判断的战法，跟"
         "turtle_breakout(单一Donchian通道)、adx_regime_switch(状态开关)"
         "都不一样。1H周期(该系统最经典的原始周期)。"
+    ),
+    "ema_cross_7_30": (
+        "EMA快慢线金叉死叉(7/30)——2026-09-04应宝贝要求新增，原话"
+        "\"我观察这么多指标，em和ema最有效，7和30，的快慢线，金叉死叉\"。"
+        "双EMA交叉是技术分析里最古老最公开的趋势跟随系统之一，没有单一"
+        "发明人可考证归属，但规则透明到任何人拿收盘价都能手算复现，符合"
+        "本擂台准入线。EMA(7)上穿EMA(30)=金叉开多，下穿=死叉开空，反向"
+        "交叉主动离场，不设固定止盈(跟turtle_breakout同一个理由：固定"
+        "止盈会在小目标位封顶，伤了系统本该吃到的大趋势尾部)。跟"
+        "adx_regime_switch内置的EMA(10/30)金叉死叉不是一回事——那是"
+        "ADX≥25时才启用的条件子状态，这里是独立、无条件的纯交叉系统，"
+        "周期也不同(10/30 vs 7/30)。4H周期，同turtle_breakout/"
+        "bollinger_squeeze一样把4H当加密货币的日线合理代理。"
     ),
 }
 

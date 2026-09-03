@@ -58,6 +58,11 @@
     值(550，见multi_strategy_runner.BARS_LIMIT)的bars_limit=1400(约58
     天历史)——通过roster条目新增的bars_limit字段覆盖，不影响其它战法
     的默认拉取量(2026-09-01之前的战法都不传这个字段，行为不变)。
+
+2026-09-04新增：
+  - ema_cross_7_30：4h，宝贝原话"em和ema最有效，7和30，的快慢线，金叉
+    死叉"——双EMA(7/30)交叉，跟其余8套单品种战法一样用4h当加密货币
+    日线的合理代理。
 """
 from __future__ import annotations
 
@@ -99,6 +104,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ema_cross_7_30", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

@@ -101,6 +101,25 @@
     overflow-y: auto; padding: 14px 10px 24px;
   }
   .sidebar-label{ font-size: 11.5px; font-weight: 650; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px 10px; }
+  .category-toggle{
+    display:flex; gap: 4px; padding: 4px; margin: 2px 6px 12px;
+    background: rgba(0,0,0,0.05); border-radius: 12px;
+  }
+  @media (prefers-color-scheme: dark){ .category-toggle{ background: rgba(255,255,255,0.07); } }
+  :root[data-theme="dark"] .category-toggle{ background: rgba(255,255,255,0.07); }
+  .cat-btn{
+    flex: 1 1 0; border: none; background: transparent; color: var(--ink-soft);
+    font-size: 12.5px; font-weight: 600; padding: 8px 6px; border-radius: 9px; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .cat-btn.active{ background: var(--glass-strong); color: var(--ink); box-shadow: var(--shadow); }
+  .wallet-addr{ font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .badge-live{
+    display:inline-flex; align-items:center; gap:5px; font-size: 11.5px; font-weight: 600;
+    color: var(--ink-faint); background: rgba(0,0,0,0.05); border-radius: 999px; padding: 4px 10px;
+  }
+  @media (prefers-color-scheme: dark){ .badge-live{ background: rgba(255,255,255,0.08); } }
+  :root[data-theme="dark"] .badge-live{ background: rgba(255,255,255,0.08); }
   .strat-row{
     display:flex; align-items:center; justify-content: space-between; gap: 10px;
     padding: 11px 12px; border-radius: 12px; cursor: pointer; margin-bottom: 3px;
@@ -186,7 +205,7 @@
           <span class="sub" id="heroSub">策略对比 · 纸面模拟</span>
         </div>
         <div style="display:flex; align-items:center; gap:22px;">
-          <div class="top-stats">
+          <div class="top-stats" id="topStats">
             <div class="top-stat">策略数<b id="statStrategies">–</b></div>
             <div class="top-stat">品种数<b id="statSymbols">–</b></div>
             <div class="top-stat">起始净值<b id="statEquity">–</b></div>
@@ -201,7 +220,11 @@
 
     <div class="body-row">
       <aside class="sidebar">
-        <div class="sidebar-label">按收益率排名</div>
+        <div class="category-toggle">
+          <button class="cat-btn active" data-cat="cex">中心化交易所</button>
+          <button class="cat-btn" data-cat="chain">链上数据</button>
+        </div>
+        <div class="sidebar-label" id="sidebarLabel">按收益率排名</div>
         <div id="sidebarList"><div class="loading-row">加载中…</div></div>
       </aside>
 
@@ -219,12 +242,19 @@ const API = {
   compare: '/api/roster/compare',
   symbols: s => `/api/roster/compare/${encodeURIComponent(s)}/symbols`,
   positions: (s, status) => `/api/roster/compare/${encodeURIComponent(s)}/positions?status=${status}&limit=80`,
+  chainOverview: '/api/chain/overview',
+  chainWallets: '/api/chain/wallets',
+  chainPositions: status => `/api/chain/positions?status=${status}&limit=80`,
 };
 
 let rosterRows = [];
 let currentStrategy = null;
 let currentTab = 'symbols';
 let lastLoadOk = false;
+let currentCategory = 'cex';
+let chainOverview = null;
+let chainWallets = [];
+let currentWallet = null; // null = 总览, otherwise "address|chain" key
 
 function fmtPct(v){
   if (v === null || v === undefined) return '–';
@@ -274,6 +304,156 @@ function renderSidebar(){
   list.querySelectorAll('.strat-row').forEach(el => {
     el.addEventListener('click', () => selectStrategy(el.dataset.strategy));
   });
+}
+
+// ── 链上数据分类 ─────────────────────────────────────────────────────────
+function walletKey(w){ return `${w.address}|${w.chain}`; }
+
+function renderChainSidebar(){
+  const list = document.getElementById('sidebarList');
+  const overviewActive = currentWallet === null ? 'active' : '';
+  const rows = [`
+    <div class="strat-row ${overviewActive}" data-wallet="__overview__">
+      <div class="strat-main"><div class="strat-name">总览</div></div>
+      <div class="strat-ret flat">${chainWallets.length} 个地址</div>
+    </div>`];
+  chainWallets.forEach(w => {
+    const active = currentWallet === walletKey(w) ? 'active' : '';
+    const short = w.address.length > 10 ? `${w.address.slice(0,4)}…${w.address.slice(-4)}` : w.address;
+    rows.push(`
+      <div class="strat-row ${active}" data-wallet="${walletKey(w)}">
+        <div class="strat-main">
+          <div class="strat-name">${w.label || short}</div>
+          <div class="strat-open wallet-addr">${short} · ${w.chain}</div>
+        </div>
+        <div class="strat-ret flat">${w.event_count || 0} 事件</div>
+      </div>`);
+  });
+  list.innerHTML = rows.join('');
+  list.querySelectorAll('.strat-row').forEach(el => {
+    el.addEventListener('click', () => {
+      currentWallet = el.dataset.wallet === '__overview__' ? null : el.dataset.wallet;
+      renderChainSidebar();
+      renderChainDetail();
+    });
+  });
+}
+
+async function loadChain(isFirst){
+  try{
+    const [ovR, wR] = await Promise.all([fetch(API.chainOverview), fetch(API.chainWallets)]);
+    chainOverview = await ovR.json();
+    const wd = await wR.json();
+    chainWallets = wd.wallets || [];
+    lastLoadOk = true;
+    setStatus(true);
+    if (currentCategory === 'chain'){
+      renderChainSidebar();
+      renderChainDetail();
+    }
+  }catch(e){
+    setStatus(false);
+    if (!lastLoadOk && currentCategory === 'chain'){
+      document.getElementById('sidebarList').innerHTML = '<div class="empty-note">暂时连不上链上数据服务，稍后自动重试…</div>';
+    }
+  }
+}
+
+async function renderChainDetail(){
+  const inner = document.getElementById('detailInner');
+  if (!chainOverview || !chainOverview.available){
+    inner.innerHTML = '<div class="empty-note">链上数据服务还没连上，或者数据库还没生成——chain_sniper正在启动中</div>';
+    return;
+  }
+  if (currentWallet === null){
+    const ks = chainOverview.kill_switch_active
+      ? '<span class="badge-live" style="color:var(--bad);">⛔ 熔断已触发</span>'
+      : '<span class="badge-live">● 正常运行</span>';
+    inner.innerHTML = `
+      <div class="detail-head">
+        <div>
+          <div class="detail-title">链上聪明钱监察</div>
+          <div class="detail-desc">追踪种子聪明钱地址的链上买卖行为，模拟观察+模拟开单跟踪，不做真实下单(DRY_RUN)。区别于上方"中心化交易所"分类——那是纸面模拟CEX战法，这里是链上信号驱动的独立观察体系。</div>
+        </div>
+        ${ks}
+      </div>
+      <div class="kpi-row">
+        <div class="kpi-card"><div class="label">监察地址</div><div class="value">${chainOverview.watched_wallets}</div></div>
+        <div class="kpi-card"><div class="label">持仓中</div><div class="value">${chainOverview.open_positions}</div></div>
+        <div class="kpi-card"><div class="label">已平仓</div><div class="value">${chainOverview.closed_trades}</div></div>
+        <div class="kpi-card"><div class="label">胜率</div><div class="value">${chainOverview.win_rate != null ? chainOverview.win_rate+'%' : '–'}</div></div>
+      </div>
+      <div class="tabs">
+        <button class="tab-btn active" data-ctab="open">持仓中</button>
+        <button class="tab-btn" data-ctab="closed">平仓历史</button>
+      </div>
+      <div id="chainTabBody"><div class="loading-row">加载中…</div></div>
+    `;
+    inner.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        inner.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+        loadChainPositionsTab(btn.dataset.ctab);
+      });
+    });
+    loadChainPositionsTab('open');
+    return;
+  }
+
+  const w = chainWallets.find(x => walletKey(x) === currentWallet);
+  if (!w){ inner.innerHTML = '<div class="empty-note">选一个地址查看详情</div>'; return; }
+  inner.innerHTML = `
+    <div class="detail-head">
+      <div>
+        <div class="detail-title">${w.label || '未命名地址'}</div>
+        <div class="detail-desc wallet-addr">${w.address} · ${w.chain}</div>
+      </div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi-card"><div class="label">链上事件</div><div class="value">${w.event_count || 0}</div></div>
+      <div class="kpi-card"><div class="label">加入日期</div><div class="value" style="font-size:16px;">${w.added_at ? new Date(w.added_at*1000).toLocaleDateString('zh-CN') : '–'}</div></div>
+      <div class="kpi-card"><div class="label">状态</div><div class="value" style="font-size:16px;">${w.active ? '监察中' : '已停用'}</div></div>
+      <div class="kpi-card"><div class="label">最近事件</div><div class="value" style="font-size:16px;">${w.last_event_ts ? new Date(w.last_event_ts*1000).toLocaleDateString('zh-CN') : '暂无'}</div></div>
+    </div>
+    <div class="empty-note">该地址的逐笔链上事件明细——种子名单/事件量随宝贝陆续添加聪明钱地址增长</div>
+  `;
+}
+
+async function loadChainPositionsTab(status){
+  const body = document.getElementById('chainTabBody');
+  if (!body) return;
+  body.innerHTML = '<div class="loading-row">加载中…</div>';
+  const r = await fetch(API.chainPositions(status));
+  const d = await r.json();
+  const rows = d.positions || [];
+  if (!rows.length){ body.innerHTML = `<div class="empty-note">暂无${status==='open'?'持仓中':'已平仓'}记录</div>`; return; }
+  if (status === 'open'){
+    body.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>链</th><th>代币地址</th><th>入场价</th><th>止盈</th><th>止损</th></tr></thead>
+      <tbody>${rows.map(p => `<tr><td>${p.chain}</td><td class="wallet-addr">${p.token_address}</td>
+        <td>${p.entry_price}</td><td>${p.tp_price}</td><td>${p.sl_price}</td></tr>`).join('')}</tbody></table></div>`;
+  } else {
+    body.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>链</th><th>代币地址</th><th>入场价</th><th>出场价</th><th>盈亏</th></tr></thead>
+      <tbody>${rows.map(p => `<tr><td>${p.chain}</td><td class="wallet-addr">${p.token_address}</td>
+        <td>${p.entry_price}</td><td>${p.exit_price ?? '–'}</td>
+        <td class="num ${toneClass(p.realized_pnl_usd)}">${fmtUsdSimple(p.realized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+}
+
+function switchCategory(cat){
+  if (cat === currentCategory) return;
+  currentCategory = cat;
+  document.querySelectorAll('.cat-btn').forEach(b => b.classList.toggle('active', b.dataset.cat === cat));
+  document.getElementById('sidebarLabel').textContent = cat === 'cex' ? '按收益率排名' : '监察地址';
+  document.getElementById('topStats').style.display = cat === 'cex' ? '' : 'none';
+  if (cat === 'cex'){
+    renderSidebar();
+    if (currentStrategy) renderDetailHeader(); else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
+  } else {
+    renderChainSidebar();
+    renderChainDetail();
+    if (!chainOverview) loadChain(true);
+  }
 }
 
 async function loadCompare(isFirst){
@@ -393,11 +573,15 @@ async function loadTab(){
   }
 }
 
+document.querySelectorAll('.cat-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchCategory(btn.dataset.cat));
+});
+
 loadMeta();
 loadCompare(true);
-setInterval(() => loadCompare(false), 30000);
+setInterval(() => { if (currentCategory === 'cex') loadCompare(false); else loadChain(false); }, 30000);
 // 首次加载若失败，尽快重试一次，不用等满30秒才恢复
-setTimeout(() => { if (!lastLoadOk) loadCompare(true); }, 3000);
+setTimeout(() => { if (!lastLoadOk) { if (currentCategory === 'cex') loadCompare(true); else loadChain(true); } }, 3000);
 </script>
 </body>
 </html>
