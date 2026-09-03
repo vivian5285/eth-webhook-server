@@ -31,7 +31,19 @@ STRIP_ON_REPLAY_KEYS = {"secret", "token", "key", "bar_index", "seq", "bar_time"
 
 _TERMINAL_PHASES = {"REPORTED", "MONITORING", "FAILED", "IDLE"}
 _FINALIZE_POLL_SEC = 3.0
-_FINALIZE_TIMEOUT_SEC = 60.0
+_FINALIZE_TIMEOUT_SEC = 90.0  # 2026-09-04：60→90，给常规重试留一点余量
+# 2026-09-04新增(宝贝"熊猫量化"TV信号面板发现的真实问题——XMRUSDT实盘早
+# 已成交好几个小时，面板一直显示"处理中(限价待成交)")：第一轮
+# _FINALIZE_TIMEOUT_SEC超时后，以前直接放弃记"timeout"，从此再也没人回头
+# 核实过。但"先平后开"这类流程单次_close_all/开仓重试预算就有~145秒，撞上
+# IP冷却/网络抽风(2026-09-03深夜Telegram断线那次实测)真实成交可能要几
+# 分钟才확定，远超60/90秒的第一轮观察窗口——这本来就是代码自己注释里承
+# 认的"正常未决"，只是从没有后续机制去把"未决"变回真结果。现在第一轮超时
+# 后转入更稀疏的第二轮长窗口追查，追到真终态就用finalize_signal(本身是
+# 按id的UPDATE，天然支持覆盖之前记的"timeout")回头更正；两轮都没等到才
+# 真的放弃，交给人工核对。
+_FINALIZE_EXTENDED_POLL_SEC = 15.0
+_FINALIZE_EXTENDED_TIMEOUT_SEC = 600.0  # 第一轮之后再追10分钟，覆盖6次重试+IP冷却等真实最坏情况
 
 _lock = threading.Lock()
 
@@ -176,51 +188,69 @@ def _snapshot_supervisor(sup) -> Dict[str, Any]:
     }
 
 
-def _finalizer_loop(signal_id: int, symbol: str) -> None:
-    try:
-        from position_supervisor_binance import get_supervisor
-    except Exception as e:
-        logger.warning(f"[webhook_log] finalizer import 跳过: {e}")
-        return
-    # 2026-08-18修复：pipeline 是 per-symbol 共享单例，不是 per-signal——如果
-    # 同一品种短时间内连续发出好几笔信号（重放/手动发单），后面信号的
-    # finalizer 轮询时可能看到的是"更早那笔信号"遗留下来的旧终态（比如旧的
-    # LIMIT 单超时变成 FAILED），被错误地当成"这笔信号自己的结果"记下来——
-    # 实盘复现过：ANTHROPIC 连续测试时下单其实成功了，面板却显示"失败"。
-    # start_ts 记录本轮观察开始的时间；只信任 phase_ts 不早于 start_ts 的终态
-    # （说明这次阶段变化确实发生在本信号进来之后），旧终态视为"还没轮到我"
-    # 继续等，不当场采信——signal_officer 那层本身就有≥1s的缓存合并窗口，
-    # 给这道时间戳校验留了足够余量，不会误伤本信号自己的正常终态。
-    start_ts = time.time()
-    deadline = start_ts + _FINALIZE_TIMEOUT_SEC
+def _poll_supervisor_until(sup, start_ts: float, deadline: float, interval: float):
+    """轮询到 deadline 为止，等到"本信号自己触发的新终态"就提前返回
+    (phase, snapshot)；到点还没等到返回 (None, 最后一次快照)。
+    2026-08-18修复的时间戳校验原样保留：pipeline 是 per-symbol 共享单例，
+    只信任 phase_ts >= start_ts 的终态，避免把"更早那笔信号"遗留的旧终态
+    误当成本信号自己的结果(实盘复现过：ANTHROPIC连续测试时下单其实成功
+    了，面板却显示"失败")。"""
     last_snapshot: Dict[str, Any] = {}
-    phase = ""
-    try:
-        sup = get_supervisor(symbol)
-    except Exception as e:
-        finalize_signal(signal_id, "n/a", {"error": str(e)})
-        return
     while time.time() < deadline:
         try:
             last_snapshot = _snapshot_supervisor(sup)
             phase = str(last_snapshot.get("phase") or "")
             phase_ts = float(last_snapshot.get("phase_ts") or 0.0)
         except Exception as e:
-            last_snapshot = {"error": str(e)}
-            phase = "n/a"
-            break
+            return "n/a", {"error": str(e)}
         if phase in _TERMINAL_PHASES and phase_ts >= start_ts:
-            break
-        time.sleep(_FINALIZE_POLL_SEC)
-    else:
-        # while 自然耗尽 deadline 退出（没有 break）：60秒内没等到"本信号自己
-        # 触发的"新终态——可能是限价单还在等成交（LIMIT最长300s超时，本来就
-        # 比这里60秒的观察窗口长，属于正常未决），也可能是还卡着某个旧终态
-        # 没刷新。两种情况都不能把当时读到的 phase 当真实结果写回去（旧终态
-        # 会被上面 phase_ts 校验挡住走不到 break，中间态又不算数），统一记
-        # "timeout"，前端按"处理中/待确认"展示，不会误报成功也不会误报失败。
-        phase = "timeout"
-    finalize_signal(signal_id, phase or "timeout", last_snapshot)
+            return phase, last_snapshot
+        time.sleep(interval)
+    return None, last_snapshot
+
+
+def _finalizer_loop(signal_id: int, symbol: str) -> None:
+    try:
+        from position_supervisor_binance import get_supervisor
+    except Exception as e:
+        logger.warning(f"[webhook_log] finalizer import 跳过: {e}")
+        return
+    start_ts = time.time()
+    try:
+        sup = get_supervisor(symbol)
+    except Exception as e:
+        finalize_signal(signal_id, "n/a", {"error": str(e)})
+        return
+
+    phase, snapshot = _poll_supervisor_until(
+        sup, start_ts, start_ts + _FINALIZE_TIMEOUT_SEC, _FINALIZE_POLL_SEC
+    )
+    if phase is not None:
+        finalize_signal(signal_id, phase, snapshot)
+        return
+
+    # 第一轮(_FINALIZE_TIMEOUT_SEC内)没等到"本信号自己触发的新终态"——可能
+    # 限价单还在等成交(LIMIT最长300s超时)，也可能撞上IP冷却/重试预算(单次
+    # _close_all~145秒)。先记一次"timeout"占位，面板立刻能看到"处理中"而
+    # 不是长时间毫无反馈；同时不代表真的放弃，转入下面更稀疏的第二轮长
+    # 窗口继续追查。
+    finalize_signal(signal_id, "timeout", snapshot)
+
+    # 2026-09-04新增：第一轮超时后，以前直接放弃，从此再也没人回头核实过
+    # ——2026-09-03深夜XMRUSDT在E账户实盘复现，"先平后开"撞上Telegram断线
+    # 额外延迟，真实成交在第一轮窗口过后才确认，面板卡在"处理中"好几个
+    # 小时没人知道，直到宝贝自己去TV信号面板发现跟实盘对不上。这里追加
+    # 一轮更长、更稀疏的观察(_FINALIZE_EXTENDED_TIMEOUT_SEC/_POLL_SEC)，
+    # 追到真终态就用finalize_signal(按id的UPDATE，天然支持覆盖)回头把
+    # "timeout"更正成真实结果；两轮都没等到才真的放弃，交给人工核对。
+    phase2, snapshot2 = _poll_supervisor_until(
+        sup,
+        start_ts,
+        start_ts + _FINALIZE_TIMEOUT_SEC + _FINALIZE_EXTENDED_TIMEOUT_SEC,
+        _FINALIZE_EXTENDED_POLL_SEC,
+    )
+    if phase2 is not None:
+        finalize_signal(signal_id, phase2, snapshot2)
 
 
 def start_finalizer(signal_id: Optional[int], symbol: str) -> None:
