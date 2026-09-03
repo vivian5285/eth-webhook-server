@@ -11,21 +11,25 @@
 # 止损决策只认本模块数值；webhook 不传 ATR/ADX。
 from __future__ import annotations
 
+import json
 import logging
+import os
 import statistics
 import threading
 time_mod = __import__("time")
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-KLINE_INTERVAL = "30m"  # 拉取周期；合成后等效 90m
-SYNTH_INTERVAL = "90m"
+KLINE_INTERVAL = "30m"  # 拉取周期；合成后按品种真实周期聚合（默认等效 90m）
+SYNTH_INTERVAL = "90m"  # 找不到品种专属周期时的默认合成周期
 PERIOD_30M_MS = 30 * 60 * 1000
-PERIOD_90M_MS = 90 * 60 * 1000  # UTC epoch 对齐锚
+PERIOD_90M_MS = 90 * 60 * 1000  # UTC epoch 对齐锚（默认周期）
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-FETCH_LIMIT = 220
+FETCH_LIMIT = 220  # 默认90m(3根/张)品种拉取张数；2026-09-04起实际生效值是
+                   # MarketEngine.fetch_limit(按品种合成比例等比放大)，这个
+                   # 模块级常量只保留给外部脚本按名引用，本模块内部不再用它。
 REFRESH_MIN_SEC = 60.0
 ATR_COMPARE_ALERT_PCT = 0.20
 # 动量/速度：最近几根已闭合90m的净方向位移，除以同期平均振幅，
@@ -50,21 +54,90 @@ def _f(x, default=0.0) -> float:
         return float(default)
 
 
-def bucket_90m_open_ms(open_time_ms: int) -> int:
-    """将任意时间戳对齐到 UTC epoch 90m 桶开盘时间。"""
+# 2026-09-04修复(宝贝当面指出："每个品种确实策略挂载不一样的周期，之前
+# 我告诉过你"——之前只把90m写死给全部品种用，没有分品种)：真实的品种专属
+# 周期早就存在、且一直在维护——config/reentry_tiers.json里每个品种的
+# tv_tf_sec字段（reentry_profiles.py读的同一份权威数据源，ETH那条2026-
+# 09-01就已经从90分钟改成150分钟、连同breath_tp12/23等三档系数一起用真实
+# 150分钟K线重新校准过了），本模块（雷达ADX/动量的行情引擎）之前完全没
+# 读这份数据、一直统一用90分钟——这是本模块自己独有的遗留缺口，不是"整个
+# 系统都没做品种区分"。这里补上：品种周期必须是30分钟的整数倍才能从
+# 30m源K线正确合成(50/45/130/105分钟这类非整数倍暂时保留旧的90m默认，
+# 用错误拼接的bar喂ADX比用近似周期更危险)。
+REENTRY_TIERS_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
+)
+
+
+def _load_symbol_period_ms() -> Dict[str, int]:
+    if not os.path.isfile(REENTRY_TIERS_JSON):
+        return {}
+    try:
+        with open(REENTRY_TIERS_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    out: Dict[str, int] = {}
+    for sym, cfg in (data or {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            sec = int(cfg.get("tv_tf_sec") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sec <= 0 or (sec * 1000) % PERIOD_30M_MS != 0:
+            continue  # 非30分钟整数倍，暂不支持，该品种沿用默认90m
+        out[str(sym).upper()] = sec * 1000
+    return out
+
+
+_SYMBOL_PERIOD_MS = _load_symbol_period_ms()
+
+
+def resolve_symbol_period_ms(symbol: str) -> int:
+    """品种真实合成周期(毫秒)，来自config/reentry_tiers.json::tv_tf_sec。
+    找不到品种、或该品种周期不是30分钟整数倍时 → 退回默认90分钟。
+    reentry_tiers.json的key是短名(ETH/XAU/BNB…)不是完整symbol，这里用
+    symbol_config.py::BINANCE_SYMBOL_META的breath字段做同一套权威映射，
+    不额外猜测/新造对照表。"""
+    sym = str(symbol or "").upper()
+    short = sym
+    try:
+        from symbol_config import BINANCE_SYMBOL_META
+        meta = BINANCE_SYMBOL_META.get(sym) or {}
+        short = str(meta.get("breath") or sym).upper()
+    except Exception:
+        pass
+    return _SYMBOL_PERIOD_MS.get(short, PERIOD_90M_MS)
+
+
+def bucket_open_ms(open_time_ms: int, period_ms: int = PERIOD_90M_MS) -> int:
+    """将任意时间戳对齐到 UTC epoch period_ms 桶开盘时间。"""
     t = int(open_time_ms or 0)
-    if t <= 0:
+    if t <= 0 or int(period_ms or 0) <= 0:
         return 0
-    return t - (t % PERIOD_90M_MS)
+    return t - (t % int(period_ms))
 
 
-def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
+def bucket_90m_open_ms(open_time_ms: int) -> int:
+    """向后兼容别名（check_90m_align.py 等既有脚本按名引用）。"""
+    return bucket_open_ms(open_time_ms, PERIOD_90M_MS)
+
+
+def merge_30m_to_period(klines_30m: Sequence, period_ms: int = PERIOD_90M_MS) -> List[list]:
     """
-    按 UTC epoch 90m 边界合成：
-      仅输出 bucket 内恰好具备 3 根完整 30m
-      (t0, t0+30m, t0+60m) 的已闭合 90m K。
+    按 UTC epoch period_ms 边界合成：
+      仅输出 bucket 内恰好具备 period_ms/30m 根完整 30m
+      (t0, t0+30m, …) 的已闭合 K。period_ms 必须是 30 分钟的整数倍，
+      否则返回空列表（调用方应已用 resolve_symbol_period_ms() 过滤过，
+      这里只做防御，不静默拼错）。
     返回 [open_time, o, h, l, c, volume]。
     """
+    period_ms = int(period_ms or 0)
+    if period_ms <= 0 or period_ms % PERIOD_30M_MS != 0:
+        return []
+    n_bars = period_ms // PERIOD_30M_MS
+
     rows = []
     for r in (klines_30m or []):
         try:
@@ -74,7 +147,7 @@ def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
         if t <= 0:
             continue
         rows.append(r)
-    if len(rows) < 3:
+    if len(rows) < n_bars:
         return []
 
     rows.sort(key=lambda r: int(r[0]))
@@ -82,29 +155,30 @@ def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
     for r in rows:
         by_t[int(r[0])] = r
 
-    # 从数据中出现过的 90m 桶起算（已按 epoch 对齐，非进程启动偏移）
-    buckets = sorted({bucket_90m_open_ms(int(r[0])) for r in rows})
+    # 从数据中出现过的 period_ms 桶起算（已按 epoch 对齐，非进程启动偏移）
+    buckets = sorted({bucket_open_ms(int(r[0]), period_ms) for r in rows})
     out = []
     for bucket in buckets:
         if bucket <= 0:
             continue
-        expected = (
-            bucket,
-            bucket + PERIOD_30M_MS,
-            bucket + 2 * PERIOD_30M_MS,
-        )
+        expected = [bucket + i * PERIOD_30M_MS for i in range(n_bars)]
         if not all(t in by_t for t in expected):
             continue
-        a, b, c = by_t[expected[0]], by_t[expected[1]], by_t[expected[2]]
+        sub = [by_t[t] for t in expected]
         out.append([
             bucket,
-            a[1],
-            max(_f(a[2]), _f(b[2]), _f(c[2])),
-            min(_f(a[3]), _f(b[3]), _f(c[3])),
-            c[4],
-            _f(a[5]) + _f(b[5]) + _f(c[5]),
+            sub[0][1],
+            max(_f(b[2]) for b in sub),
+            min(_f(b[3]) for b in sub),
+            sub[-1][4],
+            sum(_f(b[5]) for b in sub),
         ])
     return out
+
+
+def merge_30m_to_90m(klines_30m: Sequence) -> List[list]:
+    """向后兼容别名（check_90m_align.py 等既有脚本按名引用）。"""
+    return merge_30m_to_period(klines_30m, PERIOD_90M_MS)
 
 
 def atr_series(bars: Sequence, period: int = ATR_PERIOD) -> List[float]:
@@ -554,21 +628,31 @@ class MarketEngine:
         self.bars_count = 0
         self.atr_history: List[float] = []
         self.last_bars_90m: List[list] = []
+        # 2026-09-04：品种真实合成周期(见resolve_symbol_period_ms顶部注释)。
+        self.period_ms = resolve_symbol_period_ms(self.symbol)
+        n_bars = max(1, self.period_ms // PERIOD_30M_MS)
+        # 拉取张数按合成比例等比放大，保持跟旧90m(3根/张)同样的"约73根已
+        # 合成K线"深度——n_bars=3(默认90m，未受本次修复影响的品种)时算出
+        # 来恰好还是220，不变；n_bars更大的品种(XMR等16根/张)按比例多拉，
+        # 加了1500上限防止单次请求过大，同时保留原有的REFRESH_MIN_SEC=60秒
+        # 节流，不会让REST调用频率变高，只是单次拉的K线张数变多。
+        self.fetch_limit = min(1500, max(220, round(220 * n_bars / 3)))
 
     def bind_fetcher(self, fetch_klines):
         self._fetch_klines = fetch_klines
 
     def snapshot(self) -> dict:
         with self._lock:
+            period_min = int(self.period_ms // 60000)
             return {
                 "symbol": self.symbol,
                 "atr": float(self.atr),
                 "adx": float(self.adx),
                 "momentum": float(self.momentum),
-                "interval": SYNTH_INTERVAL,
+                "interval": f"{period_min}m",
                 "source_interval": KLINE_INTERVAL,
-                "align": "utc_epoch_90m",
-                "period_90m_ms": PERIOD_90M_MS,
+                "align": f"utc_epoch_{period_min}m",
+                "period_ms": int(self.period_ms),
                 "last_bar_open_ms": int(self.last_bar_open_ms),
                 "bars": int(self.bars_count),
                 "atr_history_n": len(self.atr_history),
@@ -610,13 +694,13 @@ class MarketEngine:
             return float(self.atr), float(self.adx)
 
         try:
-            raw = self._fetch_klines(self.symbol, KLINE_INTERVAL, FETCH_LIMIT)
+            raw = self._fetch_klines(self.symbol, KLINE_INTERVAL, self.fetch_limit)
         except Exception as e:
             self.last_error = str(e)
             logger.warning(f"[行情引擎] {self.symbol} 拉K失败: {e}")
             return float(self.atr), float(self.adx)
 
-        bars = merge_30m_to_90m(raw or [])
+        bars = merge_30m_to_period(raw or [], self.period_ms)
         series = atr_series(bars, ATR_PERIOD)
         atr = float(series[-1]) if series else 0.0
         adx = wilder_adx(bars, ADX_PERIOD)
@@ -637,8 +721,9 @@ class MarketEngine:
                 self.atr_history = [float(x) for x in series if float(x) > 0]
             self.last_refresh_ts = now
             self.last_error = "" if atr > 0 else "atr_zero"
+            period_min = int(self.period_ms // 60000)
             logger.info(
-                f"[行情引擎] {self.symbol} 90m={len(bars)}根(UTC epoch对齐←30m) | "
+                f"[行情引擎] {self.symbol} {period_min}m={len(bars)}根(UTC epoch对齐←30m) | "
                 f"last_open={bar_open} | "
                 f"ATR({ATR_PERIOD})={self.atr:.4f} ADX({ADX_PERIOD})={self.adx:.2f} "
                 f"动量={self.momentum:+.2f} | "
