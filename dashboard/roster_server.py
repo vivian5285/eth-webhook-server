@@ -216,7 +216,12 @@ def _chain_query(sql, params=()):
 @app.route("/api/chain/overview")
 def api_chain_overview():
     wallets = _chain_query("SELECT COUNT(*) AS n FROM watched_wallets WHERE active=1")
-    open_rows = _chain_query("SELECT COUNT(*) AS n FROM positions WHERE status='OPEN'")
+    # 2026-09-04迁移时发现：main.py/buyer.py现阶段(Phase 0骨架期)记录的
+    # 持仓status是'DRY_RUN'而不是'OPEN'(chain字段也存的是占位符
+    # 'unknown'，不是'solana')——这是chain_sniper自己Phase 0/1过渡期
+    # 遗留的既有状态，不是这次迁移引入的问题，这里只读不改它的库，把
+    # 'DRY_RUN'也算进"持仓中"统计，不然这几笔模拟仓会在面板上直接消失。
+    open_rows = _chain_query("SELECT COUNT(*) AS n FROM positions WHERE status IN ('OPEN','DRY_RUN')")
     closed_rows = _chain_query(
         "SELECT COUNT(*) AS n, SUM(realized_pnl_usd) AS total_pnl, "
         "SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) AS wins "
@@ -258,10 +263,13 @@ def api_chain_positions():
     if status not in ("OPEN", "CLOSED"):
         status = "OPEN"
     limit = max(1, min(int(request.args.get("limit", 100) or 100), 500))
+    # 'DRY_RUN'状态并入'OPEN'一起查——见api_chain_overview同日期注释。
+    statuses = ("OPEN", "DRY_RUN") if status == "OPEN" else ("CLOSED",)
     order = "opened_at DESC" if status == "OPEN" else "closed_at DESC"
+    placeholders = ",".join("?" * len(statuses))
     rows = _chain_query(
-        f"SELECT * FROM positions WHERE status=? ORDER BY {order} LIMIT ?",
-        (status, limit),
+        f"SELECT * FROM positions WHERE status IN ({placeholders}) ORDER BY {order} LIMIT ?",
+        (*statuses, limit),
     )
     return jsonify({"status": "ok", "positions": rows})
 
