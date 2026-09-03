@@ -9946,7 +9946,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return None
 
     def _can_safely_place_radar_sl(self, curr_px, sl):
-        """False = 贴市 / 未在浮盈侧 → 交易所会立刻全平"""
+        """False = 贴市 / 未在浮盈侧 → 交易所会立刻全平。
+
+        2026-09-04修复(宝贝在"熊猫量化"面板发现XAUUSDT反复报"拒绝雷达
+        止损：市价不安全"，C/E两个账户连续几分钟每隔1-2分钟刷一次)：
+        `_clamp_radar_sl_for_market`算出安全上限后用round(...,2)取整才
+        返回`clamped`(交易所价格精度本来就要求2位小数)，但这里重新算的
+        阈值(curr_px∓gap)是未取整的原始浮点数——四舍五入取整可能让已经
+        贴着边界的`clamped`比未取整的真实阈值大那么零点几分(比如
+        4488.297572取整成4488.30，反而比4488.297572本身大)，导致同一个
+        刚刚被判定"安全"的止损价，传到这里用未取整阈值一比又被判成"不
+        安全"，陷入"算出来→夹紧→复核又被拒"的空转，止损迟迟挂不出去。
+        这里统一按同样2位小数取整口径比较，跟clamped的取整方式对齐，
+        不再因为取整方向不一致误杀刚夹紧过的安全值。
+        """
         if curr_px <= 0 or not sl:
             return False
         if not self._is_valid_radar_sl(sl):
@@ -9954,9 +9967,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         gap = self._radar_min_stop_gap(curr_px)
         sl = float(sl)
         if self.current_side == "LONG":
-            return sl <= curr_px - gap
+            return sl <= round(curr_px - gap, 2)
         if self.current_side == "SHORT":
-            return sl >= curr_px + gap
+            return sl >= round(curr_px + gap, 2)
         return False
 
     def _radar_placement_blocked(self, live_qty=None, curr_px=0.0, reason="", silent=False):
