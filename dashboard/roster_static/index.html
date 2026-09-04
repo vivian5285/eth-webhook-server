@@ -271,6 +271,12 @@ let cexView = 'strategy';        // 'strategy' | 'symbol' | 'stock'
 let symbolRows = [];
 let currentSymbol = null;
 let currentSymTab = 'strategies'; // 'strategies' | 'open' | 'closed'
+// 已经渲染出详情面板的是哪个策略/币——用来判断 30s 自动刷新时该"整块重建"
+// 还是"只就地更新数字+静默刷新当前 tab"，避免每次刷新把用户正在看的内容
+// 打回"加载中…"。tabSeq 防止慢响应把新响应覆盖掉(看起来也像"不稳定")。
+let renderedStrategy = null;
+let renderedSymbol = null;
+let tabSeq = 0;
 let chainOverview = null;
 let chainWallets = [];
 let currentWallet = null; // null = 总览, otherwise "address|chain" key
@@ -353,11 +359,14 @@ async function loadSymbolsCompare(isFirst){
       const visible = symbolRows.filter(s => cexView === 'stock' ? s.is_stock : true);
       if (visible.length && (!currentSymbol || !visible.some(s => s.symbol === currentSymbol))){
         selectSymbol(visible[0].symbol);
-      } else if (currentSymbol && !document.getElementById('symTabBody')){
-        // 详情还没渲染过(比如切进来的第一帧)才重建；已经在看某个币的
-        // 明细时，30s 自动刷新只更新左侧边栏数字，不重建右侧、不打断
-        // 正在看的 tab。
+      } else if (currentSymbol && currentSymbol === renderedSymbol && document.getElementById('symTabBody')){
+        // 已经在看这个币的明细：只就地更新 KPI + 静默刷新当前 tab，
+        // 不重建右侧、不把内容打回"加载中…"。
+        patchSymbolKpis();
+        loadSymTab({silent: true});
+      } else if (currentSymbol){
         renderSymbolDetail();
+        loadSymTab();
       }
     }
   }catch(e){
@@ -407,7 +416,7 @@ function selectSymbol(symbol){
 function renderSymbolDetail(){
   const row = symbolRows.find(r => r.symbol === currentSymbol);
   const inner = document.getElementById('detailInner');
-  if (!row){ inner.innerHTML = '<div class="empty-note">选一个品种查看详情</div>'; return; }
+  if (!row){ inner.innerHTML = '<div class="empty-note">选一个品种查看详情</div>'; renderedSymbol = null; return; }
   const tone = toneClass(row.total_pnl_usd);
   inner.innerHTML = `
     <div class="detail-head">
@@ -417,10 +426,10 @@ function renderSymbolDetail(){
       </div>
     </div>
     <div class="kpi-row">
-      <div class="kpi-card"><div class="label">合并盈亏</div><div class="value ${tone}">${fmtUsdSimple(row.total_pnl_usd)}</div></div>
-      <div class="kpi-card"><div class="label">胜率</div><div class="value">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
-      <div class="kpi-card"><div class="label">已平仓</div><div class="value">${row.trades ?? 0}</div></div>
-      <div class="kpi-card"><div class="label">持仓中</div><div class="value">${row.open_count ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">合并盈亏</div><div class="value ${tone}" id="symKpiPnl">${fmtUsdSimple(row.total_pnl_usd)}</div></div>
+      <div class="kpi-card"><div class="label">胜率</div><div class="value" id="symKpiWin">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
+      <div class="kpi-card"><div class="label">已平仓</div><div class="value" id="symKpiTrades">${row.trades ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">持仓中</div><div class="value" id="symKpiOpen">${row.open_count ?? 0}</div></div>
     </div>
     <div class="tabs">
       <button class="tab-btn ${currentSymTab==='strategies'?'active':''}" data-stab="strategies">按策略</button>
@@ -436,49 +445,53 @@ function renderSymbolDetail(){
       loadSymTab();
     });
   });
+  renderedSymbol = currentSymbol;
 }
 
-async function loadSymTab(){
+function patchSymbolKpis(){
+  const row = symbolRows.find(r => r.symbol === currentSymbol);
+  if (!row) return;
+  const p = document.getElementById('symKpiPnl');
+  if (p){ p.textContent = fmtUsdSimple(row.total_pnl_usd); p.className = 'value ' + toneClass(row.total_pnl_usd); }
+  const w = document.getElementById('symKpiWin');
+  if (w) w.textContent = row.win_rate != null ? row.win_rate + '%' : '–';
+  const t = document.getElementById('symKpiTrades');
+  if (t) t.textContent = row.trades ?? 0;
+  const o = document.getElementById('symKpiOpen');
+  if (o) o.textContent = row.open_count ?? 0;
+}
+
+async function loadSymTab(opts){
+  const silent = opts && opts.silent;
   const body = document.getElementById('symTabBody');
   if (!body || !currentSymbol) return;
-  body.innerHTML = '<div class="loading-row">加载中…</div>';
-
-  if (currentSymTab === 'strategies'){
-    const r = await fetch(API.symbolStrategies(currentSymbol));
-    const d = await r.json();
-    const rows = d.strategies || [];
-    if (!rows.length){ body.innerHTML = '<div class="empty-note">这个品种还没有已平仓记录</div>'; return; }
-    body.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>策略</th><th>笔数</th><th>胜率</th><th>累计盈亏</th></tr></thead>
-      <tbody>${rows.map(s => `<tr><td>${s.strategy}</td><td>${s.trades}</td>
-        <td>${s.win_rate != null ? s.win_rate+'%' : '–'}</td>
-        <td class="num ${toneClass(s.total_pnl_usd)}">${fmtUsdSimple(s.total_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
+  const seq = ++tabSeq;
+  const sym = currentSymbol, tab = currentSymTab;
+  if (!silent) body.innerHTML = '<div class="loading-row">加载中…</div>';
+  let html;
+  try{
+    if (tab === 'strategies'){
+      const d = await (await fetch(API.symbolStrategies(sym))).json();
+      const rows = d.strategies || [];
+      html = !rows.length ? '<div class="empty-note">这个品种还没有已平仓记录</div>'
+        : `<div class="table-wrap"><table>
+        <thead><tr><th>策略</th><th>笔数</th><th>胜率</th><th>累计盈亏</th></tr></thead>
+        <tbody>${rows.map(s => `<tr><td>${s.strategy}</td><td>${s.trades}</td>
+          <td>${s.win_rate != null ? s.win_rate+'%' : '–'}</td>
+          <td class="num ${toneClass(s.total_pnl_usd)}">${fmtUsdSimple(s.total_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
+    } else {
+      const status = tab === 'open' ? 'open' : 'closed';
+      const d = await (await fetch(API.symbolPositions(sym, status))).json();
+      const rows = d.positions || [];
+      html = !rows.length ? `<div class="empty-note">暂无${status==='open'?'持仓中':'已平仓'}记录</div>`
+        : (status === 'open' ? _posOpenTable(rows, '策略', 'strategy') : _posClosedTable(rows, '策略', 'strategy'));
+    }
+  }catch(e){
+    if (!silent && seq === tabSeq) body.innerHTML = '<div class="empty-note">加载失败，稍后自动重试…</div>';
     return;
   }
-
-  const status = currentSymTab === 'open' ? 'open' : 'closed';
-  const r = await fetch(API.symbolPositions(currentSymbol, status));
-  const d = await r.json();
-  const rows = d.positions || [];
-  if (!rows.length){ body.innerHTML = `<div class="empty-note">暂无${status==='open'?'持仓中':'已平仓'}记录</div>`; return; }
-  if (status === 'open'){
-    body.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>策略</th><th>方向</th><th>买入时间</th><th>入场价</th><th>现价</th><th>浮动盈亏</th></tr></thead>
-      <tbody>${rows.map(p => `<tr><td>${p.strategy}</td><td>${p.side}</td>
-        <td>${fmtTime(p.entry_bar_time)}</td><td>${p.entry}</td><td>${p.current_price ?? '–'}</td>
-        <td class="num ${toneClass(p.unrealized_pnl_usd)}">${fmtUsdSimple(p.unrealized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
-  } else {
-    body.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>策略</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>盈亏</th></tr></thead>
-      <tbody>${rows.map(p => {
-        const pnl = p.realized_pnl_atr_weighted != null && p.atr0 && p.qty ? p.realized_pnl_atr_weighted*p.atr0*p.qty : null;
-        const exitMs = p.exit_bar_time || (p.closed_at ? p.closed_at*1000 : null);
-        return `<tr><td>${p.strategy}</td><td>${p.side}</td>
-          <td>${fmtTime(p.entry_bar_time)}</td><td>${fmtTime(exitMs)}</td>
-          <td>${p.entry}</td><td>${p.exit_price ?? '–'}</td>
-          <td>${p.exit_reason || '–'}</td>
-          <td class="num ${toneClass(pnl)}">${fmtUsdSimple(pnl)}</td></tr>`;
-      }).join('')}</tbody></table></div>`;
+  if (seq === tabSeq && sym === currentSymbol && tab === currentSymTab && document.getElementById('symTabBody')){
+    document.getElementById('symTabBody').innerHTML = html;
   }
 }
 
@@ -491,10 +504,11 @@ function switchCexView(view){
     view === 'strategy' ? '按收益率排名' : (view === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏');
   if (view === 'strategy'){
     renderSidebar();
-    if (currentStrategy) renderDetailHeader(); else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
+    if (currentStrategy){ renderDetailHeader(); loadTab(); }
+    else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
   } else {
     document.getElementById('detailInner').innerHTML = '<div class="loading-row">加载中…</div>';
-    if (symbolRows.length){ loadSymbolsCompare(true); } else { loadSymbolsCompare(true); }
+    loadSymbolsCompare(true);
   }
 }
 
@@ -642,7 +656,8 @@ function switchCategory(cat){
     if (cexView === 'strategy'){
       document.getElementById('sidebarLabel').textContent = '按收益率排名';
       renderSidebar();
-      if (currentStrategy) renderDetailHeader(); else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
+      if (currentStrategy){ renderDetailHeader(); loadTab(); }
+      else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
     } else {
       document.getElementById('sidebarLabel').textContent = cexView === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏';
       loadSymbolsCompare(true);
@@ -667,7 +682,15 @@ async function loadCompare(isFirst){
       if (isFirst && rosterRows.length){
         selectStrategy(rosterRows[0].strategy);
       } else if (currentStrategy){
-        renderDetailHeader();
+        if (currentStrategy === renderedStrategy && document.getElementById('tabBody')){
+          // 面板已经在展示这个策略：只就地更新 KPI 数字 + 静默刷新当前
+          // tab(不闪"加载中…")，用户正在看的表格不被打断。
+          patchStrategyKpis();
+          loadTab({silent: true});
+        } else {
+          renderDetailHeader();
+          loadTab();
+        }
       }
     }
   }catch(e){
@@ -701,7 +724,7 @@ function selectStrategy(strategy){
 function renderDetailHeader(){
   const row = rosterRows.find(r => r.strategy === currentStrategy);
   const inner = document.getElementById('detailInner');
-  if (!row){ inner.innerHTML = '<div class="empty-note">选一套策略查看详情</div>'; return; }
+  if (!row){ inner.innerHTML = '<div class="empty-note">选一套策略查看详情</div>'; renderedStrategy = null; return; }
   const tone = toneClass(row.equity_return_pct);
   inner.innerHTML = `
     <div class="detail-head">
@@ -711,10 +734,10 @@ function renderDetailHeader(){
       </div>
     </div>
     <div class="kpi-row">
-      <div class="kpi-card"><div class="label">收益率</div><div class="value ${tone}">${fmtPct(row.equity_return_pct)}</div></div>
-      <div class="kpi-card"><div class="label">胜率</div><div class="value">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
-      <div class="kpi-card"><div class="label">已平仓</div><div class="value">${row.trades ?? 0}</div></div>
-      <div class="kpi-card"><div class="label">净值</div><div class="value">$${(row.equity ?? 0).toLocaleString(undefined,{maximumFractionDigits:0})}</div></div>
+      <div class="kpi-card"><div class="label">收益率</div><div class="value ${tone}" id="kpiRet">${fmtPct(row.equity_return_pct)}</div></div>
+      <div class="kpi-card"><div class="label">胜率</div><div class="value" id="kpiWin">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
+      <div class="kpi-card"><div class="label">已平仓</div><div class="value" id="kpiTrades">${row.trades ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">净值</div><div class="value" id="kpiEq">${fmtUsd0(row.equity ?? 0)}</div></div>
     </div>
     <div class="tabs">
       <button class="tab-btn ${currentTab==='symbols'?'active':''}" data-tab="symbols">按品种</button>
@@ -730,51 +753,79 @@ function renderDetailHeader(){
       loadTab();
     });
   });
+  renderedStrategy = currentStrategy;
 }
 
-async function loadTab(){
+function patchStrategyKpis(){
+  const row = rosterRows.find(r => r.strategy === currentStrategy);
+  if (!row) return;
+  const ret = document.getElementById('kpiRet');
+  if (ret){ ret.textContent = fmtPct(row.equity_return_pct); ret.className = 'value ' + toneClass(row.equity_return_pct); }
+  const win = document.getElementById('kpiWin');
+  if (win) win.textContent = row.win_rate != null ? row.win_rate + '%' : '–';
+  const tr = document.getElementById('kpiTrades');
+  if (tr) tr.textContent = row.trades ?? 0;
+  const eq = document.getElementById('kpiEq');
+  if (eq) eq.textContent = fmtUsd0(row.equity ?? 0);
+}
+
+function _posOpenTable(rows, firstCol, firstColKey){
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>入场价</th><th>现价</th><th>浮动盈亏</th></tr></thead>
+    <tbody>${rows.map(p => `<tr><td>${p[firstColKey]}</td><td>${p.side}</td>
+      <td>${fmtTime(p.entry_bar_time)}</td><td>${p.entry}</td>
+      <td>${p.current_price ?? '–'}</td>
+      <td class="num ${toneClass(p.unrealized_pnl_usd)}">${fmtUsdSimple(p.unrealized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function _posClosedTable(rows, firstCol, firstColKey){
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>盈亏</th></tr></thead>
+    <tbody>${rows.map(p => {
+      const pnl = p.realized_pnl_atr_weighted != null && p.atr0 && p.qty ? p.realized_pnl_atr_weighted*p.atr0*p.qty : null;
+      const exitMs = p.exit_bar_time || (p.closed_at ? p.closed_at*1000 : null);
+      return `<tr><td>${p[firstColKey]}</td><td>${p.side}</td>
+        <td>${fmtTime(p.entry_bar_time)}</td><td>${fmtTime(exitMs)}</td>
+        <td>${p.entry}</td><td>${p.exit_price ?? '–'}</td>
+        <td>${p.exit_reason || '–'}</td>
+        <td class="num ${toneClass(pnl)}">${fmtUsdSimple(pnl)}</td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+async function loadTab(opts){
+  const silent = opts && opts.silent;
   const body = document.getElementById('tabBody');
   if (!body || !currentStrategy) return;
-  body.innerHTML = '<div class="loading-row">加载中…</div>';
-
-  if (currentTab === 'symbols'){
-    const r = await fetch(API.symbols(currentStrategy));
-    const d = await r.json();
-    const rows = d.symbols || [];
-    if (!rows.length){ body.innerHTML = '<div class="empty-note">这套策略还没有已平仓的品种数据</div>'; return; }
-    body.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>累计盈亏</th></tr></thead>
-      <tbody>${rows.map(s => {
-        const wr = s.trades ? Math.round(100*(s.wins||0)/s.trades) : null;
-        return `<tr><td>${s.symbol}</td><td>${s.trades}</td><td>${wr!=null? wr+'%':'–'}</td>
-          <td class="num ${toneClass(s.total_pnl_usd)}">${fmtUsdSimple(s.total_pnl_usd)}</td></tr>`;
-      }).join('')}</tbody></table></div>`;
-  } else {
-    const status = currentTab === 'open' ? 'open' : 'closed';
-    const r = await fetch(API.positions(currentStrategy, status));
-    const d = await r.json();
-    const rows = d.positions || [];
-    if (!rows.length){ body.innerHTML = `<div class="empty-note">暂无${status==='open'?'持仓中':'已平仓'}记录</div>`; return; }
-    if (status === 'open'){
-      body.innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th>品种</th><th>方向</th><th>买入时间</th><th>入场价</th><th>现价</th><th>浮动盈亏</th></tr></thead>
-        <tbody>${rows.map(p => `<tr><td>${p.symbol}</td><td>${p.side}</td>
-          <td>${fmtTime(p.entry_bar_time)}</td><td>${p.entry}</td>
-          <td>${p.current_price ?? '–'}</td>
-          <td class="num ${toneClass(p.unrealized_pnl_usd)}">${fmtUsdSimple(p.unrealized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
-    } else {
-      body.innerHTML = `<div class="table-wrap"><table>
-        <thead><tr><th>品种</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>盈亏</th></tr></thead>
-        <tbody>${rows.map(p => {
-          const pnl = p.realized_pnl_atr_weighted != null && p.atr0 && p.qty ? p.realized_pnl_atr_weighted*p.atr0*p.qty : null;
-          const exitMs = p.exit_bar_time || (p.closed_at ? p.closed_at*1000 : null);
-          return `<tr><td>${p.symbol}</td><td>${p.side}</td>
-            <td>${fmtTime(p.entry_bar_time)}</td><td>${fmtTime(exitMs)}</td>
-            <td>${p.entry}</td><td>${p.exit_price ?? '–'}</td>
-            <td>${p.exit_reason || '–'}</td>
-            <td class="num ${toneClass(pnl)}">${fmtUsdSimple(pnl)}</td></tr>`;
+  const seq = ++tabSeq;
+  const strat = currentStrategy, tab = currentTab;
+  if (!silent) body.innerHTML = '<div class="loading-row">加载中…</div>';
+  let html;
+  try{
+    if (tab === 'symbols'){
+      const d = await (await fetch(API.symbols(strat))).json();
+      const rows = d.symbols || [];
+      html = !rows.length ? '<div class="empty-note">这套策略还没有已平仓的品种数据</div>'
+        : `<div class="table-wrap"><table>
+        <thead><tr><th>品种</th><th>笔数</th><th>胜率</th><th>累计盈亏</th></tr></thead>
+        <tbody>${rows.map(s => {
+          const wr = s.trades ? Math.round(100*(s.wins||0)/s.trades) : null;
+          return `<tr><td>${s.symbol}</td><td>${s.trades}</td><td>${wr!=null? wr+'%':'–'}</td>
+            <td class="num ${toneClass(s.total_pnl_usd)}">${fmtUsdSimple(s.total_pnl_usd)}</td></tr>`;
         }).join('')}</tbody></table></div>`;
+    } else {
+      const status = tab === 'open' ? 'open' : 'closed';
+      const d = await (await fetch(API.positions(strat, status))).json();
+      const rows = d.positions || [];
+      html = !rows.length ? `<div class="empty-note">暂无${status==='open'?'持仓中':'已平仓'}记录</div>`
+        : (status === 'open' ? _posOpenTable(rows, '品种', 'symbol') : _posClosedTable(rows, '品种', 'symbol'));
     }
+  }catch(e){
+    if (!silent && seq === tabSeq) body.innerHTML = '<div class="empty-note">加载失败，稍后自动重试…</div>';
+    return;
+  }
+  // 只有还停在同一个策略/同一个 tab、且没有更新的请求发出，才写回——
+  // 防止慢响应盖掉用户已经切走的内容(那也会看起来"不稳定")。
+  if (seq === tabSeq && strat === currentStrategy && tab === currentTab && document.getElementById('tabBody')){
+    document.getElementById('tabBody').innerHTML = html;
   }
 }
 
