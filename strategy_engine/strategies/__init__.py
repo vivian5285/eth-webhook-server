@@ -301,6 +301,23 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] keltner_channel 加载失败: {_e}")
 
+# 2026-09-05第二批新增：宝贝转发DeepSeek的"AI合约战法"建议，评估后发现
+# 大部分是"AI临场判断/训练黑箱"驱动、过不了准入线，但剥掉AI层之后剩下
+# 两套纯规则骨架站得住脚，值得加入——见各自模块顶部docstring的详细说明。
+try:
+    from strategy_engine.strategies import chanlun_pivot
+    STRATEGIES["chanlun_pivot"] = chanlun_pivot.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] chanlun_pivot 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import adx_efficiency_zscore
+    STRATEGIES["adx_efficiency_zscore"] = adx_efficiency_zscore.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] adx_efficiency_zscore 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -606,6 +623,33 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "(Donchian结构通道，不管波动率)都不同——这套通道宽度直接用ATR、"
         "随波动率实时热胀冷缩，且不要求先经历挤压。4H周期，方便跟另外两套"
         "通道突破战法直接对照。"
+    ),
+    "chanlun_pivot": (
+        "缠论结构突破/背驰(简化版)——2026-09-05新增，宝贝转发DeepSeek"
+        "'缠论×AI结构化战法'建议后剥离出的纯规则部分(去掉了AI临场开仓/"
+        "持仓判断，那部分没法复现回测)。K线合并→分型→笔→中枢，完全公开"
+        "可算法化的缠论体系(缠中说禅本人公开连载，无个人实盘战绩背书，"
+        "跟vegas_tunnel同一类'公开成体系但无战绩'战法)，简化了正统线段"
+        "构造(直接用连续3笔重叠区间当中枢)、背驰用MACD柱状图面积代理"
+        "力度(单一时间框架比较，非正统多级别背驰)。突破中枢上/下沿进场，"
+        "背驰或结构失效(价格退回中枢内)离场。本擂台唯一一套用'结构/分形'"
+        "当信号来源的战法，跟turtle_breakout/keltner_channel/darvas_box"
+        "那种固定窗口或波动率通道完全不是一回事——边界由价格自己的摆动"
+        "结构推导，不设回看窗口。4H周期。"
+    ),
+    "adx_efficiency_zscore": (
+        "ADX+效率比+Z-score回调(固定1:3盈亏比)——2026-09-05新增，宝贝"
+        "转发DeepSeek'两阶段AI过滤'建议后剥离出的纯规则部分(去掉了AI"
+        "最终确认那一步)。三个已有公开指标(ADX/Kaufman效率比/Z-score)"
+        "换一种新组合：ADX>20确认有趋势+效率比≥0.2排除'看着有趋势实际"
+        "震荡'的假趋势+价格回调到Z-score极值再修复入场，止损止盈**固定**"
+        "1.5/4.5倍ATR(1:3盈亏比)，开仓那一刻锁定、不设额外主动离场判断。"
+        "这是刻意的纪律选择——落地DeepSeek这批建议里最有价值的洞察："
+        "Gate.io六模型对决中DeepSeek以41%的胜率、6.71的盈亏比拿到最高"
+        "收益，胜率不重要、盈亏比才重要。跟raschke_adx_pullback回踩EMA"
+        "均线不同，这套回踩的是Z-score(统计偏离度)且多一层效率比过滤；"
+        "跟kaufman_ama把效率比用来调均线速度不同，这套把效率比当regime"
+        "过滤门槛。4H周期，跟同批ADX战法同周期方便对照。"
     ),
 }
 

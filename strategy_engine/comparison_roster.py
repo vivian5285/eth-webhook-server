@@ -136,6 +136,15 @@ AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真
   - keltner_channel：4h。**跟turtle_breakout/bollinger_squeeze同周期**，
     方便三种不同构造方式的通道突破战法(Donchian结构通道/布林带统计
     通道+挤压/Keltner的ATR波动率通道)在同一周期上直接对照。
+
+2026-09-05第二批新增2套：宝贝转发DeepSeek"AI合约战法"建议，评估后剥离
+出两套能过准入线的纯规则骨架(去掉原方案里"AI临场判断/AI最终确认"那
+一步，理由见各自模块docstring)：
+  - chanlun_pivot：4h。缠论结构对K线数量要求较高(分型→笔→中枢要攒够
+    好几层)，4h是本仓库"加密货币日线合理代理"的既定选择。
+  - adx_efficiency_zscore：4h，跟同批ADX战法(adx_regime_switch/
+    raschke_adx_pullback/supertrend_adx)同周期，方便横向比较"用ADX的
+    不同方式，谁更好"这个持续在做的对照实验。
 """
 from __future__ import annotations
 
@@ -227,6 +236,9 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "kaufman_ama", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "raschke_adx_pullback", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "keltner_channel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # ── 2026-09-05第二批新增2套(DeepSeek建议剥离出的纯规则版) ────────────
+    + [{"symbol": s, "strategy": "chanlun_pivot", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "adx_efficiency_zscore", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
