@@ -102,7 +102,19 @@ CATCHUP_MAX_CONCURRENT_PER_ACCOUNT = 2  # 2026-08-21实盘复现：同一账户�
                                          # 仓位一样走保守克制的路子，不追求一次
                                          # 吃满所有机会。
 
-# 2026-09-01新增：追回止损距离ATR下限——宝贝XPDUSDT实盘复现：TV心跳给的
+# 2026-09-04新增：追回"价差过大就别追了"闸门——宝贝XMRUSDT实盘复现：TV心跳
+# entry=494.39，一根大阳线拉到527附近才多周期EMA确认通过，追回限价刷新6轮
+# 才在523.15成交(比TV原始entry高28.76，接近TV止损空间33.07本身那么大)，
+# 成交后价格很快回落，雷达止损焊在保本附近被回撤打掉——TV的利润空间
+# 在我们真正进场之前已经被这根阳线吃掉大半，等于追了个"入场即接近打平"的
+# 仓位，白白磨损。宝贝原话："价格差很大，就不要心跳追了，因为利润空间少
+# 了"。这里加一道硬性检查：追回启动前，用当前价到TV.tp1的剩余距离，除以
+# TV.entry到TV.tp1的原始距离，算出"利润空间还剩多少比例"——低于
+# CATCHUP_MIN_REWARD_FRAC就直接不启动这次追回(不是刷新预算耗尽转市价，是
+# 一开始就判定不值得追)，跟_multi_tf_trend_confirmed一样只挡"要不要开始
+# 追"这一步，已经武装的周期不受影响。tp1缺失(<=0)时不设限，避免心跳数据
+# 本身缺TP导致误伤。
+CATCHUP_MIN_REWARD_FRAC = 0.4
 # tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
 # TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
 # 心跳这条数据流本身没有任何校验(见record_tv_heartbeat)，异常值会原样
@@ -339,6 +351,7 @@ class RadarReentryMixin:
         self._catchup_episode_resolved = False
         self._catchup_stale_give_up_alerted = False
         self._catchup_capacity_blocked_alerted = False
+        self._catchup_reward_blocked_alerted = False
 
     def _reentry_state_dict(self) -> Dict[str, Any]:
         return {
@@ -2467,6 +2480,7 @@ class RadarReentryMixin:
         # 或者又满了，值得重新评估/重新提醒一次。
         self._catchup_stale_give_up_alerted = False
         self._catchup_capacity_blocked_alerted = False
+        self._catchup_reward_blocked_alerted = False
         if side in ("LONG", "SHORT"):
             def _f(key):
                 try:
@@ -2700,6 +2714,58 @@ class RadarReentryMixin:
                 except Exception as e:
                     logger.debug(f"[{self.symbol}] 并发上限提醒钉钉跳过: {e}")
             return
+
+        # 2026-09-04新增：追回前"利润空间还剩多少"闸门——见
+        # CATCHUP_MIN_REWARD_FRAC顶部注释(XMRUSDT实盘复现)。用TV.tp1做
+        # 参照，tp1缺失/查不到现价时不设限(保守放行，不因为数据缺失
+        # 误伤——真正的价格/止损安全性后面挂单前还会重新校验)。这道闸门
+        # 只挡"要不要开始追"，不影响已经武装的周期，逻辑位置紧跟在
+        # multi_tf_trend_confirmed/并发上限两道闸门之后，同一惯例。
+        hb_tp1 = float(getattr(self, "tv_heartbeat_tp1", 0) or 0)
+        if hb_tp1 > 0:
+            original_reward = abs(hb_tp1 - hb_entry)
+            if original_reward > 0:
+                from binance_client import binance_client
+                try:
+                    curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+                except Exception:
+                    curr_px = 0.0
+                if curr_px > 0:
+                    remaining_reward = abs(hb_tp1 - curr_px)
+                    reward_frac = remaining_reward / original_reward
+                    if reward_frac < CATCHUP_MIN_REWARD_FRAC:
+                        if not bool(getattr(self, "_catchup_reward_blocked_alerted", False)):
+                            self._catchup_reward_blocked_alerted = True
+                            logger.warning(
+                                f"🚫 [{self.symbol}] TV心跳追回：价格已经跑得太远，"
+                                f"到TV.tp1({hb_tp1})只剩{remaining_reward:.4f}距离，"
+                                f"只有原始空间({original_reward:.4f})的"
+                                f"{reward_frac*100:.0f}%(门槛"
+                                f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%) → 利润空间太小，不追"
+                            )
+                            try:
+                                import dingtalk
+                                self._dingtalk(
+                                    dingtalk.report_system_alert,
+                                    title=f"TV心跳追回：利润空间不足，不追 [{self.symbol}]",
+                                    detail=(
+                                        f"TV.entry={hb_entry} TV.tp1={hb_tp1} "
+                                        f"当前价={curr_px}，追回入场后到tp1只剩原始"
+                                        f"空间的{reward_frac*100:.0f}%(门槛"
+                                        f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%)，价格差"
+                                        f"已经太大，本次不启动追回。价格如果回落到"
+                                        f"门槛以内会自动重新评估。"
+                                    ),
+                                    level="提示",
+                                    notify_level=1,
+                                )
+                            except Exception as e:
+                                logger.debug(f"[{self.symbol}] 利润空间不足提醒钉钉跳过: {e}")
+                        return
+                    else:
+                        # 空间恢复到门槛以上——回退提醒去重标记，下次再
+                        # 跌破门槛还能重新提醒一次，不会被这次的标记永久压住。
+                        self._catchup_reward_blocked_alerted = False
 
         self._catchup_episode_side = hb_side
         self._catchup_episode_entry = hb_entry
