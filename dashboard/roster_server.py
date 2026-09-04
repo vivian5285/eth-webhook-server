@@ -45,9 +45,12 @@ from strategy_engine import shadow_store  # noqa: E402
 from strategy_engine.comparison_roster import (  # noqa: E402
     PAIRS_ROSTER,
     SINGLE_SYMBOL_ROSTER,
+    TOKENIZED_STOCK_SYMBOLS,
     UNIVERSE_ROSTER,
 )
 from strategy_engine.strategies import STRATEGY_DESCRIPTIONS  # noqa: E402
+
+_STOCK_SET = set(TOKENIZED_STOCK_SYMBOLS)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] RosterDashboard: %(message)s")
 logger = logging.getLogger("roster_dashboard")
@@ -178,6 +181,62 @@ def api_compare_positions(strategy):
         rows = _augment_open_rows(rows[:limit])
     else:
         rows = shadow_store.list_closed(strategy=strategy, limit=limit)
+        rows.sort(key=lambda r: r.get("closed_at") or 0, reverse=True)
+    return jsonify({"status": "ok", "positions": rows})
+
+
+# ── "按币种" / "按美股" 汇总视图 ───────────────────────────────────────────
+# 2026-09-04新增。宝贝原话："最后方便我们看策略的擂台，同样可以看币种和
+# 美股的擂台，方便我们对比和总结"。跟上面"按策略"(api_compare)并列：
+# 这里是跨所有战法、按品种聚合，回答"哪个币被这堆战法整体做赚了/做亏了"。
+# "美股擂台"就是这份数据里 is_stock=true 的子集(前端用同一个接口过滤)。
+@app.route("/api/roster/symbols_compare")
+def api_symbols_compare():
+    rows = shadow_store.summary_all_by_symbol()
+    # 品种清单以 roster 配置为基准：一单没触发过的新币也要显示，不能因为
+    # shadow_v2.db 里还没记录就从列表里消失(跟 api_compare 同一处理)。
+    roster_syms = sorted({e["symbol"] for e in SINGLE_SYMBOL_ROSTER}
+                         | {s for e in UNIVERSE_ROSTER for s in e.get("symbols", [])}
+                         | {s for e in PAIRS_ROSTER for s in e.get("symbols", [])})
+    by_sym = {r["symbol"]: r for r in rows}
+    out = []
+    for sym in roster_syms:
+        row = dict(by_sym.get(sym) or {
+            "symbol": sym, "trades": 0, "wins": 0, "total_pnl_atr": 0.0,
+            "avg_pnl_atr": None, "worst_trade_atr": None, "total_pnl_usd": 0.0,
+            "open_count": 0, "win_rate": None,
+        })
+        row["is_stock"] = sym in _STOCK_SET
+        out.append(row)
+    # 把 roster 里没有、但 db 里有历史记录的品种(比如刚被移出 roster 的)也带上
+    for sym, r in by_sym.items():
+        if sym not in roster_syms:
+            r = dict(r)
+            r["is_stock"] = sym in _STOCK_SET
+            out.append(r)
+    out.sort(key=lambda r: (r.get("total_pnl_usd") is None, -(r.get("total_pnl_usd") or -1e18)))
+    return jsonify({"status": "ok", "symbols": out, "stock_symbols": sorted(_STOCK_SET)})
+
+
+@app.route("/api/roster/symbol/<symbol>/strategies")
+def api_symbol_strategies(symbol):
+    rows = shadow_store.strategies_for_symbol(symbol.upper())
+    for r in rows:
+        r["description"] = STRATEGY_DESCRIPTIONS.get(r.get("strategy"), "")
+    return jsonify({"status": "ok", "strategies": rows})
+
+
+@app.route("/api/roster/symbol/<symbol>/positions")
+def api_symbol_positions(symbol):
+    symbol = symbol.upper()
+    status = request.args.get("status", "closed")
+    limit = max(1, min(int(request.args.get("limit", 100) or 100), 500))
+    if status == "open":
+        rows = shadow_store.list_open(symbol=symbol)
+        rows.sort(key=lambda r: r.get("entry_bar_time") or 0, reverse=True)
+        rows = _augment_open_rows(rows[:limit])
+    else:
+        rows = shadow_store.list_closed(symbol=symbol, limit=limit)
         rows.sort(key=lambda r: r.get("closed_at") or 0, reverse=True)
     return jsonify({"status": "ok", "positions": rows})
 

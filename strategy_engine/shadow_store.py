@@ -276,7 +276,12 @@ def list_closed(symbol: Optional[str] = None, strategy: Optional[str] = None,
             if strategy:
                 q += " AND strategy=?"
                 params.append(strategy)
-            q += " ORDER BY entry_bar_time ASC LIMIT ?"
+            # 2026-09-04：从 ASC 改成 DESC——擂台面板"平仓历史"tab 要看的是
+            # 最近这 limit 笔(带买入/平仓时间+平仓原因)，ASC + LIMIT 会永远
+            # 只返回最早那 limit 笔、成交多了以后新交易根本翻不到。唯一调用方
+            # (dashboard/roster_server.py)本来就会再按 closed_at 倒序，这里
+            # 换成 DESC 只是把"取哪一段"从最旧改成最新，不影响它的最终排序。
+            q += " ORDER BY entry_bar_time DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(q, params).fetchall()
             return [dict(r) for r in rows]
@@ -304,7 +309,7 @@ def get_last_closed_meta(symbol: str, strategy: str) -> Optional[dict]:
         return None
 
 
-def list_open(strategy: Optional[str] = None) -> List[dict]:
+def list_open(strategy: Optional[str] = None, symbol: Optional[str] = None) -> List[dict]:
     try:
         with _connect() as conn:
             q = "SELECT * FROM shadow_positions_v2 WHERE status='open'"
@@ -312,6 +317,9 @@ def list_open(strategy: Optional[str] = None) -> List[dict]:
             if strategy:
                 q += " AND strategy=?"
                 params.append(strategy)
+            if symbol:  # 2026-09-04：擂台"按币种"视图要按品种(不限策略)查持仓
+                q += " AND symbol=?"
+                params.append(symbol)
             rows = conn.execute(q, params).fetchall()
             return [dict(r) for r in rows]
     except Exception as e:
@@ -399,4 +407,81 @@ def summary_by_symbol(strategy: str) -> List[dict]:
             return [dict(r) for r in rows]
     except Exception as e:
         logger.warning(f"[shadow_store] summary_by_symbol 失败: {e}")
+        return []
+
+
+def summary_all_by_symbol() -> List[dict]:
+    """2026-09-04新增：跨**所有策略**、按品种聚合的战绩汇总——擂台面板
+    "按币种"/"按美股"视图用(宝贝要求：除了"按策略"排名，还要能按币种、
+    按美股分别对比总结)。跟 summary_by_symbol(strategy) 平行，只是不按
+    策略过滤，回答"这个币在这一堆公开战法手里整体是被赚钱还是被亏钱"。
+
+    没有"净值"概念(净值 strategy_equity 是按策略记的、每策略从 1000 起)，
+    所以这里只给累计盈亏(ATR加权 + 真实美元，跟 summary_by_strategy 同一
+    套 realized_pnl_atr_weighted×atr0×qty 口径)、胜率、当前持仓数。
+    只有持仓、还没有任何已平仓记录的品种也要出现(不然刚上线的新币在
+    对比表里直接消失)。
+    """
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT symbol,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
+                          ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
+                          ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr,
+                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd
+                   FROM shadow_positions_v2
+                   WHERE status='closed'
+                   GROUP BY symbol ORDER BY symbol"""
+            ).fetchall()
+            out = [dict(r) for r in rows]
+            open_counts = conn.execute(
+                """SELECT symbol, COUNT(*) AS open_count
+                   FROM shadow_positions_v2 WHERE status='open' GROUP BY symbol"""
+            ).fetchall()
+            open_map = {r["symbol"]: int(r["open_count"]) for r in open_counts}
+            for row in out:
+                row["open_count"] = open_map.get(row["symbol"], 0)
+                trades = int(row["trades"] or 0)
+                row["win_rate"] = round(100.0 * (row["wins"] or 0) / trades, 1) if trades > 0 else None
+            for sym, cnt in open_map.items():
+                if not any(r["symbol"] == sym for r in out):
+                    out.append({
+                        "symbol": sym, "trades": 0, "wins": 0,
+                        "total_pnl_atr": 0.0, "avg_pnl_atr": None,
+                        "worst_trade_atr": None, "total_pnl_usd": 0.0,
+                        "open_count": cnt, "win_rate": None,
+                    })
+            return out
+    except Exception as e:
+        logger.warning(f"[shadow_store] summary_all_by_symbol 失败: {e}")
+        return []
+
+
+def strategies_for_symbol(symbol: str) -> List[dict]:
+    """2026-09-04新增：某个品种在**每一套策略**手里的战绩明细——擂台
+    "按币种"视图点开一个币后看的下钻表(跟 summary_by_symbol 正好转置：
+    那个是"某策略在各品种"，这个是"某品种在各策略")。"""
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN realized_pnl_atr_weighted > 0 THEN 1 ELSE 0 END) AS wins,
+                          ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
+                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd
+                   FROM shadow_positions_v2
+                   WHERE status='closed' AND symbol=?
+                   GROUP BY strategy ORDER BY total_pnl_usd DESC""",
+                (symbol,),
+            ).fetchall()
+            out = [dict(r) for r in rows]
+            for row in out:
+                trades = int(row["trades"] or 0)
+                row["win_rate"] = round(100.0 * (row["wins"] or 0) / trades, 1) if trades > 0 else None
+            return out
+    except Exception as e:
+        logger.warning(f"[shadow_store] strategies_for_symbol 失败: {e}")
         return []

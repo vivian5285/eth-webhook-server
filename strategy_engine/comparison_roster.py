@@ -97,6 +97,13 @@ klines.py确认能正常拉到币安合约K线)。周期按每套战法自己的
     6.5小时交易窗口里有足够判定点——15m刚好。代币化美股品种用真实美股
     开盘9:30 ET(anchor="us_equity"，自动处理夏令时)，纯加密货币退化用
     UTC 00:00(anchor="utc"，人为类比，模块注释里如实说明局限)。
+
+2026-09-04第三批：宝贝拍板再加6个品种(_ALL_SYMBOLS 19→25)——BTCUSDT(老
+大哥/风向标)、XLMUSDT(跟XRP常联动)、DOGEUSDT + 1000PEPEUSDT(meme簇，
+两者也常一起动)、HYPEUSDT(perp-DEX原生币，全场最高流动性)、ENAUSDT
+(perp原生、资金费率摆动大)。同时应宝贝要求，dashboard/roster_server.py
+新增"按币种"、"按美股"两个汇总视图(跟原有"按策略"排名并列)，用
+shadow_store.summary_all_by_symbol() + TOKENIZED_STOCK_SYMBOLS 名单。
 """
 from __future__ import annotations
 
@@ -105,23 +112,36 @@ from __future__ import annotations
 # watchdog/check.py同一天发现的同一类问题——这份擂台赛品种清单当时也漏改
 # 了。这个引擎本身已停用(systemctl stop strategy-engine/strategy-compare)、
 # 不碰真实资金，这里只是顺手保持一致，不是紧急修复。
-_ALL_SYMBOLS = [
-    "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT",
-    "SNDKUSDT", "PAXGUSDT", "OPENAIUSDT", "ANTHROPICUSDT",
-    "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
-    # 2026-09-04第二批新增：4个主流山寨永续，均已用 klines.get_bars 确认
-    # 能正常拉到币安合约K线。SINGLE_SYMBOL_ROSTER 是 list comprehension，
-    # 改这里会自动传导到所有按 _ALL_SYMBOLS 铺开的单品种战法。
-    "XRPUSDT", "SOLUSDT", "LINKUSDT", "UNIUSDT",
-]
-
-# opening_range_breakout 专用分组：代币化美股跟踪真实美股、有真实 9:30 ET
-# 开盘，用 anchor="us_equity"；纯加密货币(含贵金属系 XAU/PAXG，24/7 无
-# 休市)没有真正的"开盘"，退化用 UTC 00:00 作锚点(anchor="utc"，人为类比)。
-_ORB_STOCK_SYMBOLS = [
+# 代币化美股：跟踪真实美股标的(有真实 9:30 ET 开盘)。公开给 dashboard/
+# roster_server.py 的"美股擂台"视图用——擂台面板除了"按策略"排名，还要能
+# "按币种"、"按美股"分别汇总对比(宝贝 2026-09-04 要求)。ORB 战法也用这份
+# 名单区分 anchor=us_equity / anchor=utc。
+TOKENIZED_STOCK_SYMBOLS = [
     "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT",
     "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
 ]
+
+_ALL_SYMBOLS = [
+    # ── 加密货币 ──────────────────────────────────────────────────────────
+    "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT",
+    "XRPUSDT", "SOLUSDT", "LINKUSDT", "UNIUSDT",
+    # 2026-09-04第三批新增(宝贝拍板)：BTC=老大哥/风向标必须有；XLM 跟 XRP
+    # 常联动(补一个相关簇内对照)；DOGE+1000PEPE=meme 簇(两者也常一起动，
+    # 加进来内部能互比)；HYPE=perp-DEX 原生币($1B+/24h 全场最高流动性，
+    # 全新持有者结构)；ENA=perp 原生、资金费率摆动大(给 funding_trend 当
+    # 压力测试样本)。全部已用 klines.get_bars/fundingRate 确认可正常拉取；
+    # HYPE 日线自 2025-05-30 起 463 根，够 connors_rsi2 的 SMA200 预热。
+    "BTCUSDT", "XLMUSDT", "DOGEUSDT", "1000PEPEUSDT", "HYPEUSDT", "ENAUSDT",
+    # ── 贵金属系(24/7 无休市) ─────────────────────────────────────────────
+    "XAUUSDT", "PAXGUSDT",
+    # ── 代币化美股 ────────────────────────────────────────────────────────
+    *TOKENIZED_STOCK_SYMBOLS,
+]
+
+# opening_range_breakout 专用分组：代币化美股用 anchor="us_equity"(真实
+# 9:30 ET 开盘)；其余(加密货币 + 贵金属系，24/7 无休市，没有真正的"开盘")
+# 退化用 UTC 00:00 作锚点(anchor="utc"，人为类比)。
+_ORB_STOCK_SYMBOLS = list(TOKENIZED_STOCK_SYMBOLS)
 _ORB_CRYPTO_SYMBOLS = [s for s in _ALL_SYMBOLS if s not in _ORB_STOCK_SYMBOLS]
 
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
