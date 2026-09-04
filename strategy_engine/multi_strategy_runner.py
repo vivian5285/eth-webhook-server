@@ -57,6 +57,27 @@ _open_positions: Dict[tuple, dict] = {}
 _open_pair: Optional[dict] = None
 
 
+def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: int) -> list:
+    """2026-09-04新增：单轮run_comparison_once内的K线拉取去重缓存。
+
+    背景：宝贝新增7套战法 + 4个品种(XRP/SOL/LINK/UNI)后，每轮巡检的
+    klines.get_bars调用数从~200涨到~400+，而且大量是重复的——同一个
+    (symbol, timeframe, limit)被十几套战法各自拉一遍(比如SOLUSDT@4h被
+    turtle/ema_cross/supertrend/breakout_retest/bollinger_squeeze/...
+    全都要)。币安期货公开接口的IP限流是2400 request-weight/分钟，
+    klines按limit计权重(limit>500记5)，不去重的话一轮峰值能顶到
+    ~2000 weight挤在几十秒内打完，余量太薄、偶发429。
+
+    缓存键含limit：不同战法可能要不同根数，键不同就各拉各的，只有
+    完全相同的(symbol,timeframe,limit)才复用。缓存**每轮新建**(见
+    run_comparison_once)，不跨轮——跨轮必须重新拉最新已收盘K线。
+    """
+    key = (symbol, timeframe, int(limit))
+    if key not in cache:
+        cache[key] = klines.get_bars(symbol, timeframe, limit=int(limit))
+    return cache[key]
+
+
 def _check_stop_tp(pos: dict, bar: dict):
     """跟backtest_runner.py::_check_stop_tp同一套简化口径：一根K线内到底
     先碰到止损还是先碰到止盈无法从OHLC里还原真实顺序，保守假设止损优先。"""
@@ -173,7 +194,7 @@ def _hydrate_keys_from_db(keys: List[tuple]) -> None:
             _open_positions[key] = row
 
 
-def _tick_single_symbol_entry(entry: dict) -> None:
+def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     symbol, strategy, timeframe = entry["symbol"], entry["strategy"], entry["timeframe"]
     params = entry.get("params") or {}
     fn = get_strategy(strategy)
@@ -181,9 +202,24 @@ def _tick_single_symbol_entry(entry: dict) -> None:
     # vegas_tunnel需要EMA676，550根连算出第一个值都不够，其它战法不传
     # 这个字段时行为完全不变(仍用全局默认值)。
     bars_limit = int(entry.get("bars_limit") or BARS_LIMIT)
-    bars = klines.get_bars(symbol, timeframe, limit=bars_limit)
+    bars = _cached_bars(cache, symbol, timeframe, bars_limit)
     if len(bars) < 30:
         return
+
+    # 2026-09-04新增：多周期(MTF)支持。roster条目带 "mtf": ["1h", ...] 时
+    # 额外拉这些周期的K线，一起塞进 bars_by_tf(键=周期字符串，跟
+    # backtest_runner.py/symbol_registry.py早就在用的同名机制一致)。
+    # 不带 mtf 字段的战法：bars_by_tf 就只有 {"base": bars}，跟改动前
+    # 逐字节等价。目前只有 mtf_ema_pullback 用到(高周期1h定潮汐方向)。
+    bars_by_tf = {"base": bars}
+    for tf in (entry.get("mtf") or []):
+        bars_by_tf[str(tf)] = _cached_bars(cache, symbol, tf, bars_limit)
+    # symbol 注入 params——funding_trend 需要靠它去拉对应品种的资金费率
+    # (跟 _tick_universe_entry 给 cross_momentum 注入 symbol/universe_returns
+    # 同一个做法)。其它战法用 {**DEFAULT_PARAMS, **params} 合并，多一个
+    # 用不到的 symbol 键完全无害。
+    call_params = {**params, "symbol": symbol}
+
     key = (symbol, strategy)
     pos = _open_positions.get(key)
     last_bar = bars[-1]
@@ -196,7 +232,7 @@ def _tick_single_symbol_entry(entry: dict) -> None:
         if hit_tp:
             _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")
             return
-        sig = fn({"base": bars}, params, {
+        sig = fn(bars_by_tf, call_params, {
             "side": pos["side"], "entry_price": pos["entry"],
             "entry_bar_time": pos["entry_bar_time"],
         })
@@ -204,15 +240,18 @@ def _tick_single_symbol_entry(entry: dict) -> None:
             _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
         return
 
-    sig = fn({"base": bars}, params, None)
+    sig = fn(bars_by_tf, call_params, None)
     if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
         _open_from_signal(symbol, strategy, timeframe, sig)
 
 
-def _compute_universe_returns(symbols: List[str], timeframe: str, lookback_bars: int) -> Dict[str, float]:
+def _compute_universe_returns(symbols: List[str], timeframe: str, lookback_bars: int, cache: Dict[tuple, list]) -> Dict[str, float]:
     out = {}
     for s in symbols:
-        bars = klines.get_bars(s, timeframe, limit=lookback_bars + 5)
+        # 2026-09-04：改成走 _cached_bars(拉 BARS_LIMIT 根)，跟同一轮里
+        # 该品种@该周期的信号用K线共用缓存，少打一次接口。只用末尾的
+        # bars[-1] / bars[-1-lookback] 两个点，多拉的历史不影响结果。
+        bars = _cached_bars(cache, s, timeframe, BARS_LIMIT)
         if len(bars) < lookback_bars + 1:
             continue
         c_now = float(bars[-1]["c"])
@@ -222,18 +261,16 @@ def _compute_universe_returns(symbols: List[str], timeframe: str, lookback_bars:
     return out
 
 
-def _tick_universe_entry(entry: dict) -> None:
+def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     strategy, timeframe = entry["strategy"], entry["timeframe"]
     symbols = entry["symbols"]
     lookback = int(entry.get("lookback_bars") or 20)
     fn = get_strategy(strategy)
-    universe_returns = _compute_universe_returns(symbols, timeframe, lookback)
+    universe_returns = _compute_universe_returns(symbols, timeframe, lookback, cache)
     if len(universe_returns) < 2:
         return
-    bars_cache: Dict[str, list] = {}
     for symbol in symbols:
-        bars = bars_cache.get(symbol) or klines.get_bars(symbol, timeframe, limit=BARS_LIMIT)
-        bars_cache[symbol] = bars
+        bars = _cached_bars(cache, symbol, timeframe, BARS_LIMIT)
         if len(bars) < 30:
             continue
         key = (symbol, strategy)
@@ -337,7 +374,7 @@ def _close_pair(exit_price_a: float, exit_price_b: float, bar_time: int, reason:
     _open_pair = None
 
 
-def _tick_pairs_entry(entry: dict) -> None:
+def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     """配对交易(distance method)专用调度——跟_tick_single_symbol_entry/
     _tick_universe_entry是并列的第三条巡检路径，两条腿绑定同开同平，
     接口/状态管理都不一样，不能复用那两个函数。"""
@@ -357,7 +394,7 @@ def _tick_pairs_entry(entry: dict) -> None:
 
     bars_cache: Dict[str, list] = {}
     for s in symbols:
-        bars_cache[s] = klines.get_bars(s, timeframe, limit=max(BARS_LIMIT, formation_bars + 10))
+        bars_cache[s] = _cached_bars(cache, s, timeframe, max(BARS_LIMIT, formation_bars + 10))
 
     if _open_pair:
         p = _open_pair
@@ -485,19 +522,22 @@ def run_comparison_once(
     for u in universe_roster:
         keys.extend((s, u["strategy"]) for s in u["symbols"])
     _hydrate_keys_from_db(keys)
+    # 本轮共享的K线拉取缓存，键=(symbol, timeframe, limit)。每轮新建、
+    # 不跨轮(见_cached_bars注释)。
+    cache: Dict[tuple, list] = {}
     for entry in single_roster:
         try:
-            _tick_single_symbol_entry(entry)
+            _tick_single_symbol_entry(entry, cache)
         except Exception as e:
             logger.warning(f"[多策略][{entry['strategy']}][{entry['symbol']}] 本轮巡检异常，跳过: {e}")
     for entry in universe_roster:
         try:
-            _tick_universe_entry(entry)
+            _tick_universe_entry(entry, cache)
         except Exception as e:
             logger.warning(f"[多策略][{entry['strategy']}] 篮子巡检异常，跳过: {e}")
     for entry in (pairs_roster or []):
         try:
-            _tick_pairs_entry(entry)
+            _tick_pairs_entry(entry, cache)
         except Exception as e:
             logger.warning(f"[多策略][{entry['strategy']}] 配对巡检异常，跳过: {e}")
 

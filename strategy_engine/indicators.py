@@ -216,3 +216,57 @@ def wilder_adx(bars: Sequence[dict], period: int = 14) -> float:
     for dx in dx_list[period:]:
         adx = (adx * (period - 1) + dx) / period
     return float(adx)
+
+
+def supertrend(bars: Sequence[dict], period: int = 10, multiplier: float = 3.0) -> List[tuple]:
+    """SuperTrend(ATR通道翻转指标)——公开经典指标(Olivier Seban提出，各大
+    图表软件内置)，本仓库此前没有。返回 [(st_value, direction), ...]，
+    direction: +1=多头(收盘价在SuperTrend线上方)，-1=空头。序列末尾对齐到
+    最新一根K线，取负索引即可(out[-1]=当前，out[-2]=上一根，用来判断翻转)。
+
+    算法(跟TradingView `ta.supertrend` 同口径)：
+      hl2 = (high+low)/2
+      basic_upper = hl2 + multiplier*ATR ；basic_lower = hl2 - multiplier*ATR
+      final_upper/lower 带"棘轮"约束(只在更极端或价格穿越时才放开)
+      SuperTrend 在 final_upper / final_lower 之间按收盘价与前值切换
+
+    ATR 用本模块的 Wilder atr_series(跟系统其它地方 ATR 口径一致)。返回序列
+    第一个点对应 bars 里第 period+1 根(需要 ATR 首值 + 一根前值做递推种子)。
+    """
+    atr = atr_series(bars, period)
+    if len(atr) < 2:
+        return []
+    # atr[k] 对应 bars[period + k]
+    offset = len(bars) - len(atr)  # = period
+    fu_prev = fl_prev = st_prev = None
+    dir_prev = 1
+    out: List[tuple] = []
+    for k in range(len(atr)):
+        i = offset + k
+        h = _f(bars[i]["h"])
+        l = _f(bars[i]["l"])
+        c = _f(bars[i]["c"])
+        pc = _f(bars[i - 1]["c"])
+        hl2 = (h + l) / 2.0
+        basic_upper = hl2 + multiplier * atr[k]
+        basic_lower = hl2 - multiplier * atr[k]
+        if fu_prev is None:
+            final_upper, final_lower = basic_upper, basic_lower
+            st = final_lower if c >= hl2 else final_upper
+            direction = 1 if c >= hl2 else -1
+        else:
+            final_upper = basic_upper if (basic_upper < fu_prev or pc > fu_prev) else fu_prev
+            final_lower = basic_lower if (basic_lower > fl_prev or pc < fl_prev) else fl_prev
+            if st_prev == fu_prev:
+                if c <= final_upper:
+                    st, direction = final_upper, -1
+                else:
+                    st, direction = final_lower, 1
+            else:  # st_prev == fl_prev
+                if c >= final_lower:
+                    st, direction = final_lower, 1
+                else:
+                    st, direction = final_upper, -1
+        out.append((float(st), int(direction)))
+        fu_prev, fl_prev, st_prev, dir_prev = final_upper, final_lower, st, direction
+    return out

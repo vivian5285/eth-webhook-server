@@ -63,6 +63,40 @@
   - ema_cross_7_30：4h，宝贝原话"em和ema最有效，7和30，的快慢线，金叉
     死叉"——双EMA(7/30)交叉，跟其余8套单品种战法一样用4h当加密货币
     日线的合理代理。
+
+2026-09-04第二批新增：宝贝要求补7套经典公开战法(同一个准入门槛：有公开
+发表规则/可考证真实track record，排除SMC/ICT/流动性扫单/回测截图性质的
+黑箱)，同时把_ALL_SYMBOLS从15个扩到19个(+XRP/SOL/LINK/UNI，均已用
+klines.py确认能正常拉到币安合约K线)。周期按每套战法自己的天然节奏定：
+  - mtf_ema_pullback：base=15m + mtf=["1h"]。本擂台第一个多周期战法(其余
+    全是单周期)——高周期1h的EMA50/200定潮汐、低周期15m等回踩+RSI抬头
+    进场，是Elder三重滤网"相邻两级周期差3~5倍"区间内的选择。不用更慢
+    的4h/1d当base，否则跟已有一堆慢周期趋势战法同质化，这套的价值就在
+    填补"日内多周期择时"空白。为它给multi_strategy_runner._tick_single_
+    symbol_entry加了对roster条目"mtf"字段的支持(照搬backtest_runner.py/
+    symbol_registry.py同名机制)，其它不带mtf的战法行为不变。
+  - vwap_mean_reversion：15m。要在一个UTC自然日内累计出足够多K线VWAP和
+    σ才稳定——15m一天96根是"日内anchored VWAP"的常见周期，1h(一天24根)
+    日内样本太少、5m噪声主导。anchor到UTC 00:00(加密货币没有真实开盘，
+    人为约定，模块注释里如实说明)。
+  - volume_profile_reversion：1h。Volume Profile需要"结构稳定"的历史堆出
+    有意义的分布——15m几根插针就带偏，4h/1d则lookback 150根要拉到几十
+    上百天把失效的老筹码也算进来。1h×150≈6.25天≈VPVR常用可视范围量级。
+  - funding_trend：1h。资金费率每8小时结算一次，战法节奏不能更快(否则
+    一个结算周期内被同一个费率读数反复触发)。1h的EMA50/200+20根突破
+    对应"最近一天新高/新低"，跟8小时费率结算节奏错开。这套额外读币安
+    公开资金费率端点(strategy_engine/funding.py，无API Key)，是唯一吃
+    K线以外市场数据的战法，只在live擂台跑、不进backtest_runner历史回放。
+  - supertrend_adx：4h。**必须跟adx_regime_switch同周期**这次"大道至简
+    是否有效"对照实验才成立(极简的SuperTrend+ADX+ATR止损 vs 有状态切换
+    的复杂自适应)。SuperTrend是indicators.py本批新增的指标。
+  - breakout_retest：4h。**必须跟turtle_breakout同周期**，对照"突破要不要
+    等回踩二次确认"这一个变量，其它(Donchian通道、反向10期通道离场)
+    全部对齐。
+  - opening_range_breakout：15m。要在30分钟开盘区间里至少2根K线、又要在
+    6.5小时交易窗口里有足够判定点——15m刚好。代币化美股品种用真实美股
+    开盘9:30 ET(anchor="us_equity"，自动处理夏令时)，纯加密货币退化用
+    UTC 00:00(anchor="utc"，人为类比，模块注释里如实说明局限)。
 """
 from __future__ import annotations
 
@@ -75,7 +109,20 @@ _ALL_SYMBOLS = [
     "ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT",
     "SNDKUSDT", "PAXGUSDT", "OPENAIUSDT", "ANTHROPICUSDT",
     "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
+    # 2026-09-04第二批新增：4个主流山寨永续，均已用 klines.get_bars 确认
+    # 能正常拉到币安合约K线。SINGLE_SYMBOL_ROSTER 是 list comprehension，
+    # 改这里会自动传导到所有按 _ALL_SYMBOLS 铺开的单品种战法。
+    "XRPUSDT", "SOLUSDT", "LINKUSDT", "UNIUSDT",
 ]
+
+# opening_range_breakout 专用分组：代币化美股跟踪真实美股、有真实 9:30 ET
+# 开盘，用 anchor="us_equity"；纯加密货币(含贵金属系 XAU/PAXG，24/7 无
+# 休市)没有真正的"开盘"，退化用 UTC 00:00 作锚点(anchor="utc"，人为类比)。
+_ORB_STOCK_SYMBOLS = [
+    "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT",
+    "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
+]
+_ORB_CRYPTO_SYMBOLS = [s for s in _ALL_SYMBOLS if s not in _ORB_STOCK_SYMBOLS]
 
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
 _RSI2_SYMBOLS = [
@@ -93,7 +140,7 @@ _SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
 # single_symbol_entry新增的bars_limit字段支持)。
 _VEGAS_BARS_LIMIT = 1400
 
-# 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?}
+# 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?, mtf?}
 SINGLE_SYMBOL_ROSTER = (
     [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
     + [{"symbol": s, "strategy": "connors_rsi2", "timeframe": "1d"} for s in _RSI2_SYMBOLS]
@@ -105,6 +152,15 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "ema_cross_7_30", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # ── 2026-09-04第二批新增7套 ──────────────────────────────────────────
+    + [{"symbol": s, "strategy": "mtf_ema_pullback", "timeframe": "15m", "mtf": ["1h"]} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "vwap_mean_reversion", "timeframe": "15m"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "volume_profile_reversion", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "funding_trend", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "supertrend_adx", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "breakout_retest", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "opening_range_breakout", "timeframe": "15m", "params": {"anchor": "us_equity"}} for s in _ORB_STOCK_SYMBOLS]
+    + [{"symbol": s, "strategy": "opening_range_breakout", "timeframe": "15m", "params": {"anchor": "utc"}} for s in _ORB_CRYPTO_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

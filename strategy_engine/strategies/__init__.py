@@ -182,6 +182,63 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] ema_cross_7_30 加载失败: {_e}")
 
+# 2026-09-04新增7套(宝贝要求，同一个准入门槛：有公开发表规则/可考证真实
+# track record的经典战法，排除SMC/ICT/流动性扫单/"某人回测截图"性质的
+# 黑箱)。7套里 mtf_ema_pullback 是本擂台第一个真正的多周期战法——为它
+# multi_strategy_runner._tick_single_symbol_entry 加了对 roster 条目 "mtf"
+# 字段的支持(照搬 backtest_runner.py/symbol_registry.py 早就在用的同名
+# 机制)，其它不带 mtf 的战法行为完全不变。funding_trend 额外读币安公开
+# 资金费率端点(strategy_engine/funding.py，无API Key)，是唯一一套吃
+# K线以外市场数据的战法。
+try:
+    from strategy_engine.strategies import mtf_ema_pullback
+    STRATEGIES["mtf_ema_pullback"] = mtf_ema_pullback.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] mtf_ema_pullback 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import vwap_mean_reversion
+    STRATEGIES["vwap_mean_reversion"] = vwap_mean_reversion.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] vwap_mean_reversion 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import volume_profile_reversion
+    STRATEGIES["volume_profile_reversion"] = volume_profile_reversion.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] volume_profile_reversion 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import funding_trend
+    STRATEGIES["funding_trend"] = funding_trend.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] funding_trend 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import supertrend_adx
+    STRATEGIES["supertrend_adx"] = supertrend_adx.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] supertrend_adx 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import breakout_retest
+    STRATEGIES["breakout_retest"] = breakout_retest.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] breakout_retest 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import opening_range_breakout
+    STRATEGIES["opening_range_breakout"] = opening_range_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] opening_range_breakout 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -330,6 +387,87 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "ADX≥25时才启用的条件子状态，这里是独立、无条件的纯交叉系统，"
         "周期也不同(10/30 vs 7/30)。4H周期，同turtle_breakout/"
         "bollinger_squeeze一样把4H当加密货币的日线合理代理。"
+    ),
+    "mtf_ema_pullback": (
+        "MTF EMA Pullback多周期趋势+回踩——2026-09-04新增，补上本擂台唯一"
+        "的结构性缺口(其余13套全是单一周期)。Elder三重滤网精简版：高周期"
+        "(1h)EMA50/200定潮汐方向，低周期(15m)等价格回踩EMA20、RSI(14)从"
+        "超卖区往上穿这个**事件**触发时才顺势进场，高周期潮汐反转就离场。"
+        "跟ema_cross_7_30都用EMA交叉，但那套单周期、金叉即入场；这套EMA"
+        "交叉只在高周期定方向，低周期还要等回调+RSI抬头，进场点离回调低点"
+        "更近。跟connors_rsi2都'顺大势等回调'，但connors是纯均值回归(赌"
+        "反弹到SMA5)、单周期SMA200定方向；这套是趋势延续(赌回调后趋势"
+        "继续)、方向来自独立高周期。唯一用到bars_by_tf里base以外周期的"
+        "单品种战法。"
+    ),
+    "vwap_mean_reversion": (
+        "VWAP偏离均值回归——2026-09-04新增。VWAP是机构交易台几十年的公开"
+        "标准工具，'价格显著偏离VWAP后倾向回归'是做市/日内均值回归的经典"
+        "观察。anchored VWAP按UTC自然日00:00重置(加密货币没有真实开盘，"
+        "这个锚点是人为约定，注释里如实说明)。close偏离当日VWAP超过2倍"
+        "(close-VWAP)标准差就反向进场、回到VWAP附近离场，必须先过ADX(14)"
+        "<25的趋势过滤(强趋势里越偏离越不回归，宁可错过)。跟"
+        "bollinger_rsi_contrarian/adx_regime_switch的均值回归腿都用移动均线"
+        "中轨(等权收盘价)不同，这套中枢是成交量加权价，放量区间位置差别"
+        "明显。跟bollinger_squeeze同用偏离带但方向相反(回归vs突破)。"
+    ),
+    "volume_profile_reversion": (
+        "Volume Profile(VPVR)POC/价值区回归——2026-09-04新增。Peter "
+        "Steidlmayer的Market Profile公开方法论(1980s CBOT推广)，POC(成交量"
+        "最大价位)/Value Area(含70%成交量的价格带)都是公开术语，不是黑箱。"
+        "滚动150根K线把成交量按价格分桶成直方图，价格探出价值区到VAL"
+        "下方又收不下去(长下影+收回VAL上方)做多、目标POC，VAH对称做空。"
+        "唯一一套用'成交量在价格上的分布形态'构造信号的战法——"
+        "bollinger_squeeze/vwap_mean_reversion用的是'成交量随时间'，这套"
+        "用'成交量随价格'。跟connors_rsi2/bollinger_rsi_contrarian同属逆势"
+        "回归，但中枢是由实际成交密度决定、会长期黏在同一绝对价位的POC，"
+        "不是移动均线。"
+    ),
+    "funding_trend": (
+        "资金费率拥挤度过滤的趋势突破——2026-09-04新增。骨架是'EMA50/200"
+        "趋势 + 20根新高/新低突破'(跟turtle/ema_cross同血统)，叠加一道"
+        "**资金费率滤网**：币安公开资金费率端点(无API Key)，当前费率在"
+        "自己历史分位数≥85%(多头拥挤)时否决做多、≤15%(空头拥挤)时把仓位"
+        "档位提到2。资金费率**只当拥挤度过滤器不当买卖信号**(费率高不代表"
+        "该做空)。用分位数不用绝对阈值——不同币种费率量级差很多。跟"
+        "ema_cross_7_30/turtle骨架几乎一样，差异只有资金费率这一道滤网，"
+        "是dual_momentum vs cross_momentum那种'单变量对照实验'思路。唯一"
+        "一套吃K线以外市场数据的战法，因此只在live擂台跑、不进历史回放。"
+    ),
+    "supertrend_adx": (
+        "SuperTrend + ADX极简趋势跟随——2026-09-04新增，**刻意保持极简**，"
+        "专门跟adx_regime_switch做'大道至简是否有效'对照。只有三件东西："
+        "SuperTrend(10,3)ATR通道翻转定方向、ADX(14)≥20才允许开仓、"
+        "SuperTrend线本身当动态止损。没有震荡市逻辑、没有状态切换、没有"
+        "均值回归腿，ADX低就单纯不开仓。adx_regime_switch则用ADX做趋势/"
+        "震荡开关+两套子逻辑+按实时ADX切换离场规则。两套都用4H、都用ADX"
+        "过滤，变量集中在'要不要为震荡市单独设计一套逻辑+状态切换'。"
+        "SuperTrend是本仓库indicators.py 2026-09-04新增的指标，也是唯一"
+        "用ATR动态通道(而非Donchian/EMA交叉)定方向的战法。不设固定止盈。"
+    ),
+    "breakout_retest": (
+        "突破不追、等回踩确认——2026-09-04新增，**专门跟turtle_breakout"
+        "对照**。同样用Donchian(20)通道定义突破，但突破那根不进场，等之后"
+        "6根内价格回踩到突破位±0.6ATR、再收盘重新站上突破位才进场，止损"
+        "放突破位下方1.5ATR(比海龟2N近)。离场机制完全照搬turtle(反向"
+        "Donchian(10)破位)，保证除'进场要不要等回踩二次确认'以外全部对齐。"
+        "赌的是过滤掉一批假突破、真突破回踩进场胜率更高止损更近，是否"
+        "抵得过海龟吃到的那段更早的涨幅——擂台数据说话。跟volatility_"
+        "breakout也不同(那套单根K线vs昨日振幅、不做回踩)。不设固定止盈。"
+    ),
+    "opening_range_breakout": (
+        "开盘区间突破(ORB)——2026-09-04新增。Toby Crabel《Day Trading with "
+        "Short Term Price Patterns and Opening Range Breakout》(1990)系统化"
+        "的公开日内策略。取session锚点后前30分钟高低点作开盘区间，收盘价"
+        "突破区间高点做多(止损区间低点)、跌破低点做空，收盘前平仓。"
+        "代币化美股(TSLA/META/GS/MU/OPENAI/ANTHROPIC/SNDK/LITE)用真实美股"
+        "开盘9:30 ET(自动处理夏令时)；纯加密货币退化用UTC 00:00作锚点——"
+        "这是人为类比、加密货币24/7没有真正的'开盘'，注释里如实说明局限。"
+        "唯一一套**信号由绝对时钟时间驱动**的战法(其它战法跟K线出现在"
+        "一天中哪个时刻无关)。跟turtle/breakout_retest/volatility_breakout"
+        "同属突破类，但区间是'每天固定时刻起算、当天不变'的水平线而非"
+        "滚动通道。只认当日session内第一次突破，避免区间边缘反复抽刷"
+        "交易。15m周期。"
     ),
 }
 
