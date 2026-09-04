@@ -104,6 +104,38 @@ klines.py确认能正常拉到币安合约K线)。周期按每套战法自己的
 (perp原生、资金费率摆动大)。同时应宝贝要求，dashboard/roster_server.py
 新增"按币种"、"按美股"两个汇总视图(跟原有"按策略"排名并列)，用
 shadow_store.summary_all_by_symbol() + TOKENIZED_STOCK_SYMBOLS 名单。
+
+2026-09-05新增8套：宝贝要求"擂台还有更好的策略推荐吗，各路大神战法、
+AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真功夫"。同一个
+准入门槛(公开发表规则/可考证真实track record，排除SMC/ICT/网红黑箱)，
+诚实说明其中不含真正的黑箱AI/ML策略——那类没有公开可复现规则也没有
+独立可验证战绩，过不了准入线；kaufman_ama是本批唯一带"自适应"性质但
+规则完全透明的战法，是"AI战法"这个类别里唯一能合规入场的候选。indicators
+.py新增parabolic_sar/macd/kama/wilder_adx_di/donchian_mid五个指标原语。
+周期按每套战法自己的天然节奏定：
+  - darvas_box：4h。Darvas原始箱体整理在股票日线上持续数天到数周，4h上
+    box_period(20)+confirm_bars(3)≈3.8天，是这个节奏在更快加密市场里的
+    合理压缩，跟turtle_breakout/ema_cross_7_30同一批"4h日线代理"逻辑。
+  - weinstein_stage：1d。原始设计用30周均线配周线图，是几个月量级的
+    判断周期，本仓库压缩成SMA(30)配1d(约1个月量级)，比其余日线战法压缩
+    比例更激进，是刻意为加密货币更快节奏做的适配。
+  - ichimoku_cloud：1d。9/26/52这三个周期数字本身绑定了原始日历含义
+    (9≈1.5周、26≈1个月、52≈2个月，源自日本旧式6天交易周)，放到4h会
+    破坏这个比例关系、失去原始设计意图，所以保留在1d、周期数字完全
+    不改，是本批里唯一"周期数字本身有意义、不能压缩"的战法。
+  - parabolic_sar_flip：4h。**必须跟supertrend_adx同周期**，两套结构
+    几乎一样(指标翻转定方向+指标本身当止损)，唯一变量是要不要加ADX≥20
+    这道确认门槛，同周期这层"去掉确认门槛效果如何"的对照才成立。
+  - macd_histogram：4h，跟ema_cross_7_30/adx_regime_switch同一批"4h日线
+    代理"选择。MACD(12,26,9)这几个数字只是K线根数，不像Ichimoku那样
+    绑定日历含义，不需要为保留比例放慢周期。
+  - kaufman_ama：4h，同上一批中速趋势战法周期选择，KAMA参数同样不绑定
+    日历含义。
+  - raschke_adx_pullback：4h。**跟adx_regime_switch同周期**，两套都是
+    "ADX主导判断"的战法，同周期方便横向比较"用ADX的不同方式，谁更好"。
+  - keltner_channel：4h。**跟turtle_breakout/bollinger_squeeze同周期**，
+    方便三种不同构造方式的通道突破战法(Donchian结构通道/布林带统计
+    通道+挤压/Keltner的ATR波动率通道)在同一周期上直接对照。
 """
 from __future__ import annotations
 
@@ -181,6 +213,15 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "breakout_retest", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "opening_range_breakout", "timeframe": "15m", "params": {"anchor": "us_equity"}} for s in _ORB_STOCK_SYMBOLS]
     + [{"symbol": s, "strategy": "opening_range_breakout", "timeframe": "15m", "params": {"anchor": "utc"}} for s in _ORB_CRYPTO_SYMBOLS]
+    # ── 2026-09-05新增8套 ─────────────────────────────────────────────────
+    + [{"symbol": s, "strategy": "darvas_box", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "weinstein_stage", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ichimoku_cloud", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "parabolic_sar_flip", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "macd_histogram", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "kaufman_ama", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "raschke_adx_pullback", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "keltner_channel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

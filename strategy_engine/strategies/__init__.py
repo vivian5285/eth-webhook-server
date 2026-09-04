@@ -239,6 +239,68 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] opening_range_breakout 加载失败: {_e}")
 
+# 2026-09-05新增8套(宝贝要求"各路大神战法多加几个看看，方便对比谁有真
+# 功夫"，同一个准入门槛：有公开发表规则/可考证真实track record的经典
+# 战法，明确排除SMC/ICT/流动性扫单/网红黑箱指标)。indicators.py同批
+# 新增parabolic_sar/macd/kama/wilder_adx_di/donchian_mid五个指标原语。
+# kaufman_ama是本批唯一贴近"AI/自适应"概念但规则完全公开透明的战法，
+# 其余7套都是纯规则、无自适应机制的经典技术分析系统。
+try:
+    from strategy_engine.strategies import darvas_box
+    STRATEGIES["darvas_box"] = darvas_box.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] darvas_box 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import weinstein_stage
+    STRATEGIES["weinstein_stage"] = weinstein_stage.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] weinstein_stage 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ichimoku_cloud
+    STRATEGIES["ichimoku_cloud"] = ichimoku_cloud.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ichimoku_cloud 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import parabolic_sar_flip
+    STRATEGIES["parabolic_sar_flip"] = parabolic_sar_flip.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] parabolic_sar_flip 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import macd_histogram
+    STRATEGIES["macd_histogram"] = macd_histogram.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] macd_histogram 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import kaufman_ama
+    STRATEGIES["kaufman_ama"] = kaufman_ama.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] kaufman_ama 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import raschke_adx_pullback
+    STRATEGIES["raschke_adx_pullback"] = raschke_adx_pullback.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] raschke_adx_pullback 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import keltner_channel
+    STRATEGIES["keltner_channel"] = keltner_channel.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] keltner_channel 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -468,6 +530,82 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "同属突破类，但区间是'每天固定时刻起算、当天不变'的水平线而非"
         "滚动通道。只认当日session内第一次突破，避免区间边缘反复抽刷"
         "交易。15m周期。"
+    ),
+    "darvas_box": (
+        "达瓦斯箱形突破(Nicolas Darvas)——2026-09-05新增，宝贝要求'各路"
+        "大神战法多加几个看看'批次之一。Darvas本人18个月靠这套把$36,000"
+        "做到$200万，写进公开出版的《我如何在股市赚了200万》，是真实实盘"
+        "战绩不是回测。价格创新高后若干根K线不再创新高/不跌破某低点，"
+        "判定为'箱体'整理，突破箱体上沿进场、止损放箱体下沿；持仓期间"
+        "新箱体在更高处形成就把止损跟着上移(箱体阶梯止损，Darvas原始"
+        "手法)。跟turtle_breakout(Donchian通道，没有'必须先稳定收窄'这个"
+        "要求)、breakout_retest(等回踩突破位)都不同——这套要求先有一个"
+        "宽度受限、经过confirm_bars确认稳定住的箱体，突破箱体本身。4H周期。"
+    ),
+    "weinstein_stage": (
+        "温斯坦阶段分析(Stan Weinstein《Secrets for Profiting in Bull and "
+        "Bear Markets》1988)——2026-09-05新增。用一条慢速均线的位置+斜率"
+        "把行情分成Stage1筑底/Stage2上升/Stage3筑顶/Stage4下降四阶段，只在"
+        "Stage1→2转换(夺回均线+均线转涨+创新高三件事同时发生)进场，只在"
+        "Stage2→3/4(跌破均线)离场。原始设计用30周均线配周线图，本模块"
+        "压缩成SMA(30)配1D。跟adx_regime_switch用ADX数值做趋势/震荡二分"
+        "开关不同，这套用均线位置+斜率划四阶段，且要求'阶段转换那一刻'"
+        "触发，不是'当前处于该阶段就一直进'。1D周期。"
+    ),
+    "ichimoku_cloud": (
+        "一目均衡表(Ichimoku Kinko Hyo，细田悟一1969年公开发表)——"
+        "2026-09-05新增。经典三重确认买点：转换线(9)上穿基准线(26)+价格在"
+        "云(先行A/B，向右平移26根)上方+延迟线(收盘价左移26根)确认动量，"
+        "三者同时满足才进场；跌回云内离场。跟vegas_tunnel都是'多层结构"
+        "过滤'但构造方式完全不同——隧道是纯均线叠加，这套用'向右平移过的"
+        "先行线围成的云'当动态支撑压力，是本仓库唯一用到时间位移概念的"
+        "战法。周期数字(9/26/52)绑定原始日历含义，保留在1D不压缩。"
+    ),
+    "parabolic_sar_flip": (
+        "抛物线转向指标(Parabolic SAR，J. Welles Wilder 1978年《New "
+        "Concepts in Technical Trading Systems》公开发表，跟本仓库RSI/"
+        "ATR/ADX同一位作者)——2026-09-05新增，**专门跟supertrend_adx做"
+        "'去掉确认门槛'对照**：结构几乎一样(指标翻转定方向+指标本身当"
+        "止损)，但supertrend_adx特意要求ADX≥20才开仓，这套完全遵照Wilder"
+        "原始设计，翻转就反手，不设任何确认门槛，同用4H周期方便直接对比。"
+        "止损止盈都内建在SAR线本身，不设固定止盈。"
+    ),
+    "macd_histogram": (
+        "MACD柱状图系统(Gerald Appel发明MACD，Thomas Aspray 1986年补充"
+        "柱状图交易规则，均公开发表)——2026-09-05新增。经典参数(12,26,9)"
+        "完全不改，柱状图由负转正/正转负(=DIF上穿/下穿DEA)触发开平仓。跟"
+        "ema_cross_7_30比较两条原始价格EMA不同，这套比较'两条EMA的差值'"
+        "和'差值本身的EMA'，是二阶平滑，比单纯双均线交叉更能过滤高频假"
+        "交叉。4H周期。"
+    ),
+    "kaufman_ama": (
+        "考夫曼自适应均线(Kaufman's AMA/KAMA，Perry Kaufman《Trading "
+        "Systems and Methods》公开发表，本人真实管理过量化基金)——"
+        "2026-09-05新增，**本擂台目前唯一一套'均线自己根据市场效率自动"
+        "变速'的战法**：效率比(ER)高(真趋势)→均线跟得紧，ER低(震荡)→"
+        "均线走平不理会噪音，自适应机制内建在均线公式本身，不像"
+        "adx_regime_switch要另外接ADX开关切状态。价格穿越KAMA且KAMA自身"
+        "同向才进场，是本批里唯一贴近'AI/自适应'概念、但规则完全公开"
+        "透明、发明人真实可考的战法。4H周期。"
+    ),
+    "raschke_adx_pullback": (
+        "Raschke ADX回踩系统\"Holy Grail\"(Linda Raschke与Larry Connors"
+        "《Street Smarts》1996年公开发表，Raschke本人是真实注册CTA)——"
+        "2026-09-05新增。ADX(14)>30(比adx_regime_switch的25更严格)确认"
+        "'非常强'的趋势，+DI/-DI定方向，价格回踩到EMA(20)后夺回才进场，"
+        "重新跌破EMA(20)离场。跟adx_regime_switch(ADX二分状态开关+两套"
+        "子逻辑)、supertrend_adx(ADX只是较低的开仓门槛)都不同——这套只在"
+        "ADX极高的单一区间工作，且是'强趋势+回踩+夺回'组合事件触发。"
+        "4H周期，跟adx_regime_switch同周期方便对照。"
+    ),
+    "keltner_channel": (
+        "凯特纳通道突破(Chester Keltner 1960年提出，Linda Raschke推广的"
+        "现代版：中线EMA+ATR倍数通道，各大图表软件标准配置)——2026-09-05"
+        "新增。EMA(20)±2×ATR(10)，收盘突破上/下轨进场，回归中线离场。跟"
+        "bollinger_squeeze(标准差通道+必须先挤压)、turtle_breakout"
+        "(Donchian结构通道，不管波动率)都不同——这套通道宽度直接用ATR、"
+        "随波动率实时热胀冷缩，且不要求先经历挤压。4H周期，方便跟另外两套"
+        "通道突破战法直接对照。"
     ),
 }
 

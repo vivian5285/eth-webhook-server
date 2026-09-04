@@ -270,3 +270,161 @@ def supertrend(bars: Sequence[dict], period: int = 10, multiplier: float = 3.0) 
         out.append((float(st), int(direction)))
         fu_prev, fl_prev, st_prev, dir_prev = final_upper, final_lower, st, direction
     return out
+
+
+def parabolic_sar(bars: Sequence[dict], af_init: float = 0.02, af_step: float = 0.02, af_max: float = 0.2) -> List[tuple]:
+    """Wilder 抛物线转向指标(Parabolic SAR，《New Concepts in Technical
+    Trading Systems》1978)。返回 [(sar, direction), ...]，跟 bars 等长
+    (第一个点是初始化种子，从第二个点起才是真正逐根递推出来的值)。
+    direction: +1=多头(SAR在价格下方，价格站上SAR才反手)，-1=空头。
+    调用方取 out[-1]/out[-2] 判断本根是否刚刚翻转。"""
+    n = len(bars or [])
+    if n < 2:
+        return []
+    highs = [_f(b["h"]) for b in bars]
+    lows = [_f(b["l"]) for b in bars]
+    trend = 1 if (highs[1] + lows[1]) >= (highs[0] + lows[0]) else -1
+    if trend == 1:
+        sar, ep = lows[0], highs[0]
+    else:
+        sar, ep = highs[0], lows[0]
+    af = af_init
+    out: List[tuple] = [(float(sar), trend)]
+    for i in range(1, n):
+        sar = sar + af * (ep - sar)
+        if trend == 1:
+            lim = min(lows[i - 1], lows[i - 2]) if i >= 2 else lows[i - 1]
+            sar = min(sar, lim)
+            if lows[i] < sar:
+                trend = -1
+                sar = ep
+                ep = lows[i]
+                af = af_init
+            elif highs[i] > ep:
+                ep = highs[i]
+                af = min(af + af_step, af_max)
+        else:
+            lim = max(highs[i - 1], highs[i - 2]) if i >= 2 else highs[i - 1]
+            sar = max(sar, lim)
+            if highs[i] > sar:
+                trend = 1
+                sar = ep
+                ep = highs[i]
+                af = af_init
+            elif lows[i] < ep:
+                ep = lows[i]
+                af = min(af + af_step, af_max)
+        out.append((float(sar), trend))
+    return out
+
+
+def macd(values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9):
+    """经典 MACD(Gerald Appel)。DIF=EMA(fast)-EMA(slow)，DEA=EMA(DIF,signal)，
+    柱状图=DIF-DEA。三条序列长度不同(ema()各自从各自的period-1才起算)，
+    本函数已经把 dif 对齐裁到跟 ema_slow 等长、跟 dea/hist 都是"结尾对齐到
+    同一根K线"，调用方直接用负索引取用即可。数据不够时三个都返回[]。"""
+    ema_fast = ema(values, fast)
+    ema_slow = ema(values, slow)
+    if not ema_fast or not ema_slow:
+        return [], [], []
+    n = min(len(ema_fast), len(ema_slow))
+    dif = [ema_fast[len(ema_fast) - n + i] - ema_slow[len(ema_slow) - n + i] for i in range(n)]
+    dea = ema(dif, signal)
+    if not dea:
+        return dif, [], []
+    dif_tail = dif[-len(dea):]
+    hist = [dif_tail[i] - dea[i] for i in range(len(dea))]
+    return dif, dea, hist
+
+
+def kama(values: Sequence[float], er_period: int = 10, fast: int = 2, slow: int = 30) -> List[float]:
+    """考夫曼自适应均线(Kaufman's Adaptive Moving Average)。效率比(ER)=
+    净变化/波动路径总长，ER高(真趋势)→平滑常数变大→均线跟得紧，ER低
+    (震荡)→平滑常数变小→均线趋于走平。返回从输入第er_period个点开始
+    对齐的序列(种子=该点原始值)，长度=len(values)-er_period。"""
+    n = len(values or [])
+    if n <= er_period:
+        return []
+    fast_sc = 2.0 / (fast + 1.0)
+    slow_sc = 2.0 / (slow + 1.0)
+    out = [float(values[er_period])]
+    for i in range(er_period + 1, n):
+        change = abs(values[i] - values[i - er_period])
+        volatility = sum(abs(values[j] - values[j - 1]) for j in range(i - er_period + 1, i + 1))
+        er = (change / volatility) if volatility > 0 else 0.0
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        out.append(out[-1] + sc * (values[i] - out[-1]))
+    return out
+
+
+def wilder_adx_di(bars: Sequence[dict], period: int = 14):
+    """跟 wilder_adx 同一套 Wilder 算法，额外把最新一根的 +DI/-DI 也带出来
+    (ADX 本身只讲趋势强度、不讲方向，Raschke ADX回踩战法需要方向)。
+    返回 (adx, plus_di, minus_di)，数据不够时返回 (0.0, 0.0, 0.0)。跟
+    wilder_adx 各自独立实现(没有共用内部函数)，避免改动会影响到已经在用
+    wilder_adx 的既有战法。"""
+    n = len(bars or [])
+    if n < period * 2 + 2:
+        return 0.0, 0.0, 0.0
+
+    plus_dm, minus_dm, trs = [], [], []
+    for i in range(1, n):
+        h = _f(bars[i]["h"])
+        l = _f(bars[i]["l"])
+        ph = _f(bars[i - 1]["h"])
+        pl = _f(bars[i - 1]["l"])
+        pc = _f(bars[i - 1]["c"])
+        up = h - ph
+        down = pl - l
+        plus_dm.append(up if up > down and up > 0 else 0.0)
+        minus_dm.append(down if down > up and down > 0 else 0.0)
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+
+    if len(trs) < period:
+        return 0.0, 0.0, 0.0
+
+    sm_tr = sum(trs[:period])
+    sm_plus = sum(plus_dm[:period])
+    sm_minus = sum(minus_dm[:period])
+
+    def _di(sp, sm, st):
+        if st <= 0:
+            return 0.0, 0.0
+        return 100.0 * sp / st, 100.0 * sm / st
+
+    dx_list = []
+    pdi, mdi = _di(sm_plus, sm_minus, sm_tr)
+    denom = pdi + mdi
+    dx_list.append(100.0 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+
+    for i in range(period, len(trs)):
+        sm_tr = sm_tr - sm_tr / period + trs[i]
+        sm_plus = sm_plus - sm_plus / period + plus_dm[i]
+        sm_minus = sm_minus - sm_minus / period + minus_dm[i]
+        pdi, mdi = _di(sm_plus, sm_minus, sm_tr)
+        denom = pdi + mdi
+        dx_list.append(100.0 * abs(pdi - mdi) / denom if denom > 0 else 0.0)
+
+    if len(dx_list) < period:
+        return 0.0, pdi, mdi
+    adx = sum(dx_list[:period]) / period
+    for dx in dx_list[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return float(adx), float(pdi), float(mdi)
+
+
+def donchian_mid(bars: Sequence[dict], period: int) -> List[float]:
+    """一目均衡表用的中值线：(period根内最高高点+最低低点)/2，**含当前这
+    根**(跟donchian_high_low故意相反——那个是海龟规则"不含当前"，一目
+    均衡表的转换线/基准线传统定义就是含当前这根)。返回从第period个点
+    开始对齐的序列。"""
+    n = len(bars or [])
+    if n < period:
+        return []
+    out = []
+    for i in range(period - 1, n):
+        window = bars[i - period + 1:i + 1]
+        hh = max(_f(b["h"]) for b in window)
+        ll = min(_f(b["l"]) for b in window)
+        out.append((hh + ll) / 2.0)
+    return out
