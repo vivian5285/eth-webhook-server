@@ -284,9 +284,10 @@ def api_chain_overview():
     closed_rows = _chain_query(
         "SELECT COUNT(*) AS n, SUM(realized_pnl_usd) AS total_pnl, "
         "SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END) AS wins "
-        "FROM positions WHERE status='CLOSED'"
+        "FROM positions WHERE status IN ('CLOSED','DRY_RUN_CLOSED','DRY_RUN_RUG')"
     )
     ks = _chain_query("SELECT active, reason FROM kill_switch WHERE id=1")
+    sig = _chain_query("SELECT COUNT(*) AS n FROM signal_events WHERE ts>=?", (time.time() - 7 * 86400,))
     closed = closed_rows[0] if closed_rows else {}
     trades = int(closed.get("n") or 0)
     return jsonify({
@@ -295,6 +296,7 @@ def api_chain_overview():
         "watched_wallets": (wallets[0]["n"] if wallets else 0),
         "open_positions": (open_rows[0]["n"] if open_rows else 0),
         "closed_trades": trades,
+        "signals_7d": (sig[0]["n"] if sig else 0),
         "win_rate": round(100.0 * (closed.get("wins") or 0) / trades, 1) if trades > 0 else None,
         "total_pnl_usd": round(float(closed.get("total_pnl") or 0), 2),
         "kill_switch_active": bool(ks[0]["active"]) if ks else False,
@@ -322,8 +324,10 @@ def api_chain_positions():
     if status not in ("OPEN", "CLOSED"):
         status = "OPEN"
     limit = max(1, min(int(request.args.get("limit", 100) or 100), 500))
-    # 'DRY_RUN'状态并入'OPEN'一起查——见api_chain_overview同日期注释。
-    statuses = ("OPEN", "DRY_RUN") if status == "OPEN" else ("CLOSED",)
+    # 'DRY_RUN'并入'OPEN'；平仓含 chain_sniper 2026-09-04 起的
+    # DRY_RUN_CLOSED / DRY_RUN_RUG / DRY_RUN_ABANDONED 各态。
+    statuses = (("OPEN", "DRY_RUN") if status == "OPEN"
+                else ("CLOSED", "DRY_RUN_CLOSED", "DRY_RUN_RUG", "DRY_RUN_ABANDONED"))
     order = "opened_at DESC" if status == "OPEN" else "closed_at DESC"
     placeholders = ",".join("?" * len(statuses))
     rows = _chain_query(
@@ -331,6 +335,111 @@ def api_chain_positions():
         (*statuses, limit),
     )
     return jsonify({"status": "ok", "positions": rows})
+
+
+def _chain_since(default_days=14):
+    try:
+        d = float(request.args.get("days", default_days))
+    except (TypeError, ValueError):
+        d = default_days
+    return time.time() - max(0.5, d) * 86400, d
+
+
+@app.route("/api/chain/funnel")
+def api_chain_funnel():
+    """信号漏斗：signal_events 按动作/原因/链聚合（chain_sniper 真相账本）。"""
+    since, days = _chain_since()
+    ev = _chain_query("SELECT gate_action, gate_reason, chain FROM signal_events WHERE ts>=?", (since,))
+    by_action, by_reason, by_chain = {}, {}, {}
+    for e in ev:
+        by_action[e["gate_action"]] = by_action.get(e["gate_action"], 0) + 1
+        key = (e["gate_reason"] or "").split(":")[0].split("(")[0].strip()[:40] or "(none)"
+        by_reason[key] = by_reason.get(key, 0) + 1
+        by_chain[e["chain"]] = by_chain.get(e["chain"], 0) + 1
+    reasons = sorted(({"reason": k, "n": v} for k, v in by_reason.items()), key=lambda x: -x["n"])[:10]
+    return jsonify({"status": "ok", "days": days, "total": len(ev),
+                    "by_action": by_action, "by_chain": by_chain, "reasons": reasons})
+
+
+@app.route("/api/chain/outcomes")
+def api_chain_outcomes():
+    """结果分布：signal_outcomes 的 MFE/MAE 分桶 + rug 率。"""
+    since, days = _chain_since()
+    oc = _chain_query("SELECT mfe_pct, mae_pct, rugged, tracking_done FROM signal_outcomes WHERE signal_ts>=?", (since,))
+    n = len(oc)
+    mfe = sorted(float(o["mfe_pct"]) for o in oc if o["mfe_pct"] is not None)
+    mae = [float(o["mae_pct"]) for o in oc if o["mae_pct"] is not None]
+    rug = sum(1 for o in oc if o["rugged"])
+
+    def pc(k, w):
+        return round(100.0 * k / w, 1) if w else 0.0
+
+    return jsonify({
+        "status": "ok", "days": days, "tracked": n,
+        "tracking_done": sum(1 for o in oc if o["tracking_done"]),
+        "rug": rug, "rug_pct": pc(rug, n),
+        "mfe_max": round(mfe[-1], 1) if mfe else None,
+        "mfe_median": round(mfe[len(mfe) // 2], 1) if mfe else None,
+        "mfe_ge": {str(t): pc(sum(1 for x in mfe if x >= t), len(mfe)) for t in (20, 50, 100, 200)},
+        "mae_median": round(sorted(mae)[len(mae) // 2], 1) if mae else None,
+        "mae_le_50": pc(sum(1 for x in mae if x <= -50), len(mae)),
+    })
+
+
+@app.route("/api/chain/wallets_review")
+def api_chain_wallets_review():
+    """每钱包预测力：该钱包相关信号的 token 之后的 MFE/rug 分布 → 命中分。
+    跟 chain_sniper/review.py 的第 2 节同口径。"""
+    since, days = _chain_since()
+    ev = _chain_query(
+        "SELECT token_address, chain, which_wallets FROM signal_events "
+        "WHERE ts>=? AND which_wallets IS NOT NULL AND which_wallets!=''", (since,))
+    oc_rows = _chain_query("SELECT chain, token_address, mfe_pct, mae_pct, rugged FROM signal_outcomes")
+    oc = {(o["chain"], o["token_address"]): o for o in oc_rows}
+    wl = {(w["address"], w["chain"]): w for w in _chain_query(
+        "SELECT address, chain, source, label, active FROM watched_wallets")}
+
+    per, seen = {}, set()
+    for e in ev:
+        o = oc.get((e["chain"], e["token_address"]))
+        if not o:
+            continue
+        for w in (e["which_wallets"] or "").split(","):
+            w = w.strip()
+            if not w:
+                continue
+            k = (w, e["chain"], e["token_address"])
+            if k in seen:
+                continue
+            seen.add(k)
+            p = per.setdefault((w, e["chain"]), {"tokens": set(), "mfe": [], "rug": 0})
+            p["tokens"].add(e["token_address"])
+            if o["mfe_pct"] is not None:
+                p["mfe"].append(float(o["mfe_pct"]))
+            if o["rugged"]:
+                p["rug"] += 1
+
+    out = []
+    for (w, ch), p in per.items():
+        nt = len(p["tokens"])
+        if not nt:
+            continue
+        mfe = p["mfe"] or [0.0]
+        hit50 = sum(1 for x in mfe if x >= 50) / len(mfe)
+        hit2x = sum(1 for x in mfe if x >= 100) / len(mfe)
+        rug_rate = p["rug"] / nt
+        meta = wl.get((w, ch)) or {}
+        out.append({
+            "wallet": w, "chain": ch, "n": nt,
+            "hit_50pct": round(hit50 * 100, 1), "hit_2x_pct": round(hit2x * 100, 1),
+            "rug_pct": round(rug_rate * 100, 1),
+            "median_mfe": round(sorted(mfe)[len(mfe) // 2], 1),
+            "hit_score": round(100 * (hit50 - rug_rate), 1),
+            "source": meta.get("source", "?"), "active": bool(meta.get("active", 1)),
+            "label": (meta.get("label") or "")[:28],
+        })
+    out.sort(key=lambda r: -r["hit_score"])
+    return jsonify({"status": "ok", "days": days, "wallets": out})
 
 
 if __name__ == "__main__":

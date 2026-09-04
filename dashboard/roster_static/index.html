@@ -260,6 +260,9 @@ const API = {
   chainOverview: '/api/chain/overview',
   chainWallets: '/api/chain/wallets',
   chainPositions: status => `/api/chain/positions?status=${status}&limit=80`,
+  chainFunnel: '/api/chain/funnel?days=14',
+  chainWalletsReview: '/api/chain/wallets_review?days=14',
+  chainOutcomes: '/api/chain/outcomes?days=14',
 };
 
 let rosterRows = [];
@@ -585,12 +588,15 @@ async function renderChainDetail(){
       </div>
       <div class="kpi-row">
         <div class="kpi-card"><div class="label">监察地址</div><div class="value">${chainOverview.watched_wallets}</div></div>
-        <div class="kpi-card"><div class="label">持仓中</div><div class="value">${chainOverview.open_positions}</div></div>
-        <div class="kpi-card"><div class="label">已平仓</div><div class="value">${chainOverview.closed_trades}</div></div>
-        <div class="kpi-card"><div class="label">胜率</div><div class="value">${chainOverview.win_rate != null ? chainOverview.win_rate+'%' : '–'}</div></div>
+        <div class="kpi-card"><div class="label">近7天信号</div><div class="value">${chainOverview.signals_7d ?? '–'}</div></div>
+        <div class="kpi-card"><div class="label">模拟平仓</div><div class="value">${chainOverview.closed_trades}</div></div>
+        <div class="kpi-card"><div class="label">模拟盈亏</div><div class="value ${toneClass(chainOverview.total_pnl_usd)}">${fmtUsdSimple(chainOverview.total_pnl_usd)}</div></div>
       </div>
       <div class="tabs">
-        <button class="tab-btn active" data-ctab="open">持仓中</button>
+        <button class="tab-btn active" data-ctab="funnel">信号漏斗</button>
+        <button class="tab-btn" data-ctab="wallets">钱包命中率</button>
+        <button class="tab-btn" data-ctab="outcomes">结果分布</button>
+        <button class="tab-btn" data-ctab="open">持仓中</button>
         <button class="tab-btn" data-ctab="closed">平仓历史</button>
       </div>
       <div id="chainTabBody"><div class="loading-row">加载中…</div></div>
@@ -598,10 +604,10 @@ async function renderChainDetail(){
     inner.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         inner.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
-        loadChainPositionsTab(btn.dataset.ctab);
+        loadChainTab(btn.dataset.ctab);
       });
     });
-    loadChainPositionsTab('open');
+    loadChainTab('funnel');
     return;
   }
 
@@ -624,6 +630,64 @@ async function renderChainDetail(){
   `;
 }
 
+async function loadChainTab(kind){
+  if (kind === 'open' || kind === 'closed') return loadChainPositionsTab(kind);
+  const body = document.getElementById('chainTabBody');
+  if (!body) return;
+  body.innerHTML = '<div class="loading-row">加载中…</div>';
+  try {
+    if (kind === 'funnel'){
+      const d = await (await fetch(API.chainFunnel)).json();
+      if (!d.total){ body.innerHTML = '<div class="empty-note">近14天还没有信号记录</div>'; return; }
+      const act = d.by_action || {};
+      const rows = (d.reasons||[]).map(x => `<tr><td>${x.reason}</td><td>${x.n}</td><td>${(100*x.n/d.total).toFixed(1)}%</td></tr>`).join('');
+      body.innerHTML = `
+        <div class="kpi-row" style="margin-top:0">
+          <div class="kpi-card"><div class="label">BUY</div><div class="value good">${act.BUY||0}</div></div>
+          <div class="kpi-card"><div class="label">WAIT(确认中)</div><div class="value">${act.WAIT||0}</div></div>
+          <div class="kpi-card"><div class="label">SKIP</div><div class="value bad">${act.SKIP||0}</div></div>
+          <div class="kpi-card"><div class="label">总判定 · 近${d.days}天</div><div class="value">${d.total}</div></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>门控失败/等待原因</th><th>次数</th><th>占比</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+        <div class="empty-note" style="padding:12px 4px">按链: ${Object.entries(d.by_chain||{}).map(([k,v])=>k+'='+v).join('  ')}</div>`;
+    } else if (kind === 'wallets'){
+      const d = await (await fetch(API.chainWalletsReview)).json();
+      const ws = d.wallets || [];
+      if (!ws.length){ body.innerHTML = '<div class="empty-note">还没有可归因到钱包的信号（需要信号发出后 outcome_tracker 追踪一段时间）</div>'; return; }
+      body.innerHTML = `<div class="table-wrap"><table>
+        <thead><tr><th>钱包</th><th>链</th><th>n</th><th>50%+</th><th>2x+</th><th>rug</th><th>中位MFE</th><th>命中分</th><th>来源</th></tr></thead>
+        <tbody>${ws.map(w => `<tr>
+          <td class="wallet-addr">${w.wallet.slice(0,6)}…${w.wallet.slice(-4)}${w.active?'':' <span style="color:var(--bad)">(停用)</span>'}</td>
+          <td>${w.chain}</td><td>${w.n}</td>
+          <td>${w.hit_50pct}%</td><td>${w.hit_2x_pct}%</td>
+          <td class="${w.rug_pct>0?'num bad':''}">${w.rug_pct}%</td>
+          <td class="num ${toneClass(w.median_mfe)}">${w.median_mfe>0?'+':''}${w.median_mfe}%</td>
+          <td class="num ${toneClass(w.hit_score)}">${w.hit_score}</td>
+          <td>${w.source}</td></tr>`).join('')}</tbody></table></div>
+        <div class="empty-note" style="padding:12px 4px">命中分 = 50%+命中率 − rug率。数据攒够后复盘脚本会自动建议停用命中分为负的钱包。</div>`;
+    } else if (kind === 'outcomes'){
+      const d = await (await fetch(API.chainOutcomes)).json();
+      if (!d.tracked){ body.innerHTML = '<div class="empty-note">还没有被追踪的信号</div>'; return; }
+      const ge = d.mfe_ge || {};
+      body.innerHTML = `
+        <div class="kpi-row" style="margin-top:0">
+          <div class="kpi-card"><div class="label">追踪中/完成</div><div class="value" style="font-size:18px">${d.tracked} / ${d.tracking_done}</div></div>
+          <div class="kpi-card"><div class="label">rug 率</div><div class="value bad">${d.rug_pct}%</div></div>
+          <div class="kpi-card"><div class="label">MFE 中位/最大</div><div class="value" style="font-size:18px">${d.mfe_median ?? '–'}% / ${d.mfe_max ?? '–'}%</div></div>
+          <div class="kpi-card"><div class="label">MAE 中位</div><div class="value bad">${d.mae_median ?? '–'}%</div></div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>信号后价格曾达到</th><th>占比</th></tr></thead><tbody>
+          ${[20,50,100,200].map(t=>`<tr><td>≥ +${t}%</td><td>${ge[t] ?? 0}%</td></tr>`).join('')}
+          <tr><td>曾跌破 -50%</td><td>${d.mae_le_50}%</td></tr>
+        </tbody></table></div>
+        <div class="empty-note" style="padding:12px 4px">MFE=最大浮盈，MAE=最大浮亏，均为信号发出后 ${d.days} 天窗口内。</div>`;
+    }
+  } catch(e){
+    body.innerHTML = '<div class="empty-note">加载失败</div>';
+  }
+}
+
 async function loadChainPositionsTab(status){
   const body = document.getElementById('chainTabBody');
   if (!body) return;
@@ -638,9 +702,11 @@ async function loadChainPositionsTab(status){
       <tbody>${rows.map(p => `<tr><td>${p.chain}</td><td class="wallet-addr">${p.token_address}</td>
         <td>${p.entry_price}</td><td>${p.tp_price}</td><td>${p.sl_price}</td></tr>`).join('')}</tbody></table></div>`;
   } else {
+    const st = s => ({DRY_RUN_CLOSED:'平仓', DRY_RUN_RUG:'RUG', DRY_RUN_ABANDONED:'弃单', CLOSED:'平仓'}[s] || s);
     body.innerHTML = `<div class="table-wrap"><table>
-      <thead><tr><th>链</th><th>代币地址</th><th>入场价</th><th>出场价</th><th>盈亏</th></tr></thead>
-      <tbody>${rows.map(p => `<tr><td>${p.chain}</td><td class="wallet-addr">${p.token_address}</td>
+      <thead><tr><th>链</th><th>代币地址</th><th>结果</th><th>入场价</th><th>出场价</th><th>盈亏</th></tr></thead>
+      <tbody>${rows.map(p => `<tr><td>${p.chain}</td><td class="wallet-addr">${(p.token_address||'').slice(0,16)}…</td>
+        <td class="${p.status==='DRY_RUN_RUG'?'num bad':''}">${st(p.status)}</td>
         <td>${p.entry_price}</td><td>${p.exit_price ?? '–'}</td>
         <td class="num ${toneClass(p.realized_pnl_usd)}">${fmtUsdSimple(p.realized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
   }
