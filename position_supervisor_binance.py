@@ -1027,6 +1027,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._purge_all_defense_orders_on_flat("confirm_flat_stale_clean")
             except Exception:
                 pass
+            # 2026-09-04修复(BNBUSDT实盘复现，C/E两个真实账户)：这条清账本
+            # 路径漏了_save_state()——_reset_breath_ledger_on_flat本身从不
+            # 落盘，全仓库其它每一处调用它的地方(蚂蚁仓扫尾/重启对账补发
+            # 收网/感知空仓等)都在紧接着调用_save_state()，唯独这条
+            # "REST复核确认交易所已空仓、账本却还是有仓"的清理路径漏了。
+            # 实盘现象：日志明明打出"账本已清零"，但state json文件的mtime
+            # 停在清零之前那一刻——内存状态是对的(后续追回/巡检逻辑照常
+            # 按真实空仓走)，但落盘的还是旧的LONG快照，一旦这之间发生
+            # 重启，recover_state_on_startup会把这个早就不存在的仓位当真
+            # 复活。这里补上，跟其它清账本路径的既有惯例对齐。
+            try:
+                self._save_state()
+            except Exception:
+                pass
         return confirmed
 
     def _build_adverse_extreme_hint(self):
