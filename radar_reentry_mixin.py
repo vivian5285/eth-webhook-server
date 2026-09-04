@@ -102,6 +102,19 @@ CATCHUP_MAX_CONCURRENT_PER_ACCOUNT = 2  # 2026-08-21实盘复现：同一账户�
                                          # 仓位一样走保守克制的路子，不追求一次
                                          # 吃满所有机会。
 
+# 2026-09-05新增：新开仓"限价优价"预算——宝贝原话"按照比tv还有利的价格
+# 进场...相当于tv给的是方向，我们尽量更加有利的价格开单"。复用TV心跳
+# 追回引擎已经验证过的同一套纯函数(is_better_than_tv/compute_reentry_
+# limit_px)，但预算给得比追回短得多：追回是恢复一笔已经错过、TV已经
+# 持有了一阵子的仓位(~25分钟预算合理)；这里是对全新信号的第一反应，
+# 等太久会让"抢占更好价格"这件事本身失去意义(市场可能已经朝反方向走远，
+# 错过整段趋势)。45秒是"给一次真实的回踩/价差收窄机会，但不影响对新
+# 信号的正常反应速度"之间的折中，PAXGUSDT这次实盘复现的滑点发生在
+# 13-19秒的信号处理延迟内，45秒的窗口足够覆盖类似量级的短暂不利波动。
+# 见_try_better_than_tv_limit_entry。
+FRESH_OPEN_LIMIT_BUDGET_SEC = 45.0
+FRESH_OPEN_LIMIT_POLL_SEC = 2.0
+
 # 2026-09-04新增：追回"价差过大就别追了"闸门——宝贝XMRUSDT实盘复现：TV心跳
 # entry=494.39，一根大阳线拉到527附近才多周期EMA确认通过，追回限价刷新6轮
 # 才在523.15成交(比TV原始entry高28.76，接近TV止损空间33.07本身那么大)，
@@ -2860,6 +2873,111 @@ class RadarReentryMixin:
         except Exception as e:
             logger.debug(f"[{self.symbol}] 追回拉5m K线失败: {e}")
         return k15, k5
+
+    def _try_better_than_tv_limit_entry(self, action, qty, payload=None, tv_price=None):
+        """2026-09-05新增：新开仓前，先尝试用比TV参考价更优的限价单入场——
+        宝贝原话"按照比tv还有利的价格进场...相当于tv给的是方向，我们尽量
+        更加有利的价格开单"。复用TV心跳追回引擎已经验证过的同一套纯函数
+        (is_better_than_tv/compute_reentry_limit_px/pick_best_tier_
+        extreme)，但预算给得比追回短得多(FRESH_OPEN_LIMIT_BUDGET_SEC=
+        45秒，见调用方position_supervisor_binance.py顶部同批注释：追回是
+        恢复一笔TV已经持有了一阵子的仓位，~25分钟预算合理；这里是对全新
+        信号的第一反应，等太久会让"抢占更好价格"本身失去意义)。
+
+        这是纯粹的"如果条件允许就抢占一部分更优成交"加法，不是替换——
+        调用方(_open_position)据返回值原样落回既有的摸盘口+市价流程补足
+        剩余数量，任何异常/找不到优价/预算内没成交都不影响既有开仓行为，
+        只是这次没有抢到优价而已。
+
+        返回(filled_qty, avg_px)：filled_qty<=0表示这次没有任何成交。
+        """
+        try:
+            side = str(action or "").strip().upper()
+            qty = float(qty or 0)
+            if side not in ("LONG", "SHORT") or qty <= 0:
+                return 0.0, 0.0
+            payload = payload or {}
+            tv_px = float(
+                tv_price if tv_price is not None else (
+                    payload.get("price") or payload.get("tv_price") or 0
+                )
+            )
+            if tv_px <= 0:
+                return 0.0, 0.0
+
+            from binance_client import binance_client
+
+            k15, k5 = self._fetch_catchup_klines()
+            lo, hi = pick_best_tier_extreme(side, k15, k5)
+            rp = get_reentry_profile(self.symbol)
+            lim, src = compute_reentry_limit_px(
+                side=side, tv_price=tv_px, low5=lo, high5=hi, low3=0.0, high3=0.0,
+                tick=float(rp.get("tick_size") or 0.01),
+                discount=float(rp.get("limit_discount") or 0.003),
+                prev_entry=0.0,
+            )
+            if lim <= 0:
+                logger.info(
+                    f"[{self.symbol}] 开仓限价优价：找不到优于TV参考价"
+                    f"({tv_px:.4f})的价 | {src} → 走原有流程"
+                )
+                return 0.0, 0.0
+
+            open_side = "BUY" if side == "LONG" else "SELL"
+            tag = f"FRESHOPEN_BETTER_{side}_{int(time.time() * 1000) % 100000000}"
+            budget_sec = FRESH_OPEN_LIMIT_BUDGET_SEC
+            logger.info(
+                f"🎯 [{self.symbol}] 开仓限价优价尝试: {open_side} {qty} @ {lim:.4f} "
+                f"(TV参考{tv_px:.4f}，src={src})，预算{budget_sec:.0f}s"
+            )
+            order = binance_client.place_limit_order(
+                open_side, qty, lim, symbol=self.symbol, reduce_only=False,
+                client_order_id=tag,
+            )
+            if not order:
+                return 0.0, 0.0
+            order_id = order.get("orderId") or order.get("algoId")
+
+            # 跟追回引擎轮询同一个思路：查真实仓位而不是订单状态——限价
+            # 单成交会直接体现在仓位上，天然兼容部分成交，不需要额外的
+            # 订单查询接口。这是同步阻塞轮询(handle_signal本身已经跑在
+            # enqueue_signal的后台工作线程里，不占用webhook请求线程)。
+            deadline = time.time() + budget_sec
+            filled_qty, avg_px = 0.0, 0.0
+            while time.time() < deadline:
+                time.sleep(FRESH_OPEN_LIMIT_POLL_SEC)
+                try:
+                    pos = self._get_active_position(prefer_ws=True)
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 开仓限价优价查仓异常: {e}")
+                    continue
+                if pos == "QUERY_FAILED" or not pos:
+                    continue
+                sz = float(pos.get("size") or 0)
+                if sz > 0 and str(pos.get("side") or "").upper() == side:
+                    filled_qty = sz
+                    avg_px = float(pos.get("entry_price") or lim)
+                    if filled_qty >= qty * 0.999:
+                        break
+
+            if filled_qty < qty:
+                # 没完全成交(含0成交)：撤掉剩余挂单，交给下面既有的摸盘口
+                # +市价流程补足差额。cancel失败大概率是已经自然成交/自然
+                # 取消，不当异常处理，只留debug日志。
+                try:
+                    binance_client.cancel_order(self.symbol, order_id=order_id)
+                except Exception as e:
+                    logger.debug(f"[{self.symbol}] 开仓限价优价撤单跳过: {e}")
+
+            if filled_qty > 0:
+                logger.info(
+                    f"✅ [{self.symbol}] 开仓限价优价成交 {filled_qty}/{qty} @ "
+                    f"{avg_px:.4f}（优于TV参考价{tv_px:.4f}）"
+                )
+            return filled_qty, avg_px
+        except Exception as e:
+            logger.warning(f"[{self.symbol}] 开仓限价优价尝试异常，跳过走原有流程: {e}")
+            return 0.0, 0.0
 
     def _prepare_tv_catchup_sizing(self, side):
         """仓位大小：固定中档(tier=1)，从零安全取值——照抄

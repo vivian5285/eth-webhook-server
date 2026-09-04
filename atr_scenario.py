@@ -98,6 +98,47 @@ def hard_stop_price(
     return round(fill + dist, 2)
 
 
+def reanchor_tp_prices_to_fill(
+    side: str,
+    tv_entry: float,
+    fill_entry: float,
+    tp_prices,
+) -> list:
+    """
+    TP1/2/3 按"空间"重新锚定到真实成交价——2026-09-05新增，跟本模块顶部
+    硬止损公式(距离锚TV、价格锚成交价)同一个道理，此前只有硬止损做了这层，
+    TP123一直直接照搬TV绝对价位挂单：PAXGUSDT实盘复现，TV信号到我们真正
+    下单之间有滑点(市场剧烈波动/webhook处理耗时)，成交价比TV参考价差了
+    近一整根ATR，TP绝对价位没跟着挪，等于"到TP1还有多远"这件事被滑点悄悄
+    改变了，而且方向还是缩窄可用利润空间(entry变差、TP位置不变→距离变
+    小)。硬止损那边已经在这么做(hard_stop_price)，TP这边只是此前一直
+    没补——不是新决定，是补齐同一套已经生效的原则。
+
+    dist_i = |TP_i − TV.entry|（每一档单独算，不假设三档等距）
+    多：新TP_i = 成交价 + dist_i；空：新TP_i = 成交价 − dist_i
+
+    tv_entry<=0 或 tv_entry 跟 fill_entry 几乎相等(没有实质滑点)时原样
+    返回，避免无意义的浮点误差改写；0 值档位（该档本来就没有）保持 0。
+    """
+    side_u = str(side or "").strip().upper()
+    tv_e = float(tv_entry or 0)
+    fill = float(fill_entry or 0)
+    prices = list(tp_prices or [])
+    if side_u not in ("LONG", "SHORT") or tv_e <= 0 or fill <= 0:
+        return prices
+    if abs(tv_e - fill) < 1e-9:
+        return prices
+    out = []
+    for tp in prices:
+        tp = float(tp or 0)
+        if tp <= 0:
+            out.append(0.0)
+            continue
+        dist = abs(tp - tv_e)
+        out.append(round(fill + dist, 2) if side_u == "LONG" else round(fill - dist, 2))
+    return out
+
+
 def temp_hard_stop_price(side: str, entry: float, tv_stop_loss: float,
                          buffer_mult: float = HARD_SL_BUFFER_MULT, **kwargs) -> float:
     """兼容旧调用名 → 永久硬止损（同一公式）。"""

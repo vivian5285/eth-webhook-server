@@ -109,6 +109,7 @@ from atr_scenario import (
     compute_hard_stop_distance,
     hard_stop_price,
     place_tp_levels_for_scenario,
+    reanchor_tp_prices_to_fill,
     temp_hard_stop_price,
 )
 from defense_profiles import (
@@ -15410,8 +15411,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._takeover_price_skip = False
         snap = snap or getattr(self, "_pending_open_defense_snap", None) or {}
         side = str(side or snap.get("action") or self.current_side or "").upper()
+        # 2026-09-05新增：TP123按"空间"重锚到真实成交价——先取TV原始参考价
+        # (snap["price"]，此时entry参数如果是调用方显式传的真实成交价，
+        # 两者会不同)，下面entry被重新赋值成"没传就退化成TV参考价"之后，
+        # tv_ref_price这份快照依然是原始TV价，供reanchor用；entry没显式
+        # 传时tv_ref_price会等于entry本身，reanchor自然no-op，不影响
+        # 既有调用路径。
+        tv_ref_price = float(snap.get("price") or 0)
         entry = float(entry or snap.get("price") or self.watched_entry or self.tv_price or 0)
-        tps = self._sanitize_tp_prices(list(snap.get("tv_tps") or self.tv_tps or []))
+        raw_tps = self._sanitize_tp_prices(list(snap.get("tv_tps") or self.tv_tps or []))
+        # 2026-09-05新增：宝贝原话"如果入场价格有利，硬止损的空间也需要
+        # 相应移动"——查实硬止损(hard_stop_price)早就是"距离锚TV、价格锚
+        # 成交价"这套逻辑，唯独TP123一直直接照搬TV绝对价位，PAXGUSDT
+        # 实盘复现滑点近一整根ATR、TP位置却纹丝不动，等于把"到TP1还有多
+        # 远"这件事的准确性拱手让给了滑点。这里补齐同一套原则，见
+        # atr_scenario.reanchor_tp_prices_to_fill顶部注释。
+        tps = reanchor_tp_prices_to_fill(side, tv_ref_price, entry, raw_tps)
+        if tps != raw_tps and any(tps):
+            logger.info(
+                f"🎯 [{self.symbol}] [{source}] TP按空间重锚: TV参考价{tv_ref_price:.2f} → "
+                f"成交价{entry:.2f} | {raw_tps} → {tps}"
+            )
         if side in ("LONG", "SHORT") and entry > 0:
             if not validate_tp_prices_for_side(side, entry, tps):
                 logger.error(
@@ -15811,6 +15831,32 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             except Exception:
                 pass
 
+            # 2026-09-05新增：市价/摸盘口之前，先给一次短预算的"限价优于
+            # TV参考价"机会——宝贝原话"按照比tv还有利的价格进场...tv给的
+            # 是方向，我们尽量更加有利的价格开单"。找不到优价/预算内没
+            # 成交都原样落回下面已经在用的摸盘口+市价流程，不影响既有
+            # 行为，纯粹是"条件允许就抢占一部分更优成交"的加法。见
+            # radar_reentry_mixin._try_better_than_tv_limit_entry顶部注释。
+            # tv_price 必须是 TV 信号里的原始 price 字段(payload.get("price"))，
+            # 不是 curr_px——curr_px 是这一刻现查的实时市价，跟TV发信号那
+            # 一刻已经隔了先平/风控检查这些耗时步骤，拿它当"TV参考价"去比
+            # 较，等于拿"马上要成交的价格"跟自己比，会让这道优价闸门形同
+            # 虚设。_try_better_than_tv_limit_entry内部本来就有从payload
+            # 取price的兜底，这里显式传清楚，不依赖隐式兜底。
+            remaining_qty = qty
+            try:
+                limit_filled_qty, limit_avg_px = self._try_better_than_tv_limit_entry(
+                    action, remaining_qty, payload=payload,
+                    tv_price=self._safe_float(payload.get("price") or payload.get("tv_price"), 0),
+                )
+            except Exception as e:
+                logger.warning(f"[{self.symbol}] 开仓限价优价整体异常，跳过: {e}")
+                limit_filled_qty, limit_avg_px = 0.0, 0.0
+            if limit_filled_qty > 0:
+                remaining_qty = binance_client.format_quantity(
+                    max(qty - limit_filled_qty, 0.0), self.symbol
+                )
+
             # 2026-08-29重新上线（v2）：市价前先"摸一口"盘口最优价。8-28
             # 那版实盘复现BNBUSDT/OPENAIUSDT/PAXGUSDT三个品种、跨B/C/E
             # 三账户精确翻倍——根因是直接相信了下单响应里的executedQty，
@@ -15821,26 +15867,27 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 查+主动撤，不管交易所返回什么都会在下单后显式确认真实成交
             # 量、显式撤掉未终结的挂单，再把确认过的filled_qty返回给这里
             # ——不会再重演"信错了返回值"这类双开仓事故。
-            market_qty = qty
+            market_qty = remaining_qty
             try:
-                bid, ask = binance_client.get_best_bid_ask(self.symbol)
-                touch_px = ask if action == "LONG" else bid
-                if touch_px > 0:
-                    filled_qty = binance_client.place_ioc_limit_order(
-                        open_side, qty, touch_px, symbol=self.symbol,
-                    )
-                    filled_qty = float(filled_qty or 0)
-                    if filled_qty > 0:
-                        market_qty = binance_client.format_quantity(
-                            max(qty - filled_qty, 0.0), self.symbol
+                if remaining_qty > 0:
+                    bid, ask = binance_client.get_best_bid_ask(self.symbol)
+                    touch_px = ask if action == "LONG" else bid
+                    if touch_px > 0:
+                        filled_qty = binance_client.place_ioc_limit_order(
+                            open_side, remaining_qty, touch_px, symbol=self.symbol,
                         )
-                        logger.info(
-                            f"✅ [{self.symbol}] 摸盘口最优价确认成交 {filled_qty}/{qty} "
-                            f"@ {touch_px:.4f} | 剩余{market_qty}改市价补足"
-                        )
+                        filled_qty = float(filled_qty or 0)
+                        if filled_qty > 0:
+                            market_qty = binance_client.format_quantity(
+                                max(remaining_qty - filled_qty, 0.0), self.symbol
+                            )
+                            logger.info(
+                                f"✅ [{self.symbol}] 摸盘口最优价确认成交 {filled_qty}/{remaining_qty} "
+                                f"@ {touch_px:.4f} | 剩余{market_qty}改市价补足"
+                            )
             except Exception as e:
                 logger.warning(f"[{self.symbol}] 摸盘口最优价跳过，直接市价: {e}")
-                market_qty = qty
+                market_qty = remaining_qty
 
             # market_qty<=0说明摸盘口已经把全部意向量都确认成交了——这
             # 种情况不该走市价、更不该被下面的重试/失败逻辑误判成"开仓
