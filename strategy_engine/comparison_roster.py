@@ -139,11 +139,15 @@ AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真
 """
 from __future__ import annotations
 
-# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
-# active_binance_symbols()删除（commit e45383d），跟dashboard/server.py、
-# watchdog/check.py同一天发现的同一类问题——这份擂台赛品种清单当时也漏改
-# 了。这个引擎本身已停用(systemctl stop strategy-engine/strategy-compare)、
-# 不碰真实资金，这里只是顺手保持一致，不是紧急修复。
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT真实交易胜率太低、已从
+# symbol_config.py::active_binance_symbols()删除（commit e45383d）——这是
+# 真实资金账户的决定。
+# 2026-09-05：宝贝反过来问"擂台加他们俩影响不"——两码事：擂台是纯模拟
+# 对比、不碰真实资金，"真实账户胜率低不做"不等于"擂台也不该跑"，币安K线
+# 数据本身仍正常可拉(已用klines.fetch_klines_paged核实)，没有技术障碍。
+# 加回来之前先把之前遗留的8条孤儿仓(品种从真实交易表移除时擂台仓位没
+# 跟着关掉，一直卡在open状态)按现价结算清干净，让这两个品种从零开始，
+# 不带着旧账。
 # 代币化美股：跟踪真实美股标的(有真实 9:30 ET 开盘)。公开给 dashboard/
 # roster_server.py 的"美股擂台"视图用——擂台面板除了"按策略"排名，还要能
 # "按币种"、"按美股"分别汇总对比(宝贝 2026-09-04 要求)。ORB 战法也用这份
@@ -151,6 +155,7 @@ from __future__ import annotations
 TOKENIZED_STOCK_SYMBOLS = [
     "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT",
     "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
+    "SKHYNIXUSDT", "ASMLUSDT",
 ]
 
 _ALL_SYMBOLS = [
