@@ -31,6 +31,16 @@ def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
+    # 2026-09-05：默认rollback-journal模式下，重启/并行部署时新旧进程
+    # 短暂重叠访问同一个db文件容易撞上"database is locked"——WAL模式下
+    # 读不阻塞写、写不阻塞读，能大幅降低这类瞬时锁冲突(标准SQLite并发
+    # 场景推荐做法)。幂等：已经是WAL就是空操作，每次连接执行一次开销
+    # 可忽略。见 get_open_row 重复开仓bug 的根因排查(time_series_momentum
+    # 10个品种因为这个锁冲突产生"孤儿仓位")。
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except Exception as e:
+        logger.warning(f"[shadow_store] 开启WAL模式失败(不影响功能，只是更容易撞锁): {e}")
     return conn
 
 
@@ -164,18 +174,34 @@ def settle_trade_on_equity(strategy: str, pnl_atr_weighted: float, atr0: float, 
 
 
 def get_open_row(symbol: str, strategy: str) -> Optional[dict]:
-    try:
-        with _connect() as conn:
-            row = conn.execute(
-                """SELECT * FROM shadow_positions_v2
-                   WHERE symbol=? AND strategy=? AND status='open'
-                   ORDER BY id DESC LIMIT 1""",
-                (symbol, strategy),
-            ).fetchone()
-            return dict(row) if row else None
-    except Exception as e:
-        logger.warning(f"[shadow_store] get_open_row 失败: {e}")
-        return None
+    """重启后靠这个查询判断"这个品种这套策略现在有没有开着的仓"——是
+    防止重复开仓的关键闸门，2026-09-05之前这里查询失败(比如重启瞬间
+    撞上sqlite锁)会被静默吞掉直接返回None，等于把"不确定"当成"确认空仓"
+    处理，实测导致time_series_momentum在10个品种上产生了永远不会被
+    平仓检查到的"孤儿"重复仓位。改成失败重试几次(SQLite锁冲突通常是
+    毫秒级窗口，短暂退避大概率能等过去)，仍然失败才真的当查询失败处理
+    (退回None，调用方行为不变)，但升级成ERROR日志、不再是容易被忽略的
+    WARNING。"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            with _connect() as conn:
+                row = conn.execute(
+                    """SELECT * FROM shadow_positions_v2
+                       WHERE symbol=? AND strategy=? AND status='open'
+                       ORDER BY id DESC LIMIT 1""",
+                    (symbol, strategy),
+                ).fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.2 * (attempt + 1))
+    logger.error(
+        f"[shadow_store] get_open_row({symbol},{strategy}) 重试3次仍失败，"
+        f"本轮当作查询失败处理(不代表真的空仓): {last_err}"
+    )
+    return None
 
 
 def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
@@ -213,18 +239,24 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
 
 def get_open_pair_legs(pair_key: str) -> List[dict]:
     """按pair_key找回配对交易的两条腿(status='open')——重启恢复用，
-    跟get_open_row(单腿战法用)是平行的两条查询路径。"""
-    try:
-        with _connect() as conn:
-            rows = conn.execute(
-                """SELECT * FROM shadow_positions_v2
-                   WHERE pair_key=? AND status='open'""",
-                (pair_key,),
-            ).fetchall()
-            return [dict(r) for r in rows]
-    except Exception as e:
-        logger.warning(f"[shadow_store] get_open_pair_legs 失败: {e}")
-        return []
+    跟get_open_row(单腿战法用)是平行的两条查询路径，2026-09-05同样加上
+    重试(理由见get_open_row的注释：查询失败不该被静默当成"没有持仓")。"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            with _connect() as conn:
+                rows = conn.execute(
+                    """SELECT * FROM shadow_positions_v2
+                       WHERE pair_key=? AND status='open'""",
+                    (pair_key,),
+                ).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.2 * (attempt + 1))
+    logger.error(f"[shadow_store] get_open_pair_legs({pair_key}) 重试3次仍失败: {last_err}")
+    return []
 
 
 def update_row(position_id: int, updates: Dict[str, Any], bar_time: int) -> None:
