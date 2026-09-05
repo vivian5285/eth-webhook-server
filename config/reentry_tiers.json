@@ -15,40 +15,40 @@
   },
   "hard_sl_buffer_mult": 1.15,
   "ETH": {
-    "tv_tf_sec": 9000,
+    "tv_tf_sec": 3540,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-09-01再校准：用户把ETH周期从90分钟改成150分钟，tv_tf_sec同步为9000。ETH是其它多个品种三档步进缩放比例的参照基准本身，不是靠sqrt(own/ETH)公式缩放出来的——它的weak/mid/strong数值历史上是v2.1/v2.2两轮'步进大幅放宽'实盘调出来的(不是从P50/P75/P90机械换算)，那份调优经验值得保留。这次重新用ETH真实150分钟K线测出mid档新基线(P50=2.55×ATR/P75=3.53×ATR/P90=5.01×ATR，方法同breath_profiles.py::BREATH_ETH同一条注释)，再按旧90分钟三档之间原有的比例关系(weak≈0.8×mid，strong≈1.25×mid，取旧数据weak/mid/strong在5个字段上的平均比例约0.78/1.0/1.27，取整成0.8/1.0/1.25)套到新基线上，既用上了真实新周期的数据，也没有丢掉之前实盘调优出来的三档相对结构。",
+    "note": "2026-09-01再校准：用户把ETH周期从90分钟改成150分钟，tv_tf_sec同步为9000。ETH是其它多个品种三档步进缩放比例的参照基准本身，不是靠sqrt(own/ETH)公式缩放出来的——它的weak/mid/strong数值历史上是v2.1/v2.2两轮'步进大幅放宽'实盘调出来的(不是从P50/P75/P90机械换算)，那份调优经验值得保留。这次重新用ETH真实150分钟K线测出mid档新基线(P50=2.55×ATR/P75=3.53×ATR/P90=5.01×ATR，方法同breath_profiles.py::BREATH_ETH同一条注释)，再按旧90分钟三档之间原有的比例关系(weak≈0.8×mid，strong≈1.25×mid，取旧数据weak/mid/strong在5个字段上的平均比例约0.78/1.0/1.27，取整成0.8/1.0/1.25)套到新基线上，既用上了真实新周期的数据，也没有丢掉之前实盘调优出来的三档相对结构。2026-09-06再校准：宝贝把ETH周期从150分钟改成59分钟，tv_tf_sec同步为3540。59是质数，不能被5/15/30整除，只能用1分钟原始K线×59合成(同SKHYNIX 101分钟手法)，分页拉了87606根1m原始K线覆盖约60.8天，测了1484根合成K线、255个真实摆动点识别回调样本，测出mid档新基线(P50=2.37×ATR/P75=3.43×ATR/P90=4.92×ATR)，继续沿用weak≈0.8×mid/strong≈1.25×mid这条历史比例关系套到新基线上（同09-01那次同一套方法，不重新反推比例）。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：呼吸宽松，允许行情充分跑动（2026-09-01按150分钟新基线×0.8重新缩放，比例关系继承v2.2放宽后的结构）",
-        "step_trigger_atr": 2.04,
-        "step_advance_atr": 1.33,
-        "breath_tp12": 2.04,
-        "breath_tp23": 2.82,
+        "note": "弱趋势：呼吸宽松，允许行情充分跑动（2026-09-06按59分钟新基线×0.8重新缩放，比例关系继承v2.2放宽后的结构）",
+        "step_trigger_atr": 1.90,
+        "step_advance_atr": 1.23,
+        "breath_tp12": 1.90,
+        "breath_tp23": 2.74,
         "min_mult": 3.0,
         "max_mult": 4.2
       },
       {
         "name": "mid",
-        "note": "中趋势：直接取150分钟新实测中位数回调基线(step_trigger/breath_tp12=P50=2.55，breath_tp23=P75=3.53，min/max_mult覆盖P90=5.01附近)",
-        "step_trigger_atr": 2.55,
-        "step_advance_atr": 1.66,
-        "breath_tp12": 2.55,
-        "breath_tp23": 3.53,
-        "min_mult": 3.8,
-        "max_mult": 5.3
+        "note": "中趋势：直接取59分钟新实测中位数回调基线(step_trigger/breath_tp12=P50=2.37，breath_tp23=P75=3.43，min/max_mult覆盖P90=4.92附近)",
+        "step_trigger_atr": 2.37,
+        "step_advance_atr": 1.54,
+        "breath_tp12": 2.37,
+        "breath_tp23": 3.43,
+        "min_mult": 3.7,
+        "max_mult": 5.2
       },
       {
         "name": "strong",
-        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（2026-09-01按150分钟新基线×1.25重新缩放，比例关系继承v2.2放宽后的结构）",
-        "step_trigger_atr": 3.19,
-        "step_advance_atr": 2.08,
-        "breath_tp12": 3.19,
-        "breath_tp23": 4.41,
-        "min_mult": 4.8,
-        "max_mult": 6.6
+        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（2026-09-06按59分钟新基线×1.25重新缩放，比例关系继承v2.2放宽后的结构）",
+        "step_trigger_atr": 2.96,
+        "step_advance_atr": 1.93,
+        "breath_tp12": 2.96,
+        "breath_tp23": 4.29,
+        "min_mult": 4.6,
+        "max_mult": 6.5
       }
     ]
   },

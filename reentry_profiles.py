@@ -406,7 +406,7 @@ _TSLA_WINDOW_BARS = int((_CFG.get("TSLA") or {}).get("reentry_window_bars") or 1
 _META_WINDOW_BARS = int((_CFG.get("META") or {}).get("reentry_window_bars") or 1)
 _DELL_WINDOW_BARS = int((_CFG.get("DELL") or {}).get("reentry_window_bars") or 1)
 _GEV_WINDOW_BARS = int((_CFG.get("GEV") or {}).get("reentry_window_bars") or 1)
-_ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
+_ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 3540)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
 # BCH从5400(90min)改21600(6h)。这几个都是早期建REENTRY_XAU/BNB/ZEC/BCH
@@ -487,7 +487,7 @@ def make_chase_client_order_id(
 
 REENTRY_ETH: Dict[str, Any] = {
     "name": "ETH",
-    "tv_tf": "90m",
+    "tv_tf": "59m",
     "tv_tf_sec": _ETH_TF_SEC,
     "enabled": True,
     "arm_sl_atr": ARM_SL_ATR,
