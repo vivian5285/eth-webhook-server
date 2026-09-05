@@ -2985,7 +2985,23 @@ class RadarReentryMixin:
         显式清零tv_suggested_qty/tv_sl_ref（否则会带入上一个TV周期的
         陈旧值），现算一个真实ATR写入_tv_signal_atr（否则
         _resolve_open_atr_with_degrade会静默退化成不带止损距离的
-        纯名义下单）。"""
+        纯名义下单）。
+
+        2026-09-05修复实盘复现：这里原来硬编码"15m"给所有品种算ATR，
+        BNBUSDT真实TV周期是150分钟(config/reentry_tiers.json::BNB.
+        tv_tf_sec=9000，reentry_profiles.py早就把这当权威数据源在用)，
+        15分钟ATR比150分钟真实ATR小了近5倍(实盘复现：追回成交时算出
+        atr=1.3691，而同一时刻行情引擎按150分钟算出的ATR(14)=7.078)。
+        用这个偏小的ATR锁定整个持仓的呼吸止损/"大赢家利润地板"(峰值
+        浮盈≥3×ATR才触发)阈值，导致price从727.70涨到735.54这种按
+        150分钟真实节奏看很普通的一次波动，按错误的小ATR算却是
+        "5.73倍ATR的暴力大赢家"，止损被利润地板连续两次顶到接近峰值，
+        一次正常回撤(735.54→730.60)就把仓位打掉——外观上像"重入的仓位
+        雷达一开就秒平"，根因是ATR周期选错了，不是雷达逻辑本身有误。
+        现在跟其它地方一样，从get_reentry_profile(symbol)读这个品种
+        真实的tv_tf_sec，换算成分钟喂给get_bars（get_bars本身已经支持
+        150m这类非原生周期，会自动用更细的源K线合成，不用另外处理）。
+        """
         from binance_client import binance_client
 
         curr_px = float(
@@ -2996,7 +3012,9 @@ class RadarReentryMixin:
         try:
             from strategy_engine import klines as _sk_klines
             from strategy_engine import indicators as _sk_ind
-            bars = _sk_klines.get_bars(self.symbol, "15m", limit=60)
+            tf_sec = int(get_reentry_profile(self.symbol).get("tv_tf_sec") or 900)
+            tf_minutes = max(1, tf_sec // 60)
+            bars = _sk_klines.get_bars(self.symbol, f"{tf_minutes}m", limit=60)
             atr = float(_sk_ind.wilder_atr(bars, 14)) if bars else 0.0
         except Exception as e:
             logger.warning(f"[{self.symbol}] 追回ATR现算失败: {e}")
