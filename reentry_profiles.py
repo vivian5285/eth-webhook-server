@@ -387,7 +387,7 @@ _BNB_TF_SEC = int((_CFG.get("BNB") or {}).get("tv_tf_sec") or 9000)
 _ZEC_TF_SEC = int((_CFG.get("ZEC") or {}).get("tv_tf_sec") or 9000)
 _BCH_TF_SEC = int((_CFG.get("BCH") or {}).get("tv_tf_sec") or 21600)
 _XMR_TF_SEC = int((_CFG.get("XMR") or {}).get("tv_tf_sec") or 21600)
-_SNDK_TF_SEC = int((_CFG.get("SNDK") or {}).get("tv_tf_sec") or 5400)
+_SNDK_TF_SEC = int((_CFG.get("SNDK") or {}).get("tv_tf_sec") or 4500)
 _PAXG_TF_SEC = int((_CFG.get("PAXG") or {}).get("tv_tf_sec") or 9000)
 _SKHYNIX_TF_SEC = int((_CFG.get("SKHYNIX") or {}).get("tv_tf_sec") or 9000)
 _XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
@@ -566,17 +566,17 @@ REENTRY_XMR: Dict[str, Any] = {
 }
 REENTRY_SNDK: Dict[str, Any] = {
     "name": "SNDK",
-    "tv_tf": "90m",
+    "tv_tf": "75m",
     "tv_tf_sec": _SNDK_TF_SEC,
     "enabled": True,
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
-    # 2026-08-19：跟ZEC同款问题——1.5×ATR封顶换算成价格百分比实测3.56%，
-    # 比当年ZEC加收益率腿兜底之前的2.15%还夸张（币安TRADIFI_PERPETUAL
-    # 个股品种普遍波动更猛，浮盈很容易在触发前被暴涨暴跌打回浮亏），
-    # 收益率腿封顶到1.5%，让雷达提前接管。
-    "radar_gate_return_pct": 0.015,
+    # 2026-09-05修正：宝贝反映TV周期改成75分钟，tv_tf从90m改75m。用真实
+    # 75分钟K线重新测得ATR%=0.94%（原90分钟版本2.37%），1.5×ATR封顶降到
+    # ≈1.41%，不再像原来3.56%那么夸张，但仍高于1%基准线，跟着OPENAI(raw
+    # 2.00%→0.012)同一档位收紧到1.2%，不用原来更激进的1.5%。
+    "radar_gate_return_pct": 0.012,
     "tiers": SNDK_TIERS,
     "reentry_zone_atr": _SNDK_ZONE,
     "reentry_window_bars": _SNDK_WINDOW_BARS,

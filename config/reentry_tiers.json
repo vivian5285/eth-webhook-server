@@ -243,10 +243,10 @@
     ]
   },
   "SNDK": {
-    "tv_tf_sec": 5400,
+    "tv_tf_sec": 4500,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种，同XMR一并修复_BY_SYMBOL遗漏。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(SNDK breath_profiles.py中位数回调2.81/ETH中位数回调3.26)≈0.928倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。",
+    "note": "2026-08-15：新增品种，同XMR一并修复_BY_SYMBOL遗漏。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(SNDK breath_profiles.py中位数回调2.81/ETH中位数回调3.26)≈0.928倍缩放ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-09-05修正：宝贝反映TV策略周期改成75分钟，tv_tf_sec从5400(90分钟)改成4500(75分钟)；reentry_window_bars维持2根(2×75=150分钟，符合~150-200分钟惯例，不用调整)；breath_profiles.py::BREATH_SNDK同批用真实75分钟K线重新校准，见该文件注释。",
     "tiers": [
       {
         "name": "weak",

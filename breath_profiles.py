@@ -334,30 +334,35 @@ BREATH_BCH: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# SNDK 基线（新增品种，2026-08-14，90分钟周期）
-# 用真实SNDK 30m K线合成90分钟K线（分页拉了4500根30m原始K线覆盖约93天），
-# 量了1500根合成样本、103个回调样本的分布：中位数≈2.81×ATR，75分位≈
-# 5.27×ATR，90分位≈7.74×ATR。ATR%=2.37%——波动率比XMR(2.07%)更高，且
-# 回调分布尾巴明显更肥（75/90分位相对中位数的比值远大于其它品种），
-# 呼吸空间给得也相应更宽，避免肥尾回调被打止损。
+# SNDK 基线——2026-09-05重新校准：宝贝反映"sndk变成75分钟周期"，原
+# 08-14那版是按90分钟合成K线测的，周期变了必须用真实75分钟K线重新测
+# 回调分布，不能只改tv_tf_sec不改呼吸系数。75分钟能被15分钟整除，用
+# 真实15m K线合成（分页拉了8790根15m原始K线覆盖约91.5天），真实摆动点
+# 识别(fractal pivot，±3根确认，同08-18/08-25那批方法)测了1757根合成
+# K线、265个摆动回调样本：中位数≈2.25×ATR，75分位≈4.02×ATR，90分位≈
+# 5.92×ATR。ATR%=0.94%（原90分钟版本2.37%，周期变短、波动率regime也
+# 可能变化，双重因素共同作用，以本次实测为准）。step_trigger_atr/
+# step_advance_atr推算方法同XAU/SKHYNIX/GS/MU 08-25/09-05注释（跨品种
+# 均值比例：step_trigger≈0.375×breath_tp12，step_advance≈0.65×
+# step_trigger），不是脚本粗算建议里直接拿p50当step_trigger那版。
 BREATH_SNDK: Dict[str, Any] = {
     "name": "SNDK",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.93,
-    "step_advance_atr": 0.60,
+    "step_trigger_atr": 0.84,
+    "step_advance_atr": 0.55,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.80,  # 覆盖实测中位数回调(2.81)
-    "breath_tp23": 5.25,  # 覆盖实测75分位回调(5.27)
+    "breath_tp12": 2.25,  # 覆盖实测中位数回调(2.25)
+    "breath_tp23": 4.02,  # 覆盖实测75分位回调(4.02)
     "phase2_trail_mult": 1.0,
-    "min_mult": 5.6,
-    "max_mult": 8.1,      # 覆盖实测90分位回调(7.74)以上
+    "min_mult": 4.5,
+    "max_mult": 6.2,      # 覆盖实测90分位回调(5.92)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
