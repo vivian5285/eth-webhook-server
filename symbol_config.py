@@ -228,6 +228,34 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "LITEUSDT",
         "breath": "LITE",
     },
+    "DELLUSDT": {
+        "symbol": "DELLUSDT",
+        "unit": "DELL",
+        "tag": "DELL",
+        # 2026-09-06：币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，DELL
+        # (戴尔科技)股票代币化永续，跟GS/MU/LITE/TSLA/META同类。3小时周期
+        # (180分钟能被30整除，用30m合成，同BNB 150min手法)。
+        "qty_step": 0.01,    # 实测LOT_SIZE stepSize
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,  # 实测PRICE_FILTER tickSize=0.01
+        "atr_fallback_symbol": "DELLUSDT",
+        "breath": "DELL",
+    },
+    "GEVUSDT": {
+        "symbol": "GEVUSDT",
+        "unit": "GEV",
+        "tag": "GEV",
+        # 2026-09-06：币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，GEV
+        # (通用电气威能)股票代币化永续，跟GS/MU/LITE/TSLA/META同类。4小时
+        # 周期，原生K线，同META周期一致。
+        "qty_step": 0.01,    # 实测LOT_SIZE stepSize
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,  # 实测PRICE_FILTER tickSize=0.01
+        "atr_fallback_symbol": "GEVUSDT",
+        "breath": "GEV",
+    },
 }
 
 # 深币 SWAP
@@ -353,6 +381,18 @@ _BINANCE_ALIASES = {
     "TSLAUSDT.P": "TSLAUSDT",
     "BINANCE:TSLAUSDT": "TSLAUSDT",
     "BINANCE:TSLAUSDT.P": "TSLAUSDT",
+    "DELL": "DELLUSDT",
+    "DELLUSDT": "DELLUSDT",
+    "DELLUSD": "DELLUSDT",
+    "DELLUSDT.P": "DELLUSDT",
+    "BINANCE:DELLUSDT": "DELLUSDT",
+    "BINANCE:DELLUSDT.P": "DELLUSDT",
+    "GEV": "GEVUSDT",
+    "GEVUSDT": "GEVUSDT",
+    "GEVUSD": "GEVUSDT",
+    "GEVUSDT.P": "GEVUSDT",
+    "BINANCE:GEVUSDT": "GEVUSDT",
+    "BINANCE:GEVUSDT.P": "GEVUSDT",
     "GSUSDT": "GSUSDT",
     "GSUSD": "GSUSDT",
     "GSUSDT.P": "GSUSDT",
@@ -453,15 +493,19 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 # 要恢复直接把这两个symbol重新加回下面两处清单即可，不用改别的代码。
 # 2026-09-05：宝贝要求把SKHYNIXUSDT的TV重新接回实盘(ASMLUSDT不动，仍然
 # 删除状态)——这里加回来，同步各账户.env的BINANCE_SYMBOLS。
+# 2026-09-06：新增品种DELLUSDT(3小时周期，30m合成)、GEVUSDT(4小时周期，
+# 原生K线)——币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，跟GS/MU/LITE/
+# TSLA/META同类，已核实stepSize/minQty/tickSize均为0.01，跟同族其它
+# TradFi品种一致。
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,SKHYNIXUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,SKHYNIXUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT,DELLUSDT,GEVUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT", "DELLUSDT", "GEVUSDT"]
 
 
 def active_deepcoin_symbols():
@@ -511,6 +555,8 @@ def extract_symbol_from_payload(data):
         "LITEUSDT.P", "BINANCE:LITEUSDT", "LITEUSDT",
         "TSLAUSDT.P", "BINANCE:TSLAUSDT", "TSLAUSDT",
         "METAUSDT.P", "BINANCE:METAUSDT", "METAUSDT",
+        "DELLUSDT.P", "BINANCE:DELLUSDT", "DELLUSDT",
+        "GEVUSDT.P", "BINANCE:GEVUSDT", "GEVUSDT",
     ):
         if token in blob:
             return token

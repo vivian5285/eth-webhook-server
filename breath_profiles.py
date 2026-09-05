@@ -708,6 +708,75 @@ BREATH_LITE: Dict[str, Any] = {
     "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(LITE)
 }
 
+# DELL 基线（新增品种，2026-09-06，3小时周期，已上市正股EQUITY类，跟
+# GS/MU/LITE/TSLA/META同类）。180分钟能被30整除，用真实30m K线合成
+# （分页拉了4526根30m原始K线覆盖约94.2天），真实摆动点识别(fractal
+# pivot，±3根确认，同批方法)测了754根合成K线、112个摆动回调样本：
+# 中位数≈2.74×ATR，75分位≈3.98×ATR，90分位≈5.70×ATR。ATR%=1.63%。
+# step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS/MU/SNDK
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger）。has_staged_exit_gate未核实真实TV Pine源码，
+# 默认False（同大多数品种惯例，只有verified的7个品种才标True）。
+BREATH_DELL: Dict[str, Any] = {
+    "name": "DELL",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.03,
+    "step_advance_atr": 0.67,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.74,  # 覆盖实测中位数回调(2.74)
+    "breath_tp23": 3.98,  # 覆盖实测75分位回调(3.98)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.3,
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.70)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
+# GEV 基线（新增品种，2026-09-06，4小时周期，原生K线，已上市正股EQUITY类，
+# 跟GS/MU/LITE/TSLA/META同类，周期跟META一致）。用真实4h原生K线（分页
+# 拉了344根，覆盖约57.3天，2026年才上市，样本量比老品种薄，后续需要按
+# "周期性呼吸再校准"惯例尽快补测），真实摆动点识别(fractal pivot，±3根
+# 确认，同批方法)测了344根K线、49个摆动回调样本：中位数≈2.65×ATR，
+# 75分位≈3.87×ATR，90分位≈5.46×ATR。ATR%=1.13%。step_trigger_atr/
+# step_advance_atr推算方法同DELL。has_staged_exit_gate同DELL，未核实
+# 默认False。
+BREATH_GEV: Dict[str, Any] = {
+    "name": "GEV",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.99,
+    "step_advance_atr": 0.64,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.65,  # 覆盖实测中位数回调(2.65)
+    "breath_tp23": 3.87,  # 覆盖实测75分位回调(3.87)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.2,
+    "max_mult": 5.8,      # 覆盖实测90分位回调(5.46)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
 # 2026-09-04：has_staged_exit_gate=True 只标在这7个品种上（META/LITE/MU/
 # GS/OPENAI/SKHYNIX/SNDK，全是03版本.pine"平开不互斥版"家族）——核实过
 # 真实TV Pine源码只有这7个有useStagedExitGate，其余全部False（含ETH/XAU/
@@ -738,6 +807,8 @@ _BY_BINANCE = {
     "LITEUSDT": BREATH_LITE,  # 2026-08-25：新增
     "TSLAUSDT": BREATH_TSLA,  # 2026-08-27：新增
     "METAUSDT": BREATH_META,  # 2026-08-27：新增
+    "DELLUSDT": BREATH_DELL,  # 2026-09-06：新增
+    "GEVUSDT": BREATH_GEV,  # 2026-09-06：新增
 }
 
 _BY_DEEPCOIN = {

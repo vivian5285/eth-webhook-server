@@ -697,5 +697,81 @@
         "max_mult": 6.0
       }
     ]
+  },
+  "DELL": {
+    "tv_tf_sec": 10800,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-09-06：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，DELL戴尔科技股票代币化永续，跟GS/MU/LITE/TSLA/META同类）。周期3h(180分钟能被30整除，用30m合成)，reentry_window_bars收到1根（3h×1=180min，正好落在~150-200min窗口惯例内，×2=360min明显过长，同TSLA/META处理一致）。step_trigger/step_advance按sqrt(DELL breath_profiles.py中位数回调2.74/ETH当前中位数回调2.55)≈1.037倍缩放，套用GS/MU/LITE/TSLA/META同一套「weak/mid/strong的breath_tp12/23/min/max固定用通用模板1.50-2.00-2.50/2.00-2.80-3.50/2.5-3.0-4.0/3.5-4.5-6.0，只有step_trigger_atr=ratio×{1.0,1.2,1.4}、step_advance_atr≈step_trigger_atr×0.5按各档比例缩放」的既定惯例，不是重新照ETH三档绝对值×比例（94.2天754根30m合成3h K线、112个回调样本，样本量充足；breath_profiles.py::BREATH_DELL基线沿用另一套「品种自己实测P50/P75/P90直接覆盖」的独立惯例，两套数值不必一致，理由同GS/MU/LITE历史注释）。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按DELL自身波动率(1.037倍)微放宽",
+        "step_trigger_atr": 1.04,
+        "step_advance_atr": 0.52,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按DELL自身波动率(1.037倍)微放宽",
+        "step_trigger_atr": 1.24,
+        "step_advance_atr": 0.62,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按DELL自身波动率(1.037倍)微放宽",
+        "step_trigger_atr": 1.45,
+        "step_advance_atr": 0.72,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
+  },
+  "GEV": {
+    "tv_tf_sec": 14400,
+    "reentry_window_bars": 1,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-09-06：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，GEV通用电气威能股票代币化永续，跟GS/MU/LITE/TSLA/META同类）。周期4h，原生K线，同META周期一致，reentry_window_bars收到1根（4h×1=240min，比~150-200min窗口惯例略长，×2=480min明显过长，同META处理一致）。step_trigger/step_advance按sqrt(GEV breath_profiles.py中位数回调2.65/ETH当前中位数回调2.55)≈1.019倍缩放，套用GS/MU/LITE/TSLA/META同一套「breath_tp12/23/min/max固定通用模板，只有step_trigger_atr=ratio×{1.0,1.2,1.4}」的既定惯例，理由同DELL（57.3天344根原生4h K线、49个回调样本，2026年才上市样本量偏薄，后续需要按“周期性呼吸再校准”惯例尽快补测）。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按GEV自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.02,
+        "step_advance_atr": 0.51,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按GEV自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.22,
+        "step_advance_atr": 0.61,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按GEV自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.43,
+        "step_advance_atr": 0.71,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
   }
 }

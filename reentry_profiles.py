@@ -216,6 +216,28 @@ _DEFAULT_META_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.37, "step_advance_atr": 0.68,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
+# 2026-09-06新增：sqrt(DELL breath_profiles.py中位数回调2.74/ETH当前中位数
+# 回调2.55)≈1.037倍微放宽ETH三档基线（94.2天754根30m合成3h K线、112个
+# 回调样本）。
+_DEFAULT_DELL_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.04, "step_advance_atr": 0.52,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.24, "step_advance_atr": 0.62,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.45, "step_advance_atr": 0.72,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# 2026-09-06新增：sqrt(GEV breath_profiles.py中位数回调2.65/ETH当前中位数
+# 回调2.55)≈1.019倍微放宽ETH三档基线（57.3天344根原生4h K线、49个回调
+# 样本，2026年才上市样本量偏薄）。
+_DEFAULT_GEV_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.02, "step_advance_atr": 0.51,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.22, "step_advance_atr": 0.61,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.43, "step_advance_atr": 0.71,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
 
 REENTRY_TIERS_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
@@ -326,6 +348,12 @@ TSLA_TIERS: List[Dict[str, float]] = list(
 META_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("META") or {}).get("tiers") or _DEFAULT_META_TIERS)
 )
+DELL_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("DELL") or {}).get("tiers") or _DEFAULT_DELL_TIERS)
+)
+GEV_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("GEV") or {}).get("tiers") or _DEFAULT_GEV_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 _BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
@@ -344,6 +372,8 @@ _MU_ZONE = float((_CFG.get("MU") or {}).get("reentry_zone_atr") or 0.5)
 _LITE_ZONE = float((_CFG.get("LITE") or {}).get("reentry_zone_atr") or 0.5)
 _TSLA_ZONE = float((_CFG.get("TSLA") or {}).get("reentry_zone_atr") or 0.5)
 _META_ZONE = float((_CFG.get("META") or {}).get("reentry_zone_atr") or 0.5)
+_DELL_ZONE = float((_CFG.get("DELL") or {}).get("reentry_zone_atr") or 0.5)
+_GEV_ZONE = float((_CFG.get("GEV") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
 # 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
@@ -374,6 +404,8 @@ _MU_WINDOW_BARS = int((_CFG.get("MU") or {}).get("reentry_window_bars") or 2)
 _LITE_WINDOW_BARS = int((_CFG.get("LITE") or {}).get("reentry_window_bars") or 2)
 _TSLA_WINDOW_BARS = int((_CFG.get("TSLA") or {}).get("reentry_window_bars") or 1)
 _META_WINDOW_BARS = int((_CFG.get("META") or {}).get("reentry_window_bars") or 1)
+_DELL_WINDOW_BARS = int((_CFG.get("DELL") or {}).get("reentry_window_bars") or 1)
+_GEV_WINDOW_BARS = int((_CFG.get("GEV") or {}).get("reentry_window_bars") or 1)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 5400)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
@@ -399,6 +431,8 @@ _MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 3300)
 _LITE_TF_SEC = int((_CFG.get("LITE") or {}).get("tv_tf_sec") or 5400)
 _TSLA_TF_SEC = int((_CFG.get("TSLA") or {}).get("tv_tf_sec") or 21600)
 _META_TF_SEC = int((_CFG.get("META") or {}).get("tv_tf_sec") or 14400)
+_DELL_TF_SEC = int((_CFG.get("DELL") or {}).get("tv_tf_sec") or 10800)
+_GEV_TF_SEC = int((_CFG.get("GEV") or {}).get("tv_tf_sec") or 14400)
 
 
 def make_reentry_client_order_id(
@@ -806,6 +840,48 @@ REENTRY_META: Dict[str, Any] = {
     "tick_size": 0.01,
 }
 
+REENTRY_DELL: Dict[str, Any] = {
+    "name": "DELL",
+    "tv_tf": "3h",
+    "tv_tf_sec": _DELL_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    # 2026-09-06：DELL ATR%=1.63%，1.5×ATR封顶≈2.45%，虽然比其它TradFi
+    # 品种略高，但沿用最近这批(LITE 1.40%/TSLA 1.35%)的最新惯例——不再
+    # 逐个品种客制化收紧，统一1%基准线。
+    "radar_gate_return_pct": 0.01,
+    "tiers": DELL_TIERS,
+    "reentry_zone_atr": _DELL_ZONE,
+    "reentry_window_bars": _DELL_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
+REENTRY_GEV: Dict[str, Any] = {
+    "name": "GEV",
+    "tv_tf": "4h",
+    "tv_tf_sec": _GEV_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    # 2026-09-06：GEV ATR%=1.13%，沿用跟其它TradFi品种一致的1%惯例。
+    "radar_gate_return_pct": 0.01,
+    "tiers": GEV_TIERS,
+    "reentry_zone_atr": _GEV_ZONE,
+    "reentry_window_bars": _GEV_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
@@ -825,6 +901,8 @@ _BY_SYMBOL = {
     "LITEUSDT": REENTRY_LITE,
     "TSLAUSDT": REENTRY_TSLA,
     "METAUSDT": REENTRY_META,
+    "DELLUSDT": REENTRY_DELL,
+    "GEVUSDT": REENTRY_GEV,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }
