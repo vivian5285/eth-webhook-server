@@ -55,7 +55,9 @@ from flask import Flask, jsonify, Response, request
 # 陈旧状态出不去就是因为这个。这里同步删掉，不需要额外改动——旧的
 # binance_vps_state_{ASMLUSDT,SKHYNIXUSDT}.json文件留着无害，本来就不会
 # 再被更新，只是这个清单不再读它们。
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+# 2026-09-05：宝贝要求把SKHYNIXUSDT重新接回实盘，这里同步加回来。ASMLUSDT
+# 不动，仍是删除状态。
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 ACCOUNTS = [
     {"id": "B", "port": 5007, "label": "妈妈的币安账户", "user": "binanceB", "svc": "binanceB-engine"},
     {"id": "C", "port": 5008, "label": "我自己的币安账户", "user": "binanceC", "svc": "binanceC-engine"},

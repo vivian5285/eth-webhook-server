@@ -38,7 +38,10 @@ MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
 # (heartbeat_silent)，宝贝发现"监督狗可能还不知道我们删除了一些币"，
 # 一猜就中。这里同步删掉，跟dashboard/server.py那次(同一天，同一类问题)
 # 是完全一样的根因。
-SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
+# 2026-09-05：宝贝要求把SKHYNIXUSDT重新接回实盘，这里同步加回来（跟各
+# 账户.env/symbol_config.py一起改，避免又漏改成误报心跳失效）。ASMLUSDT
+# 不动，仍是删除状态。
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT"]
 
 STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
 ALERT_DEDUPE_SEC = 30 * 60

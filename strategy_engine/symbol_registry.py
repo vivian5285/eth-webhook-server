@@ -86,11 +86,10 @@ SYMBOLS: Dict[str, dict] = {
     "GSUSDT":        {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},  # [占位] 待宝贝核实图表周期
     "OPENAIUSDT":    {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
     "SNDKUSDT":      {"strategy": _NARROW, "timeframe": "90m",  "mtf": _MTF, "params": {}},
-    # SKHYNIXUSDT：2026-09-04 宝贝确认"胜率太低，以后不做他们了，删除"（跟
-    # ASMLUSDT同一批决定）——四个账户(B/C/D/E)都已核实空仓+零挂单，注释掉
-    # 而不物理删这一行，保留可逆性；如需恢复追踪，取消注释即可，原属家族②
-    # （平开不互斥版）。
-    # "SKHYNIXUSDT": {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
+    # SKHYNIXUSDT：2026-09-04 曾因"胜率太低"删除（跟ASMLUSDT同一批），
+    # 2026-09-05 宝贝要求把TV重新接回实盘，取消注释恢复——ASMLUSDT本身
+    # 不动，仍是删除状态。
+    "SKHYNIXUSDT":   {"strategy": _NARROW, "timeframe": "150m", "mtf": _MTF, "params": {}},
 
     # ── 家族③ KDJ豁免温和版（窄TP + KDJ豁免）：TSLA / ANTHROPIC / PAXG / ZEC ─
     "TSLAUSDT":      {"strategy": _KDJ_EXEMPT, "timeframe": "90m",  "mtf": _MTF, "params": {}},  # [占位] 待宝贝核实图表周期
