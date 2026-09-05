@@ -145,6 +145,18 @@ AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真
   - adx_efficiency_zscore：4h，跟同批ADX战法(adx_regime_switch/
     raschke_adx_pullback/supertrend_adx)同周期，方便横向比较"用ADX的
     不同方式，谁更好"这个持续在做的对照实验。
+
+2026-09-05第三批新增5套(宝贝要求"还有更多好的策略吗")：
+  - donchian_reversal：1d。"4周法则"直接换算20个交易日，教科书标准
+    等价表述，不需要额外压缩。
+  - wyckoff_spring：4h，跟darvas_box/breakout_retest同一批区间结构类
+    战法同周期，方便横向对照三种不同的"区间边界交易"哲学。
+  - livermore_pivotal_point：4h，跟同批结构类战法同周期。
+  - obv_divergence：4h，跟chanlun_pivot(同属背离类)同周期，方便对照
+    "MACD面积背驰 vs OBV背离，哪种信号源更好"。
+  - turtle_system2：4h，必须跟turtle_breakout同周期，才能验证"只把
+    Donchian回看窗口从20拉长到55(海龟原版系统2)，其余全部不变"这个
+    单变量对照实验。
 """
 from __future__ import annotations
 
@@ -206,6 +218,10 @@ _SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
 # single_symbol_entry新增的bars_limit字段支持)。
 _VEGAS_BARS_LIMIT = 1400
 
+# turtle_system2：海龟原版系统2(55日进场/20日离场)，用跟turtle_breakout
+# 完全相同的_TURTLE_SYMBOLS品种池，保证除回看窗口外单变量对照成立。
+_TURTLE_SYSTEM2_PARAMS = {"entry_period": 55, "exit_period": 20, "atr_len": 20, "atr_stop_mult": 2.0}
+
 # 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?, mtf?}
 SINGLE_SYMBOL_ROSTER = (
     [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
@@ -239,6 +255,12 @@ SINGLE_SYMBOL_ROSTER = (
     # ── 2026-09-05第二批新增2套(DeepSeek建议剥离出的纯规则版) ────────────
     + [{"symbol": s, "strategy": "chanlun_pivot", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_efficiency_zscore", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # ── 2026-09-05第三批新增5套 ──────────────────────────────────────────
+    + [{"symbol": s, "strategy": "donchian_reversal", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "wyckoff_spring", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "livermore_pivotal_point", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "obv_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "turtle_system2", "timeframe": "4h", "params": _TURTLE_SYSTEM2_PARAMS} for s in _TURTLE_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

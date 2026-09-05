@@ -413,6 +413,44 @@ def wilder_adx_di(bars: Sequence[dict], period: int = 14):
     return float(adx), float(pdi), float(mdi)
 
 
+def obv(bars: Sequence[dict]) -> List[float]:
+    """能量潮(On-Balance Volume)——Joseph Granville 1963年公开发表，成交量
+    类指标里最经典的之一。收盘价比前一根高就把这根成交量加进累计值，
+    比前一根低就减掉，平就不变。返回跟bars等长的序列(第一个点=0，
+    作为累计起点)。"""
+    n = len(bars or [])
+    if n == 0:
+        return []
+    out = [0.0]
+    for i in range(1, n):
+        c, pc = _f(bars[i]["c"]), _f(bars[i - 1]["c"])
+        v = _f(bars[i].get("v"))
+        if c > pc:
+            out.append(out[-1] + v)
+        elif c < pc:
+            out.append(out[-1] - v)
+        else:
+            out.append(out[-1])
+    return out
+
+
+def swing_points(bars: Sequence[dict], kind: str) -> List[tuple]:
+    """轻量级摆动高低点识别(3根K线局部极值，不做K线合并处理——是比
+    supertrend/chanlun_pivot那套更轻的独立实现，专供背离类战法用)。
+    kind='high'找局部高点，'low'找局部低点。返回[(bars下标, 极值价), ...]。"""
+    n = len(bars or [])
+    out = []
+    for i in range(1, n - 1):
+        h, l = _f(bars[i]["h"]), _f(bars[i]["l"])
+        ph, pl = _f(bars[i - 1]["h"]), _f(bars[i - 1]["l"])
+        nh, nl = _f(bars[i + 1]["h"]), _f(bars[i + 1]["l"])
+        if kind == "high" and h > ph and h > nh:
+            out.append((i, h))
+        elif kind == "low" and l < pl and l < nl:
+            out.append((i, l))
+    return out
+
+
 def donchian_mid(bars: Sequence[dict], period: int) -> List[float]:
     """一目均衡表用的中值线：(period根内最高高点+最低低点)/2，**含当前这
     根**(跟donchian_high_low故意相反——那个是海龟规则"不含当前"，一目

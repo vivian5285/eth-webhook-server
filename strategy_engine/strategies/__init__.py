@@ -318,6 +318,48 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] adx_efficiency_zscore 加载失败: {_e}")
 
+# 2026-09-05第三批新增：宝贝要求"还有更多好的策略"，挑了5个真正差异化、
+# 过得了准入线的老牌真实战法(唐奇安/威科夫/利弗莫尔/格兰维尔OBV都是
+# 真实历史人物公开发表/真实交易记录，turtle_system2是海龟原版就有的
+# 另一半规则，之前只接了系统1)。
+try:
+    from strategy_engine.strategies import donchian_reversal
+    STRATEGIES["donchian_reversal"] = donchian_reversal.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] donchian_reversal 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import wyckoff_spring
+    STRATEGIES["wyckoff_spring"] = wyckoff_spring.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] wyckoff_spring 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import livermore_pivotal_point
+    STRATEGIES["livermore_pivotal_point"] = livermore_pivotal_point.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] livermore_pivotal_point 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import obv_divergence
+    STRATEGIES["obv_divergence"] = obv_divergence.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] obv_divergence 加载失败: {_e}")
+
+try:
+    # turtle_system2：跟turtle_breakout共用同一份代码，只是参数换成海龟
+    # 原版真正的"系统2"(55日突破进场/20日突破离场)——跟bollinger_squeeze_
+    # fast复用bollinger_squeeze代码同一个做法，不是重复注册bug。
+    from strategy_engine.strategies import turtle_breakout as _turtle_mod
+    STRATEGIES["turtle_system2"] = _turtle_mod.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] turtle_system2 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -650,6 +692,61 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "均线不同，这套回踩的是Z-score(统计偏离度)且多一层效率比过滤；"
         "跟kaufman_ama把效率比用来调均线速度不同，这套把效率比当regime"
         "过滤门槛。4H周期，跟同批ADX战法同周期方便对照。"
+    ),
+    "donchian_reversal": (
+        "唐奇安原始反转系统(4周法则)——2026-09-05新增。Richard Donchian，"
+        "\"趋势跟随之父\"，本人真实管理过公开的Donchian期货基金(1949年"
+        "成立)，Turtle海龟系统的通道突破思路正是从他这套发展来的。"
+        "20日(\"4周法则\"的现代换算)新高做多、新低做空，**永远在场内**"
+        "反手，没有独立止损(止损就是反向突破本身，本模块额外加ATR兜底"
+        "是实用主义补丁，如实说明不冒充原版)。跟parabolic_sar_flip同属"
+        "\"永远持仓反手\"，但那套反手依据SAR指标值，这套依据纯价格结构，"
+        "是本擂台唯一的价格结构驱动反手系统。跟turtle_breakout的关系："
+        "那套是这个原始设计+ATR止损/止盈风控层的后续改良版。1D周期，"
+        "\"4周\"直接换算20个交易日，教科书标准等价表述。"
+    ),
+    "wyckoff_spring": (
+        "威科夫弹簧/派发——2026-09-05新增。Richard Wyckoff，20世纪初真实"
+        "交易员/教育家，跟道氏、江恩同时代，公开出版《股票市场技术分析"
+        "研究课程》。价格跌破区间支撑后放量(≥1.3倍均量)又迅速收回=\"弹簧\""
+        "(洗盘不是真跌，做多)，突破压力后放量又收回=\"派发\"(做空)。跟"
+        "breakout_retest(先突破、等回踩确认真突破)方向相反——这套赌的是"
+        "\"假跌破/假突破\"，本擂台唯一要求\"单根K线放量确认\"的假突破反转"
+        "战法(跟volume_profile_reversion的成交量空间分布、chanlun_pivot"
+        "的MACD面积力度都不是同一个维度)。4H周期。"
+    ),
+    "livermore_pivotal_point": (
+        "利弗莫尔关键点突破——2026-09-05新增。Jesse Livermore，史上最"
+        "具名的真实交易员之一(1929年美股崩盘真实做空获利上亿，公开可"
+        "考证)，本人口述出版《股票作手回忆录》(1923)，\"关键点\"是书里"
+        "反复强调的核心概念。要求同时满足两件事：前面已经有一段真正的"
+        "大动作(20根内涨跌≥8%)，后面有一段真正安静的停顿(8根内区间"
+        "宽度≤6%)，价格朝原趋势方向突破停顿区间才进场——只做趋势延续"
+        "不追反转。本擂台唯一明确要求\"入场前必须已存在明确前置趋势\"的"
+        "突破类战法，跟darvas_box/breakout_retest都不要求这个前置条件。"
+        "4H周期，信号天然稀少(双重门槛)，呼应利弗莫尔本人\"少而精\"的"
+        "真实交易风格。"
+    ),
+    "obv_divergence": (
+        "能量潮背离——2026-09-05新增。Joseph Granville 1963年公开发表"
+        "OBV指标，\"背离判断反转\"是几十年公开教材的经典用法。找最近两个"
+        "摆动高点(顶背离：价格新高但OBV反而走低)/摆动低点(底背离对称)，"
+        "背离出现即进场，跌破/突破触发信号的摆动点则判定背离失效离场。"
+        "本擂台唯一纯粹从**累计成交量**构造背离信号的战法——chanlun_"
+        "pivot的背驰用MACD面积(动量维度)，这套用OBV(资金流维度)，量在"
+        "先价在后。4H周期，跟chanlun_pivot同周期方便对照\"哪种背离信号源"
+        "更好用\"。"
+    ),
+    "turtle_system2": (
+        "海龟系统2(55日突破)——2026-09-05新增，复用turtle_breakout.py"
+        "同一份代码(跟bollinger_squeeze_fast复用bollinger_squeeze同一个"
+        "做法)，只是参数换成Dennis教海龟交易员时真正的\"系统2\"：55日"
+        "突破进场、20日突破离场(系统1是20日进场/10日离场，早前已经接入"
+        "为turtle_breakout)。海龟原版规则本来就是系统1、系统2同时跑、"
+        "互相验证——之前只接了一半，这次补上另一半，零新增指标逻辑，"
+        "纯粹是用更长回看窗口跑出更慢、信号更少但理论上噪音更低的趋势"
+        "跟随版本，直接跟turtle_breakout对照\"更长周期是否更好\"。4H"
+        "周期，跟turtle_breakout同周期保证除回看窗口外全部对齐。"
     ),
 }
 
