@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from strategy_engine import indicators, klines, shadow_store
 from strategy_engine.strategies import get_strategy, pairs_trading
-from strategy_engine.position_sizing import compute_qty
+from strategy_engine.position_sizing import compute_qty, compute_liquidation_price, LEVERAGE
 
 logger = logging.getLogger(__name__)
 
@@ -80,17 +80,51 @@ def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: i
 
 def _check_stop_tp(pos: dict, bar: dict):
     """跟backtest_runner.py::_check_stop_tp同一套简化口径：一根K线内到底
-    先碰到止损还是先碰到止盈无法从OHLC里还原真实顺序，保守假设止损优先。"""
+    先碰到止损还是先碰到止盈无法从OHLC里还原真实顺序，保守假设止损优先。
+
+    2026-09-05新增"模拟强平价"这道安全网：宝贝指出擂台排名可能被"模拟盘
+    扛住了现实中会强平的深度浮亏"这种假象带偏——42套战法各自的ATR止损
+    宽窄不一，但整个引擎从没算过"5倍杠杆下价格反向走多远会被交易所强平"；
+    如果某套战法自己设的止损比强平价还宽(宽止损搏大趋势的战法尤其容易
+    这样)，模拟盘会一直扛到战法自己的止损才平仓，真实账户早就被强平出局，
+    两边盈亏对不上。
+
+    这里把"战法自己的止损"和"开仓时按LEVERAGE算好的模拟强平价"放在一起
+    比较，**取离入场价更近(更容易先触发)的那个**当真正生效的止损线——
+    这正是现实中会发生的事：不管战法自己想不想止损，价格先碰到哪个就先
+    在哪个位置离场。返回(exit_kind, exit_price, hit_tp)，exit_kind是
+    None/'stop'/'liq'，调用方用它区分记录"触及止损"还是"触及强平"
+    (后者对判断"这套战法能不能上真实杠杆"是最直接的证据)。老仓位(这次
+    改动之前开的)liq_price是NULL，candidates里只有stop一项，行为完全
+    不变，不需要单独处理。"""
     side = pos["side"]
     stop = pos.get("stop_loss")
+    liq = pos.get("liq_price")
     tp1 = pos.get("tp1")
+
+    candidates = []
+    if stop is not None:
+        candidates.append(("stop", float(stop)))
+    if liq:  # liq_price为None或0(计算失败)都不参与比较
+        candidates.append(("liq", float(liq)))
+
+    exit_kind, exit_price = None, None
+    if candidates:
+        if side == "LONG":
+            kind, price = max(candidates, key=lambda kv: kv[1])  # 两个候选都在入场价下方，取更高(更近)的
+            hit = float(bar["l"]) <= price
+        else:
+            kind, price = min(candidates, key=lambda kv: kv[1])  # 两个候选都在入场价上方，取更低(更近)的
+            hit = float(bar["h"]) >= price
+        if hit:
+            exit_kind, exit_price = kind, price
+
     if side == "LONG":
-        hit_stop = stop is not None and float(bar["l"]) <= float(stop)
         hit_tp = tp1 is not None and float(bar["h"]) >= float(tp1)
     else:
-        hit_stop = stop is not None and float(bar["h"]) >= float(stop)
         hit_tp = tp1 is not None and float(bar["l"]) <= float(tp1)
-    return hit_stop, hit_tp
+
+    return exit_kind, exit_price, hit_tp
 
 
 def _pnl_atr_weighted(pos: dict, exit_price: float) -> float:
@@ -105,6 +139,10 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
     tier = int(sig.get("tier") or 1)
     equity = shadow_store.get_equity(strategy)
     qty = compute_qty(equity, float(sig["price"]), sig.get("stop_loss"), tier)
+    # 2026-09-05新增：开仓那一刻按LEVERAGE(5x，跟compute_qty同一套杠杆
+    # 假设)算好模拟强平价存下来，_check_stop_tp用它跟战法自己的止损
+    # 取更紧的那个当真正生效的止损线(见该函数注释)。
+    liq_price = compute_liquidation_price(float(sig["price"]), sig["action"], LEVERAGE)
     row = {
         "symbol": symbol, "strategy": strategy, "timeframe": timeframe,
         "side": sig["action"], "entry": float(sig["price"]), "atr0": float(sig.get("atr") or 0),
@@ -114,6 +152,7 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
         "stop": sig.get("stop_loss"), "last_ratchet_price": None,
         "tp1_done": 0, "tp2_done": 0,
         "realized_frac": 0, "realized_pnl_atr_weighted": 0, "qty": qty,
+        "liq_price": liq_price,
     }
     pid = shadow_store.insert_open_row(row)
     if pid is None:
@@ -125,7 +164,8 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
     _open_positions[(symbol, strategy)] = mem
     logger.info(
         f"📈 [多策略][{strategy}][{symbol}] 开仓 {sig['action']} @ {sig['price']:.6f} "
-        f"qty={qty:.6f}(净值${equity:.2f}·T{tier}) stop={sig.get('stop_loss')} tp1={sig.get('tp1')}"
+        f"qty={qty:.6f}(净值${equity:.2f}·T{tier}) stop={sig.get('stop_loss')} tp1={sig.get('tp1')} "
+        f"liq≈{liq_price:.6f}"
     )
     return pid
 
@@ -225,9 +265,10 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     last_bar = bars[-1]
 
     if pos:
-        hit_stop, hit_tp = _check_stop_tp(pos, last_bar)
-        if hit_stop:
-            _close_position(key, float(pos["stop_loss"]), int(last_bar["t"]), "触及止损")
+        exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)
+        if exit_kind:
+            reason = "触及模拟强平(5x杠杆)" if exit_kind == "liq" else "触及止损"
+            _close_position(key, exit_price, int(last_bar["t"]), reason)
             return
         if hit_tp:
             _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")
@@ -279,9 +320,10 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         params = {"symbol": symbol, "universe_returns": universe_returns, "lookback_bars": lookback}
 
         if pos:
-            hit_stop, hit_tp = _check_stop_tp(pos, last_bar)
-            if hit_stop:
-                _close_position(key, float(pos["stop_loss"]), int(last_bar["t"]), "触及止损")
+            exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)
+            if exit_kind:
+                reason = "触及模拟强平(5x杠杆)" if exit_kind == "liq" else "触及止损"
+                _close_position(key, exit_price, int(last_bar["t"]), reason)
                 continue
             if hit_tp:
                 _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")

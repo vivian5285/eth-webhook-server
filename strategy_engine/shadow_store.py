@@ -122,6 +122,11 @@ def _init_db() -> None:
             ("pair_base_price", "REAL"),
             ("pair_formation_mean", "REAL"),
             ("pair_formation_std", "REAL"),
+            # 2026-09-05新增：模拟强平价(position_sizing.compute_liquidation_
+            # price，开仓那一刻按5倍杠杆算好存下来)——老行这一列是NULL，
+            # _check_stop_tp里liq_price为None时自然只用战法自己的止损，
+            # 不需要为老仓位单独处理(见multi_strategy_runner.py注释)。
+            ("liq_price", "REAL"),
         ):
             try:
                 conn.execute(f"ALTER TABLE shadow_positions_v2 ADD COLUMN {col} {coltype}")
@@ -143,6 +148,7 @@ _init_db()
 _UPDATABLE_FIELDS = (
     "tp1_price", "tp2_price", "stop", "last_ratchet_price",
     "tp1_done", "tp2_done", "realized_frac", "realized_pnl_atr_weighted",
+    "liq_price",
 )
 
 DEFAULT_STARTING_EQUITY = 1000.0
@@ -238,8 +244,8 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                     stop, last_ratchet_price, tp1_done, tp2_done,
                     realized_frac, realized_pnl_atr_weighted, qty,
                     pair_key, pair_base_price, pair_formation_mean, pair_formation_std,
-                    status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                    liq_price, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
                 (
                     row["symbol"], row["strategy"], row["timeframe"], row["side"],
                     row["entry"], row["atr0"], row["tier"], row.get("adx"),
@@ -251,6 +257,7 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                     row.get("qty") or 0.0,
                     row.get("pair_key"), row.get("pair_base_price"),
                     row.get("pair_formation_mean"), row.get("pair_formation_std"),
+                    row.get("liq_price"),
                     time.time(),
                 ),
             )

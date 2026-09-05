@@ -29,6 +29,35 @@ TIER_NOTIONAL_MULT = {0: 0.14, 1: 0.245, 2: 0.35}
 
 DEFAULT_STARTING_EQUITY = 1000.0
 
+# 2026-09-05新增：模拟强平价——宝贝指出"擂台第一名会不会是靠模拟盘扛住了
+# 现实中会强平的深度浮亏堆出来的"，查证后确认这是真实缺口：42套战法都有
+# 自己的ATR止损，但整个引擎从来没算过"5倍杠杆下价格反向走多远会被交易所
+# 强平"——如果某个战法自己设的止损比强平价还宽(比如宽止损搏大趋势的
+# 战法)，模拟盘会一直扛到战法自己的止损才平仓，但真实账户早就被强平出局，
+# 两边算出来的盈亏完全对不上。
+#
+# 简化近似公式(忽略资金费率/手续费，隔离保证金模式)：
+#   多头强平价 = entry × (1 - 1/leverage + maintenance_margin_rate)
+#   空头强平价 = entry × (1 + 1/leverage - maintenance_margin_rate)
+# maintenance_margin_rate取0.4%——币安USDT本位合约低杠杆档位(仓位名义
+# 价值较小时)常见的维持保证金率代表值，不同品种/名义价值档位实际数字
+# 略有出入，这里统一近似不做逐品种精确对照(模拟盘的目的是暴露"有没有
+# 这类风险"，不是复刻某个具体品种当下的精确强平价)。
+LIQUIDATION_MAINTENANCE_MARGIN_RATE = 0.004
+
+
+def compute_liquidation_price(entry_price: float, side: str, leverage: float = LEVERAGE) -> float:
+    """返回模拟强平价。entry_price<=0或leverage<=0时返回0.0(调用方按
+    "没有强平价"处理，不参与止损比较)。"""
+    entry_price = float(entry_price or 0)
+    leverage = float(leverage or 0)
+    if entry_price <= 0 or leverage <= 0:
+        return 0.0
+    margin_rate = 1.0 / leverage
+    if str(side or "").upper() == "LONG":
+        return entry_price * (1 - margin_rate + LIQUIDATION_MAINTENANCE_MARGIN_RATE)
+    return entry_price * (1 + margin_rate - LIQUIDATION_MAINTENANCE_MARGIN_RATE)
+
 
 def compute_qty(equity: float, price: float, stop_price: Optional[float], tier: int = 1) -> float:
     """返回开仓数量(标的单位，比如ETH数量/XAU盎司数)。任何入参不合法
