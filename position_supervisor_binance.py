@@ -14078,9 +14078,45 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return fallback_qty
 
     def _split_tp_quantities(self, qty: float, ratios: list) -> tuple:
-        """余数吸收：qty1+qty2+qty3 == qty"""
-        qty1 = round(qty * ratios[0], 3)
-        qty2 = round(qty * ratios[1], 3)
+        """余数吸收：qty1+qty2+qty3 == qty
+
+        2026-09-05新增：min_qty感知的TP1保底——宝贝复现SNDKUSDT实盘：B/C
+        两个账户仓位较小(0.06)，按固定10%比例算出的TP1(0.006)低于交易所
+        最小下单量(0.01)，被_normalize_tp_qty_map合并进TP2挂成一档；那
+        一次价格只冲到TP1附近就回落，合并后的那一档因为要等到TP2那么远
+        才成交，始终没等到，仓位全程没能提前锁一点利润，最后整仓吃了一口
+        回撤止损——同一笔TV信号，仓位更大的E账户(0.10)TP1能单独挂出、
+        提前锁到了利润，同样的回撤对E的影响小得多。
+
+        这里在"按比例算"这一步就尽量保证TP1够格独立挂单：如果按默认
+        ratios[0]算出来的TP1低于min_qty、但TP1+TP2合起来的总量本身够
+        (说明不是仓位真的小到没法细分，纯粹是比例切分的问题)，优先从
+        TP2挪一点填平TP1到min_qty——不动TP3，TP3是"让利润奔跑"的份额，
+        能不动就不动；只有TP2挪到自己也只剩min_qty还不够时，才继续从
+        TP3补一点点(且保证TP3自己也不会被挪到min_qty以下)。仓位小到
+        连TP1+TP2合并都不够min_qty的情况(比如实盘复现过的ANTHROPIC
+        qty=0.03)，这里不勉强凑数，原样跳过，交给_normalize_tp_qty_map
+        既有的合并/放弃兜底处理——那条路径已经验证过是对的，这里只是
+        补上"够格却因为切分比例卡在夹缝里"这一种此前没覆盖的场景。
+        """
+        qty = float(qty or 0)
+        r1 = float(ratios[0]) if ratios else 0.10
+        r2 = float(ratios[1]) if len(ratios or []) > 1 else 0.20
+        qty1 = qty * r1
+        qty2 = qty * r2
+        min_leg_qty = float(getattr(self, "min_qty", 0) or MIN_TP_LEG_QTY)
+        if 0 < qty1 < min_leg_qty <= qty * (r1 + r2):
+            deficit = min_leg_qty - qty1
+            take_from_2 = min(deficit, max(qty2 - min_leg_qty, 0.0))
+            qty1 += take_from_2
+            qty2 -= take_from_2
+            remaining = min_leg_qty - qty1
+            if remaining > 1e-9:
+                qty3_avail = qty - qty1 - qty2
+                take_from_3 = min(remaining, max(qty3_avail - min_leg_qty, 0.0))
+                qty1 += take_from_3
+        qty1 = round(qty1, 3)
+        qty2 = round(qty2, 3)
         qty3 = round(qty - qty1 - qty2, 3)
         return qty1, qty2, qty3
 
