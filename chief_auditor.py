@@ -66,14 +66,27 @@ def check_tp_slice_budget(
     place_levels: int = 2,
     ratios: Optional[List[float]] = None,
     tol_ratio: float = 0.03,
+    expected_override: Optional[float] = None,
 ) -> AuditItem:
-    """TP1+TP2 之和应 ≈ initial × 30%（place=2）。"""
+    """TP1+TP2 之和应 ≈ initial × 30%（place=2）。
+
+    expected_override: 调用方已经用min_qty感知算法(见
+    position_supervisor_binance.py::_split_tp_quantities)算出实际期望
+    份额时传入，覆盖这里的朴素按比例估算。2026-09-05实盘复现（C账户
+    BNBUSDT心跳追回仓）：TP1单独不够格挂单时会从TP2/TP3各借一点凑够
+    最小下单量，TP1+TP2合计因此可能比朴素比例值略高(借自TP3的部分)，
+    朴素估算会把这种合法调整误判成"超帽"连续拒挂，导致仓位长时间只有
+    硬止损、完全没有止盈单。
+    """
     ratios = list(ratios or [0.10, 0.20, 0.70])
     place_n = max(1, min(2, int(place_levels or 2)))
     initial = _f(initial_qty)
     if initial <= 0:
         return AuditItem("tp_slice", False, True, "initial_qty<=0")
-    expected = initial * sum(_f(r) for r in ratios[:place_n])
+    expected = (
+        _f(expected_override) if expected_override is not None
+        else initial * sum(_f(r) for r in ratios[:place_n])
+    )
     got = _f(tp1_qty) + _f(tp2_qty)
     drift = abs(got - expected)
     tol = max(0.001, initial * float(tol_ratio), expected * float(tol_ratio))

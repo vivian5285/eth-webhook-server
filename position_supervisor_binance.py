@@ -9480,6 +9480,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # TP1+TP2理论份额0.009本身就低于min_qty=0.01，市价开仓+硬止损都已成功
             # 挂上，就因为这道闸整条流水线被判FAILED+暂停交易告警，控制台显示"失败"
             # 让人误以为没开成，实际上仓位是真开了的，只是没有限价止盈。
+            # 2026-09-05修复：cap/expected都改用_split_tp_quantities的min_qty
+            # 感知结果，而不是朴素比例——否则TP1从TP2/TP3借qty凑够最小下单量
+            # 的合法调整（首次挂单、consumed为空时才会发生）会被下面的批量帽
+            # 和check_tp_slice_budget误判成"超帽"连续拒挂。实盘复现：C账户
+            # BNBUSDT心跳追回仓qty=0.06，借调后tp1+tp2=0.02 > 朴素比例0.018，
+            # 导致开仓起20多分钟每轮巡检都被这道闸拦下，仓位全程只有硬止损、
+            # 完全没有止盈单。
+            exp_q1, exp_q2, _exp_q3 = self._split_tp_quantities(init_q, ratios)
+            expected_min_qty_aware = exp_q1 if place_n <= 1 else (exp_q1 + exp_q2)
+            cap = round(max(expected_min_qty_aware, 0.0) + 1e-6, 3)
             if got_1_2 <= 0 and expected_raw < min_leg_qty:
                 logger.info(
                     f"🧩 [{self.symbol}] TP1+TP2理论份额{expected_raw:.4f}本身低于"
@@ -9492,6 +9502,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     float(q_by.get(2) or 0),
                     place_levels=place_n,
                     ratios=ratios,
+                    expected_override=expected_min_qty_aware,
                 )
                 if not item.ok:
                     return False, item.detail
