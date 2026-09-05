@@ -634,31 +634,35 @@ BREATH_GS: Dict[str, Any] = {
     "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(GS)
 }
 
-# MU 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟ASML/
-# GS同类）。用真实30m K线合成90分钟K线（分页拉了3950根30m原始K线覆盖约
-# 82天），真实摆动点识别(fractal pivot，±3根确认，同08-18/08-25那批方法)
-# 测了1316根合成K线、180个摆动回调样本：中位数≈2.62×ATR，75分位≈
-# 3.69×ATR，90分位≈6.83×ATR。ATR%=1.21%——比XAU/ASML/GS这几个稍高，
-# 尾部也更肥。step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS
-# 08-25注释（跨品种均值比例）。
+# MU 基线——2026-09-05重新校准：宝贝反映"mu的tv挂载55分钟周期了"，原
+# 08-25那版是按90分钟合成K线测的，周期变了必须用真实55分钟K线重新测
+# 回调分布，不能只改tv_tf_sec不改呼吸系数(旧系数是拿90分钟的"跑腿距离"
+# 校出来的，直接套到55分钟上会明显偏松)。55分钟能被5分钟整除，用真实
+# 5m K线合成（分页拉了23304根5m原始K线覆盖约80.9天），真实摆动点识别
+# (fractal pivot，±3根确认，同08-18/08-25那批方法)测了2118根合成K线、
+# 317个摆动回调样本：中位数≈2.50×ATR，75分位≈3.71×ATR，90分位≈
+# 5.56×ATR。ATR%=0.47%（周期变短后ATR的价格占比也相应变小，符合预期）。
+# step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS 08-25注释
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger），不是脚本粗算建议里直接拿p50当step_trigger那版。
 BREATH_MU: Dict[str, Any] = {
     "name": "MU",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.98,
-    "step_advance_atr": 0.64,
+    "step_trigger_atr": 0.94,
+    "step_advance_atr": 0.61,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.62,  # 覆盖实测中位数回调(2.62)
-    "breath_tp23": 3.69,  # 覆盖实测75分位回调(3.69)
+    "breath_tp12": 2.50,  # 覆盖实测中位数回调(2.50)
+    "breath_tp23": 3.71,  # 覆盖实测75分位回调(3.71)
     "phase2_trail_mult": 1.0,
-    "min_mult": 5.3,
-    "max_mult": 7.1,      # 覆盖实测90分位回调(6.83)以上
+    "min_mult": 4.2,
+    "max_mult": 5.9,      # 覆盖实测90分位回调(5.56)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

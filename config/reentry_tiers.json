@@ -547,10 +547,10 @@
     ]
   },
   "MU": {
-    "tv_tf_sec": 5400,
+    "tv_tf_sec": 3300,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-25：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，MU美光科技股票代币化永续，已上市正股类跟ASML/GS同类）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(MU breath_profiles.py中位数回调2.62/ETH当前中位数回调2.70)≈0.985倍缩放ETH三档基线，几乎不用收紧；breath_tp12/23/min_mult/max_mult维持ETH同款。",
+    "note": "2026-08-25：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，MU美光科技股票代币化永续，已上市正股类跟ASML/GS同类）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(MU breath_profiles.py中位数回调2.62/ETH当前中位数回调2.70)≈0.985倍缩放ETH三档基线，几乎不用收紧；breath_tp12/23/min_mult/max_mult维持ETH同款。2026-09-05修正：宝贝反映TV策略周期改成55分钟，tv_tf_sec从5400(90分钟)改成3300(55分钟)；reentry_window_bars维持2根(2×55=110分钟，比原90分钟窗口短，符合周期缩短的预期，不强行凑150-200分钟惯例)；breath_profiles.py::BREATH_MU同批用真实55分钟K线重新校准，见该文件注释。",
     "tiers": [
       {
         "name": "weak",

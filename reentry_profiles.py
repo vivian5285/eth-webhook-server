@@ -395,7 +395,7 @@ _OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
 _ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 5400)
 _ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
 _GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)
-_MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 5400)
+_MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 3300)
 _LITE_TF_SEC = int((_CFG.get("LITE") or {}).get("tv_tf_sec") or 5400)
 _TSLA_TF_SEC = int((_CFG.get("TSLA") or {}).get("tv_tf_sec") or 21600)
 _META_TF_SEC = int((_CFG.get("META") or {}).get("tv_tf_sec") or 14400)
@@ -725,13 +725,16 @@ REENTRY_GS: Dict[str, Any] = {
 
 REENTRY_MU: Dict[str, Any] = {
     "name": "MU",
-    "tv_tf": "90m",
+    "tv_tf": "55m",
     "tv_tf_sec": _MU_TF_SEC,
     "enabled": True,
     "arm_sl_atr": ARM_SL_ATR,
     "fee_cover_pct": FEE_COVER_PCT,
     "arm_mode": ARM_MODE,
-    # 2026-08-25：MU ATR%=1.21%，沿用跟其它TradFi品种一致的1%惯例。
+    # 2026-09-05修正：宝贝反映TV周期改成55分钟，tv_tf从90m改55m。用真实
+    # 55分钟K线重新测得ATR%=0.47%(原90分钟版本1.21%)，1.5×ATR封顶≈
+    # 0.705%，比1%还紧，沿用跟GS同一惯例：1%这条腿不是实际约束，不用
+    # 额外收紧。
     "radar_gate_return_pct": 0.01,
     "tiers": MU_TIERS,
     "reentry_zone_atr": _MU_ZONE,
