@@ -261,15 +261,23 @@ def _chain_query(sql, params=()):
     擂台主体功能。"""
     if not os.path.exists(CHAIN_DB_PATH):
         return []
+    conn = None
     try:
         conn = sqlite3.connect(f"file:{CHAIN_DB_PATH}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[roster_dashboard] chain_sniper.db 查询失败: {e}")
         return []
+    finally:
+        # 2026-09-05修复：原来conn.close()只写在成功路径上，execute/
+        # fetchall抛异常时直接跳去except、连接永远不关——是跟shadow_
+        # store.py同一类"连接泄漏靠GC兜底"的问题(那边已经在
+        # _AutoCloseConnection里修过)，这里量小、触发条件也窄(只有真的
+        # 查询失败才会漏)，但顺手一起改成finally保证一定关闭。
+        if conn is not None:
+            conn.close()
 
 
 @app.route("/api/chain/overview")
