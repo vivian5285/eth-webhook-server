@@ -157,6 +157,17 @@ AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真
   - turtle_system2：4h，必须跟turtle_breakout同周期，才能验证"只把
     Donchian回看窗口从20拉长到55(海龟原版系统2)，其余全部不变"这个
     单变量对照实验。
+
+2026-09-05第四批新增3套(宝贝转发"永续合约主流战法大全"整理稿)：
+  - hma_trend：4h，跟本仓库其余中速趋势战法同一批周期选择。
+  - cvd_divergence：4h，必须跟obv_divergence同周期，才能验证"OBV vs
+    CVD，哪种成交量信号源更准"这个单变量对照实验。
+  - oi_price_confirm：4h，必须跟funding_trend同周期(1h)才能做"资金
+    费率滤网 vs OI滤网"对照——但OI历史数据点最快5分钟一个、~1个月
+    保留期，4h周期下能拿到足够多样本做oi_lookback比较，权衡之下选
+    4h而不是严格对齐funding_trend的1h(两者对照的是"滤网种类"这个
+    变量，周期不同不影响这层对照的有效性，骨架/滤网机制才是对照
+    核心)。
 """
 from __future__ import annotations
 
@@ -261,6 +272,10 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "livermore_pivotal_point", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "obv_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "turtle_system2", "timeframe": "4h", "params": _TURTLE_SYSTEM2_PARAMS} for s in _TURTLE_SYMBOLS]
+    # ── 2026-09-05第四批新增3套 ──────────────────────────────────────────
+    + [{"symbol": s, "strategy": "hma_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "cvd_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "oi_price_confirm", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

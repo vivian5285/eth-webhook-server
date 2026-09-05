@@ -434,6 +434,60 @@ def obv(bars: Sequence[dict]) -> List[float]:
     return out
 
 
+def wma(values: Sequence[float], period: int) -> List[float]:
+    """加权移动均线：越近的数据权重越大(权重按1..period线性递增)，是
+    Hull Moving Average的构造基础。返回从第period个点开始对齐的序列。"""
+    n = len(values or [])
+    if period <= 0 or n < period:
+        return []
+    weights = list(range(1, period + 1))
+    weight_sum = sum(weights)
+    out = []
+    for i in range(period - 1, n):
+        window = values[i - period + 1:i + 1]
+        out.append(sum(w * v for w, v in zip(weights, window)) / weight_sum)
+    return out
+
+
+def hma(values: Sequence[float], period: int) -> List[float]:
+    """Hull Moving Average(Alan Hull，2005年公开发表)。公式：
+    HMA(n) = WMA(2×WMA(close, n/2) - WMA(close, n), round(sqrt(n)))
+    是"降低均线滞后"流派的代表构造法，比同周期SMA/EMA对价格反转的
+    反应更快。返回结尾对齐到最新收盘价的序列，取负索引即可。"""
+    n = len(values or [])
+    half = max(1, period // 2)
+    sqrt_n = max(1, round(period ** 0.5))
+    wma_half = wma(values, half)
+    wma_full = wma(values, period)
+    if not wma_half or not wma_full:
+        return []
+    m = min(len(wma_half), len(wma_full))
+    raw = [2 * wma_half[len(wma_half) - m + i] - wma_full[len(wma_full) - m + i] for i in range(m)]
+    return wma(raw, sqrt_n)
+
+
+def cvd(bars: Sequence[dict]) -> List[float]:
+    """累计成交量差值(Cumulative Volume Delta)——用交易所自己上报的
+    主动买入量(bars里的"tb"字段，klines.py 2026-09-05新增，来自币安K线
+    接口原生自带的taker_buy_base_asset_volume，是真实数据，不是像OBV
+    那样用价格涨跌方向猜的代理指标)算真实主动买卖盘差值：
+    delta = 主动买量 - 主动卖量 = 2×tb - 总成交量v。累计求和，返回跟
+    bars等长的序列。bars里没有"tb"字段时该根delta记0(不报错，只是当根
+    不贡献信息，累计值保持不变)。"""
+    n = len(bars or [])
+    if n == 0:
+        return []
+    out = []
+    running = 0.0
+    for b in bars:
+        v = _f(b.get("v"))
+        tb = b.get("tb")
+        delta = (2.0 * _f(tb) - v) if tb is not None else 0.0
+        running += delta
+        out.append(running)
+    return out
+
+
 def swing_points(bars: Sequence[dict], kind: str) -> List[tuple]:
     """轻量级摆动高低点识别(3根K线局部极值，不做K线合并处理——是比
     supertrend/chanlun_pivot那套更轻的独立实现，专供背离类战法用)。

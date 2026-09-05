@@ -360,6 +360,31 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] turtle_system2 加载失败: {_e}")
 
+# 2026-09-05第四批新增：宝贝转发"永续合约主流战法大全"整理稿，评估后
+# 挑了3个过得了准入线、真正没重复的方向(排除了SMC/ICT术语、机器学习
+# 黑箱、做市/跨交易所套利这些架构不兼容或准入线过不去的部分，详见跟
+# 宝贝的讨论)。
+try:
+    from strategy_engine.strategies import hma_trend
+    STRATEGIES["hma_trend"] = hma_trend.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] hma_trend 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import cvd_divergence
+    STRATEGIES["cvd_divergence"] = cvd_divergence.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] cvd_divergence 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import oi_price_confirm
+    STRATEGIES["oi_price_confirm"] = oi_price_confirm.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] oi_price_confirm 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -747,6 +772,38 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "纯粹是用更长回看窗口跑出更慢、信号更少但理论上噪音更低的趋势"
         "跟随版本，直接跟turtle_breakout对照\"更长周期是否更好\"。4H"
         "周期，跟turtle_breakout同周期保证除回看窗口外全部对齐。"
+    ),
+    "hma_trend": (
+        "赫尔均线趋势系统——2026-09-05新增。Alan Hull 2005年公开发表"
+        "HMA公式(WMA(2×WMA(n/2)-WMA(n), sqrt(n)))，\"降低均线滞后\"流派"
+        "的代表构造法，各大图表软件都有内置(如TradingView ta.hma)。"
+        "HMA拐头向上做多、拐头向下做空(反向拐头即反手，跟parabolic_"
+        "sar_flip/supertrend_adx同一套\"指标翻转即反手\"结构)。跟ema_"
+        "cross_7_30(双线交叉)、kaufman_ama(效率比自适应变速)都不同——"
+        "这套只用一条均线，靠\"加权+差分\"的特殊构造方式本身降低滞后，"
+        "是本擂台第三种不同的\"减少均线滞后\"思路。4H周期。"
+    ),
+    "cvd_divergence": (
+        "累计成交量差值背离(CVD/Delta)——2026-09-05新增。用币安K线接口"
+        "自带的taker_buy_base_asset_volume(交易所自己上报的真实主动"
+        "买卖盘分类数据)算CVD，背离检测框架跟obv_divergence完全一致，"
+        "只换了成交量数据源——本擂台第一套用**真实主动买卖盘分类数据**"
+        "(而非从OHLCV自己推算)构造信号的战法，跟OBV(用价格涨跌方向猜"
+        "代理指标)形成\"哪种成交量信号源更准\"的直接对照组。klines.py"
+        "新增\"tb\"字段专门支撑这套。4H周期，跟obv_divergence同周期保证"
+        "对照实验只有数据源这一个变量。"
+    ),
+    "oi_price_confirm": (
+        "持仓量+价格确认——2026-09-05新增。永续合约OI(Open Interest)是"
+        "公开可查数据(币安/futures/data/openInterestHist)，\"价格涨跌"
+        "配合OI涨跌判断这波是不是真的有新钱\"是永续合约圈公开常识框架"
+        "(价格↑OI↑=趋势确认，价格↑OI↓=空头平仓推动的弱反弹，以此类推)。"
+        "骨架复用funding_trend.py的EMA50/200方向+突破，只把资金费率"
+        "拥挤度滤网换成OI趋势确认滤网(必须上升，不管方向)——跟funding_"
+        "trend形成\"资金费率滤网 vs OI滤网，哪个更好用\"的直接对照。"
+        "⚠️架构限制：币安OI历史保留约1个月，没法像K线一样长期回放，"
+        "这套战法只在live擂台跑，backtest不驱动它(跟funding_trend同一条"
+        "边界)。4H周期。"
     ),
 }
 

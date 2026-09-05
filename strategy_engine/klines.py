@@ -122,12 +122,18 @@ def merge_bars(source_bars: List[dict], target_minutes: int) -> List[dict]:
             "l": min(r["l"] for r in rows),
             "c": rows[-1]["c"],
             "v": sum(r["v"] for r in rows),
+            "tb": sum(r.get("tb") or 0.0 for r in rows),
         })
     return out
 
 
 def to_ohlcv_dicts(raw_klines: List[list]) -> List[dict]:
-    """币安原始K线数组 → 干净的dict列表，按时间升序。"""
+    """币安原始K线数组 → 干净的dict列表，按时间升序。
+    2026-09-05新增"tb"字段(taker_buy_base_asset_volume，原始数组第10个
+    位置r[9])——币安K线接口本来就自带这个字段，是交易所自己上报的"主动
+    买入量"真实数据(不是用价格涨跌方向猜的代理指标)，给cvd_divergence.py
+    的真实CVD/Delta背离用。纯新增字段，不影响任何只读t/o/h/l/c/v的既有
+    调用方。"""
     out = []
     for r in raw_klines or []:
         try:
@@ -138,6 +144,7 @@ def to_ohlcv_dicts(raw_klines: List[list]) -> List[dict]:
                 "l": float(r[3]),
                 "c": float(r[4]),
                 "v": float(r[5]),
+                "tb": float(r[9]) if len(r) > 9 else 0.0,
             })
         except (TypeError, ValueError, IndexError):
             continue
@@ -256,6 +263,7 @@ def get_current_bar(symbol: str, interval: str) -> Optional[dict]:
         "l": min(b["l"] for b in src_bars),
         "c": src_bars[-1]["c"],
         "v": sum(b["v"] for b in src_bars),
+        "tb": sum(b.get("tb") or 0.0 for b in src_bars),
     }
 
 
