@@ -168,8 +168,35 @@ AI战法，一起加入擂台比赛，多增加几个看看方便对比谁有真
     4h而不是严格对齐funding_trend的1h(两者对照的是"滤网种类"这个
     变量，周期不同不影响这层对照的有效性，骨架/滤网机制才是对照
     核心)。
+
+2026-09-05：宝贝要求把TV真实策略复刻也拉进擂台一起比。这4套(eth_
+pingkai_buhuchi/eth_pingkai_buhuchi_narrow/eth_kdj_exempt_narrow/
+bnb_heartbeat_real_reversal，逐字复刻宝贝亲自发来的真实TV Pine源码)
+原本挂在live_runner.py(60s轮询)/shadow_engine.py(更完整的TP1/TP2/TP3
++呼吸阶梯复刻，产出tv_multiscore_v1)这两个更早期的独立引擎下——实测
+两个引擎在这台VPS上都**没有在跑**(ps aux/systemctl都查不到进程，VPS
+迁移到这台之后没有跟着重新部署，不是宝贝主动取消)，shadow_v2.db里能
+看到的tv_multiscore_v1仓位其实是更早之前留下的孤儿数据，从未被清理过。
+
+宝贝的洞察是对的：TV真实告警惯例上"每根K线收盘才触发一次"(即使Pine
+脚本内部逐tick评估，告警投递这一步通常受这个节流)；这几套策略在
+symbol_registry.py里配的品种周期都是50m~6h(没有分钟级scalping)，本
+擂台引擎5分钟一轮直接拉币安实时K线判断，相对这些周期时长是很小的
+比例(50m周期上5分钟只占10%)，理论上确实能比"等TV告警"更快对每根新
+收盘K线做出反应——这正是这次要验证的假设，用同一套多空持仓记账引擎
+(multi_strategy_runner.py)跑起来最公平，不需要额外造一个"实时反应"
+模式。
+
+直接复用symbol_registry.py里宝贝亲自核对过的品种→策略→周期→MTF映射
+(_TV_MIRROR_ROSTER，见下)，不是另起一份擂台专用映射，避免"擂台版参数"
+和"真实TV版参数"不小心跑偏。zec_pingkai_buhuchi不在这次范围内——
+symbol_registry.py里已经没有任何品种指向它，是纯历史遗留(该文件
+2026-09-03的说明)。XPDUSDT跳过：实测币安公开接口拉不到K线(HTTP 400，
+可能已下架/改名)，如实标注，不猜测替代品种名称。
 """
 from __future__ import annotations
+
+from strategy_engine import symbol_registry
 
 # 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT真实交易胜率太低、已从
 # symbol_config.py::active_binance_symbols()删除（commit e45383d）——这是
@@ -233,6 +260,21 @@ _VEGAS_BARS_LIMIT = 1400
 # 完全相同的_TURTLE_SYMBOLS品种池，保证除回看窗口外单变量对照成立。
 _TURTLE_SYSTEM2_PARAMS = {"entry_period": 55, "exit_period": 20, "atr_len": 20, "atr_stop_mult": 2.0}
 
+# TV真实策略复刻拉进擂台：直接复用symbol_registry.SYMBOLS(宝贝亲自核对
+# 过的品种→策略→周期→MTF映射)，不重新写一份。XPDUSDT币安接口拉不到
+# K线(HTTP 400)，跳过。
+_TV_MIRROR_ROSTER = [
+    {
+        "symbol": sym,
+        "strategy": cfg["strategy"],
+        "timeframe": cfg["timeframe"],
+        "mtf": cfg.get("mtf") or [],
+        "params": cfg.get("params") or {},
+    }
+    for sym, cfg in symbol_registry.SYMBOLS.items()
+    if sym != "XPDUSDT"
+]
+
 # 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?, mtf?}
 SINGLE_SYMBOL_ROSTER = (
     [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
@@ -276,6 +318,8 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "hma_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "cvd_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "oi_price_confirm", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # ── 2026-09-05：TV真实策略复刻拉进擂台 ────────────────────────────────
+    + _TV_MIRROR_ROSTER
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

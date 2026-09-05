@@ -65,16 +65,32 @@ def timeframe_to_minutes(interval: str) -> Optional[int]:
 def resolve_source_interval(interval: str) -> str:
     """
     目标周期是原生周期 → 原样返回；不是（比如90m/45m/50m/150m这类TV常见
-    但币安没有的周期）→ 返回用来合成它的源周期。5m 能整除本系统目前见过
-    的所有非原生周期(45/50/90/150)，选它做通用源周期；万一以后出现不能
-    被5整除的目标周期，退化到1m（总是安全，只是拉的K线更多）。
+    但币安没有的周期）→ 返回用来合成它的源周期。
+
+    2026-09-05修复：原来无脑固定选5m当源周期，不管目标周期本身能不能被
+    更粗的原生周期整除——150m其实能被30m整除(只需要5倍源K线)，之前却
+    还是按5m合成(需要30倍源K线)，白白多拉6倍数据。实测这个问题在把TV
+    真实策略复刻(50m/90m/150m/6h这些周期)接入擂台时暴露出来：150m单个
+    品种拉550根要45秒以上，886条roster里混进十几个这种品种会拖垮整轮
+    5分钟tick的时间预算。
+
+    改成：从币安全部原生周期里，挑**能整除目标周期、且尽量粗**的那个当
+    源周期，需要拉的源K线数量=目标周期/源周期倍数，越粗倍数越小、请求
+    量越少。正确性不受影响——OHLCV聚合运算(open取首根/close取末根/high
+    取max/low取min/volume求和)在数学上是结合律成立的，不管从多细的
+    粒度往上合并，同一个目标桶算出来的结果完全一致，只是变快，结果不变。
+    实在找不到能整除的原生周期(理论上不会发生，因为1m总能整除任何整数
+    分钟数)才退化到1m。
     """
     s = str(interval or "").strip().lower()
     if s in NATIVE_INTERVALS:
         return s
     mins = _minutes_of(s)
-    if mins and mins % 5 == 0:
-        return "5m"
+    if not mins:
+        return "1m"
+    for name, m in sorted(_NATIVE_MINUTES.items(), key=lambda kv: -kv[1]):
+        if m < mins and mins % m == 0:
+            return name
     return "1m"
 
 
@@ -293,7 +309,14 @@ def get_bars(
         logger.error(f"[klines] 无法识别的周期: {interval}")
         return []
     source_interval = resolve_source_interval(s)
-    source_minutes = _minutes_of(source_interval) or (1 if source_interval == "1m" else 5)
+    # 2026-09-05修复：resolve_source_interval现在会返回30m/15m这类**原生**
+    # 源周期(见该函数注释)，但_minutes_of()对原生周期故意返回None(它只
+    # 负责解析非原生周期)，原来这里的兜底`... or (1 if ... else 5)`是在
+    # "源周期只可能是1m或5m"这个旧假设下写的，源周期变成30m之后这个兜底
+    # 会把source_minutes错算成5，进而让n_per_bucket、fetch_limit都算错
+    # (拉的K线量不降反可能更多，合成分桶也会错位)。改用统一处理原生+
+    # 非原生的timeframe_to_minutes()。
+    source_minutes = timeframe_to_minutes(source_interval) or 1
     n_per_bucket = max(1, target_minutes // source_minutes)
     # 多拉一些源K线，保证合成后的目标K线数量够 limit 根；超过单次1500上限
     # 就走分页（合成周期比源周期粗好几倍，稍微拉长一点历史就会撞到这个上限）
