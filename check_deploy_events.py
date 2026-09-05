@@ -312,7 +312,7 @@ def audit_breath_and_sizing_smoke(a: Audit):
     a.check("INITIAL_SL_ATR=0.0 (规格 v1.0模式)", abs(INITIAL_SL_ATR) < 1e-9)
     a.check("STEP=0.50/0.35", abs(STEP_TRIGGER_ATR - 0.50) < 1e-9 and abs(STEP_ADVANCE_ATR - 0.35) < 1e-9)
     a.check("BREAKEVEN=3.0", abs(BREAKEVEN_TRIGGER_ATR - 3.0) < 1e-9)
-    a.check("RISK20/NOTIONAL5", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 5.0)
+    a.check("RISK20/NOTIONAL3", abs(FIXED_RISK_PCT - 0.20) < 1e-9 and float(FIXED_NOTIONAL_MULT) == 3.0)
 
     entry, atr = 3000.0, 40.0
     # 规格 v1.0模式：initial_stop 返回 entry+tick+fee（保本起步，不用 ATR 臂）

@@ -571,13 +571,15 @@ def health():
     try:
         risk, lev = get_active_sizing()
     except Exception:
-        risk, lev = 0.20, 5.0
+        # 2026-09-05：杠杆假设从5降到3，兜底值同步更新，否则get_active_
+        # sizing()异常时/health会展示错误的旧杠杆。
+        risk, lev = 0.20, 3.0
     return jsonify({
         "service": "binance_webhook",
         "status": "ok",
         "version": BINANCE_VPS_VERSION,
         "tv_strategy": TV_STRATEGY_VERSION,
-        "sizing": SIZING_MODE,  # RISK20_NOTIONAL5 公式骨架；数值来自生效档案
+        "sizing": SIZING_MODE,  # RISK20_NOTIONAL3 公式骨架；数值来自生效档案
         "leverage": float(lev),
         "risk_pct": float(risk),
         "notional_mult": float(lev),

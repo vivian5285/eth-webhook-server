@@ -3,7 +3,7 @@
 """
 万亿战神 VPS 逻辑静态自查 — Cursor / CI 可用，无需交易所 API Key。
 
-对齐：TV v6.5.6 · VPS v15.5.3-rigor-checks · RISK20_NOTIONAL5
+对齐：TV v6.5.6 · VPS v15.5.3-rigor-checks · RISK20_NOTIONAL3
 
 用法:
   python check_vps_logic.py
@@ -280,7 +280,7 @@ def _grep_binance_vps_version() -> str:
 
 
 def audit_module2_sizing(a: Audit):
-    a.section("模块二 · 开单计算（RISK20_NOTIONAL5 · v6.5.6）")
+    a.section("模块二 · 开单计算（RISK20_NOTIONAL3 · v6.5.6）")
     from webhook_parser import (
         TV_STRATEGY_VERSION,
         FIXED_RISK_PCT,
@@ -317,29 +317,33 @@ def audit_module2_sizing(a: Audit):
     )
     risk_ok = abs(float(FIXED_RISK_PCT) - 0.20) < 1e-9 or abs(float(FIXED_MARGIN_PCT) - 0.20) < 1e-9
     a.check("2.1 FIXED_RISK_PCT/FIXED_MARGIN_PCT=0.20", risk_ok, f"risk={FIXED_RISK_PCT} margin={FIXED_MARGIN_PCT}")
-    mult_ok = float(FIXED_NOTIONAL_MULT) == 5.0 or float(FIXED_LEVERAGE) == 5
-    a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=5", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
-    a.check("2.1c EXCHANGE_LEVERAGE=5", EXCHANGE_LEVERAGE == 5, str(EXCHANGE_LEVERAGE))
+    # 2026-09-05：杠杆假设从5降到3(宝贝要求"仓位金额不变，杠杆下降，
+    # 换算下降")，这几条断言的期望值同步更新，不然会对着一次刻意的
+    # 策略变更报假失败。
+    mult_ok = float(FIXED_NOTIONAL_MULT) == 3.0 or float(FIXED_LEVERAGE) == 3
+    a.check("2.1b FIXED_NOTIONAL_MULT/FIXED_LEVERAGE=3", mult_ok, f"mult={FIXED_NOTIONAL_MULT} lev={FIXED_LEVERAGE}")
+    a.check("2.1c EXCHANGE_LEVERAGE=3", EXCHANGE_LEVERAGE == 3, str(EXCHANGE_LEVERAGE))
     a.check("2.1d LEG_TP_RATIOS=10/20/70", LEG_TP_RATIOS == [0.10, 0.20, 0.70], str(LEG_TP_RATIOS))
     a.check("2.1e PLACE_TP_LEVELS=2(仅TP1+TP2)", PLACE_TP_LEVELS == 2, str(PLACE_TP_LEVELS))
-    a.check("2.1f SIZING_MODE=RISK20_NOTIONAL5", SIZING_MODE == "RISK20_NOTIONAL5", str(SIZING_MODE))
+    a.check("2.1f SIZING_MODE=RISK20_NOTIONAL3", SIZING_MODE == "RISK20_NOTIONAL3", str(SIZING_MODE))
     a.check("2.1g SIGNAL_DEDUP_SEC=60", int(SIGNAL_DEDUP_SEC) == 60, str(SIGNAL_DEDUP_SEC))
     a.check("2.1h ATR_UPDATE_SEC=300", int(ATR_UPDATE_SEC) == 300, str(ATR_UPDATE_SEC))
     a.check("2.1i ORDER_TIMEOUT_SEC=300", int(ORDER_TIMEOUT_SEC) == 300, str(ORDER_TIMEOUT_SEC))
     a.check("2.2 HARD_NOTIONAL_CAP=0", float(HARD_NOTIONAL_CAP or 0) == 0.0)
     a.check("2.3 MAX_TOTAL_NOTIONAL_MULT=13", MAX_TOTAL_NOTIONAL_MULT == 13.0)
 
-    # 无 TV.sl → adj=1.0：min(200/100, 1000×20%×5/3300.5, 12) = min(2, 0.3029, 12) → 0.302
+    # 2026-09-05：杠杆假设从5降到3后，min(...)第二项和最终结果都要重算——
+    # 无 TV.sl → adj=1.0：min(200/100, 1000×20%×3/3300.5, 12) = min(2, 0.1818, 12) → 0.181
     qty, meta = compute_fixed_order_qty(1000, 3300.5, stop_loss=3200.5, tv_qty=12)
-    expected = 0.302
+    expected = 0.181
     a.check(
-        "2.4 1000U@3300.5 SL3200.5 tv=12 → 0.302(本金×20%×5=本金×1)",
+        "2.4 1000U@3300.5 SL3200.5 tv=12 → 0.181(本金×20%×3=本金×0.6)",
         abs(qty - expected) < 0.001,
         f"qty={qty} expected={expected} mode={meta.get('sizing_mode')} bind={meta.get('bind')}",
     )
     a.check(
         "2.4 mode/bind RISK20",
-        meta.get("sizing_mode") == "RISK20_NOTIONAL5"
+        meta.get("sizing_mode") == "RISK20_NOTIONAL3"
         and str(meta.get("bind") or "") in (
             "notional_primary",
             "equity_x20pct_x5_over_price",
@@ -353,8 +357,8 @@ def audit_module2_sizing(a: Audit):
         f"sl_adj={meta.get('sl_adj')}",
     )
     a.check(
-        "2.4a2 名义上限=本金×1",
-        abs(float(meta.get("notional_cap") or 0) - 1000.0) < 0.01,
+        "2.4a2 名义上限=本金×0.6",
+        abs(float(meta.get("notional_cap") or 0) - 600.0) < 0.01,
         f"notional_cap={meta.get('notional_cap')}",
     )
 
@@ -372,7 +376,9 @@ def audit_module2_sizing(a: Audit):
         f"qty={qty_tv} meta={meta_tv.get('tv_qty')}",
     )
 
-    # 白皮书：sl_adj 已废除；名义主约束；TV.qty=2 软上限不影响名义≈0.333
+    # 白皮书：sl_adj 已废除；名义主约束；TV.qty=2 软上限不影响
+    # 2026-09-05：杠杆假设从5降到3，名义上限从本金×1降到本金×0.6，
+    # qty≈0.333→0.2
     qty_adj, meta_adj = compute_fixed_order_qty(
         1000, 3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
     )
@@ -384,8 +390,8 @@ def audit_module2_sizing(a: Audit):
         f"vps_dist={meta_adj.get('vps_stop_dist')} qty={qty_adj}",
     )
     a.check(
-        "2.5c 名义=本金×1 约束生效 → qty≈0.333",
-        abs(qty_adj - 0.333) < 0.002 and meta_adj.get("binding") == "notional",
+        "2.5c 名义=本金×0.6 约束生效 → qty≈0.2",
+        abs(qty_adj - 0.2) < 0.002 and meta_adj.get("binding") == "notional",
         f"qty={qty_adj} binding={meta_adj.get('binding')} adj_tv={meta_adj.get('adjusted_tv_qty')} "
         f"notional_cap={meta_adj.get('notional_cap')}",
     )
@@ -431,7 +437,7 @@ def audit_module2_sizing(a: Audit):
     )
     a.check(
         "2.11 app health sizing=RISK20/SIZING_MODE",
-        "RISK20_NOTIONAL5" in app_src
+        "RISK20_NOTIONAL3" in app_src
         or ("SIZING_MODE" in app_src and "sizing" in app_src),
     )
     a.check("2.11b app health leverage=fixed_5", 'leverage": "fixed_5"' in app_src)
@@ -1018,13 +1024,13 @@ def audit_readme_consistency(a: Audit):
         "v6.5.6" in readme and 'TV_STRATEGY_VERSION = "v6.5.6"' in wp,
     )
     a.check(
-        "README 20% 与 5x",
-        "20%" in readme and ("5x" in readme or "5×" in readme or "×5" in readme),
+        "README 20% 与 3x",
+        "20%" in readme and ("3x" in readme or "3×" in readme or "×3" in readme),
     )
     a.check(
-        "README sizing=RISK20_NOTIONAL5",
-        "RISK20_NOTIONAL5" in readme
-        and ("SIZING_MODE" in app_src or "RISK20_NOTIONAL5" in app_src),
+        "README sizing=RISK20_NOTIONAL3",
+        "RISK20_NOTIONAL3" in readme
+        and ("SIZING_MODE" in app_src or "RISK20_NOTIONAL3" in app_src),
     )
     a.check(
         "README 硬止损描述",

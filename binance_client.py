@@ -1385,7 +1385,7 @@ class BinanceClient:
         """兼容别名 → get_total_equity（清单口径：总权益非可用余额）"""
         return self.get_total_equity(asset)
 
-    def get_symbol_leverage(self, symbol, default=5.0):
+    def get_symbol_leverage(self, symbol, default=3.0):
         """
         读交易所当前该品种真实生效杠杆（futures_position_information 自带
         "leverage" 字段，用户可在币安APP自行修改）。复用 _refresh_all_positions

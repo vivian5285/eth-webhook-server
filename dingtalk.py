@@ -27,6 +27,7 @@ from webhook_parser import (
     format_tv_sizing_note,
     format_regime_tp_ratios_label,
     SIZING_MODE,
+    FIXED_LEVERAGE,
     normalize_entry_type,
     ENTRY_TYPE_OPEN,
     CLOSE_TYPE_TP3,
@@ -921,11 +922,14 @@ def get_regime_name(regime_code):
     regime 内部编号可保留供逻辑使用，但用户可见文案一律只展示 RISK20 算仓模式，
     禁止再输出 R1/R2/R3/R4。
     """
-    return _g("算仓=本金20%风险资金×5x杠杆（RISK20）", G_MUTED)
+    # 2026-09-05修复：这里之前硬编码"5x"，杠杆假设改成3之后如果不改会
+    # 一直对用户展示错误的旧杠杆数字——改成读FIXED_LEVERAGE动态拼，
+    # 以后杠杆再调也不用记得来改这两处文案。
+    return _g(f"算仓=本金20%风险资金×{int(FIXED_LEVERAGE)}x杠杆（RISK20）", G_MUTED)
 
 
 def _sizing_mode_label():
-    return _g("本金20%风险资金 × 5x杠杆 · RISK20_NOTIONAL5", G_MAIN)
+    return _g(f"本金20%风险资金 × {int(FIXED_LEVERAGE)}x杠杆 · {SIZING_MODE}", G_MAIN)
 
 
 def _format_tp_compare(tp_pxs, tv_tps=None, unit_label=None, symbol=None):

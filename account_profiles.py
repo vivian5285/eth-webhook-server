@@ -25,7 +25,7 @@ SYMBOL_SETTINGS_PATH = os.path.join(BASE_DIR, "data", "symbol_settings.json")
 _LOCK = threading.RLock()
 
 DEFAULT_RISK_PCT = 0.20
-DEFAULT_LEVERAGE = 5.0
+DEFAULT_LEVERAGE = 3.0  # 2026-09-05：全局杠杆假设从5降到3，见webhook_parser.py::FIXED_LEVERAGE注释
 
 
 def _ensure_dir():

@@ -10,14 +10,21 @@ logger = logging.getLogger(__name__)
 
 TV_STRATEGY_VERSION = "v6.5.6"
 
-# ── RISK20：名义=(本金×20%×5)/价；stop/TV.qty 可选收紧，无状态纯函数 ─────
+# ── RISK20：名义=(本金×20%×3)/价；stop/TV.qty 可选收紧，无状态纯函数 ─────
+# 2026-09-05：宝贝反映"由于有的品种周期调的更低了（可能噪音也多，当然
+# 机会也更多），把所有的仓位权重调整成3倍杠杆吧，仓位金额不变，杠杆
+# 下降，换算下降"——仓位公式与交易所真实杠杆本来就彻底解耦(见下面
+# position_supervisor_binance.py同款注释)，只调这里的VPS下单公式假设
+# 杠杆，不碰交易所APP上的真实杠杆设置(系统从不调用set_leverage)。
+# risk_pct(本金×20%，"仓位金额"这部分)不变，只把leverage从5降到3，
+# 名义/qty按比例(3/5=0.6倍)一起降下来。
 FIXED_RISK_PCT = 0.20
-FIXED_NOTIONAL_MULT = 5.0  # 杠杆倍数：作用在「本金×20%」上，不是全本金
+FIXED_NOTIONAL_MULT = 3.0  # 杠杆倍数：作用在「本金×20%」上，不是全本金
 FIXED_MARGIN_PCT = FIXED_RISK_PCT
-FIXED_LEVERAGE = 5
+FIXED_LEVERAGE = 3
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
-SIZING_MODE = "RISK20_NOTIONAL5"
+SIZING_MODE = "RISK20_NOTIONAL3"
 
 # 2026-08-12：趋势强弱仓位倾斜（用户决策：弱中强 = 1/2/3倍权益名义，
 # 线性递增）。作用在 RISK20_NOTIONAL5 算出来的基础qty上做整体缩放，
@@ -115,8 +122,9 @@ def get_runtime_leverage():
     except Exception:
         return float(FIXED_LEVERAGE)
 ABSURD_TV_QTY_VS_CAPS = 50.0
-# 铁律：名义上限 = 合约本金 × 20% × 5 = 本金 × 1（≈余额1倍）。
-# 保证金不足由 supervisor 用 available×20%×5×0.92 再裁。
+# 铁律：名义上限 = 合约本金 × 20% × 3 = 本金 × 0.6（≈余额0.6倍）。
+# 2026-09-05：杠杆假设从5降到3(见上方FIXED_LEVERAGE注释)。
+# 保证金不足由 supervisor 用 available×20%×3×0.92 再裁。
 NOTIONAL_MARGIN_HAIRCUT = 1.0
 VPS_RISK_PCT = 0.0
 VPS_GLOBAL_SCALE = 1.0
@@ -438,7 +446,8 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
                             tv_price=None, **_kw):
     """
     无状态纯函数（仅开仓时算一次；不读历史仓位）——白皮书定稿：
-      主公式：qty = (principal × 0.20 × 5 × NOTIONAL_MARGIN_HAIRCUT) / price
+      主公式：qty = (principal × 0.20 × 3 × NOTIONAL_MARGIN_HAIRCUT) / price
+      （2026-09-05：杠杆假设从5降到3，见FIXED_LEVERAGE注释）
       stop_loss 可选：若给出则用 risk/|price−stop| 作额外 min 收紧
       TV.qty 可选：非天文则 soft-cap；天文则忽略
     TV.stop_loss 不参与挂止损价，仅历史兼容字段。
@@ -477,7 +486,7 @@ def compute_fixed_order_qty(principal, price, qty_step=0.001, min_qty=None,
         "regime": 0,
         "bind": "notional_primary",
         "formula": (
-            "(principal×0.20×5×NOTIONAL_MARGIN_HAIRCUT)/price"
+            "(principal×0.20×3×NOTIONAL_MARGIN_HAIRCUT)/price"
             " · optional min(risk/dist, TV.qty soft-cap)"
         ),
         "sl_adj": 1.0,
@@ -631,7 +640,9 @@ def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
     mult = float(meta.get("notional_mult") or meta.get("leverage") or FIXED_NOTIONAL_MULT)
     parts = [
         f"风险{risk_pct * 100:.0f}%/止损距",
-        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.0f}(=本金×{risk_pct * mult:.0f})",
+        # 2026-09-05修复：risk_pct*mult不再总是整数(0.20×3=0.6)，.0f会
+        # 把0.6误显示成"1"，改用.2f保留真实精度。
+        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.0f}(=本金×{risk_pct * mult:.2f})",
         f"sizing={SIZING_MODE}",
     ]
     if principal > 0:

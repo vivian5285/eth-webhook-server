@@ -4512,7 +4512,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         logger.info(
             f"📐 仓位参数: 风险{FIXED_RISK_PCT * 100:.0f}%/VPS止损距 · "
             f"名义=本金×{FIXED_RISK_PCT * 100:.0f}%×{FIXED_NOTIONAL_MULT:.0f}"
-            f"(=本金×{FIXED_RISK_PCT * FIXED_NOTIONAL_MULT:.0f}) "
+            # 2026-09-05修复：同webhook_parser.py::format_vps_sizing_note，
+            # risk_pct*mult=0.6时.0f会误显示成"1"，改用.2f保留真实精度。
+            f"(=本金×{FIXED_RISK_PCT * FIXED_NOTIONAL_MULT:.2f}) "
             f"| TV.qty={self.tv_suggested_qty or '-'} "
             f"| TV.qty1/2/3={self.tv_qty1 or '-'}/{self.tv_qty2 or '-'}/{self.tv_qty3 or '-'} "
             f"| TV.sl_ref={float(getattr(self, 'tv_sl_ref', 0) or 0) or '-'} "
@@ -5933,7 +5935,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             lev = float(
                 binance_client.get_symbol_leverage(
                     self.symbol, default=FIXED_LEVERAGE,
-                ) or FIXED_LEVERAGE or 5.0
+                ) or FIXED_LEVERAGE or 3.0
             )
             haircut = 0.92
             if avail > 0 and px > 0 and lev > 0 and float(qty or 0) > 0:

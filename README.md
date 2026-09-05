@@ -3,7 +3,7 @@
 **当前版本：`v16.27-v2.5-momentum-tilt`**（雷达激活线改双触发(TP1近点/1.5×ATR)+呼吸空间ADX/动量双维连续插值+阶梯步进v2.2再放宽；TP架构简化：废除循环对账，回归简洁三流程。开仓→TP1/TP2/硬止损挂出后不动；平仓→一键平仓+撤干净；恢复→检查TP是否存在，缺失才补，不对账）
 **TV 策略 schema：`v6.5.6`**
 **Webhook地址：`http://187.77.130.144/binance/webhook`**
-**仓位模式：`RISK20_NOTIONAL5`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×5 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty）
+**仓位模式：`RISK20_NOTIONAL3`**（ETH/XAU/ZEC/BNB 同一公式：`qty = 本金×20%×3 / 开仓价`；TV.qty 可选 soft-cap；20U 演练可传小 qty；2026-09-05杠杆假设从5降到3，仓位金额(20%本金)不变，见webhook_parser.py::FIXED_LEVERAGE注释）
 **保护引擎：三层防线**（永久硬止损 + 独立雷达止损 + TP1/TP2 限价；**TP3 永不挂限价**，70% 交雷达）  
 **TP 分腿：10% / 20% / 70%**（盘口限价 **恰好 2** 笔 LIMIT=TP1+TP2；余仓无上限）  
 **硬止损：`｜TV.price−TV.stop_loss｜×1.15` 锚定成交价**（**统一呼吸垫，不分档**；禁止 1.5×ATR 地板；开仓以市价回执为准，禁因 REST 滞后跳过硬止损）  
@@ -228,7 +228,7 @@ TV 价 1897.03，TV.SL 1912.18，成交 1900.51：
 
 1. **开仓永远先平后开**（含同向；无菌：qty=0 且 LIMIT+STOP/Algo=0）  
 2. **单仓位，不加仓**（pyramiding=1）  
-3. **下单数量**：`(本金×20%×5)/price`；`stop_loss`/`TV.qty` 可选收紧；不采信天文 TV.qty  
+3. **下单数量**：`(本金×20%×3)/price`；`stop_loss`/`TV.qty` 可选收紧；不采信天文 TV.qty  
 4. **双 STOP 永久共存**（见 §零）；写入方：`_ensure_frozen_hard_sl`（硬）+ `_sync_exchange_stop`（雷达）  
 5. **15s 开平窗口**：同 symbol 内 OPEN 先到→丢弃窗内 CLOSE；CLOSE 先到→先平后开；超时 CLOSE 独立执行
 
@@ -337,7 +337,7 @@ position_supervisor_binance.py     ← 唯一生产大脑（岗位边界挂接�
 
 1. **信号官**登记 `SIGNAL_RECEIVED`（不调交易所）  
 2. **仓位稽查员**先平后开 / 无菌净场 → `CLEARED`  
-3. **执行官** `qty=(本金×20%×5)/price` → 杠杆(档案) → 市价开仓 → `ENTRY_CONFIRMED`（锁定 `initial_qty`）  
+3. **执行官** `qty=(本金×20%×3)/price` → 杠杆(档案) → 市价开仓 → `ENTRY_CONFIRMED`（锁定 `initial_qty`）  
 4. **共同第一步**：永久硬止损 + **仅 TP1+TP2**（10%/20%，预算闸自检）→ `ORDERS_PLACED`  
 5. 雷达休眠待命（激活线前盘口仅硬止损）  
 6. **督察官** 8 项复查 → `VERIFIED`（硬失败可暂停）  

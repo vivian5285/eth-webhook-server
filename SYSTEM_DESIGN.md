@@ -1,7 +1,7 @@
 # ETH Webhook Trading System - 系统设计文档
 
 > **唯一权威**：见 [`README.md`](README.md)  
-> **TV v6.5.6** · **VPS `v16.9.1-tv-ready`** · sizing **RISK20_NOTIONAL5** · 三层防线 · `position_supervisor_binance.py` 唯一大脑。
+> **TV v6.5.6** · **VPS `v16.9.1-tv-ready`** · sizing **RISK20_NOTIONAL3**（2026-09-05：杠杆假设5→3，仓位金额不变） · 三层防线 · `position_supervisor_binance.py` 唯一大脑。
 
 ---
 
@@ -10,12 +10,12 @@
 ```
 TradingView v6.5.6 Alert (secret)
         ↓
-app.py (网关 + health: RISK20_NOTIONAL5)
+app.py (网关 + health: RISK20_NOTIONAL3)
         ↓
 position_supervisor_binance.py   ← 唯一生产大脑
 ├── TV 消息缓存固定 1.0s + 15s OPEN/CLOSE 铁律（tv_seq.py）
 ├── 订单标签持久化（TP1/TP2/HARD/RADAR · SHA-256 clientOrderId）
-├── 仓位：名义=权益×20%×5 / 价（可选 SL/TV.qty 收紧）
+├── 仓位：名义=权益×20%×3 / 价（可选 SL/TV.qty 收紧）
 ├── TP 10/20/70；**仅挂 TP1+TP2 限价**；**TP3(70%) 永不挂限价，交雷达**
 ├── 永久硬止损 |TV−SL|×1.15 @ 成交价 + 独立雷达雷达止损（只读 TV webhook atr）
 ├── 雷达激活：规格 v1.0 §5.1 绝对价格锚定（首次 (TP1+TP2)/2 · 重入 TP2）
