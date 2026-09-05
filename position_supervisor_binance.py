@@ -18830,13 +18830,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"目标@{new_sl:.2f} vs 账本@{prior_sl:.2f} → 账本保留原值，"
                     f"仅同步盘口已有挂单价"
                 )
-            self._last_applied_exchange_sl = round(
-                float(order_stop_price(
-                    self.current_side, new_sl,
-                    buffer_usd=self._stop_buffer_usd(),
-                    profile=getattr(self, "breath_profile", None),
-                ) or new_sl), 2,
-            )
+            # 2026-09-05修复实盘复现：这里过去会把_last_applied_exchange_sl
+            # 直接改写成new_sl(候选目标价)，但_has_stop_sl_near只确认了
+            # "盘口某张单在候选价±2U容差内"，并不代表那张单真的挂在候选价
+            # 上——它可能还停在几个刻度以前的旧价。候选价随行情缓慢爬升时，
+            # 每一步都被判定"够近，不用真的改单"，但_last_applied_exchange_sl
+            # 却跟着候选价一起悄悄爬升，等于给下面moved_enough判断喂了一个
+            # 越走越假的参照点：真正挂在交易所上的止损单可能已经跟这个"账本
+            # 自认为"的位置差出好几美元，却因为moved_enough拿这个虚高的
+            # 参照点去比较，迟迟判定"没挪够"，改单被无限期拖延。LITE/MU两个
+            # 品种在C账户上实测过：真实止损单一次挂完后6-7.5小时都没有真的
+            # 更新过（跨越好几次这个"够近"判定），期间账本自认为的止损位置
+            # 已经涨了4-6美元，导致C的仓位在同一次晚间回调里没被打中(账面
+            # 止损位置早就该触发了)，B/E因为真实挂单价恰好更贴近现价而正常
+            # 止损离场——三个账户看起来"平仓时间差异巨大"，根源不是行情
+            # 或sizing差异，是这道"够近就不用真的改单"的判断污染了自己的
+            # 参照点。修复：这个分支本来就没有真的调用改单，_last_applied_
+            # exchange_sl就不该在这里跟着候选价走——让它继续保留"上一次真的
+            # 成功改单"时的价格，moved_enough才能测出跟真实交易所挂单的
+            # 真实差距，候选价一旦真的偏离真实挂单超过容差就会立刻触发改单，
+            # 不会再被这道分支自己制造的假参照点无限期拖延。
             self._radar_stage_last = stage
             if phase_up and not getattr(self, "_radar_activation_notified", False):
                 self._report_breath_phase2(
