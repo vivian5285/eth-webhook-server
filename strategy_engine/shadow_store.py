@@ -27,9 +27,33 @@ DB_PATH = BASE_DIR / "data" / "shadow_v2.db"
 _lock = threading.Lock()
 
 
+class _AutoCloseConnection(sqlite3.Connection):
+    """2026-09-05发现的严重bug：整个文件全部call site都是`with _connect()
+    as conn:`这个写法——sqlite3.Connection当context manager用时，__exit__
+    只负责commit/rollback事务，**不会关闭连接**，文件描述符要等Python
+    垃圾回收器哪天想起来才会真正释放，时间点完全不确定。本模块跑在
+    5分钟一轮、690条roster、每条都要开好几次连接的场景下，泄漏速度远
+    超GC回收速度——实测撞见 strategy-roster.service 进程1024个文件描述符
+    (ulimit软上限)里1021个是shadow_v2.db的连接，导致新连接全部失败、
+    get_open_row这个防重复开仓的关键闸门大面积报错(表现为"unable to
+    open database file")。这是从项目最早期就存在的潜在问题，2026-09-05
+    加上WAL模式后被放大暴露出来(WAL模式每个连接额外占用-wal/-shm两个
+    文件的描述符，同样的泄漏速度下更快打满上限)。
+
+    修复：重写__exit__，在原有commit/rollback行为之后**强制关闭连接**，
+    这样所有`with _connect() as conn:`调用点不用改一行代码，离开with块
+    就确定性释放文件描述符，不再依赖GC。"""
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=10, factory=_AutoCloseConnection)
     conn.row_factory = sqlite3.Row
     # 2026-09-05：默认rollback-journal模式下，重启/并行部署时新旧进程
     # 短暂重叠访问同一个db文件容易撞上"database is locked"——WAL模式下
