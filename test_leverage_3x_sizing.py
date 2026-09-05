@@ -53,12 +53,24 @@ class TestComputeFixedOrderQtyAt3x(unittest.TestCase):
     """精确复现check_vps_logic.py同款用例，验证3倍杠杆下的实际输出
     （手工核对过的真实数值，不是脚本自己再算一遍来自我验证）。"""
 
+    # 2026-09-05修复：这三个测试原来调用compute_fixed_order_qty()时没
+    # 显式传margin_pct/leverage，函数在这种情况下会退回get_runtime_
+    # risk_pct()/get_runtime_leverage()——这两个函数读的是account_
+    # profiles.py里"当前生效档案"，实盘C/D/E三个账户在控制台登录流程里
+    # 各自留了一份"默认账户(.env)"档案，创建时按当时的DEFAULT_LEVERAGE
+    # 快照存了leverage=5.0，不会因为这次改常量就跟着变。真正的实盘开仓
+    # 流程(position_supervisor_binance.py:5865-5876)从来不读这个档案的
+    # leverage(只读risk_pct，且两边都是0.2没有分歧)，leverage永远显式
+    # 传FIXED_LEVERAGE——这几个测试要验证的正是"生产口径"，所以必须跟
+    # 生产调用一样显式传margin_pct/leverage，不能依赖隐式回退，否则会在
+    # 存了旧档案的账户上跑出跟B账户不一致的假失败。
     def test_notional_primary_case(self):
         """1000本金，无TV.sl，risk/dist=2.0 vs 名义3300.5价位下的qty_by_
         notional=600/3300.5≈0.1818，名义约束生效：1000×20%×3=600
         （旧5倍杠杆版本是1000，新版本按比例(3/5=0.6倍)降到600）。"""
         qty, meta = wp.compute_fixed_order_qty(
             1000, 3300.5, stop_loss=3200.5, tv_qty=12,
+            margin_pct=wp.FIXED_RISK_PCT, leverage=wp.FIXED_LEVERAGE,
         )
         self.assertAlmostEqual(qty, 0.181, places=3)
         self.assertAlmostEqual(meta["notional_cap"], 600.0, places=1)
@@ -71,6 +83,7 @@ class TestComputeFixedOrderQtyAt3x(unittest.TestCase):
         risk_pct(不变)×leverage(5→3)直接线性关系。"""
         qty, meta = wp.compute_fixed_order_qty(
             1000, 3000, stop_loss=2940, tv_qty=2.0, tv_sl=2960,
+            margin_pct=wp.FIXED_RISK_PCT, leverage=wp.FIXED_LEVERAGE,
         )
         self.assertAlmostEqual(qty, 0.2, places=3)
         self.assertEqual(meta["binding"], "notional")
@@ -82,6 +95,7 @@ class TestComputeFixedOrderQtyAt3x(unittest.TestCase):
         这里验证展示文本里出现的是精确的0.60，不是被四舍五入的1。"""
         qty, meta = wp.compute_fixed_order_qty(
             1000, 3300.5, stop_loss=3200.5, tv_qty=12,
+            margin_pct=wp.FIXED_RISK_PCT, leverage=wp.FIXED_LEVERAGE,
         )
         note = wp.format_vps_sizing_note(meta, qty=qty)
         self.assertIn("0.60", note)
