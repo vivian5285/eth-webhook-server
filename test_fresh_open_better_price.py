@@ -201,5 +201,79 @@ class TestTryBetterThanTvLimitEntry(unittest.TestCase):
         self.assertEqual(filled, 0.0)
 
 
+class TestStrongTrendSkipsLimitOptimization(unittest.TestCase):
+    """2026-09-05新增：强趋势(tier=2)信号跳过优价等待的回归测试。
+
+    背景——实盘复现：OPENAIUSDT同一笔tier=2强趋势信号(ADX=57.6)，B/C/E
+    三账户都先按K线极值挂了限价(1401.19，比TV参考1409.94低8.75，意图
+    更优)，但行情正在单边急涨，45秒预算里价格从未回落到限价，全部超时
+    转市价——不仅没抢到优价，反而因为白等了45秒，成交价比"信号一到就
+    直接市价"更差(B最终1418.12，比TV参考贵8.18)，且三账户各自45秒窗口
+    结束的时间点差几秒，撞上的市价点位不同，造成B比C/E贵3.7+的额外
+    分化。修复：tier>=2时直接跳过优价尝试，不下限价单也不等待。"""
+
+    def setUp(self):
+        self._orig_budget = rrm.FRESH_OPEN_LIMIT_BUDGET_SEC
+        self._orig_poll = rrm.FRESH_OPEN_LIMIT_POLL_SEC
+        rrm.FRESH_OPEN_LIMIT_BUDGET_SEC = 0.08
+        rrm.FRESH_OPEN_LIMIT_POLL_SEC = 0.02
+
+    def tearDown(self):
+        rrm.FRESH_OPEN_LIMIT_BUDGET_SEC = self._orig_budget
+        rrm.FRESH_OPEN_LIMIT_POLL_SEC = self._orig_poll
+
+    def test_tier_2_skips_without_placing_any_order(self):
+        s = _mk_supervisor()
+        _fake_bc.binance_client.place_limit_order = MagicMock()
+        filled, avg = s._try_better_than_tv_limit_entry(
+            "LONG", 0.07, payload={"price": 1409.94, "tier": 2},
+        )
+        self.assertEqual((filled, avg), (0.0, 0.0))
+        _fake_bc.binance_client.place_limit_order.assert_not_called()
+
+    def test_adx_tier_field_also_gates_when_tier_missing(self):
+        """payload没有"tier"字段、只有"adx_tier"时同样要生效(两个字段
+        实盘payload里数值一致，互为兜底)。"""
+        s = _mk_supervisor()
+        _fake_bc.binance_client.place_limit_order = MagicMock()
+        filled, avg = s._try_better_than_tv_limit_entry(
+            "LONG", 0.07, payload={"price": 1409.94, "adx_tier": 2},
+        )
+        self.assertEqual((filled, avg), (0.0, 0.0))
+        _fake_bc.binance_client.place_limit_order.assert_not_called()
+
+    def test_weak_or_mid_tier_still_attempts_limit(self):
+        """弱/中趋势(tier<2)不受影响，继续走既有的优价尝试逻辑。"""
+        s = _mk_supervisor()
+        _fake_bc.binance_client.place_limit_order = MagicMock(
+            return_value={"orderId": 1}
+        )
+        s._get_active_position = MagicMock(return_value=None)
+        _fake_bc.binance_client.cancel_order = MagicMock()
+        klines_5m = [[0, 0, "4400.0", "4390.0", 0, 0, 9999999999999]]
+        s._fetch_catchup_klines = MagicMock(return_value=(None, klines_5m))
+        s._try_better_than_tv_limit_entry(
+            "SHORT", 0.023, payload={"price": 4398.63, "tier": 1},
+        )
+        _fake_bc.binance_client.place_limit_order.assert_called_once()
+
+    def test_missing_tier_field_does_not_block(self):
+        """payload完全没有tier信息(比如追回引擎自己构造的payload)时，
+        不应该被误伤跳过——只有明确tier>=2才跳过，缺失字段按"不知道"
+        处理，继续走既有优价尝试。"""
+        s = _mk_supervisor()
+        _fake_bc.binance_client.place_limit_order = MagicMock(
+            return_value={"orderId": 1}
+        )
+        s._get_active_position = MagicMock(return_value=None)
+        _fake_bc.binance_client.cancel_order = MagicMock()
+        klines_5m = [[0, 0, "4400.0", "4390.0", 0, 0, 9999999999999]]
+        s._fetch_catchup_klines = MagicMock(return_value=(None, klines_5m))
+        s._try_better_than_tv_limit_entry(
+            "SHORT", 0.023, payload={"price": 4398.63},
+        )
+        _fake_bc.binance_client.place_limit_order.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

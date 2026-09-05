@@ -2905,6 +2905,31 @@ class RadarReentryMixin:
             if tv_px <= 0:
                 return 0.0, 0.0
 
+            # 2026-09-05修复实盘复现：强趋势(tier=2)信号跳过优价尝试，直接
+            # 走原有摸盘口+市价流程。OPENAIUSDT同一笔tier=2强趋势信号，B/C/E
+            # 三账户都先按K线极值挂了限价(1401.19，比TV参考1409.94低8.75)，
+            # 但行情正在单边急涨(ADX=57.6)，45秒预算里价格从未回落到限价，
+            # 全部超时转市价——不仅没抢到优价，反而因为白等了45秒，成交价
+            # 比"信号一到就直接市价"更差(B最终1418.12，比TV参考贵8.18；三
+            # 账户因为各自45秒窗口结束的时间点差几秒，撞上的市价点位不同，
+            # 造成B比C/E贵3.7+的额外分化)。这套"等更优价格"机制的前提是
+            # 行情大概率会给一次回踩/insurance价，强趋势单边突破行情下这个
+            # 前提不成立，等待本身就是纯粹的负收益。弱/中趋势(tier<2)行情
+            # 更可能有正常波动/回踩，继续走优价尝试。
+            tier = payload.get("tier")
+            if tier is None:
+                tier = payload.get("adx_tier")
+            try:
+                tier = int(tier) if tier is not None else -1
+            except (TypeError, ValueError):
+                tier = -1
+            if tier >= 2:
+                logger.info(
+                    f"[{self.symbol}] 开仓限价优价：强趋势档tier={tier}(ADX强) "
+                    f"→ 跳过优价等待，直接走市价，避免单边行情里空等45s让价格跑更远"
+                )
+                return 0.0, 0.0
+
             from binance_client import binance_client
 
             k15, k5 = self._fetch_catchup_klines()
