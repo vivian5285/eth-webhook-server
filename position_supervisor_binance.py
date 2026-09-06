@@ -18341,7 +18341,14 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             acct = pwd.getpwuid(os.getuid()).pw_name
             path = self._radar_sync_file()
             with open(path, "w") as f:
-                json.dump({"ts": time.time(), "mark": float(curr_px or 0), "acct": acct}, f)
+                json.dump({
+                    "ts": time.time(),
+                    "mark": float(curr_px or 0),
+                    "acct": acct,
+                    # 2026-09-06新增：写入方自己的入场价，供读取方校验"真的是
+                    # 同一条信号近乎同时开的仓"，见_radar_sync_touch_check注释。
+                    "entry": float(getattr(self, "watched_entry", 0) or 0),
+                }, f)
             try:
                 os.chmod(path, 0o666)
             except Exception:
@@ -18350,7 +18357,24 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             logger.debug(f"[{self.symbol}] 雷达激活互通写入跳过: {e}")
 
     def _radar_sync_touch_check(self):
-        """姊妹账户是否已经摸过本仓位这一轮的激活线（只信任本仓位开仓之后的记录）。"""
+        """姊妹账户是否已经摸过本仓位这一轮的激活线（只信任本仓位开仓之后、
+        且入场价与本仓位足够接近——即确实是同一条信号广播出的近乎同时
+        开仓——的记录）。
+
+        2026-09-06修复(B账户ETHUSDT实盘复现"秒平")：原来只按写入时间戳
+        新旧判断，不够可靠——姊妹账户可能是一笔entry差出一大截、开仓
+        时间早得多的老仓位，只是恰好还没平、文件时间戳看起来仍在"新鲜"
+        窗口内，就被这里误判成"同一条信号刚一起开仓"，直接把它的雷达
+        摸线状态继承过来。实盘复现：B新仓entry=2504.67，刚开仓8秒就
+        被误继承姊妹账户E一笔entry=2465.45、早在约23分钟前就已摸线的
+        老仓位状态，雷达跳过正常的呼吸/推进过程直接顶到保本止损附近，
+        价格一次很普通的小回落(2508→2506)就把新仓打了个92秒的"秒平"
+        (盈亏几乎为零)。加一道入场价接近度校验：只有姊妹账户摸线时的
+        入场价跟我自己的入场价足够接近(≤2×锁定ATR 或 ≤0.5%价格，取
+        较大者——SNDKUSDT历史实例里B/C两账户入场价差1.35点/约0.08%，
+        远在此容差内，不受影响)，才认定是同一条新信号广播出的近乎同时
+        开仓，继续互通；差得远则视为各自独立的仓位，各自摸各自的线，
+        不再互相传染。"""
         try:
             with open(self._radar_sync_file(), "r") as f:
                 data = json.load(f)
@@ -18358,6 +18382,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             open_ts = float(getattr(self, "_radar_sync_open_ts", 0) or 0)
             if ts <= 0 or open_ts <= 0 or ts < open_ts - 5:
                 return None
+            my_entry = float(getattr(self, "watched_entry", 0) or 0)
+            their_entry = float(data.get("entry") or 0)
+            if my_entry > 0 and their_entry > 0:
+                atr_v = float(self._get_locked_initial_atr() or 0)
+                tol = max(atr_v * 2.0, my_entry * 0.005)
+                if abs(my_entry - their_entry) > tol:
+                    return None
             return data
         except Exception:
             return None
