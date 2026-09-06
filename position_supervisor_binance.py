@@ -3058,16 +3058,39 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # 允许舍入误差：excess < 0.001（小于最小下单量）时忽略
             if tot_raw > hard_raw + 0.001:
                 excess = tot_raw - hard_raw
-                logger.warning(
-                    f"🚨 [{self.symbol}] TP限价超帽 tot={tot_raw:.4f} hard={hard_raw:.4f} "
-                    f"excess={excess:.4f} → 压回"
-                )
-                # 按档比例分配减少量
+                # 按档比例分配减少量——先算出压回后的候选值，跟压回前比对，
+                # 只有真的降下去了才落地+告警。
+                new_vals = {}
                 for l in list(out.keys()):
                     if int(l) <= 2:
                         portion = float(out.get(l, 0) or 0) / tot_raw if tot_raw > 0 else 0
                         reduction = excess * portion
-                        out[l] = round(max(out[l] - reduction, min_leg_qty), 3)
+                        new_vals[l] = round(max(out[l] - reduction, min_leg_qty), 3)
+                changed = any(
+                    abs(new_vals[l] - float(out.get(l, 0) or 0)) > 1e-9
+                    for l in new_vals
+                )
+                # 2026-09-06修复(E账户实盘复现)：SNDK/GS这类min_qty=0.01的
+                # 小仓位，TP1+TP2两档各自都已经被下限顶到min_leg_qty(合计
+                # 2×0.01=0.02)，而30%硬帽(hard_raw)本身就小于这个下限合计
+                # (SNDK实测hard=0.015、GS实测hard=0.018)——这种情况下"压回"
+                # 无论怎么按比例扣减，扣完都会被min_leg_qty地板重新顶回
+                # 原值，new_vals跟压回前完全一样，changed=False。这是"交易
+                # 所最小下单量下限 vs 30%软帽"结构性打架、根本降不下去的
+                # 稳定态，不是每次都有新东西要压——原实现不管有没有真的
+                # 降下去都无条件打一条WARNING，导致E账户SNDKUSDT/GSUSDT两
+                # 小时内被同一组数字(tot=0.0200 hard=0.0150/0.0180)刷了
+                # 929次一模一样的"TP限价超帽...压回"日志，控制面板异常告警
+                # 刷屏。只有真正压下去了(changed=True)才落地新值+告警；
+                # 降无可降时静默保留原值(仍是有效的最小下单量组合，不影响
+                # 挂单正确性，只是不再重复喊同一件办不到的事)。
+                if changed:
+                    logger.warning(
+                        f"🚨 [{self.symbol}] TP限价超帽 tot={tot_raw:.4f} hard={hard_raw:.4f} "
+                        f"excess={excess:.4f} → 压回"
+                    )
+                    for l, v in new_vals.items():
+                        out[l] = v
         return out
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
