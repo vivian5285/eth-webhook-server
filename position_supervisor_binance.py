@@ -5935,7 +5935,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             lev = float(
                 binance_client.get_symbol_leverage(
                     self.symbol, default=FIXED_LEVERAGE,
-                ) or FIXED_LEVERAGE or 3.0
+                ) or FIXED_LEVERAGE or 5.0
             )
             haircut = 0.92
             if avail > 0 and px > 0 and lev > 0 and float(qty or 0) > 0:
