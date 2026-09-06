@@ -150,12 +150,17 @@ def audit_open_bundle(facts: Dict[str, Any]) -> AuditResult:
     items.append(AuditItem("symbol", sym_ok, True, f"{sym} vs {key_sym}"))
 
     # 5) TP 切片
+    # 2026-09-06：facts里如果带了tp_slice_expected_override(调用方已经
+    # 走完split+normalize两道min_qty逻辑算出的权威目标值)就用它，不再
+    # 用这里的朴素比例重新猜一遍——理由同position_supervisor_binance.py
+    # ::_assert_place_tp_budget同批注释。
     items.append(check_tp_slice_budget(
         _f(facts.get("initial_qty") or facts.get("live_qty")),
         _f(facts.get("tp1_qty")),
         _f(facts.get("tp2_qty")),
         place_levels=int(facts.get("place_levels") or 2),
         ratios=facts.get("ratios"),
+        expected_override=facts.get("tp_slice_expected_override"),
     ))
 
     # 6) 硬止损

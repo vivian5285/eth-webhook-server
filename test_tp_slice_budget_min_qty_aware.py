@@ -30,7 +30,7 @@ _fake_bc.is_position_query_failed = lambda x: False
 _fake_bc.is_orders_query_failed = lambda x: False
 sys.modules.setdefault("dingtalk", MagicMock())
 
-from chief_auditor import check_tp_slice_budget  # noqa: E402
+from chief_auditor import check_tp_slice_budget, audit_open_bundle  # noqa: E402
 import position_supervisor_binance as psb  # noqa: E402
 
 
@@ -83,6 +83,105 @@ class TestAssertPlaceTpBudgetIntegration(unittest.TestCase):
         ]
         ok, detail = s._assert_place_tp_budget(0.06)
         self.assertTrue(ok, detail)
+
+    def test_gev_tp2_dropped_after_rebalance_still_passes_budget_gate(self):
+        """2026-09-06修复实盘复现：E账户GEVUSDT弱档tier=0缩量后qty=0.04，
+        _split_tp_quantities借调后TP1=0.01合格，但TP2自己仍是0.008不够格，
+        被_normalize_tp_qty_map放弃降到0——_expected_tp_levels(真正会去挂
+        的目标)因此是TP1=0.01/TP2=0，旧版expected(未考虑TP2被放弃)还按
+        0.018算，被这道闸连续拒挂。修复后expected直接取实际值(=0.01)，
+        必须放行。"""
+        s = _mk_supervisor(min_qty=0.01)
+        s._leg_ratios = [0.10, 0.20, 0.70]
+        s.tp_levels_consumed = []
+        s.initial_qty = 0.04
+        s._tp_baseline_qty = lambda live_qty: 0.04
+        s._effective_place_tp_levels = lambda: 2
+        s._expected_tp_levels = lambda live_qty: [
+            {"level": 1, "qty": 0.01, "price": 979.16},
+            {"level": 2, "qty": 0.0, "price": 998.77},
+        ]
+        ok, detail = s._assert_place_tp_budget(0.04)
+        self.assertTrue(ok, detail)
+
+
+class TestAuditOpenBundleUsesExpectedOverrideFact(unittest.TestCase):
+    """2026-09-06新增：chief_auditor.audit_open_bundle()读取facts里的
+    tp_slice_expected_override回归测试。
+
+    背景——"督察官"(audit_open_bundle，由pipeline_bridge.py调用)是跟
+    "执行官"(_assert_place_tp_budget)完全独立的第二道TP预算闸，原来
+    完全没有expected_override，pipeline_bridge.py喂给它的tp1_qty/
+    tp2_qty还是_split_remaining_tp_quantities的半成品(只做了min_qty
+    从TP2/TP3借调给TP1那一半逻辑，没有跟着走_normalize_tp_qty_map的
+    "借调后TP2自己还是不够格，直接放弃"第二道降级)——GEVUSDT实盘复现：
+    qty=0.04，半成品tp1+tp2=0.018(TP1=0.01借调后合格，TP2=0.008未经
+    第二道降级)，chief_auditor自己再按朴素比例算expected=0.012，两头
+    都不对，被这道闸连续拒挂。修复后pipeline_bridge.py会把真正走完
+    整个split+normalize流水线的目标值(TP2真的被放弃后的0)一并作为
+    tp_slice_expected_override塞进facts，这里验证audit_open_bundle
+    确实会读取并转发这个字段给check_tp_slice_budget。"""
+
+    def test_expected_override_fact_is_forwarded_and_prevents_false_reject(self):
+        facts = {
+            "symbol": "GEVUSDT",
+            "ledger_symbol": "GEVUSDT",
+            "signal_side": "LONG",
+            "live_side": "LONG",
+            "live_qty": 0.04,
+            "initial_qty": 0.04,
+            "entry": 949.74,
+            "leverage": 3.0,
+            "leverage_cap": 3.0,
+            "risk_pct": 0.2,
+            "risk_pct_cfg": 0.2,
+            "tp1_qty": 0.01,
+            "tp2_qty": 0.0,  # 已经走完normalize、TP2被放弃后的真实目标
+            "tp_slice_expected_override": 0.01,
+            "hard_sl_px": 938.16,
+            "hard_sl_expected": 938.16,
+            "hard_sl_live": True,
+            "hard_sl_query_failed": False,
+            "radar_activated": False,
+            "radar_should_active": None,
+            "api_recent": 0,
+            "api_budget": 48,
+            "place_levels": 2,
+        }
+        result = audit_open_bundle(facts)
+        tp_item = next(i for i in result.items if i.key == "tp_slice")
+        self.assertTrue(tp_item.ok, tp_item.detail)
+
+    def test_without_override_fact_naive_ratio_still_used(self):
+        """确认没有tp_slice_expected_override这个fact时行为不变(向后
+        兼容)——旧调用方/旧facts继续走朴素比例，不受这次改动影响。"""
+        facts = {
+            "symbol": "GEVUSDT",
+            "ledger_symbol": "GEVUSDT",
+            "signal_side": "LONG",
+            "live_side": "LONG",
+            "live_qty": 0.04,
+            "initial_qty": 0.04,
+            "entry": 949.74,
+            "leverage": 3.0,
+            "leverage_cap": 3.0,
+            "risk_pct": 0.2,
+            "risk_pct_cfg": 0.2,
+            "tp1_qty": 0.5,
+            "tp2_qty": 0.5,
+            "hard_sl_px": 938.16,
+            "hard_sl_expected": 938.16,
+            "hard_sl_live": True,
+            "hard_sl_query_failed": False,
+            "radar_activated": False,
+            "radar_should_active": None,
+            "api_recent": 0,
+            "api_budget": 48,
+            "place_levels": 2,
+        }
+        result = audit_open_bundle(facts)
+        tp_item = next(i for i in result.items if i.key == "tp_slice")
+        self.assertFalse(tp_item.ok)
 
 
 if __name__ == "__main__":

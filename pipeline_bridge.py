@@ -309,15 +309,30 @@ class PipelineBridgeMixin:
         try:
             facts = self._pipeline_facts_for_audit()
             # 若刚挂完单，用对账函数刷新切片事实
+            # 2026-09-06修复实盘复现：E账户GEVUSDT弱档tier=0缩量后qty=0.04，
+            # 这里原来只调_split_remaining_tp_quantities(只做了min_qty从
+            # TP2/TP3借调给TP1那一半逻辑)，没有跟着走_normalize_tp_qty_map
+            # 的第二道"借调后TP2自己还是不够格，直接放弃这一档"降级——喂给
+            # 督察官的tp1_qty/tp2_qty(0.01/0.008)因此比实际真的会去挂的量
+            # (0.01/0，TP2已被放弃)偏大，加上chief_auditor自己按朴素比例
+            # 算expected(未跟着min_qty调整)，两头都不对，被这道闸连续拒挂。
+            # 改法同execution_officer那道闸(_assert_place_tp_budget)：
+            # qm走完整个split+normalize流水线后就是唯一权威的目标值，不需要
+            # 另外再猜一个"期望值"来验证它——直接把归一化后的qty当作
+            # expected_override一并传给chief_auditor，规避掉它自己的朴素
+            # 比例假设。
             try:
                 live_qty = float(facts.get("live_qty") or 0)
                 if live_qty > 0 and hasattr(self, "_split_remaining_tp_quantities"):
                     qm = self._split_remaining_tp_quantities(live_qty)  # type: ignore[attr-defined]
+                    if isinstance(qm, dict) and hasattr(self, "_normalize_tp_qty_map"):
+                        qm = self._normalize_tp_qty_map(qm, live_qty)  # type: ignore[attr-defined]
                     if isinstance(qm, dict):
-                        if float(qm.get(1) or 0) > 0:
-                            facts["tp1_qty"] = float(qm.get(1) or 0)
-                        if float(qm.get(2) or 0) > 0:
-                            facts["tp2_qty"] = float(qm.get(2) or 0)
+                        tp1_norm = float(qm.get(1) or 0)
+                        tp2_norm = float(qm.get(2) or 0)
+                        facts["tp1_qty"] = tp1_norm
+                        facts["tp2_qty"] = tp2_norm
+                        facts["tp_slice_expected_override"] = tp1_norm + tp2_norm
             except Exception:
                 pass
             result = audit_open_bundle(facts)

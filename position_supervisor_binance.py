@@ -9489,8 +9489,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # BNBUSDT心跳追回仓qty=0.06，借调后tp1+tp2=0.02 > 朴素比例0.018，
             # 导致开仓起20多分钟每轮巡检都被这道闸拦下，仓位全程只有硬止损、
             # 完全没有止盈单。
-            exp_q1, exp_q2, _exp_q3 = self._split_tp_quantities(init_q, ratios)
-            expected_min_qty_aware = exp_q1 if place_n <= 1 else (exp_q1 + exp_q2)
+            # 2026-09-06再修复：上面那版只replicate了_split_tp_quantities
+            # 这一半的min_qty逻辑，没有跟着走_normalize_tp_qty_map的第二道
+            # "借调后TP2自己还是不够格，直接放弃这一档"降级——q_by(=levels，
+            # 就是_expected_tp_levels(live_qty)算出来的、马上要真的去挂的
+            # 那份)已经完整走过split+normalize两道min_qty逻辑，是唯一权威
+            # 的目标值；not consumed这个分支只在首次开仓触发，此时
+            # live_qty恒等于init_q，q_by本身就是"用init_q+ratios算出来的
+            # 完整正确目标"，不需要另外再猜一个"期望值"来验证它——直接把
+            # got_1_2自己当作expected，两道min_qty降级(TP1借调/TP2放弃)
+            # 无论单独发生还是叠加发生都不会再被误判。实盘复现：E账户
+            # GEVUSDT弱档tier=0缩量后qty=0.04，借调后TP1=0.01合格但TP2=
+            # 0.008仍不够格被_normalize_tp_qty_map放弃，got_1_2=0.01，
+            # 上一版expected仍按未考虑TP2放弃的0.018算，被这道闸连续拒挂。
+            expected_min_qty_aware = got_1_2
             cap = round(max(expected_min_qty_aware, 0.0) + 1e-6, 3)
             if got_1_2 <= 0 and expected_raw < min_leg_qty:
                 logger.info(
@@ -14328,11 +14340,37 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         # 雷达已交棒/已激活：优先归因 radar_be（允许微赚区智能再入），
         # 避免「未贴止损线」误判 manual 导致丢重入机会。
+        # 2026-09-06修复实盘复现：B账户宝贝手动平仓XPDUSDT(成交1399.05)后
+        # ~3.5分钟，系统判定exit_source=radar_be并自动"智能再入"，把刚
+        # 平掉的仓位又重新开了回去——宝贝发现后又手动平了一次。根因是
+        # 这里原来完全不设价格上限："雷达曾经武装过"就无条件归因radar_be，
+        # 而can_smart_reenter()只对radar_be/sl_breakeven/sl_initial这几个
+        # "分类"放行智能再入，不区分"这次真的是我们自己的止损单成交"还是
+        # "用户在交易所手动市价平仓、只是恰好这次仓位曾经武装过雷达"。
+        # 复现当时账本记录的止损价1392.84，实际成交1399.05，相差6.21
+        # (≈0.44%价格/≈0.22×ATR)——已经超出_likely_exchange_stop_exit
+        # 自己的紧容差(max(2.5,px*0.2%)≈2.80)一倍以上，明显不是同一张
+        # 止损单成交，本该走到下面的EXIT_SOURCE_MANUAL分支。这条"宽松兜底"
+        # 当初是为了不把"检测延迟导致现价跟止损线差一点点"的真雷达出局误判
+        # 成manual、白白丢掉重入机会，但原实现完全没有价格上限、等于对
+        # "雷达武装过的仓位"的任意成交价照单全收——现在加回一道加倍宽容差
+        # (是_likely_exchange_stop_exit紧容差的2倍)：差距在这个范围内，
+        # 大概率是检测延迟，继续归因radar_be放行智能再入；差距明显更大
+        # (像这次的6.21)，宁可保守地判为manual、放弃这次重入机会，也不要
+        # 把用户刚手动平掉的仓位自动开回去。
         if self._radar_was_armed():
-            gate = self._describe_radar_trigger_gate(self.watched_qty, curr_px)
-            note = hint or "雷达交棒后仓位归零（保本/微赚再评估）"
-            note += f" | 闸门={gate}"
-            return EXIT_SOURCE_RADAR_BE, note
+            sl_ref = float(
+                getattr(self, "_last_applied_exchange_sl", 0)
+                or getattr(self, "current_sl", 0)
+                or getattr(self, "tv_sl", 0)
+                or 0
+            )
+            wide_tol = max(2.5, px_chk * 0.002) * 2.0
+            if sl_ref > 0 and px_chk > 0 and abs(px_chk - sl_ref) <= wide_tol:
+                gate = self._describe_radar_trigger_gate(self.watched_qty, curr_px)
+                note = hint or "雷达交棒后仓位归零（保本/微赚再评估）"
+                note += f" | 闸门={gate}"
+                return EXIT_SOURCE_RADAR_BE, note
         if getattr(self, "shield_active", False):
             return (
                 EXIT_SOURCE_MANUAL,
