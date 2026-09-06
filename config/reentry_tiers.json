@@ -129,16 +129,16 @@
     ]
   },
   "ZEC": {
-    "tv_tf_sec": 9000,
+    "tv_tf_sec": 7800,
     "reentry_window_bars": 1,
     "reentry_zone_atr": 0.5,
-    "note": "v2.8（2026-08-11）：ZEC自己近73根90m K线局部高点回撤分析——P75回撤≈1.82×ATR，比ETH当前strong档(1.40)宽出约30%，跟今天实盘反复验证ZEC需要更宽呼吸空间的结论一致。step_trigger/step_advance整体按sqrt(1.82/1.40)≈1.14倍放宽（开根号缓冲避免直接按线性比例放大，样本量约29个局部高点/4.5天数据，量不算大）；breath_tp12/23/min_mult/max_mult暂不动，运行时还有ADX+动量+TP振幅三层连续调节，不在这里叠加更多改动。2026-08-15追加修正：tv_tf_sec同BNB一样一直停在ETH的90min没跟着ZEC后来确认的150分钟周期更新，reentry_window_sec()算错了窗口时长，核对TV截图才发现。window_bars同样从2改成1，理由同BNB。",
+    "note": "v2.8（2026-08-11）：ZEC自己近73根90m K线局部高点回撤分析——P75回撤≈1.82×ATR，比ETH当前strong档(1.40)宽出约30%，跟今天实盘反复验证ZEC需要更宽呼吸空间的结论一致。step_trigger/step_advance整体按sqrt(1.82/1.40)≈1.14倍放宽（开根号缓冲避免直接按线性比例放大，样本量约29个局部高点/4.5天数据，量不算大）；breath_tp12/23/min_mult/max_mult暂不动，运行时还有ADX+动量+TP振幅三层连续调节，不在这里叠加更多改动。2026-08-15追加修正：tv_tf_sec同BNB一样一直停在ETH的90min没跟着ZEC后来确认的150分钟周期更新，reentry_window_sec()算错了窗口时长，核对TV截图才发现。window_bars同样从2改成1，理由同BNB。2026-09-06修正：用户把ZEC周期从150分钟改成130分钟，tv_tf_sec同步为7800；window_bars维持1（130min×1=130min比260min(×2)更接近~150-200min的窗口惯例，理由同PAXG 2026-08-27那次130分钟再校准）。step_trigger/step_advance按sqrt(ZEC新测130分钟中位数回调2.54/ETH当前中位数回调2.37)≈1.035倍重新缩放ETH三档基线（81.9天907根5m合成K线、132个回调样本）；breath_tp12/23/min_mult/max_mult维持不变，理由同BNB/ZEC/BCH。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：按ZEC自身波动率放宽",
-        "step_trigger_atr": 1.14,
-        "step_advance_atr": 0.57,
+        "note": "弱趋势：按ZEC新测130分钟波动率(1.035倍)缩放",
+        "step_trigger_atr": 1.04,
+        "step_advance_atr": 0.52,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -146,9 +146,9 @@
       },
       {
         "name": "mid",
-        "note": "中趋势：按ZEC自身波动率放宽",
-        "step_trigger_atr": 1.37,
-        "step_advance_atr": 0.68,
+        "note": "中趋势：按ZEC新测130分钟波动率(1.035倍)缩放",
+        "step_trigger_atr": 1.24,
+        "step_advance_atr": 0.62,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -156,9 +156,9 @@
       },
       {
         "name": "strong",
-        "note": "强趋势：按ZEC自身波动率放宽（今天实盘ADX长期在38-41，多数时间落在这一档）",
-        "step_trigger_atr": 1.60,
-        "step_advance_atr": 0.80,
+        "note": "强趋势：按ZEC新测130分钟波动率(1.035倍)缩放",
+        "step_trigger_atr": 1.45,
+        "step_advance_atr": 0.72,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,

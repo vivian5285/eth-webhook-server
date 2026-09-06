@@ -120,34 +120,44 @@ BREATH_BNB: Dict[str, Any] = {
     "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
 }
 
-# ZEC 基线（150分钟周期）
+# ZEC 基线（130分钟周期）
 # 2026-08-13：用真实ZEC 30m K线合成150分钟K线，量了300根样本的回调分布：
 # 中位数≈3.10×ATR，75分位≈4.28×ATR，90分位≈5.89×ATR——三个品种里周期
 # 最长、回调分布也最宽，呼吸空间给得也最松。
+# 2026-09-06再校准：用户把ZEC周期从150分钟改成130分钟。130分钟能被5分钟
+# 整除，用真实5m K线合成后测(81.9天907根合成K线、132个回调样本)：中位数
+# 回调2.54×ATR、75分位3.42×ATR、90分位4.52×ATR，ATR%=2.64%——覆盖旧的
+# 150分钟时代数值，周期缩短后相对回调幅度跟着收窄。跟PAXG同款130分钟
+# 再校准(2026-08-27)同一套公式：step_trigger_atr/breath_tp12直接取中位数、
+# step_advance_atr=step_trigger×0.65、max_mult=90分位+0.3缓冲、min_mult=
+# max_mult×0.72。
 BREATH_ZEC: Dict[str, Any] = {
     "name": "ZEC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 1.05,
-    "step_advance_atr": 0.68,
+    "step_trigger_atr": 2.54,
+    "step_advance_atr": 1.65,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 3.10,  # 覆盖实测中位数回调(3.10)
-    "breath_tp23": 4.30,  # 覆盖实测75分位回调
+    "breath_tp12": 2.54,  # 09-06再校准(130min)：覆盖实测中位数回调(2.54)
+    "breath_tp23": 3.42,  # 09-06再校准(130min)：覆盖实测75分位回调(3.42)
     "phase2_trail_mult": 1.0,
-    "min_mult": 3.8,
-    "max_mult": 6.0,      # 覆盖实测90分位回调(5.89)以上
+    "min_mult": 3.5,
+    "max_mult": 4.8,      # 09-06再校准(130min)：覆盖实测90分位回调(4.52)以上
     # 2026-08-31：利润回吐刹车最初用4H K线近似回测(阈值收紧到1.5/0.45/
     # 0.60后)三档差值基本转正/打平(+0.52/+0.12/-0.08×ATR/笔)，一度启用；
     # 随后用ZEC真实生产周期(150min，30m合成)重新回测复核，三档差值全部
     # 转为明确负值(-0.33~-0.39×ATR/笔，触发子集更差达-0.69×ATR/笔)——
     # 4H近似在ZEC身上是误导性的，真实周期上ZEC回调深但更常继续走，跟
-    # XAU/PAXG是同一类特性。故意不启用，不要照抄别的品种加上。
+    # XAU/PAXG是同一类特性。故意不启用，不要照抄别的品种加上。2026-09-06：
+    # ZEC周期已改成130分钟，此回测结论基于旧的150分钟周期，尚未用新周期
+    # 重新复核——维持"不启用"结论不变，但如果之后要重新考虑打开这个
+    # 开关，应先用130分钟真实数据重新回测，不能直接沿用旧结论。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

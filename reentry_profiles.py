@@ -416,7 +416,7 @@ _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 3540)
 # 直到今天用户发来TV警报截图逐个核对周期才挖出来。
 _XAU_TF_SEC = int((_CFG.get("XAU") or {}).get("tv_tf_sec") or 3000)
 _BNB_TF_SEC = int((_CFG.get("BNB") or {}).get("tv_tf_sec") or 9000)
-_ZEC_TF_SEC = int((_CFG.get("ZEC") or {}).get("tv_tf_sec") or 9000)
+_ZEC_TF_SEC = int((_CFG.get("ZEC") or {}).get("tv_tf_sec") or 7800)
 _BCH_TF_SEC = int((_CFG.get("BCH") or {}).get("tv_tf_sec") or 21600)
 _XMR_TF_SEC = int((_CFG.get("XMR") or {}).get("tv_tf_sec") or 21600)
 _SNDK_TF_SEC = int((_CFG.get("SNDK") or {}).get("tv_tf_sec") or 4500)
@@ -541,7 +541,10 @@ REENTRY_BNB: Dict[str, Any] = {
 }
 REENTRY_ZEC: Dict[str, Any] = {
     "name": "ZEC",
-    "tv_tf": "90m",
+    # 2026-09-06修正：这个标签从2026-08-15 ZEC确认改成150分钟起就一直
+    # 没跟着更新过(只是展示标签，不影响tv_tf_sec实际取值)，这次周期
+    # 改成130分钟顺手一并修正，避免继续沿用陈旧的"90m"误导排查。
+    "tv_tf": "130m",
     "tv_tf_sec": _ZEC_TF_SEC,
     "enabled": True,
     "arm_sl_atr": ARM_SL_ATR,
