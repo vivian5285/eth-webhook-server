@@ -3024,10 +3024,23 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 硬止损+雷达单独兜底，好过挂一笔必定被交易所拒的单。
         last_q = float(out.get(last, 0) or 0)
         if 0 < last_q < min_leg_qty:
-            logger.warning(
-                f"🧩 [{self.symbol}] TP限价档合计{last_q:.4f}仍低于最小下单量"
-                f"{min_leg_qty}，仓位过小放弃挂限价TP，只留硬止损+雷达"
-            )
+            # 2026-09-06限频(宝贝反馈面板刷屏第二例)：仓位小到挂不出限价TP这个
+            # 结论只要仓位不变就会一直成立，每次调用都是同一个legit结论的
+            # 重新确认，不是新事件——跟上面"硬帽压回"那个"降无可降"死循环
+            # 不是一回事(那个是原本不该重复的bug，这个是本来就会持续成立的
+            # 稳定态)，但一样吵：实盘复现GEV/SNDK/GS/SKHYNIX两小时内单个
+            # symbol被打了123~222次一模一样的日志。跟dingtalk.py既有的
+            # "title dedup(300s)"同一个思路，按symbol+account加5分钟冷却，
+            # 只在冷却期外才真正落地这条日志，冷却期内静默但清零动作(下面
+            # out[last]=0.0)照常执行，不影响任何实际下单行为。
+            now_ts = time.time()
+            last_logged = float(getattr(self, "_tp_too_small_log_ts", 0) or 0)
+            if now_ts - last_logged >= 300.0:
+                self._tp_too_small_log_ts = now_ts
+                logger.warning(
+                    f"🧩 [{self.symbol}] TP限价档合计{last_q:.4f}仍低于最小下单量"
+                    f"{min_leg_qty}，仓位过小放弃挂限价TP，只留硬止损+雷达"
+                )
             out[last] = 0.0
         total = round(sum(float(out.get(l, 0) or 0) for l in levels), 3)
         if total > live_qty + 0.001:
