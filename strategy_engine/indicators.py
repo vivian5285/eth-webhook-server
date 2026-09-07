@@ -520,3 +520,25 @@ def donchian_mid(bars: Sequence[dict], period: int) -> List[float]:
         ll = min(_f(b["l"]) for b in window)
         out.append((hh + ll) / 2.0)
     return out
+
+
+def cci(bars: Sequence[dict], period: int = 20) -> List[float]:
+    """商品通道指数(Commodity Channel Index, Donald Lambert 1980年公开
+    发表)。典型价 TP=(high+low+close)/3；CCI = (TP - SMA(TP,period)) /
+    (0.015 × 平均绝对偏差)。±100 是 Lambert 原始定义的常规波动边界，
+    穿越 +100/-100 常被当作动量冲量的触发/确认。返回从第 period 个点开始
+    对齐的序列。"""
+    n = len(bars or [])
+    if n < period:
+        return []
+    tp = [(_f(b["h"]) + _f(b["l"]) + _f(b["c"])) / 3.0 for b in bars]
+    out = []
+    for i in range(period - 1, n):
+        window = tp[i - period + 1:i + 1]
+        m = sum(window) / period
+        mad = sum(abs(x - m) for x in window) / period
+        if mad <= 0:
+            out.append(0.0)
+        else:
+            out.append((tp[i] - m) / (0.015 * mad))
+    return out

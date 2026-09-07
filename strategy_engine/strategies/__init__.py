@@ -398,6 +398,17 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] time_series_momentum_v2 加载失败: {_e}")
 
+# 2026-09-07：宝贝设计的多周期多因子择时战法——日线EMA7/30定大方向，
+# 4h 上叠 EMA7/30排列 + MACD柱实心/空心形态 + 放量 + CCI±100冲量确认，
+# 四重同时点亮才进场。快指标从 RSI/CCI/SKDJ 里选了 CCI(本擂台没人用过、
+# 差异化最大，且±100冲量确认正好扮演"这一下够不够猛"的角色)。
+try:
+    from strategy_engine.strategies import mtf_ema_macd_cci
+    STRATEGIES["mtf_ema_macd_cci"] = mtf_ema_macd_cci.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] mtf_ema_macd_cci 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -805,6 +816,19 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "代理指标)形成\"哪种成交量信号源更准\"的直接对照组。klines.py"
         "新增\"tb\"字段专门支撑这套。4H周期，跟obv_divergence同周期保证"
         "对照实验只有数据源这一个变量。"
+    ),
+    "mtf_ema_macd_cci": (
+        "多周期 EMA7/30 + MACD柱形态 + 量能 + CCI冲量——2026-09-07 宝贝"
+        "设计。日线 EMA7/30 定大方向(只做同向)，4h 上四重叠加：EMA7/30 "
+        "多/空排列 + MACD柱在零轴同侧\"实心\"(柱在放大=动能加速) + 当根"
+        "成交量≥1.15×量能加权均量 + CCI 突破±100，且这一根是刚触发"
+        "(4h EMA 交叉 或 CCI 刚穿±100)才进场。离场：日线大方向翻转 / "
+        "4h EMA 反向交叉 / MACD柱转\"空心\"(缩小)且 CCI 回到0轴另一侧"
+        "(动能衰竭)。快指标特意选 CCI——本擂台 RSI/随机K都被用过了，CCI "
+        "没人用，且它无界、对短冲量敏感，扮演的是\"这一下够不够猛\"而不是"
+        "又一个趋势过滤器。跟 ema_cross_7_30(单周期纯交叉)、mtf_ema_"
+        "pullback(等回踩+RSI抬头)、macd_histogram(单周期柱变号)都不同——"
+        "这套是\"多重确认同时点亮的冲量启动\"。base=4h，mtf=[1d]。"
     ),
     "time_series_momentum_v2": (
         "时间序列动量·无固定止盈版——2026-09-07新增，跟 time_series_"
