@@ -18022,6 +18022,35 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self._maybe_reevaluate_adx_tier()
             except Exception as e:
                 logger.debug(f"[{self.symbol}] ADX档动态复评跳过: {e}")
+            # 2026-09-07新增(宝贝提出"冲高又被决定性反转打回来"缺口分析)：
+            # _maybe_lock_profit_on_reversal原本只在雷达已武装(下面armed
+            # 分支)才会被调用到——雷达没武装这段窗口(比如ZEC实盘复现：
+            # entry=1189.18冲高到best=1216.84(+2.33%)又回落到~1177(-1.02%)，
+            # 激活进度全程卡在20%)完全没有任何主动防护，只剩很宽的硬止损
+            # 兜底。不碰激活门槛/呼吸空间本身(那是拿真实亏损换来的调优，
+            # 见ZEC strong档"5.5分钟就被打掉"的历史教训)，只是把这道已经
+            # 验证过的"4H决定性反转K线+放量"棘轮，延伸到休眠期也跑一次——
+            # 复用它自带的REVERSAL_LOCK_MIN_PROFIT_ATR门槛(必须先有过像样
+            # 的浮盈)和decisive_bear/decisive_bull+放量判定(必须是决定性
+            # 反转，不是普通回撤噪音)，正常趋势延续(没有出现放量反转K线)
+            # 完全不受影响，该给的呼吸空间还是给；只有真的"冲高/杀跌后被
+            # 决定性反转打回来"才会把止损顶到保本锁盈价，不会让雷达提前
+            # 正式激活(不设radar_activated=True，不进入连续追踪的阶梯逻辑)。
+            try:
+                dormant_floor = (
+                    float(getattr(self, "current_sl", 0) or 0)
+                    or float(getattr(self, "initial_stop", 0) or 0)
+                )
+                if dormant_floor > 0:
+                    locked = self._maybe_lock_profit_on_reversal(px0 or entry, dormant_floor)
+                    if locked and locked != dormant_floor:
+                        if side == "LONG":
+                            self.current_sl = max(dormant_floor, locked)
+                        else:
+                            self.current_sl = min(dormant_floor, locked)
+                        self.tv_sl = float(self.current_sl)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 休眠期反转锁盈复评跳过: {e}")
             return None
         atr = self._get_locked_initial_atr()
         # 2026-09-01新增：进场延迟呼吸补偿——见_arm_temp_stop_and_tp12顶部
