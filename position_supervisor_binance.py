@@ -19169,6 +19169,22 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             reason=self.pending_forced_close_reason or "哨兵续追平仓",
                             reset_state=True,
                         )
+                        # 2026-09-07修复(宝贝"老规矩"标准检查实盘复现)：
+                        # _close_all内部有非阻塞的per-instance锁(见2026-09-04
+                        # _close_all race/XMR事故那次修复)，如果主流程(比如
+                        # _ensure_flat_before_open的"先平后开"净场)正持有这把
+                        # 锁，这里调用会立刻"本次退让"原样返回，pending_
+                        # forced_close却还没被清掉——上面紧跟着的continue
+                        # 中间完全没有sleep，导致本轮循环立刻回到顶部重新
+                        # 判断，还是True，再退让，再continue……零延迟死循环。
+                        # 实盘复现：ZEC/BCH/XAU/GEV/ETH/MU/SKHYNIX/LITE等
+                        # 多个品种"先平后开"期间，单个symbol几分钟内被打了
+                        #近1.5万次一模一样的"哨兵续追...本次退让"，一夜下来
+                        # 8个品种合计超8.6万条——纯粹空转刷屏(有锁保护，没有
+                        # 造成任何下错单)。跟紧接着下面"_lock.acquire超时"
+                        # 分支同款处理：退让后睡0.5秒再重试，给主流程留出
+                        # 完成净场的时间窗口，不再零延迟空转。
+                        time.sleep(0.5)
                         continue
                     if not self._lock.acquire(timeout=2.0):
                         time.sleep(0.5)
