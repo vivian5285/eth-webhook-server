@@ -180,6 +180,12 @@ SENTINEL_POLL_JITTER_SEC = 8.0
 IDLE_PATROL_INTERVAL_SEC = 300
 IDLE_PATROL_BACKOFF_SEC = 900
 IDLE_TAKEOVER_COOLDOWN_SEC = 60
+# 2026-09-07新增：哨兵"续追未兑现强平意图"新鲜度门槛——见_sentinel_loop里
+# pending_forced_close分支同日期注释。_ensure_flat_before_open自己的6次
+# 重试预算文档记载的worst case是"长达~145秒"，这里取150秒(略高于那个
+# worst case)当门槛：意图挂起时间没到这个门槛，大概率是主流程正常在忙，
+# 哨兵完全让位；真正超过worst case还没清掉，才认定"大概率没人管了"出手。
+PENDING_FORCED_CLOSE_SENTINEL_GRACE_SEC = 150.0
 # 2026-08-24：多品种顺序启动恢复(recover_state_on_startup)跟每品种自己独立
 # 节奏的空闲巡检(_run_idle_live_reconcile)之间的竞态兜底阀——正常情况下
 # 顺序恢复清单跑完13个品种远用不到这么久，这个值只是防真出现更早品种卡死
@@ -19189,10 +19195,34 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     # 用self._lock：_close_all/_flat_close_parallel内部不抢
                     # 这把锁，放在锁外调用避免长达~145秒的重试期间把哨兵其它
                     # 职责一起卡住。
-                    if bool(getattr(self, "pending_forced_close", False)):
+                    #
+                    # 2026-09-07再修复(宝贝反馈GSUSDT实盘复现：TV信号到最终
+                    # 开仓完成耗时72秒，其中21秒被这里的续追空转占用)：
+                    # pending_forced_close是_close_all_impl一进函数就无条件
+                    # 打上的("必须平掉"意图落盘防崩溃丢单，见该函数顶部注释)，
+                    # 完全不区分"刚打上、主流程(比如先平后开净场)正常在忙"
+                    # 还是"真的卡死很久没人管"——旧实现看到标记为True就立刻
+                    # 冲上去抢锁，每次正常的"先平后开"都会撞上，虽然08-07昨天
+                    # 已经把"零延迟"那部分修掉(加了0.5秒退避)，但每次开仓
+                    # 仍然平白多等十几到二十秒。加一道新鲜度判断：只有这个
+                    # 意图挂起时间超过主流程自己的重试预算上限(~145秒，见
+                    # 上方注释)才认定"大概率真的没人管了"，哨兵才出手续追；
+                    # 意图刚打上不久，大概率是主流程正常在忙，哨兵完全让位、
+                    # 不试探不退让，短暂睡一下再回来复查——真正的崩溃恢复
+                    # 场景(标记会一直挂到超过阈值)完全不受影响。
+                    pending_since = float(
+                        getattr(self, "pending_forced_close_started_ts", 0) or 0
+                    )
+                    pending_age = (
+                        (time.time() - pending_since) if pending_since > 0 else 0.0
+                    )
+                    if (
+                        bool(getattr(self, "pending_forced_close", False))
+                        and pending_age >= PENDING_FORCED_CLOSE_SENTINEL_GRACE_SEC
+                    ):
                         logger.warning(
                             f"🚑 [{self.symbol}] 哨兵续追未兑现的强平意图"
-                            f"({self.pending_forced_close_reason})"
+                            f"(挂起{pending_age:.0f}s·{self.pending_forced_close_reason})"
                         )
                         self._close_all(
                             reason=self.pending_forced_close_reason or "哨兵续追平仓",
@@ -19214,6 +19244,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         # 分支同款处理：退让后睡0.5秒再重试，给主流程留出
                         # 完成净场的时间窗口，不再零延迟空转。
                         time.sleep(0.5)
+                        continue
+                    if bool(getattr(self, "pending_forced_close", False)):
+                        # 意图还新鲜(大概率主流程正常在忙)，完全不去抢锁、
+                        # 不打任何日志——静默睡一小段再回来复查，避免空转。
+                        time.sleep(2.0)
                         continue
                     if not self._lock.acquire(timeout=2.0):
                         time.sleep(0.5)
