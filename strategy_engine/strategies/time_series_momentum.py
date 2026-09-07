@@ -35,6 +35,14 @@ atr_len根计算ATR安全网。本模块用1d周期，lookback_bars默认20(约2
 是论文原版12个月周期针对加密货币更快节奏的有意识压缩(跟本仓库
 cross_momentum/bollinger_squeeze_fast同样的"不猜哪个周期更好，用真实
 数据说话"的一贯做法)。
+
+参数 use_fixed_tp（2026-09-07新增，默认 True = 原行为不变）：
+  - True：发 tp1/tp2/tp3（1.5/3/5 倍 ATR 固定止盈），runner 摸到 tp1 就平
+  - False：完全不发止盈，只靠"动量翻转"或 ATR 止损/模拟强平离场——这才
+    是原始论文的做法（持有到信号翻转）。用真实数据核对过：本战法当前
+    盈亏比只有 0.86（均亏 > 均盈），怀疑就是 1.5 倍 ATR 固定止盈把赢家
+    封死、亏家却能跑到 2 倍 ATR 止损造成的结构性倒挂。time_series_
+    momentum_v2 用 False 跟现版并排跑，验证"让利润奔跑"能不能修好盈亏比。
 """
 from __future__ import annotations
 
@@ -46,6 +54,7 @@ DEFAULT_PARAMS = {
     "lookback_bars": 20,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    "use_fixed_tp": True,
 }
 
 
@@ -96,15 +105,18 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return None
     direction = 1 if action == "LONG" else -1
 
-    return {
+    sig = {
         "action": action,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - direction * atr * float(p["atr_stop_mult"]), 6),
-        "tp1": round(price + direction * atr * 1.5, 6),
-        "tp2": round(price + direction * atr * 3.0, 6),
-        "tp3": round(price + direction * atr * 5.0, 6),
         "tier": 1,
         "bar_time": bar_time,
-        "reason": f"自身{lookback}根时间序列动量={momentum:+.4f}",
+        "reason": f"自身{lookback}根时间序列动量={momentum:+.4f}"
+                  + ("" if p.get("use_fixed_tp", True) else "(无固定止盈,持有到翻转)"),
     }
+    if p.get("use_fixed_tp", True):
+        sig["tp1"] = round(price + direction * atr * 1.5, 6)
+        sig["tp2"] = round(price + direction * atr * 3.0, 6)
+        sig["tp3"] = round(price + direction * atr * 5.0, 6)
+    return sig

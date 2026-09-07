@@ -385,6 +385,19 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] oi_price_confirm 加载失败: {_e}")
 
+# 2026-09-07：time_series_momentum_v2——跟 v1 逐字共用同一份代码(跟
+# bollinger_squeeze_fast/turtle_system2 同一个复用做法)，只在 roster 里
+# 传 params={"use_fixed_tp": False} 去掉 1.5 倍 ATR 固定止盈，改成原始
+# 论文的"持有到动量翻转"。真实数据核对发现 v1 盈亏比只有 0.86(均亏>均盈)、
+# 靠 69% 高胜率撑着正期望，怀疑就是固定止盈把赢家封死造成的。v2 跟 v1
+# 并排跑，验证"让利润奔跑"能不能把盈亏比结构修正过来。
+try:
+    from strategy_engine.strategies import time_series_momentum as _tsmom_mod
+    STRATEGIES["time_series_momentum_v2"] = _tsmom_mod.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] time_series_momentum_v2 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -792,6 +805,17 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "代理指标)形成\"哪种成交量信号源更准\"的直接对照组。klines.py"
         "新增\"tb\"字段专门支撑这套。4H周期，跟obv_divergence同周期保证"
         "对照实验只有数据源这一个变量。"
+    ),
+    "time_series_momentum_v2": (
+        "时间序列动量·无固定止盈版——2026-09-07新增，跟 time_series_"
+        "momentum 逐字共用同一份代码(参数 use_fixed_tp=False)，唯一区别："
+        "去掉 1.5/3/5 倍 ATR 的固定止盈，改成原始论文的做法——持有到"
+        "20根动量翻转、或碰到 ATR 止损/模拟强平才离场。用真实数据核对："
+        "v1 盈亏比只有 0.86(均亏 1.54 > 均盈 1.33)、靠 69% 高胜率撑着"
+        "正期望，怀疑就是固定止盈把赢家封在 1.5ATR、亏家却能跑到 2ATR "
+        "止损造成的结构性倒挂。这一版跟 v1 并排跑，验证\"让利润奔跑\"能"
+        "不能把盈亏比修正过来(预期胜率会掉到 ~55%，但单笔均盈拉大、"
+        "期望值上升)。1D 周期，其余配置跟 v1 完全一致，单变量对照。"
     ),
     "oi_price_confirm": (
         "持仓量+价格确认——2026-09-05新增。永续合约OI(Open Interest)是"

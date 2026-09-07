@@ -260,6 +260,11 @@ _VEGAS_BARS_LIMIT = 1400
 # 完全相同的_TURTLE_SYMBOLS品种池，保证除回看窗口外单变量对照成立。
 _TURTLE_SYSTEM2_PARAMS = {"entry_period": 55, "exit_period": 20, "atr_len": 20, "atr_stop_mult": 2.0}
 
+# time_series_momentum_v2：跟 v1 同代码、同 1d 周期、同全品种，只去掉固定
+# 止盈（use_fixed_tp=False），单变量对照"让利润奔跑能不能修好 v1 的盈亏
+# 比结构倒挂"。见 strategies/__init__.py 的说明。
+_TSMOM_V2_PARAMS = {"use_fixed_tp": False}
+
 # TV真实策略复刻拉进擂台：直接复用symbol_registry.SYMBOLS(宝贝亲自核对
 # 过的品种→策略→周期→MTF映射)，不重新写一份。XPDUSDT币安接口拉不到
 # K线(HTTP 400)，跳过。
@@ -283,6 +288,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "bollinger_squeeze_fast", "timeframe": "1h", "params": _SQUEEZE_FAST_PARAMS} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "volatility_breakout", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "time_series_momentum", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "time_series_momentum_v2", "timeframe": "1d", "params": _TSMOM_V2_PARAMS} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
