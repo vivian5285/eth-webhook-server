@@ -794,6 +794,44 @@ BREATH_GEV: Dict[str, Any] = {
     "has_staged_exit_gate": False,
 }
 
+# STXX 基线（新增品种，2026-09-08，75分钟周期，已上市正股EQUITY类，跟
+# GS/MU/LITE/TSLA/META/DELL/GEV同类，交易所filter(stepSize=0.01/minQty=
+# 0.01/tickSize=0.01)也跟同族其它TradFi品种一致）。75分钟不是币安原生
+# 间隔(原生只有1m/3m/5m/15m/30m/1h/2h/4h/6h/8h/12h)，能被15整除，用
+# 15m原始K线合成（分页拉了8310根15m原始K线覆盖约86.5天，STXXUSDT交易所
+# onboardDate=2026-06-11，86.5天已覆盖上线以来几乎全部历史），真实摆动
+# 点识别(fractal pivot，±3根确认，同批方法)测了1661根合成K线、234个
+# 摆动回调样本：中位数≈2.46×ATR，75分位≈4.03×ATR，90分位≈6.26×ATR。
+# ATR%=0.64%。step_trigger_atr/step_advance_atr推算方法同DELL/GEV
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger）。has_staged_exit_gate未核实真实TV Pine源码，
+# 默认False（同大多数品种惯例）。
+BREATH_STXX: Dict[str, Any] = {
+    "name": "STXX",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,
+    "step_advance_atr": 0.60,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.46,  # 覆盖实测中位数回调(2.46)
+    "breath_tp23": 4.03,  # 覆盖实测75分位回调(4.03)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.8,
+    "max_mult": 6.6,      # 覆盖实测90分位回调(6.26)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
 # 2026-09-04：has_staged_exit_gate=True 只标在这7个品种上（META/LITE/MU/
 # GS/OPENAI/SKHYNIX/SNDK，全是03版本.pine"平开不互斥版"家族）——核实过
 # 真实TV Pine源码只有这7个有useStagedExitGate，其余全部False（含ETH/XAU/
@@ -826,6 +864,7 @@ _BY_BINANCE = {
     "METAUSDT": BREATH_META,  # 2026-08-27：新增
     "DELLUSDT": BREATH_DELL,  # 2026-09-06：新增
     "GEVUSDT": BREATH_GEV,  # 2026-09-06：新增
+    "STXXUSDT": BREATH_STXX,  # 2026-09-08：新增
 }
 
 _BY_DEEPCOIN = {

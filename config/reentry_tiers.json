@@ -773,5 +773,43 @@
         "max_mult": 6.0
       }
     ]
+  },
+  "STXX": {
+    "tv_tf_sec": 4500,
+    "reentry_window_bars": 2,
+    "reentry_zone_atr": 0.5,
+    "note": "2026-09-08：新增品种（币安TRADIFI_PERPETUAL，underlyingType=EQUITY，STXX股票代币化永续，跟GS/MU/LITE/TSLA/META/DELL/GEV同类，交易所filter stepSize=0.01/minQty=0.01/tickSize=0.01也一致）。周期75分钟(不是原生间隔，能被15整除，用15m合成)，reentry_window_bars收到2根（75min×2=150min，正好落在ETH 2×90m=180min一带的~150-200min窗口惯例低端，比照GS/MU/LITE(90m/55m)沿用2根的处理方式，不套用DELL/GEV/TSLA/META那种长周期收1根的处理）。step_trigger/step_advance按sqrt(STXX breath_profiles.py中位数回调2.46/ETH当前中位数回调2.37)≈1.019倍缩放，套用GS/MU/LITE/TSLA/META/DELL/GEV同一套「weak/mid/strong的breath_tp12/23/min/max固定用通用模板1.50-2.00-2.50/2.00-2.80-3.50/2.5-3.0-4.0/3.5-4.5-6.0，只有step_trigger_atr=ratio×{1.0,1.2,1.4}、step_advance_atr≈step_trigger_atr×0.5按各档比例缩放」的既定惯例（86.5天1661根15m合成75分钟K线、234个回调样本，样本量充足；STXXUSDT交易所onboardDate=2026-06-11，86.5天已覆盖上线以来几乎全部历史；breath_profiles.py::BREATH_STXX基线沿用另一套「品种自己实测P50/P75/P90直接覆盖」的独立惯例，两套数值不必一致，理由同GS/MU/LITE/DELL/GEV历史注释）。",
+    "tiers": [
+      {
+        "name": "weak",
+        "note": "弱趋势：按STXX自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.02,
+        "step_advance_atr": 0.51,
+        "breath_tp12": 1.50,
+        "breath_tp23": 2.00,
+        "min_mult": 2.5,
+        "max_mult": 3.5
+      },
+      {
+        "name": "mid",
+        "note": "中趋势：按STXX自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.22,
+        "step_advance_atr": 0.61,
+        "breath_tp12": 2.00,
+        "breath_tp23": 2.80,
+        "min_mult": 3.0,
+        "max_mult": 4.5
+      },
+      {
+        "name": "strong",
+        "note": "强趋势：按STXX自身波动率(1.019倍)微放宽",
+        "step_trigger_atr": 1.43,
+        "step_advance_atr": 0.71,
+        "breath_tp12": 2.50,
+        "breath_tp23": 3.50,
+        "min_mult": 4.0,
+        "max_mult": 6.0
+      }
+    ]
   }
 }

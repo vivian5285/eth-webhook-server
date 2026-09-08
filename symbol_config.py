@@ -256,6 +256,20 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "GEVUSDT",
         "breath": "GEV",
     },
+    "STXXUSDT": {
+        "symbol": "STXXUSDT",
+        "unit": "STXX",
+        "tag": "STXX",
+        # 2026-09-08：币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，STXX
+        # 股票代币化永续，跟GS/MU/LITE/TSLA/META/DELL/GEV同类。75分钟周期
+        # (不是原生间隔，能被15整除，用15m合成，同ETH旧59min手法)。
+        "qty_step": 0.01,    # 实测LOT_SIZE stepSize
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,  # 实测PRICE_FILTER tickSize=0.01
+        "atr_fallback_symbol": "STXXUSDT",
+        "breath": "STXX",
+    },
 }
 
 # 深币 SWAP
@@ -393,6 +407,12 @@ _BINANCE_ALIASES = {
     "GEVUSDT.P": "GEVUSDT",
     "BINANCE:GEVUSDT": "GEVUSDT",
     "BINANCE:GEVUSDT.P": "GEVUSDT",
+    "STXX": "STXXUSDT",
+    "STXXUSDT": "STXXUSDT",
+    "STXXUSD": "STXXUSDT",
+    "STXXUSDT.P": "STXXUSDT",
+    "BINANCE:STXXUSDT": "STXXUSDT",
+    "BINANCE:STXXUSDT.P": "STXXUSDT",
     "GSUSDT": "GSUSDT",
     "GSUSD": "GSUSDT",
     "GSUSDT.P": "GSUSDT",
@@ -497,15 +517,18 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 # 原生K线)——币安TRADIFI_PERPETUAL(underlyingType=EQUITY)，跟GS/MU/LITE/
 # TSLA/META同类，已核实stepSize/minQty/tickSize均为0.01，跟同族其它
 # TradFi品种一致。
+# 2026-09-08：新增品种STXXUSDT(75分钟周期，15m合成)——同样是币安
+# TRADIFI_PERPETUAL(underlyingType=EQUITY)，跟GS/MU/LITE/TSLA/META/DELL/
+# GEV同类，已核实stepSize/minQty/tickSize均为0.01。
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,SKHYNIXUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT,DELLUSDT,GEVUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,SKHYNIXUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT,DELLUSDT,GEVUSDT,STXXUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT", "DELLUSDT", "GEVUSDT"]
+    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT", "DELLUSDT", "GEVUSDT", "STXXUSDT"]
 
 
 def active_deepcoin_symbols():
@@ -557,6 +580,7 @@ def extract_symbol_from_payload(data):
         "METAUSDT.P", "BINANCE:METAUSDT", "METAUSDT",
         "DELLUSDT.P", "BINANCE:DELLUSDT", "DELLUSDT",
         "GEVUSDT.P", "BINANCE:GEVUSDT", "GEVUSDT",
+        "STXXUSDT.P", "BINANCE:STXXUSDT", "STXXUSDT",
     ):
         if token in blob:
             return token
