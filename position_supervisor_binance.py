@@ -186,6 +186,16 @@ IDLE_TAKEOVER_COOLDOWN_SEC = 60
 # worst case)当门槛：意图挂起时间没到这个门槛，大概率是主流程正常在忙，
 # 哨兵完全让位；真正超过worst case还没清掉，才认定"大概率没人管了"出手。
 PENDING_FORCED_CLOSE_SENTINEL_GRACE_SEC = 150.0
+# 2026-09-08新增：跨账户雷达激活互通的"己方进度"门槛——见
+# _latch_radar_activation_sticky里的详细注释(SKHYNIXUSDT实盘复现)。
+# entry接近度校验(2026-09-06)只堵住了"姊妹账户是一笔entry差很远的老
+# 仓位"这种情况，没堵住"entry确实接近、但我自己的价格/best全程没怎么
+# 往自己的激活线方向走(大概率是自己这段时间行情/追踪掉线了)、却因为
+# 姊妹账户价格真的冲到位而被一起武装到保本"这种情况。取0.5——自己的
+# best相对entry→act这段距离，至少要走完一半，才允许借姊妹账户的摸线
+# 状态；这是一个宽松的"没掉线"哨兵，不是要求自己也摸线(那样这层互通
+# 机制就没意义了)。
+RADAR_SYNC_MIN_OWN_PROGRESS_FRAC = 0.5
 # 2026-08-24：多品种顺序启动恢复(recover_state_on_startup)跟每品种自己独立
 # 节奏的空闲巡检(_run_idle_live_reconcile)之间的竞态兜底阀——正常情况下
 # 顺序恢复清单跑完13个品种远用不到这么久，这个值只是防真出现更早品种卡死
@@ -18499,21 +18509,50 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         act = float(self._radar_activation_price() or 0)
         if act <= 0:
             return False
+        side = str(self.current_side or "").strip().upper()
+        px = float(curr_px or 0)
+        best = float(self.best_price or 0)
+        entry_ref = float(getattr(self, "watched_entry", 0) or 0)
+        my_best_ref = best if best > 0 else (px if px > 0 else entry_ref)
         # 跨账户互通：姊妹账户（同一条TV信号广播出去的B/C/D）已经摸过线，
         # 我这边即使自己的行情还差一点没摸到，也直接跟着激活，不再各account
         # 各自为战。
-        sync = self._radar_sync_touch_check()
+        #
+        # 2026-09-08修复(宝贝反馈SKHYNIXUSDT实盘复现"保本止损后立即被套")：
+        # 2026-09-06那次修复(entry接近度校验)只堵住了"姊妹账户是一笔entry
+        # 差很远的老仓位"这一种情况——这次B/C两账户entry几乎完全相同
+        # (1380.63 vs 1380.27，差0.36点，entry校验正确放行)，但C账户自己
+        # 的价格真的冲到了1404.51、摸到了它自己的激活线，B账户这边的价格
+        # 却全程还在entry附近(~1381)、离自己的激活线(≈1399~1406)一步都
+        # 没挪动——B/C明明是同一个交易所同一个symbol、行情应该完全一致，
+        # 大概率是B自己那段时间的行情/best_price追踪出现了滞后或缺口(根因
+        # 还需要进一步排查)，但不管根因是什么，只看entry接近度不够——B
+        # 自己的价格离自己的激活线还有一大截距离时，不该因为C那边摸线了
+        # 就直接把B也跟着武装到保本位，那等于让B在自己完全没赚到这段浮盈
+        # 的情况下，也被顶到一个几乎贴着entry的止损，稍微一个正常回撤
+        # 就把B打出去了(实盘：01:44开仓,03:49被同步激活,05:06就被保本
+        # 止损扫出，随后智能重入又被套)。加一道"自己的价格必须也已经走完
+        # 大半段路"的校验：自己的best/curr相对entry→gate这段距离，至少
+        # 也要走完一半，才允许借姊妹账户的摸线状态；走得太少(大概率是
+        # 自己这边行情/追踪掉线了，不是真的还没到)一律不借，各account
+        # 各自摸各自的线，保留原有"雷达没武装、只有硬止损"的宽松保护，
+        # 不会更差，只是不会被误伤般地提前顶到保本。
+        gate_span = abs(act - entry_ref) if entry_ref > 0 else 0.0
+        my_progress = abs(my_best_ref - entry_ref) if entry_ref > 0 else 0.0
+        own_progress_ok = (
+            gate_span <= 0
+            or my_progress >= gate_span * RADAR_SYNC_MIN_OWN_PROGRESS_FRAC
+        )
+        sync = self._radar_sync_touch_check() if own_progress_ok else None
         if sync is not None:
             self.radar_activation_sticky = True
             self._post_recover_radar_pulse = True
             logger.info(
                 f"📌 [{self.symbol}] 激活线跟随姊妹账户({sync.get('acct')})联动闩锁 "
-                f"| 对方 mark={float(sync.get('mark') or 0):.2f} gate≈{act:.2f}"
+                f"| 对方 mark={float(sync.get('mark') or 0):.2f} gate≈{act:.2f} "
+                f"| 己方进度={my_progress:.2f}/{gate_span:.2f}"
             )
             return True
-        side = str(self.current_side or "").strip().upper()
-        px = float(curr_px or 0)
-        best = float(self.best_price or 0)
         # 安全容差：价格进到激活线0.1%以内也算摸到，防止"差一点点没摸线、
         # 雷达整段缺席"这种边界情况（实盘复现：SNDKUSDT B账户就差1.35点/
         # 约0.08%）。容差是相对激活线价位算的百分比，跟品种价位高低无关。
