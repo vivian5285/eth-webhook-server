@@ -46,27 +46,27 @@ BREATH_ETH: Dict[str, Any] = {
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 2.37,   # 2026-09-06再校准(59min)：覆盖实测中位数回调
-    "step_advance_atr": 1.54,   # 2026-09-06再校准(59min)：覆盖实测中位数回调×0.65
+    "step_trigger_atr": 2.37,   # 2026-09-08再校准(75min)：覆盖实测中位数回调
+    "step_advance_atr": 1.54,   # 2026-09-08再校准(75min)：覆盖实测中位数回调×0.65
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.37,  # 2026-09-06再校准(59min)：覆盖实测中位数回调(2.37)
-    "breath_tp23": 3.43,  # 2026-09-06再校准(59min)：覆盖实测75分位回调(3.43)
+    "breath_tp12": 2.37,  # 2026-09-08再校准(75min)：覆盖实测中位数回调(2.37)
+    "breath_tp23": 3.51,  # 2026-09-08再校准(75min)：覆盖实测75分位回调(3.51)
     "phase2_trail_mult": 1.0,
-    "min_mult": 3.7,      # 2026-09-06再校准(59min)
-    "max_mult": 5.2,      # 2026-09-06再校准(59min)：覆盖实测90分位回调(4.92)以上
+    "min_mult": 3.9,      # 2026-09-08再校准(75min)
+    "max_mult": 5.4,      # 2026-09-08再校准(75min)：覆盖实测90分位回调(5.08)以上
     # 2026-08-31：利润回吐刹车最初用4H K线近似回测显示ETH受益，但当时
     # ETH真实生产周期是90分钟——用30m合成90分钟K线重新回测后发现：只有
     # min_mult(最冷/最不常见的低波动状态)差值为正，mid_mult/max_mult
     # (更常见的正常/高波动状态)差值持续为负，即使把阈值收紧两档依然负
     # (-0.08~-0.56×ATR/笔)。说明4H近似掩盖了ETH真实短周期上"深回调后
-    # 仍常继续走"的特性，故意不启用。2026-09-01/09-06：ETH周期已连续两次
-    # 变更(→150分钟→59分钟)，这条结论是否还成立始终没有用最新周期重新
-    # 验证过，继续保持不启用，不要因为周期变了就顺手打开，除非用ETH
-    # 自己当前生产周期(59分钟)K线重新测出正收益。
+    # 仍常继续走"的特性，故意不启用。2026-09-01/09-06/09-08：ETH周期已
+    # 连续三次变更(→150分钟→59分钟→75分钟)，这条结论是否还成立始终没有
+    # 用最新周期重新验证过，继续保持不启用，不要因为周期变了就顺手打开，
+    # 除非用ETH自己当前生产周期(75分钟)K线重新测出正收益。
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
@@ -554,24 +554,30 @@ BREATH_OPENAI: Dict[str, Any] = {
 # 回调2.38×ATR、75分位3.41×ATR、90分位5.27×ATR，ATR%=0.74%，覆盖旧的4
 # 小时时代数值。跟以往同批(XAU/SKHYNIX/OpenAI/ASML等)周期变更后的重校准
 # 用同一套方法(scratch_calibrate_xau_skhynix.py::run_symbol)。
+# 2026-09-08再校准：宝贝截图核实TV面板真实周期是101分钟(不是配置里过期
+# 的105分钟，跟SKHYNIX同周期)。101是质数，不能被5/15/30整除，只能用1
+# 分钟原始K线合成，分页拉了66811根1m原始K线覆盖约46.3天(ANTHROPIC样本
+# 历史本来就偏薄，76个真实摆动点识别回调样本略薄但可用)：中位数回调
+# 2.48×ATR、75分位3.30×ATR、90分位6.69×ATR，ATR%=1.28%，覆盖旧的105
+# 分钟时代数值。
 BREATH_ANTHROPIC: Dict[str, Any] = {
     "name": "ANTHROPIC",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 2.38,
-    "step_advance_atr": 1.55,
+    "step_trigger_atr": 2.48,
+    "step_advance_atr": 1.61,
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.38,  # 08-31再校准(105min)：覆盖实测中位数回调(2.38)
-    "breath_tp23": 3.41,  # 08-31再校准(105min)：覆盖实测75分位回调(3.41)
+    "breath_tp12": 2.48,  # 2026-09-08再校准(101min)：覆盖实测中位数回调(2.48)
+    "breath_tp23": 3.30,  # 2026-09-08再校准(101min)：覆盖实测75分位回调(3.30)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.0,
-    "max_mult": 5.6,      # 08-31再校准(105min)：覆盖实测90分位回调(5.27)以上
+    "min_mult": 5.0,
+    "max_mult": 7.0,      # 2026-09-08再校准(101min)：覆盖实测90分位回调(6.69)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,

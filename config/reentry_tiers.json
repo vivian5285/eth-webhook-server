@@ -15,40 +15,40 @@
   },
   "hard_sl_buffer_mult": 1.15,
   "ETH": {
-    "tv_tf_sec": 3540,
+    "tv_tf_sec": 4500,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-09-01再校准：用户把ETH周期从90分钟改成150分钟，tv_tf_sec同步为9000。ETH是其它多个品种三档步进缩放比例的参照基准本身，不是靠sqrt(own/ETH)公式缩放出来的——它的weak/mid/strong数值历史上是v2.1/v2.2两轮'步进大幅放宽'实盘调出来的(不是从P50/P75/P90机械换算)，那份调优经验值得保留。这次重新用ETH真实150分钟K线测出mid档新基线(P50=2.55×ATR/P75=3.53×ATR/P90=5.01×ATR，方法同breath_profiles.py::BREATH_ETH同一条注释)，再按旧90分钟三档之间原有的比例关系(weak≈0.8×mid，strong≈1.25×mid，取旧数据weak/mid/strong在5个字段上的平均比例约0.78/1.0/1.27，取整成0.8/1.0/1.25)套到新基线上，既用上了真实新周期的数据，也没有丢掉之前实盘调优出来的三档相对结构。2026-09-06再校准：宝贝把ETH周期从150分钟改成59分钟，tv_tf_sec同步为3540。59是质数，不能被5/15/30整除，只能用1分钟原始K线×59合成(同SKHYNIX 101分钟手法)，分页拉了87606根1m原始K线覆盖约60.8天，测了1484根合成K线、255个真实摆动点识别回调样本，测出mid档新基线(P50=2.37×ATR/P75=3.43×ATR/P90=4.92×ATR)，继续沿用weak≈0.8×mid/strong≈1.25×mid这条历史比例关系套到新基线上（同09-01那次同一套方法，不重新反推比例）。",
+    "note": "2026-09-01再校准：用户把ETH周期从90分钟改成150分钟，tv_tf_sec同步为9000。ETH是其它多个品种三档步进缩放比例的参照基准本身，不是靠sqrt(own/ETH)公式缩放出来的——它的weak/mid/strong数值历史上是v2.1/v2.2两轮'步进大幅放宽'实盘调出来的(不是从P50/P75/P90机械换算)，那份调优经验值得保留。这次重新用ETH真实150分钟K线测出mid档新基线(P50=2.55×ATR/P75=3.53×ATR/P90=5.01×ATR，方法同breath_profiles.py::BREATH_ETH同一条注释)，再按旧90分钟三档之间原有的比例关系(weak≈0.8×mid，strong≈1.25×mid，取旧数据weak/mid/strong在5个字段上的平均比例约0.78/1.0/1.27，取整成0.8/1.0/1.25)套到新基线上，既用上了真实新周期的数据，也没有丢掉之前实盘调优出来的三档相对结构。2026-09-06再校准：宝贝把ETH周期从150分钟改成59分钟，tv_tf_sec同步为3540。59是质数，不能被5/15/30整除，只能用1分钟原始K线×59合成(同SKHYNIX 101分钟手法)，分页拉了87606根1m原始K线覆盖约60.8天，测了1484根合成K线、255个真实摆动点识别回调样本，测出mid档新基线(P50=2.37×ATR/P75=3.43×ATR/P90=4.92×ATR)，继续沿用weak≈0.8×mid/strong≈1.25×mid这条历史比例关系套到新基线上（同09-01那次同一套方法，不重新反推比例）。2026-09-08再校准：宝贝截图核实TV面板ETH真实周期是75分钟，配置里的59分钟已经过期(不知道TV是何时改的，靠截图核对才发现)，tv_tf_sec同步为4500。75能被15整除，用15m原始K线合成(比59分钟那版1分钟合成轻得多)，分页拉了8790根15m原始K线覆盖约91.5天，测了1757根合成K线、281个真实摆动点识别回调样本，测出mid档新基线(P50=2.37×ATR/P75=3.51×ATR/P90=5.08×ATR，跟59分钟那版P50几乎一样，只有P75/P90略高)，继续沿用weak≈0.8×mid/strong≈1.25×mid这条历史比例关系套到新基线上（同09-01/09-06两次周期变更同一套方法）。reentry_window_bars维持2根——2×75=150min，比59分钟时代的2×59=118min更贴合~150-200min窗口惯例。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：呼吸宽松，允许行情充分跑动（2026-09-06按59分钟新基线×0.8重新缩放，比例关系继承v2.2放宽后的结构）",
+        "note": "弱趋势：呼吸宽松，允许行情充分跑动（2026-09-08按75分钟新基线×0.8重新缩放，比例关系继承v2.2放宽后的结构）",
         "step_trigger_atr": 1.90,
         "step_advance_atr": 1.23,
         "breath_tp12": 1.90,
-        "breath_tp23": 2.74,
-        "min_mult": 3.0,
-        "max_mult": 4.2
+        "breath_tp23": 2.81,
+        "min_mult": 3.1,
+        "max_mult": 4.3
       },
       {
         "name": "mid",
-        "note": "中趋势：直接取59分钟新实测中位数回调基线(step_trigger/breath_tp12=P50=2.37，breath_tp23=P75=3.43，min/max_mult覆盖P90=4.92附近)",
+        "note": "中趋势：直接取75分钟新实测中位数回调基线(step_trigger/breath_tp12=P50=2.37，breath_tp23=P75=3.51，min/max_mult覆盖P90=5.08附近)",
         "step_trigger_atr": 2.37,
         "step_advance_atr": 1.54,
         "breath_tp12": 2.37,
-        "breath_tp23": 3.43,
-        "min_mult": 3.7,
-        "max_mult": 5.2
+        "breath_tp23": 3.51,
+        "min_mult": 3.9,
+        "max_mult": 5.4
       },
       {
         "name": "strong",
-        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（2026-09-06按59分钟新基线×1.25重新缩放，比例关系继承v2.2放宽后的结构）",
+        "note": "强趋势：呼吸最宽松，市价在前面跑，雷达保持安全距离（2026-09-08按75分钟新基线×1.25重新缩放，比例关系继承v2.2放宽后的结构）",
         "step_trigger_atr": 2.96,
         "step_advance_atr": 1.93,
         "breath_tp12": 2.96,
-        "breath_tp23": 4.29,
-        "min_mult": 4.6,
-        "max_mult": 6.5
+        "breath_tp23": 4.39,
+        "min_mult": 4.9,
+        "max_mult": 6.8
       }
     ]
   },
@@ -433,16 +433,16 @@
     ]
   },
   "ANTHROPIC": {
-    "tv_tf_sec": 6300,
+    "tv_tf_sec": 6060,
     "reentry_window_bars": 2,
     "reentry_zone_atr": 0.5,
-    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-27修正：用户把ANTHROPIC周期从90分钟改成4小时，tv_tf_sec同步为14400；window_bars从2改成1——4h×1=240min已经比~150-200min的窗口惯例略长，×2=480min会明显过长，只能收到1根（同XMR/TSLA等原生长周期品种的处理一致）。step_trigger/step_advance按sqrt(ANTHROPIC新测4小时中位数回调2.24/ETH当前中位数回调2.70)≈0.911倍重新缩放ETH三档基线（86天516根原生4h K线、61个回调样本）。2026-08-31再次修正：用户把ANTHROPIC周期从4小时改成105分钟，tv_tf_sec同步为6300；window_bars从1改回2——105min×2=210min重新落回~150-210min的窗口惯例区间(比4h×1=240min更贴合)，同ETH/XAU/SNDK/ASML等90-105min一带品种的处理一致。step_trigger/step_advance按sqrt(ANTHROPIC新测105分钟中位数回调2.38/ETH当前中位数回调2.70)≈0.939倍重新缩放ETH三档基线（90天1234根15m合成105min K线、170个真实摆动点回调样本，fractal pivot±3根确认法，同XAU/SKHYNIX一套方法）；breath_tp12/23/min_mult/max_mult继续维持ETH同款不变。",
+    "note": "2026-08-15：新增品种（币安TRADIFI_PERPETUAL，underlyingType=PREMARKET，Anthropic未上市股权盘前代币化永续，24h成交量约612万U同样偏薄）。周期90m跟ETH同周期，reentry_window_bars沿用2根一致。step_trigger/step_advance按sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961倍微收紧ETH三档基线；breath_tp12/23/min_mult/max_mult维持ETH同款，理由同BNB/ZEC/BCH。2026-08-27修正：用户把ANTHROPIC周期从90分钟改成4小时，tv_tf_sec同步为14400；window_bars从2改成1——4h×1=240min已经比~150-200min的窗口惯例略长，×2=480min会明显过长，只能收到1根（同XMR/TSLA等原生长周期品种的处理一致）。step_trigger/step_advance按sqrt(ANTHROPIC新测4小时中位数回调2.24/ETH当前中位数回调2.70)≈0.911倍重新缩放ETH三档基线（86天516根原生4h K线、61个回调样本）。2026-08-31再次修正：用户把ANTHROPIC周期从4小时改成105分钟，tv_tf_sec同步为6300；window_bars从1改回2——105min×2=210min重新落回~150-210min的窗口惯例区间(比4h×1=240min更贴合)，同ETH/XAU/SNDK/ASML等90-105min一带品种的处理一致。step_trigger/step_advance按sqrt(ANTHROPIC新测105分钟中位数回调2.38/ETH当前中位数回调2.70)≈0.939倍重新缩放ETH三档基线（90天1234根15m合成105min K线、170个真实摆动点回调样本，fractal pivot±3根确认法，同XAU/SKHYNIX一套方法）；breath_tp12/23/min_mult/max_mult继续维持ETH同款不变。2026-09-08再校准：宝贝截图核实TV面板ANTHROPIC真实周期是101分钟(不是配置里过期的105分钟，跟SKHYNIX同周期)，tv_tf_sec同步为6060。101是质数，不能被5/15/30整除，只能用1分钟原始K线合成(同SKHYNIX/旧ETH59min手法)，分页拉了66811根1m原始K线覆盖约46.3天(ANTHROPIC本来样本就偏薄，76个回调样本略薄但可用)，测出新基线(P50=2.48×ATR/P75=3.30×ATR/P90=6.69×ATR)。sqrt(2.48/ETH当前中位数回调2.37)≈1.02倍，改用GS/MU/LITE/TSLA/META/DELL/GEV/STXX同一套「breath_tp12/23/min/max固定通用模板，只有step_trigger_atr=ratio×{1.0,1.2,1.4}」的既定最新惯例(不再沿用ANTHROPIC历史上0.9x倍收紧ETH绝对值那套旧写法，统一到最新惯例，跟breath_profiles.py::BREATH_ANTHROPIC自己实测P50/P75/P90直接覆盖是两套独立数值，不必一致，理由同其它品种历史注释)。reentry_window_bars维持2不动(101min×2=202min；注意跟SKHYNIX同为101min周期却用window_bars=1不一致，这是历史遗留、本次未改，留给宝贝决定要不要统一)。",
     "tiers": [
       {
         "name": "weak",
-        "note": "弱趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
-        "step_trigger_atr": 0.94,
-        "step_advance_atr": 0.47,
+        "note": "弱趋势：按ANTHROPIC最新101分钟波动率(1.02倍)微放宽",
+        "step_trigger_atr": 1.02,
+        "step_advance_atr": 0.51,
         "breath_tp12": 1.50,
         "breath_tp23": 2.00,
         "min_mult": 2.5,
@@ -450,9 +450,9 @@
       },
       {
         "name": "mid",
-        "note": "中趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
-        "step_trigger_atr": 1.13,
-        "step_advance_atr": 0.56,
+        "note": "中趋势：按ANTHROPIC最新101分钟波动率(1.02倍)微放宽",
+        "step_trigger_atr": 1.22,
+        "step_advance_atr": 0.61,
         "breath_tp12": 2.00,
         "breath_tp23": 2.80,
         "min_mult": 3.0,
@@ -460,9 +460,9 @@
       },
       {
         "name": "strong",
-        "note": "强趋势：按ANTHROPIC新测105分钟波动率(0.939倍)缩放",
-        "step_trigger_atr": 1.31,
-        "step_advance_atr": 0.66,
+        "note": "强趋势：按ANTHROPIC最新101分钟波动率(1.02倍)微放宽",
+        "step_trigger_atr": 1.43,
+        "step_advance_atr": 0.71,
         "breath_tp12": 2.50,
         "breath_tp23": 3.50,
         "min_mult": 4.0,

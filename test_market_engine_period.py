@@ -32,14 +32,25 @@ class TestResolveSymbolPeriod(unittest.TestCase):
     里真实维护的tv_tf_sec，不是写死的90分钟；非30分钟整数倍的品种(PAXG
     130min/ANTHROPIC 105min)正确退回默认90m，不用错误拼接的bar喂ADX。"""
 
+    # 2026-09-08更新：宝贝截图核实TV面板真实周期后，ETH(→75min)/ZEC(→
+    # 130min)都变成了非30分钟整数倍，从各自原来真实拿到手的90m/150m
+    # 整数倍周期退回默认90m——这是市场引擎(ADX/动量)自己的已知限制
+    # (见resolve_symbol_period_ms顶部注释：非30整数倍周期"用错误拼接的
+    # bar喂ADX比用近似周期更危险"，宁可退回默认，不臆造周期)，不是
+    # bug，reentry_profiles.py/breath_profiles.py两层真实校准跟这里
+    # 的90m退回互不影响(各自独立读取tv_tf_sec)。新增DELL/GEV/STXX。
     EXPECT_MIN = {
-        "ETHUSDT": 150, "XAUUSDT": 90, "BNBUSDT": 150, "ZECUSDT": 150,
+        "ETHUSDT": 90,        # 真实75min非30整数倍 → 退回默认90m(2026-09-08起)
+        "XAUUSDT": 90, "BNBUSDT": 150,
+        "ZECUSDT": 90,        # 真实130min非30整数倍 → 退回默认90m
         "BCHUSDT": 360, "XMRUSDT": 480, "SNDKUSDT": 90,
         "PAXGUSDT": 90,       # 真实130min非30整数倍 → 退回默认90m
         "XPDUSDT": 150, "OPENAIUSDT": 150,
-        "ANTHROPICUSDT": 90,  # 真实105min非30整数倍 → 退回默认90m
+        "ANTHROPICUSDT": 90,  # 真实101min非30整数倍 → 退回默认90m
         "GSUSDT": 90, "MUUSDT": 90, "LITEUSDT": 90,
         "TSLAUSDT": 360, "METAUSDT": 240,
+        "DELLUSDT": 180, "GEVUSDT": 240,
+        "STXXUSDT": 90,       # 真实75min非30整数倍 → 退回默认90m
     }
 
     def test_all_active_symbols_resolve_correctly(self):
@@ -51,9 +62,15 @@ class TestResolveSymbolPeriod(unittest.TestCase):
                     f"{sym}周期解析错误：期望{exp_min}min，实际{got_ms // 60000}min",
                 )
 
-    def test_eth_specifically_no_longer_hardcoded_90m(self):
-        # 2026-09-04当天的直接触发点：ETH从90分钟改成150分钟。
-        self.assertEqual(ME.resolve_symbol_period_ms("ETHUSDT") // 60000, 150)
+    def test_eth_currently_falls_back_to_90m_non_multiple_period(self):
+        # 2026-09-04当天的直接触发点是ETH从90分钟改成150分钟(一个真实
+        # 30整数倍周期)，验证market_engine不再写死90分钟。但ETH周期后来
+        # 又连续变了两次(→59min→75min)，现在都不是30整数倍，本来就该
+        # 退回默认90m——这条测试改成验证"当前确实是90m的退回结果"，不再
+        # 断言一个已经不存在的150分钟。BNBUSDT(150min，仍是真实30整数倍
+        # 周期)承接原本"验证不再写死"的意图。
+        self.assertEqual(ME.resolve_symbol_period_ms("ETHUSDT") // 60000, 90)
+        self.assertEqual(ME.resolve_symbol_period_ms("BNBUSDT") // 60000, 150)
 
     def test_unknown_symbol_falls_back_to_default_90m(self):
         self.assertEqual(ME.resolve_symbol_period_ms("NOSUCHUSDT"), ME.PERIOD_90M_MS)
@@ -116,12 +133,15 @@ class TestFetchLimitScaling(unittest.TestCase):
         self.assertEqual(eng.fetch_limit, 220)
 
     def test_longer_period_symbol_scales_up_proportionally(self):
-        eng_eth = ME.MarketEngine("ETHUSDT")   # 150m = 5根/张
+        # 2026-09-08：改用BNBUSDT(150m=5根/张，仍是真实30整数倍周期)
+        # 承接原本用ETHUSDT做的示例——ETH真实周期后来变成75min(非30
+        # 整数倍)，现在退回默认90m，不再适合当"更长周期"的示例。
+        eng_bnb = ME.MarketEngine("BNBUSDT")   # 150m = 5根/张
         eng_xmr = ME.MarketEngine("XMRUSDT")   # 480m = 16根/张
-        self.assertGreater(eng_eth.fetch_limit, 220)
-        self.assertGreater(eng_xmr.fetch_limit, eng_eth.fetch_limit)
+        self.assertGreater(eng_bnb.fetch_limit, 220)
+        self.assertGreater(eng_xmr.fetch_limit, eng_bnb.fetch_limit)
         # 保持跟旧版"220/3根≈73根已合成K线"同一个深度目标
-        self.assertAlmostEqual(eng_eth.fetch_limit / 5, 220 / 3, delta=5)
+        self.assertAlmostEqual(eng_bnb.fetch_limit / 5, 220 / 3, delta=5)
         self.assertAlmostEqual(eng_xmr.fetch_limit / 16, 220 / 3, delta=5)
 
     def test_never_exceeds_safety_cap(self):

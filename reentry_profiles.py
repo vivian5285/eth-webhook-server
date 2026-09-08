@@ -35,14 +35,17 @@ _DEFAULT_ADX_WEAK_LT = 20.0
 _DEFAULT_ADX_STRONG_GT = 30.0
 
 _DEFAULT_ETH_TIERS: List[Dict[str, float]] = [
-    # v2.7（2026-08-11）：step_advance/step_trigger 捕获比例从~25%提到50%，
-    # step_trigger 不动，理由见 config/reentry_tiers.json 顶层 note
-    {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
-     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
-    {"step_trigger_atr": 1.20, "step_advance_atr": 0.60,
-     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.40, "step_advance_atr": 0.70,
-     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+    # 2026-09-08再校准：宝贝截图核实TV面板ETH真实周期是75分钟(不是配置
+    # 里过期的59分钟)。75能被15整除，15m合成，91.5天1757根合成K线、281
+    # 个真实摆动回调样本，测出mid档新基线(P50=2.37×ATR/P75=3.51×ATR/
+    # P90=5.08×ATR)，continue沿用weak≈0.8×mid/strong≈1.25×mid这条历史
+    # 比例关系(同09-01/09-06两次周期变更同一套方法)。
+    {"step_trigger_atr": 1.90, "step_advance_atr": 1.23,
+     "breath_tp12": 1.90, "breath_tp23": 2.81, "min_mult": 3.1, "max_mult": 4.3},
+    {"step_trigger_atr": 2.37, "step_advance_atr": 1.54,
+     "breath_tp12": 2.37, "breath_tp23": 3.51, "min_mult": 3.9, "max_mult": 5.4},
+    {"step_trigger_atr": 2.96, "step_advance_atr": 1.93,
+     "breath_tp12": 2.96, "breath_tp23": 4.39, "min_mult": 4.9, "max_mult": 6.8},
 ]
 _DEFAULT_XAU_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.00, "step_advance_atr": 0.50,
@@ -147,13 +150,15 @@ _DEFAULT_OPENAI_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.25, "step_advance_atr": 0.62,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
-# ANTHROPIC: sqrt(ANTHROPIC breath_profiles.py中位数回调3.01/ETH中位数回调3.26)≈0.961。
+# ANTHROPIC: 2026-09-08再校准，宝贝截图核实TV真实周期是101分钟(不是
+# 配置里过期的105分钟)。sqrt(ANTHROPIC breath_profiles.py中位数回调
+# 2.48/ETH当前中位数回调2.37)≈1.02。
 _DEFAULT_ANTHROPIC_TIERS: List[Dict[str, float]] = [
-    {"step_trigger_atr": 0.96, "step_advance_atr": 0.48,
+    {"step_trigger_atr": 1.02, "step_advance_atr": 0.51,
      "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
-    {"step_trigger_atr": 1.15, "step_advance_atr": 0.58,
+    {"step_trigger_atr": 1.22, "step_advance_atr": 0.61,
      "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
-    {"step_trigger_atr": 1.35, "step_advance_atr": 0.67,
+    {"step_trigger_atr": 1.43, "step_advance_atr": 0.71,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
 # ASML: sqrt(ASML breath_profiles.py中位数回调3.10/ETH中位数回调3.26)≈0.975。
@@ -428,7 +433,7 @@ _GEV_WINDOW_BARS = int((_CFG.get("GEV") or {}).get("reentry_window_bars") or 1)
 # 窗口惯例低端，比照GS/MU/LITE(90m/55m均沿用2根)收2根，不用DELL/GEV/
 # TSLA/META那种1根×长周期直接超出上限的处理方式。
 _STXX_WINDOW_BARS = int((_CFG.get("STXX") or {}).get("reentry_window_bars") or 2)
-_ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 3540)
+_ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 4500)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
 # BCH从5400(90min)改21600(6h)。这几个都是早期建REENTRY_XAU/BNB/ZEC/BCH
@@ -446,7 +451,7 @@ _PAXG_TF_SEC = int((_CFG.get("PAXG") or {}).get("tv_tf_sec") or 9000)
 _SKHYNIX_TF_SEC = int((_CFG.get("SKHYNIX") or {}).get("tv_tf_sec") or 9000)
 _XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
 _OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
-_ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 5400)
+_ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 6060)
 _ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
 _GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)
 _MU_TF_SEC = int((_CFG.get("MU") or {}).get("tv_tf_sec") or 3300)
