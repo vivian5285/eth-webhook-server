@@ -19830,7 +19830,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         def _fire_cancel():
             logger.info(f"🚀 [{tag}] 并行撤单: 全部挂单")
-            return binance_client.cancel_all_open_orders(self.symbol)
+            # 2026-09-08修复：撤单这两次REST调用也走紧急通道，跟市价平仓
+            # 保持同等优先级——否则撤单本身排在19品种重启对账队列后面，
+            # 平仓类信号照样被拖慢(见_throttle_rest/cancel_all_open_orders
+            # 同日期注释，BCHUSDT实盘复现)。
+            return binance_client.cancel_all_open_orders(self.symbol, emergency=True)
 
         # 同时发两路请求
         results = {}

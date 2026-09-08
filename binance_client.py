@@ -604,11 +604,26 @@ class BinanceClient:
             getattr(self, "_rest_global_min_interval", REST_GLOBAL_MIN_INTERVAL_SEC)
             or 1.5
         )
+        # 2026-09-08修复(宝贝实盘复现BCHUSDT重启期间平仓延迟30-140秒才
+        # 执行)：kind="emergency_close"上面已经走了AccountThrottle独立的
+        # 紧急通道(20次/分钟预算，可覆盖静默)——但这道全账户共用的本地
+        # 排队节奏(gap/g_gap，19个品种重启对账期间同一account的REST调用
+        # 全部排在同一把_rest_throttle_lock后面依次sleep)完全不认kind，
+        # 紧急平仓照样要排在其它18个品种恢复流程的REST调用后面，实盘
+        # 复现平仓类信号被延迟半分钟到两分多钟才真正执行——紧急通道的
+        # "插队"设计被这一层无条件的节奏排队悄悄架空了。这里紧急平仓
+        # 跳过本地排队等待(仍然拿锁、仍然记录last_ts供后续常规调用接着
+        # 排，只是自己不用等)，真正做到"平仓类信号插队优先处理，不排
+        # 在重启对账队列后面"；常规调用完全不受影响，行为不变。
+        is_emergency = str(kind or "").strip() == "emergency_close"
         with self._rest_throttle_lock:
             now = time.time()
             last_sym = float(self._rest_last_by_sym.get(sym) or 0)
             last_g = float(getattr(self, "_rest_last_global", 0) or 0)
-            wait = max(0.0, gap - (now - last_sym), g_gap - (now - last_g))
+            wait = (
+                0.0 if is_emergency
+                else max(0.0, gap - (now - last_sym), g_gap - (now - last_g))
+            )
             if wait > 0:
                 time.sleep(wait)
             now2 = time.time()
@@ -691,10 +706,10 @@ class BinanceClient:
             return True
         return str(val or "").strip().lower() in ("true", "1", "yes")
 
-    def _futures_signed_request(self, method, path, params=None):
+    def _futures_signed_request(self, method, path, params=None, kind="rest"):
         params = dict(params or {})
         symbol = str(params.get("symbol") or "")
-        self._throttle_rest(symbol)
+        self._throttle_rest(symbol, kind=kind or "rest")
         try:
             return self.client._request_futures_api(
                 method.lower(), path, signed=True, data=params,
@@ -2447,20 +2462,26 @@ class BinanceClient:
             logger.error(f"[撤单失败] {symbol} orderId={order_id}: {e}")
             return None
 
-    def cancel_all_open_orders(self, symbol="ETHUSDT"):
+    def cancel_all_open_orders(self, symbol="ETHUSDT", emergency=False):
+        """2026-09-08新增emergency参数：强平/紧急平仓流程(_flat_close_
+        parallel)传True，让撤单这两次REST调用也走紧急通道跳过本地节奏
+        排队(见_throttle_rest同日期注释)——不传则完全保持原有行为，
+        不影响其它非紧急场景(重入清场、防御单常规维护等)的调用节奏。"""
         if self.is_monitor_only(symbol):
             logger.error(f"[仅监控] 拒绝 cancel_all {symbol}")
             return
 
+        kind = "emergency_close" if emergency else "rest"
+
         def _do_plain():
-            self._throttle_rest(symbol)
+            self._throttle_rest(symbol, kind=kind)
             self.client.futures_cancel_all_open_orders(symbol=symbol)
             logger.info(f"[撤单成功] {symbol} 全部普通挂单已撤销")
             return True
 
         def _do_algo():
             self._futures_signed_request(
-                "delete", "algoOpenOrders", {"symbol": symbol},
+                "delete", "algoOpenOrders", {"symbol": symbol}, kind=kind,
             )
             logger.info(f"[撤单成功] {symbol} 全部 Algo 条件单已撤销")
             return True
