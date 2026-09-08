@@ -7239,6 +7239,31 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if not self._price_reached_tp_zone(level, curr_px, px):
             return False
         if not self._qty_evidence_tp_consumed(level, live_qty):
+            # 2026-09-08修复(LITEUSDT/PAXGUSDT/ANTHROPICUSDT实盘复现，一夜
+            # 3千多条一模一样的"拒认假成交")：这里原本只看self.tv_tps这个
+            # 原始TV价位表，完全不知道_normalize_tp_qty_map(min_qty感知
+            # 借调/放弃流水线)有没有已经把这一档正确降到0——同批的
+            # _infer_tp_consumed_by_price_and_gone(见其内联merged_qty_map
+            # 判断)早就加了这道防护，这个更常用的共用函数(4/5调用点在用)
+            # 却一直没同步。真实复现：LITEUSDT live=base=0.08，TP1按比例
+            # 只有0.008，本身就低于min_qty=0.01——借调/放弃流水线早就正确
+            # 决定"这一档不挂"，交易所上确实只有TP2一张单，这是设计内的
+            # 正常状态，不是漏挂；这里却仍然按裸TV价位表判定"价到+限价无+
+            # 无减仓证据→视为漏挂"，每个tick、每一个调用点都重新喊一遍，
+            # 一夜刷屏还从未真正补挂成功(因为_patch_missing_tp_levels等
+            # 下游函数走的是_expected_tp_levels，早就正确跳过了这一档)。
+            # 加一道跟_infer_tp_consumed_by_price_and_gone同款的权威降级
+            # 检查：这一档如果已经被min_qty流水线正确降到0，直接判定
+            # "不适用"(既不是漏挂也不是成交)，静默返回False，不打误导性
+            # 日志、也不再反复"允许补挂"一个本来就不该单独存在的档位。
+            try:
+                merged_qty_map = self._normalize_tp_qty_map(
+                    self._split_remaining_tp_quantities(live_qty), live_qty,
+                )
+            except Exception:
+                merged_qty_map = {}
+            if float(merged_qty_map.get(level, 1) or 0) <= 0:
+                return False
             logger.warning(
                 f"🧩 [{self.symbol}] 拒认 TP{level} 假成交：价到+限价无，但头寸无减仓证据 "
                 f"(live={live_qty:.4f} base={float(self._tp_baseline_qty(live_qty) or 0):.4f}) "
