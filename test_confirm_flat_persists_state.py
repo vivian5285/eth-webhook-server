@@ -102,5 +102,66 @@ class TestConfirmFlatPersistsState(unittest.TestCase):
         self.assertTrue(confirmed)
 
 
+class TestConfirmFlatFreshSmallGuard(unittest.TestCase):
+    """2026-09-09新增：ANTHROPICUSDT实盘复现——TV心跳追回(_finalize_tv_
+    catchup_fill)刚成交、刚挂好硬止损的真实仓位(0.02-0.03，追回市价兜底
+    按0.7倍逐轮打折出来的正常仓位大小)被_confirm_position_flat误判"确认
+    平仓"(因为0.02 <= ANTHROPIC的dust_qty=0.05)，随即被下一轮空闲巡检
+    当蚂蚁仓扫平——刚追回成交几分钟内又变回"TV要LONG、VPS空仓"的漏单
+    缺口。跟_should_finalize_tp_victory里2026-08-18那次"_fresh_small"
+    同一类坑，这里补上同款防线的回归测试。"""
+
+    def _mk(self, live_qty, initial_qty, watched_qty=None, consumed=None):
+        with patch.object(psb.PositionSupervisorBinance, "__init__", lambda self, *a, **k: None):
+            s = psb.PositionSupervisorBinance()
+        s.symbol = "ANTHROPICUSDT"
+        s.dust_qty = 0.05  # ANTHROPIC真实配置值
+        s.initial_qty = initial_qty
+        s.watched_qty = watched_qty if watched_qty is not None else initial_qty
+        s.current_side = "LONG" if initial_qty > 0 else None
+        s.tp_levels_consumed = list(consumed or [])
+        s._live_position_qty = MagicMock(return_value=live_qty)
+        s._build_adverse_extreme_hint = MagicMock(return_value=None)
+        s._reset_breath_ledger_on_flat = MagicMock()
+        s._purge_all_defense_orders_on_flat = MagicMock()
+        s._save_state = MagicMock()
+        return s
+
+    def test_real_incident_fresh_catchup_fill_not_treated_as_flat(self):
+        """实盘复现精确数值：追回成交0.02，账本记的开仓基线也是0.02，
+        一档TP都没吃过——0.02 <= dust_qty(0.05)，但这是刚开的正常仓位，
+        不该被判"确认平仓"，不该清账本/撤防御单。"""
+        s = self._mk(live_qty=0.02, initial_qty=0.02)
+        confirmed = s._confirm_position_flat(retries=1, delay=0)
+        self.assertFalse(confirmed, "刚追回成交的真实仓位不应被误判为已确认平仓")
+        s._reset_breath_ledger_on_flat.assert_not_called()
+        s._purge_all_defense_orders_on_flat.assert_not_called()
+
+    def test_genuine_dust_residual_after_tp_consumed_still_confirmed_flat(self):
+        """回归：TP1/TP2已经吃掉、只剩真实零头残留(远小于开仓基线)时，
+        既有"确认平仓→清账本"行为不能被这次改动误伤。"""
+        s = self._mk(live_qty=0.001, initial_qty=0.13, consumed=[1, 2])
+        confirmed = s._confirm_position_flat(retries=1, delay=0)
+        self.assertTrue(confirmed, "TP吃完后的真实零头残留仍应正常确认平仓")
+        s._reset_breath_ledger_on_flat.assert_called_once()
+
+    def test_genuine_full_close_no_ledger_reference_still_confirmed_flat(self):
+        """回归：账本本来就没有参考基线(ref<=0，比如已经清过一次)时，
+        新增的fresh-small防线不应该拦住原有"交易所真空仓"的确认。"""
+        s = self._mk(live_qty=0.0, initial_qty=0.0, watched_qty=0.0)
+        confirmed = s._confirm_position_flat(retries=1, delay=0)
+        self.assertTrue(confirmed)
+
+    def test_small_but_shrunk_position_not_protected_by_stale_ref(self):
+        """边界：真实仓位已经明显小于账本记的开仓基线(比如部分成交/
+        滑点导致远低于98%)，且一档TP都没吃——不该被fresh-small豁免，
+        因为它不像"账本记的量本身就等于现在这笔仓位"，交由既有dust_qty
+        兜底逻辑正常处理（保持这次改动的判定尽量保守，只保护"现值≈
+        基线"这一种明确场景）。"""
+        s = self._mk(live_qty=0.01, initial_qty=0.05)
+        confirmed = s._confirm_position_flat(retries=1, delay=0)
+        self.assertTrue(confirmed, "现值明显小于账本基线时应沿用既有dust_qty判定，不强行保护")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

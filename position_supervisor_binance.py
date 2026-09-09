@@ -1024,6 +1024,25 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         final = self._live_position_qty()
         if final is None:
             return False
+        # 2026-09-09修复(ANTHROPICUSDT实盘复现，B/C/E三账户)：TV心跳追回
+        # (_finalize_tv_catchup_fill)刚成交、刚挂好硬止损的真实仓位被本
+        # 函数误判"确认平仓"，随即被下一轮空闲巡检当蚂蚁仓扫平——dust_qty
+        # 是给"止盈吃掉大半、只剩零头"这种真残留设计的固定阈值(ANTHROPIC
+        # 配的0.05)，但心跳追回市价兜底会按0.7倍逐轮打折仓位(0.05→0.03→
+        # 0.02)，一笔全新的、完整的追回仓位本身可能就比dust_qty还小——
+        # 不是残留，是仓位本来就这么大。跟_should_finalize_tp_victory里
+        # 2026-08-18那次"_fresh_small"同一类坑(实盘复现过B/C两账户
+        # ANTHROPIC开仓1-2分钟内被误扫平)，那边早就加了同款防线，这条
+        # "REST复核确认交易所已空仓"路径当时漏掉了。加一道同样的判定：
+        # 没有任何TP档被消费过、且当前量约等于账本记的开仓基线，说明这是
+        # 刚开的正常仓位，不能当"确认平仓"处理，让本函数原地判"未确认"。
+        _fresh_ref = max(
+            float(getattr(self, "initial_qty", 0) or 0),
+            float(getattr(self, "watched_qty", 0) or 0),
+        )
+        _fresh_consumed = getattr(self, "tp_levels_consumed", []) or []
+        if not _fresh_consumed and _fresh_ref > 0 and final >= _fresh_ref * 0.98:
+            return False
         confirmed = final <= self.dust_qty
         if confirmed and self._book_thinks_active():
             logger.warning(
