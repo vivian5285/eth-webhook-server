@@ -132,16 +132,24 @@ class TestCatchupRewardGate(unittest.TestCase):
 
     def test_exactly_at_threshold_frac_matches_constant(self):
         """健全性检查：门槛常量本身是0.4，构造一个恰好卡在边界两侧的
-        场景，确认阈值方向没有反过来(< 拒绝，>= 放行)。"""
+        场景，确认阈值方向没有反过来(< 拒绝，>= 放行)。
+
+        2026-09-09更新：stop从90改成40(止损空间100→60)，只为了避开同
+        一函数里新加的CATCHUP_MAX_PROFIT_EXTENSION_MULT深度浮盈闸门
+        (见test_catchup_profit_extension_gate.py)——这里160/161的价格
+        本身对止损空间10来说已经算"深度浮盈"，会被那道新闸门单独拦下，
+        干扰这条测试想单独验证的reward_frac边界；把止损空间拉宽到60，
+        新闸门阈值变成90，160/161这两个价格都不会碰到它，两道闸门互不
+        干扰，各自独立验证。"""
         self.assertAlmostEqual(CATCHUP_MIN_REWARD_FRAC, 0.4)
         entry, tp1 = 100.0, 200.0  # original_reward=100
         # frac恰好=0.4 → remaining=40 → curr_px = tp1-40 = 160
-        s = _mk_supervisor(tv_heartbeat_entry=entry, tv_heartbeat_stop=90.0, tv_heartbeat_tp1=tp1)
+        s = _mk_supervisor(tv_heartbeat_entry=entry, tv_heartbeat_stop=40.0, tv_heartbeat_tp1=tp1)
         _fake_bc.binance_client.get_current_price = MagicMock(return_value=160.0)
         s._maybe_start_tv_heartbeat_catchup()
         s._place_tv_catchup_limit.assert_called_once()  # >= 门槛，放行
 
-        s2 = _mk_supervisor(tv_heartbeat_entry=entry, tv_heartbeat_stop=90.0, tv_heartbeat_tp1=tp1)
+        s2 = _mk_supervisor(tv_heartbeat_entry=entry, tv_heartbeat_stop=40.0, tv_heartbeat_tp1=tp1)
         _fake_bc.binance_client.get_current_price = MagicMock(return_value=161.0)  # remaining=39<40
         s2._maybe_start_tv_heartbeat_catchup()
         s2._place_tv_catchup_limit.assert_not_called()  # < 门槛，拒绝

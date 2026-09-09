@@ -128,6 +128,15 @@ FRESH_OPEN_LIMIT_POLL_SEC = 2.0
 # 追"这一步，已经武装的周期不受影响。tp1缺失(<=0)时不设限，避免心跳数据
 # 本身缺TP导致误伤。
 CATCHUP_MIN_REWARD_FRAC = 0.4
+# 2026-09-09新增：追回"深度浮盈/明显超涨超跌不追"闸门——宝贝ZECUSDT
+# 实盘复现：手动平仓锁定一大段浮盈之后，TV心跳还没跟上，追回机制拿
+# 高位现价重新追了进去。用TV给的止损距离(TV.entry到TV.stop)当"一个
+# 身位"，现价相对TV.entry顺向跑出的距离超过这个身位的这个倍数，就不
+# 追，详见_maybe_start_tv_heartbeat_catchup里的完整注释。1.5倍是"给
+# 技术性漏单(通常几分钟内被发现，价格离entry还很近)留足空间，但明显
+# 挡住深度浮盈后手动落袋"这两者之间的折中，不是回测出来的精确值——
+# 后续如果发现太松/太紧，跟着真实案例继续调整。
+CATCHUP_MAX_PROFIT_EXTENSION_MULT = 1.5
 # tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
 # TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
 # 心跳这条数据流本身没有任何校验(见record_tv_heartbeat)，异常值会原样
@@ -2734,51 +2743,108 @@ class RadarReentryMixin:
         # 误伤——真正的价格/止损安全性后面挂单前还会重新校验)。这道闸门
         # 只挡"要不要开始追"，不影响已经武装的周期，逻辑位置紧跟在
         # multi_tf_trend_confirmed/并发上限两道闸门之后，同一惯例。
+        from binance_client import binance_client
+        try:
+            curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        except Exception:
+            curr_px = 0.0
         hb_tp1 = float(getattr(self, "tv_heartbeat_tp1", 0) or 0)
-        if hb_tp1 > 0:
+        if hb_tp1 > 0 and curr_px > 0:
             original_reward = abs(hb_tp1 - hb_entry)
             if original_reward > 0:
-                from binance_client import binance_client
-                try:
-                    curr_px = float(binance_client.get_current_price(self.symbol) or 0)
-                except Exception:
-                    curr_px = 0.0
-                if curr_px > 0:
-                    remaining_reward = abs(hb_tp1 - curr_px)
-                    reward_frac = remaining_reward / original_reward
-                    if reward_frac < CATCHUP_MIN_REWARD_FRAC:
-                        if not bool(getattr(self, "_catchup_reward_blocked_alerted", False)):
-                            self._catchup_reward_blocked_alerted = True
-                            logger.warning(
-                                f"🚫 [{self.symbol}] TV心跳追回：价格已经跑得太远，"
-                                f"到TV.tp1({hb_tp1})只剩{remaining_reward:.4f}距离，"
-                                f"只有原始空间({original_reward:.4f})的"
-                                f"{reward_frac*100:.0f}%(门槛"
-                                f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%) → 利润空间太小，不追"
+                remaining_reward = abs(hb_tp1 - curr_px)
+                reward_frac = remaining_reward / original_reward
+                if reward_frac < CATCHUP_MIN_REWARD_FRAC:
+                    if not bool(getattr(self, "_catchup_reward_blocked_alerted", False)):
+                        self._catchup_reward_blocked_alerted = True
+                        logger.warning(
+                            f"🚫 [{self.symbol}] TV心跳追回：价格已经跑得太远，"
+                            f"到TV.tp1({hb_tp1})只剩{remaining_reward:.4f}距离，"
+                            f"只有原始空间({original_reward:.4f})的"
+                            f"{reward_frac*100:.0f}%(门槛"
+                            f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%) → 利润空间太小，不追"
+                        )
+                        try:
+                            import dingtalk
+                            self._dingtalk(
+                                dingtalk.report_system_alert,
+                                title=f"TV心跳追回：利润空间不足，不追 [{self.symbol}]",
+                                detail=(
+                                    f"TV.entry={hb_entry} TV.tp1={hb_tp1} "
+                                    f"当前价={curr_px}，追回入场后到tp1只剩原始"
+                                    f"空间的{reward_frac*100:.0f}%(门槛"
+                                    f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%)，价格差"
+                                    f"已经太大，本次不启动追回。价格如果回落到"
+                                    f"门槛以内会自动重新评估。"
+                                ),
+                                level="提示",
+                                notify_level=1,
                             )
-                            try:
-                                import dingtalk
-                                self._dingtalk(
-                                    dingtalk.report_system_alert,
-                                    title=f"TV心跳追回：利润空间不足，不追 [{self.symbol}]",
-                                    detail=(
-                                        f"TV.entry={hb_entry} TV.tp1={hb_tp1} "
-                                        f"当前价={curr_px}，追回入场后到tp1只剩原始"
-                                        f"空间的{reward_frac*100:.0f}%(门槛"
-                                        f"{CATCHUP_MIN_REWARD_FRAC*100:.0f}%)，价格差"
-                                        f"已经太大，本次不启动追回。价格如果回落到"
-                                        f"门槛以内会自动重新评估。"
-                                    ),
-                                    level="提示",
-                                    notify_level=1,
-                                )
-                            except Exception as e:
-                                logger.debug(f"[{self.symbol}] 利润空间不足提醒钉钉跳过: {e}")
-                        return
-                    else:
-                        # 空间恢复到门槛以上——回退提醒去重标记，下次再
-                        # 跌破门槛还能重新提醒一次，不会被这次的标记永久压住。
-                        self._catchup_reward_blocked_alerted = False
+                        except Exception as e:
+                            logger.debug(f"[{self.symbol}] 利润空间不足提醒钉钉跳过: {e}")
+                    return
+                else:
+                    # 空间恢复到门槛以上——回退提醒去重标记，下次再
+                    # 跌破门槛还能重新提醒一次，不会被这次的标记永久压住。
+                    self._catchup_reward_blocked_alerted = False
+
+        # 2026-09-09新增(ZECUSDT实盘复现，宝贝反馈)：TV心跳持仓期间价格
+        # 已经顺向跑出一段明显的行情、积累了相当可观的浮盈，宝贝在交易所
+        # 手动平仓落袋为安(担心冲高回落、利润回吐)——TV自己的心跳流还没
+        # 跟上(还在报老的entry/LONG)，如果这时候只看上面那道"到tp1还有
+        # 多少空间"的闸门，可能仍然放行(ZEC这类品种tp1本来就设得比较远，
+        # 深度浮盈之后到tp1可能仍有余量)，结果拿现价(已经在高位)重新追
+        # 回去，等于把宝贝刚主动锁定的利润又送回市场，还买在更差的位置。
+        # 宝贝原话："一个是趋势坏了、硬止损不重入；一个是盈利太多出局的，
+        # 那时候虽然指标看起来还没走坏趋势，但随时有反转可能性，也不
+        # 适合重入，应该耐心等待下次TV开仓说话，而不是自己在不利于我们
+        # 方向的价格再次自己做主开单"——这是"到未来目标还有多少空间"之外
+        # 一个独立的维度："从原始入场已经顺向走出了多远"，跟can_smart_
+        # reenter()给自己出场重入用的exit_in_reentry_zone(entry~entry+
+        # 0.5×ATR保本/微赚区间，深盈利区间不重入)同一个思路，这里补上
+        # 追回路径一直缺的同款防线。用TV给的止损距离(TV.entry到TV.stop)
+        # 当这个品种自己的"一个身位"参照，现价相对TV.entry顺向跑出的
+        # 距离超过这个身位的CATCHUP_MAX_PROFIT_EXTENSION_MULT倍，就认为
+        # "已经是深度浮盈区域"，本轮不追，等TV自己发一条全新的真实OPEN
+        # 信号(不是心跳滞后)才重新评估——不影响这个函数最初要解决的"信号
+        # 刚发出几分钟内技术性漏单"这类场景(那时候现价离entry通常还很近，
+        # 不会碰到这道门槛)。
+        hb_dist = abs(hb_entry - hb_stop)
+        if hb_dist > 0 and curr_px > 0:
+            favorable_move = (
+                (curr_px - hb_entry) if hb_side == "LONG" else (hb_entry - curr_px)
+            )
+            if favorable_move > CATCHUP_MAX_PROFIT_EXTENSION_MULT * hb_dist:
+                if not bool(getattr(self, "_catchup_extension_blocked_alerted", False)):
+                    self._catchup_extension_blocked_alerted = True
+                    logger.warning(
+                        f"🚫 [{self.symbol}] TV心跳追回：现价相对TV.entry"
+                        f"({hb_entry:.4f})已顺向跑出{favorable_move:.4f}"
+                        f"(超过止损空间{hb_dist:.4f}的"
+                        f"{CATCHUP_MAX_PROFIT_EXTENSION_MULT}倍) → 深度浮盈/明显"
+                        f"超涨超跌区域，不追，等TV下一条真实开仓信号"
+                    )
+                    try:
+                        import dingtalk
+                        self._dingtalk(
+                            dingtalk.report_system_alert,
+                            title=f"TV心跳追回：现价已明显偏离入场，不追 [{self.symbol}]",
+                            detail=(
+                                f"TV.entry={hb_entry:.4f} 当前价={curr_px:.4f} "
+                                f"顺向已跑出{favorable_move:.4f}(TV止损空间"
+                                f"{hb_dist:.4f}的{CATCHUP_MAX_PROFIT_EXTENSION_MULT}倍"
+                                f"以上)，大概率是深度浮盈后被手动/其它方式平仓、"
+                                f"而不是技术性漏单，本次不启动追回，耐心等TV下一次"
+                                f"真实开仓信号。价格回落到门槛以内会自动重新评估。"
+                            ),
+                            level="提示",
+                            notify_level=1,
+                        )
+                    except Exception as e:
+                        logger.debug(f"[{self.symbol}] 深度浮盈不追提醒钉钉跳过: {e}")
+                return
+            else:
+                self._catchup_extension_blocked_alerted = False
 
         self._catchup_episode_side = hb_side
         self._catchup_episode_entry = hb_entry
