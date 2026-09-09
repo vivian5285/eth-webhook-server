@@ -903,12 +903,16 @@ def audit_module5_actions(a: Audit):
         "5.1 RECONCILE_ACTIONS 已废除为空",
         RECONCILE_ACTIONS == frozenset(),
     )
+    # 2026-09-09: 新增CLOSE_DYNAMIC_TRAIL后不再断言"恰好等于"，只断言
+    # 既有的QUICK/RSI两个仍在集合里(见check_deploy_events.py同款改动说明)。
     a.check(
-        "5.2 FLATTEN_ACTIONS",
-        FLATTEN_ACTIONS == frozenset({"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}),
+        "5.2 FLATTEN_ACTIONS ⊇ QUICK/RSI",
+        {"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"} <= FLATTEN_ACTIONS,
+        str(FLATTEN_ACTIONS),
     )
     a.check("5.3 is_reconcile CLOSE_TP 应为False", not is_reconcile_action("CLOSE_TP"))
     a.check("5.4 is_flatten CLOSE_RSI_EXIT", is_flatten_action("CLOSE_RSI_EXIT"))
+    a.check("5.4b is_flatten CLOSE_DYNAMIC_TRAIL", is_flatten_action("CLOSE_DYNAMIC_TRAIL"))
     a.check(
         "5.5 classify CLOSE_SL_INITIAL 兼容仍可映射",
         classify_tv_close("CLOSE_SL_INITIAL") in ("hard_sl", "generic"),

@@ -275,11 +275,14 @@ def audit_webhook_actions(a: Audit):
         a.check("webhook_parser 常量", False, str(e))
         return
 
-    expected = {"LONG", "SHORT", "PING", "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}
-    a.check("VALID_ACTIONS ⊇ 4+PING", expected.issubset(VALID_ACTIONS), str(sorted(VALID_ACTIONS)))
+    # 2026-09-09: 新增CLOSE_DYNAMIC_TRAIL(SKHYNIXUSDT"动态移动止盈")后，
+    # 白名单不再是固定5个——白名单本身会随TV策略新增CLOSE_*变体增长，
+    # 这里只断言"已知的基础集合仍在"，不再断言"恰好等于某个历史快照"。
+    expected = {"LONG", "SHORT", "PING", "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT", "CLOSE_DYNAMIC_TRAIL"}
+    a.check("VALID_ACTIONS ⊇ 5+PING", expected.issubset(VALID_ACTIONS), str(sorted(VALID_ACTIONS)))
     a.check(
-        "FLATTEN 仅 QUICK/RSI",
-        FLATTEN_ACTIONS == frozenset({"CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT"}),
+        "FLATTEN ⊇ QUICK/RSI/DYNAMIC_TRAIL",
+        expected - {"LONG", "SHORT", "PING"} <= FLATTEN_ACTIONS,
         str(FLATTEN_ACTIONS),
     )
     a.check("PLACE_TP_LEVELS=2", int(PLACE_TP_LEVELS) == 2, str(PLACE_TP_LEVELS))

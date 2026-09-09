@@ -14753,17 +14753,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         try:
             # ── 已废除对账类 CLOSE_*：一律忽略 ──
+            # 2026-09-09简化：原来这里额外硬编码了一遍
+            # ("CLOSE_QUICK_EXIT","CLOSE_RSI_EXIT")跟FLATTEN_ACTIONS重复判断，
+            # 两处各自维护同一份"合法CLOSE"清单，新增CLOSE_DYNAMIC_TRAIL那次
+            # 才发现这里差点漏改一处——改成只认FLATTEN_ACTIONS这一份权威
+            # 清单，以后新增/删除合法CLOSE action只用改webhook_parser.py一处。
             if (
                 is_reconcile_action(raw_action)
-                or (
-                    raw_action.startswith("CLOSE")
-                    and raw_action not in FLATTEN_ACTIONS
-                    and raw_action not in ("CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT")
-                )
+                or (raw_action.startswith("CLOSE") and raw_action not in FLATTEN_ACTIONS)
             ):
                 logger.warning(
                     f"🚫 [{self.symbol}] 忽略已废除 webhook action={raw_action} "
-                    f"(仅接受 LONG/SHORT/CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT)"
+                    f"(仅接受 LONG/SHORT + {sorted(FLATTEN_ACTIONS)})"
                 )
                 try:
                     dingtalk.report_system_alert(
@@ -14854,10 +14855,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     )
                     return
                 tv_reason = close_reason or raw_action
-                tag = (
-                    "反转保护"
-                    if raw_action == "CLOSE_QUICK_EXIT"
-                    else "反转保护(RSI)"
+                # 2026-09-09新增CLOSE_DYNAMIC_TRAIL(SKHYNIXUSDT实盘复现)分支：
+                # 原来这里只认QUICK/RSI两种、写死二元三目，新action静默落进
+                # else分支被贴错"反转保护(RSI)"标签——不影响是否平仓(下面
+                # _close_all一样会执行)，但钉钉播报/exit_source会显示错误
+                # 来源。改成显式tuple映射，未来再加新CLOSE_*变体一眼能看出
+                # 要在这里补一行，不会又默默滑进错误的else。
+                _flatten_tag_map = {
+                    "CLOSE_QUICK_EXIT": ("反转保护", EXIT_SOURCE_QUICK),
+                    "CLOSE_RSI_EXIT": ("反转保护(RSI)", EXIT_SOURCE_RSI),
+                    "CLOSE_DYNAMIC_TRAIL": ("动态移动止盈", EXIT_SOURCE_TV_CLOSE),
+                }
+                tag, _flatten_exit_source = _flatten_tag_map.get(
+                    raw_action, (tv_reason or "反转保护", EXIT_SOURCE_TV_CLOSE)
                 )
                 if not pos or pos.get("size", 0) <= 0:
                     # 盘口已空：只复位账本，钉钉标明「非本次新平仓」，避免误读成刚平完却不知原因
@@ -14870,11 +14880,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     flat_meta = dict(close_meta or {})
                     flat_meta["already_flat"] = True
                     flat_meta["tv_reason"] = already_reason
-                    flat_meta["exit_source"] = (
-                        EXIT_SOURCE_QUICK
-                        if raw_action == "CLOSE_QUICK_EXIT"
-                        else EXIT_SOURCE_RSI
-                    )
+                    flat_meta["exit_source"] = _flatten_exit_source
                     flat_meta["exit_source_label"] = EXIT_SOURCE_LABELS.get(
                         flat_meta["exit_source"], tag
                     )

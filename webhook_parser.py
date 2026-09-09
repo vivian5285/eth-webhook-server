@@ -187,13 +187,21 @@ ENTRY_TYPE_PROFIT_ADD = "PROFIT_ADD"
 VALID_ENTRY_TYPES = frozenset({ENTRY_TYPE_OPEN})
 
 # 最终架构：只认 4 个交易 action + PING 探活
+# 2026-09-09新增CLOSE_DYNAMIC_TRAIL(实盘复现，SKHYNIXUSDT.P·ETH优化版VPS
+# 策略"动态移动止盈"新增的平仓alert)：白名单外的action在app.py的webhook
+# 路由里_parse_ok=False直接400拒绝、不下任何单——TV这边alert已发送成功、
+# 认为仓位已平，VPS这边却完全没收到有效指令，两边状态从此不一致。B/C/E
+# 三账户当天实测：TV在15:09主动止盈时全部被拒，VPS一直挂着这笔LONG直到
+# ~15分钟后才由人工在交易所补平(成交价1406.63，比TV想要的止盈价1413.83
+# 更差)。新增的策略只要还在用，就有新的CLOSE_*变体持续出现，这条白名单
+# 必须跟着TV脚本的真实action集合同步维护，不能只在事后被动补。
 RECONCILE_ACTIONS = frozenset()  # 已废除，保留空集防旧 import
 FLATTEN_ACTIONS = frozenset({
-    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
+    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT", "CLOSE_DYNAMIC_TRAIL",
 })
 VALID_ACTIONS = frozenset({
     "LONG", "SHORT", "PING", "HEARTBEAT",
-    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT",
+    "CLOSE_QUICK_EXIT", "CLOSE_RSI_EXIT", "CLOSE_DYNAMIC_TRAIL",
 })
 
 ACTION_ALIASES = {

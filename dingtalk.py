@@ -1736,6 +1736,7 @@ def report_tv_signal_received(action, entry_type="", price=0, regime=3, atr=0,
     close_actions = {
         "CLOSE_QUICK_EXIT": "反转保护",
         "CLOSE_RSI_EXIT": "反转保护(RSI)",
+        "CLOSE_DYNAMIC_TRAIL": "动态移动止盈",
     }
     if act in close_actions:
         type_txt = close_actions[act]
