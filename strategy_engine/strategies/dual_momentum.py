@@ -46,6 +46,10 @@ DEFAULT_PARAMS = {
     "atr_len": 14,
     "atr_stop_mult": 2.5,
     "min_universe": 6,
+    # 2026-09-10 新增，默认 True = 原行为不变。见 cross_momentum.py 同名参数
+    # 说明——True 发 1.2/2.2/3.5 倍 ATR 固定止盈(赢家封顶结构倒挂)，False 让
+    # 利润跑到"跌出候选池/自身动量反转"再离场。dual_momentum_runwin 传 False。
+    "use_fixed_tp": True,
 }
 
 
@@ -116,15 +120,19 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return None
     direction = 1 if action == "LONG" else -1
 
-    return {
+    use_tp = bool(p.get("use_fixed_tp", True))
+    sig = {
         "action": action,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - direction * atr * float(p["atr_stop_mult"]), 6),
-        "tp1": round(price + direction * atr * 1.2, 6),
-        "tp2": round(price + direction * atr * 2.2, 6),
-        "tp3": round(price + direction * atr * 3.5, 6),
         "tier": 1,
         "bar_time": bar_time,
-        "reason": f"相对动量={bucket} 且自身{p['lookback_bars']}根动量同号={own_ret:+.4f}(双重确认)",
+        "reason": f"相对动量={bucket} 且自身{p['lookback_bars']}根动量同号={own_ret:+.4f}(双重确认)"
+                  + ("" if use_tp else "(无固定止盈,持有到跌出候选池/动量反转)"),
     }
+    if use_tp:
+        sig["tp1"] = round(price + direction * atr * 1.2, 6)
+        sig["tp2"] = round(price + direction * atr * 2.2, 6)
+        sig["tp3"] = round(price + direction * atr * 3.5, 6)
+    return sig

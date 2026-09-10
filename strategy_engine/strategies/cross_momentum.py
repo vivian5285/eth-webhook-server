@@ -40,6 +40,12 @@ DEFAULT_PARAMS = {
     "atr_len": 14,
     "atr_stop_mult": 2.5,
     "min_universe": 6,  # 篮子里参与排名的品种数太少，排名意义不大，直接不评估
+    # 2026-09-10 新增，默认 True = 原行为不变。True 发 tp1/tp2/tp3(1.2/2.2/3.5
+    # 倍 ATR 固定止盈)，runner 摸到 tp1 就平——但这会把赢家封在 +1.2R、亏家
+    # 却能跑到 -2.5R 止损，结构性倒挂(跟 turtle_breakout 2026-09-02 修的是
+    # 同一个病)。False 则不发 tp，只靠"排名跌出榜单"+ATR 止损离场，让利润跑。
+    # cross_momentum_runwin 用 params 传 False 做单变量对照。
+    "use_fixed_tp": True,
 }
 
 
@@ -110,15 +116,19 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     direction = 1 if action == "LONG" else -1
     own_ret = universe_returns.get(symbol, 0.0)
 
-    return {
+    use_tp = bool(p.get("use_fixed_tp", True))
+    sig = {
         "action": action,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - direction * atr * float(p["atr_stop_mult"]), 6),
-        "tp1": round(price + direction * atr * 1.2, 6),
-        "tp2": round(price + direction * atr * 2.2, 6),
-        "tp3": round(price + direction * atr * 3.5, 6),
         "tier": 1,
         "bar_time": bar_time,
-        "reason": f"篮子动量排名={bucket} 自身{p['lookback_bars']}根动量={own_ret:+.4f}",
+        "reason": f"篮子动量排名={bucket} 自身{p['lookback_bars']}根动量={own_ret:+.4f}"
+                  + ("" if use_tp else "(无固定止盈,持有到跌出榜单)"),
     }
+    if use_tp:
+        sig["tp1"] = round(price + direction * atr * 1.2, 6)
+        sig["tp2"] = round(price + direction * atr * 2.2, 6)
+        sig["tp3"] = round(price + direction * atr * 3.5, 6)
+    return sig

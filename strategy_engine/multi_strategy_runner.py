@@ -317,7 +317,12 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         key = (symbol, strategy)
         pos = _open_positions.get(key)
         last_bar = bars[-1]
-        params = {"symbol": symbol, "universe_returns": universe_returns, "lookback_bars": lookback}
+        # 2026-09-10：允许 UNIVERSE_ROSTER 条目带 "params" 覆盖战法默认参数
+        # （跟 _tick_single_symbol_entry 早就在做的 call_params 合并对齐）。
+        # 现有条目都不带 "params" 字段 → 行为逐字不变。用途：cross_momentum_
+        # runwin / dual_momentum_runwin 传 use_fixed_tp=False 做去止盈封顶对照。
+        params = {"symbol": symbol, "universe_returns": universe_returns, "lookback_bars": lookback,
+                  **(entry.get("params") or {})}
 
         if pos:
             exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)

@@ -489,6 +489,35 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] fiftytwo_week_high 加载失败: {_e}")
 
+# 2026-09-10 第四批：宝贝诊断出擂台头部选手的滞后/远止损/全梭哈问题，
+# 做"手术级对照版"（原版都不动）。
+#   tsmom_agile          : time_series_momentum 的手术版（双周期同向+强度门+
+#                          止损封顶8%+快出场），独立模块
+#   cross_momentum_runwin / dual_momentum_runwin : 逐字复用 cross/dual_momentum
+#                          代码，只在 roster 传 use_fixed_tp=False 去掉 +1.2R
+#                          止盈封顶（跟 turtle_system2 / time_series_momentum_v2
+#                          同一个"复用代码换参数"做法）
+try:
+    from strategy_engine.strategies import tsmom_agile
+    STRATEGIES["tsmom_agile"] = tsmom_agile.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] tsmom_agile 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import cross_momentum as _cm_mod
+    STRATEGIES["cross_momentum_runwin"] = _cm_mod.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] cross_momentum_runwin 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import dual_momentum as _dm_mod
+    STRATEGIES["dual_momentum_runwin"] = _dm_mod.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_momentum_runwin 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -967,6 +996,27 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
         "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
         "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "tsmom_agile": (
+        "time_series_momentum 的手术版——2026-09-10 宝贝诊断原版四个结构病，"
+        "逐条对症（原版不动作基准）：①双周期动量必须同向(20根方向 + 5根方向"
+        "一致才持有，背离立即走)治滞后；②趋势强度门(|20根收益|/(日ATR%×√20)"
+        "≥1.0，弱趋势不碰)治全品种梭哈；③止损硬性封顶 min(2×ATR, 入场价8%)，"
+        "永远在 5x 强平线内治远止损；④快出场(5根动量反向 / 穿越EMA10 即离场，"
+        "不等20根翻符号)治翻转慢。不设固定止盈。目标是敏捷+风控形状，胜率"
+        "提高是筛掉模糊信号的顺带结果。1d，单品种全 _ALL_SYMBOLS。"
+    ),
+    "cross_momentum_runwin": (
+        "cross_momentum 去止盈封顶对照版——2026-09-10。逐字复用 cross_momentum"
+        "代码，只把 use_fixed_tp 传 False：不再发 +1.2R 固定止盈(原版赢家被封在"
+        "+1.2R、亏家却能跑到 -2.5R 止损，结构倒挂，跟 turtle_breakout 2026-09-02"
+        "修的同一个病)，改成只靠'排名跌出榜单前25%'+ATR止损离场，让利润跑。"
+        "跟原版单变量对照，直接看盈亏比能不能修正。4h 篮子。"
+    ),
+    "dual_momentum_runwin": (
+        "dual_momentum 去止盈封顶对照版——2026-09-10。同 cross_momentum_runwin，"
+        "use_fixed_tp=False 去掉 +1.2R 封顶，改成靠'跌出候选池/自身动量反转'+"
+        "ATR 止损离场。跟原版 dual_momentum 单变量对照盈亏比。4h 篮子。"
     ),
     "residual_momentum": (
         "残差动量(Residual Momentum，Blitz-Huij-Martens 2011)——2026-09-10"

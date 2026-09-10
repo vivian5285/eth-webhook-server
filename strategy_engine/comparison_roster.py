@@ -334,6 +334,9 @@ SINGLE_SYMBOL_ROSTER = (
     #   fiftytwo_week_high : 52周高点锚定（单品种，1d，252 日回看）
     #   （residual_momentum 是篮子战法，见下方 UNIVERSE_ROSTER）
     + [{"symbol": s, "strategy": "fiftytwo_week_high", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    # 2026-09-10 第四批：time_series_momentum 手术版（双周期同向 + 强度门 +
+    # 止损封顶8% + 快出场），1d，跟原版 time_series_momentum 并排跑对照。
+    + [{"symbol": s, "strategy": "tsmom_agile", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
@@ -386,6 +389,25 @@ UNIVERSE_ROSTER = [
         "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
+    },
+    # 2026-09-10 第四批：cross/dual_momentum 去止盈封顶对照版——逐字复用
+    # 同一份代码(strategies/__init__.py 里 cross_momentum_runwin/dual_momentum_
+    # runwin 都指向原模块的 generate_signal)，只靠这里的 "params" 传
+    # use_fixed_tp=False 关掉 +1.2R 固定止盈。_tick_universe_entry 2026-09-10
+    # 起会把条目的 "params" 合并进战法参数。
+    {
+        "strategy": "cross_momentum_runwin",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "params": {"use_fixed_tp": False},
+    },
+    {
+        "strategy": "dual_momentum_runwin",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "params": {"use_fixed_tp": False},
     },
     # 2026-09-10：币圈 ETH 系列板块特化——只在 ETH 生态小篮子里做，
     # ETH 大盘 beta 门 + 相对强弱 + 资金费率拥挤度否决(见 strategies/
