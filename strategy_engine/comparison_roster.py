@@ -253,6 +253,12 @@ _ETH_SECTOR_SYMBOLS = [
     "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT",
     "UNIUSDT", "BCHUSDT", "XMRUSDT", "ZECUSDT",
 ]
+# 2026-09-10 第二批：纯加密品种（剔除代币化美股 + 贵金属系）——
+# funding_oi_divergence 的"杠杆清算/去杠杆"叙事是加密永续原生的，
+# 代币化美股/黄金的 perp 虽然也有 OI/费率但语义不贴。
+_CRYPTO_ONLY_SYMBOLS = [
+    s for s in _ALL_SYMBOLS if s not in set(TOKENIZED_STOCK_SYMBOLS) | {"XAUUSDT", "PAXGUSDT"}
+]
 
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
 _RSI2_SYMBOLS = [
@@ -317,6 +323,13 @@ SINGLE_SYMBOL_ROSTER = (
     # 默认 550×15m≈5.7 天在周末/节假日跨越时余量偏薄，加大到能稳覆盖
     # 前 6~7 个交易日 session。
     + [{"symbol": s, "strategy": "us_stock_rth_momentum", "timeframe": "15m", "bars_limit": 960} for s in _US_STOCK_SECTOR_SYMBOLS]
+    # 2026-09-10 第二批：GPT《跨资产战法大全》补的 3 个真缺口
+    #   gold_session_breakout  : 亚盘区间 → 伦敦/纽约开盘放量突破（15m，672根≈7天）
+    #   us_stock_gap           : 开盘跳空 Gap&Go / Gap Fill（15m，960根，同 rth_momentum）
+    #   funding_oi_divergence  : 价格/OI/资金费率背离 + 清算反转（4h，纯加密，只 live 跑）
+    + [{"symbol": s, "strategy": "gold_session_breakout", "timeframe": "15m", "bars_limit": 672} for s in _GOLD_SECTOR_SYMBOLS]
+    + [{"symbol": s, "strategy": "us_stock_gap", "timeframe": "15m", "bars_limit": 960} for s in _US_STOCK_SECTOR_SYMBOLS]
+    + [{"symbol": s, "strategy": "funding_oi_divergence", "timeframe": "4h"} for s in _CRYPTO_ONLY_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]

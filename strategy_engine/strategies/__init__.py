@@ -447,6 +447,30 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] eth_beta_rs_momentum 加载失败: {_e}")
 
+# 2026-09-10 第二批：宝贝转发 GPT《跨资产量化战法大全》，评估后擂台已覆盖
+# ~7成，只补 3 个"数据拿得到且真差异化"的缺口——黄金时段突破 / 美股跳空 /
+# Funding·OI·价格背离。见各自模块 docstring。
+try:
+    from strategy_engine.strategies import gold_session_breakout
+    STRATEGIES["gold_session_breakout"] = gold_session_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] gold_session_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import us_stock_gap
+    STRATEGIES["us_stock_gap"] = us_stock_gap.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] us_stock_gap 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import funding_oi_divergence
+    STRATEGIES["funding_oi_divergence"] = funding_oi_divergence.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] funding_oi_divergence 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -925,6 +949,36 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
         "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
         "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "gold_session_breakout": (
+        "【黄金系列·时段突破】2026-09-10新增。只挂 XAU/PAXG。黄金有明显的"
+        "亚盘(00–07 UTC)憋区间 → 伦敦盘(07:00 UTC)/纽约盘(13:30 UTC)开盘"
+        "放量突破的时段结构（外汇/贵金属几十年的 London/NY Breakout 公开"
+        "套路）。取当日亚盘区间高低点，在两个开盘窗口里等第一次**放量**"
+        "突破（量>1.2×量能均线，过滤假突破），突破后吊灯止损跨时段持有到"
+        "纽约盘收 21:00 UTC 强平，周末不做。跟 opening_range_breakout(取"
+        "今早头30分钟)、us_stock_rth_momentum(取昨日RTH+VWAP)的区间盒子和"
+        "触发时钟都不同。15m。"
+    ),
+    "us_stock_gap": (
+        "【美股系列·开盘跳空】2026-09-10新增。只挂 10 个代币化美股。美股"
+        "个股 9:30 ET 开盘常相对昨日 RTH 收盘跳空。两种打法二选一(按跳空"
+        "幅度自动分流)：跳空≥4% 且开盘后顺跳空方向站稳(过开盘价+当日VWAP)"
+        "→ Gap&Go 追跳空、无固定止盈、跌破 VWAP 认输；1.5%≤跳空<4% 且已"
+        "回补≥25% → Gap Fill 逆跳空做、目标昨收(tp1)。每 session 每方向"
+        "一次，收盘前强平、周末不做。跟 us_stock_rth_momentum(突破昨日RTH"
+        "区间)互补——一个吃开盘价格断层、一个吃区间突破。15m。"
+    ),
+    "funding_oi_divergence": (
+        "【币圈专属·价格/OI/资金费率背离】2026-09-10新增。只挂纯加密品种。"
+        "永续价格只是结果，OI + 资金费率能看出杠杆资金在干什么。把"
+        "**背离当信号本身**(不是像 funding_trend/oi_price_confirm 那样当"
+        "过滤器)：价涨但 OI 跌 = 空头平仓推的弱反弹 → fade 做空；价跌 OI "
+        "跌 = 多头去杠杆踩踏近尾声 → fade 做多；再叠加'暴跌+OI暴降+费率"
+        "分位极端+单根反包'识别清算瀑布见底/见顶(tier2 高确信反转)。只在"
+        "ADX<25 的非强趋势里做，OI 重新上升或持有超 2 天即离场。均值回归"
+        "性质，方向常跟短期动量相反。4h，只 live 跑(OI/费率历史保留期"
+        "有限，backtest 不驱动)。"
     ),
     "eth_beta_rs_momentum": (
         "【币圈ETH系列板块特化】2026-09-10新增。ETH 生态篮子(ETH/BNB/SOL/"
