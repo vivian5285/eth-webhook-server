@@ -471,6 +471,24 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] funding_oi_divergence 加载失败: {_e}")
 
+# 2026-09-10 第三批：宝贝转发千问《超越经典动量/均值回归》整理稿，评估后
+# 落地 2 个"能实现 + 学术证据强 + 跟现有不重复"的信号——残差动量 /
+# 52周高点锚定。（Vol-Targeting 擂台按风险定仓已内建大半；OFI/VPIN/短波动
+# 溢价/基差套利数据拿不到；Ensemble/RL/风险平价属组合层归 llm_trader。）
+try:
+    from strategy_engine.strategies import residual_momentum
+    STRATEGIES["residual_momentum"] = residual_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] residual_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import fiftytwo_week_high
+    STRATEGIES["fiftytwo_week_high"] = fiftytwo_week_high.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] fiftytwo_week_high 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -949,6 +967,27 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
         "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
         "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "residual_momentum": (
+        "残差动量(Residual Momentum，Blitz-Huij-Martens 2011)——2026-09-10"
+        "新增(宝贝转发千问整理稿)。对每个品种的收益率回归市场因子(默认"
+        "BTC)、**扣掉 beta·市场收益**，只在**残差**上做动量。目的是治动量"
+        "的老毛病'动量崩溃'(原始动量最大回撤 -40%+)——把'搭大盘便车'那部分"
+        "虚假强弱去掉。跟 cross_momentum/dual_momentum(按总收益排名)、"
+        "eth_beta_rs_momentum(用 ETH 动量当开关)都不同：这套先做 OLS 回归"
+        "扣 beta 再看残差。残差动量标准化成 t 值量纲，|score|≥1 且自身"
+        "EMA(10/40)同向进场，回到 ±0.25 内离场。1d，走 UNIVERSE_ROSTER，"
+        "BTC 自己不开仓(它是因子)。"
+    ),
+    "fiftytwo_week_high": (
+        "52周新高锚定(George & Hwang 2004，Journal of Finance)——2026-09-10"
+        "新增(宝贝转发千问整理稿)。投资者有'锚定偏差'：价格贴近 52 周高点"
+        "时不愿追涨，正面信息未被充分定价、随后继续上行。信号就一个：现价"
+        "/ 近 252 日最高价。贴前高(≥95%)且创 20 日新高→做多；贴前低(≤105%)"
+        "且创 20 日新低→做空；离前高/低 15%+ 锚定失效即离场。单因子、参数"
+        "极少、天然抗过拟合，多项研究预测力超传统 12-1 月动量。跟 turtle/"
+        "donchian(20 日通道突破)不同——锚是 52 周级别极值、允许'仅接近'就"
+        "进、离场靠 ratio 衰减而非反向通道。1d，单品种全 _ALL_SYMBOLS。"
     ),
     "gold_session_breakout": (
         "【黄金系列·时段突破】2026-09-10新增。只挂 XAU/PAXG。黄金有明显的"

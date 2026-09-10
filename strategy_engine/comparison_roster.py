@@ -330,6 +330,10 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "gold_session_breakout", "timeframe": "15m", "bars_limit": 672} for s in _GOLD_SECTOR_SYMBOLS]
     + [{"symbol": s, "strategy": "us_stock_gap", "timeframe": "15m", "bars_limit": 960} for s in _US_STOCK_SECTOR_SYMBOLS]
     + [{"symbol": s, "strategy": "funding_oi_divergence", "timeframe": "4h"} for s in _CRYPTO_ONLY_SYMBOLS]
+    # 2026-09-10 第三批：千问整理稿里能落地的 2 个
+    #   fiftytwo_week_high : 52周高点锚定（单品种，1d，252 日回看）
+    #   （residual_momentum 是篮子战法，见下方 UNIVERSE_ROSTER）
+    + [{"symbol": s, "strategy": "fiftytwo_week_high", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
@@ -392,6 +396,15 @@ UNIVERSE_ROSTER = [
         "strategy": "eth_beta_rs_momentum",
         "timeframe": "4h",
         "symbols": _ETH_SECTOR_SYMBOLS,
+        "lookback_bars": 30,
+    },
+    # 2026-09-10 第三批：残差动量（Blitz 2011）——对收益率回归 BTC 因子、
+    # 扣掉 beta 再在残差上做动量。走 UNIVERSE 只是为了统一调度，实际每品种
+    # 自己跟 BTC 回归算残差（tuning 全在模块 DEFAULT_PARAMS，1d 周期）。
+    {
+        "strategy": "residual_momentum",
+        "timeframe": "1d",
+        "symbols": _ALL_SYMBOLS,
         "lookback_bars": 30,
     },
 ]
