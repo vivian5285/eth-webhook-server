@@ -240,6 +240,20 @@ _ALL_SYMBOLS = [
 _ORB_STOCK_SYMBOLS = list(TOKENIZED_STOCK_SYMBOLS)
 _ORB_CRYPTO_SYMBOLS = [s for s in _ALL_SYMBOLS if s not in _ORB_STOCK_SYMBOLS]
 
+# 2026-09-10：宝贝要求按「币圈ETH / 黄金 / 美股」三个板块各做一套板块
+# 特化战法，每套只挂本板块的品种(不是全 _ALL_SYMBOLS 一刀切)。品种全部
+# 已在 _ALL_SYMBOLS 里、klines 早已核实可拉。
+#   · 黄金系列  = 贵金属系两个
+#   · 美股系列  = 现有 10 个代币化美股(直接复用 TOKENIZED_STOCK_SYMBOLS)
+#   · ETH 系列  = ETH + 主流山寨(宝贝 AskUserQuestion 选定，排除 meme /
+#                 过新的 HYPE/ENA；BTC 只当基准、不做腿)
+_GOLD_SECTOR_SYMBOLS = ["XAUUSDT", "PAXGUSDT"]
+_US_STOCK_SECTOR_SYMBOLS = list(TOKENIZED_STOCK_SYMBOLS)
+_ETH_SECTOR_SYMBOLS = [
+    "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "LINKUSDT",
+    "UNIUSDT", "BCHUSDT", "XMRUSDT", "ZECUSDT",
+]
+
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
 _RSI2_SYMBOLS = [
     "TSLAUSDT", "METAUSDT", "GSUSDT", "MUUSDT",
@@ -293,6 +307,16 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "mtf_ema_macd_cci", "timeframe": "4h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
     # 2026-09-10：DualThrust 区间突破（base=1h + 日线 n 日 Range）
     + [{"symbol": s, "strategy": "dual_thrust", "timeframe": "1h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
+    # 2026-09-10：三板块特化战法——每套只挂本板块品种(不进 _ALL_SYMBOLS)。
+    #   gold_trend_pullback   : 黄金专属，4h 顺日线大方向回踩 EMA20 + 吊灯止损
+    #   us_stock_rth_momentum : 代币化美股专属，15m 锚 9:30 ET，突破昨日 RTH
+    #                           区间 + 当日 VWAP，收盘平仓、不留夜/过周末
+    #   （eth_beta_rs_momentum 是篮子战法，见下方 UNIVERSE_ROSTER）
+    + [{"symbol": s, "strategy": "gold_trend_pullback", "timeframe": "4h", "mtf": ["1d"]} for s in _GOLD_SECTOR_SYMBOLS]
+    # bars_limit 960×15m≈10 天：这套要拿到"昨日整个 RTH session"作区间，
+    # 默认 550×15m≈5.7 天在周末/节假日跨越时余量偏薄，加大到能稳覆盖
+    # 前 6~7 个交易日 session。
+    + [{"symbol": s, "strategy": "us_stock_rth_momentum", "timeframe": "15m", "bars_limit": 960} for s in _US_STOCK_SECTOR_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
@@ -345,6 +369,17 @@ UNIVERSE_ROSTER = [
         "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
+    },
+    # 2026-09-10：币圈 ETH 系列板块特化——只在 ETH 生态小篮子里做，
+    # ETH 大盘 beta 门 + 相对强弱 + 资金费率拥挤度否决(见 strategies/
+    # eth_beta_rs_momentum.py)。lookback 30×4h≈5 天，比 cross/dual_momentum
+    # 的 20 根长一档，跟 ETH 波段节奏更贴。tuning 全在模块 DEFAULT_PARAMS
+    # 里(_tick_universe_entry 不透传 roster 的 params 字段)。
+    {
+        "strategy": "eth_beta_rs_momentum",
+        "timeframe": "4h",
+        "symbols": _ETH_SECTOR_SYMBOLS,
+        "lookback_bars": 30,
     },
 ]
 

@@ -422,6 +422,31 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] dual_thrust 加载失败: {_e}")
 
+# 2026-09-10：宝贝要求按「币圈ETH / 黄金 / 美股」三个板块各做一套板块特化
+# 战法，每套只挂本板块的品种。这三套是"自研板块特化"性质(跟 mtf_ema_macd_
+# cci / dual_thrust 同类)，不是复刻某个公开名人战法——擂台准入线在这里
+# 放宽成"板块脾气 + 透明可复现规则"，见各自模块 docstring。
+try:
+    from strategy_engine.strategies import gold_trend_pullback
+    STRATEGIES["gold_trend_pullback"] = gold_trend_pullback.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] gold_trend_pullback 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import us_stock_rth_momentum
+    STRATEGIES["us_stock_rth_momentum"] = us_stock_rth_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] us_stock_rth_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import eth_beta_rs_momentum
+    STRATEGIES["eth_beta_rs_momentum"] = eth_beta_rs_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] eth_beta_rs_momentum 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -880,6 +905,37 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "⚠️架构限制：币安OI历史保留约1个月，没法像K线一样长期回放，"
         "这套战法只在live擂台跑，backtest不驱动它(跟funding_trend同一条"
         "边界)。4H周期。"
+    ),
+    "gold_trend_pullback": (
+        "【黄金系列板块特化】2026-09-10新增。只挂 XAUUSDT/PAXGUSDT。黄金"
+        "三板块里趋势最干净、回撤最浅、极少插针反转，所以做\"顺日线大方向"
+        "+ 等 4h 浅回调到 EMA20 企稳再进 + 吊灯止损让它跟大趋势跑、不设"
+        "固定止盈\"。日线 EMA50/200 定方向，4h ADX≥18 过滤死盘，回踩段"
+        "最低点-0.5ATR 作止损，入场以来极值-3ATR 收盘跌破 或 日线方向"
+        "翻转离场。跟 turtle_breakout(黄金也在跑，但那是突破不等回踩)、"
+        "mtf_ema_pullback(15m/1h 日内回踩、全品种)都不同——这套是 4h/1d"
+        "波段级、黄金专属参数。"
+    ),
+    "us_stock_rth_momentum": (
+        "【美股系列板块特化】2026-09-10新增。只挂 10 个代币化美股。代币化"
+        "外壳 24/7 都在盘，但真实价格发现只在美股现货时段 9:30–16:00 ET；"
+        "盘后/周末是薄流动性漂移。所以只在开盘后头 2.5h 开仓，方向=收盘"
+        "突破**昨日 RTH 区间**高/低 且 站在**当日 session VWAP** 正确一侧，"
+        "收盘前强制平仓、周末不留仓。复用 opening_range_breakout 的 9:30 ET"
+        "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
+        "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
+        "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "eth_beta_rs_momentum": (
+        "【币圈ETH系列板块特化】2026-09-10新增。ETH 生态篮子(ETH/BNB/SOL/"
+        "XRP/LINK/UNI/BCH/XMR/ZEC)，走 UNIVERSE_ROSTER。山寨对 ETH 的 beta"
+        "极高，所以三重闸门：(1) 只在 ETH 自己明确上行(近5天动量>2%)时才"
+        "允许做多山寨、下行才做空；(2) 山寨还要自身正动量 + 跑赢篮子中位数"
+        "(相对强弱);(3) 资金费率在自身历史分位≥90%(多头拥挤)否决做多、"
+        "≤10%否决做空。ETH 大盘方向翻转/自身掉出强势半区即离场。跟 "
+        "cross_momentum/dual_momentum(对全25品种两头排名)区别：篮子更小"
+        "专注 ETH 生态，大盘锚是 ETH 本身、外加资金费率拥挤度否决。资金"
+        "费率走币安公开端点(无Key)，只在 live 擂台跑。4H。"
     ),
 }
 
