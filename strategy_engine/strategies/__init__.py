@@ -518,6 +518,50 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] dual_momentum_runwin 加载失败: {_e}")
 
+# 2026-09-10 第六批：宝贝要求"全面搜索著名指标/组合"，评估后擂台已覆盖
+# ~全部主流指标，只补 6 个"够著名 + 够确定性 + 擂台真没有"的。
+try:
+    from strategy_engine.strategies import ttm_squeeze
+    STRATEGIES["ttm_squeeze"] = ttm_squeeze.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ttm_squeeze 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import schaff_trend_cycle
+    STRATEGIES["schaff_trend_cycle"] = schaff_trend_cycle.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] schaff_trend_cycle 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import td_sequential
+    STRATEGIES["td_sequential"] = td_sequential.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] td_sequential 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import wavetrend
+    STRATEGIES["wavetrend"] = wavetrend.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] wavetrend 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import heikin_ashi_trend
+    STRATEGIES["heikin_ashi_trend"] = heikin_ashi_trend.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] heikin_ashi_trend 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import kdj_cross
+    STRATEGIES["kdj_cross"] = kdj_cross.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] kdj_cross 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -996,6 +1040,49 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
         "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
         "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "ttm_squeeze": (
+        "TTM Squeeze / Squeeze Momentum(John Carter，LazyBear TV 版)——"
+        "2026-09-10新增。布林带(20,2)缩进 Keltner 通道(20,1.5ATR)内 = 挤压"
+        "蓄势；挤压释放那一刻按 LazyBear 的 linreg 动量柱方向顺势进。跟"
+        "bollinger_squeeze(只看布林带宽收缩)、keltner_channel(只用KC通道)的"
+        "区别：这个是**布林 vs Keltner 的相对关系**判挤压 + 动量柱定方向，"
+        "才是 TTM Squeeze 本体。动量柱穿零轴离场，不设固定止盈。4h。"
+    ),
+    "schaff_trend_cycle": (
+        "Schaff Trend Cycle(STC，Doug Schaff 1999)——2026-09-10新增。把 MACD"
+        "线(EMA23−EMA50)再做两遍随机指标+0.5平滑，得 0–100 循环振荡器，"
+        "'更快、假信号更少的 MACD'。STC 上穿 25 做多、下穿 75 做空，反向穿"
+        "另一侧阈值离场。跟 macd_histogram(MACD柱零轴穿越)对照——'MACD 再"
+        "加两层随机平滑+循环化'到底值不值。不设固定止盈。4h。"
+    ),
+    "td_sequential": (
+        "TD Sequential(Tom DeMark，只做 TD Setup 9 计数)——2026-09-10新增。"
+        "连续 9 根收盘 < 4 根前收盘 = 下跌衰竭→做多；连续 9 根 > 4 根前 = "
+        "上涨衰竭→做空。真机构在用的确定性衰竭反转系统(纯数 K 线，无参数"
+        "拟合空间)。第8/9根极值超过第6/7根记 tier2(完美化)。反向 Setup 完成/"
+        "持有超 13 根/ATR 止损离场。擂台**唯一纯计数式衰竭反转**。1d。"
+    ),
+    "wavetrend": (
+        "WaveTrend Oscillator(LazyBear TV 版)——2026-09-10新增。ap=(h+l+c)/3"
+        "→ 通道指数 ci=(ap−EMA(ap))/(0.015·EMA(|ap−EMA(ap)|)) → wt1=EMA(ci,21)、"
+        "wt2=SMA(wt1,4)。wt1 在超卖带(−53)上穿 wt2 做多、超买带(+53)下穿做空，"
+        "反向穿/穿 0 轴离场。加密圈最流行振荡器之一(Market Cipher 核心)。比"
+        "裸 CCI/RSI 多两层 EMA 平滑，转折更利落。4h，不设固定止盈。"
+    ),
+    "heikin_ashi_trend": (
+        "Heikin Ashi 趋势——2026-09-10新增。把 OHLC 递归平滑成平均K线，连续"
+        "3 根同色(且实体放大)HA K 线顺势进，第一根反色 或 明显反向影线 离场。"
+        "跟 turtle/ema_cross/supertrend/hma(都在原始价格上算指标)不同——这套"
+        "先把 K 线本身平滑掉再看颜色，对单根插针不敏感。擂台唯一'改造 K 线"
+        "本身'的趋势跟随。4h，不设固定止盈。"
+    ),
+    "kdj_cross": (
+        "KDJ 金叉/死叉(9,3,3；宝贝点名)——2026-09-10新增。K 上穿 D 且 K<20 = "
+        "低位金叉→做多(J<0 记 tier2)；K 下穿 D 且 K>80 = 高位死叉→做空。"
+        "反向交叉/K 回中位(50)/ATR 止损离场。诚实说明：'指标翻转型'信号，"
+        "跟 ema_cross_7_30 / macd_histogram / parabolic_sar_flip 一样在震荡市"
+        "易被抽；加了'只在 20/80 极值区才动'的过滤，到底好多少用数据说话。4h。"
     ),
     "tsmom_agile": (
         "time_series_momentum 的手术版——2026-09-10 宝贝诊断原版四个结构病，"

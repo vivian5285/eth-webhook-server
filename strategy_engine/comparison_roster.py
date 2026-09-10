@@ -337,6 +337,14 @@ SINGLE_SYMBOL_ROSTER = (
     # 2026-09-10 第四批：time_series_momentum 手术版（双周期同向 + 强度门 +
     # 止损封顶8% + 快出场），1d，跟原版 time_series_momentum 并排跑对照。
     + [{"symbol": s, "strategy": "tsmom_agile", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    # 2026-09-10 第六批：6 个著名指标/组合战法（宝贝要求"全面搜索"）。
+    #   td_sequential 用 1d（DeMark 原始日线级别）；其余 5 个 4h。
+    + [{"symbol": s, "strategy": "ttm_squeeze", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "schaff_trend_cycle", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "td_sequential", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "wavetrend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "heikin_ashi_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     # 2026-09-10 全面审计：adx_regime_switch/vegas_tunnel/mtf_ema_pullback 都是
     # 趋势跟随类，固定 1.5×ATR 止盈把趋势尾部切掉（实测平仓 55~60% 是"触及
