@@ -409,6 +409,19 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] mtf_ema_macd_cci 加载失败: {_e}")
 
+# 2026-09-10：DualThrust(Michael Chalek，1980s，中国期货量化圈大量复现的
+# 公开日内区间突破系统)。宝贝转来一批 GitHub 仓库/清单(TradingAgents/
+# Qbot/vnpy 等)评估后，绝大多数是 LLM智能体/训练模型/框架，过不了擂台
+# "公开确定性规则+可复现+非黑箱"的准入线；唯一能提取的确定性经典是
+# vnpy 自带示例里的 DualThrust——加密无 session 收盘，这里做成"持有到
+# 反向线破位"的 stop-and-reverse 波段版(不是经典的日内平仓版)。
+try:
+    from strategy_engine.strategies import dual_thrust
+    STRATEGIES["dual_thrust"] = dual_thrust.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_thrust 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -816,6 +829,20 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "代理指标)形成\"哪种成交量信号源更准\"的直接对照组。klines.py"
         "新增\"tb\"字段专门支撑这套。4H周期，跟obv_divergence同周期保证"
         "对照实验只有数据源这一个变量。"
+    ),
+    "dual_thrust": (
+        "DualThrust 区间突破——Michael Chalek 1980年代公开发表，中国期货"
+        "量化圈大量文章/回测复现的经典日内区间突破系统。Range = max(HH-LC,"
+        " HC-LL)(近4根已收盘日线的最高/最低/最高收/最低收)，买线=当日"
+        "UTC开盘+0.5×Range、卖线=当日开盘-0.5×Range；1h收盘穿线进场，"
+        "持有到反向线破位直接反手(stop-and-reverse，反向线即止损)，ATR"
+        "止损兜底。同一UTC日同方向只进一次。跟 volatility_breakout(今日"
+        "开盘±k×昨日单日振幅)、opening_range_breakout(开盘后30分钟自己的"
+        "高低点)同属'开盘价±波动带'家族但 Range 定义和 K1/K2 非对称是"
+        "DualThrust 独有的具名公式；跟 turtle_breakout(滚动Donchian、不锚"
+        "当日开盘)也不同。加密无 session 收盘，这里做成持有到反向线的波段"
+        "版而非经典日内平仓版——实测抓大趋势、持仓可达数周。base=1h，"
+        "mtf=[1d]。频率低要更活跃可调小 k1/k2 或 n_days。"
     ),
     "mtf_ema_macd_cci": (
         "4h裸K突破+放量为主 / 日线只当参考方向——2026-09-07 宝贝设计。"

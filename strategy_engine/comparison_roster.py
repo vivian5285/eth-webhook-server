@@ -291,6 +291,8 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "time_series_momentum_v2", "timeframe": "1d", "params": _TSMOM_V2_PARAMS} for s in _ALL_SYMBOLS]
     # 2026-09-07：宝贝设计的多周期多因子择时（base=4h + 日线大方向）
     + [{"symbol": s, "strategy": "mtf_ema_macd_cci", "timeframe": "4h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
+    # 2026-09-10：DualThrust 区间突破（base=1h + 日线 n 日 Range）
+    + [{"symbol": s, "strategy": "dual_thrust", "timeframe": "1h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
