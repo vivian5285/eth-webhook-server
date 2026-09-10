@@ -49,7 +49,10 @@ DEFAULT_PARAMS = {
     "ema_fast": 10,
     "ema_slow": 40,
     "atr_len": 14,
-    "atr_stop_mult": 3.0,
+    "atr_stop_mult": 2.5,
+    "max_stop_frac": 0.12,   # 2026-09-10：止损距离上限（占入场价比例）。原来
+                             # 3.0×ATR 在日线波动大的山寨上能到 20%+（已见 ENA
+                             # 21.5%），比 5x 强平线还远。封顶到 12%，够在强平前触发。
 }
 
 _FACTOR_TTL = 60.0
@@ -157,9 +160,10 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if d == 0:
         return None
     action = "LONG" if d == 1 else "SHORT"
+    stop_dist = min(atr * float(p["atr_stop_mult"]), price * float(p["max_stop_frac"]))
     return {
         "action": action, "price": round(price, 6), "atr": round(atr, 6),
-        "stop_loss": round(price - d * atr * float(p["atr_stop_mult"]), 6),
+        "stop_loss": round(price - d * stop_dist, 6),
         "tier": 2 if abs(score) >= 2 * entry_z else 1,
         "bar_time": bar_time,
         "reason": f"残差动量 score={score:+.2f} (β={beta:.2f} vs {factor}) + EMA{'多' if ema_up else '空'}头排列",

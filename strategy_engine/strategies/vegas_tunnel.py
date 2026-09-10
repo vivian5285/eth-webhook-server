@@ -75,6 +75,11 @@ DEFAULT_PARAMS = {
     "pullback_lookback": 6,
     "atr_len": 14,
     "atr_stop_buffer_mult": 0.5,
+    # 2026-09-10：默认 True = 原行为。维加斯隧道是趋势跟随(顺远隧道方向骑
+    # 到结构破坏)，固定 1.5×ATR 止盈把趋势尾部切掉——实测 60% 平仓是"触及
+    # 止盈"。roster 传 False 关掉，改成只靠"远隧道方向反转 / 收盘破近隧道"
+    # +ATR 止损离场。跟 turtle_breakout 同一个修法。
+    "use_fixed_tp": True,
 }
 
 
@@ -207,18 +212,21 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     buf = atr * float(p["atr_stop_buffer_mult"])
     stop_loss = (tunnel1_lo - buf) if bias == "LONG" else (tunnel1_hi + buf)
 
-    return {
+    sig = {
         "action": bias,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(stop_loss, 6),
-        "tp1": round(price + direction * atr * 1.5, 6),
-        "tp2": round(price + direction * atr * 3.0, 6),
-        "tp3": round(price + direction * atr * 5.0, 6),
         "tier": 1,
         "bar_time": bar_time,
         "reason": (
             f"远隧道(576/676)确认{'多' if bias == 'LONG' else '空'}头结构 + "
             f"中隧道(288/338)顺排确认 + 近隧道(144/169)回踩确认 + EMA12回破触发"
+            + ("" if p.get("use_fixed_tp", True) else " (无固定止盈,持有到隧道结构破坏)")
         ),
     }
+    if p.get("use_fixed_tp", True):
+        sig["tp1"] = round(price + direction * atr * 1.5, 6)
+        sig["tp2"] = round(price + direction * atr * 3.0, 6)
+        sig["tp3"] = round(price + direction * atr * 5.0, 6)
+    return sig

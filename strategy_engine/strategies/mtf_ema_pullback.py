@@ -76,6 +76,12 @@ DEFAULT_PARAMS = {
     "rsi_wake_short": 60.0,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    # 2026-09-10：默认 True = 原行为。这套是"趋势延续"打法(顺高周期潮汐
+    # 方向做回踩)，固定 1.5×ATR 止盈会把该吃的趋势尾部切掉——实测 55% 的
+    # 平仓都是"触及止盈"、整体只做到接近打平。roster 传 False 关掉固定
+    # 止盈，改成只靠"高周期潮汐翻转"+ATR 止损离场，让利润跑到趋势前提
+    # 消失。跟 turtle_breakout 2026-09-02 修的是同一个结构性倒挂。
+    "use_fixed_tp": True,
 }
 
 
@@ -168,19 +174,22 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             return None
         action, d = "SHORT", -1
 
-    return {
+    sig = {
         "action": action,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - d * atr * float(p["atr_stop_mult"]), 6),
-        "tp1": round(price + d * atr * 1.5, 6),
-        "tp2": round(price + d * atr * 3.0, 6),
-        "tp3": round(price + d * atr * 5.0, 6),
         "tier": 1,
         "bar_time": bar_time,
         "reason": (
             f"高周期({p['htf_key']})潮汐{'多' if direction == 1 else '空'}头 + "
             f"base回踩EMA{pb_ema_n} + RSI{rsi_len}从{wake_long if direction == 1 else wake_short:.0f}"
             f"区抬头({rsi_prev:.1f}->{rsi_now:.1f})"
+            + ("" if p.get("use_fixed_tp", True) else " (无固定止盈,持有到潮汐翻转)")
         ),
     }
+    if p.get("use_fixed_tp", True):
+        sig["tp1"] = round(price + d * atr * 1.5, 6)
+        sig["tp2"] = round(price + d * atr * 3.0, 6)
+        sig["tp3"] = round(price + d * atr * 5.0, 6)
+    return sig

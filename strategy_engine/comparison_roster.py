@@ -338,11 +338,16 @@ SINGLE_SYMBOL_ROSTER = (
     # 止损封顶8% + 快出场），1d，跟原版 time_series_momentum 并排跑对照。
     + [{"symbol": s, "strategy": "tsmom_agile", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
-    + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h"} for s in _ALL_SYMBOLS]
-    + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT} for s in _ALL_SYMBOLS]
+    # 2026-09-10 全面审计：adx_regime_switch/vegas_tunnel/mtf_ema_pullback 都是
+    # 趋势跟随类，固定 1.5×ATR 止盈把趋势尾部切掉（实测平仓 55~60% 是"触及
+    # 止盈"）——跟 turtle_breakout 2026-09-02 修的同一个结构性倒挂。传
+    # use_fixed_tp=False 关掉固定止盈（各自都有"趋势前提消失"的主动离场
+    # + ATR 止损兜底）。adx_regime_switch 只关趋势腿，震荡腿 tp=中轨不动。
+    + [{"symbol": s, "strategy": "adx_regime_switch", "timeframe": "4h", "params": {"use_fixed_tp": False}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "vegas_tunnel", "timeframe": "1h", "bars_limit": _VEGAS_BARS_LIMIT, "params": {"use_fixed_tp": False}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "ema_cross_7_30", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-04第二批新增7套 ──────────────────────────────────────────
-    + [{"symbol": s, "strategy": "mtf_ema_pullback", "timeframe": "15m", "mtf": ["1h"]} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "mtf_ema_pullback", "timeframe": "15m", "mtf": ["1h"], "params": {"use_fixed_tp": False}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vwap_mean_reversion", "timeframe": "15m"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "volume_profile_reversion", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "funding_trend", "timeframe": "1h"} for s in _ALL_SYMBOLS]

@@ -67,6 +67,11 @@ DEFAULT_PARAMS = {
     "atr_len": 14,
     "trend_atr_stop_mult": 2.0,
     "range_atr_stop_mult": 1.2,
+    # 2026-09-10：默认 True = 原行为。只作用于**趋势腿**(ADX≥25 走 EMA 交叉)
+    # ——趋势腿是趋势跟随，固定 1.5×ATR 止盈把趋势尾部切掉。roster 传 False
+    # 关掉趋势腿的固定止盈(改成 EMA 反向交叉/ATR 止损离场)。**震荡腿不受
+    # 影响**：那条 tp=中轨是均值回归的正确目标，保留。
+    "use_fixed_tp": True,
 }
 
 
@@ -163,15 +168,18 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             return None
         direction = 1 if action == "LONG" else -1
         stop_mult = float(p["trend_atr_stop_mult"])
-        return {
+        sig = {
             "action": action, "price": round(price, 6), "atr": round(atr, 6),
             "stop_loss": round(price - direction * atr * stop_mult, 6),
-            "tp1": round(price + direction * atr * 1.5, 6),
-            "tp2": round(price + direction * atr * 3.0, 6),
-            "tp3": round(price + direction * atr * 5.0, 6),
             "tier": 1, "bar_time": bar_time,
-            "reason": f"趋势市(ADX={adx_now:.1f}) EMA{ema_fast_len}/{ema_slow_len}{cross}叉",
+            "reason": f"趋势市(ADX={adx_now:.1f}) EMA{ema_fast_len}/{ema_slow_len}{cross}叉"
+                      + ("" if p.get("use_fixed_tp", True) else " (无固定止盈,持有到EMA反向交叉)"),
         }
+        if p.get("use_fixed_tp", True):
+            sig["tp1"] = round(price + direction * atr * 1.5, 6)
+            sig["tp2"] = round(price + direction * atr * 3.0, 6)
+            sig["tp3"] = round(price + direction * atr * 5.0, 6)
+        return sig
 
     if adx_now <= range_adx:
         if price <= lower_now and rsi_now < float(p["rsi_entry_long"]):
