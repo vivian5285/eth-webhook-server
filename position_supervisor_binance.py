@@ -4755,6 +4755,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             )
         )
         tv_entry = float(getattr(self, "tv_price", 0) or 0)
+        # 源头消毒：fill / tv_sl / tv_entry 任一是 NaN / inf（上游成交价或
+        # ATR 中间量污染）时归零，否则 hard_stop_price 会算出 round(nan-dist)
+        # = NaN 一路写进 frozen_hard_sl_px（2026-09-09 SKHYNIX 崩栈根因）。
+        # 归零后下面的 fill>0 / tv_sl>0 分支判定会走 fail-closed（返回 0 →
+        # 上层拒开仓 / 拒挂，宁可不挂也不挂个非法价）。
+        if not math.isfinite(fill):
+            fill = 0.0
+        if not math.isfinite(tv_sl):
+            tv_sl = 0.0
+        if not math.isfinite(tv_entry):
+            tv_entry = 0.0
         if tv_entry <= 0:
             tv_entry = fill
         buf = float(self._defense_buffer_mult())
@@ -4938,6 +4949,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         if cur > 0:
             return cur
         hard = float(self._temp_hard_stop_from_tv(entry=entry, side=side) or 0)
+        if not math.isfinite(hard):
+            hard = 0.0
         if hard <= 0:
             # 区分「TV从未来过」与「TV来过但日志恢复失败」两种情况
             last = self.last_tv_signal if isinstance(self.last_tv_signal, dict) else {}
@@ -5126,10 +5139,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.radar_tier = looser_tier(int(getattr(self, "adx_tier", 1) or 1))
 
         temp_sl = self._temp_hard_stop_from_tv(entry, side)
-        if temp_sl <= 0:
+        try:
+            temp_sl = float(temp_sl)
+        except (TypeError, ValueError):
+            temp_sl = 0.0
+        # NaN / inf 会绕过下面的 `<= 0` 判定（nan<=0 为 False）一路写进
+        # frozen_hard_sl_px（2026-09-09 SKHYNIX 崩栈根因）——显式拦下。
+        if not math.isfinite(temp_sl) or temp_sl <= 0:
             logger.error(
-                f"🚨 [{self.symbol}] {source} 无有效 TV.stop_loss → "
-                f"禁止 1.5×ATR 兜底，硬止损未挂"
+                f"🚨 [{self.symbol}] {source} 无有效 TV.stop_loss "
+                f"(temp_sl={temp_sl!r}) → 禁止 1.5×ATR 兜底，硬止损未挂"
             )
             return False
 
@@ -8631,7 +8650,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return order
 
     def _frozen_hard_px(self):
-        return round(float(getattr(self, "frozen_hard_sl_px", 0) or 0), 2)
+        raw = getattr(self, "frozen_hard_sl_px", 0.0)
+        try:
+            v = float(raw or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if not math.isfinite(v):
+            # 2026-09-09 SKHYNIX 实盘：某个上游中间量（疑似 ATR / 止损 blend）
+            # 未消毒，NaN 落进 frozen_hard_sl_px，此后每轮哨兵 _ensure_frozen_
+            # hard_sl → make_defense_client_order_id 里 int(round(nan)) 崩栈
+            # （~330 次/账户，非致命但刷屏且看不出品种）。这里作为唯一读
+            # 口就地清毒：清零后上层 _maintain_hard_shield / _ensure_frozen_
+            # hard_sl 会按 TV 距×1.15 重新补锁，不吞掉"该有硬止损"这件事。
+            logger.error(
+                f"🚨 [{getattr(self, 'symbol', '?')}] frozen_hard_sl_px 非有限值 "
+                f"(raw={raw!r}) → 就地清零，交由维护路径按 TV 距重新补锁"
+            )
+            try:
+                self.frozen_hard_sl_px = 0.0
+                self._save_state()
+            except Exception:
+                pass
+            return 0.0
+        return round(v, 2)
 
     def _radar_live_stops(self):
         """Protective stop prices excluding frozen hard leg."""
@@ -8708,6 +8749,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             buffer_usd=self._stop_buffer_usd(),
             profile=getattr(self, "breath_profile", None),
         ) or hard), 2)
+        # 兜底：hard 已在 _frozen_hard_px 消过毒，但 buffer / order_stop_price
+        # 若将来引入非有限值仍会一路传到 make_defense_client_order_id 的
+        # int(round(nan)) 崩栈——在造标签之前就地拦截并打清楚是哪个品种
+        # （2026-09-09 SKHYNIX：旧异常处理器连品种都看不出来）。
+        if not math.isfinite(exchange_target) or exchange_target <= 0:
+            logger.error(
+                f"🚨 [{self.symbol}] {reason} 中止：挂单止损价非法 "
+                f"(exchange_target={exchange_target!r} hard={hard!r} "
+                f"buf={self._stop_buffer_usd()!r}) → 拒绝据此造防御单标签"
+            )
+            return False
         if self._has_stop_sl_near(exchange_target, exclude_shield=False):
             return True
         # 2026-08-31实盘复现(E账户BCH/ZEC)：IP冷却期间_has_stop_sl_near的
@@ -19637,7 +19689,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     finally:
                         self._lock.release()
                 except Exception as e:
-                    logger.error(f"哨兵异常: {e}", exc_info=True)
+                    logger.error(
+                        f"[{getattr(self, 'symbol', '?')}] 哨兵异常: {e}",
+                        exc_info=True,
+                    )
                 if self.monitoring:
                     # WS 达激活线/交棒：几乎立即再跑；接近线：1.5s；否则 5~8s
                     if getattr(self, "_radar_work_urgent", False):
@@ -20382,9 +20437,11 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             or (raw_oids or {}).get("radar_stop") or ""
                         ),
                     }
-                    self.frozen_hard_sl_px = float(
-                        s.get("frozen_hard_sl_px", 0) or 0
-                    )
+                    _fhsl = float(s.get("frozen_hard_sl_px", 0) or 0)
+                    # state json 允许 NaN 字面量往返（json.dump 默认不禁 NaN），
+                    # poisoned 快照会把 NaN 读回来，之后每轮哨兵崩栈——落盘
+                    # 阶段就清毒，_maintain_hard_shield 会按 TV 距重新补锁。
+                    self.frozen_hard_sl_px = _fhsl if math.isfinite(_fhsl) else 0.0
                     self.trading_paused = bool(s.get("trading_paused", False))
                     self.api_monitor_only = bool(s.get("api_monitor_only", False))
                     if self.api_monitor_only:

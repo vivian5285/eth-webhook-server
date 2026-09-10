@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import random
 import time
 from typing import Optional
@@ -41,8 +42,18 @@ def make_defense_client_order_id(
         sd = "L" if sd in ("LONG", "BUY", "L") else "S"
     else:
         sd = "A"  # 无方向时用 A（兼容 TP1/TP2 等无需区分方向的场景）
-    t = abs(int(float(ts if ts is not None else time.time()))) % 1_000_000
-    px = abs(int(round(float(price or 0) * 100))) % 1_000_000
+    # 兜底：ts / price 若是 NaN / inf（上游某个 ATR / 止损 blend 没消毒就
+    # 传进来，见 2026-09-09 SKHYNIX 哨兵每轮 int(round(nan)) 崩栈事件），
+    # 不能让 int(round(...)) 直接 ValueError 把整个哨兵轮次打断——退回
+    # 确定性占位（ts→当前时间，price→0），标签仍靠 sha256+随机数保证唯一。
+    _ts_raw = float(ts if ts is not None else time.time())
+    if not math.isfinite(_ts_raw):
+        _ts_raw = time.time()
+    t = abs(int(_ts_raw)) % 1_000_000
+    _px_raw = float(price or 0)
+    if not math.isfinite(_px_raw):
+        _px_raw = 0.0
+    px = abs(int(round(_px_raw * 100))) % 1_000_000
     # 随机数：时间戳微秒 + 随机 bytes 防彩虹表
     rnd = random.getrandbits(32)
     raw = f"{sym_u}|{k}|{sd}|{px}|{t}|{rnd}"
