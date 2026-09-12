@@ -62,7 +62,12 @@ _DAY_MS = 24 * 60 * 60 * 1000
 DEFAULT_PARAMS = {
     "n_std": 2.0,
     "exit_band": 0.3,
-    "min_session_bars": 12,
+    # 2026-09-12：12(=3h)→24(=6h)。实测按小时拆胜率发现 UTC00 点(刚跨日、
+    # VWAP 刚重置)胜率只有 33%，明显低于其他时段——当日 session 才刚开始
+    # 累计，12 根还不够让 VWAP/σ 稳定。这是机制性的(样本太薄→σ抖)，不是
+    # 拟合出来的相关性，vwap_mean_reversion 是现真金测试候选，这道质量
+    # 门槛值得收紧。
+    "min_session_bars": 24,
     "adx_len": 14,
     "adx_max": 25.0,
     "atr_len": 14,
