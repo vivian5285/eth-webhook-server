@@ -520,15 +520,25 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 # 2026-09-08：新增品种STXXUSDT(75分钟周期，15m合成)——同样是币安
 # TRADIFI_PERPETUAL(underlyingType=EQUITY)，跟GS/MU/LITE/TSLA/META/DELL/
 # GEV同类，已核实stepSize/minQty/tickSize均为0.01。
+# 2026-09-12：宝贝拍板——实盘这么长时间下来，只留 OPENAIUSDT / XPDUSDT /
+# SNDKUSDT 这三个品种继续吃 TV 信号，其余17个全部暂停（只停新开仓；已有
+# 持仓沿用各自的永久硬止损/TP/雷达继续正常管理到平仓，不额外强平——本次
+# 改动前核实过 B/C/D/E 四个账户，只有 B/E 两个账户的 BCHUSDT 还有仓，C/D
+# 全空仓）。跟 2026-09-04 ASML/SKHYNIX 删除（commit e45383d）同一个机制：
+# 只改这里(活跃品种默认清单)和各账户 .env 的 BINANCE_SYMBOLS，不动
+# BINANCE_SYMBOL_META/别名解析表——那些是静态参考数据，留着无害，以后要
+# 恢复直接把品种加回下面两处清单即可。跟 e45383d 一样的副作用：往后这17个
+# 品种就算 TV 误发信号（包括 CLOSE）也会在 app.py/console_api.py 的
+# webhook 入口被直接拒绝，已有仓位的平仓完全交给引擎自己的硬止损/雷达。
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "ETHUSDT,XAUUSDT,BNBUSDT,ZECUSDT,BCHUSDT,XMRUSDT,SNDKUSDT,PAXGUSDT,XPDUSDT,OPENAIUSDT,ANTHROPICUSDT,SKHYNIXUSDT,GSUSDT,MUUSDT,LITEUSDT,TSLAUSDT,METAUSDT,DELLUSDT,GEVUSDT,STXXUSDT")
+    raw = os.getenv("BINANCE_SYMBOLS", "OPENAIUSDT,XPDUSDT,SNDKUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT", "DELLUSDT", "GEVUSDT", "STXXUSDT"]
+    return out or ["OPENAIUSDT", "XPDUSDT", "SNDKUSDT"]
 
 
 def active_deepcoin_symbols():
