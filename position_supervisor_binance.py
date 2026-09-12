@@ -4795,6 +4795,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 return round(curr_px + gap, 2)
             return px
 
+        # ── 币安B系统专属："综合硬止损"(2026-09-13新增) ──────────────────
+        # 跟A系统(下面整段TV缓冲垫×1.15的公式)共用同一份代码，靠.env
+        # SMART_HARD_STOP_ENABLED=1这一个开关分叉——只有币安B系统的账户
+        # 会设这个变量，现有A系统四账户(B/C/D/E)一律不设，os.getenv默认
+        # 关闭，行为完全不变。B系统开启后：VPS自己拉K线独立算止损(结构
+        # 摆动点+分档ATR保护带，详见smart_hard_stop.py)，完全不看TV给的
+        # stop_loss/atr字段，TV只给方向+tier强弱——2026-09-13从CoinW系统
+        # (2026-09-12上线，宝贝拍板"tv的（止损）不行，太木讷了")原样移植
+        # 算法过来。计算失败(K线不够/ATR为0)时不整体拒绝，回退到下面A
+        # 系统那套久经考验的TV缓冲垫+ATR应急兜底路径，保证B系统跟A系统
+        # 一样"强壮"，不会因为新路径失败就裸奔。
+        if str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in ("1", "true", "yes"):
+            smart_px = self._try_smart_hard_stop(fill, side)
+            if smart_px and smart_px > 0:
+                return _valid_stop_vs_market(smart_px)
+            logger.warning(
+                f"⚠️ [{self.symbol}] 综合硬止损(币安B系统)不可用，"
+                f"回退TV缓冲垫止损路径"
+            )
+
         # ── 根因一修复（v16.11.x）：方向校验 + ATR 最小距离兜底 ──────────
         STOP_SIDE_VALID = False
         direction_error = False
@@ -4939,6 +4959,56 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             fill_entry=fill,
         )
         return _valid_stop_vs_market(normal_px)
+
+    def _try_smart_hard_stop(self, fill, side):
+        """
+        币安B系统专用："综合硬止损"——VPS自己拉K线独立算止损，不看TV给
+        的stop_loss/atr字段。2026-09-13从CoinW系统(2026-09-12上线，宝贝
+        拍板"tv的（止损）不行，太木讷了，还是综合的硬止损比较合理，同时
+        vps应该自己也要分辨趋势更加智慧点，tv给方向，vps开单")原样移植
+        算法过来，只是这里改用币安binance_client.fetch_klines()拉K线
+        (跟CoinW一样用30分钟周期，K线数组格式两边天然兼容，不用转换)。
+
+        只在_temp_hard_stop_from_tv检测到SMART_HARD_STOP_ENABLED=1(币安
+        B系统专属.env开关)时才会被调用——A系统(现有B/C/D/E四账户)这个
+        方法压根不会被执行到。计算失败(K线不够/ATR为0/摆动点异常)时
+        返回0.0，调用方会自动回退到A系统那套久经考验的TV缓冲垫+ATR应急
+        兜底路径，不会因为这条新路径失败就让仓位裸奔——B系统的"强壮"
+        程度不能低于A系统。
+        """
+        try:
+            from smart_hard_stop import (
+                calc_smart_hard_stop_price,
+                STRUCT_LOOKBACK_BARS,
+                ATR_PERIOD,
+                STRUCT_CONFIRM,
+            )
+            need_bars = STRUCT_LOOKBACK_BARS + ATR_PERIOD + STRUCT_CONFIRM + 10
+            klines = binance_client.fetch_klines(
+                self.symbol, interval="30m", limit=need_bars,
+            )
+            if not klines:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 综合硬止损：K线拉取为空"
+                )
+                return 0.0
+            tier = getattr(self, "tv_open_tier", None)
+            price, meta, ok, err = calc_smart_hard_stop_price(
+                side=side, entry_price=float(fill or 0), klines=klines, tier=tier,
+            )
+            if not ok:
+                logger.warning(
+                    f"⚠️ [{self.symbol}] 综合硬止损计算失败: {err} "
+                    f"(klines={len(klines or [])}根)"
+                )
+                return 0.0
+            logger.info(
+                f"🧮 [{self.symbol}] 综合硬止损(币安B系统) @{price} | {meta}"
+            )
+            return float(price)
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.symbol}] 综合硬止损异常: {e}")
+            return 0.0
 
     def _lock_frozen_hard_sl_from_tv(self, entry=None, side=None, source=""):
         """
