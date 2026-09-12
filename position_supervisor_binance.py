@@ -21222,11 +21222,60 @@ def get_supervisor_for_payload(data):
     return get_supervisor(sym), sym
 
 
+def _symbols_with_orphaned_live_positions(whitelisted):
+    """
+    2026-09-12实盘复现(BCHUSDT，B/E两账户)：17品种暂停(active_binance_
+    symbols()收窄到几个)之后，bootstrap_supervisors()只给白名单品种建
+    军师对象——原本在白名单里、暂停时手上还挂着仓位的品种(BCH/ETH/GEV/
+    MU/XAU/ZEC)直接一个军师都不建，哨兵循环/雷达追踪/硬止损维护全部
+    停摆，只剩交易所上早先挂好的静态止损单裸奔兜底，宝贝巡检发现后
+    要求补上。
+
+    白名单只应该决定"接不接受TV新开仓/平仓信号"，不该决定"要不要继续
+    照看交易所上真实存在的仓位"——这里用一次账户级批量REST(跟watchdog
+    2026-08-15同款_refresh_all_positions，不逐品种查)找出所有真实非零
+    仓位，但不在白名单里的品种，补进启动清单一起建军师、走同一套"启动
+    恢复"核查——TV信号层面(get_supervisor_for_payload)完全不变，这些
+    品种仍然拒收任何新webhook信号，只是VPS自己的哨兵/雷达/硬止损维护
+    重新跑起来，不再是只有一张静态止损单孤军奋战。
+    """
+    from symbol_config import BINANCE_SYMBOL_META
+    try:
+        rows = binance_client._refresh_all_positions(force=True)
+    except Exception as e:
+        logger.error(f"🚨 [启动恢复] 账户级持仓核对失败，跳过孤儿仓位补建军师: {e}")
+        return []
+    if not rows:
+        return []
+    orphaned = []
+    for sym, row in rows.items():
+        try:
+            amt = abs(float(row.get("positionAmt", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        if amt <= 0:
+            continue
+        if sym in whitelisted:
+            continue
+        if sym not in BINANCE_SYMBOL_META:
+            continue  # 不认识的ticker(比如已下架)，不建军师，交由人工核查
+        orphaned.append(sym)
+    if orphaned:
+        logger.warning(
+            f"🆘 [启动恢复] 发现{len(orphaned)}个不在TV白名单、但交易所仍有"
+            f"真实仓位的品种，补建军师恢复哨兵/雷达/硬止损维护(TV信号仍"
+            f"拒收，不受影响): {orphaned}"
+        )
+    return orphaned
+
+
 def bootstrap_supervisors():
     """启动全部活动品种军师并逐一恢复状态（ETH/XAU 独立核查，互不跳过）。"""
     from symbol_config import active_binance_symbols
     global position_supervisor
-    symbols = active_binance_symbols()
+    whitelisted = active_binance_symbols()
+    orphaned = _symbols_with_orphaned_live_positions(set(whitelisted))
+    symbols = list(whitelisted) + [s for s in orphaned if s not in whitelisted]
     logger.info(f"🔄 多品种启动恢复清单: {symbols}")
     for sym in symbols:
         get_supervisor(sym)

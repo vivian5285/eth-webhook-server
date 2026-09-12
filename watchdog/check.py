@@ -22,15 +22,16 @@ from dingtalk_notify import send_text
 ACCOUNTS = [
     {"name": "B", "port": 5007, "dir": "/home/binanceB/binance-engine", "service": "binanceB-engine"},
     {"name": "C", "port": 5008, "dir": "/home/binanceC/binance-engine", "service": "binanceC-engine"},
-    # 2026-08-20：D账户暂停监控——没放资金(权益0)也没接TV，任何健康/持仓/
-    # 开仓检查对它来说本来就该是空的，反而容易制造假警报(比如今天验证网格
-    # 套利闸门时D的"sizing拒绝：权益=0.0"就是预期内的正常拒绝，不是故障)。
-    # monitor=False只是跳过检查，D账户本身/binance_vps_state文件都还在，
-    # 以后放资金接TV了，把这行改回True (或直接删掉这个key) 即可恢复监控。
-    {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine", "monitor": False},
+    {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine"},
     {"name": "E", "port": 5010, "dir": "/home/binanceE/binance-engine", "service": "binanceE-engine"},
 ]
-MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
+# 2026-09-12改成动态判断，取代原来D账户写死的monitor=False：宝贝要求
+# 控制面板能随时启停任意账户，不能每次手动改这个文件才不误报——现在
+# 任何账户(不只D)被systemctl停掉，本轮就自动豁免"health异常"/TV相关
+# 检查(见run_once里的_account_is_running分支)，不需要再编辑这份清单。
+# D账户本身继续保持停着(空仓待命)，行为不变，只是判断方式从写死改成
+# 实时查询。
+MONITORED_ACCOUNTS = ACCOUNTS
 # 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
 # active_binance_symbols()和各账户.env删除（commit e45383d）。watchdog自己
 # 独立维护的这份SYMBOLS清单当时漏改了——导致这两个品种的TV心跳(我们已经
@@ -139,6 +140,26 @@ def _run(cmd: list, timeout: int = 20, cwd: str | None = None) -> str:
         return r.stdout.decode("utf-8", errors="replace")
     except Exception as e:
         return f"__ERR__{e}"
+
+
+def _account_is_running(acct: dict) -> bool:
+    """账户自己的systemd服务是不是真的在跑——取代原来D账户写死的
+    monitor=False，让"宝贝通过控制面板临时停掉某个账户"这件事自动被
+    watchdog感知，不用再手改这个文件。注意不能复用_run()：
+    `systemctl is-active`对已停止的服务返回码是3(非0)，_run会把这种
+    情况折进__ERR__分支、吞掉本来在stdout里的"inactive"文本，这里
+    要看的正是这个文本，所以直接subprocess调用。查询本身失败(比如
+    systemctl不存在/超时)时保守返回True——按"当作在跑"处理，走原有
+    健康检查路径，不会因为查询失败而误放行本该报的异常。
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", acct["service"]],
+            capture_output=True, timeout=5,
+        )
+        return r.stdout.decode("utf-8", errors="replace").strip() == "active"
+    except Exception:
+        return True
 
 
 # 2026-08-23：多品种账户(B/C/E各13个品种)重启后要逐品种核对TP/止损，实测
@@ -650,19 +671,36 @@ def run_once() -> list:
 
     for acct in MONITORED_ACCOUNTS:
         name = acct["name"]
-        h = check_health(acct)
-        if not h["ok"]:
-            if h.get("restarting"):
-                # 判定为重启恢复窗口内，不算异常也不发钉钉，但这轮仍然
-                # 没法拿到真实数据，照样跳过这个账户其它检查。
-                print(f"[跳过·重启中] {name}:health | {h.get('detail')}")
-                continue
-            detail = h.get("detail") or f"trading_paused={h.get('paused_syms')}"
-            anomalies.append({
-                "key": f"{name}:health",
-                "text": f"⚠️ {name}账户({acct['port']}) 健康异常: {detail}",
-            })
-            continue  # 健康都不行，跳过这个账户其它检查，避免连锁误报
+        running = _account_is_running(acct)
+        if not running:
+            # 账户被人为停掉(比如宝贝通过控制面板暂停C去跑擂台策略，
+            # 或D本来就空仓待命)——/health必然连不上，这不是故障，不该
+            # 每10分钟报一次"健康异常"。open_in_progress/catchup_active/
+            # chase_watch_active这几个"engine活着才有意义"的豁免字段
+            # 全部当空处理；naked/幽灵单/雷达卡死这些保护真实仓位的检查
+            # 完全独立于engine进程存不存在(fetch_positions_and_orders走
+            # 的是子进程直连交易所，不经过engine)，照常做一遍——安全网
+            # 不能因为引擎关了就跟着关，账户里可能还有仓位没处理完。
+            print(f"[跳过·账户已停(人为)] {name}:health | systemctl inactive，仍照常检查裸仓/幽灵单")
+            h = {"ok": True}
+            open_in_progress, catchup_active, chase_watch_active = {}, {}, {}
+        else:
+            h = check_health(acct)
+            if not h["ok"]:
+                if h.get("restarting"):
+                    # 判定为重启恢复窗口内，不算异常也不发钉钉，但这轮仍然
+                    # 没法拿到真实数据，照样跳过这个账户其它检查。
+                    print(f"[跳过·重启中] {name}:health | {h.get('detail')}")
+                    continue
+                detail = h.get("detail") or f"trading_paused={h.get('paused_syms')}"
+                anomalies.append({
+                    "key": f"{name}:health",
+                    "text": f"⚠️ {name}账户({acct['port']}) 健康异常: {detail}",
+                })
+                continue  # 健康都不行，跳过这个账户其它检查，避免连锁误报
+            open_in_progress = h.get("open_in_progress") or {}
+            catchup_active = h.get("catchup_active") or {}
+            chase_watch_active = h.get("chase_watch_active") or {}
 
         pos_data = fetch_positions_and_orders(acct)
         if not pos_data:
@@ -765,33 +803,39 @@ def run_once() -> list:
                     })
 
             # TV信号 vs 实盘方向核对（只在有实盘仓位时比对，避免信号还没成交就误报）
-            tv = tv_signals.get(sym)
-            if tv and side and tv["side"] != side:
-                anomalies.append({
-                    "key": f"{name}:{sym}:side_mismatch",
-                    "text": (
-                        f"🔀 {name}账户 {sym} TV最近信号={tv['side']} 但实盘方向={side}，"
-                        f"可能未同步或执行异常"
-                    ),
-                })
-
-            # 2026-08-20新增：TV心跳失联检测——只对"以前收到过心跳"的品种
-            # 才检查(hb_ts>0)，还没被加上心跳代码的品种(hb_ts恒为0)不算
-            # 失联，不然13个品种里没加完的那些会天天报警。心跳一旦收到过
-            # 却超过HEARTBEAT_SILENCE_SEC(固定24小时，足够盖住所有品种
-            # 正常的TV周期，不怕误报)没再更新，说明TV那边的心跳代码可能
-            # 被改坏/漏加了，没人会主动发现这种"安静失效"，单独探测一次。
-            hb_ts = float(info.get("hb_ts") or 0)
-            if hb_ts > 0:
-                silent_sec = time.time() - hb_ts
-                if silent_sec > HEARTBEAT_SILENCE_SEC:
+            # 2026-09-12：账户被人为停掉时，这两条(side_mismatch/
+            # heartbeat_silent)本来就该不比对/不检查——engine不接TV了，
+            # "TV最近信号"和"心跳"天然会停更，那是预期内的正常结果，不是
+            # 故障；不像naked/幽灵单/雷达卡死是保护真实仓位的安全网，这
+            # 两条只在engine在跑、理应持续收TV数据时才有意义，仅限running。
+            if running:
+                tv = tv_signals.get(sym)
+                if tv and side and tv["side"] != side:
                     anomalies.append({
-                        "key": f"{name}:{sym}:heartbeat_silent",
+                        "key": f"{name}:{sym}:side_mismatch",
                         "text": (
-                            f"💔 {name}账户 {sym} TV心跳已连续{silent_sec / 3600:.1f}小时"
-                            f"没更新，疑似该品种TV策略的心跳代码失效"
+                            f"🔀 {name}账户 {sym} TV最近信号={tv['side']} 但实盘方向={side}，"
+                            f"可能未同步或执行异常"
                         ),
                     })
+
+                # 2026-08-20新增：TV心跳失联检测——只对"以前收到过心跳"的品种
+                # 才检查(hb_ts>0)，还没被加上心跳代码的品种(hb_ts恒为0)不算
+                # 失联，不然13个品种里没加完的那些会天天报警。心跳一旦收到过
+                # 却超过HEARTBEAT_SILENCE_SEC(固定24小时，足够盖住所有品种
+                # 正常的TV周期，不怕误报)没再更新，说明TV那边的心跳代码可能
+                # 被改坏/漏加了，没人会主动发现这种"安静失效"，单独探测一次。
+                hb_ts = float(info.get("hb_ts") or 0)
+                if hb_ts > 0:
+                    silent_sec = time.time() - hb_ts
+                    if silent_sec > HEARTBEAT_SILENCE_SEC:
+                        anomalies.append({
+                            "key": f"{name}:{sym}:heartbeat_silent",
+                            "text": (
+                                f"💔 {name}账户 {sym} TV心跳已连续{silent_sec / 3600:.1f}小时"
+                                f"没更新，疑似该品种TV策略的心跳代码失效"
+                            ),
+                        })
 
         errs = fetch_real_errors(acct)
         for e in errs:
