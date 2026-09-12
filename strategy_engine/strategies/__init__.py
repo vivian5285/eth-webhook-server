@@ -200,6 +200,16 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import vwap_mean_reversion
     STRATEGIES["vwap_mean_reversion"] = vwap_mean_reversion.generate_signal
+    # 2026-09-12新增：同一份代码注册第二个策略名，跑在30m(照抄bollinger_
+    # squeeze_fast同样的做法)。起因是这套已经上真实账户，宝贝问15m是不是
+    # 最合适的周期——拿真实合约K线做的手续费敏感性回测发现，这套策略单笔
+    # 优势本来就薄(几个到几十个基点)，币安taker手续费单边0.05%/双边0.10%
+    # (用binanceC真实成交的commission字段核对过，分毫不差)几乎吃掉大部分
+    # 优势；15m因为下单频率高，扣完费用后比30m更吃亏。30m用comparison_
+    # roster.py里的_VWAP_30M_PARAMS把min_session_bars从24(15m×24=6h)等比
+    # 换算成12(30m×12=6h)，保持"当日session热身6小时"这个含义不变，不是
+    # 瞎改。用真实数据跑几周再决定要不要把实盘也切过去，不猜。
+    STRATEGIES["vwap_mean_reversion_30m"] = vwap_mean_reversion.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vwap_mean_reversion 加载失败: {_e}")
@@ -743,6 +753,13 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "bollinger_rsi_contrarian/adx_regime_switch的均值回归腿都用移动均线"
         "中轨(等权收盘价)不同，这套中枢是成交量加权价，放量区间位置差别"
         "明显。跟bollinger_squeeze同用偏离带但方向相反(回归vs突破)。"
+    ),
+    "vwap_mean_reversion_30m": (
+        "跟'vwap_mean_reversion'同一套逻辑/代码，30m快版——2026-09-12"
+        "手续费敏感性回测发现这套策略单笔优势薄，币安双边taker手续费"
+        "约0.10%(真实成交commission字段核对过)吃掉大部分优势，15m因为"
+        "下单频率更高反而扣费后更吃亏。min_session_bars等比例换算保持"
+        "6小时热身含义不变，用真实数据跑几周再判断要不要换实盘周期。"
     ),
     "volume_profile_reversion": (
         "Volume Profile(VPVR)POC/价值区回归——2026-09-04新增。Peter "

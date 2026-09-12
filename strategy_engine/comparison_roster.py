@@ -271,6 +271,11 @@ _RSI2_SYMBOLS = [
 # 量能均线本身仍是合理窗口，不需要跟着4倍放大)。
 _SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
 
+# vwap_mean_reversion_30m(30m)的参数覆盖：min_session_bars从24(15m版，
+# 24×15m=6h热身)等比例换算成12(30m版，12×30m=6h)，热身时长(6小时)本身
+# 不变，只是换算成新周期下等价的根数——不是重新拍一个数字。
+_VWAP_30M_PARAMS = {"min_session_bars": 12}
+
 # vegas_tunnel需要EMA676，默认BARS_LIMIT(550)连算出第一个值都不够，
 # 单独给这条roster覆盖更大的拉取量(见multi_strategy_runner._tick_
 # single_symbol_entry新增的bars_limit字段支持)。
@@ -361,6 +366,12 @@ SINGLE_SYMBOL_ROSTER = (
     # ── 2026-09-04第二批新增7套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "mtf_ema_pullback", "timeframe": "15m", "mtf": ["1h"], "params": {"use_fixed_tp": False}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vwap_mean_reversion", "timeframe": "15m"} for s in _ALL_SYMBOLS]
+    # 2026-09-12：vwap_mean_reversion_30m——已经上真实账户后，宝贝问15m是不
+    # 是最合适的周期，拿真实合约K线做手续费敏感性回测发现单笔优势薄、双边
+    # taker手续费(真实成交commission核对过约0.10%)吃掉大部分优势，15m下单
+    # 频率高扣完费用比30m更吃亏。同一份代码、同一批品种，跑几周看真实数据
+    # 而不是猜。
+    + [{"symbol": s, "strategy": "vwap_mean_reversion_30m", "timeframe": "30m", "params": _VWAP_30M_PARAMS} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "volume_profile_reversion", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "funding_trend", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "supertrend_adx", "timeframe": "4h"} for s in _ALL_SYMBOLS]
