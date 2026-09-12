@@ -275,6 +275,11 @@ _SQUEEZE_FAST_PARAMS = {"squeeze_lookback": 480}
 # 24×15m=6h热身)等比例换算成12(30m版，12×30m=6h)，热身时长(6小时)本身
 # 不变，只是换算成新周期下等价的根数——不是重新拍一个数字。
 _VWAP_30M_PARAMS = {"min_session_bars": 12}
+# vwap_mean_reversion_45m：币安没有原生45m周期，klines.py::get_bars本来
+# 就支持任意非原生周期(自动用15m合成，见该文件resolve_source_interval)，
+# 跟TV复刻用的90m/150m是同一条既有机制，不需要新代码。min_session_bars
+# 同样按6小时热身换算成8(8×45m=6h)。
+_VWAP_45M_PARAMS = {"min_session_bars": 8}
 
 # vegas_tunnel需要EMA676，默认BARS_LIMIT(550)连算出第一个值都不够，
 # 单独给这条roster覆盖更大的拉取量(见multi_strategy_runner._tick_
@@ -372,6 +377,7 @@ SINGLE_SYMBOL_ROSTER = (
     # 频率高扣完费用比30m更吃亏。同一份代码、同一批品种，跑几周看真实数据
     # 而不是猜。
     + [{"symbol": s, "strategy": "vwap_mean_reversion_30m", "timeframe": "30m", "params": _VWAP_30M_PARAMS} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "vwap_mean_reversion_45m", "timeframe": "45m", "params": _VWAP_45M_PARAMS} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "volume_profile_reversion", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "funding_trend", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "supertrend_adx", "timeframe": "4h"} for s in _ALL_SYMBOLS]

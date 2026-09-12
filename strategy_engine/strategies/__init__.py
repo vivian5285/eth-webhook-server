@@ -210,6 +210,10 @@ try:
     # 换算成12(30m×12=6h)，保持"当日session热身6小时"这个含义不变，不是
     # 瞎改。用真实数据跑几周再决定要不要把实盘也切过去，不猜。
     STRATEGIES["vwap_mean_reversion_30m"] = vwap_mean_reversion.generate_signal
+    # 2026-09-12二次追加：宝贝要求也测45m。币安没有原生45m周期，
+    # klines.py::get_bars本来就支持任意非原生周期自动合成(TV复刻的
+    # 90m/150m早就在用同一套机制)，不需要额外代码。
+    STRATEGIES["vwap_mean_reversion_45m"] = vwap_mean_reversion.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vwap_mean_reversion 加载失败: {_e}")
@@ -760,6 +764,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "约0.10%(真实成交commission字段核对过)吃掉大部分优势，15m因为"
         "下单频率更高反而扣费后更吃亏。min_session_bars等比例换算保持"
         "6小时热身含义不变，用真实数据跑几周再判断要不要换实盘周期。"
+    ),
+    "vwap_mean_reversion_45m": (
+        "跟'vwap_mean_reversion'同一套逻辑/代码，45m快版——2026-09-12"
+        "跟30m版同批加入，币安没有原生45m周期，靠klines.py自动用15m"
+        "合成(跟TV复刻的90m/150m同一套机制)。三个周期(15m/30m/45m)并排"
+        "跑，用真实数据决定哪个扣完手续费后净胜率/净收益最好，不猜。"
     ),
     "volume_profile_reversion": (
         "Volume Profile(VPVR)POC/价值区回归——2026-09-04新增。Peter "
