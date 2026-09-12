@@ -531,14 +531,17 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 # 品种就算 TV 误发信号（包括 CLOSE）也会在 app.py/console_api.py 的
 # webhook 入口被直接拒绝，已有仓位的平仓完全交给引擎自己的硬止损/雷达。
 def active_binance_symbols():
-    raw = os.getenv("BINANCE_SYMBOLS", "OPENAIUSDT,XPDUSDT,SNDKUSDT")
+    # 2026-09-12恢复BNBUSDT：17品种暂停(commit 0deff95)之后宝贝要求单独
+    # 把BNB的TV网关接收+实盘开仓恢复回来，其余仍暂停(OPENAI/XPD/SNDK+BNB
+    # 共4个)。跟ASML/SKHYNIX删除时同一套"注释不删除"的可逆写法。
+    raw = os.getenv("BINANCE_SYMBOLS", "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT")
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["OPENAIUSDT", "XPDUSDT", "SNDKUSDT"]
+    return out or ["BNBUSDT", "OPENAIUSDT", "XPDUSDT", "SNDKUSDT"]
 
 
 def active_deepcoin_symbols():
