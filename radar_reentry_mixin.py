@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -137,6 +138,42 @@ CATCHUP_MIN_REWARD_FRAC = 0.4
 # 挡住深度浮盈后手动落袋"这两者之间的折中，不是回测出来的精确值——
 # 后续如果发现太松/太紧，跟着真实案例继续调整。
 CATCHUP_MAX_PROFIT_EXTENSION_MULT = 1.5
+
+# ==================== TV方向+双均线趋势自主重入(2026-09-13新增·币安B
+# 系统专属，跟CoinW同一套设计) ====================
+# 宝贝拍板：VPS空仓、TV心跳当前也是FLAT时，只要TV最后一个非空方向
+# (last_nonflat_hb_side，见record_tv_heartbeat)仍然满足双均线趋势
+# 确认(定义完全对齐TV策略源码"ETH双均线15/30锁机制版"自己的开平仓
+# 逻辑：多头close>MA15 and close>MA30，空头反过来)，就认为趋势还在，
+# 允许VPS自己判断重入——用综合硬止损(smart_hard_stop.py)+ATR估算
+# TP123自己管理仓位，直到TV发出全新真实开仓信号为止。宝贝原话："TV出
+# 主要方向，VPS是执行层+半辅助+智能计算开仓，VPS占了一大半的工作量，
+# 直到下一次的TV新方向开仓来就立即按照TV方向走，TV为主要方向判断，
+# VPS作为辅助"。
+#
+# 只在SMART_HARD_STOP_ENABLED=1(币安B系统专属.env开关)时生效——A系统
+# (现有B/C/D/E四账户)这个变量不设，_trend_reentry_tick()第一行直接
+# return，完全不受影响，跟_maybe_start_tv_heartbeat_catchup(A系统心跳
+# 仍报LONG/SHORT时的追回)是两套独立机制，互不冲突。
+def _smart_hard_stop_mode_enabled() -> bool:
+    return str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in ("1", "true", "yes")
+
+
+TREND_REENTRY_FAST_LEN = int(os.getenv("TREND_REENTRY_FAST_LEN", "15"))
+TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "30"))
+TREND_REENTRY_MA_TYPE = os.getenv("TREND_REENTRY_MA_TYPE", "SMA")
+TREND_REENTRY_KLINE_INTERVAL_MIN = int(os.getenv("TREND_REENTRY_KLINE_INTERVAL_MIN", "30"))
+TREND_REENTRY_KLINE_LIMIT = int(os.getenv("TREND_REENTRY_KLINE_LIMIT", "80"))
+# 每次尝试(不管成功/趋势不确认)之间至少间隔这么久，避免现价刚好贴在
+# 均线附近来回穿越时每次idle-patrol tick都触发一轮拉K线评估
+TREND_REENTRY_COOLDOWN_SEC = float(os.getenv("TREND_REENTRY_COOLDOWN_SEC", "300"))
+TREND_REENTRY_TP1_ATR = float(os.getenv("TREND_REENTRY_TP1_ATR", "1.35"))
+TREND_REENTRY_TP2_ATR = float(os.getenv("TREND_REENTRY_TP2_ATR", "2.5"))
+TREND_REENTRY_TP3_ATR = float(os.getenv("TREND_REENTRY_TP3_ATR", "4.0"))
+# 综合硬止损算不出来时(K线不够/摆动点异常)的ATR倍数应急兜底——跟既有
+# can_smart_reenter系那套止损后再入的应急倍数取同一个量级，不是回测值。
+TREND_REENTRY_HARD_SL_ATR = float(os.getenv("TREND_REENTRY_HARD_SL_ATR", "2.0"))
+
 # tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
 # TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
 # 心跳这条数据流本身没有任何校验(见record_tv_heartbeat)，异常值会原样
@@ -925,6 +962,11 @@ class RadarReentryMixin:
         self.catchup_tps_frozen = [0.0, 0.0, 0.0]
         self.catchup_unfilled_refreshes = 0
         self.catchup_started_ts = 0.0
+        # 2026-09-13新增(币安B系统)：这轮是不是"TV方向+双均线趋势"自主
+        # 重入发起的，标记也在这里一并清掉——不然下一轮如果是正常A式
+        # 追回(TV心跳重新报LONG/SHORT触发)，会被误当成还在走趋势重入
+        # 那条precheck分支。
+        self._catchup_via_trend_reentry = False
         if source:
             logger.info(f"🧹 [{self.symbol}] TV心跳追回周期已清零 | {source}")
 
@@ -2514,6 +2556,18 @@ class RadarReentryMixin:
             self.tv_heartbeat_tp1 = _f("tv_tp1")
             self.tv_heartbeat_tp2 = _f("tv_tp2")
             self.tv_heartbeat_tp3 = _f("tv_tp3")
+            # 2026-09-13新增(币安B系统专属)：TV心跳一旦转FLAT，下面else
+            # 分支会把tv_heartbeat_entry/stop/tp123全部清零——"TV方向+
+            # 双均线趋势"自主重入(_maybe_start_trend_reentry)恰恰要在
+            # 心跳已经FLAT的时候还知道"上一次TV给的是哪个方向"，所以单独
+            # 留一份不会被FLAT清零的记忆，只在真的收到LONG/SHORT时更新。
+            # A系统完全不读这几个字段，不受影响。
+            self.last_nonflat_hb_side = side
+            self.last_nonflat_hb_entry = self.tv_heartbeat_entry
+            self.last_nonflat_hb_stop = self.tv_heartbeat_stop
+            self.last_nonflat_hb_tp1 = self.tv_heartbeat_tp1
+            self.last_nonflat_hb_tp2 = self.tv_heartbeat_tp2
+            self.last_nonflat_hb_tp3 = self.tv_heartbeat_tp3
         else:
             self.tv_heartbeat_entry = 0.0
             self.tv_heartbeat_stop = 0.0
@@ -2621,6 +2675,133 @@ class RadarReentryMixin:
             self._progress_tv_catchup_cycle()
             return
         self._maybe_start_tv_heartbeat_catchup()
+        # 2026-09-13新增(币安B系统)：A式追回(上面那行)只在心跳仍报LONG/
+        # SHORT时触发；这里补上"心跳已经FLAT，但上一次方向+双均线趋势
+        # 仍然成立"这条互补路径。放在同一个tick里调用，跟A式追回共用
+        # 一次idle-patrol节奏，不用另开一条定时器。SMART_HARD_STOP_
+        # ENABLED未设置(A系统)时函数第一行直接return，不影响A系统。
+        if not bool(getattr(self, "catchup_active", False)):
+            self._maybe_start_trend_reentry()
+
+    def _maybe_start_trend_reentry(self):
+        """
+        2026-09-13新增(宝贝拍板，币安B系统专属)：TV方向+双均线趋势自主
+        重入。只在VPS空仓、TV心跳当前也是FLAT时有意义——由上面
+        _tv_heartbeat_catchup_tick在"没有正在进行的追回周期"这个前提下
+        调用。TV最后一个非空方向(last_nonflat_hb_side)如果仍然满足双
+        均线趋势确认，就自主开仓：用综合硬止损+ATR估算TP123管理这笔
+        仓位，走跟A式追回完全相同的执行管线(_place_tv_catchup_limit→
+        限价优价→预算耗尽转市价→_finalize_tv_catchup_fill)，只是触发
+        条件和止损计算方式不同，复用已经跑了很久的成熟执行/审计/防线
+        挂单基础设施，不重新造轮子。
+
+        跟本类既有的"自己出场后小区间重入"(can_smart_reenter/
+        exit_in_reentry_zone)是两套独立机制：那套要求"现价在entry~
+        entry+zone×ATR这个窄区间"，这套完全不要求，覆盖"TV心跳已经
+        安静下来一段时间、但方向和趋势都还成立"这种更宽的场景。
+        """
+        if not _smart_hard_stop_mode_enabled():
+            return
+        side = str(getattr(self, "last_nonflat_hb_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return  # 从没见过TV给过方向，没什么好评估的
+        if bool(getattr(self, "trading_paused", False)):
+            return
+        if (
+            bool(getattr(self, "reentry_active", False))
+            or bool(getattr(self, "_chase_watch_active", False))
+        ):
+            return  # 自己出场触发的重入/追单确认在跑，让位
+
+        now = time.time()
+        if now < float(getattr(self, "_trend_reentry_next_try_ts", 0) or 0):
+            return
+        self._trend_reentry_next_try_ts = now + TREND_REENTRY_COOLDOWN_SEC
+
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(
+                self.symbol, f"{TREND_REENTRY_KLINE_INTERVAL_MIN}m",
+                limit=TREND_REENTRY_KLINE_LIMIT,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 自主重入拉K线失败: {e}")
+            return
+        if not bars:
+            return
+
+        from dual_ma_trend import dual_ma_trend_ok
+        ok, meta = dual_ma_trend_ok(
+            side, bars, fast_len=TREND_REENTRY_FAST_LEN, slow_len=TREND_REENTRY_SLOW_LEN,
+            ma_type=TREND_REENTRY_MA_TYPE,
+        )
+        if not ok:
+            logger.debug(f"[{self.symbol}] 自主重入：趋势未确认 {side} {meta}")
+            return
+
+        from binance_client import binance_client
+        curr_px = float(binance_client.get_current_price(self.symbol) or 0)
+        if curr_px <= 0:
+            return
+
+        from smart_hard_stop import calc_smart_hard_stop_price
+        hard_sl, sl_meta, sl_ok, sl_err = calc_smart_hard_stop_price(
+            side=side, entry_price=curr_px, klines=bars, tier=None,
+        )
+        atr = float(sl_meta.get("atr") or 0) if sl_ok else float(getattr(self, "current_atr", 0) or 0)
+        if atr <= 0:
+            logger.warning(f"⚠️ [{self.symbol}] 自主重入放弃：ATR不可用")
+            return
+        if sl_ok:
+            distance = abs(curr_px - float(hard_sl))
+        else:
+            distance = TREND_REENTRY_HARD_SL_ATR * atr
+            logger.warning(
+                f"⚠️ [{self.symbol}] 自主重入：综合硬止损失败({sl_err})，"
+                f"回退{TREND_REENTRY_HARD_SL_ATR}×ATR应急止损距离={distance:.4f}"
+            )
+
+        tp1 = curr_px + TREND_REENTRY_TP1_ATR * atr if side == "LONG" else curr_px - TREND_REENTRY_TP1_ATR * atr
+        tp2 = curr_px + TREND_REENTRY_TP2_ATR * atr if side == "LONG" else curr_px - TREND_REENTRY_TP2_ATR * atr
+        tp3 = curr_px + TREND_REENTRY_TP3_ATR * atr if side == "LONG" else curr_px - TREND_REENTRY_TP3_ATR * atr
+
+        self._catchup_via_trend_reentry = True
+        self.catchup_side = side
+        self.catchup_tv_entry_frozen = curr_px
+        self.catchup_stop_distance_frozen = distance
+        self.catchup_tps_frozen = [round(tp1, 2), round(tp2, 2), round(tp3, 2)]
+        self.catchup_started_ts = now
+        self.catchup_unfilled_refreshes = 0
+        try:
+            self._save_state()
+        except Exception:
+            pass
+
+        logger.warning(
+            f"🧭 [{self.symbol}] TV方向+双均线趋势自主重入 → 启动 side={side} "
+            f"现价={curr_px:.4f} 止损距离={distance:.4f}"
+            f"{'(综合硬止损)' if sl_ok else '(ATR应急兜底)'} "
+            f"TP123≈{tp1:.4f}/{tp2:.4f}/{tp3:.4f}"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"TV方向+双均线趋势自主重入 [{self.symbol}]",
+                detail=(
+                    f"TV最后方向={side}(心跳当前FLAT) | 双均线趋势确认{meta} | "
+                    f"现价={curr_px:.4f} | 止损距离={distance:.4f}"
+                    f"{'(综合硬止损)' if sl_ok else '(ATR应急兜底，综合硬止损计算失败:' + str(sl_err) + ')'} | "
+                    f"TP123≈{tp1:.2f}/{tp2:.2f}/{tp3:.2f} | "
+                    f"VPS自主判断中，TV下一次真实开仓信号会立即接管"
+                ),
+                level="提示",
+                notify_level=1,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 自主重入提醒钉钉跳过: {e}")
+
+        self._place_tv_catchup_limit(reason="TV方向+双均线趋势自主重入")
 
     def _maybe_start_tv_heartbeat_catchup(self):
         hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
@@ -3126,8 +3307,17 @@ class RadarReentryMixin:
 
     def _tv_catchup_precheck_still_valid(self) -> bool:
         """下单前复核：TV心跳是否还是原方向且未过期——不追一个TV自己可能
-        已经出场/反转的仓位。限价挂单前、市价兜底前都会调用。"""
+        已经出场/反转的仓位。限价挂单前、市价兜底前都会调用。
+
+        2026-09-13新增分支(币安B系统)：本轮如果是"TV方向+双均线趋势"
+        自主重入发起的(_catchup_via_trend_reentry=True)，触发条件本来
+        就是"TV心跳当前是FLAT"，不能照搬A系统"心跳必须还是原方向"这条
+        校验(会永远返回False)——改成重新核对一次双均线趋势是否仍然
+        成立(下单前价格可能已经变了，值得再确认一遍)。A系统这个标记
+        永远是False，走原有分支，行为完全不受影响。"""
         side = str(getattr(self, "catchup_side", "") or "").upper()
+        if bool(getattr(self, "_catchup_via_trend_reentry", False)):
+            return self._trend_reentry_still_confirmed(side)
         hb_side = str(getattr(self, "tv_heartbeat_side", "FLAT") or "FLAT").upper()
         hb_ts = float(getattr(self, "tv_heartbeat_ts", 0) or 0)
         if hb_side != side or hb_side not in ("LONG", "SHORT"):
@@ -3135,6 +3325,33 @@ class RadarReentryMixin:
         if hb_ts <= 0 or time.time() - hb_ts > self._tv_heartbeat_stale_sec():
             return False
         return True
+
+    def _trend_reentry_still_confirmed(self, side: str) -> bool:
+        """给_tv_catchup_precheck_still_valid用：重新拉一次K线核对双均线
+        趋势是否仍然成立。拉不到K线/趋势已经不确认都保守判False(中止
+        本轮，不勉强下单)。"""
+        side = str(side or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return False
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(
+                self.symbol, f"{TREND_REENTRY_KLINE_INTERVAL_MIN}m",
+                limit=TREND_REENTRY_KLINE_LIMIT,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 自主重入复核拉K线失败: {e}")
+            return False
+        if not bars:
+            return False
+        from dual_ma_trend import dual_ma_trend_ok
+        ok, meta = dual_ma_trend_ok(
+            side, bars, fast_len=TREND_REENTRY_FAST_LEN, slow_len=TREND_REENTRY_SLOW_LEN,
+            ma_type=TREND_REENTRY_MA_TYPE,
+        )
+        if not ok:
+            logger.info(f"[{self.symbol}] 自主重入下单前复核：趋势已不确认 {meta}")
+        return ok
 
     def _place_tv_catchup_limit(self, reason="", is_refresh=False):
         if not self._tv_catchup_precheck_still_valid():
@@ -3405,6 +3622,7 @@ class RadarReentryMixin:
         self.catchup_phase = ""
         self._clear_catchup_order_tag(reason="追回成交释放")
         self._catchup_episode_resolved = True
+        self._catchup_via_trend_reentry = False  # 2026-09-13新增：本轮标记翻篇，不影响下一轮
 
         self.current_side = side
         self.last_tv_side = side
