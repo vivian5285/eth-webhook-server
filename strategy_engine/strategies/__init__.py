@@ -562,6 +562,16 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] kdj_cross 加载失败: {_e}")
 
+# 2026-09-12：宝贝要求把擂台里两个已验证最强的组件(vwap_mean_reversion
+# 的震荡腿 + adx_regime_switch 式的ADX闸门趋势腿)拼成一套，而不是焊接
+# 已验证会输的裸奔EMA交叉(ema_cross_7_30)。见 vwap_ema_regime.py。
+try:
+    from strategy_engine.strategies import vwap_ema_regime
+    STRATEGIES["vwap_ema_regime"] = vwap_ema_regime.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] vwap_ema_regime 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -1040,6 +1050,20 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "锚(含夏令时)。跟擂台已有的 ORB(us_equity 锚)对照：ORB 用当日开盘"
         "前 30 分钟自己的区间，这套用昨日整个 RTH 区间 + VWAP 过滤 + 跌破"
         "VWAP 立即认输——\"区间取昨天 vs 取今早\"这一个变量的对照。15m。"
+    ),
+    "vwap_ema_regime": (
+        "VWAP·EMA Regime Switch——2026-09-12应宝贝要求新增。把擂台已验证"
+        "最强的两个组件用同一套 ADX 状态开关拼在一起：ADX(14,2h)≥25=趋势市"
+        "→ EMA(10)/EMA(30)(2h)金叉死叉，无固定止盈(2026-09-10审计教训)；"
+        "ADX≤18=震荡市→ vwap_mean_reversion 原版逻辑(anchored VWAP 偏离"
+        "2σ反向进场，走 15m 分辨率，通过 mtf 注入)；18~25 状态不明确不开"
+        "新仓。离场按当前最新 ADX 重新判断走哪条规则(跟 adx_regime_switch"
+        "同一套自适应状态机)。跟 adx_regime_switch 的区别：震荡腿从通用"
+        "布林+RSI(2)换成擂台实测第一的 VWAP 偏离回归；状态判断时钟从 4h"
+        "换成 2h(宝贝要求，捕捉趋势早期启动)；VWAP 单独走 15m 保证分辨率"
+        "(2h 一天才12根，VWAP当日样本太薄)。跟 ema_cross_7_30(裸奔EMA交叉，"
+        "0%胜率−47.5R)的关键差异就是 ADX 闸门这一件事。全新组合，还没有"
+        "实盘/纸面历史，需要先跑出真实样本再谈评判。2h base + 15m mtf。"
     ),
     "ttm_squeeze": (
         "TTM Squeeze / Squeeze Momentum(John Carter，LazyBear TV 版)——"

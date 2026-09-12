@@ -345,6 +345,10 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "wavetrend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "heikin_ashi_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-12：vwap_ema_regime——ADX(2h)状态开关：趋势腿走2h EMA(10/30)，
+    # 震荡腿走 vwap_mean_reversion 原版逻辑但要 15m 分辨率，靠 "mtf":["15m"]
+    # 注入 bars_by_tf["15m"]（跟 mtf_ema_pullback 早就在用的同一个机制）。
+    + [{"symbol": s, "strategy": "vwap_ema_regime", "timeframe": "2h", "mtf": ["15m"]} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "bollinger_rsi_contrarian", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     # 2026-09-10 全面审计：adx_regime_switch/vegas_tunnel/mtf_ema_pullback 都是
     # 趋势跟随类，固定 1.5×ATR 止盈把趋势尾部切掉（实测平仓 55~60% 是"触及
