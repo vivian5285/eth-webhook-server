@@ -323,6 +323,31 @@ DUAL_MA_EXIT_INTERVAL_MIN = {
 }
 DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周期校准)的兜底
 
+# 2026-09-14新增(宝贝拍板，币安B系统专属——跟CoinW同步实施)："保本激活双
+# 均线加宽"。背景：实盘复现(XPTUSDT)——TV信号15:46触发，两边同时开空；
+# 币安B成交@1790.88后约90秒，价格才刚朝有利方向走了不到1个ATR就已经
+# 摸到"首次开仓·绝对价格锚定"的激活线，雷达立刻把止损锁到arm_stop_price
+# 算出的纯手续费保本位(entry∓tick∓fee，完全不看现价/ATR/趋势结构，只跟
+# entry挂钩)；随后6分钟内一次很正常的回踩就把这条贴着保本的止损打穿，
+# 仅赚+0.05%就出局。同一时刻CoinW的同一笔信号也遇到几乎一样的回踩，但
+# CoinW已经有双均线破位判断(DUAL_MA_EXIT)在管后续收紧决策，识别出这只是
+# "疑似假突破"，没有一步到位锁到保本，扛住了继续持有。
+# 根源：DUAL_MA_EXIT/IMPULSE_EXIT这两层"聪明判断"目前只管激活*之后*的
+# 止损收紧决策；但arm_stop_price本身是entry锚定的纯保本公式，一旦价格
+# 触发激活线，止损立刻按这个公式实打实挂到交易所上，双均线判断根本没
+# 机会介入这"第一次锁"的环节——价格随便一个正常回踩就能打中。
+# 方案：只在"首次开仓"(不含重入)触发激活的那一刻，多看一眼双均线状态
+# (跟DUAL_MA_EXIT同一份8/20判断)——如果现价还稳稳站在双均线保护内(趋势
+# 没有任何破位迹象，是最常见的情形，因为能摸到激活线本身就说明行情朝
+# 有利方向走了)，就不要一步到位锁死在纯手续费保本位，改用"现价±ATR缓冲"
+# 这个更贴近当前真实波动的锚点，取两者中更宽松(离现价更远、更不容易被
+# 正常噪音打中)的那个——但绝不允许比综合硬止损(frozen_hard_sl_px)更松，
+# 也绝不允许倒退到比纯保本更紧(下限还是保本，不会因为这层加宽反而收紧)。
+# 双均线一旦判定趋势有问题(极少数情形，因为触发激活本身已经说明行情
+# 有利)，直接跳过加宽，原样使用现有的纯保本公式，不改变现有保守默认。
+DUAL_MA_ACTIVATION_GATE_ENABLED = True
+DUAL_MA_ACTIVATION_BUFFER_ATR = 0.5  # 略宽于DUAL_MA_EXIT自己收紧用的0.3，专用于首次激活加宽
+
 # 2026-09-13再新增(宝贝实盘截图复盘BNBUSDT.P发现)："突发放量反转K线快速
 # 锁保本"。背景：宝贝看真实图表发现——等K线收盘价真正站上/跌破双均线才
 # 反应，对一根走势凌厉的反转K线来说已经晚了(等收盘确认时，行情往往已经
@@ -759,6 +784,46 @@ class RadarReentryMixin:
         """未激活一律休眠。pending_arm=False（如 TP3 互斥）不得误开雷达改单。"""
         return not bool(getattr(self, "radar_activated", False))
 
+    def _dual_ma_activation_anchor(self, side: str, curr_px: float):
+        """见上方DUAL_MA_ACTIVATION_GATE_*常量顶部注释："保本激活双均线
+        加宽"。只在首次开仓触发激活的那一刻调用一次(非每tick)，判断现价
+        是否还稳稳站在双均线保护内；是的话返回一个"现价±ATR缓冲"的更宽
+        锚点供调用方跟纯保本位取更松的那个，不是的话/判断失败返回None
+        (调用方原样使用现有纯保本公式，不改变默认行为)。"""
+        if not DUAL_MA_ACTIVATION_GATE_ENABLED or not _smart_hard_stop_mode_enabled():
+            return None
+        side = str(side or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return None
+        interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN)
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 保本激活加宽拉K线跳过: {e}")
+            return None
+        if not bars or len(bars) < DUAL_MA_EXIT_SLOW_LEN + 2:
+            return None
+        try:
+            from dual_ma_trend import dual_ma_trend_ok
+            ok, _meta = dual_ma_trend_ok(
+                side, bars, fast_len=DUAL_MA_EXIT_FAST_LEN, slow_len=DUAL_MA_EXIT_SLOW_LEN,
+                ma_type=DUAL_MA_EXIT_MA_TYPE,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 保本激活加宽双均线判断跳过: {e}")
+            return None
+        if not ok:
+            return None  # 双均线判定趋势有问题——极少数情形，跳过加宽，走现有纯保本
+
+        atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
+        px = float(curr_px or 0)
+        if atr <= 0 or px <= 0:
+            return None
+        if side == "LONG":
+            return px - DUAL_MA_ACTIVATION_BUFFER_ATR * atr
+        return px + DUAL_MA_ACTIVATION_BUFFER_ATR * atr
+
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
         """
         规格 v2.1：价触激活线（或 sticky）：挂雷达 STOP@保本位，开始雷达动态跟随。
@@ -818,6 +883,34 @@ class RadarReentryMixin:
         if init <= 0:
             logger.warning(f"⚠️ [{self.symbol}] 达激活线但无 initial_stop | {source}")
             return False
+        # 2026-09-14新增：见上方DUAL_MA_ACTIVATION_GATE_*常量顶部注释"保本
+        # 激活双均线加宽"。只对首次开仓生效(重入沿用现有更严格的纯保本，
+        # 不做加宽)——双均线判定趋势仍站在保护内时，用现价±ATR缓冲替换纯
+        # entry锚定的保本位，取两者中更松的那个，绝不松于综合硬止损，也
+        # 绝不比纯保本更紧。
+        _attempt_for_gate = int(getattr(self, "reentry_attempt", 0) or 0)
+        if _attempt_for_gate == 0:
+            try:
+                widened = self._dual_ma_activation_anchor(side, curr_px)
+            except Exception as e:
+                widened = None
+                logger.debug(f"[{self.symbol}] 保本激活加宽异常跳过: {e}")
+            if widened is not None and widened > 0:
+                hard_ceiling = float(getattr(self, "frozen_hard_sl_px", 0) or 0)
+                if side == "LONG":
+                    final = min(init, widened)
+                    if hard_ceiling > 0:
+                        final = max(final, hard_ceiling)
+                else:
+                    final = max(init, widened)
+                    if hard_ceiling > 0:
+                        final = min(final, hard_ceiling)
+                if abs(final - init) > 1e-9:
+                    logger.info(
+                        f"🧭 [{self.symbol}] 保本激活双均线加宽 {init:.4f}→{final:.4f} "
+                        f"(双均线趋势仍成立，现价±{DUAL_MA_ACTIVATION_BUFFER_ATR}×ATR更宽)"
+                    )
+                init = final
         self.initial_stop = float(init)
         self.current_sl = float(init)
         self.tv_sl = float(init)
