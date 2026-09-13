@@ -39,6 +39,7 @@ from webhook_parser import (
     MAX_TOTAL_NOTIONAL_MULT,
     HARD_NOTIONAL_CAP,
     FIXED_LEVERAGE,
+    FIXED_LEVERAGE_B,
     FIXED_MARGIN_PCT,
     FIXED_RISK_PCT,
     FIXED_NOTIONAL_MULT,
@@ -129,6 +130,7 @@ from reentry_profiles import (
 from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import (
     RadarReentryMixin, MEGA_TREND_CEILING_MULT, TV_HEARTBEAT_GAP_GRACE_SEC,
+    _smart_hard_stop_mode_enabled,
 )
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
@@ -6021,8 +6023,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             _rp, _ = get_active_sizing(self.symbol)
         except Exception:
             _rp = FIXED_RISK_PCT
+        # 2026-09-13：币安B系统("综合硬止损"体系)仓位权重对齐CoinW——宝贝
+        # 拍板"仓位管理权重跟CoinW一样"。CoinW的公式是本金×20%×3倍杠杆，
+        # 风险比例(_rp)两边都是20%不变，只有杠杆倍数不同(A=5x/B=3x)。
+        _b_mode = _smart_hard_stop_mode_enabled()
+        _leverage = FIXED_LEVERAGE_B if _b_mode else FIXED_LEVERAGE
         # 用户要求（2026-08-08）：仓位公式与交易所真实杠杆彻底解耦——
-        # 头寸永远按 FIXED_LEVERAGE 计算，跟交易所APP上手动设的杠杆无关，
+        # 头寸永远按固定杠杆常量计算，跟交易所APP上手动设的杠杆无关，
         # 交易所杠杆调高只释放保证金，不放大下单量。
         qty, meta = compute_fixed_order_qty(
             principal=principal,
@@ -6034,15 +6041,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             qty_step=float(getattr(self, "qty_step", 0.001) or 0.001),
             min_qty=float(getattr(self, "min_qty", 0.001) or 0.001),
             margin_pct=float(_rp),
-            leverage=float(FIXED_LEVERAGE),
+            leverage=float(_leverage),
         )
         # 2026-08-12：趋势强弱仓位倾斜——在RISK20_NOTIONAL5基础qty上按tier整体
         # 缩放（全局默认弱1.0x/中2.0x/强3.0x；XAU单独覆盖为2.0x/3.0x/5.0x，
         # 见get_tier_notional_mult），缩放后按交易所qty_step重新对齐，
         # 缩放后的qty仍会走下面的_assert_notional_cap_or_reject总敞口上限校验，
         # 不绕过任何现有安全网。
+        # 2026-09-13：B系统不做这层tier缩放——跟CoinW 2026-09-12同一个决定
+        # 一致，tier的职责收窄成只管硬止损保护带宽度(K_tier，见
+        # smart_hard_stop.py)，不再影响下单量，固定按上面的杠杆公式走。
         tier = getattr(self, "tv_open_tier", None)
-        tier_mult = float(get_tier_notional_mult(self.symbol, tier))
+        tier_mult = 1.0 if _b_mode else float(get_tier_notional_mult(self.symbol, tier))
         if qty > 0 and tier_mult != 1.0:
             qty_step_v = float(getattr(self, "qty_step", 0.001) or 0.001)
             min_qty_v = float(getattr(self, "min_qty", 0.001) or 0.001)
