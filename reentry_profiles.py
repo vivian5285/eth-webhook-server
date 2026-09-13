@@ -470,8 +470,15 @@ _PAXG_WINDOW_BARS = int((_CFG.get("PAXG") or {}).get("reentry_window_bars") or 1
 # SKHYNIX同PAXG，150m原生周期，1根K线(150min)已接近ETH 2×90m=180min目标窗口
 _SKHYNIX_WINDOW_BARS = int((_CFG.get("SKHYNIX") or {}).get("reentry_window_bars") or 1)
 _XPD_WINDOW_BARS = int((_CFG.get("XPD") or {}).get("reentry_window_bars") or 1)
-# OPENAI(150m)同PAXG/SKHYNIX/XPD收到1根；ANTHROPIC(90m)同ETH/SNDK沿用2根
-_OPENAI_WINDOW_BARS = int((_CFG.get("OPENAI") or {}).get("reentry_window_bars") or 1)
+# 2026-09-13更正：OPENAI真实TV周期已经从150分钟(A系统假设值，其实B系统
+# 当时是120分钟)改成45分钟(宝贝把TV alert周期改了，跟BNB/XPD/XAU/XPT/
+# XRP/SOL统一)。这条注释和下面_OPENAI_TF_SEC此前一直按150分钟的旧假设
+# 收1根，实际上B系统OPENAI已经运行在120/现在45分钟，早就该跟着改而没改
+# ——跟2026-08-15发现的XAU/BNB/ZEC/BCH那批"tv_tf_sec表没跟上breath_
+# profiles.py真实周期"是同一类遗漏，这次借OPENAI换成45分钟一起修正。
+# 45分钟同XPT/XRP/SOL一套推算：4×45=180min，落在ETH 2×90m(现75m)=
+# 150~200min目标真实时间窗一带的上沿。
+_OPENAI_WINDOW_BARS = int((_CFG.get("OPENAI") or {}).get("reentry_window_bars") or 4)
 _ANTHROPIC_WINDOW_BARS = int((_CFG.get("ANTHROPIC") or {}).get("reentry_window_bars") or 2)
 # ASML(90m)同ETH/SNDK/ANTHROPIC沿用2根
 _ASML_WINDOW_BARS = int((_CFG.get("ASML") or {}).get("reentry_window_bars") or 2)
@@ -515,7 +522,7 @@ _SNDK_TF_SEC = int((_CFG.get("SNDK") or {}).get("tv_tf_sec") or 4500)
 _PAXG_TF_SEC = int((_CFG.get("PAXG") or {}).get("tv_tf_sec") or 9000)
 _SKHYNIX_TF_SEC = int((_CFG.get("SKHYNIX") or {}).get("tv_tf_sec") or 9000)
 _XPD_TF_SEC = int((_CFG.get("XPD") or {}).get("tv_tf_sec") or 9000)
-_OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 9000)
+_OPENAI_TF_SEC = int((_CFG.get("OPENAI") or {}).get("tv_tf_sec") or 2700)  # 45min×60
 _ANTHROPIC_TF_SEC = int((_CFG.get("ANTHROPIC") or {}).get("tv_tf_sec") or 6060)
 _ASML_TF_SEC = int((_CFG.get("ASML") or {}).get("tv_tf_sec") or 5400)
 _GS_TF_SEC = int((_CFG.get("GS") or {}).get("tv_tf_sec") or 5400)

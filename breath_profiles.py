@@ -913,28 +913,31 @@ BREATH_XPD_B: Dict[str, Any] = {
     "exit_score": 2,
 }
 
-# OPENAI(B系统) —— 同上，复用CoinW 2026-09-12池化校准：真实TV周期2小时/
-# 120分钟(A系统是150分钟，两者不同，不能共用A的BREATH_OPENAI)，CoinW
-# (1310根原生/197样本)+币安(1200根原生2h/173样本)池化共370样本
-# (P50=2.17×ATR P75=3.53×ATR P90=5.03×ATR)。
+# OPENAI(B系统) —— 2026-09-13重新校准：宝贝把TV那边OPENAI的alert周期从
+# 120分钟改成了45分钟(跟BNB/XPD/XAU/XPT/XRP/SOL统一，实盘目前只剩SNDK还是
+# 75分钟)，原120分钟那版池化校准(P50=2.17×ATR)已经不对应实际信号周期，
+# 作废。用真实币安15m K线合成45分钟K线重测(91.1天2916根合成K线、543个
+# 真实摆动点识别回调样本，方法同scratch_calibrate_xau_skhynix.py)：
+# 中位数回调2.51×ATR、75分位3.65×ATR、90分位5.77×ATR，ATR%=1.48%。
+# min/max比例沿用OPENAI自己120分钟那版的比例(4.2/5.3=0.79)。
 BREATH_OPENAI_B: Dict[str, Any] = {
     "name": "OPENAI",
     "initial_sl_atr": 0.0,
     "fee_cover_pct": 0.0008,
     "stop_exec_buffer": 0.3,
     "early_be_atr": 0.0,
-    "step_trigger_atr": 0.82,
-    "step_advance_atr": 0.53,
+    "step_trigger_atr": 0.94,   # 0.375×breath_tp12
+    "step_advance_atr": 0.61,   # 0.65×step_trigger
     "phase_switch_atr": 3.0,
     "tp1_atr": 1.35,
     "tp1_floor_atr": 0.0,
     "tp2_atr": 2.5,
     "tp2_floor_atr": 0.0,
-    "breath_tp12": 2.17,
-    "breath_tp23": 3.53,
+    "breath_tp12": 2.51,  # 实测中位数回调(2.51)
+    "breath_tp23": 3.65,  # 实测75分位回调(3.65)
     "phase2_trail_mult": 1.0,
-    "min_mult": 4.2,
-    "max_mult": 5.3,
+    "min_mult": 4.8,      # 0.79×max_mult（沿用OPENAI自己的min/max比例）
+    "max_mult": 6.1,      # 覆盖实测90分位回调(5.77)以上
     "ratio_floor": RATIO_FLOOR,
     "ratio_ceiling": RATIO_CEILING,
     "tick_size": 0.01,
