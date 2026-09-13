@@ -18435,6 +18435,17 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             else:
                 self.current_sl = min(cur, new_stop) if cur > 0 else new_stop
             self.tv_sl = float(self.current_sl)
+        # 2026-09-13再新增(宝贝实盘截图复盘："等阳线站上双均线再平仓就已经
+        # 晚了")：突发放量反转K线快速锁保本——见radar_reentry_mixin.py
+        # IMPULSE_EXIT_*常量顶部注释。三层防线里最快的一层，排在双均线
+        # 破位检查之前：不等双均线正式被突破确认，只看最新一根K线自己够
+        # 不够"决定性"(实体够大+真放量)，够的话立刻锁到保本价，抢在双
+        # 均线确认之前先落袋一部分保护。
+        try:
+            self.current_sl = self._maybe_fast_lock_on_impulse_candle(px, float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 突发反转K线快速锁保本复评跳过: {e}")
         # 2026-09-13新增(宝贝拍板，币安B系统专属)：双均线破位快速平仓——
         # 见radar_reentry_mixin.py DUAL_MA_EXIT_*常量顶部注释。故意排在
         # 反转锁盈**之前**调用——宝贝原话"双均线权重大于反转锁盈，因为

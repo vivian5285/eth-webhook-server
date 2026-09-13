@@ -321,6 +321,31 @@ DUAL_MA_EXIT_INTERVAL_MIN = {
 }
 DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周期校准)的兜底
 
+# 2026-09-13再新增(宝贝实盘截图复盘BNBUSDT.P发现)："突发放量反转K线快速
+# 锁保本"。背景：宝贝看真实图表发现——等K线收盘价真正站上/跌破双均线才
+# 反应，对一根走势凌厉的反转K线来说已经晚了(等收盘确认时，行情往往已经
+# 跑掉大半)。宝贝原话："等阳线站上双均线再平仓就已经晚了"，要求想办法
+# 更敏捷地锁住利润——不是靠"等双均线交叉确认"，而是靠"这根K线本身够不够
+# 决定性"：实体够大(不是十字星/长上下影线那种犹豫不决的K线) + 真的放量
+# (不是历史上第一次出现这个量能，是明显异常放大)。
+# 三层防线按速度快慢排列，分工不同：
+#   1) IMPULSE_EXIT(本机制，最快，~1分钟轮询一次)：只看最新一根(可能还
+#      没收盘)K线自己够不够"决定性"——不管双均线有没有真的被突破，只要
+#      单根K线实体够大+真放量，先把止损锁到保本价，抢在双均线正式确认
+#      之前先落袋为安一部分保护，避免"等确认时已经晚了"。
+#   2) DUAL_MA_EXIT(见上，5分钟轮询)：双均线真正被突破+放量确认 →
+#      直接市价清仓，这是"确认反转、彻底离场"的决定性动作。
+#   3) REVERSAL_LOCK(4H裸K，5分钟轮询但4H K线本身4小时才换一根)：最慢
+#      的兜底安全网。
+# 三层只朝有利方向棘轮/平仓，互不冲突，谁先触发谁先生效，后触发的用
+# max/min天然只会更紧不会更松。
+IMPULSE_EXIT_ENABLED = True
+IMPULSE_BODY_RATIO = 0.6  # 实体/全振幅 ≥ 此值才算"决定性"(不是十字星)
+IMPULSE_VOL_MULT = 1.5    # 该K线量能 ≥ 之前IMPULSE_VOL_LOOKBACK根均量的此倍数才算真放量
+IMPULSE_VOL_LOOKBACK = 20
+IMPULSE_REFRESH_SEC = 60.0  # 比DUAL_MA_EXIT的300秒敏捷得多，"突发"两个字的核心就是快
+IMPULSE_KLINE_LIMIT = 30    # 只需要够算量能基准的窗口，不需要DUAL_MA_EXIT那么多根
+
 # 2026-08-30新增：大赢家利润保护地板——宝贝实盘复现：XMRUSDT峰值浮盈冲到
 # 3.47倍initial_atr，最终止损离场只保住峰值的38%；ETHUSDT峰值4.88倍ATR，
 # 保住61%。跟上面的反转锁盈(REVERSAL_LOCK_*，只保证"不由盈转亏"这一条
@@ -1933,6 +1958,108 @@ class RadarReentryMixin:
                         f"把浮盈吃成亏损。呼吸阶梯基线不受影响，仍按原节奏跟踪；如果这次"
                         f"判断错了、TV还在继续持有，心跳追回会在检测到心跳仍是{side}但实盘"
                         f"已空仓时按老规矩自动尝试更优价格追回。"
+                    ),
+                    level="提示",
+                )
+            except Exception:
+                pass
+        return out
+
+    def _maybe_fast_lock_on_impulse_candle(self, curr_px: float, candidate_sl: float) -> float:
+        """突发放量反转K线快速锁保本——见上方IMPULSE_EXIT_*常量顶部注释。
+        币安B系统专属(_smart_hard_stop_mode_enabled()把关)。三层防线里
+        速度最快的一层：不等双均线正式被突破确认，只看最新一根K线自己
+        够不够"决定性"(实体够大+真放量)，够的话立刻把止损棘轮到保本价
+        ——不直接平仓(单根K线可能只是插针，直接平仓风险太大)，只是抢在
+        双均线确认之前先落袋一部分保护。真正决定性的平仓交给
+        _maybe_fast_exit_on_dual_ma_break(双均线破位+放量确认)。
+        """
+        if not IMPULSE_EXIT_ENABLED or not _smart_hard_stop_mode_enabled():
+            return candidate_sl
+        side = str(getattr(self, "current_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return candidate_sl
+        if bool(getattr(self, "trading_paused", False)) or bool(getattr(self, "api_monitor_only", False)):
+            return candidate_sl
+        now = time.time()
+        last_check = float(getattr(self, "_impulse_exit_last_check_ts", 0) or 0)
+        if last_check > 0 and (now - last_check) < IMPULSE_REFRESH_SEC:
+            return candidate_sl
+        self._impulse_exit_last_check_ts = now
+
+        interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN)
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(self.symbol, f"{interval_min}m", limit=IMPULSE_KLINE_LIMIT)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 突发反转K线检查拉K线跳过: {e}")
+            return candidate_sl
+        if not bars or len(bars) < IMPULSE_VOL_LOOKBACK + 2:
+            return candidate_sl
+
+        last = bars[-1]
+        try:
+            bar_time = int(last[0])
+            o, h, l, c, v = (float(last[i]) for i in (1, 2, 3, 4, 5))
+        except (TypeError, ValueError, IndexError):
+            return candidate_sl
+        rng = max(h - l, 1e-9)
+        body_ratio = abs(c - o) / rng
+        decisive_bear = c < o and body_ratio >= IMPULSE_BODY_RATIO
+        decisive_bull = c > o and body_ratio >= IMPULSE_BODY_RATIO
+        against_position = (side == "LONG" and decisive_bear) or (side == "SHORT" and decisive_bull)
+        if not against_position:
+            return candidate_sl
+
+        prior = bars[-(IMPULSE_VOL_LOOKBACK + 1):-1]
+        if len(prior) < IMPULSE_VOL_LOOKBACK:
+            return candidate_sl
+        vol_avg = sum(float(b[5]) for b in prior) / len(prior)
+        vol_ok = vol_avg > 0 and v >= vol_avg * IMPULSE_VOL_MULT
+        if not vol_ok:
+            return candidate_sl
+
+        already = int(getattr(self, "_impulse_exit_alerted_bar", 0) or 0)
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
+        if entry <= 0 or atr <= 0:
+            return candidate_sl
+        try:
+            from breath_stop import initial_stop_price
+            breakeven = float(initial_stop_price(
+                side, entry, atr, profile=getattr(self, "breath_profile", None),
+            ) or 0)
+        except Exception:
+            return candidate_sl
+        if breakeven <= 0:
+            return candidate_sl
+        if side == "LONG":
+            improved = breakeven > candidate_sl
+            out = max(candidate_sl, breakeven) if candidate_sl > 0 else breakeven
+        else:
+            improved = candidate_sl <= 0 or breakeven < candidate_sl
+            out = min(candidate_sl, breakeven) if candidate_sl > 0 else breakeven
+        if not improved:
+            return candidate_sl
+        if already != bar_time:
+            self._impulse_exit_alerted_bar = bar_time
+            logger.warning(
+                f"⚡ [{self.symbol}] 突发放量反转K线快速锁保本 | {side} {interval_min}m | "
+                f"实体比={body_ratio:.2f} 量能={(v / vol_avg if vol_avg > 0 else 0):.2f}倍 | "
+                f"止损顶至保本价 {candidate_sl:.4f}→{out:.4f}(呼吸阶梯基线不变，仅新增这道"
+                f"更快的安全网，双均线一旦真的被突破+放量确认会直接清仓)"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"突发反转K线快速锁保本 [{self.symbol}]",
+                    detail=(
+                        f"{side}持仓在{interval_min}分钟最新一根K线上出现"
+                        f"{'放量阳线' if side == 'SHORT' else '放量阴线'}"
+                        f"(实体比{body_ratio:.2f}/量能{(v / vol_avg if vol_avg > 0 else 0):.2f}倍)，"
+                        f"抢在双均线正式确认突破之前先把止损顶到保本价{out:.4f}，"
+                        f"entry={entry:.4f}。趋势是否真的反转仍交给双均线破位机制确认。"
                     ),
                     level="提示",
                 )
