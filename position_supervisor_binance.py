@@ -3209,19 +3209,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             f"🚨 [{self.symbol}] 手工接管无TV止损参考且综合硬止损计算"
             f"失败({err})，仍为裸仓 | {source}"
         )
-        try:
-            import dingtalk
-            self._dingtalk(
-                dingtalk.report_system_alert,
-                title=f"⚠️ 无保护仓位且自动挂止损失败 [{self.symbol}]",
-                detail=(
-                    f"手工开仓且自动计算硬止损失败({err})，请立即人工"
-                    f"核查！{self.current_side} {live_qty} @{entry:.4f}"
-                ),
-                level="紧急",
-            )
-        except Exception:
-            pass
+        # 2026-09-14新增：这条兜底现在也挂在_maintain_hard_shield的持续
+        # 巡检tick里(可能每隔几秒~几十秒就跑一次)，计算失败(比如K线暂时
+        # 拉不到)不该每次都重复报一遍一模一样的紧急告警——节流窗口跟
+        # DUAL_MA_EXIT/雷达贴市去重同一惯例(300秒)，真正的裸仓风险不会
+        # 因为告警变少而变少(硬止损计算仍然每次都会尝试)，只是不重复
+        # 刷同一条紧急告警。
+        now = time.time()
+        last_ts = float(getattr(self, "_manual_hard_stop_calc_fail_alert_ts", 0) or 0)
+        if now - last_ts >= 300.0:
+            self._manual_hard_stop_calc_fail_alert_ts = now
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"⚠️ 无保护仓位且自动挂止损失败 [{self.symbol}]",
+                    detail=(
+                        f"手工开仓且自动计算硬止损失败({err})，请立即人工"
+                        f"核查！{self.current_side} {live_qty} @{entry:.4f}"
+                    ),
+                    level="紧急",
+                )
+            except Exception:
+                pass
         return 0.0
 
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
@@ -11434,6 +11444,21 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 side=self.current_side,
                 source="维护硬止损·补锁",
             )
+            if self._frozen_hard_px() <= 0:
+                # 2026-09-14新增：实盘复现(B账户XRPUSDT宝贝手工在交易所APP
+                # 补开多单)——第一次接管当时watched_qty从0变成有值那一刻的
+                # "manual_open"检测窗口已经过去(账本已经把watched_qty持久化
+                # 落盘，往后每次重启saved_watched都>0，不会再被判定成"全新
+                # 手工仓位")，导致_ensure_full_defense_stack_inner里当时新增
+                # 的手工接管兜底也没有第二次机会触发；这个symbol从此卡死在
+                # "被追踪但从没真正挂过硬止损"的裸奔状态，只能靠这条持续
+                # 运行的哨兵维护tick自己发现并补救，不能寄望于"再抓一次
+                # 接管时机"。
+                self._compute_manual_takeover_hard_stop(
+                    entry=self.watched_entry,
+                    live_qty=real_amt,
+                    source="维护硬止损·手工仓位现算兜底",
+                )
         self._sanitize_vps_hard_sl_ledger(source="维护硬止损消毒")
         if radar_sl is not None and (
             not self._is_valid_radar_sl(radar_sl)
