@@ -336,15 +336,17 @@ DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周
 # 止损收紧决策；但arm_stop_price本身是entry锚定的纯保本公式，一旦价格
 # 触发激活线，止损立刻按这个公式实打实挂到交易所上，双均线判断根本没
 # 机会介入这"第一次锁"的环节——价格随便一个正常回踩就能打中。
-# 方案：只在"首次开仓"(不含重入)触发激活的那一刻，多看一眼双均线状态
-# (跟DUAL_MA_EXIT同一份8/20判断)——如果现价还稳稳站在双均线保护内(趋势
-# 没有任何破位迹象，是最常见的情形，因为能摸到激活线本身就说明行情朝
-# 有利方向走了)，就不要一步到位锁死在纯手续费保本位，改用"现价±ATR缓冲"
-# 这个更贴近当前真实波动的锚点，取两者中更宽松(离现价更远、更不容易被
-# 正常噪音打中)的那个——但绝不允许比综合硬止损(frozen_hard_sl_px)更松，
-# 也绝不允许倒退到比纯保本更紧(下限还是保本，不会因为这层加宽反而收紧)。
-# 双均线一旦判定趋势有问题(极少数情形，因为触发激活本身已经说明行情
-# 有利)，直接跳过加宽，原样使用现有的纯保本公式，不改变现有保守默认。
+# 方案(2026-09-14首版)：只在"首次开仓"(不含重入)触发激活的那一刻，先
+# 检查双均线是否已经确认趋势——上线当天两笔实盘复现(BNBUSDT多头、
+# XPTUSDT多头"插针触及TP1后回落"那笔)都显示：双均线用的是45分钟K线
+# 8/20周期均线，天然滞后于"价格刚摸到激活线"这个更快的瞬时判据(0.8×TP1
+# 距离或1×ATR，往往几分钟内就触发)——均线还没来得及跟上，加宽被双均线
+# 门槛拦下，等于形同虚设，两笔实盘都验证到最终锁的还是纯保本原值。
+# 2026-09-14当天改版：去掉"必须双均线先确认"这个前置门槛，只要触发了
+# 激活(本身已经证明价格朝有利方向走出了距离)，就无条件用"现价±ATR缓冲"
+# 跟纯保本位取更松的那个——真正的安全阀不是滞后的均线，而是下面两条
+# 硬性边界：绝不允许比综合硬止损(frozen_hard_sl_px)更松，也绝不允许
+# 倒退到比纯保本更紧(下限还是保本，不会因为这层加宽反而收紧)。
 DUAL_MA_ACTIVATION_GATE_ENABLED = True
 DUAL_MA_ACTIVATION_BUFFER_ATR = 0.5  # 略宽于DUAL_MA_EXIT自己收紧用的0.3，专用于首次激活加宽
 
@@ -785,40 +787,25 @@ class RadarReentryMixin:
         return not bool(getattr(self, "radar_activated", False))
 
     def _dual_ma_activation_anchor(self, side: str, curr_px: float):
-        """见上方DUAL_MA_ACTIVATION_GATE_*常量顶部注释："保本激活双均线
-        加宽"。只在首次开仓触发激活的那一刻调用一次(非每tick)，判断现价
-        是否还稳稳站在双均线保护内；是的话返回一个"现价±ATR缓冲"的更宽
-        锚点供调用方跟纯保本位取更松的那个，不是的话/判断失败返回None
-        (调用方原样使用现有纯保本公式，不改变默认行为)。"""
+        """见上方DUAL_MA_ACTIVATION_GATE_*常量顶部注释："保本激活加宽"。
+        只在首次开仓触发激活的那一刻调用一次(非每tick)，返回一个"现价±
+        ATR缓冲"的更宽锚点供调用方跟纯保本位取更松的那个，无效时返回
+        None(调用方原样使用现有纯保本公式，不改变默认行为)。
+        2026-09-14改版：不再要求双均线先确认趋势——45分钟8/20均线天然
+        滞后于"刚摸到激活线"这个更快的瞬时判据，两笔实盘(BNB多头/XPT
+        插针回落多头)验证均线门槛几乎总是拦下加宽，形同虚设。真正的
+        安全阀交给调用方的硬止损封顶+纯保本下限两条硬性边界。"""
         if not DUAL_MA_ACTIVATION_GATE_ENABLED or not _smart_hard_stop_mode_enabled():
             return None
         side = str(side or "").upper()
         if side not in ("LONG", "SHORT"):
             return None
-        interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN)
-        try:
-            from strategy_engine import klines as _sk_klines
-            bars = _sk_klines.get_bars(self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT)
-        except Exception as e:
-            logger.debug(f"[{self.symbol}] 保本激活加宽拉K线跳过: {e}")
-            return None
-        if not bars or len(bars) < DUAL_MA_EXIT_SLOW_LEN + 2:
-            return None
-        try:
-            from dual_ma_trend import dual_ma_trend_ok
-            ok, _meta = dual_ma_trend_ok(
-                side, bars, fast_len=DUAL_MA_EXIT_FAST_LEN, slow_len=DUAL_MA_EXIT_SLOW_LEN,
-                ma_type=DUAL_MA_EXIT_MA_TYPE,
-            )
-        except Exception as e:
-            logger.debug(f"[{self.symbol}] 保本激活加宽双均线判断跳过: {e}")
-            return None
-        if not ok:
-            return None  # 双均线判定趋势有问题——极少数情形，跳过加宽，走现有纯保本
-
         atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
         px = float(curr_px or 0)
         if atr <= 0 or px <= 0:
+            logger.info(
+                f"🧭 [{self.symbol}] 保本激活加宽跳过(atr={atr} curr_px={px} 无效) → 走现有纯保本"
+            )
             return None
         if side == "LONG":
             return px - DUAL_MA_ACTIVATION_BUFFER_ATR * atr

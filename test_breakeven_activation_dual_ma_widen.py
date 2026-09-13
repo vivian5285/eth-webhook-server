@@ -153,20 +153,23 @@ class TestActivationWidenBMode(unittest.TestCase):
         self.assertTrue(ok)
         self.assertAlmostEqual(s.current_sl, 1789.44, places=2)
 
-    def test_trend_broken_falls_back_to_pure_breakeven(self):
-        """双均线判定趋势已破位(尾部大幅拉回站上均线)——极少数情形，跳过
-        加宽，原样使用纯保本。"""
+    def test_widens_unconditionally_no_klines_needed(self):
+        """2026-09-14改版：不再要求双均线先确认趋势(45分钟8/20均线滞后于
+        刚触发的激活线，两笔实盘BNB/XPT都验证均线门槛几乎总拦下加宽，
+        形同虚设)——现在加宽完全不查K线，纯粹用现价+ATR缓冲，无条件生效。"""
         s = _mk_supervisor(reentry_attempt=0)
-        bars = _make_bars(decline_n=30, rally_n=15, rally_step=3.0)  # 尾部大幅拉回，站上双均线
-        with patch("strategy_engine.klines.get_bars", return_value=bars):
-            ok = s._maybe_arm_radar_on_activation(0.163, ACTIVATION_PX, source="测试·破位")
+        with patch("strategy_engine.klines.get_bars") as mock_klines:
+            ok = s._maybe_arm_radar_on_activation(0.163, ACTIVATION_PX, source="测试·无条件加宽")
+            mock_klines.assert_not_called()
         self.assertTrue(ok)
-        self.assertAlmostEqual(s.current_sl, 1789.44, places=2)
+        expected = ACTIVATION_PX + 0.5 * ATR
+        self.assertAlmostEqual(s.current_sl, expected, places=2)
 
-    def test_klines_fetch_failure_falls_back_to_pure_breakeven(self):
+    def test_invalid_atr_falls_back_to_pure_breakeven(self):
         s = _mk_supervisor(reentry_attempt=0)
-        with patch("strategy_engine.klines.get_bars", side_effect=RuntimeError("boom")):
-            ok = s._maybe_arm_radar_on_activation(0.163, ACTIVATION_PX, source="测试·异常")
+        s._get_locked_initial_atr = lambda: 0.0
+        s.current_atr = 0.0
+        ok = s._maybe_arm_radar_on_activation(0.163, ACTIVATION_PX, source="测试·ATR无效")
         self.assertTrue(ok)
         self.assertAlmostEqual(s.current_sl, 1789.44, places=2)
 

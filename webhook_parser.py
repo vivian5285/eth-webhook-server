@@ -658,7 +658,11 @@ def format_vps_sizing_note(meta=None, qty=None, entry_type="OPEN"):
         f"风险{risk_pct * 100:.0f}%/止损距",
         # 2026-09-05修复：risk_pct*mult不再总是整数(0.20×3=0.6)，.0f会
         # 把0.6误显示成"1"，改用.2f保留真实精度。
-        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.0f}(=本金×{risk_pct * mult:.2f})",
+        # 2026-09-14再修复：mult本身也不再总是整数了(B系统B_TIER_LEVERAGE=
+        # {0:2.0,1:2.5,2:3.0})——2.5用.0f显示会被Python的四舍五入(银行家
+        # 舍入)误显示成"2"，看起来像杠杆用错了，其实只是这行日志格式化的
+        # 显示问题，真实计算用的还是2.5，没有算错。改用.2f保留真实精度。
+        f"名义=本金×{risk_pct * 100:.0f}%×{mult:.2f}(=本金×{risk_pct * mult:.2f})",
         f"sizing={SIZING_MODE}",
     ]
     if principal > 0:

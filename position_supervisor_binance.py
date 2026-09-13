@@ -132,6 +132,7 @@ from smart_reentry_engine import blank_reentry_state
 from radar_reentry_mixin import (
     RadarReentryMixin, MEGA_TREND_CEILING_MULT, TV_HEARTBEAT_GAP_GRACE_SEC,
     _smart_hard_stop_mode_enabled,
+    DUAL_MA_EXIT_INTERVAL_MIN, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN, DUAL_MA_EXIT_KLINE_LIMIT,
 )
 from pipeline_bridge import PipelineBridgeMixin
 from pipeline_ledger import Phase, Role
@@ -1540,7 +1541,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
 
         live_side = pos["side"]
         tv_side = self._resolve_tv_authoritative_side()
-        if not tv_side or live_side != tv_side:
+        # 2026-09-14修复(实盘复现，B/C两账户XRPUSDT宝贝手工在交易所APP
+        # 补开多单，系统全程零挂单——完全裸奔)：这里原来要求tv_side必须
+        # 存在且跟live_side一致才会往下走接管，等于"TV完全没表态过这个
+        # 品种"(纯手工新开仓最常见的情形)也被当成拒绝接管处理，接管函数
+        # _perform_live_takeover自己内部的判断其实更宽松——它只在tv_side
+        # 存在且冲突时才拒绝(`if tv_side and side != tv_side: return
+        # False`)，tv_side为空时本来就允许继续。这里的外层闸门比被调用
+        # 的函数自己还严格，白白挡掉了纯手工开仓这个最需要接管的场景。
+        # 收紧为跟_perform_live_takeover一致的判断：只有TV明确表过态且
+        # 方向冲突时才不接管，TV完全没表态(tv_side为空)时正常往下走
+        # 接管+挂综合硬止损，manual_open=True交给_perform_live_takeover
+        # 走"全新手工仓位"分支。
+        if tv_side and live_side != tv_side:
             return
 
         now = time.time()
@@ -3146,6 +3159,71 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         out[l] = v
         return out
 
+    def _compute_manual_takeover_hard_stop(self, entry, live_qty, source=""):
+        """2026-09-14新增：实盘复现(B/C两账户XRPUSDT宝贝手工在交易所APP
+        补开多单)——纯手工仓位从未经过任何TV信号，_lock_frozen_hard_sl_
+        from_tv靠|TV.price-TV.stop_loss|算距离，这里必然算不出来(缺
+        TV.stop_loss)返回0，而_refresh_vps_hard_sl的ATR兜底只写本地雷达
+        账本(initial_stop/current_sl)、不挂交易所真实订单(见其docstring
+        "不挂盘")——链路走到底也不会真的补上止损，仓位裸奔。
+        这里现拉真实K线，用综合硬止损公式(结构摆动点+ATR分档，固定
+        tier=1中档估算，手工仓位没有TV原始tier信息)现算一个，直接锁定
+        frozen_hard_sl_px并挂到交易所。返回计算成功的止损价，失败返回0
+        (调用方据此判断是否仍是裸仓)。"""
+        try:
+            interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(
+                self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN,
+            )
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(
+                self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT,
+            )
+            from smart_hard_stop import calc_smart_hard_stop_price
+            computed, meta, calc_ok, err = calc_smart_hard_stop_price(
+                self.current_side, entry, bars or [], tier=1,
+            )
+        except Exception as e:
+            computed, calc_ok, err, meta = 0.0, False, str(e), {}
+        if calc_ok and computed > 0:
+            self.frozen_hard_sl_px = float(computed)
+            logger.warning(
+                f"🛡️ [{self.symbol}] 手工接管无TV止损参考，现算综合硬止损"
+                f"并锁定 @{computed:.2f} | {meta}"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"检测到无保护仓位 [{self.symbol}]",
+                    detail=(
+                        f"可能是手工开仓：{self.current_side} {live_qty} "
+                        f"@{entry:.4f} → 已自动计算并挂上综合硬止损 "
+                        f"@{computed:.2f}"
+                    ),
+                    level="重要",
+                )
+            except Exception:
+                pass
+            return float(computed)
+        logger.error(
+            f"🚨 [{self.symbol}] 手工接管无TV止损参考且综合硬止损计算"
+            f"失败({err})，仍为裸仓 | {source}"
+        )
+        try:
+            import dingtalk
+            self._dingtalk(
+                dingtalk.report_system_alert,
+                title=f"⚠️ 无保护仓位且自动挂止损失败 [{self.symbol}]",
+                detail=(
+                    f"手工开仓且自动计算硬止损失败({err})，请立即人工"
+                    f"核查！{self.current_side} {live_qty} @{entry:.4f}"
+                ),
+                level="紧急",
+            )
+        except Exception:
+            pass
+        return 0.0
+
     def _ensure_full_defense_stack(self, live_qty, entry, curr_px, source="接管", manual_fresh=False):
         """
         全链防线：TP1+TP2 限价 + 雷达止损单槽（唯一止损写入）。
@@ -3207,6 +3285,10 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         hard_locked = self._lock_frozen_hard_sl_from_tv(
             entry=entry, side=self.current_side, source=f"{source}·硬止损锁定",
         )
+        if hard_locked <= 0 and manual_fresh:
+            hard_locked = self._compute_manual_takeover_hard_stop(
+                entry=entry, live_qty=live_qty, source=source,
+            )
         if hard_locked > 0:
             if self._ensure_frozen_hard_sl(
                 live_qty, reason=f"{source}·永久硬止损",
@@ -8673,10 +8755,19 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             # "仓位是否还在"复查(_get_active_position)完全不受影响，
             # 该tick该查还是查，只省掉这里注定失败的REST。target价格
             # 一旦变化(雷达重新算出新数)或超过20秒，照常重新判定。
+            # 2026-09-14再实盘复现(B/E两账户XAUUSDT)：这次trigger_px全程
+            # 没变(同一个@4360.16反复被判定贴市)，但常规呼吸止损tick的
+            # 调用间隔本来就有~90-110秒(不是ASML那次急跌时的几秒一次)，
+            # 20秒的去重窗口比这个自然间隔短得多，等于形同虚设——1小时
+            # 内两个账户各刷了50+条一模一样的告警，是控制面板"异常"刷屏
+            # 的主要来源。价格没恢复、target也没变的这种"持续贴市"状态可
+            # 能会挂着好几分钟甚至更久(硬止损仍在更远处兜底，不是裸仓)，
+            # 去重窗口改成跟DUAL_MA_EXIT/REVERSAL_LOCK同一个300秒节流
+            # 惯例，价格真的变化或target真的更新时依然会立刻重新判定。
             now = time.time()
             same_block = (
                 abs(float(getattr(self, "_radar_stop_market_blocked_px", 0) or 0) - trigger_px) < 1e-6
-                and (now - float(getattr(self, "_radar_stop_market_blocked_ts", 0) or 0)) < 20.0
+                and (now - float(getattr(self, "_radar_stop_market_blocked_ts", 0) or 0)) < 300.0
             )
             if same_block:
                 return None
