@@ -560,18 +560,32 @@ def resolve_deepcoin_symbol(raw, default="ETH-USDT-SWAP"):
 # 恢复直接把品种加回下面两处清单即可。跟 e45383d 一样的副作用：往后这17个
 # 品种就算 TV 误发信号（包括 CLOSE）也会在 app.py/console_api.py 的
 # webhook 入口被直接拒绝，已有仓位的平仓完全交给引擎自己的硬止损/雷达。
+# 2026-09-13：币安B系统("综合硬止损"体系)新增独立的BINANCE_SYMBOLS_B白
+# 名单——跟A系统的BINANCE_SYMBOLS彻底分开，账户当前是A还是B模式(同一个
+# SMART_HARD_STOP_ENABLED环境变量，跟get_breath_profile的system选择、
+# _temp_hard_stop_from_tv的智能硬止损开关同一套判定)决定读哪一份。这样
+# A系统17个品种的暂停/恢复历史完全不受影响，B系统可以独立管理自己的
+# 品种清单(比如加XAU/XPT这些A系统没有B专属校准的品种)。
 def active_binance_symbols():
     # 2026-09-12恢复BNBUSDT：17品种暂停(commit 0deff95)之后宝贝要求单独
     # 把BNB的TV网关接收+实盘开仓恢复回来，其余仍暂停(OPENAI/XPD/SNDK+BNB
     # 共4个)。跟ASML/SKHYNIX删除时同一套"注释不删除"的可逆写法。
-    raw = os.getenv("BINANCE_SYMBOLS", "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT")
+    _smart_mode = str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in (
+        "1", "true", "yes",
+    )
+    if _smart_mode:
+        default_list = "BNBUSDT,XPDUSDT,SNDKUSDT,OPENAIUSDT"
+        raw = os.getenv("BINANCE_SYMBOLS_B", default_list)
+    else:
+        default_list = "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT"
+        raw = os.getenv("BINANCE_SYMBOLS", default_list)
     out = []
     for part in str(raw).split(","):
         meta = resolve_binance_symbol(part.strip(), default="")
         sym = meta.get("symbol")
         if sym and sym not in out and sym in BINANCE_SYMBOL_META:
             out.append(sym)
-    return out or ["BNBUSDT", "OPENAIUSDT", "XPDUSDT", "SNDKUSDT"]
+    return out or default_list.split(",")
 
 
 def active_deepcoin_symbols():

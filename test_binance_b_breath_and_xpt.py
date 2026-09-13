@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import breath_profiles  # noqa: E402
 import symbol_config  # noqa: E402
+import reentry_profiles  # noqa: E402
 
 
 class TestBreathProfileSystemParam(unittest.TestCase):
@@ -134,6 +135,86 @@ class TestXptOnboarding(unittest.TestCase):
     def test_extract_symbol_from_payload_recognizes_xpt(self):
         got = symbol_config.extract_symbol_from_payload({"symbol": "XPTUSDT.P"})
         self.assertEqual(got, "XPTUSDT.P")
+
+
+class TestActiveBinanceSymbolsModeAware(unittest.TestCase):
+    def setUp(self):
+        self._orig_flag = os.environ.get("SMART_HARD_STOP_ENABLED")
+        self._orig_a = os.environ.get("BINANCE_SYMBOLS")
+        self._orig_b = os.environ.get("BINANCE_SYMBOLS_B")
+
+    def tearDown(self):
+        for key, val in (
+            ("SMART_HARD_STOP_ENABLED", self._orig_flag),
+            ("BINANCE_SYMBOLS", self._orig_a),
+            ("BINANCE_SYMBOLS_B", self._orig_b),
+        ):
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+    def test_a_mode_default_unchanged(self):
+        os.environ.pop("SMART_HARD_STOP_ENABLED", None)
+        os.environ.pop("BINANCE_SYMBOLS", None)
+        os.environ.pop("BINANCE_SYMBOLS_B", None)
+        self.assertEqual(
+            symbol_config.active_binance_symbols(),
+            ["BNBUSDT", "OPENAIUSDT", "XPDUSDT", "SNDKUSDT"],
+        )
+
+    def test_b_mode_default_independent_of_a(self):
+        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
+        os.environ.pop("BINANCE_SYMBOLS_B", None)
+        os.environ["BINANCE_SYMBOLS"] = "ETHUSDT"  # A的清单改了，不该影响B
+        self.assertEqual(
+            symbol_config.active_binance_symbols(),
+            ["BNBUSDT", "XPDUSDT", "SNDKUSDT", "OPENAIUSDT"],
+        )
+
+    def test_b_mode_reads_its_own_env_key(self):
+        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
+        os.environ["BINANCE_SYMBOLS_B"] = "XAUUSDT,XPTUSDT"
+        self.assertEqual(symbol_config.active_binance_symbols(), ["XAUUSDT", "XPTUSDT"])
+
+    def test_a_mode_unaffected_by_b_env_key(self):
+        os.environ.pop("SMART_HARD_STOP_ENABLED", None)
+        os.environ["BINANCE_SYMBOLS_B"] = "XAUUSDT,XPTUSDT"
+        os.environ["BINANCE_SYMBOLS"] = "BNBUSDT"
+        self.assertEqual(symbol_config.active_binance_symbols(), ["BNBUSDT"])
+
+
+class TestXptReentryProfileDedicated(unittest.TestCase):
+    """XPT不能静默退回REENTRY_ETH——这个坑2026-08-11(BNB/ZEC/BCH)和
+    2026-08-15(XMR/SNDK/PAXG)已经踩过两次，这次新增品种必须显式登记。"""
+
+    def test_registered_not_eth_fallback(self):
+        profile = reentry_profiles.get_reentry_profile("XPTUSDT")
+        self.assertEqual(profile["name"], "XPT")
+        self.assertIsNot(profile["tiers"], reentry_profiles.REENTRY_ETH["tiers"])
+
+    def test_tv_tf_is_45m(self):
+        profile = reentry_profiles.get_reentry_profile("XPTUSDT")
+        self.assertEqual(profile["tv_tf"], "45m")
+        self.assertEqual(profile["tv_tf_sec"], 2700)
+
+    def test_tiers_scaled_from_eth_baseline(self):
+        """scale=sqrt(2.71/2.37)≈1.0693，三档=1.00/1.20/1.40×scale。"""
+        tiers = reentry_profiles.get_reentry_profile("XPTUSDT")["tiers"]
+        self.assertEqual(len(tiers), 3)
+        self.assertAlmostEqual(tiers[0]["step_trigger_atr"], 1.07, delta=0.01)
+        self.assertAlmostEqual(tiers[1]["step_trigger_atr"], 1.28, delta=0.01)
+        self.assertAlmostEqual(tiers[2]["step_trigger_atr"], 1.50, delta=0.01)
+        for t in tiers:
+            self.assertAlmostEqual(t["step_advance_atr"], t["step_trigger_atr"] * 0.5, delta=0.01)
+
+    def test_zone_and_window_bars(self):
+        profile = reentry_profiles.get_reentry_profile("XPTUSDT")
+        self.assertEqual(profile["reentry_zone_atr"], 0.5)
+        self.assertEqual(profile["reentry_window_bars"], 4)
+
+    def test_enabled(self):
+        self.assertTrue(reentry_profiles.reentry_enabled("XPTUSDT"))
 
 
 if __name__ == "__main__":

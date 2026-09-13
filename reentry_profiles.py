@@ -257,6 +257,23 @@ _DEFAULT_STXX_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.43, "step_advance_atr": 0.71,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
+# 2026-09-13新增：XPT(铂金)专属校准——不能沿用get_reentry_profile()对
+# 未登记品种"静默退回REENTRY_ETH"的兜底，这个坑2026-08-11(BNB/ZEC/BCH)
+# 和2026-08-15(XMR/SNDK/PAXG)已经踩过两次(见上面两处同日期注释)，这次
+# 新增品种直接照抄同一套公式，不再留第三个坑。
+# sqrt(XPT breath_profiles.py中位数回调2.71/ETH当前中位数回调2.37)≈
+# 1.069倍放宽ETH三档基线(与MU/LITE/TSLA/META/DELL/GEV/STXX同一套"1.00/
+# 1.20/1.40"标准基线×比例"公式，breath_tp12/23/min/max维持这批品种统一
+# 不变的惯例)。own中位数回调2.71来自91.1天2916根15m合成45分钟K线、418个
+# 真实摆动点识别回调样本(见breath_profiles.py::BREATH_XPT校准注释)。
+_DEFAULT_XPT_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.07, "step_advance_atr": 0.53,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.28, "step_advance_atr": 0.64,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.50, "step_advance_atr": 0.75,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
 
 REENTRY_TIERS_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
@@ -376,6 +393,9 @@ GEV_TIERS: List[Dict[str, float]] = list(
 STXX_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("STXX") or {}).get("tiers") or _DEFAULT_STXX_TIERS)
 )
+XPT_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("XPT") or {}).get("tiers") or _DEFAULT_XPT_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 _BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
@@ -397,6 +417,9 @@ _META_ZONE = float((_CFG.get("META") or {}).get("reentry_zone_atr") or 0.5)
 _DELL_ZONE = float((_CFG.get("DELL") or {}).get("reentry_zone_atr") or 0.5)
 _GEV_ZONE = float((_CFG.get("GEV") or {}).get("reentry_zone_atr") or 0.5)
 _STXX_ZONE = float((_CFG.get("STXX") or {}).get("reentry_zone_atr") or 0.5)
+# XPT沿用XPD同一个0.5(全品种唯一例外是XAU=0.3，XPD虽然同为贵金属也是
+# 0.5，不是"同族就该跟XAU"，是"绝大多数品种都是0.5，XAU是唯一特例")。
+_XPT_ZONE = float((_CFG.get("XPT") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
 # 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
@@ -433,6 +456,12 @@ _GEV_WINDOW_BARS = int((_CFG.get("GEV") or {}).get("reentry_window_bars") or 1)
 # 窗口惯例低端，比照GS/MU/LITE(90m/55m均沿用2根)收2根，不用DELL/GEV/
 # TSLA/META那种1根×长周期直接超出上限的处理方式。
 _STXX_WINDOW_BARS = int((_CFG.get("STXX") or {}).get("reentry_window_bars") or 2)
+# XPT(45min，本表里所有已登记品种中周期最短的一个——其余品种这里存的
+# 都是各自A系统的历史周期，XPT没有A系统身份，直接用它唯一真实存在的
+# 45分钟)：4×45=180min，落在ETH 2×90m(现75m)=150~200min这个目标真实
+# 时间窗一带的上沿，同STXX(2×75=150min)一样的推算方法，只是换算成
+# 更短的原生周期需要更多根数才能凑够类似的真实时间跨度。
+_XPT_WINDOW_BARS = int((_CFG.get("XPT") or {}).get("reentry_window_bars") or 4)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 4500)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
@@ -461,6 +490,7 @@ _META_TF_SEC = int((_CFG.get("META") or {}).get("tv_tf_sec") or 14400)
 _DELL_TF_SEC = int((_CFG.get("DELL") or {}).get("tv_tf_sec") or 10800)
 _GEV_TF_SEC = int((_CFG.get("GEV") or {}).get("tv_tf_sec") or 14400)
 _STXX_TF_SEC = int((_CFG.get("STXX") or {}).get("tv_tf_sec") or 4500)
+_XPT_TF_SEC = int((_CFG.get("XPT") or {}).get("tv_tf_sec") or 2700)  # 45min×60
 
 
 def make_reentry_client_order_id(
@@ -934,6 +964,28 @@ REENTRY_STXX: Dict[str, Any] = {
     "tick_size": 0.01,
 }
 
+# 2026-09-13新增：XPT没有A系统身份(只在币安B系统/CoinW跑，45分钟周期)，
+# tv_tf/tv_tf_sec直接用它唯一真实的45分钟，不像其它品种这里存的是A系统
+# 遗留的旧周期。不设radar_gate_return_pct，沿用同族XPD(同样不设，落回
+# 0=不生效)的先例，不照抄STXX那批的1%惯例。
+REENTRY_XPT: Dict[str, Any] = {
+    "name": "XPT",
+    "tv_tf": "45m",
+    "tv_tf_sec": _XPT_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": XPT_TIERS,
+    "reentry_zone_atr": _XPT_ZONE,
+    "reentry_window_bars": _XPT_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
@@ -956,6 +1008,7 @@ _BY_SYMBOL = {
     "DELLUSDT": REENTRY_DELL,
     "GEVUSDT": REENTRY_GEV,
     "STXXUSDT": REENTRY_STXX,
+    "XPTUSDT": REENTRY_XPT,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }
