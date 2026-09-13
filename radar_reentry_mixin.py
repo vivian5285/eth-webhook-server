@@ -2028,24 +2028,47 @@ class RadarReentryMixin:
                 logger.error(f"🚨 [{self.symbol}] 双均线破位快速平仓执行异常: {e}")
             return float(getattr(self, "current_sl", 0) or 0)
 
-        # 放量没确认——疑似假突破，不强平，只顺着ladder棘轮同款写法适度
-        # 收紧candidate_sl到破位K线收盘价附近，给行情一点时间验证是否真反转。
+        # 放量没确认——疑似假突破，不强平，只适度收紧candidate_sl到破位K线
+        # 收盘价附近，给行情一点时间验证是否真反转。
+        # 2026-09-13再补充(宝贝拍板："双均线权重大于反转锁盈，因为它是
+        # 最快速反应市场趋势的、最敏捷的一个")：这一步顺带把保本价
+        # (跟REVERSAL_LOCK同一个initial_stop_price公式)也算进来，两个
+        # 候选取更紧的那个——哪怕这次放量没确认，双均线自己给出的破位
+        # 判断也至少要收紧到反转锁盈本来会给的保本线，不能因为"没放量
+        # 确认"就比反转锁盈更保守，双均线的敏捷判断本身就该比反转锁盈
+        # 的单根K线判断更有分量。
         atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
         if atr <= 0:
             return candidate_sl
         if side == "LONG":
             tighter = close_px - DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR * atr
+        else:
+            tighter = close_px + DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR * atr
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        if entry > 0:
+            try:
+                from breath_stop import initial_stop_price
+                breakeven = float(initial_stop_price(
+                    side, entry, atr, profile=getattr(self, "breath_profile", None),
+                ) or 0)
+            except Exception:
+                breakeven = 0.0
+            if breakeven > 0:
+                # 更紧(更保护)的那个胜出：多头更高的价更紧，空头更低的价更紧
+                # ——跟下面跟candidate_sl比较时的max/min同一个方向，别搞反。
+                tighter = max(tighter, breakeven) if side == "LONG" else min(tighter, breakeven)
+        if side == "LONG":
             out = max(candidate_sl, tighter) if candidate_sl > 0 else tighter
             improved = out > candidate_sl
         else:
-            tighter = close_px + DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR * atr
             out = min(candidate_sl, tighter) if candidate_sl > 0 else tighter
             improved = candidate_sl <= 0 or out < candidate_sl
         if not improved:
             return candidate_sl
         logger.info(
             f"🧭 [{self.symbol}] 双均线破位但放量未确认(疑似假突破) | {side} {interval_min}m | "
-            f"close={close_px:.4f} → 止损适度收紧 {candidate_sl:.4f}→{out:.4f}，暂不强平"
+            f"close={close_px:.4f} → 止损适度收紧 {candidate_sl:.4f}→{out:.4f}"
+            f"(不低于保本线)，暂不强平"
         )
         return out
 

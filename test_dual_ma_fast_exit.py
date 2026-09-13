@@ -144,6 +144,23 @@ class TestDualMaFastExit(unittest.TestCase):
         self.assertAlmostEqual(out, close_px + 0.6, places=4)
         self.assertLess(out, 200.0)
 
+    def test_soft_tighten_never_weaker_than_breakeven(self):
+        """2026-09-13新增(宝贝拍板："双均线权重大于反转锁盈")：破位但放量
+        未确认时，收紧结果不能比反转锁盈本来会给的保本线更松——entry=100
+        的SHORT，close刚好拉回到100(贴着破位边缘，close+0.3×ATR=100.6
+        比保本价99.91更松)，最终应该采用更紧的保本价99.91，不是原始的
+        100.6。"""
+        s = _mk_supervisor()
+        s.watched_entry = 100.0
+        s.breath_profile = {}
+        bars = _make_bars(decline_n=25, decline_step=-1.0, rally_n=10, rally_step=1.0,
+                           start=115.0, surge=False)
+        self.assertEqual(bars[-1][4], 100.0)  # 确认合成K线收盘价符合预期
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            out = s._maybe_fast_exit_on_dual_ma_break(bars[-1][4], 200.0)
+        s._close_all.assert_not_called()
+        self.assertAlmostEqual(out, 99.91, places=2)
+
     def test_break_confirmed_same_bar_not_retriggered(self):
         """同一根K线已经触发过市价平仓——即使再次调用(节流窗口过期后)，
         同一根K线不应该重复调用_close_all。"""
