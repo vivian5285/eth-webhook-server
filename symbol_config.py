@@ -270,6 +270,21 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "STXXUSDT",
         "breath": "STXX",
     },
+    "XPTUSDT": {
+        "symbol": "XPTUSDT",
+        "unit": "XPT",
+        "tag": "XPT",
+        # 2026-09-13：币安B系统新增品种，TRADIFI_PERPETUAL
+        # (underlyingType=COMMODITY)，铂金永续，跟XAU/XPD同族贵金属。
+        # 实测LOT_SIZE stepSize=0.001/minQty=0.001，PRICE_FILTER
+        # tickSize=0.01，跟XAUUSDT filter形状完全一致。45分钟周期。
+        "qty_step": 0.001,
+        "min_qty": 0.001,
+        "dust_qty": 0.001,   # 贵金属类高单价品种，参照XAU/XPD的dust惯例
+        "price_precision": 2,
+        "atr_fallback_symbol": "XPTUSDT",
+        "breath": "XPT",
+    },
 }
 
 # 深币 SWAP
@@ -430,6 +445,12 @@ _BINANCE_ALIASES = {
     "LITEUSDT.P": "LITEUSDT",
     "BINANCE:LITEUSDT": "LITEUSDT",
     "BINANCE:LITEUSDT.P": "LITEUSDT",
+    "XPT": "XPTUSDT",
+    "XPTUSDT": "XPTUSDT",
+    "XPTUSD": "XPTUSDT",
+    "XPTUSDT.P": "XPTUSDT",
+    "BINANCE:XPTUSDT": "XPTUSDT",
+    "BINANCE:XPTUSDT.P": "XPTUSDT",
 }
 
 _DEEPCOIN_ALIASES = {
@@ -477,7 +498,16 @@ def resolve_binance_symbol(raw, default="ETHUSDT"):
     meta = dict(BINANCE_SYMBOL_META.get(sym, BINANCE_SYMBOL_META["ETHUSDT"]))
     try:
         from breath_profiles import get_breath_profile
-        meta["breath_profile"] = get_breath_profile(meta.get("symbol") or sym, "binance")
+        # 2026-09-13：币安B系统("综合硬止损"体系)专属呼吸档——跟
+        # position_supervisor_binance.py::_temp_hard_stop_from_tv同一个
+        # 环境变量/同一套真假值解析，账户当前是A系统就完全不受影响
+        # (system缺省"A"，行为跟改动前一致)。
+        _smart_mode = str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in (
+            "1", "true", "yes",
+        )
+        meta["breath_profile"] = get_breath_profile(
+            meta.get("symbol") or sym, "binance", system=("B" if _smart_mode else "A"),
+        )
     except Exception:
         meta["breath_profile"] = None
     return meta
@@ -594,6 +624,7 @@ def extract_symbol_from_payload(data):
         "DELLUSDT.P", "BINANCE:DELLUSDT", "DELLUSDT",
         "GEVUSDT.P", "BINANCE:GEVUSDT", "GEVUSDT",
         "STXXUSDT.P", "BINANCE:STXXUSDT", "STXXUSDT",
+        "XPTUSDT.P", "BINANCE:XPTUSDT", "XPTUSDT",
     ):
         if token in blob:
             return token

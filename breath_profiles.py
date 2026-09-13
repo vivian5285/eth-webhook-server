@@ -849,6 +849,179 @@ BREATH_STXX: Dict[str, Any] = {
 # "深度盈利耐心模式"要不要对某品种生效，但宝贝反馈没有这个TV机制的品种
 # 一样反复出现"TV还持有、雷达先打掉"，撤回了这道门槛——live radar现在
 # 不读这个字段，耐心模式对全部17个品种统一生效。
+# ============================================================
+# 币安B系统专属呼吸档（"综合硬止损"体系，跟CoinW币赢同一套体系/同一批
+# TV周期，2026-09-13新增）——A系统继续用上面各BREATH_*不变，这里只是
+# 平行的一套B系统专属校准，通过get_breath_profile(system="B")按账户
+# 当前SMART_HARD_STOP_ENABLED状态动态选用，不影响A系统任何现有品种。
+# ============================================================
+
+# BNB(B系统) —— 直接复用CoinW 2026-09-12"三次校准"结果：真实TV周期45
+# 分钟，CoinW(499根/15.6天/56样本)+币安(1973根合成/61.6天/286样本)池化
+# 共343个回调样本(P50=2.45×ATR P75=3.56×ATR P90=5.07×ATR)——池化样本本
+# 身就包含币安自己的K线数据，可以直接照搬到币安B系统用，不用重新校准。
+BREATH_BNB_B: Dict[str, Any] = {
+    "name": "BNB",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,
+    "step_advance_atr": 0.60,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.45,
+    "breath_tp23": 3.56,
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.9,
+    "max_mult": 5.4,
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XPD(B系统，钯金) —— 同上，复用CoinW 2026-09-12池化校准：真实TV周期45
+# 分钟，CoinW(499根/73样本)+币安(1973根合成/287样本)池化共360样本
+# (P50=2.46×ATR P75=3.68×ATR P90=5.86×ATR)。
+BREATH_XPD_B: Dict[str, Any] = {
+    "name": "XPD",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,
+    "step_advance_atr": 0.60,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.46,
+    "breath_tp23": 3.68,
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.9,
+    "max_mult": 6.2,
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# OPENAI(B系统) —— 同上，复用CoinW 2026-09-12池化校准：真实TV周期2小时/
+# 120分钟(A系统是150分钟，两者不同，不能共用A的BREATH_OPENAI)，CoinW
+# (1310根原生/197样本)+币安(1200根原生2h/173样本)池化共370样本
+# (P50=2.17×ATR P75=3.53×ATR P90=5.03×ATR)。
+BREATH_OPENAI_B: Dict[str, Any] = {
+    "name": "OPENAI",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.82,
+    "step_advance_atr": 0.53,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.17,
+    "breath_tp23": 3.53,
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.2,
+    "max_mult": 5.3,
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XAU(B系统) —— 2026-09-13新校准：宝贝要求B系统XAU也比照BNB/XPD改用45
+# 分钟周期(A系统XAU维持90分钟不变，两套并存)。用真实币安15m K线合成45
+# 分钟K线测(91.1天2916根合成K线、430个真实摆动点识别回调样本，方法同
+# scratch_calibrate_xau_skhynix.py)：中位数回调2.60×ATR、75分位3.78×ATR、
+# 90分位6.15×ATR，ATR%=0.06%——比A系统90分钟那版(ATR%=0.50%，08-25校准)
+# 低了一个数量级，说明近期金价波动率(以ATR%衡量)明显收窄，不是合成周期
+# 导致的偏差(45分钟只是90分钟的一半，正常波动率量级差异不该有8倍那么
+# 大)。min/max比例沿用XAU自己90分钟那版的比例(4.6/6.2=0.742)。
+# 提醒：这份B系统XAU参数默认对应"TV45分钟金价信号接入B系统网关"这个
+# 前提，如果宝贝实际接入的TV周期不是45分钟，需要重新校准。
+BREATH_XAU_B: Dict[str, Any] = {
+    "name": "XAU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.5,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.98,   # 0.375×breath_tp12
+    "step_advance_atr": 0.64,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.60,  # 实测中位数回调(2.60)
+    "breath_tp23": 3.78,  # 实测75分位回调(3.78)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.8,      # 0.742×max_mult（沿用XAU自己90分钟那版min/max比例）
+    "max_mult": 6.5,      # 覆盖实测90分位回调(6.15)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 1,
+    "exit_score": 1,
+}
+
+# XPT(铂金) —— 2026-09-13新增品种首次校准，B系统专属(45分钟周期，跟同为
+# 贵金属TradFi商品的XAU/XPD同族)。用真实币安15m K线合成45分钟K线测
+# (91.1天2916根合成K线、418个真实摆动点识别回调样本)：中位数回调
+# 2.71×ATR、75分位3.91×ATR、90分位5.74×ATR，ATR%=0.13%。全新品种没有
+# 自己的历史min/max比例可循，借用同周期(45分钟)、同为贵金属商品的XPD
+# 比例(4.9/6.2=0.79)。
+BREATH_XPT: Dict[str, Any] = {
+    "name": "XPT",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,   # 0.375×breath_tp12
+    "step_advance_atr": 0.66,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.71,  # 实测中位数回调(2.71)
+    "breath_tp23": 3.91,  # 实测75分位回调(3.91)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.7,      # 0.79×max_mult（借用同族XPD的min/max比例）
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.74)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+_BY_BINANCE_B = {
+    "BNBUSDT": BREATH_BNB_B,
+    "XPDUSDT": BREATH_XPD_B,
+    "OPENAIUSDT": BREATH_OPENAI_B,
+    "XAUUSDT": BREATH_XAU_B,
+    "XPTUSDT": BREATH_XPT,
+    # SNDKUSDT不需要B系统专属档：A系统SNDK已经是75分钟，跟CoinW/B系统
+    # 周期一致，直接落回_BY_BINANCE共用同一份BREATH_SNDK即可。
+}
+
+_BY_COINW_B = {
+    "XPT": BREATH_XPT,
+}
+
 _BY_BINANCE = {
     "ETHUSDT": BREATH_ETH,
     "XAUUSDT": BREATH_XAU,
@@ -871,6 +1044,7 @@ _BY_BINANCE = {
     "DELLUSDT": BREATH_DELL,  # 2026-09-06：新增
     "GEVUSDT": BREATH_GEV,  # 2026-09-06：新增
     "STXXUSDT": BREATH_STXX,  # 2026-09-08：新增
+    "XPTUSDT": BREATH_XPT,  # 2026-09-13：新增，全品种只有一份45分钟校准，A/B共用
 }
 
 _BY_DEEPCOIN = {
@@ -879,10 +1053,21 @@ _BY_DEEPCOIN = {
 }
 
 
-def get_breath_profile(symbol: str, exchange: str = "binance") -> Dict[str, Any]:
+def get_breath_profile(symbol: str, exchange: str = "binance", system: str = "A") -> Dict[str, Any]:
+    """
+    2026-09-13新增system参数："B"=币安B系统("综合硬止损"体系，跟CoinW
+    同一套体系)专属呼吸档，缺省不传/传"A"=原A系统档，行为跟改动前完全
+    一致，A系统零影响。只有_BY_BINANCE_B里显式登记过的品种才会真的换用
+    B档(比如BNB/XPD/OPENAI/XAU这几个A/B周期不同的)，没登记的品种(比如
+    SNDK，A/B周期本来就一样)自动落回A档，不会出现"查不到"的情况。
+    """
     sym = str(symbol or "").strip().upper()
     if exchange == "deepcoin":
         return dict(_BY_DEEPCOIN.get(sym) or BREATH_ETH)
+    if str(system or "A").strip().upper() == "B":
+        b_profile = _BY_BINANCE_B.get(sym)
+        if b_profile:
+            return dict(b_profile)
     return dict(_BY_BINANCE.get(sym) or BREATH_ETH)
 
 

@@ -321,6 +321,8 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self.atr_fallback_symbol = meta.get("atr_fallback_symbol") or self.symbol
         self.breath_profile = meta.get("breath_profile") or get_breath_profile(
             self.symbol, "binance",
+            system=("B" if str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower()
+                    in ("1", "true", "yes") else "A"),
         )
         self.price_precision = int(meta.get("price_precision") or 2)
         # profile.tick_size 与价格精度对齐
