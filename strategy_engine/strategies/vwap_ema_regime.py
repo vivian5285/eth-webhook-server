@@ -152,7 +152,19 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             "action": action,
             "price": round(price, 6), "atr": round(atr, 6),
             "stop_loss": round(price - d * atr * float(p["range_atr_stop_mult"]), 6),
-            "tp1": round(vwap_now, 6), "tp2": round(vwap_now, 6), "tp3": round(vwap_now, 6),
+            # 2026-09-13修复：这里原来跟vwap_mean_reversion一样设了
+            # tp1/tp2/tp3=vwap_now，但那套自己的roster条目timeframe是
+            # 15m，这套是2h(mtf才是15m)——multi_strategy_runner.py的
+            # 通用_check_stop_tp只会拿"base"周期(这里是2h)那根K线的
+            # high/low去判断有没有碰到tp1，2h一根K线的高低点范围远比
+            # 15m VWAP的紧窄偏离带宽，几乎必然提前"碰到"，等于绕过了
+            # 下面position分支里本该用15m精度做的震荡市回归判断，把
+            # 胜率/收益率都做假地推高了(2026-09-13实测复现：205笔平仓
+            # 全部经这条通用捷径成交，且因为通用路径用2h K线自己的
+            # bar_time记录平仓时间，跟这里15m bar_time记录的开仓时间
+            # 不是同一个时钟颗粒度，还闹出过"平仓时间早于开仓时间"的
+            # 显示怪象)。不设tp1，逼平仓只能走下面position分支里那条
+            # 真正15m精度的CLOSE_QUICK_EXIT判断，跟设计初衷一致。
             "tier": 1, "bar_time": bar_time,
             "reason": (f"震荡腿：2h ADX={adx_now:.1f}≤{range_adx:.0f}，15m close偏离VWAP"
                        f"({vwap_now:.6f}) {(price - vwap_now) / dev_std:+.2f}σ(阈值{n_std}σ)"),
