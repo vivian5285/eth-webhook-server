@@ -274,6 +274,30 @@ _DEFAULT_XPT_TIERS: List[Dict[str, float]] = [
     {"step_trigger_atr": 1.50, "step_advance_atr": 0.75,
      "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
 ]
+# 2026-09-13新增：XRP/SOL专属校准——同一套"不留静默退回REENTRY_ETH的坑"
+# 惯例，同一套"1.00/1.20/1.40"标准基线×比例公式。
+# sqrt(XRP breath_profiles.py中位数回调2.42/ETH当前中位数回调2.37)≈
+# 1.0105倍。own中位数回调2.42来自91.1天2916根15m合成45分钟K线、453个
+# 真实摆动点识别回调样本(见breath_profiles.py::BREATH_XRP校准注释)。
+_DEFAULT_XRP_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.01, "step_advance_atr": 0.51,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.21, "step_advance_atr": 0.61,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.41, "step_advance_atr": 0.71,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
+# sqrt(SOL breath_profiles.py中位数回调2.46/ETH当前中位数回调2.37)≈
+# 1.0188倍。own中位数回调2.46来自91.1天2916根15m合成45分钟K线、439个
+# 真实摆动点识别回调样本(见breath_profiles.py::BREATH_SOL校准注释)。
+_DEFAULT_SOL_TIERS: List[Dict[str, float]] = [
+    {"step_trigger_atr": 1.02, "step_advance_atr": 0.51,
+     "breath_tp12": 1.50, "breath_tp23": 2.00, "min_mult": 2.5, "max_mult": 3.5},
+    {"step_trigger_atr": 1.22, "step_advance_atr": 0.61,
+     "breath_tp12": 2.00, "breath_tp23": 2.80, "min_mult": 3.0, "max_mult": 4.5},
+    {"step_trigger_atr": 1.43, "step_advance_atr": 0.71,
+     "breath_tp12": 2.50, "breath_tp23": 3.50, "min_mult": 4.0, "max_mult": 6.0},
+]
 
 REENTRY_TIERS_JSON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "config", "reentry_tiers.json",
@@ -396,6 +420,12 @@ STXX_TIERS: List[Dict[str, float]] = list(
 XPT_TIERS: List[Dict[str, float]] = list(
     ((_CFG.get("XPT") or {}).get("tiers") or _DEFAULT_XPT_TIERS)
 )
+XRP_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("XRP") or {}).get("tiers") or _DEFAULT_XRP_TIERS)
+)
+SOL_TIERS: List[Dict[str, float]] = list(
+    ((_CFG.get("SOL") or {}).get("tiers") or _DEFAULT_SOL_TIERS)
+)
 _ETH_ZONE = float((_CFG.get("ETH") or {}).get("reentry_zone_atr") or 0.5)
 _XAU_ZONE = float((_CFG.get("XAU") or {}).get("reentry_zone_atr") or 0.3)
 _BNB_ZONE = float((_CFG.get("BNB") or {}).get("reentry_zone_atr") or 0.5)
@@ -420,6 +450,8 @@ _STXX_ZONE = float((_CFG.get("STXX") or {}).get("reentry_zone_atr") or 0.5)
 # XPT沿用XPD同一个0.5(全品种唯一例外是XAU=0.3，XPD虽然同为贵金属也是
 # 0.5，不是"同族就该跟XAU"，是"绝大多数品种都是0.5，XAU是唯一特例")。
 _XPT_ZONE = float((_CFG.get("XPT") or {}).get("reentry_zone_atr") or 0.5)
+_XRP_ZONE = float((_CFG.get("XRP") or {}).get("reentry_zone_atr") or 0.5)
+_SOL_ZONE = float((_CFG.get("SOL") or {}).get("reentry_zone_atr") or 0.5)
 _ETH_WINDOW_BARS = int((_CFG.get("ETH") or {}).get("reentry_window_bars") or 2)
 _XAU_WINDOW_BARS = int((_CFG.get("XAU") or {}).get("reentry_window_bars") or 3)
 # 2026-08-15：BNB/ZEC/BCH的window_bars从2改成1——2026-08-11拆分成独立
@@ -462,6 +494,10 @@ _STXX_WINDOW_BARS = int((_CFG.get("STXX") or {}).get("reentry_window_bars") or 2
 # 时间窗一带的上沿，同STXX(2×75=150min)一样的推算方法，只是换算成
 # 更短的原生周期需要更多根数才能凑够类似的真实时间跨度。
 _XPT_WINDOW_BARS = int((_CFG.get("XPT") or {}).get("reentry_window_bars") or 4)
+# XRP/SOL同为45min，同XPT一套推算：4×45=180min，落在ETH 2×90m(现75m)=
+# 150~200min目标真实时间窗一带的上沿。
+_XRP_WINDOW_BARS = int((_CFG.get("XRP") or {}).get("reentry_window_bars") or 4)
+_SOL_WINDOW_BARS = int((_CFG.get("SOL") or {}).get("reentry_window_bars") or 4)
 _ETH_TF_SEC = int((_CFG.get("ETH") or {}).get("tv_tf_sec") or 4500)
 # 2026-08-15：XAU/BNB/ZEC/BCH四个tv_tf_sec全部核对TV警报截图后修正——
 # XAU从2700(45min)改3000(50min)、BNB/ZEC从5400(90min)改9000(150min)、
@@ -491,6 +527,8 @@ _DELL_TF_SEC = int((_CFG.get("DELL") or {}).get("tv_tf_sec") or 10800)
 _GEV_TF_SEC = int((_CFG.get("GEV") or {}).get("tv_tf_sec") or 14400)
 _STXX_TF_SEC = int((_CFG.get("STXX") or {}).get("tv_tf_sec") or 4500)
 _XPT_TF_SEC = int((_CFG.get("XPT") or {}).get("tv_tf_sec") or 2700)  # 45min×60
+_XRP_TF_SEC = int((_CFG.get("XRP") or {}).get("tv_tf_sec") or 2700)  # 45min×60
+_SOL_TF_SEC = int((_CFG.get("SOL") or {}).get("tv_tf_sec") or 2700)  # 45min×60
 
 
 def make_reentry_client_order_id(
@@ -986,6 +1024,44 @@ REENTRY_XPT: Dict[str, Any] = {
     "tick_size": 0.01,
 }
 
+# 2026-09-13新增：XRP/SOL没有A系统身份(只在币安B系统/CoinW跑，45分钟
+# 周期)，同XPT一样tv_tf/tv_tf_sec直接用真实的45分钟。
+REENTRY_XRP: Dict[str, Any] = {
+    "name": "XRP",
+    "tv_tf": "45m",
+    "tv_tf_sec": _XRP_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": XRP_TIERS,
+    "reentry_zone_atr": _XRP_ZONE,
+    "reentry_window_bars": _XRP_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.0001,
+}
+
+REENTRY_SOL: Dict[str, Any] = {
+    "name": "SOL",
+    "tv_tf": "45m",
+    "tv_tf_sec": _SOL_TF_SEC,
+    "enabled": True,
+    "arm_sl_atr": ARM_SL_ATR,
+    "fee_cover_pct": FEE_COVER_PCT,
+    "arm_mode": ARM_MODE,
+    "tiers": SOL_TIERS,
+    "reentry_zone_atr": _SOL_ZONE,
+    "reentry_window_bars": _SOL_WINDOW_BARS,
+    "limit_discount": LIMIT_DISCOUNT,
+    "limit_ttl_sec": LIMIT_TTL_SEC,
+    "max_reentries": MAX_REENTRIES,
+    "max_unfilled_refreshes": MAX_UNFILLED_REFRESHES,
+    "tick_size": 0.01,
+}
+
 _BY_SYMBOL = {
     "ETHUSDT": REENTRY_ETH,
     "XAUUSDT": REENTRY_XAU,
@@ -1009,6 +1085,8 @@ _BY_SYMBOL = {
     "GEVUSDT": REENTRY_GEV,
     "STXXUSDT": REENTRY_STXX,
     "XPTUSDT": REENTRY_XPT,
+    "XRPUSDT": REENTRY_XRP,
+    "SOLUSDT": REENTRY_SOL,
     "ETH-USDT-SWAP": REENTRY_ETH,
     "XAU-USDT-SWAP": REENTRY_XAU,
 }

@@ -285,6 +285,34 @@ BINANCE_SYMBOL_META = {
         "atr_fallback_symbol": "XPTUSDT",
         "breath": "XPT",
     },
+    "XRPUSDT": {
+        "symbol": "XRPUSDT",
+        "unit": "XRP",
+        "tag": "XRP",
+        # 2026-09-13：币安B系统新增品种，普通PERPETUAL(underlyingType=COIN，
+        # 主流加密货币，不是TradFi商品/股票类)。实测LOT_SIZE
+        # stepSize=0.1/minQty=0.1，PRICE_FILTER tickSize=0.0001。45分钟周期。
+        "qty_step": 0.1,
+        "min_qty": 0.1,
+        "dust_qty": 0.5,
+        "price_precision": 4,
+        "atr_fallback_symbol": "XRPUSDT",
+        "breath": "XRP",
+    },
+    "SOLUSDT": {
+        "symbol": "SOLUSDT",
+        "unit": "SOL",
+        "tag": "SOL",
+        # 2026-09-13：币安B系统新增品种，普通PERPETUAL(underlyingType=COIN)。
+        # 实测LOT_SIZE stepSize=0.01/minQty=0.01，PRICE_FILTER
+        # tickSize=0.01。45分钟周期。
+        "qty_step": 0.01,
+        "min_qty": 0.01,
+        "dust_qty": 0.05,
+        "price_precision": 2,
+        "atr_fallback_symbol": "SOLUSDT",
+        "breath": "SOL",
+    },
 }
 
 # 深币 SWAP
@@ -451,6 +479,18 @@ _BINANCE_ALIASES = {
     "XPTUSDT.P": "XPTUSDT",
     "BINANCE:XPTUSDT": "XPTUSDT",
     "BINANCE:XPTUSDT.P": "XPTUSDT",
+    "XRP": "XRPUSDT",
+    "XRPUSDT": "XRPUSDT",
+    "XRPUSD": "XRPUSDT",
+    "XRPUSDT.P": "XRPUSDT",
+    "BINANCE:XRPUSDT": "XRPUSDT",
+    "BINANCE:XRPUSDT.P": "XRPUSDT",
+    "SOL": "SOLUSDT",
+    "SOLUSDT": "SOLUSDT",
+    "SOLUSD": "SOLUSDT",
+    "SOLUSDT.P": "SOLUSDT",
+    "BINANCE:SOLUSDT": "SOLUSDT",
+    "BINANCE:SOLUSDT.P": "SOLUSDT",
 }
 
 _DEEPCOIN_ALIASES = {
@@ -639,6 +679,8 @@ def extract_symbol_from_payload(data):
         "GEVUSDT.P", "BINANCE:GEVUSDT", "GEVUSDT",
         "STXXUSDT.P", "BINANCE:STXXUSDT", "STXXUSDT",
         "XPTUSDT.P", "BINANCE:XPTUSDT", "XPTUSDT",
+        "XRPUSDT.P", "BINANCE:XRPUSDT", "XRPUSDT",
+        "SOLUSDT.P", "BINANCE:SOLUSDT", "SOLUSDT",
     ):
         if token in blob:
             return token

@@ -1008,12 +1008,73 @@ BREATH_XPT: Dict[str, Any] = {
     "exit_score": 2,
 }
 
+# XRP(瑞波币) —— 2026-09-13新增品种，B系统专属(45分钟周期)。用真实币安
+# 15m K线合成45分钟K线测(91.1天2916根合成K线、453个真实摆动点识别回调
+# 样本)：中位数回调2.42×ATR、75分位3.50×ATR、90分位4.96×ATR，
+# ATR%=0.47%。普通主流加密货币(不是贵金属/TradFi类)，min/max比例借用
+# 同为B系统45分钟主流币的BNB比例(3.9/5.4=0.72)。
+BREATH_XRP: Dict[str, Any] = {
+    "name": "XRP",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.91,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.42,  # 实测中位数回调(2.42)
+    "breath_tp23": 3.50,  # 实测75分位回调(3.50)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.72×max_mult（借用同族BNB的min/max比例）
+    "max_mult": 5.3,      # 覆盖实测90分位回调(4.96)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.0001,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# SOL(Solana) —— 2026-09-13新增品种，B系统专属(45分钟周期)。用真实币安
+# 15m K线合成45分钟K线测(91.1天2916根合成K线、439个真实摆动点识别回调
+# 样本)：中位数回调2.46×ATR、75分位3.48×ATR、90分位5.01×ATR，
+# ATR%=0.45%。同XRP借用BNB的min/max比例(0.72)。
+BREATH_SOL: Dict[str, Any] = {
+    "name": "SOL",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,   # 0.375×breath_tp12
+    "step_advance_atr": 0.60,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.46,  # 实测中位数回调(2.46)
+    "breath_tp23": 3.48,  # 实测75分位回调(3.48)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.72×max_mult（借用同族BNB的min/max比例）
+    "max_mult": 5.3,      # 覆盖实测90分位回调(5.01)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
 _BY_BINANCE_B = {
     "BNBUSDT": BREATH_BNB_B,
     "XPDUSDT": BREATH_XPD_B,
     "OPENAIUSDT": BREATH_OPENAI_B,
     "XAUUSDT": BREATH_XAU_B,
     "XPTUSDT": BREATH_XPT,
+    "XRPUSDT": BREATH_XRP,
+    "SOLUSDT": BREATH_SOL,
     # SNDKUSDT不需要B系统专属档：A系统SNDK已经是75分钟，跟CoinW/B系统
     # 周期一致，直接落回_BY_BINANCE共用同一份BREATH_SNDK即可。
 }
@@ -1045,6 +1106,8 @@ _BY_BINANCE = {
     "GEVUSDT": BREATH_GEV,  # 2026-09-06：新增
     "STXXUSDT": BREATH_STXX,  # 2026-09-08：新增
     "XPTUSDT": BREATH_XPT,  # 2026-09-13：新增，全品种只有一份45分钟校准，A/B共用
+    "XRPUSDT": BREATH_XRP,  # 2026-09-13：新增，同上，只有一份45分钟校准
+    "SOLUSDT": BREATH_SOL,  # 2026-09-13：新增，同上，只有一份45分钟校准
 }
 
 _BY_DEEPCOIN = {
