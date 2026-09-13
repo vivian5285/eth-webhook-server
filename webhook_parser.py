@@ -30,8 +30,13 @@ FIXED_LEVERAGE = 5
 # 里SMART_HARD_STOP_ENABLED分支。跟CoinW(defense_profiles.py::
 # TIER_LEVERAGE)完全同一份数值，保持"仓位管理权重一样"。A系统这两个
 # 常量完全不受影响，缺省行为不变。
-B_TIER_LEVERAGE = {0: 2.0, 1: 2.5, 2: 3.0}
-FIXED_LEVERAGE_B = 3.0  # 保留：tier缺失/非法时的兜底杠杆(=强档)
+# 2026-09-14再下调：宝贝拍板"币种还是有点多，仓位都下降"——弱/中/强
+# 三档从40%/50%/60%整体下调到10%/15%/20%(本金notional占比)，风险比例
+# 仍是20%不变，只是杠杆倍数从2.0/2.5/3.0统一下调到0.5/0.75/1.0(=20%×
+# 0.5/0.75/1.0=10%/15%/20%)。同一天同一批CoinW(defense_profiles.py::
+# TIER_LEVERAGE)一起改，保持两边权重继续一致。
+B_TIER_LEVERAGE = {0: 0.5, 1: 0.75, 2: 1.0}
+FIXED_LEVERAGE_B = 1.0  # 保留：tier缺失/非法时的兜底杠杆(=强档)
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"

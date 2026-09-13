@@ -2880,7 +2880,34 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         side = str(side or "").strip().upper()
         entry = float(entry or 0)
         atr = float(getattr(self, "open_atr", 0) or getattr(self, "current_atr", 0) or 0)
-        if side not in ("LONG", "SHORT") or entry <= 0 or atr <= 0:
+        if side not in ("LONG", "SHORT") or entry <= 0:
+            return None
+        if atr <= 0:
+            # 2026-09-14修复(实盘复现XRPUSDT，宝贝手工在交易所APP补开多单)：
+            # 纯手工仓位接管这一刻，行情引擎的定期ATR刷新可能还没轮到这个
+            # 品种，open_atr/current_atr都还是0——此前直接放弃(return None)，
+            # 这条兜底本身就再也没有重试机会，TP123永久缺失。这是纯粹的
+            # 时序问题(不是TV模板缺数据)：现拉一次真实K线自己算一遍ATR，
+            # 不必等行情引擎的下一轮定期刷新。
+            try:
+                interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(
+                    self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN,
+                )
+                from strategy_engine import klines as _sk_klines
+                bars = _sk_klines.get_bars(
+                    self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT,
+                )
+                from smart_hard_stop import calc_smart_hard_stop_price
+                _hard, _meta, _ok, _err = calc_smart_hard_stop_price(
+                    side, entry, bars or [], tier=1,
+                )
+                atr = float((_meta or {}).get("atr") or 0)
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] TP兜底现算ATR失败: {e}")
+                atr = 0.0
+            if atr > 0:
+                logger.info(f"[{self.symbol}] TP兜底现算ATR成功(行情引擎未及时刷新) atr={atr:.6f}")
+        if atr <= 0:
             return None
         profile = getattr(self, "breath_profile", None) or {}
         tp1_atr = float(profile.get("tp1_atr") or 1.35)

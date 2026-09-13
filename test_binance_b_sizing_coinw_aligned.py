@@ -3,10 +3,12 @@
 """
 2026-09-13新增：币安B系统("综合硬止损"体系)仓位权重对齐CoinW的回归测试。
 
-背景：宝贝要求"币安B系统的仓位就按照coinw的仓位管理权重一样"。当天
-两次拍板：第一次是本金×20%×3倍杠杆固定公式(不分tier)；同一天晚些
-时候改主意，恢复按趋势强弱分档——弱40%/中50%/强60%(本金notional
-占比)，风险比例20%不变，只有杠杆按tier查表(2.0/2.5/3.0x)。
+背景：宝贝要求"币安B系统的仓位就按照coinw的仓位管理权重一样"。2026-
+09-13当天两次拍板：第一次是本金×20%×3倍杠杆固定公式(不分tier)；同一
+天晚些时候改主意，恢复按趋势强弱分档——弱40%/中50%/强60%(本金
+notional占比)，风险比例20%不变，只有杠杆按tier查表(2.0/2.5/3.0x)。
+2026-09-14再下调：宝贝拍板"币种有点多，仓位都下降"，整体收窄到
+弱10%/中15%/强20%，杠杆查表同步改成0.5/0.75/1.0x。
 
 验证：
 1. A系统(SMART_HARD_STOP_ENABLED未设/为假)：leverage仍是FIXED_LEVERAGE
@@ -107,11 +109,11 @@ class TestSizingModeSelection(unittest.TestCase):
         qty, meta = self._run_calc(tier=None)
         self.assertEqual(meta["leverage"], FIXED_LEVERAGE_B)
 
-    def test_b_mode_tier_scales_qty_40_50_60_pct(self):
-        """本金1000U、价格100：弱/中/强三档应分别对应本金的40%/50%/60%
-        名义(qty=4.0/5.0/6.0)。"""
+    def test_b_mode_tier_scales_qty_10_15_20_pct(self):
+        """本金1000U、价格100：弱/中/强三档应分别对应本金的10%/15%/20%
+        名义(qty=1.0/1.5/2.0)。"""
         os.environ["SMART_HARD_STOP_ENABLED"] = "1"
-        expected_frac = {0: 0.40, 1: 0.50, 2: 0.60}
+        expected_frac = {0: 0.10, 1: 0.15, 2: 0.20}
         for tier, frac in expected_frac.items():
             qty, meta = self._run_calc(tier=tier, principal=1000.0, price=100.0)
             self.assertAlmostEqual(qty, 1000.0 * frac / 100.0, places=3, msg=f"tier={tier}")
