@@ -22,13 +22,16 @@ FIXED_MARGIN_PCT = FIXED_RISK_PCT
 FIXED_LEVERAGE = 5
 
 # 2026-09-13：币安B系统("综合硬止损"体系)专属仓位公式——宝贝要求"仓位
-# 管理权重跟CoinW一样"。CoinW 2026-09-12拍板的固定公式是本金×20%×3倍
-# 杠杆(=本金×0.6名义)，且不再按tier(弱/中/强)缩放仓位——tier的职责收窄
-# 成只管硬止损保护带宽度(K_tier)，不再影响下单量。风险比例20%跟A系统
-# 相同(FIXED_RISK_PCT)，只有杠杆倍数(5→3)和"不做tier缩放"这两点不同，
-# 见position_supervisor_binance.py::_calc_vps_open_qty里SMART_HARD_STOP_
-# ENABLED分支。A系统这两个常量完全不受影响，缺省行为不变。
-FIXED_LEVERAGE_B = 3.0
+# 管理权重跟CoinW一样"。CoinW 2026-09-12曾短暂改成固定本金×20%×3倍杠杆
+# (不分tier)，2026-09-13再拍板恢复按趋势强弱分档：弱40%/中50%/强60%
+# (本金notional占比)，风险比例20%不变，只有杠杆按档位变化。风险比例
+# 跟A系统相同(FIXED_RISK_PCT)，只有杠杆倍数按tier查表(而不是A系统固定
+# 5倍)这一点不同，见position_supervisor_binance.py::_calc_vps_open_qty
+# 里SMART_HARD_STOP_ENABLED分支。跟CoinW(defense_profiles.py::
+# TIER_LEVERAGE)完全同一份数值，保持"仓位管理权重一样"。A系统这两个
+# 常量完全不受影响，缺省行为不变。
+B_TIER_LEVERAGE = {0: 2.0, 1: 2.5, 2: 3.0}
+FIXED_LEVERAGE_B = 3.0  # 保留：tier缺失/非法时的兜底杠杆(=强档)
 EXCHANGE_LEVERAGE = FIXED_LEVERAGE
 VPS_MARGIN_LEVERAGE = FIXED_LEVERAGE
 SIZING_MODE = "RISK20_NOTIONAL5"

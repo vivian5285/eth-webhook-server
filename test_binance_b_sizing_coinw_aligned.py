@@ -3,18 +3,19 @@
 """
 2026-09-13新增：币安B系统("综合硬止损"体系)仓位权重对齐CoinW的回归测试。
 
-背景：宝贝要求"币安B系统的仓位就按照coinw的仓位管理权重一样"，币安A
-系统维持原样。CoinW 2026-09-12拍板的固定公式是本金×20%×3倍杠杆(=本金
-×0.6名义)，不再按tier(弱/中/强)缩放仓位——tier职责收窄成只管硬止损
-保护带宽度，不再影响下单量。
+背景：宝贝要求"币安B系统的仓位就按照coinw的仓位管理权重一样"。当天
+两次拍板：第一次是本金×20%×3倍杠杆固定公式(不分tier)；同一天晚些
+时候改主意，恢复按趋势强弱分档——弱40%/中50%/强60%(本金notional
+占比)，风险比例20%不变，只有杠杆按tier查表(2.0/2.5/3.0x)。
 
 验证：
 1. A系统(SMART_HARD_STOP_ENABLED未设/为假)：leverage仍是FIXED_LEVERAGE
    (5)，tier_mult仍按get_tier_notional_mult正常缩放——跟改动前完全一致。
-2. B系统(SMART_HARD_STOP_ENABLED=1)：leverage变成FIXED_LEVERAGE_B(3)，
-   tier_mult恒为1.0，不管tv_open_tier是0/1/2哪个档位。
-3. 端到端qty计算：B系统本金1000U、价格100时，qty应该等于
-   1000×0.20×3/100=6.0(风险比例20%两边一致，只有杠杆和tier缩放不同)。
+2. B系统(SMART_HARD_STOP_ENABLED=1)：leverage按tier查B_TIER_LEVERAGE表
+   (弱2.0x/中2.5x/强3.0x)，tier_mult恒为1.0(缩放已经在杠杆那步做完，
+   不叠加第二层)。
+3. 端到端qty计算：本金1000U、价格100时，弱/中/强三档应该分别对应
+   本金的40%/50%/60%名义。
 
 不碰任何真实账户/持仓，mock binance_client + monkeypatch os.environ，
 沿用test_binance_b_smart_stop_integration.py同款安全测试手法。
@@ -36,7 +37,9 @@ _fake_bc.is_orders_query_failed = lambda x: False
 sys.modules.setdefault("dingtalk", MagicMock())
 
 import position_supervisor_binance as psb  # noqa: E402
-from webhook_parser import FIXED_LEVERAGE, FIXED_LEVERAGE_B, FIXED_RISK_PCT  # noqa: E402
+from webhook_parser import (  # noqa: E402
+    FIXED_LEVERAGE, FIXED_LEVERAGE_B, FIXED_RISK_PCT, B_TIER_LEVERAGE,
+)
 
 
 def _mk_supervisor(symbol="BNBUSDT", tier=1):
@@ -92,27 +95,27 @@ class TestSizingModeSelection(unittest.TestCase):
         # A系统tier缩放仍生效：强档qty应该明显大于弱档(0.175x vs 0.07x)
         self.assertGreater(qty_strong, qty_weak)
 
-    def test_b_mode_uses_reduced_leverage(self):
+    def test_b_mode_uses_tier_scaled_leverage(self):
         os.environ["SMART_HARD_STOP_ENABLED"] = "1"
-        qty, meta = self._run_calc(tier=1)
+        for tier, expected_lev in B_TIER_LEVERAGE.items():
+            qty, meta = self._run_calc(tier=tier)
+            self.assertEqual(meta["leverage"], expected_lev, f"tier={tier}")
+            self.assertEqual(meta["margin_pct"], FIXED_RISK_PCT)
+
+    def test_b_mode_missing_tier_defaults_to_strongest(self):
+        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
+        qty, meta = self._run_calc(tier=None)
         self.assertEqual(meta["leverage"], FIXED_LEVERAGE_B)
-        self.assertEqual(meta["margin_pct"], FIXED_RISK_PCT)
 
-    def test_b_mode_tier_does_not_affect_qty(self):
-        """B系统不做tier缩放——弱/中/强三档算出来的qty应该完全一样。"""
+    def test_b_mode_tier_scales_qty_40_50_60_pct(self):
+        """本金1000U、价格100：弱/中/强三档应分别对应本金的40%/50%/60%
+        名义(qty=4.0/5.0/6.0)。"""
         os.environ["SMART_HARD_STOP_ENABLED"] = "1"
-        qty_weak, _ = self._run_calc(tier=0)
-        qty_mid, _ = self._run_calc(tier=1)
-        qty_strong, _ = self._run_calc(tier=2)
-        self.assertEqual(qty_weak, qty_mid)
-        self.assertEqual(qty_mid, qty_strong)
-
-    def test_b_mode_matches_coinw_formula_exactly(self):
-        """本金1000U、价格100：qty = 1000×0.20×3/100 = 6.0。"""
-        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
-        qty, meta = self._run_calc(tier=1, principal=1000.0, price=100.0)
-        self.assertAlmostEqual(qty, 6.0, places=3)
-        self.assertAlmostEqual(meta["notional"], 600.0, delta=1.0)
+        expected_frac = {0: 0.40, 1: 0.50, 2: 0.60}
+        for tier, frac in expected_frac.items():
+            qty, meta = self._run_calc(tier=tier, principal=1000.0, price=100.0)
+            self.assertAlmostEqual(qty, 1000.0 * frac / 100.0, places=3, msg=f"tier={tier}")
+            self.assertAlmostEqual(meta["notional"], 1000.0 * frac, delta=1.0, msg=f"tier={tier}")
 
     def test_a_mode_unaffected_matches_pre_change_formula(self):
         """本金1000U、价格100、中档tier=1(0.1225x)：

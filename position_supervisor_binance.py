@@ -40,6 +40,7 @@ from webhook_parser import (
     HARD_NOTIONAL_CAP,
     FIXED_LEVERAGE,
     FIXED_LEVERAGE_B,
+    B_TIER_LEVERAGE,
     FIXED_MARGIN_PCT,
     FIXED_RISK_PCT,
     FIXED_NOTIONAL_MULT,
@@ -6023,11 +6024,20 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             _rp, _ = get_active_sizing(self.symbol)
         except Exception:
             _rp = FIXED_RISK_PCT
+        tier = getattr(self, "tv_open_tier", None)
         # 2026-09-13：币安B系统("综合硬止损"体系)仓位权重对齐CoinW——宝贝
-        # 拍板"仓位管理权重跟CoinW一样"。CoinW的公式是本金×20%×3倍杠杆，
-        # 风险比例(_rp)两边都是20%不变，只有杠杆倍数不同(A=5x/B=3x)。
+        # 拍板"仓位管理权重跟CoinW一样"，按趋势强弱分档：弱40%/中50%/强
+        # 60%(本金notional占比)。风险比例(_rp)两边都是20%不变，只有杠杆
+        # 按tier查B_TIER_LEVERAGE表(A系统仍固定FIXED_LEVERAGE=5x不查表)。
         _b_mode = _smart_hard_stop_mode_enabled()
-        _leverage = FIXED_LEVERAGE_B if _b_mode else FIXED_LEVERAGE
+        if _b_mode:
+            try:
+                _tier_key = int(str(tier).strip())
+            except (TypeError, ValueError):
+                _tier_key = None
+            _leverage = B_TIER_LEVERAGE.get(_tier_key, FIXED_LEVERAGE_B)
+        else:
+            _leverage = FIXED_LEVERAGE
         # 用户要求（2026-08-08）：仓位公式与交易所真实杠杆彻底解耦——
         # 头寸永远按固定杠杆常量计算，跟交易所APP上手动设的杠杆无关，
         # 交易所杠杆调高只释放保证金，不放大下单量。
@@ -6048,10 +6058,9 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         # 见get_tier_notional_mult），缩放后按交易所qty_step重新对齐，
         # 缩放后的qty仍会走下面的_assert_notional_cap_or_reject总敞口上限校验，
         # 不绕过任何现有安全网。
-        # 2026-09-13：B系统不做这层tier缩放——跟CoinW 2026-09-12同一个决定
-        # 一致，tier的职责收窄成只管硬止损保护带宽度(K_tier，见
-        # smart_hard_stop.py)，不再影响下单量，固定按上面的杠杆公式走。
-        tier = getattr(self, "tv_open_tier", None)
+        # 2026-09-13：B系统的tier分档已经在上面选杠杆那一步做完了(查
+        # B_TIER_LEVERAGE)，这里不再叠加第二层缩放，tier_mult固定1.0，
+        # 避免tier被算两次。
         tier_mult = 1.0 if _b_mode else float(get_tier_notional_mult(self.symbol, tier))
         if qty > 0 and tier_mult != 1.0:
             qty_step_v = float(getattr(self, "qty_step", 0.001) or 0.001)
