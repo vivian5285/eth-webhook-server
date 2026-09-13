@@ -46,6 +46,21 @@ STRUCT_CONFIRM = 3             # fractal pivot 左右各3根确认
 STRUCT_BUFFER_ATR = 0.3        # 摆动点缓冲垫（×ATR）
 ATR_PERIOD = 14
 
+# 2026-09-13新增：宝贝实盘发现同一笔OPENAI空单，币安B系统(tier=2强·
+# 真放量确认→wide组合)算出硬止损距entry约80点(≈5.6×ATR)，CoinW(tier=0弱
+# →tight组合)只有约20点——根因是两边TV各自独立分析各自venue的价格走势
+# 算出不同的tier(不是bug，是两个市场各自真实的趋势强弱判断)，但wide模式
+# 原来对"结构止损离多远"完全没有上限——找到的摆动点可能是60根K线窗口
+# 内很久以前的一个高点/低点，跟当前ATR脱节，一旦离得太远，赶上开错方向
+# 会让亏损被显著放大，这正是宝贝担心的"币安太宽也不是好事"。
+# 修复：wide模式的最终距离不能超过tight模式基准距离(k×ATR)的
+# WIDE_MODE_CEILING_MULT倍——继续保留wide模式"让强趋势多喘口气、不被
+# 恰好路过的摆动点/过紧ATR带提前打出去"的本意，但给这份"多喘的空间"
+# 设一个绝对上限，防止结构止损离谱地远。1.5倍是折中：给强趋势明显比
+# tight模式(1.0×)更多呼吸空间，但不会像本次实盘这样膨胀到快2倍
+# (1500.95-entry ≈ 1.68× k×ATR)。
+WIDE_MODE_CEILING_MULT = 1.5
+
 VOLUME_CONFIRM_LOOKBACK = 20   # 基准量能取这个窗口内、最近N根之前的均量
 VOLUME_CONFIRM_RECENT_N = 3    # 最近几根的均量拿来跟基准比
 VOLUME_CONFIRM_MULT = 1.3      # 最近量能 ≥ 基准 × 此倍数 才算"真放量"
@@ -175,6 +190,8 @@ def calc_smart_hard_stop_price(
 
     pivot = _last_confirmed_pivot(bars, side, confirm)
 
+    wide_ceiling_dist = WIDE_MODE_CEILING_MULT * k * atr
+    ceiling_applied = False
     if side == "LONG":
         atr_stop = entry_price - k * atr
         if pivot is not None:
@@ -182,6 +199,9 @@ def calc_smart_hard_stop_price(
         else:
             struct_stop = min(float(b[3]) for b in bars)  # 找不到摆动点：简单窗口最低点兜底
         hard_sl = min(struct_stop, atr_stop) if wide_mode else max(struct_stop, atr_stop)
+        if wide_mode and (entry_price - hard_sl) > wide_ceiling_dist:
+            hard_sl = entry_price - wide_ceiling_dist
+            ceiling_applied = True
         if hard_sl >= entry_price:
             return 0.0, {}, False, f"stop_above_entry_long:{hard_sl}>={entry_price}"
     else:
@@ -191,6 +211,9 @@ def calc_smart_hard_stop_price(
         else:
             struct_stop = max(float(b[2]) for b in bars)
         hard_sl = max(struct_stop, atr_stop) if wide_mode else min(struct_stop, atr_stop)
+        if wide_mode and (hard_sl - entry_price) > wide_ceiling_dist:
+            hard_sl = entry_price + wide_ceiling_dist
+            ceiling_applied = True
         if hard_sl <= entry_price:
             return 0.0, {}, False, f"stop_below_entry_short:{hard_sl}<={entry_price}"
 
@@ -204,5 +227,10 @@ def calc_smart_hard_stop_price(
         "bars_used": len(bars),
         "volume_confirmed": vol_ok,
         "combo_mode": "wide" if wide_mode else "tight",
+        # 2026-09-13新增：wide模式距离上限是否生效——生效时说明本来的结构
+        # 止损比tight基准(k×ATR)远超过WIDE_MODE_CEILING_MULT倍，已经被
+        # 收紧到上限，日志/人工核查时能看出这次不是"自然"的wide结果。
+        "wide_ceiling_applied": ceiling_applied,
+        "wide_ceiling_dist": round(wide_ceiling_dist, 4) if wide_mode else 0.0,
     }
     return round(hard_sl, 2), meta, True, ""
