@@ -21022,10 +21022,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                             f"🔄 [重启] 人工/孤儿同向仓 {side} {pos['size']} {self._unit()} "
                             f"→ 闪电接管 TP123+止损+雷达"
                         )
+                        # 2026-09-14修复(实盘复现，B/C两账户XRPUSDT宝贝手工在
+                        # 交易所APP补开多单，重启接管全程无TV止损参考也没挂上
+                        # 任何交易所订单)：这里进入本分支的条件是"OR"——
+                        # reconcile显式标记manual_open，或者watched_qty<=0
+                        # (账本从未追踪过，纯手工新开仓最典型的样子)。但下面
+                        # 传给_perform_live_takeover的manual_open只看了
+                        # reconcile的旗标，watched_qty<=0触发进来的这条路
+                        # 会把manual_open传成False，导致manual_fresh在
+                        # _ensure_full_defense_stack_inner里也是False，
+                        # 2026-09-14新增的"手工接管现算综合硬止损"兜底整个
+                        # 被跳过，链路走到底仍然裸奔。改成跟上面判断条件本身
+                        # 保持一致，两个条件任一为真都当手工/孤儿仓处理。
+                        is_manual_or_orphan = bool(
+                            reconcile.get("manual_open")
+                            or float(self.watched_qty or 0) <= 0
+                        )
                         self._perform_live_takeover(
                             pos,
                             source="VPS重启",
-                            manual_open=bool(reconcile.get("manual_open")),
+                            manual_open=is_manual_or_orphan,
                             qty_change=reconcile.get("qty_manual_change"),
                         )
                         recover_ok = True
