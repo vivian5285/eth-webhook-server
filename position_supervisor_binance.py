@@ -18443,6 +18443,18 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
             self.tv_sl = float(self.current_sl)
         except Exception as e:
             logger.debug(f"[{self.symbol}] 反转锁盈复评跳过: {e}")
+        # 2026-09-13新增(宝贝拍板，币安B系统专属)：双均线破位快速平仓——
+        # 见radar_reentry_mixin.py DUAL_MA_EXIT_*常量顶部注释。跟反转锁盈
+        # 同一个位置调用，但这个检查更决断：真实放量确认破位时直接
+        # _close_all()市价清仓(内部自己处理，不等ladder继续跑)，没放量
+        # 确认时只顺着ladder棘轮同款写法收紧current_sl，不强平。A系统
+        # (SMART_HARD_STOP_ENABLED未设)完全不受影响，函数内部一开始就
+        # 会因为_smart_hard_stop_mode_enabled()为假直接返回。
+        try:
+            self.current_sl = self._maybe_fast_exit_on_dual_ma_break(px, float(self.current_sl or 0))
+            self.tv_sl = float(self.current_sl)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 双均线破位快速平仓复评跳过: {e}")
         # 2026-08-30新增：大赢家利润地板——见radar_reentry_mixin.py
         # BIG_WIN_ATR_THRESHOLD/BIG_WIN_RETAIN_FRAC顶部注释。跟反转锁盈
         # 是两个独立的棘轮，都只朝有利方向收紧，先后顺序不影响结果。

@@ -292,6 +292,35 @@ REVERSAL_LOCK_MIN_PROFIT_ATR = 1.0
 # tick(可能几秒一次)都发一次4H K线REST请求。
 REVERSAL_LOCK_REFRESH_SEC = 300.0
 
+# 2026-09-13新增(宝贝拍板，币安B系统专属——跟CoinW同步实施)："双均线破位
+# 快速平仓"。背景：币安B系统OPENAI靠ATR跟踪止损雷达在反弹时被打出(1404.56)，
+# 同一时刻CoinW的OPENAI止损还停在更远的1413.52没被打到，还在持仓——宝贝
+# 指出雷达不该只是单一的ATR跟踪系数去锁利润，还要主动看这个品种自己真实
+# 周期的裸K是否跌破/站上快慢双均线(做空=K线收盘价还在双均线下方才算趋势
+# 仍成立；做多=还在双均线上方才算成立)。跟REVERSAL_LOCK(4H裸K单根反转
+# 实体+放量，固定4H不管品种周期)是两套独立机制，可以同时生效：
+#   - REVERSAL_LOCK：只朝有利方向棘轮到保本价，不直接平仓，判据是"单根
+#     决定性反转K线"。
+#   - DUAL_MA_EXIT(本机制)：真实放量确认破位时直接_close_all()市价清仓，
+#     不等ATR跟踪止损慢慢追上；放量没确认(疑似假突破)时不强平，只把止损
+#     适度收紧到破位K线收盘价附近，给行情留一点时间和空间验证是否真反转
+#     ——只要没有真正站上/跌破双均线，就不算反转，继续按呼吸阶梯正常跑。
+# 用品种自己真实的TV周期(不是双均线自主重入用的固定30分钟——那个是复刻
+# TV Pine脚本内部计算周期，这里要看的是"这个品种自己真实图表"有没有站上/
+# 跌破均线，两件事目的不同)。
+DUAL_MA_EXIT_ENABLED = True
+DUAL_MA_EXIT_FAST_LEN = 8
+DUAL_MA_EXIT_SLOW_LEN = 20
+DUAL_MA_EXIT_MA_TYPE = "SMA"
+DUAL_MA_EXIT_KLINE_LIMIT = 80
+DUAL_MA_EXIT_REFRESH_SEC = 300.0  # 跟REVERSAL_LOCK同一节流窗口，够及时又不刷REST
+DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR = 0.3  # 假突破疑似时的收紧缓冲(×ATR)
+DUAL_MA_EXIT_INTERVAL_MIN = {
+    "BNBUSDT": 45, "XPDUSDT": 45, "SNDKUSDT": 75, "OPENAIUSDT": 120,
+    "XAUUSDT": 45, "XPTUSDT": 45,
+}
+DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周期校准)的兜底
+
 # 2026-08-30新增：大赢家利润保护地板——宝贝实盘复现：XMRUSDT峰值浮盈冲到
 # 3.47倍initial_atr，最终止损离场只保住峰值的38%；ETHUSDT峰值4.88倍ATR，
 # 保住61%。跟上面的反转锁盈(REVERSAL_LOCK_*，只保证"不由盈转亏"这一条
@@ -1909,6 +1938,115 @@ class RadarReentryMixin:
                 )
             except Exception:
                 pass
+        return out
+
+    def _maybe_fast_exit_on_dual_ma_break(self, curr_px: float, candidate_sl: float) -> float:
+        """双均线破位快速平仓——见上方DUAL_MA_EXIT_*常量顶部注释。币安B
+        系统专属(_smart_hard_stop_mode_enabled()把关，A系统这里直接原样
+        放行candidate_sl，不受任何影响)。
+
+        真实放量确认破位时直接调用self._close_all()市价清仓——这是本
+        文件里唯一一个会主动平仓而不是单纯棘轮candidate_sl的"maybe"函数，
+        调用方(_apply_breath_stop_tick)按跟其它棘轮完全相同的写法调用
+        (self.current_sl = self._maybe_fast_exit_on_dual_ma_break(...))，
+        平仓后返回当前(已经被_close_all_impl重置过的)current_sl，不会用
+        平仓前的候选值覆盖回去。
+        """
+        if not DUAL_MA_EXIT_ENABLED or not _smart_hard_stop_mode_enabled():
+            return candidate_sl
+        side = str(getattr(self, "current_side", "") or "").upper()
+        if side not in ("LONG", "SHORT"):
+            return candidate_sl
+        if bool(getattr(self, "trading_paused", False)) or bool(getattr(self, "api_monitor_only", False)):
+            return candidate_sl
+        now = time.time()
+        last_check = float(getattr(self, "_dual_ma_exit_last_check_ts", 0) or 0)
+        if last_check > 0 and (now - last_check) < DUAL_MA_EXIT_REFRESH_SEC:
+            return candidate_sl
+        self._dual_ma_exit_last_check_ts = now
+
+        interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN)
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT)
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 双均线破位拉K线跳过: {e}")
+            return candidate_sl
+        if not bars or len(bars) < DUAL_MA_EXIT_SLOW_LEN + 2:
+            return candidate_sl
+
+        try:
+            from dual_ma_trend import dual_ma_trend_ok
+            ok, meta = dual_ma_trend_ok(
+                side, bars, fast_len=DUAL_MA_EXIT_FAST_LEN, slow_len=DUAL_MA_EXIT_SLOW_LEN,
+                ma_type=DUAL_MA_EXIT_MA_TYPE,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 双均线破位判断跳过: {e}")
+            return candidate_sl
+        if ok:
+            return candidate_sl  # 空头仍在双均线下方/多头仍在双均线上方，趋势仍成立
+
+        close_px = float(bars[-1][4])
+        bar_time = int(bars[-1][0])
+        try:
+            from smart_hard_stop import _volume_confirmed
+            vol_ok = _volume_confirmed(bars)
+        except Exception:
+            vol_ok = False
+
+        if vol_ok:
+            already = int(getattr(self, "_dual_ma_exit_closed_bar", 0) or 0)
+            if already == bar_time:
+                return candidate_sl  # 同一根K线已经处理过，不重复触发
+            self._dual_ma_exit_closed_bar = bar_time
+            logger.warning(
+                f"⚡ [{self.symbol}] 双均线破位快速平仓 | {side} {interval_min}m | "
+                f"close={close_px:.4f} fast={meta.get('ma_fast', 0):.4f} "
+                f"slow={meta.get('ma_slow', 0):.4f} | 真实放量确认(非假突破) → 市价清仓"
+            )
+            try:
+                import dingtalk
+                self._dingtalk(
+                    dingtalk.report_system_alert,
+                    title=f"双均线破位快速平仓 [{self.symbol}]",
+                    detail=(
+                        f"{side}持仓在{interval_min}分钟K线上"
+                        f"{'跌破' if side == 'LONG' else '站上'}双均线"
+                        f"({DUAL_MA_EXIT_FAST_LEN}/{DUAL_MA_EXIT_SLOW_LEN})，且真实放量确认"
+                        f"(不是假突破)，判定趋势已反转，已市价快速平仓——不再等ATR跟踪"
+                        f"止损慢慢追上。close={close_px:.4f} fast_ma={meta.get('ma_fast', 0):.4f} "
+                        f"slow_ma={meta.get('ma_slow', 0):.4f}"
+                    ),
+                    level="重要",
+                )
+            except Exception:
+                pass
+            try:
+                self._close_all(reason="双均线破位+放量确认快速平仓")
+            except Exception as e:
+                logger.error(f"🚨 [{self.symbol}] 双均线破位快速平仓执行异常: {e}")
+            return float(getattr(self, "current_sl", 0) or 0)
+
+        # 放量没确认——疑似假突破，不强平，只顺着ladder棘轮同款写法适度
+        # 收紧candidate_sl到破位K线收盘价附近，给行情一点时间验证是否真反转。
+        atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
+        if atr <= 0:
+            return candidate_sl
+        if side == "LONG":
+            tighter = close_px - DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR * atr
+            out = max(candidate_sl, tighter) if candidate_sl > 0 else tighter
+            improved = out > candidate_sl
+        else:
+            tighter = close_px + DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR * atr
+            out = min(candidate_sl, tighter) if candidate_sl > 0 else tighter
+            improved = candidate_sl <= 0 or out < candidate_sl
+        if not improved:
+            return candidate_sl
+        logger.info(
+            f"🧭 [{self.symbol}] 双均线破位但放量未确认(疑似假突破) | {side} {interval_min}m | "
+            f"close={close_px:.4f} → 止损适度收紧 {candidate_sl:.4f}→{out:.4f}，暂不强平"
+        )
         return out
 
     def _maybe_lock_profit_on_big_win(self, candidate_sl: float) -> float:
