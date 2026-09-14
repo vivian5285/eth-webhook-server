@@ -36,13 +36,18 @@ sys.modules.setdefault("dingtalk", MagicMock())
 import position_supervisor_binance as psb  # noqa: E402
 
 
-def _make_bars(n=90, start=100.0, step=0.5):
+def _make_bars(n=90, start=100.0, step=0.5, expand_last_n=0, expand_mult=2.0):
+    """expand_last_n>0时把最后expand_last_n根的成交量放大到expand_mult倍，
+    满足2026-09-15新增的trend_confirmed_with_volume放量确认。"""
     bars = []
     t0 = 1_700_000_000_000
     period_ms = 30 * 60 * 1000
     for i in range(n):
         close = start + i * step
-        bars.append([t0 + i * period_ms, close - step, close + 0.5, close - 0.5, close, 100.0])
+        vol = 100.0
+        if expand_last_n > 0 and i >= n - expand_last_n:
+            vol = 100.0 * expand_mult
+        bars.append([t0 + i * period_ms, close - step, close + 0.5, close - 0.5, close, vol])
     return bars
 
 
@@ -111,11 +116,13 @@ class TestMaybeStartTrendReentry(unittest.TestCase):
         s._place_tv_catchup_limit.assert_not_called()
 
     def test_trend_confirmed_triggers_catchup_pipeline(self):
-        """核心场景：TV最后方向LONG，现价站上双均线——应该冻结catchup_*
-        字段并调用_place_tv_catchup_limit(复用既有执行管线)。"""
+        """核心场景：TV最后方向LONG，现价站上双均线+最近3根阳线+放量——
+        应该冻结catchup_*字段并调用_place_tv_catchup_limit(复用既有
+        执行管线)。"""
         s = _mk_supervisor()
         s.last_nonflat_hb_side = "LONG"
-        bars = _make_bars(n=90, step=0.5)  # 持续上涨，双均线确认多头
+        # 持续上涨(双均线确认多头)+最后3根放量2倍(满足新的放量确认)
+        bars = _make_bars(n=90, step=0.5, expand_last_n=3, expand_mult=2.0)
         _fake_bc.binance_client.get_current_price = MagicMock(return_value=bars[-1][4])
 
         with patch("strategy_engine.klines.get_bars", return_value=bars):
@@ -171,6 +178,41 @@ class TestMaybeStartTrendReentry(unittest.TestCase):
         # 这一层由既有代码保证，本测试确认不会抛异常即可。
         # (故意不assert调用次数，避免对_tv_heartbeat_catchup_tick的职责
         # 边界做重复断言)
+
+
+    def test_dual_ma_confirmed_but_no_volume_does_not_trigger(self):
+        """2026-09-15新增：双均线站上了，但没有放量(平量)——新的更严格
+        确认应该拒绝，不能只靠双均线就开仓。"""
+        s = _mk_supervisor()
+        s.last_nonflat_hb_side = "LONG"
+        bars = _make_bars(n=90, step=0.5)  # 平量
+        _fake_bc.binance_client.get_current_price = MagicMock(return_value=bars[-1][4])
+
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            s._maybe_start_trend_reentry()
+
+        s._place_tv_catchup_limit.assert_not_called()
+
+    def test_daily_cap_blocks_fourth_attempt_same_day(self):
+        """2026-09-15新增：每日上限(TREND_REENTRY_MAX_PER_DAY=3)第4次
+        应该被拒绝。"""
+        s = _mk_supervisor()
+        s.last_nonflat_hb_side = "LONG"
+        bars = _make_bars(n=90, step=0.5, expand_last_n=3, expand_mult=2.0)
+        _fake_bc.binance_client.get_current_price = MagicMock(return_value=bars[-1][4])
+
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            for _ in range(3):
+                s._trend_reentry_next_try_ts = 0.0  # 绕过冷却，专测每日上限
+                s._maybe_start_trend_reentry()
+            self.assertEqual(s._place_tv_catchup_limit.call_count, 3)
+
+            s._trend_reentry_next_try_ts = 0.0
+            s._maybe_start_trend_reentry()
+            self.assertEqual(
+                s._place_tv_catchup_limit.call_count, 3,
+                "第4次应该被每日上限拦下，不再调用_place_tv_catchup_limit",
+            )
 
 
 class TestPrecheckTrendReentryBranch(unittest.TestCase):

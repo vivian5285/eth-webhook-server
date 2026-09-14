@@ -571,10 +571,40 @@ def calculate_stop_long(
     # 雷达给的耐心不该超过TV自己愿意承担的风险。tv_stop_dist>0时用
     # entry−tv_stop_dist(TV止损空间100%，不是TV_STOP_FLOOR_FRAC那65%)
     # 兜底夹一次，两条地板哪个更紧(更靠近价格)取哪个。
-    if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
-        breath_floor = entry_price - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+    # 2026-09-15"悬崖变坡道"：上面这条地板只在step_count==0生效，但激活线
+    # 本身离entry就有约1.9×step_trigger那么远(2026-09-01注释已经点破同一
+    # 根因)，价格一摸线，step_count在武装后第一个tick就已经跳到1(上面
+    # 2026-08-17"每次最多前进一档"的棘轮保护，反而让它立刻跳过了0)——这
+    # 条本该给最早期缓冲的地板在实盘里几乎打不到，武装后止损直接从纯
+    # 保本跳到阶梯第一档，宝贝原话"雷达是不断锁住部分利润，不是掐着市价
+    # 的脖子走""让市价多奔跑，只要硬止损挂好就行，然后盈利了才慢慢推
+    # 雷达"，说的正是这个悬崖。改成随价格从entry走到TP1的进度连续收窄
+    # 的坡道：进度=0(刚武装)时坡道宽度=硬止损自己的距离(tv_stop_dist)，
+    # 进度=1(价格走到TP1)时收窄到跟现有pre_tp1标称宽度(trail_dist)一致，
+    # 不引入新的不衔接点；不依赖step_count，不会再被"武装第一tick就跳过
+    # 0"打穿。
+    if zone == "pre_tp1" and trail_dist > 0:
+        if tp1_px > 0:
+            tp1_dist = abs(float(tp1_px) - entry_price)
+        else:
+            tp1_dist = float(p.get("tp1_atr") or TP1_ATR) * initial_atr
+        progress = 0.0
+        if tp1_dist > 0:
+            progress = max(0.0, min(1.0, (new_highest - entry_price) / tp1_dist))
         if tv_stop_dist > 0:
-            breath_floor = max(breath_floor, entry_price - float(tv_stop_dist))
+            # 坡道公式是tv_stop_dist→trail_dist的线性插值。当trail_dist>
+            # tv_stop_dist(硬止损本身比pre_tp1标称宽度还紧，GSUSDT实盘
+            # 就是这种形状：trail_dist=7.90 > tv_stop_dist=6.52)时，
+            # 原始插值会在中间progress上短暂超出tv_stop_dist——"雷达给的
+            # 耐心不该超过TV自己愿意承担的风险"(2026-09-04注释)，这里补
+            # 一道min(...,tv_stop_dist)硬上限，这种形状下坡道退化成常数
+            # tv_stop_dist，不会比硬止损本身还松。
+            ramp_dist = float(tv_stop_dist) - (float(tv_stop_dist) - float(trail_dist)) * progress
+            ramp_dist = max(ramp_dist, float(trail_dist))
+            ramp_dist = min(ramp_dist, float(tv_stop_dist))
+            breath_floor = entry_price - ramp_dist
+        else:
+            breath_floor = entry_price - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
         if candidate > 0:
             candidate = min(candidate, breath_floor)
         else:
@@ -720,10 +750,23 @@ def calculate_stop_short(
     # trail_dist这个空间，不再被"new_lowest已经比entry低出多少"倒扣掉。
     #
     # 安全上限，SHORT对称版——见calculate_stop_long同日期注释。
-    if zone == "pre_tp1" and step_count == 0 and trail_dist > 0:
-        breath_floor = entry_price + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+    # 2026-09-15"悬崖变坡道"，SHORT对称版——见calculate_stop_long同日期
+    # 注释。
+    if zone == "pre_tp1" and trail_dist > 0:
+        if tp1_px > 0:
+            tp1_dist = abs(float(tp1_px) - entry_price)
+        else:
+            tp1_dist = float(p.get("tp1_atr") or TP1_ATR) * initial_atr
+        progress = 0.0
+        if tp1_dist > 0:
+            progress = max(0.0, min(1.0, (entry_price - new_lowest) / tp1_dist))
         if tv_stop_dist > 0:
-            breath_floor = min(breath_floor, entry_price + float(tv_stop_dist))
+            ramp_dist = float(tv_stop_dist) - (float(tv_stop_dist) - float(trail_dist)) * progress
+            ramp_dist = max(ramp_dist, float(trail_dist))
+            ramp_dist = min(ramp_dist, float(tv_stop_dist))
+            breath_floor = entry_price + ramp_dist
+        else:
+            breath_floor = entry_price + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
         if candidate > 0:
             candidate = max(candidate, breath_floor)
         else:

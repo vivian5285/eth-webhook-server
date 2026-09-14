@@ -162,8 +162,12 @@ def _smart_hard_stop_mode_enabled() -> bool:
 TREND_REENTRY_FAST_LEN = int(os.getenv("TREND_REENTRY_FAST_LEN", "15"))
 TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "30"))
 TREND_REENTRY_MA_TYPE = os.getenv("TREND_REENTRY_MA_TYPE", "SMA")
-TREND_REENTRY_KLINE_INTERVAL_MIN = int(os.getenv("TREND_REENTRY_KLINE_INTERVAL_MIN", "30"))
+# 2026-09-15：30→45分钟+确认口径从dual_ma_trend_ok换成trend_confirmed_
+# with_volume(双均线+最近3根同向实体+放量)——跟CoinW同一批改，见
+# _maybe_start_trend_reentry/_maybe_start_tv_heartbeat_catchup顶部注释。
+TREND_REENTRY_KLINE_INTERVAL_MIN = int(os.getenv("TREND_REENTRY_KLINE_INTERVAL_MIN", "45"))
 TREND_REENTRY_KLINE_LIMIT = int(os.getenv("TREND_REENTRY_KLINE_LIMIT", "80"))
+TREND_REENTRY_CANDLE_RUN = int(os.getenv("TREND_REENTRY_CANDLE_RUN", "3"))
 # 每次尝试(不管成功/趋势不确认)之间至少间隔这么久，避免现价刚好贴在
 # 均线附近来回穿越时每次idle-patrol tick都触发一轮拉K线评估
 TREND_REENTRY_COOLDOWN_SEC = float(os.getenv("TREND_REENTRY_COOLDOWN_SEC", "300"))
@@ -173,6 +177,10 @@ TREND_REENTRY_TP3_ATR = float(os.getenv("TREND_REENTRY_TP3_ATR", "4.0"))
 # 综合硬止损算不出来时(K线不够/摆动点异常)的ATR倍数应急兜底——跟既有
 # can_smart_reenter系那套止损后再入的应急倍数取同一个量级，不是回测值。
 TREND_REENTRY_HARD_SL_ATR = float(os.getenv("TREND_REENTRY_HARD_SL_ATR", "2.0"))
+# 2026-09-15新增(宝贝确认)：每个品种每天最多允许这套机制自主开仓几次，
+# 冷却+条件复核之外的额外风控上限，防止震荡行情里反复触发磨损——跟
+# CoinW的TREND_REENTRY_MAX_PER_DAY保持同一个数值。
+TREND_REENTRY_MAX_PER_DAY = int(os.getenv("TREND_REENTRY_MAX_PER_DAY", "3"))
 
 # tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
 # TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
@@ -3090,17 +3098,62 @@ class RadarReentryMixin:
         if not bool(getattr(self, "catchup_active", False)):
             self._maybe_start_trend_reentry()
 
+    def _trend_reentry_daily_allow(self) -> bool:
+        """2026-09-15新增：每个品种每天最多TREND_REENTRY_MAX_PER_DAY次
+        (宝贝确认的风控上限，独立于冷却+条件复核之外，跟CoinW同一批改)。
+        返回True时顺带把计数+1；调用方应只在真的要开仓前调用一次。"""
+        import datetime
+        today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        rec = dict(getattr(self, "_trend_reentry_daily", None) or {"date": "", "count": 0})
+        if rec.get("date") != today:
+            rec = {"date": today, "count": 0}
+        if int(rec.get("count") or 0) >= TREND_REENTRY_MAX_PER_DAY:
+            self._trend_reentry_daily = rec
+            return False
+        rec["count"] = int(rec.get("count") or 0) + 1
+        self._trend_reentry_daily = rec
+        return True
+
+    def _trend_confirmed_with_volume_gate(self, side: str):
+        """公共小工具：拉TREND_REENTRY_KLINE_INTERVAL_MIN周期K线，跑
+        dual_ma_trend.trend_confirmed_with_volume确认。返回(ok, meta)，
+        K线拉取失败时(ok=False, {})。供_maybe_start_trend_reentry和
+        _maybe_start_tv_heartbeat_catchup的快速通道共用，避免同一份
+        确认逻辑写两遍。"""
+        try:
+            from strategy_engine import klines as _sk_klines
+            bars = _sk_klines.get_bars(
+                self.symbol, f"{TREND_REENTRY_KLINE_INTERVAL_MIN}m",
+                limit=TREND_REENTRY_KLINE_LIMIT,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 趋势确认拉K线失败: {e}")
+            return False, {}
+        if not bars:
+            return False, {}
+        from dual_ma_trend import trend_confirmed_with_volume
+        return trend_confirmed_with_volume(
+            side, bars, fast_len=TREND_REENTRY_FAST_LEN, slow_len=TREND_REENTRY_SLOW_LEN,
+            ma_type=TREND_REENTRY_MA_TYPE, candle_run=TREND_REENTRY_CANDLE_RUN,
+        )
+
     def _maybe_start_trend_reentry(self):
         """
         2026-09-13新增(宝贝拍板，币安B系统专属)：TV方向+双均线趋势自主
         重入。只在VPS空仓、TV心跳当前也是FLAT时有意义——由上面
         _tv_heartbeat_catchup_tick在"没有正在进行的追回周期"这个前提下
-        调用。TV最后一个非空方向(last_nonflat_hb_side)如果仍然满足双
-        均线趋势确认，就自主开仓：用综合硬止损+ATR估算TP123管理这笔
-        仓位，走跟A式追回完全相同的执行管线(_place_tv_catchup_limit→
-        限价优价→预算耗尽转市价→_finalize_tv_catchup_fill)，只是触发
-        条件和止损计算方式不同，复用已经跑了很久的成熟执行/审计/防线
-        挂单基础设施，不重新造轮子。
+        调用。TV最后一个非空方向(last_nonflat_hb_side)如果仍然满足
+        趋势确认，就自主开仓：用综合硬止损+ATR估算TP123管理这笔仓位，
+        走跟A式追回完全相同的执行管线(_place_tv_catchup_limit→限价
+        优价→预算耗尽转市价→_finalize_tv_catchup_fill)，只是触发条件
+        和止损计算方式不同，复用已经跑了很久的成熟执行/审计/防线挂单
+        基础设施，不重新造轮子。
+
+        2026-09-15增强(宝贝反馈OPENAI连续3根阳线放量上涨且站上45分钟
+        双均线)：确认条件从单纯dual_ma_trend_ok换成更严格的
+        trend_confirmed_with_volume(双均线+最近3根同向实体+放量三者
+        都满足)，新增每日次数上限——跟CoinW同一批改，见
+        _trend_confirmed_with_volume_gate/_trend_reentry_daily_allow。
 
         跟本类既有的"自己出场后小区间重入"(can_smart_reenter/
         exit_in_reentry_zone)是两套独立机制：那套要求"现价在entry~
@@ -3125,6 +3178,18 @@ class RadarReentryMixin:
             return
         self._trend_reentry_next_try_ts = now + TREND_REENTRY_COOLDOWN_SEC
 
+        ok, meta = self._trend_confirmed_with_volume_gate(side)
+        if not ok:
+            logger.debug(f"[{self.symbol}] 自主重入：趋势未确认 {side} {meta}")
+            return
+        if not self._trend_reentry_daily_allow():
+            logger.warning(f"[{self.symbol}] 自主重入：今日次数已达上限({TREND_REENTRY_MAX_PER_DAY}) {side}")
+            return
+
+        # _trend_confirmed_with_volume_gate内部自己拉了一份K线做确认，
+        # 没有把bars传出来(接口保持给catchup快速通道复用时的简单签名)，
+        # 这里给综合硬止损计算重新拉一次——这条路径冷却300s一次，不是
+        # 热路径，多这一次K线请求可以忽略。
         try:
             from strategy_engine import klines as _sk_klines
             bars = _sk_klines.get_bars(
@@ -3132,18 +3197,9 @@ class RadarReentryMixin:
                 limit=TREND_REENTRY_KLINE_LIMIT,
             )
         except Exception as e:
-            logger.debug(f"[{self.symbol}] 自主重入拉K线失败: {e}")
+            logger.debug(f"[{self.symbol}] 自主重入拉K线失败(硬止损计算前): {e}")
             return
         if not bars:
-            return
-
-        from dual_ma_trend import dual_ma_trend_ok
-        ok, meta = dual_ma_trend_ok(
-            side, bars, fast_len=TREND_REENTRY_FAST_LEN, slow_len=TREND_REENTRY_SLOW_LEN,
-            ma_type=TREND_REENTRY_MA_TYPE,
-        )
-        if not ok:
-            logger.debug(f"[{self.symbol}] 自主重入：趋势未确认 {side} {meta}")
             return
 
         from binance_client import binance_client
@@ -3286,12 +3342,39 @@ class RadarReentryMixin:
         # 一旦确认(或心跳过期/TV转FLAT)自然结束等待，不需要额外计时器。
         # 只挡"要不要开始追"这一步，已经武装后的限价刷新/市价兜底沿用
         # 原有节奏，不重复加门槛（市价兜底那步宝贝已经明确要求不要犹豫）。
-        if not self._multi_tf_trend_confirmed(hb_side):
+        # 2026-09-15新增：更强的技术确认(45分钟双均线+最近3根同向实体+
+        # 放量)可以作为上面5m/15m/30m EMA+动量确认的平行快速通道——今天
+        # OPENAI在B账户被误判止损后TV其实还在持有，5m/15m/30m确认反复
+        # 未通过卡了几个小时，账户一直空仓。两条通道任一满足即可放行，
+        # 不影响原有确认逻辑本身，也不改动上面几道episode去重/并发上限/
+        # 利润空间闸门(仍然全部生效)。
+        multi_tf_ok = self._multi_tf_trend_confirmed(hb_side)
+        vol_ok = False
+        vol_meta = {}
+        if not multi_tf_ok:
+            vol_ok, vol_meta = self._trend_confirmed_with_volume_gate(hb_side)
+        if not (multi_tf_ok or vol_ok):
             logger.debug(
-                f"[{self.symbol}] TV心跳漏单：5m/15m/30m EMA+动量未一致确认{hb_side} "
-                f"→ 暂不启动追回，继续观察"
+                f"[{self.symbol}] TV心跳漏单：5m/15m/30m EMA+动量未一致确认{hb_side}，"
+                f"45m双均线+放量快速通道也未确认{vol_meta} → 暂不启动追回，继续观察"
             )
             return
+        if vol_ok and not multi_tf_ok:
+            # 走的是新的快速通道而非既有5m/15m/30m确认——套用同一个每日
+            # 上限(TREND_REENTRY_MAX_PER_DAY，宝贝确认的风控数字，跟
+            # _maybe_start_trend_reentry共用同一个计数器/同一条风控原则)。
+            # 原有5m/15m/30m确认通过时不占用这个上限，沿用它原本就有的
+            # episode去重+并发上限节制，不重复加限制。
+            if not self._trend_reentry_daily_allow():
+                logger.warning(
+                    f"[{self.symbol}] TV心跳追回快速通道：今日次数已达上限"
+                    f"({TREND_REENTRY_MAX_PER_DAY}) {hb_side} → 暂不启动，继续等5m/15m/30m确认"
+                )
+                return
+            logger.warning(
+                f"🧭 [{self.symbol}] TV心跳追回：走45分钟双均线+3根同向+放量快速通道"
+                f"确认{hb_side}(5m/15m/30m EMA未一致) → 启动追回"
+            )
 
         # 2026-08-21实盘复现：账户内曾同时出现5个品种一起进入观察名单——
         # EMA都通过了不代表可以无限制并发下单，账户级同时"已武装"(挂着
