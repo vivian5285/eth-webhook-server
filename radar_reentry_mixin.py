@@ -343,12 +343,39 @@ DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周
 # 距离或1×ATR，往往几分钟内就触发)——均线还没来得及跟上，加宽被双均线
 # 门槛拦下，等于形同虚设，两笔实盘都验证到最终锁的还是纯保本原值。
 # 2026-09-14当天改版：去掉"必须双均线先确认"这个前置门槛，只要触发了
-# 激活(本身已经证明价格朝有利方向走出了距离)，就无条件用"现价±ATR缓冲"
-# 跟纯保本位取更松的那个——真正的安全阀不是滞后的均线，而是下面两条
-# 硬性边界：绝不允许比综合硬止损(frozen_hard_sl_px)更松，也绝不允许
-# 倒退到比纯保本更紧(下限还是保本，不会因为这层加宽反而收紧)。
+# 激活(本身已经证明价格朝有利方向走出了距离)，就无条件用一个更宽的
+# 锚点跟纯保本位取更松的那个——真正的安全阀不是滞后的均线，而是下面
+# 两条硬性边界：绝不允许比综合硬止损(frozen_hard_sl_px)更松，也绝不
+# 允许倒退到比纯保本更紧(下限还是保本，不会因为这层加宽反而收紧)。
+# 2026-09-14当天第三版：实盘复现(BNBUSDT，10小时内B/E两账户各触发5次
+# 同一模式)显示"现价±0.5×ATR"这个缓冲量级根本不够用——激活线本身就是
+# min(0.8×TP1距离,1×ATR)算出来的，价格往往"刚摸到激活线就触发"，几乎
+# 不会有明显超涨(overshoot)。这种最常见的"刚好到线"情形下，
+# 现价-0.5×ATR算出来的锚点反而比纯保本(entry+tick+fee，通常只有
+# 0.5~0.6左右)更紧(因为激活线本身离entry就有1个ATR以上距离，减掉
+# 0.5×ATR缓冲后仍然离entry更远)，取更松那个的min/max结果自然又是回退
+# 到纯保本——等于加宽形同虚设，跟BNB当天复现的表现完全吻合。
+# 第三版最初的方案是改成锚定"激活线相对entry走的那段距离"，只保留其中
+# ACTIVATION_RETAIN_FRAC(50%)当止损缓冲(entry±0.5×gate_dist)——写完之后
+# 用BNB真实数字复算才发现这个方案本身也有一个方向性漏洞：当纯保本
+# (entry+tick+fee，通常只占gate_dist一个很小的比例，因为手续费率远小于
+# 一个ATR)本来就已经比"entry±0.5×gate_dist"这个锚点更靠近entry时，这个
+# 新锚点反而比纯保本更贴近激活线本身，等于比纯保本更紧——BNB就是这种
+# 情形(手续费保本距entry仅约0.59，而0.5×ATR缓冲约1.34，比手续费保本更
+# 深入激活线方向)，取更松的min/max结果又会回退成纯保本，跟"现价±0.5×
+# ATR"版本殊途同归地形同虚设。
+# 根本问题：用一个跟纯保本完全独立算出来的锚点，再拿去跟纯保本比"谁更
+# 松"，谁更松完全取决于两个不相关公式的巧合，不能保证任何时候都比纯
+# 保本更松。第三版最终修正：不再独立算锚点去比较，而是直接在纯保本的
+# 基础上做加法/减法——保本位再往回让出ACTIVATION_RETAIN_FRAC比例的
+# gate_dist当额外缓冲(LONG是保本位再减，SHORT是保本位再加)，这样锚点
+# 由构造上保证100%比纯保本更松，不再依赖任何巧合的数值关系，同时依然
+# 随激活线的远近(gate_dist)自适应，越远的行情让出的额外缓冲也越大。
+# 这跟已经验证过的"雷达止损不能比TV止损距离紧过50%"(project_radar_tv_
+# stop_floor_20260901)是同一个"在原有止损基础上按比例让出已走距离"的
+# 思路。
 DUAL_MA_ACTIVATION_GATE_ENABLED = True
-DUAL_MA_ACTIVATION_BUFFER_ATR = 0.5  # 略宽于DUAL_MA_EXIT自己收紧用的0.3，专用于首次激活加宽
+DUAL_MA_ACTIVATION_RETAIN_FRAC = 0.5  # 在纯保本基础上，额外让出的gate_dist比例当止损缓冲
 
 # 2026-09-13再新增(宝贝实盘截图复盘BNBUSDT.P发现)："突发放量反转K线快速
 # 锁保本"。背景：宝贝看真实图表发现——等K线收盘价真正站上/跌破双均线才
@@ -786,30 +813,40 @@ class RadarReentryMixin:
         """未激活一律休眠。pending_arm=False（如 TP3 互斥）不得误开雷达改单。"""
         return not bool(getattr(self, "radar_activated", False))
 
-    def _dual_ma_activation_anchor(self, side: str, curr_px: float):
+    def _dual_ma_activation_anchor(self, side: str, curr_px: float, init_breakeven: float = 0.0):
         """见上方DUAL_MA_ACTIVATION_GATE_*常量顶部注释："保本激活加宽"。
-        只在首次开仓触发激活的那一刻调用一次(非每tick)，返回一个"现价±
-        ATR缓冲"的更宽锚点供调用方跟纯保本位取更松的那个，无效时返回
-        None(调用方原样使用现有纯保本公式，不改变默认行为)。
-        2026-09-14改版：不再要求双均线先确认趋势——45分钟8/20均线天然
-        滞后于"刚摸到激活线"这个更快的瞬时判据，两笔实盘(BNB多头/XPT
-        插针回落多头)验证均线门槛几乎总是拦下加宽，形同虚设。真正的
-        安全阀交给调用方的硬止损封顶+纯保本下限两条硬性边界。"""
+        只在首次开仓触发激活的那一刻调用一次(非每tick)，返回一个更宽的
+        锚点供调用方跟纯保本位取更松的那个，无效时返回None(调用方原样
+        使用现有纯保本公式，不改变默认行为)。
+        2026-09-14第三版修正：不再独立算一个锚点去跟纯保本比"谁更松"(那
+        样谁更松取决于两个不相关公式的巧合，BNB实盘复算证明会巧合失效)，
+        而是直接在纯保本(init_breakeven)基础上，按gate_dist(激活线相对
+        entry走了多远)的ACTIVATION_RETAIN_FRAC比例再让出一段缓冲——由
+        构造保证100%比纯保本更松，同时随行情走出的距离自适应。"""
         if not DUAL_MA_ACTIVATION_GATE_ENABLED or not _smart_hard_stop_mode_enabled():
             return None
         side = str(side or "").upper()
         if side not in ("LONG", "SHORT"):
             return None
-        atr = float(self._get_locked_initial_atr() or getattr(self, "current_atr", 0) or 0)
-        px = float(curr_px or 0)
-        if atr <= 0 or px <= 0:
+        entry = float(getattr(self, "watched_entry", 0) or 0)
+        init_breakeven = float(init_breakeven or 0)
+        try:
+            gate_px = float(self._radar_activation_price() or 0)
+        except Exception as e:
+            logger.info(f"🧭 [{self.symbol}] 保本激活加宽跳过(激活线取值异常): {e} → 走现有纯保本")
+            return None
+        if entry <= 0 or gate_px <= 0 or init_breakeven <= 0:
             logger.info(
-                f"🧭 [{self.symbol}] 保本激活加宽跳过(atr={atr} curr_px={px} 无效) → 走现有纯保本"
+                f"🧭 [{self.symbol}] 保本激活加宽跳过(entry={entry} gate={gate_px} "
+                f"init={init_breakeven} 无效) → 走现有纯保本"
             )
             return None
+        gate_dist = abs(gate_px - entry)
+        if gate_dist <= 0:
+            return None
         if side == "LONG":
-            return px - DUAL_MA_ACTIVATION_BUFFER_ATR * atr
-        return px + DUAL_MA_ACTIVATION_BUFFER_ATR * atr
+            return init_breakeven - DUAL_MA_ACTIVATION_RETAIN_FRAC * gate_dist
+        return init_breakeven + DUAL_MA_ACTIVATION_RETAIN_FRAC * gate_dist
 
     def _maybe_arm_radar_on_activation(self, live_qty, curr_px, source=""):
         """
@@ -878,7 +915,7 @@ class RadarReentryMixin:
         _attempt_for_gate = int(getattr(self, "reentry_attempt", 0) or 0)
         if _attempt_for_gate == 0:
             try:
-                widened = self._dual_ma_activation_anchor(side, curr_px)
+                widened = self._dual_ma_activation_anchor(side, curr_px, init_breakeven=init)
             except Exception as e:
                 widened = None
                 logger.debug(f"[{self.symbol}] 保本激活加宽异常跳过: {e}")
@@ -894,8 +931,8 @@ class RadarReentryMixin:
                         final = min(final, hard_ceiling)
                 if abs(final - init) > 1e-9:
                     logger.info(
-                        f"🧭 [{self.symbol}] 保本激活双均线加宽 {init:.4f}→{final:.4f} "
-                        f"(双均线趋势仍成立，现价±{DUAL_MA_ACTIVATION_BUFFER_ATR}×ATR更宽)"
+                        f"🧭 [{self.symbol}] 保本激活加宽 {init:.4f}→{final:.4f} "
+                        f"(保留激活线距entry {DUAL_MA_ACTIVATION_RETAIN_FRAC:.0%}距离当缓冲)"
                     )
                 init = final
         self.initial_stop = float(init)
