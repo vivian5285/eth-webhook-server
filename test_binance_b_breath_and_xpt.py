@@ -169,7 +169,7 @@ class TestActiveBinanceSymbolsModeAware(unittest.TestCase):
         os.environ["BINANCE_SYMBOLS"] = "ETHUSDT"  # A的清单改了，不该影响B
         self.assertEqual(
             symbol_config.active_binance_symbols(),
-            ["BNBUSDT", "XPDUSDT", "SNDKUSDT", "OPENAIUSDT"],
+            ["BNBUSDT", "XPDUSDT", "SNDKUSDT", "OPENAIUSDT", "XAUUSDT"],
         )
 
     def test_b_mode_reads_its_own_env_key(self):

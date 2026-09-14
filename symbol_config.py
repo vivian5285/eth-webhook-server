@@ -610,11 +610,16 @@ def active_binance_symbols():
     # 2026-09-12恢复BNBUSDT：17品种暂停(commit 0deff95)之后宝贝要求单独
     # 把BNB的TV网关接收+实盘开仓恢复回来，其余仍暂停(OPENAI/XPD/SNDK+BNB
     # 共4个)。跟ASML/SKHYNIX删除时同一套"注释不删除"的可逆写法。
+    # 2026-09-15：宝贝拍板"精细化做好这几个"——币安B系统+CoinW都只留
+    # BNB/XPD/SNDK/OPENAI/XAU这5个品种精细打磨，XPT/XRP/SOL暂停(不是
+    # 删除，恢复直接把品种加回下面default_list/VPS .env即可)。SOL当时
+    # 还有持仓，按跟0deff95同样的既定语义处理：暂停只挡新开仓，已有
+    # 仓位交给引擎自己的硬止损/雷达管到自然平仓，不强制清仓。
     _smart_mode = str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in (
         "1", "true", "yes",
     )
     if _smart_mode:
-        default_list = "BNBUSDT,XPDUSDT,SNDKUSDT,OPENAIUSDT"
+        default_list = "BNBUSDT,XPDUSDT,SNDKUSDT,OPENAIUSDT,XAUUSDT"
         raw = os.getenv("BINANCE_SYMBOLS_B", default_list)
     else:
         default_list = "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT"
