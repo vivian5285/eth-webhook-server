@@ -37,8 +37,8 @@ def _ema(values: List[float], n: int) -> float:
 def dual_ma_trend_ok(
     side: str,
     klines: List[list],
-    fast_len: int = 15,
-    slow_len: int = 30,
+    fast_len: int = 8,
+    slow_len: int = 20,
     ma_type: str = "SMA",
 ) -> Tuple[bool, Dict[str, Any]]:
     """
@@ -127,8 +127,8 @@ def _consecutive_same_direction_candles(side: str, bars: List[list], n: int = 3)
 def trend_confirmed_with_volume(
     side: str,
     klines: List[list],
-    fast_len: int = 15,
-    slow_len: int = 30,
+    fast_len: int = 8,
+    slow_len: int = 20,
     ma_type: str = "SMA",
     candle_run: int = 3,
 ) -> Tuple[bool, Dict[str, Any]]:

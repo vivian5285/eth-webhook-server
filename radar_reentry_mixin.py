@@ -159,8 +159,10 @@ def _smart_hard_stop_mode_enabled() -> bool:
     return str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in ("1", "true", "yes")
 
 
-TREND_REENTRY_FAST_LEN = int(os.getenv("TREND_REENTRY_FAST_LEN", "15"))
-TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "30"))
+# 2026-09-15：15/30→8/20，跟DUAL_MA_EXIT(平仓判断"趋势还在不在")用
+# 同一套均线定义，两仓库同批改。
+TREND_REENTRY_FAST_LEN = int(os.getenv("TREND_REENTRY_FAST_LEN", "8"))
+TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "20"))
 TREND_REENTRY_MA_TYPE = os.getenv("TREND_REENTRY_MA_TYPE", "SMA")
 # 2026-09-15：30→45分钟+确认口径从dual_ma_trend_ok换成trend_confirmed_
 # with_volume(双均线+最近3根同向实体+放量)——跟CoinW同一批改，见
