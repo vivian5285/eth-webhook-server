@@ -43,16 +43,20 @@ class TestBreathProfileSystemParam(unittest.TestCase):
             got = breath_profiles.get_breath_profile(sym, "binance", system="B")
             self.assertEqual(got, expected, f"{sym}: B系统应返回专属档")
 
-    def test_b_system_falls_back_to_a_when_not_registered(self):
-        """SNDK没有B系统专属档(A本来就是75分钟)，system="B"应该原样落回A档。"""
-        a_profile = breath_profiles.get_breath_profile("SNDKUSDT", "binance", system="A")
-        b_profile = breath_profiles.get_breath_profile("SNDKUSDT", "binance", system="B")
+    def test_b_system_falls_back_to_a_for_unregistered_symbol(self):
+        """一个完全没在_BY_BINANCE_B登记过的品种(比如ETH，A/B周期本来
+        就一样)，system="B"应该原样落回A档——2026-09-19起SNDK已经有了
+        自己的B系统专属档(周期从75分钟改到91分钟，不再跟A系统一样)，
+        不能再用SNDK当这个"落回A档"场景的例子。"""
+        a_profile = breath_profiles.get_breath_profile("ETHUSDT", "binance", system="A")
+        b_profile = breath_profiles.get_breath_profile("ETHUSDT", "binance", system="B")
         self.assertEqual(a_profile, b_profile)
 
     def test_b_profiles_are_actually_different_from_a_for_period_changed_symbols(self):
         """确认B档真的是"不同的数字"，不是复制粘贴A档换了个名字——这几个
-        品种A/B周期不同(BNB/XPD/OPENAI/XAU)，数值理应不同。"""
-        for sym in ("BNBUSDT", "XPDUSDT", "OPENAIUSDT", "XAUUSDT"):
+        品种A/B周期不同(BNB/XPD/OPENAI/XAU/SNDK，2026-09-19起SNDK也加入
+        这个列表——91分钟B档跟A系统75分钟档不再一样)，数值理应不同。"""
+        for sym in ("BNBUSDT", "XPDUSDT", "OPENAIUSDT", "XAUUSDT", "SNDKUSDT"):
             a = breath_profiles.get_breath_profile(sym, "binance", system="A")
             b = breath_profiles.get_breath_profile(sym, "binance", system="B")
             self.assertNotEqual(
@@ -101,13 +105,26 @@ class TestResolveBinanceSymbolModeAware(unittest.TestCase):
             meta = symbol_config.resolve_binance_symbol("XAUUSDT")
             self.assertEqual(meta["breath_profile"], breath_profiles.BREATH_XAU, f"flag={val!r}")
 
-    def test_b_mode_sndk_unchanged(self):
-        """SNDK没有B档，B模式下也应该跟A模式返回相同的breath_profile。"""
+    def test_b_mode_eth_unchanged(self):
+        """ETH没有B档(A/B周期本来就一样)，B模式下也应该跟A模式返回相同
+        的breath_profile——2026-09-19起SNDK已经有了自己的B档(见上方
+        test_b_system_falls_back_to_a_for_unregistered_symbol同日期
+        注释)，不能再用SNDK当这个"没有B档"场景的例子。"""
+        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
+        meta_b = symbol_config.resolve_binance_symbol("ETHUSDT")
+        os.environ["SMART_HARD_STOP_ENABLED"] = "0"
+        meta_a = symbol_config.resolve_binance_symbol("ETHUSDT")
+        self.assertEqual(meta_a["breath_profile"], meta_b["breath_profile"])
+
+    def test_b_mode_sndk_now_uses_own_profile(self):
+        """2026-09-19新增：SNDK B系统周期(91分钟)已经跟A系统(75分钟)
+        不一致，B模式下必须返回专属档，不能再落回A档。"""
         os.environ["SMART_HARD_STOP_ENABLED"] = "1"
         meta_b = symbol_config.resolve_binance_symbol("SNDKUSDT")
         os.environ["SMART_HARD_STOP_ENABLED"] = "0"
         meta_a = symbol_config.resolve_binance_symbol("SNDKUSDT")
-        self.assertEqual(meta_a["breath_profile"], meta_b["breath_profile"])
+        self.assertNotEqual(meta_a["breath_profile"], meta_b["breath_profile"])
+        self.assertEqual(meta_b["breath_profile"], breath_profiles.BREATH_SNDK_B)
 
 
 class TestXptOnboarding(unittest.TestCase):
