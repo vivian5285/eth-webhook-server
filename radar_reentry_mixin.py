@@ -139,6 +139,16 @@ CATCHUP_MIN_REWARD_FRAC = 0.4
 # 后续如果发现太松/太紧，跟着真实案例继续调整。
 CATCHUP_MAX_PROFIT_EXTENSION_MULT = 1.5
 
+# 2026-09-19新增(宝贝反馈"本周系统问题总结"：仓位大小两边不一致)：CoinW
+# 的重入(不管是radar_be小区间智能限价再入场，还是追单确认watch)一直按
+# REENTRY_SIZE_FACTOR(0.6)统一缩小仓位(position_supervisor_coinw.py::
+# _reentry_size_factor，_handle_open里is_reentry=True时生效)，币安B
+# 系统这边同类重入此前一直原样复用出场前的qty快照(_reentry_open_snap)，
+# 100%满仓重开——同样的"档位权重"看起来一样，重入这个环节实际下单量
+# 两边差了近一倍。这里对齐CoinW，同样缩到0.6倍(_apply_reentry_size_
+# factor，见下方定义处调用点)。
+REENTRY_SIZE_FACTOR = float(os.getenv("REENTRY_SIZE_FACTOR", "0.6"))
+
 # ==================== TV方向+双均线趋势自主重入(2026-09-13新增·币安B
 # 系统专属，跟CoinW同一套设计) ====================
 # 宝贝拍板：VPS空仓、TV心跳当前也是FLAT时，只要TV最后一个非空方向
@@ -186,6 +196,15 @@ TREND_REENTRY_HARD_SL_ATR = float(os.getenv("TREND_REENTRY_HARD_SL_ATR", "2.0"))
 # 冷却+条件复核之外的额外风控上限，防止震荡行情里反复触发磨损——跟
 # CoinW的TREND_REENTRY_MAX_PER_DAY保持同一个数值。
 TREND_REENTRY_MAX_PER_DAY = int(os.getenv("TREND_REENTRY_MAX_PER_DAY", "3"))
+# 2026-09-19新增：这套机制是VPS自主判断开仓、不是TV真实信号，宝贝当初
+# (2026-09-13)已经拍板"缩小仓位对冲这份自主性带来的额外风险"，CoinW侧
+# (position_supervisor_coinw.py::TREND_REENTRY_SIZE_FACTOR)当时就已经
+# 落地成0.6倍，但币安B系统这边_prepare_tv_catchup_sizing一直是跟其它
+# 正常TV追回同一条路径(固定tier=1现算，没有额外缩小)，两边"同一个功能"
+# 实际仓位差了近一倍——这里补齐，_catchup_via_trend_reentry=True时按
+# 这个系数缩小(跟REENTRY_SIZE_FACTOR同源同值，各自独立命名是为了跟
+# CoinW两个常量的语义一一对应，互不影响)。
+TREND_REENTRY_SIZE_FACTOR = float(os.getenv("TREND_REENTRY_SIZE_FACTOR", "0.6"))
 
 # tv_stop跟tv_entry只差0.08(该品种真实ATR有3.9~11.87那么大)，追回原样按
 # TV给的距离锚定硬止损，等于挂了个形同虚设的止损，一根普通插针就打穿。
@@ -1282,6 +1301,27 @@ class RadarReentryMixin:
             pass
         return False
 
+    def _apply_reentry_size_factor(self, raw_qty: float, factor: float = None) -> float:
+        """把重入(智能限价再入场/追单确认watch/TV趋势自主重入)原本要
+        用的qty按缩小系数对齐——2026-09-19新增，对齐CoinW的
+        _reentry_size_factor机制，见上方REENTRY_SIZE_FACTOR顶部注释。
+        factor缺省用REENTRY_SIZE_FACTOR，TV趋势自主重入(_prepare_tv_
+        catchup_sizing)传TREND_REENTRY_SIZE_FACTOR复用同一套floor逻辑。
+        按qty_step对齐，低于min_qty则清零(交给调用方按"无数量"处理，
+        跟原有0值语义一致)。"""
+        raw_qty = float(raw_qty or 0)
+        if raw_qty <= 0:
+            return 0.0
+        f = float(REENTRY_SIZE_FACTOR if factor is None else factor)
+        qty = raw_qty * f
+        step = float(getattr(self, "qty_step", 0.001) or 0.001)
+        if step > 0:
+            qty = math.floor(qty / step) * step
+        min_qty = float(getattr(self, "min_qty", 0.001) or 0.001)
+        if qty < min_qty:
+            return 0.0
+        return qty
+
     def _maybe_start_smart_limit_reentry(self, snap: Dict[str, Any], meta: Dict[str, Any]):
         """仓位归零且微赚/保本后挂限价再入；硬止损/亏损/超次不挂。"""
         if not reentry_enabled(self.symbol):
@@ -1381,7 +1421,8 @@ class RadarReentryMixin:
                 # 走不到）。
                 self._arm_chase_reentry_watch(
                     side=side, exit_px=exit_px, atr=atr, attempt=attempt,
-                    deadline_ts=window_ts, qty=float(snap.get("qty") or 0),
+                    deadline_ts=window_ts,
+                    qty=self._apply_reentry_size_factor(float(snap.get("qty") or 0)),
                 )
             return False
 
@@ -3810,6 +3851,13 @@ class RadarReentryMixin:
         self.tv_suggested_qty = 0.0
         self.tv_sl_ref = 0.0
         qty, principal, margin_usdt, margin_pct, meta = self._calc_target_open_qty(curr_px)
+        qty = float(qty or 0)
+        # 2026-09-19新增：TV趋势自主重入(VPS自己判断开仓，不是TV真实信号)
+        # 按TREND_REENTRY_SIZE_FACTOR缩小，对齐CoinW同一机制(见上方常量
+        # 顶部注释)——普通TV心跳追回(_catchup_via_trend_reentry=False)
+        # 不受影响，仍是tier=1满额。
+        if bool(getattr(self, "_catchup_via_trend_reentry", False)):
+            qty = self._apply_reentry_size_factor(qty, factor=TREND_REENTRY_SIZE_FACTOR)
         self._catchup_qty = float(qty or 0)
         logger.info(
             f"📐 [{self.symbol}] 追回sizing tier=1 qty={self._catchup_qty} "
@@ -4440,7 +4488,8 @@ class RadarReentryMixin:
                             qty_now = float(getattr(self, "base_qty", 0) or 0)
                         self._arm_chase_reentry_watch(
                             side=side_now, exit_px=exit_px_now, atr=atr_now,
-                            attempt=attempt, deadline_ts=deadline, qty=qty_now,
+                            attempt=attempt, deadline_ts=deadline,
+                            qty=self._apply_reentry_size_factor(qty_now),
                         )
                 except Exception as e:
                     logger.debug(f"[{self.symbol}] 限价超限转追单确认跳过: {e}")
@@ -4499,6 +4548,7 @@ class RadarReentryMixin:
         qty = float((getattr(self, "_reentry_open_snap", None) or {}).get("qty") or 0)
         if qty <= 0:
             qty = float(getattr(self, "base_qty", 0) or 0)
+        qty = self._apply_reentry_size_factor(qty)
         if qty <= 0:
             logger.error(f"🚨 [{self.symbol}] 再入限价无数量")
             return False
