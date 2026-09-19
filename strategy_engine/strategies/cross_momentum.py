@@ -46,17 +46,48 @@ DEFAULT_PARAMS = {
     # 同一个病)。False 则不发 tp，只靠"排名跌出榜单"+ATR 止损离场，让利润跑。
     # cross_momentum_runwin 用 params 传 False 做单变量对照。
     "use_fixed_tp": True,
+    # 2026-09-19新增(cross_momentum_v2对照实验，宝贝要求)：
+    # exit_top_frac/exit_bottom_frac —— 原版进场阈值(top_frac=25%)跟离场
+    # 阈值是同一条线，排名在25%边界附近来回抖一格就反复开平仓，产生一批
+    # 接近零盈亏的噪音交易，拖累胜率。None=沿用旧行为(离场阈值=进场阈值)；
+    # 传一个比top_frac更宽的值(比如0.45)，进场要求前25%强，但只要还留在
+    # 前45%就不平仓，给排名噪音留缓冲带，参考指数编制"缓冲区"惯例。
+    "exit_top_frac": None,
+    "exit_bottom_frac": None,
+    # use_ema_direction_filter：宝贝要求——additionally require EMA(ema_fast_len)
+    # 相对 EMA(ema_slow_len) 的站上/跌破方向，跟动量排名方向一致才真正开仓。
+    # 排名进前25%只代表"篮子内相对最强"，不保证这个品种自己的均线结构是
+    # 多头排列——加一道自身趋势方向确认，过滤"篮子里矮子拔将军"式的入场。
+    "use_ema_direction_filter": False,
+    "ema_fast_len": 7,
+    "ema_slow_len": 25,
 }
 
 
-def _rank_bucket(symbol: str, universe_returns: Dict[str, float], top_frac: float, bottom_frac: float):
-    """返回 'top' / 'bottom' / 'mid' / None(数据不足或symbol不在榜里)。"""
+def _rank_bucket(
+    symbol: str, universe_returns: Dict[str, float], top_frac: float, bottom_frac: float,
+    exit_top_frac: Optional[float] = None, exit_bottom_frac: Optional[float] = None,
+    currently: Optional[str] = None,
+):
+    """返回 'top' / 'bottom' / 'mid' / None(数据不足或symbol不在榜里)。
+
+    currently传"LONG"/"SHORT"时，用更宽的exit_top_frac/exit_bottom_frac
+    (缓冲带)判断是否还留在榜单里，不传则用原版的进出同阈值行为(逐字
+    兼容旧版本)——两个新参数都不传时，这个函数跟旧版本完全等价。"""
     if symbol not in universe_returns or len(universe_returns) < 2:
         return None
     ranked = sorted(universe_returns.items(), key=lambda kv: kv[1], reverse=True)
     n = len(ranked)
-    top_n = max(1, int(round(n * top_frac)))
-    bottom_n = max(1, int(round(n * bottom_frac)))
+
+    eff_top = top_frac
+    eff_bottom = bottom_frac
+    if currently == "LONG" and exit_top_frac is not None:
+        eff_top = max(top_frac, float(exit_top_frac))
+    if currently == "SHORT" and exit_bottom_frac is not None:
+        eff_bottom = max(bottom_frac, float(exit_bottom_frac))
+
+    top_n = max(1, int(round(n * eff_top)))
+    bottom_n = max(1, int(round(n * eff_bottom)))
     top_symbols = {s for s, _ in ranked[:top_n]}
     bottom_symbols = {s for s, _ in ranked[-bottom_n:]}
     if symbol in top_symbols:
@@ -81,34 +112,56 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     last = bars[-1]
     price = float(last["c"])
     bar_time = int(last["t"])
-    bucket = _rank_bucket(symbol, universe_returns, float(p["top_frac"]), float(p["bottom_frac"]))
-    if bucket is None:
-        return None
 
     if position:
         side = str(position.get("side") or "").upper()
+        bucket = _rank_bucket(
+            symbol, universe_returns, float(p["top_frac"]), float(p["bottom_frac"]),
+            exit_top_frac=p.get("exit_top_frac"), exit_bottom_frac=p.get("exit_bottom_frac"),
+            currently=side,
+        )
+        if bucket is None:
+            return None
         if side == "LONG" and bucket != "top":
+            exit_frac = p.get("exit_top_frac") or p["top_frac"]
             return {
                 "action": "CLOSE_QUICK_EXIT",
                 "price": round(price, 6),
-                "reason": f"动量排名跌出榜单前{p['top_frac']*100:.0f}%",
+                "reason": f"动量排名跌出榜单前{exit_frac*100:.0f}%",
                 "bar_time": bar_time,
             }
         if side == "SHORT" and bucket != "bottom":
+            exit_frac = p.get("exit_bottom_frac") or p["bottom_frac"]
             return {
                 "action": "CLOSE_QUICK_EXIT",
                 "price": round(price, 6),
-                "reason": f"动量排名回升出榜单后{p['bottom_frac']*100:.0f}%",
+                "reason": f"动量排名回升出榜单后{exit_frac*100:.0f}%",
                 "bar_time": bar_time,
             }
         return None
 
+    bucket = _rank_bucket(symbol, universe_returns, float(p["top_frac"]), float(p["bottom_frac"]))
     if bucket == "top":
         action = "LONG"
     elif bucket == "bottom":
         action = "SHORT"
     else:
         return None
+
+    # 2026-09-19新增(宝贝要求)：额外要求EMA(7)相对EMA(25)的站上/跌破方向
+    # 跟动量排名方向一致——排名前25%只代表"篮子内相对最强"，不保证这个
+    # 品种自己的均线结构是多头排列，加一道自身趋势确认过滤"矮子里拔将军"
+    # 式的入场。
+    if bool(p.get("use_ema_direction_filter")):
+        closes = indicators.closes(bars)
+        ema_f = indicators.ema(closes, int(p["ema_fast_len"]))
+        ema_s = indicators.ema(closes, int(p["ema_slow_len"]))
+        if not ema_f or not ema_s:
+            return None
+        if action == "LONG" and not (ema_f[-1] > ema_s[-1]):
+            return None
+        if action == "SHORT" and not (ema_f[-1] < ema_s[-1]):
+            return None
 
     atr = indicators.wilder_atr(bars, atr_len)
     if atr <= 0:

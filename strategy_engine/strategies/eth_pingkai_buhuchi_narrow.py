@@ -85,6 +85,19 @@ DEFAULT_PARAMS = {
     "use_kdj_relax": False,
     "score_margin_for_skip_kdj": 2,
 
+    # ---- 2026-09-19新增(eth_pingkai_buhuchi_narrow_v2对照实验，宝贝要求)----
+    # adx_bonus_directional(默认False=100%等同03源码原版，不碰镜像逻辑)：
+    # 原版ADX达标时bull_score/bear_score同时各+1(下面那两行)——ADX衡量的是
+    # 趋势"强度"，不分方向，同时加给两边等于任何强趋势的K线都会同时满足
+    # long_entry_score=1这道门槛，6个打分因子里最容易触发的那个变成了
+    # "摆设"，入场门槛比03源码作者原本设计的6因子评分系统松得多。True时
+    # ADX加分只给"当前base周期EMA(ema_fast_len/ema_slow_len)已经站上/跌破
+    # 方向"那一边——用这套评分系统自己已经算出来的方向去决定ADX加给谁，
+    # 不是新造一个方向判断。**这条不是要覆盖真实TV策略的03源码**(那份
+    # 保留原样跑，作为参考基准)，是单独注册一个v2对照，看这道修正是否
+    # 真的能提升胜率。
+    "adx_bonus_directional": False,
+
     # ---- 核心参数（03源码脚本默认）----
     "ema_fast_len": 15,
     "ema_slow_len": 30,
@@ -270,8 +283,13 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if stoch_k_c < 45:
         bear_score += 1
     if adx_val > p["min_adx"]:
-        bull_score += 1
-        bear_score += 1
+        if not p["adx_bonus_directional"]:
+            bull_score += 1
+            bear_score += 1
+        elif ema_fast_c > ema_slow_c:
+            bull_score += 1
+        elif ema_fast_c < ema_slow_c:
+            bear_score += 1
 
     # ---- KDJ 硬门槛 + 【04源码新增】评分超标豁免 ----
     kdj_filter_long = (stoch_k_c > 50) if p["use_kdj_filter"] else True

@@ -325,7 +325,16 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         _open_from_signal(symbol, strategy, timeframe, sig)
 
 
-def _compute_universe_returns(symbols: List[str], timeframe: str, lookback_bars: int, cache: Dict[tuple, list]) -> Dict[str, float]:
+def _compute_universe_returns(
+    symbols: List[str], timeframe: str, lookback_bars: int, cache: Dict[tuple, list],
+    vol_scale: bool = False,
+) -> Dict[str, float]:
+    """vol_scale=False(默认，原行为逐字不变)：原始收益率排名——高波动品种
+    天然更容易冲进"最强/最弱"区间，本质上更像"选高波动品种"而不是纯动量。
+    vol_scale=True(2026-09-19新增，cross_momentum_v2/dual_momentum_v2用)：
+    收益率除以自身ATR%做波动率标准化(Moskowitz/Barroso-Santa-Clara一类
+    截面动量文献的标准做法)，让不同波动特征的品种排名可比，不是新拍的
+    经验参数，是量纲修正。"""
     out = {}
     for s in symbols:
         # 2026-09-04：改成走 _cached_bars(拉 BARS_LIMIT 根)，跟同一轮里
@@ -336,8 +345,16 @@ def _compute_universe_returns(symbols: List[str], timeframe: str, lookback_bars:
             continue
         c_now = float(bars[-1]["c"])
         c_then = float(bars[-1 - lookback_bars]["c"])
-        if c_then > 0:
-            out[s] = c_now / c_then - 1.0
+        if c_then <= 0:
+            continue
+        ret = c_now / c_then - 1.0
+        if vol_scale:
+            atr = indicators.wilder_atr(bars, 14)
+            if atr > 0 and c_now > 0:
+                ret = ret / (atr / c_now)
+            else:
+                continue
+        out[s] = ret
     return out
 
 
@@ -346,7 +363,9 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     symbols = entry["symbols"]
     lookback = int(entry.get("lookback_bars") or 20)
     fn = get_strategy(strategy)
-    universe_returns = _compute_universe_returns(symbols, timeframe, lookback, cache)
+    universe_returns = _compute_universe_returns(
+        symbols, timeframe, lookback, cache, vol_scale=bool(entry.get("vol_scale_rank")),
+    )
     if len(universe_returns) < 2:
         return
     for symbol in symbols:

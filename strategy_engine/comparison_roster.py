@@ -310,6 +310,20 @@ _TV_MIRROR_ROSTER = [
     if sym != "XPDUSDT"
 ]
 
+# 2026-09-19新增(宝贝要求逐个优化胜率，见strategies/__init__.py顶部同批
+# 说明)：eth_pingkai_buhuchi_narrow_v2/eth_kdj_exempt_narrow_v2——原版
+# ADX达标时把加分同时给bull_score和bear_score(ADX只衡量趋势强度、不分
+# 方向，这样加分等于给6因子评分系统里最容易触发的那个做成了摆设)。v2
+# 用同一批品种/周期/mtf，只把params换成adx_bonus_directional=True，让
+# ADX加分只给当前base周期EMA已经站上/跌破的那一边。_TV_MIRROR_ROSTER本身
+# (真实TV策略的逐字镜像)保持原样不动，当对照基准。
+_TV_MIRROR_V2_ROSTER = [
+    {**entry, "strategy": entry["strategy"] + "_v2",
+     "params": {**entry["params"], "adx_bonus_directional": True}}
+    for entry in _TV_MIRROR_ROSTER
+    if entry["strategy"] in ("eth_pingkai_buhuchi_narrow", "eth_kdj_exempt_narrow")
+]
+
 # 单品种战法：{symbol, strategy, timeframe, params?, bars_limit?, mtf?}
 SINGLE_SYMBOL_ROSTER = (
     [{"symbol": s, "strategy": "turtle_breakout", "timeframe": "4h"} for s in _TURTLE_SYMBOLS]
@@ -321,6 +335,16 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "time_series_momentum_v2", "timeframe": "1d", "params": _TSMOM_V2_PARAMS} for s in _ALL_SYMBOLS]
     # 2026-09-07：宝贝设计的多周期多因子择时（base=4h + 日线大方向）
     + [{"symbol": s, "strategy": "mtf_ema_macd_cci", "timeframe": "4h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
+    # 2026-09-19新增：mtf_ema_macd_cci_v2——原版用来确认"趋势开始"的结构
+    # 窗口(brk_lookback=10根)比确认"趋势结束"的窗口(exit_struct_lookback=5
+    # 根)宽一倍，是不对称的，v2把两个窗口对齐成10；再加
+    # max_breakout_extension_atr_mult=0.5，对"追多高"设上限，避免入场就
+    # 把固定ATR止损预算的大头吃在这根放量K线自己身上。日线EMA7/30依然
+    # 只当tier参考、不gate交易——这是宝贝原话设计的规则，v2也遵守，不
+    # 额外加方向硬门槛。
+    + [{"symbol": s, "strategy": "mtf_ema_macd_cci_v2", "timeframe": "4h", "mtf": ["1d"],
+        "params": {"exit_struct_lookback": 10, "max_breakout_extension_atr_mult": 0.5}}
+       for s in _ALL_SYMBOLS]
     # 2026-09-10：DualThrust 区间突破（base=1h + 日线 n 日 Range）
     + [{"symbol": s, "strategy": "dual_thrust", "timeframe": "1h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
     # 2026-09-10：三板块特化战法——每套只挂本板块品种(不进 _ALL_SYMBOLS)。
@@ -354,6 +378,18 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "td_sequential", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "wavetrend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "heikin_ashi_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-19新增：heikin_ashi_trend_v2——原版require_growing_body要求
+    # streak里实体一根比一根大，等于系统性地把入场锁定在这波HA同色行情
+    # 最夸张、最延伸的那一根(偏晚入场)；离场用的"下影线过长"判断反而没用
+    # 在入场质量上。v2改用require_clean_entry_bar(拿HA自身"强势K线下影
+    # 极短"的定义去挑入场质量，不是新造参数)，wick_exit_atr_floor_frac
+    # 修复十字星场景对分母趋零过度敏感的问题，再加EMA(7/25)方向确认。
+    # 明确不加固定止盈——这套的收益全靠"让利润奔跑"的肥尾，加止盈会
+    # 把胜率做好看但期望值大概率变差。
+    + [{"symbol": s, "strategy": "heikin_ashi_trend_v2", "timeframe": "4h",
+        "params": {"require_growing_body": False, "require_clean_entry_bar": True,
+                   "wick_exit_atr_floor_frac": 0.15, "use_ema_direction_filter": True}}
+       for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # 2026-09-12：vwap_ema_regime——ADX(2h)状态开关：趋势腿走2h EMA(10/30)，
     # 震荡腿走 vwap_mean_reversion 原版逻辑但要 15m 分辨率，靠 "mtf":["15m"]
@@ -371,6 +407,18 @@ SINGLE_SYMBOL_ROSTER = (
     # ── 2026-09-04第二批新增7套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "mtf_ema_pullback", "timeframe": "15m", "mtf": ["1h"], "params": {"use_fixed_tp": False}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vwap_mean_reversion", "timeframe": "15m"} for s in _ALL_SYMBOLS]
+    # 2026-09-19新增：vwap_mean_reversion_v2——⚠️只在擂台纸面版本上验证，
+    # 不碰真实账户vwap_live那套代码。原版OPEN信号带tp1=tp2=tp3=入场时
+    # 锁死的VWAP值，通用_check_stop_tp会优先拿这个旧值去平仓，抢在"用
+    # 实时VWAP判断回归"这条真正逻辑之前成交——但VWAP是session内逐根
+    # 滚动重算的，锁死的旧值离场，平的不是"现在真正回归到的位置"。v2用
+    # disable_frozen_tp=True关掉这条，逼平仓走实时VWAP判断；
+    # use_htf_adx_veto=True额外看4h(通过mtf注入)的ADX，补上15m自己测不
+    # 出来的大周期趋势；min_reward_risk_mult=1.0要求止盈距离至少覆盖
+    # 止损距离，安静session里"担1.5倍ATR风险博很小目标"的信号直接跳过。
+    + [{"symbol": s, "strategy": "vwap_mean_reversion_v2", "timeframe": "15m", "mtf": ["4h"],
+        "params": {"disable_frozen_tp": True, "use_htf_adx_veto": True, "min_reward_risk_mult": 1.0}}
+       for s in _ALL_SYMBOLS]
     # 2026-09-12：vwap_mean_reversion_30m——已经上真实账户后，宝贝问15m是不
     # 是最合适的周期，拿真实合约K线做手续费敏感性回测发现单笔优势薄、双边
     # taker手续费(真实成交commission核对过约0.10%)吃掉大部分优势，15m下单
@@ -408,6 +456,7 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "oi_price_confirm", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05：TV真实策略复刻拉进擂台 ────────────────────────────────
     + _TV_MIRROR_ROSTER
+    + _TV_MIRROR_V2_ROSTER
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
@@ -442,6 +491,32 @@ UNIVERSE_ROSTER = [
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
         "params": {"use_fixed_tp": False},
+    },
+    # 2026-09-19新增(宝贝要求逐个优化胜率)：cross_momentum_v2/dual_momentum_v2。
+    # 原版排名用原始涨跌幅，高波动品种天然更容易冲进"最强/最弱25%"——
+    # 更像"选高波动品种"，不是纯动量。vol_scale_rank=True(_tick_universe_
+    # entry独立读取的roster级开关，不透传给策略params)让排名改用"收益率
+    # /自身ATR%"做波动率标准化(截面动量文献标准做法，不是拍脑袋参数)。
+    # exit_top_frac/exit_bottom_frac=0.45给排名边界加缓冲带，原版进出场
+    # 用同一条25%阈值，边界附近来回抖动的噪音交易会反复开平仓拖累胜率。
+    # dual_momentum再加abs_momentum_hurdle_mult=0.5，把原版形同虚设的
+    # "own_ret>0"绝对动量门槛换成"按自身ATR%缩放"的非零门槛(还原
+    # Antonacci原书用无风险利率当门槛的本意)。两者都加EMA(7/25)方向确认。
+    {
+        "strategy": "cross_momentum_v2",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "vol_scale_rank": True,
+        "params": {"exit_top_frac": 0.45, "exit_bottom_frac": 0.45, "use_ema_direction_filter": True},
+    },
+    {
+        "strategy": "dual_momentum_v2",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "vol_scale_rank": True,
+        "params": {"abs_momentum_hurdle_mult": 0.5, "use_ema_direction_filter": True},
     },
     # 2026-09-10：币圈 ETH 系列板块特化——只在 ETH 生态小篮子里做，
     # ETH 大盘 beta 门 + 相对强弱 + 资金费率拥挤度否决(见 strategies/

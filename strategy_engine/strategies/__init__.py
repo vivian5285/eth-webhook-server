@@ -62,6 +62,12 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import eth_pingkai_buhuchi_narrow
     STRATEGIES["eth_pingkai_buhuchi_narrow"] = eth_pingkai_buhuchi_narrow.generate_signal
+    # 2026-09-19新增：同一份代码注册_v2对照名，配合comparison_roster.py
+    # 里的params={"adx_bonus_directional": True}修正ADX加分不分方向的
+    # 打分bug(详见eth_pingkai_buhuchi_narrow.py该参数注释)。原版是真实
+    # TV策略的逐字镜像，保持不动当基准，_v2单独验证这处修正是否真的
+    # 提升胜率。
+    STRATEGIES["eth_pingkai_buhuchi_narrow_v2"] = eth_pingkai_buhuchi_narrow.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] eth_pingkai_buhuchi_narrow 加载失败: {_e}")
@@ -69,6 +75,7 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import eth_kdj_exempt_narrow
     STRATEGIES["eth_kdj_exempt_narrow"] = eth_kdj_exempt_narrow.generate_signal
+    STRATEGIES["eth_kdj_exempt_narrow_v2"] = eth_kdj_exempt_narrow.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] eth_kdj_exempt_narrow 加载失败: {_e}")
@@ -95,6 +102,12 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import cross_momentum
     STRATEGIES["cross_momentum"] = cross_momentum.generate_signal
+    # 2026-09-19新增：同一份代码注册_v2对照名。comparison_roster.py里配了
+    # vol_scale_rank=True(排名按自身ATR%做波动率标准化，不是原始涨跌幅
+    # 排名——原版本质上更接近"选高波动品种")+ exit_top_frac/exit_bottom_
+    # frac=0.45(进出场阈值拉开，排名边界抖动不再反复开平仓)+ EMA(7/25)
+    # 方向确认，详见cross_momentum.py DEFAULT_PARAMS注释。
+    STRATEGIES["cross_momentum_v2"] = cross_momentum.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] cross_momentum 加载失败: {_e}")
@@ -133,6 +146,12 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import dual_momentum
     STRATEGIES["dual_momentum"] = dual_momentum.generate_signal
+    # 2026-09-19新增：同一份代码注册_v2对照名。原版"绝对动量"门槛own_ret>0
+    # 实测形同虚设(胜率跟cross_momentum完全一样)，_v2用
+    # abs_momentum_hurdle_mult=0.5换成按自身ATR%缩放的非零门槛，
+    # 还原Antonacci原书"要求收益显著、不是无风险利率噪音"的本意，
+    # 再加EMA(7/25)方向确认，详见dual_momentum.py DEFAULT_PARAMS注释。
+    STRATEGIES["dual_momentum_v2"] = dual_momentum.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] dual_momentum 加载失败: {_e}")
@@ -214,6 +233,12 @@ try:
     # klines.py::get_bars本来就支持任意非原生周期自动合成(TV复刻的
     # 90m/150m早就在用同一套机制)，不需要额外代码。
     STRATEGIES["vwap_mean_reversion_45m"] = vwap_mean_reversion.generate_signal
+    # 2026-09-19新增：vwap_mean_reversion_v2——⚠️只在擂台纸面版本验证，不
+    # 碰真实账户vwap_live代码。修正原版tp1锁死入场时刻VWAP值、抢在实时
+    # VWAP回归判断之前成交的问题(disable_frozen_tp)，加4h ADX否决补15m
+    # 自己测不出来的大周期趋势(use_htf_adx_veto，配合roster的mtf注入)，
+    # 加最小盈亏比门槛(min_reward_risk_mult)，详见DEFAULT_PARAMS注释。
+    STRATEGIES["vwap_mean_reversion_v2"] = vwap_mean_reversion.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vwap_mean_reversion 加载失败: {_e}")
@@ -419,6 +444,11 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import mtf_ema_macd_cci
     STRATEGIES["mtf_ema_macd_cci"] = mtf_ema_macd_cci.generate_signal
+    # 2026-09-19新增：同一份代码注册_v2对照名——离场结构窗口对齐进场窗口
+    # (exit_struct_lookback=brk_lookback=10)+ 追高上限
+    # (max_breakout_extension_atr_mult)，详见DEFAULT_PARAMS注释。日线
+    # EMA7/30继续只当tier参考、不gate，遵守宝贝原话的设计规则。
+    STRATEGIES["mtf_ema_macd_cci_v2"] = mtf_ema_macd_cci.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] mtf_ema_macd_cci 加载失败: {_e}")
@@ -565,6 +595,12 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import heikin_ashi_trend
     STRATEGIES["heikin_ashi_trend"] = heikin_ashi_trend.generate_signal
+    # 2026-09-19新增：同一份代码注册_v2对照名——require_clean_entry_bar
+    # 换掉require_growing_body(原版把入场锁定在streak里实体最夸张的
+    # 那一根，系统性偏晚)，wick_exit_atr_floor_frac修十字星场景对分母
+    # 趋零过度敏感，加EMA(7/25)方向确认。明确不加固定止盈，详见
+    # DEFAULT_PARAMS注释。
+    STRATEGIES["heikin_ashi_trend_v2"] = heikin_ashi_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] heikin_ashi_trend 加载失败: {_e}")
@@ -620,6 +656,18 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "明显超标(超门槛≥2分)时豁免 KDJ 硬门槛，捕捉趋势刚启动、StochK 还"
         "没过50的早期机会。品种：TSLA/ANTHROPIC/PAXG/ZEC。"
     ),
+    "eth_pingkai_buhuchi_narrow_v2": (
+        "跟'eth_pingkai_buhuchi_narrow'同一套真实TV逻辑，只修一处评分bug："
+        "原版ADX达标时同时给bull_score和bear_score各+1(ADX只衡量趋势强度"
+        "不分方向，等于6因子评分系统里最容易触发的那个被做成了摆设，入场"
+        "门槛比03源码作者原意松得多)。v2的ADX加分只给当前EMA已经站上/"
+        "跌破方向的那一边。原版保留不动当真实策略基准，v2单独验证这处"
+        "修正是否真的提升胜率。"
+    ),
+    "eth_kdj_exempt_narrow_v2": (
+        "跟'eth_kdj_exempt_narrow'同一套逻辑，同一处ADX加分方向修正，"
+        "见eth_pingkai_buhuchi_narrow_v2说明。"
+    ),
     "bnb_heartbeat_real_reversal": (
         "BNB真实TV策略复刻：'心跳版本ETH(4H+日线·宽止盈等真反转版)'——"
         "01版本的简化版(去掉加仓/评分骤降/评分新鲜度)，宽止盈系数跟01/02"
@@ -637,6 +685,13 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "跨品种动量因子(Jegadeesh-Titman学术动量异象)：把篮子里全部品种"
         "按近期涨跌幅排名，做多最强25%、做空最弱25%，排名跌出区间就离场。"
         "唯一一个看'相对强弱'而不是单品种自身形态的策略。"
+    ),
+    "cross_momentum_v2": (
+        "跟'cross_momentum'同一套相对动量思路，修三处：①排名改用收益率"
+        "/自身ATR%做波动率标准化(原版原始涨跌幅排名，高波动品种天然更容易"
+        "冲进最强/最弱区间，更像'选高波动品种')；②进出场阈值拉开缓冲带"
+        "(进前25%、出前45%)，原版进出用同一条线，边界抖动会反复开平仓；"
+        "③加EMA(7/25)方向确认，排名最强不代表自身均线结构是多头排列。"
     ),
     "connors_rsi2": (
         "Connors RSI-2均值回归(Larry Connors公开发表)：只在SMA200方向"
@@ -667,6 +722,15 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "多加一道'绝对动量'过滤——候选池里的品种，还必须自己这段时间真的"
         "是同方向涨跌，不是'矮子里拔将军'。回答'多这道过滤到底是减少假"
         "信号还是错过真实机会'，直接对照cross_momentum就是最干净的实验。"
+    ),
+    "dual_momentum_v2": (
+        "跟'dual_momentum'同一套双重动量思路，修两处：①绝对动量门槛原版"
+        "是own_ret>0，篮子前25%强的品种几乎天然满足，实测胜率跟"
+        "cross_momentum完全一样(56.6% vs 56.6%)、笔数只少11%，等于没真的"
+        "在过滤——v2换成own_ret必须超过0.5×自身ATR%的非零门槛，还原"
+        "Antonacci原书用无风险利率当门槛的本意(要求收益显著、不是噪音)；"
+        "②加EMA(7/25)方向确认。排名/波动率标准化改动跟cross_momentum_v2"
+        "同款。"
     ),
     "time_series_momentum": (
         "Time Series Momentum时间序列动量(Moskowitz-Ooi-Pedersen 2012年"
@@ -757,6 +821,16 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "bollinger_rsi_contrarian/adx_regime_switch的均值回归腿都用移动均线"
         "中轨(等权收盘价)不同，这套中枢是成交量加权价，放量区间位置差别"
         "明显。跟bollinger_squeeze同用偏离带但方向相反(回归vs突破)。"
+    ),
+    "vwap_mean_reversion_v2": (
+        "跟'vwap_mean_reversion'同一套均值回归思路，15m，修三处(⚠️只在"
+        "擂台纸面版本验证，不碰真实账户vwap_live代码)：①原版tp1锁死入场"
+        "时刻的VWAP值，通用引擎优先拿这个旧值平仓，抢在'用实时VWAP判断"
+        "回归'这条真正逻辑之前成交——VWAP在session内逐根滚动重算，锁死"
+        "的旧值离场平的不是当下真正回归到的位置，v2关掉这个锁死目标；"
+        "②加4h ADX否决(通过mtf注入)，补15m自己测不出来的大周期趋势；"
+        "③加最小盈亏比门槛，止盈距离盖不住止损距离的安静session信号"
+        "直接跳过。"
     ),
     "vwap_mean_reversion_30m": (
         "跟'vwap_mean_reversion'同一套逻辑/代码，30m快版——2026-09-12"
@@ -1035,6 +1109,15 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "(Donchian通道、不看单根K线形态和量)都不同——这套要求突破那根"
         "本身是放量强实体K线，更即时、更挑质量。base=4h，mtf=[1d]。"
     ),
+    "mtf_ema_macd_cci_v2": (
+        "跟'mtf_ema_macd_cci'同一套裸K突破+放量思路，修两处：①原版用来"
+        "确认'趋势开始'的结构窗口(近10根高低点突破)比确认'趋势结束'的"
+        "窗口(近5根结构破位)宽一倍，突破需要10根积累的强度、却只用5根"
+        "结构去管理风险，v2把两个窗口对齐成10；②加追高/追低上限，原版"
+        "对'收盘价突破了多远'没有上限，止损却是固定ATR倍数，追得越远止损"
+        "预算被这根放量K线自己吃掉越多。日线EMA7/30依然只定仓位档位、"
+        "不否决交易，遵守宝贝原话的设计规则。"
+    ),
     "time_series_momentum_v2": (
         "时间序列动量·无固定止盈版——2026-09-07新增，跟 time_series_"
         "momentum 逐字共用同一份代码(参数 use_fixed_tp=False)，唯一区别："
@@ -1127,6 +1210,16 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "跟 turtle/ema_cross/supertrend/hma(都在原始价格上算指标)不同——这套"
         "先把 K 线本身平滑掉再看颜色，对单根插针不敏感。擂台唯一'改造 K 线"
         "本身'的趋势跟随。4h，不设固定止盈。"
+    ),
+    "heikin_ashi_trend_v2": (
+        "跟'heikin_ashi_trend'同一套HA顺势思路，修两处：①原版要求streak"
+        "里实体一根比一根大，这个条件把入场锁定在这波同色行情里实体最"
+        "夸张、最延伸的那一根——系统性偏晚入场；v2换成要求触发进场那根"
+        "HA下影(多)/上影(空)够短，用HA自身'强势K线无明显反向影线'的经典"
+        "读法去挑入场质量，而不是拿'实体递增'这个跟入场时机负相关的条件；"
+        "②修离场判断对十字星(HA实体收缩趋近0)过度敏感的分母问题，加ATR"
+        "兜底；③加EMA(7/25)方向确认。明确不加固定止盈——这套收益全靠"
+        "让利润奔跑的肥尾，加止盈会把胜率做好看但期望值大概率变差。"
     ),
     "kdj_cross": (
         "KDJ 金叉/死叉(9,3,3；宝贝点名)——2026-09-10新增。K 上穿 D 且 K<20 = "

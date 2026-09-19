@@ -50,6 +50,21 @@ DEFAULT_PARAMS = {
     # 说明——True 发 1.2/2.2/3.5 倍 ATR 固定止盈(赢家封顶结构倒挂)，False 让
     # 利润跑到"跌出候选池/自身动量反转"再离场。dual_momentum_runwin 传 False。
     "use_fixed_tp": True,
+    # 2026-09-19新增(dual_momentum_v2对照实验，宝贝要求)：
+    # abs_momentum_hurdle_mult —— 原版"绝对动量"门槛是own_ret>0/own_ret<0，
+    # 篮子前25%强的品种几乎天然满足own_ret>0，这道门槛形同虚设(实测
+    # dual_momentum跟cross_momentum胜率完全一样，笔数只少11%，说明没真的
+    # 在过滤)。Antonacci原书用无风险利率当门槛(一个明确高于0的硬指标)，
+    # 本仓库改用"own_ret必须超过k×自身ATR%"这个按自身波动率缩放的门槛，
+    # 是把原书门槛的"功能"(要求收益显著、不是噪音)还原回来，不是新拍的
+    # 经验值。默认0.0=原行为不变；k=0.5表示"这段lookback的涨幅得有半个
+    # ATR那么大，才算真的在涨"。
+    # 出场沿用原版own_ret<=0/own_ret>=0(零门槛)，天然形成"进场门槛高、
+    # 出场门槛低"的缓冲带，减少门槛附近来回抖动的噪音交易。
+    "abs_momentum_hurdle_mult": 0.0,
+    "use_ema_direction_filter": False,
+    "ema_fast_len": 7,
+    "ema_slow_len": 25,
 }
 
 
@@ -108,12 +123,28 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             }
         return None
 
-    if bucket == "top" and own_ret > 0:
+    atr_for_hurdle = indicators.wilder_atr(bars, atr_len) if float(p.get("abs_momentum_hurdle_mult") or 0) > 0 else 0.0
+    hurdle = 0.0
+    if atr_for_hurdle > 0 and price > 0:
+        hurdle = float(p["abs_momentum_hurdle_mult"]) * (atr_for_hurdle / price)
+
+    if bucket == "top" and own_ret > hurdle:
         action = "LONG"
-    elif bucket == "bottom" and own_ret < 0:
+    elif bucket == "bottom" and own_ret < -hurdle:
         action = "SHORT"
     else:
-        return None  # 候选池里但自身动量不同号——Dual Momentum拒绝这种"矮子里拔将军"的信号
+        return None  # 候选池里但自身动量不同号(或不够显著)——Dual Momentum拒绝这种"矮子里拔将军"的信号
+
+    if bool(p.get("use_ema_direction_filter")):
+        closes = indicators.closes(bars)
+        ema_f = indicators.ema(closes, int(p["ema_fast_len"]))
+        ema_s = indicators.ema(closes, int(p["ema_slow_len"]))
+        if not ema_f or not ema_s:
+            return None
+        if action == "LONG" and not (ema_f[-1] > ema_s[-1]):
+            return None
+        if action == "SHORT" and not (ema_f[-1] < ema_s[-1]):
+            return None
 
     atr = indicators.wilder_atr(bars, atr_len)
     if atr <= 0:

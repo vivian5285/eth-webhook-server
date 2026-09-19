@@ -36,6 +36,29 @@ DEFAULT_PARAMS = {
     "wick_frac": 1.0,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    # 2026-09-19新增(heikin_ashi_trend_v2对照实验，宝贝要求)：
+    # require_growing_body原版要求streak里"实体一根比一根大"——这个条件
+    # 恰好把入场点锁定在这波HA同色行情里实体最夸张、最延伸的那一根，是
+    # 系统性的偏晚入场，不是随机噪音。HA本身的经典读法是"强势K线下影极短"，
+    # 但这套代码只把这条读法用在离场(wick_frac)上，入场反而没用——等于
+    # 拿HA自己的强弱标准去晚出场，却不用来挑好入场点。
+    # require_clean_entry_bar(默认False=原行为不变)：True时不再要求实体
+    # 递增，改成要求streak最后一根(触发进场那一根)本身下影(多)/上影(空)
+    # 够短——用HA自身已有的定义去"评分入场质量"，而不是新造一个参数。
+    "require_clean_entry_bar": False,
+    # wick_exit_atr_floor_frac(默认0.0=原行为不变，分母floor仍是1e-9)：
+    # 原版离场判断 (cur.o - cur.l) > wick_frac × max(实体, 1e-9) —— HA实体
+    # 收缩趋近0(十字星，趋势中段很常见的犹豫K线)时分母趋近1e-9，任何一点
+    # 下影线都会触发离场，等于对十字星极度敏感、经常提前把仓位震出去。
+    # 传大于0的值(比如0.15)后分母floor改成max(实体, floor_frac×ATR)，
+    # 用ATR兜住十字星场景，不再对分母趋零敏感——这是数值稳定性修正，
+    # 不是新的择时逻辑。
+    "wick_exit_atr_floor_frac": 0.0,
+    # use_ema_direction_filter：额外要求EMA(7)相对EMA(25)的站上/跌破方向
+    # 跟HA颜色方向一致，过滤"HA刚好连续同色但大周期其实还在盘整"的情况。
+    "use_ema_direction_filter": False,
+    "ema_fast_len": 7,
+    "ema_slow_len": 25,
 }
 
 
@@ -73,6 +96,9 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return abs(x["c"] - x["o"])
 
     cur = ha[-1]
+    atr = indicators.wilder_atr(bars, atr_len)
+    floor_frac = float(p.get("wick_exit_atr_floor_frac") or 0.0)
+    wick_floor = max(floor_frac * atr, 1e-9) if atr > 0 else 1e-9
 
     if position:
         side = str(position.get("side") or "").upper()
@@ -80,14 +106,14 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             if not _green(cur):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 转阴，趋势转弱", "bar_time": bar_time}
-            if (cur["o"] - cur["l"]) > float(p["wick_frac"]) * max(_body(cur), 1e-9):
+            if (cur["o"] - cur["l"]) > float(p["wick_frac"]) * max(_body(cur), wick_floor):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 阳线现明显下影，上涨承压", "bar_time": bar_time}
         elif side == "SHORT":
             if _green(cur):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 转阳，趋势转弱", "bar_time": bar_time}
-            if (cur["h"] - cur["o"]) > float(p["wick_frac"]) * max(_body(cur), 1e-9):
+            if (cur["h"] - cur["o"]) > float(p["wick_frac"]) * max(_body(cur), wick_floor):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 阴线现明显上影，下跌承压", "bar_time": bar_time}
         return None
@@ -102,9 +128,27 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if not ((all_green or all_red) and growing):
         return None
 
-    atr = indicators.wilder_atr(bars, atr_len)
+    if bool(p.get("require_clean_entry_bar")):
+        last_ha = seg[-1]
+        if all_green and (last_ha["o"] - last_ha["l"]) > float(p["wick_frac"]) * max(_body(last_ha), wick_floor):
+            return None
+        if all_red and (last_ha["h"] - last_ha["o"]) > float(p["wick_frac"]) * max(_body(last_ha), wick_floor):
+            return None
+
     if atr <= 0:
         return None
+
+    if bool(p.get("use_ema_direction_filter")):
+        closes = indicators.closes(bars)
+        ema_f = indicators.ema(closes, int(p["ema_fast_len"]))
+        ema_s = indicators.ema(closes, int(p["ema_slow_len"]))
+        if not ema_f or not ema_s:
+            return None
+        if all_green and not (ema_f[-1] > ema_s[-1]):
+            return None
+        if all_red and not (ema_f[-1] < ema_s[-1]):
+            return None
+
     d = 1 if all_green else -1
     return {
         "action": "LONG" if d == 1 else "SHORT",

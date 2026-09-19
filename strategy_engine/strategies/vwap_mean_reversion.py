@@ -72,6 +72,29 @@ DEFAULT_PARAMS = {
     "adx_max": 25.0,
     "atr_len": 14,
     "atr_stop_mult": 1.5,
+    # 2026-09-19新增(vwap_mean_reversion_v2对照实验，宝贝要求；⚠️只在擂台
+    # 纸面版本上验证，不直接碰真实账户vwap_live那套代码)：
+    # disable_frozen_tp(默认False=原行为不变)——原版OPEN信号自带
+    # tp1=tp2=tp3=vwap_now(入场那一刻锁死的VWAP值)，multi_strategy_runner
+    # 的通用_check_stop_tp会优先拿这个锁死的旧值去跟每根新K线的high/low
+    # 比、抢在下面position分支里"用实时VWAP判断回归"这条真正的逻辑之前
+    # 成交——但VWAP是session内逐根滚动重算的，入场后一直在移动，锁死的
+    # 旧值离场，平的不是"现在真正回归到的位置"。True时不设tp1，逼平仓
+    # 只能走下面position分支里那条用实时VWAP的CLOSE_QUICK_EXIT判断。
+    # use_htf_adx_veto(默认False)——原版ADX过滤只看15m自己的ADX(~3.5小时
+    # 窗口)，防的是"单边强趋势"，但15m内经常会有ADX<25的间隙、测不出更
+    # 大周期(比如日线级别)的真实趋势。True时通过roster的mtf机制额外看
+    # 一个更高周期(4h)的ADX，任一超过阈值就不开仓——用词典型"总量本轮
+    # 结束"的高周期结构去补15m自己测不出来的趋势。
+    "use_htf_adx_veto": False,
+    "htf_adx_max": 25.0,
+    # min_reward_risk_mult(默认0.0=不启用，原行为不变)——原版入场没有
+    # 强制"止盈距离必须大于止损距离的多少倍"这道关系，安静的session里
+    # n_std×σ可能远小于atr_stop_mult×ATR，变成"担1.5倍ATR风险博很小的
+    # 目标"。传大于0的值(比如1.0)后，要求2σ止盈距离至少是止损距离的这个
+    # 倍数，覆盖不了就跳过这次信号，不开仓——是一道纯做减法的质量门槛，
+    # 不改变会开仓那些信号的行为。
+    "min_reward_risk_mult": 0.0,
 }
 
 
@@ -141,6 +164,13 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if adx_now >= float(p["adx_max"]):
         return None  # 强趋势,均值回归不玩
 
+    if bool(p.get("use_htf_adx_veto")):
+        htf_bars = bars_by_tf.get("4h") or []
+        if len(htf_bars) >= adx_len * 2 + 2:
+            htf_adx = indicators.wilder_adx(htf_bars, adx_len)
+            if htf_adx >= float(p["htf_adx_max"]):
+                return None  # 15m自己测不出来的大周期趋势，4h这道补上
+
     if price >= upper:
         action, d = "SHORT", -1
     elif price <= lower:
@@ -152,14 +182,18 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if atr <= 0:
         return None
 
-    return {
+    rr_mult = float(p.get("min_reward_risk_mult") or 0.0)
+    if rr_mult > 0:
+        reward_dist = n_std * dev_std
+        risk_dist = atr * float(p["atr_stop_mult"])
+        if risk_dist <= 0 or reward_dist < rr_mult * risk_dist:
+            return None  # 止盈距离盖不住止损距离的这个倍数，这次信号性价比不够
+
+    sig = {
         "action": action,
         "price": round(price, 6),
         "atr": round(atr, 6),
         "stop_loss": round(price - d * atr * float(p["atr_stop_mult"]), 6),
-        "tp1": round(vwap_now, 6),
-        "tp2": round(vwap_now, 6),
-        "tp3": round(vwap_now, 6),
         "tier": 1,
         "bar_time": bar_time,
         "reason": (
@@ -167,3 +201,8 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             f"(阈值{n_std}σ), ADX={adx_now:.1f}<{p['adx_max']}"
         ),
     }
+    if not bool(p.get("disable_frozen_tp")):
+        sig["tp1"] = round(vwap_now, 6)
+        sig["tp2"] = round(vwap_now, 6)
+        sig["tp3"] = round(vwap_now, 6)
+    return sig
