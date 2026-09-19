@@ -7,8 +7,14 @@
 bootstrap_supervisors() 只给白名单品种建"军师"对象——原本在白名单里、
 暂停时手上还挂着仓位的品种(BCHUSDT，B账户0.62/E账户1.02空单)完全没有
 军师了，哨兵循环/雷达追踪/硬止损维护全部停摆，只剩交易所上早先挂好的
-静态止损单裸奔兜底。白名单应该只决定"接不接受TV新开仓/平仓信号"，
-不该决定"要不要继续照看交易所上真实存在的仓位"。
+静态止损单裸奔兜底。
+
+2026-09-19推翻(宝贝明确叫停，实盘复现：ZEC今天被强平两次、ETH手动多单
+也被平仓)："自动补建军师继续照看"这个设计本身就是问题根源——白名单外
+的仓位(不管是历史TV仓位还是宝贝自己手工开的)一律不该被VPS的硬止损/
+雷达/TV方向强平碰到，宝贝自己管理止盈止损。_symbols_with_orphaned_
+live_positions()这个检测函数本身保留(纯只读，帮宝贝发现+告警)，但
+bootstrap_supervisors()不再拿它的结果去建supervisor——detection≠adoption。
 
 不碰任何真实账户/持仓，mock binance_client._refresh_all_positions，
 用BINANCE_SYMBOL_META真实内容验证"认识的品种才补建、不认识的跳过"。
@@ -75,19 +81,54 @@ class TestOrphanedPositionBootstrap(unittest.TestCase):
         out = psb._symbols_with_orphaned_live_positions(set())
         self.assertEqual(out, [])
 
-    def test_bootstrap_symbols_list_unions_whitelist_and_orphaned(self):
-        """验证bootstrap_supervisors()真正拼装的启动清单：白名单 + 孤儿
-        仓位品种去重合并，不重复、不遗漏。"""
+    def test_bootstrap_symbols_list_only_whitelist_orphans_alert_only(self):
+        """2026-09-19宝贝明确叫停(实盘复现：ZEC今天被强平两次、ETH手动
+        多单也被平仓)：孤儿仓位品种不再自动补建军师接管——只保留检测+
+        告警，bootstrap清单只有白名单品种，orphaned品种不会被get_
+        supervisor()创建（也就不会有任何线程碰它们的下单/平仓）。"""
         with patch.object(psb, "_symbols_with_orphaned_live_positions", return_value=["BCHUSDT", "ETHUSDT"]), \
              patch("symbol_config.active_binance_symbols", return_value=["OPENAIUSDT", "XPDUSDT", "SNDKUSDT"]), \
              patch.object(psb, "get_supervisor") as mock_get_sup:
             psb.SUPERVISORS.clear()
             psb.bootstrap_supervisors()
             called_syms = [c.args[0] for c in mock_get_sup.call_args_list]
-            self.assertEqual(
-                called_syms,
-                ["OPENAIUSDT", "XPDUSDT", "SNDKUSDT", "BCHUSDT", "ETHUSDT"],
-            )
+            self.assertEqual(called_syms, ["OPENAIUSDT", "XPDUSDT", "SNDKUSDT"])
+            self.assertNotIn("BCHUSDT", called_syms)
+            self.assertNotIn("ETHUSDT", called_syms)
+
+    def test_orphans_found_sends_alert_not_silent(self):
+        """检测到白名单外仓位时必须告警——不接管不等于假装没看见，宝贝
+        需要知道自己有个仓位VPS不再管了，得自己去挂止损。bootstrap本身
+        还有其它跟孤儿仓位无关的既有告警(比如"品种档位不齐提醒")，这里
+        只关心"白名单外发现仓位"这一条有没有真的发出去，不对整个mock
+        的调用次数做强假设。"""
+        with patch.object(psb, "_symbols_with_orphaned_live_positions", return_value=["ZECUSDT"]), \
+             patch("symbol_config.active_binance_symbols", return_value=["OPENAIUSDT"]), \
+             patch.object(psb, "get_supervisor"):
+            psb.SUPERVISORS.clear()
+            import dingtalk
+            dingtalk.report_system_alert = MagicMock()
+            psb.bootstrap_supervisors()
+            orphan_calls = [
+                c for c in dingtalk.report_system_alert.call_args_list
+                if "白名单外发现仓位" in str(c.kwargs.get("title", ""))
+            ]
+            self.assertEqual(len(orphan_calls), 1)
+            self.assertIn("ZECUSDT", orphan_calls[0].kwargs.get("detail", ""))
+
+    def test_no_orphans_no_orphan_alert(self):
+        with patch.object(psb, "_symbols_with_orphaned_live_positions", return_value=[]), \
+             patch("symbol_config.active_binance_symbols", return_value=["OPENAIUSDT"]), \
+             patch.object(psb, "get_supervisor"):
+            psb.SUPERVISORS.clear()
+            import dingtalk
+            dingtalk.report_system_alert = MagicMock()
+            psb.bootstrap_supervisors()
+            orphan_calls = [
+                c for c in dingtalk.report_system_alert.call_args_list
+                if "白名单外发现仓位" in str(c.kwargs.get("title", ""))
+            ]
+            self.assertEqual(orphan_calls, [])
 
 
 if __name__ == "__main__":

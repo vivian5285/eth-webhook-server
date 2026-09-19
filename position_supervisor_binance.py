@@ -21600,8 +21600,34 @@ def bootstrap_supervisors():
     from symbol_config import active_binance_symbols
     global position_supervisor
     whitelisted = active_binance_symbols()
+    # 2026-09-19宝贝明确叫停(实盘复现：今天ZEC被强平两次、ETH手动多单
+    # 也被平仓)：白名单外的仓位——不管是历史TV仓位断档留下的，还是宝贝
+    # 自己手工开的——一律不再自动补建军师接管(硬止损/雷达/TV方向强平
+    # 全部不跑)。宝贝原话："我自己手工开的其他品种不要管我的，不要平仓
+    # 我的...白名单内的走系统健康开仓和雷达、硬止损，白名单外的我自己
+    # 知道设置止盈止损"。2026-09-12的BCH孤儿仓事故催生的"自动补建军师
+    # 继续照看"这个设计，被这次更明确的宝贝反馈推翻——只保留检测+告警
+    # (供宝贝自己去手动挂止损/管理)，不再实际创建supervisor、不再有
+    # 任何线程碰这些仓位的下单/平仓。
     orphaned = _symbols_with_orphaned_live_positions(set(whitelisted))
-    symbols = list(whitelisted) + [s for s in orphaned if s not in whitelisted]
+    if orphaned:
+        logger.warning(
+            f"⚠️ 白名单外发现{len(orphaned)}个真实仓位(不再自动接管，仅告警，"
+            f"由宝贝自己管理止盈止损): {orphaned}"
+        )
+        try:
+            dingtalk.report_system_alert(
+                title="白名单外发现仓位(VPS不再接管)",
+                detail=(
+                    f"品种: {orphaned}。这些仓位不在当前TV白名单里，VPS不会再"
+                    f"自动建军师接管硬止损/雷达/强平逻辑——如果是你自己手工开的，"
+                    f"请自行管理止盈止损；如果是遗留的旧TV仓位，请人工核查。"
+                ),
+                level="提示",
+            )
+        except Exception as e:
+            logger.debug(f"白名单外仓位告警发送跳过: {e}")
+    symbols = list(whitelisted)
     logger.info(f"🔄 多品种启动恢复清单: {symbols}")
     for sym in symbols:
         get_supervisor(sym)
