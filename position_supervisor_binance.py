@@ -2393,7 +2393,28 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         return live_side in self._collect_credible_tv_directions()
 
     def _strict_tv_opposite_side(self, live_side):
-        """仅当「最新 TV 指令」与实盘明确反向时才强平（不用陈旧全量扫描）"""
+        """仅当「最新 TV 指令」与实盘明确反向时才强平（不用陈旧全量扫描）。
+
+        2026-09-19修复(ZECUSDT实盘复现)：宝贝手动在交易所开了ZEC空单，
+        ZEC当天已经不在TV白名单里(0deff95精细化聚焦时暂停)、TV信号本来
+        就拒收——但这里此前完全不看symbol是否还在白名单，直接拿
+        last_tv_signal/最后一条TV日志(可能是几天前ZEC还在白名单时的
+        陈旧记录)当"最新TV"，判定跟手动空单反向就强制市价平仓，仅12秒
+        就把刚接管的仓位打平了，之后用户重开一次也被同样逻辑再次打平。
+        根源：一个品种暂停之后TV再也发不出新信号来更新这个"最新方向"，
+        陈旧记录被永久当成"最新"用，且强平逻辑本身也没有"这个品种现在
+        还归不归TV管"这层判断。修复：品种当前不在活跃白名单时，TV对它
+        没有现行意见(信号本来就被拒收)，直接返回None(不判定反向)——
+        已有仓位(不管是孤儿仓还是人工新开)完全交给引擎自己的硬止损/
+        雷达管理，跟0deff95"暂停只挡新开仓，已有仓位平仓交给引擎自己
+        硬止损/雷达"的既定语义一致，不该被这条已经过时的方向记录打平。
+        """
+        try:
+            from symbol_config import active_binance_symbols
+            if self.symbol not in set(active_binance_symbols()):
+                return None
+        except Exception:
+            pass
         for src in (self.last_tv_signal, self._load_last_journal_entry(None, kind="tv")):
             if not src:
                 continue
