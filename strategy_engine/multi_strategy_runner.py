@@ -317,7 +317,18 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             "side": pos["side"], "entry_price": pos["entry"],
             "entry_bar_time": pos["entry_bar_time"],
         })
-        if sig and str(sig.get("action", "")).startswith("CLOSE"):
+        if sig and str(sig.get("action", "")).startswith("CLOSE") and int(sig["bar_time"]) > int(pos["entry_bar_time"]):
+            # 2026-09-20修复：早前的_entered_this_bar用last_bar(base周期
+            # 自己的bar_time)当门槛，对vwap_ema_regime这种战法自己内部用
+            # mtf(15m)时钟报bar_time的策略不生效(base是2h、内部时钟是15m，
+            # 两个时钟不是同一个东西，早前那道门槛形同虚设)——实测复现:
+            # vwap_ema_regime即便已经去掉了range腿的tp1(2026-09-13那次
+            # 修复)，自己的CLOSE_QUICK_EXIT信号还是报出过exit_bar_time早于
+            # entry_bar_time的记录，因为门槛检查用的时钟跟信号自己报的
+            # 时钟对不上。这里改成直接校验战法自己报的bar_time(不管是
+            # 什么时钟来源)必须晚于入场时间，不信任任何单一"当前last_bar"
+            # 代理判断，从根上堵死这类时钟不一致的战法也可能触发的同一
+            # 类问题。
             _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
         return
 
@@ -426,7 +437,8 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
                 "side": pos["side"], "entry_price": pos["entry"],
                 "entry_bar_time": pos["entry_bar_time"],
             })
-            if sig and str(sig.get("action", "")).startswith("CLOSE"):
+            if sig and str(sig.get("action", "")).startswith("CLOSE") and int(sig["bar_time"]) > int(pos["entry_bar_time"]):
+                # 见_tick_single_symbol_entry同一处2026-09-20修复的注释
                 _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
             continue
 
