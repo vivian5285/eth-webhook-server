@@ -33,7 +33,9 @@ from typing import Any, Dict, List, Optional
 
 from strategy_engine import indicators, klines, shadow_store
 from strategy_engine.strategies import get_strategy, pairs_trading
-from strategy_engine.position_sizing import compute_qty, compute_liquidation_price, LEVERAGE
+from strategy_engine.position_sizing import (
+    compute_qty, compute_liquidation_price, clamp_qty_to_portfolio_cap, LEVERAGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,22 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
     tier = int(sig.get("tier") or 1)
     equity = shadow_store.get_equity(strategy)
     qty = compute_qty(equity, float(sig["price"]), sig.get("stop_loss"), tier)
+    # 2026-09-19新增：组合层面仓位约束(见position_sizing.py顶部注释)——
+    # 按这个策略账上已经占用的名义仓位，把这一笔等比缩小到剩余额度内。
+    # 额度已用满(clamped_qty<=0)时不落这条记录，等同于真实账户"保证金
+    # 不够，这笔开不了"——不是策略/风控层面故意跳过信号。
+    existing_notional = sum(
+        float(r.get("entry") or 0) * float(r.get("qty") or 0)
+        for r in shadow_store.list_open(strategy=strategy)
+    )
+    clamped_qty = clamp_qty_to_portfolio_cap(qty, float(sig["price"]), existing_notional, equity)
+    if clamped_qty <= 0:
+        logger.info(
+            f"⚠️ [多策略][{strategy}][{symbol}] 组合名义仓位已达上限"
+            f"(已占用${existing_notional:.2f}/净值${equity:.2f})，这笔开不了，跳过"
+        )
+        return None
+    qty = clamped_qty
     # 2026-09-05新增：开仓那一刻按LEVERAGE(5x，跟compute_qty同一套杠杆
     # 假设)算好模拟强平价存下来，_check_stop_tp用它跟战法自己的止损
     # 取更紧的那个当真正生效的止损线(见该函数注释)。

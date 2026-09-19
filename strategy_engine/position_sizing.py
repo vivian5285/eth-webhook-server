@@ -59,6 +59,45 @@ def compute_liquidation_price(entry_price: float, side: str, leverage: float = L
     return entry_price * (1 + margin_rate - LIQUIDATION_MAINTENANCE_MARGIN_RATE)
 
 
+# 2026-09-19新增：组合层面的真实仓位约束——宝贝实测抓到"无限子弹"问题：
+# compute_qty每次开仓都是独立拿"当前净值"算一遍20%×5倍，完全不知道账上
+# 已经有多少笔仓位占着钱。这对vwap_mean_reversion这类很少同时开多笔的
+# 策略问题不大，但cross_momentum这种"篮子里最强/最弱25%"的策略天生就要
+# 同时开13-14笔，heikin_ashi_trend这类跑满27个品种独立触发的趋势策略行情
+# 一致时也会同时开20+笔——全库排查过，65套策略里最严重的time_series_
+# momentum_v2同时名义敞口达到净值的10.89倍，真实账户根本扛不住，也大概率
+# 会被交易所保证金不足拒单。MAX_TOTAL_NOTIONAL_MULT=3.0参考本项目一贯的
+# 低杠杆纪律(vwap_live真账户用3倍杠杆)，不是随手拍的数字。
+#
+# 这里选择"按剩余额度等比缩小新仓位"而不是"额度不够就跳过信号"——后者
+# 违反宝贝对vwap_live定下的"信号来了必须开仓"原则；缩小仓位才是真实资金
+# 有限时该有的行为(仓位越占越满，新仓位自然越开越小，额度用完新仓位趋于
+# 0但不会主动拒绝信号本身)。
+MAX_TOTAL_NOTIONAL_MULT = 3.0
+
+
+def clamp_qty_to_portfolio_cap(
+    qty: float, price: float, existing_notional: float, equity: float,
+    max_total_notional_mult: float = MAX_TOTAL_NOTIONAL_MULT,
+) -> float:
+    """按"这个策略账上已经占用了多少名义仓位"把新仓位等比缩小，让
+    existing_notional+新仓位名义价值 不超过 equity×max_total_notional_mult。
+    额度已经用满时返回0.0(不开仓，等其它仓位平仓腾出额度)，不是负数。"""
+    price = float(price or 0)
+    qty = float(qty or 0)
+    if price <= 0 or qty <= 0:
+        return 0.0
+    equity = float(equity or 0)
+    cap = equity * float(max_total_notional_mult or 0)
+    remaining_notional = cap - float(existing_notional or 0)
+    if remaining_notional <= 0:
+        return 0.0
+    desired_notional = qty * price
+    if desired_notional <= remaining_notional:
+        return qty
+    return remaining_notional / price
+
+
 def compute_qty(equity: float, price: float, stop_price: Optional[float], tier: int = 1) -> float:
     """返回开仓数量(标的单位，比如ETH数量/XAU盎司数)。任何入参不合法
     时保守返回0.0(不开仓)，不悄悄退化成一个猜测值。"""
