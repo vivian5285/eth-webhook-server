@@ -161,8 +161,11 @@ def _smart_hard_stop_mode_enabled() -> bool:
 
 # 2026-09-15：15/30→8/20，跟DUAL_MA_EXIT(平仓判断"趋势还在不在")用
 # 同一套均线定义，两仓库同批改。
+# 2026-09-19再改：宝贝反馈8/20的慢线太短，容易被正常回撤打成"假破位"
+# 提前平仓——改成8/30，跟DUAL_MA_EXIT_SLOW_LEN同步改(两者本来就该用
+# 同一套"趋势还在不在"定义，见上一条注释)。
 TREND_REENTRY_FAST_LEN = int(os.getenv("TREND_REENTRY_FAST_LEN", "8"))
-TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "20"))
+TREND_REENTRY_SLOW_LEN = int(os.getenv("TREND_REENTRY_SLOW_LEN", "30"))
 TREND_REENTRY_MA_TYPE = os.getenv("TREND_REENTRY_MA_TYPE", "SMA")
 # 2026-09-15：30→45分钟+确认口径从dual_ma_trend_ok换成trend_confirmed_
 # with_volume(双均线+最近3根同向实体+放量)——跟CoinW同一批改，见
@@ -318,9 +321,16 @@ REVERSAL_LOCK_REFRESH_SEC = 300.0
 # 用品种自己真实的TV周期(不是双均线自主重入用的固定30分钟——那个是复刻
 # TV Pine脚本内部计算周期，这里要看的是"这个品种自己真实图表"有没有站上/
 # 跌破均线，两件事目的不同)。
+# 2026-09-19再补充(宝贝反馈"本周系统问题总结")：这套机制不该开仓后立刻
+# 就评判平仓——TV自己已经决定了这笔交易，硬止损才是真正的安全网；双均线
+# 的职责是"保护已经取得的利润"，应该等浮盈真正朝TP2/TP3推进、给行情合理
+# 呼吸空间之后，才让双均线破位的判断说了算(不管是强平还是收紧)。下面
+# _dual_ma_exit_profit_gate_passed门槛：现价越过TP1之前一律不评估，越过
+# 之后再按原逻辑判断趋势是否还成立。同时把慢线20→30(20太短，正常回撤就
+# 能把均线打穿，容易在浮盈还很薄的时候被"假破位"提前平仓)。
 DUAL_MA_EXIT_ENABLED = True
 DUAL_MA_EXIT_FAST_LEN = 8
-DUAL_MA_EXIT_SLOW_LEN = 20
+DUAL_MA_EXIT_SLOW_LEN = 30
 DUAL_MA_EXIT_MA_TYPE = "SMA"
 DUAL_MA_EXIT_KLINE_LIMIT = 80
 DUAL_MA_EXIT_REFRESH_SEC = 300.0  # 跟REVERSAL_LOCK同一节流窗口，够及时又不刷REST
@@ -2207,6 +2217,13 @@ class RadarReentryMixin:
         (self.current_sl = self._maybe_fast_exit_on_dual_ma_break(...))，
         平仓后返回当前(已经被_close_all_impl重置过的)current_sl，不会用
         平仓前的候选值覆盖回去。
+
+        2026-09-19新增门槛：不该开仓/雷达刚激活就立刻评判平仓——TV自己
+        已经决定了这笔交易，硬止损才是真正的安全网；双均线的职责是保护
+        已经取得的利润，只有浮盈真正越过TP1、朝TP2/TP3推进之后，才轮到
+        双均线破位的判断说了算。self._dual_ma_exit_profit_gate_passed
+        由_apply_breath_stop_tick每个tick跟zone一起算好(zone!="pre_tp1")，
+        缺失时默认放行(不静默关掉这层保护，比如测试/边界场景)。
         """
         if not DUAL_MA_EXIT_ENABLED or not _smart_hard_stop_mode_enabled():
             return candidate_sl
@@ -2214,6 +2231,8 @@ class RadarReentryMixin:
         if side not in ("LONG", "SHORT"):
             return candidate_sl
         if bool(getattr(self, "trading_paused", False)) or bool(getattr(self, "api_monitor_only", False)):
+            return candidate_sl
+        if not bool(getattr(self, "_dual_ma_exit_profit_gate_passed", True)):
             return candidate_sl
         now = time.time()
         last_check = float(getattr(self, "_dual_ma_exit_last_check_ts", 0) or 0)

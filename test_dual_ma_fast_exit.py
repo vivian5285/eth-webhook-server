@@ -213,6 +213,13 @@ class TestDualMaFastExit(unittest.TestCase):
         self.assertEqual(out, 95.0)
         s._close_all.assert_not_called()
 
+    def test_slow_len_is_30_not_20(self):
+        """2026-09-19：宝贝反馈8/20慢线太短，正常回撤就能打穿——改成
+        8/30。"""
+        from radar_reentry_mixin import DUAL_MA_EXIT_FAST_LEN, DUAL_MA_EXIT_SLOW_LEN
+        self.assertEqual(DUAL_MA_EXIT_FAST_LEN, 8)
+        self.assertEqual(DUAL_MA_EXIT_SLOW_LEN, 30)
+
     def test_uses_symbol_specific_interval(self):
         """OPENAI应该用45分钟(2026-09-13起，TV alert周期从120分钟改成45分钟)。"""
         from radar_reentry_mixin import DUAL_MA_EXIT_INTERVAL_MIN
@@ -223,6 +230,88 @@ class TestDualMaFastExit(unittest.TestCase):
             args, kwargs = mock_klines.call_args
             self.assertEqual(args[1], f"{DUAL_MA_EXIT_INTERVAL_MIN['OPENAIUSDT']}m")
             self.assertEqual(DUAL_MA_EXIT_INTERVAL_MIN["OPENAIUSDT"], 45)
+
+
+class TestProfitProgressGateZoneDerivation(unittest.TestCase):
+    """验证self._dual_ma_exit_profit_gate_passed = zone != "pre_tp1"这个
+    映射本身，用position_supervisor_binance.py::_apply_breath_stop_tick
+    实际调用的同一个纯函数breath_stop._zone_trail_atr，不碰那个方法本身
+    (太大、集成度太高，跟test_patience_mode.py::TestZoneEngage同款纪律：
+    只测纯函数)。"""
+
+    def test_price_below_tp1_is_pre_tp1_zone_gate_closed(self):
+        import breath_stop as BS
+        entry, atr = 100.0, 2.0
+        tp1 = entry + 1.5 * atr
+        price = entry + 0.5 * atr  # 还没到TP1
+        mult, zone = BS._zone_trail_atr(
+            side="LONG", price=price, entry=entry, atr=atr, profile={},
+            coeff=1.0, tp1_px=tp1, tp2_px=entry + 3.0 * atr, tp3_px=entry + 4.0 * atr, best=price,
+        )
+        self.assertEqual(zone, "pre_tp1")
+        gate_passed = str(zone or "pre_tp1") != "pre_tp1"
+        self.assertFalse(gate_passed)
+
+    def test_price_past_tp1_leaves_pre_tp1_zone_gate_open(self):
+        import breath_stop as BS
+        entry, atr = 100.0, 2.0
+        tp1 = entry + 1.5 * atr
+        price = tp1 + 0.1 * atr  # 已经越过TP1
+        mult, zone = BS._zone_trail_atr(
+            side="LONG", price=price, entry=entry, atr=atr, profile={},
+            coeff=1.0, tp1_px=tp1, tp2_px=entry + 3.0 * atr, tp3_px=entry + 4.0 * atr, best=price,
+        )
+        self.assertNotEqual(zone, "pre_tp1")
+        gate_passed = str(zone or "pre_tp1") != "pre_tp1"
+        self.assertTrue(gate_passed)
+
+
+class TestProfitProgressGate(unittest.TestCase):
+    """2026-09-19新增(宝贝反馈"本周系统问题总结")：DUAL_MA_EXIT不该开仓
+    /雷达刚激活就立刻评判平仓——TV自己已经决定了这笔交易，硬止损才是
+    真正的安全网；双均线的职责是保护已经取得的利润，只有浮盈真正越过
+    TP1、朝TP2/TP3推进之后才轮到它说了算。self._dual_ma_exit_profit_
+    gate_passed由_apply_breath_stop_tick每个tick跟zone一起算好
+    (zone!="pre_tp1")。"""
+
+    def setUp(self):
+        os.environ["SMART_HARD_STOP_ENABLED"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("SMART_HARD_STOP_ENABLED", None)
+
+    def test_gate_closed_blocks_close_all_even_with_confirmed_break(self):
+        """浮盈还没越过TP1(zone=pre_tp1) → 即使双均线真实放量确认破位，
+        也不该强平，candidate_sl原样放行——硬止损继续是唯一安全网。"""
+        s = _mk_supervisor()
+        s._dual_ma_exit_profit_gate_passed = False
+        bars = _make_bars(decline_n=40, rally_n=10, surge=True)
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            out = s._maybe_fast_exit_on_dual_ma_break(bars[-1][4], 60.0)
+        s._close_all.assert_not_called()
+        self.assertEqual(out, 60.0)
+
+    def test_gate_open_allows_normal_evaluation(self):
+        """浮盈已经越过TP1(zone!=pre_tp1) → 恢复原有行为，真实放量确认
+        破位时照常强平。"""
+        s = _mk_supervisor()
+        s._dual_ma_exit_profit_gate_passed = True
+        s.current_sl = 55.0
+        bars = _make_bars(decline_n=40, rally_n=10, surge=True)
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            out = s._maybe_fast_exit_on_dual_ma_break(bars[-1][4], 60.0)
+        s._close_all.assert_called_once()
+        self.assertEqual(out, 55.0)
+
+    def test_gate_attribute_missing_defaults_to_open(self):
+        """没有显式设置门槛属性时(比如老测试/边界场景)——默认放行，不
+        静默关掉这层保护。"""
+        s = _mk_supervisor()
+        self.assertFalse(hasattr(s, "_dual_ma_exit_profit_gate_passed"))
+        bars = _make_bars(decline_n=40, rally_n=10, surge=True)
+        with patch("strategy_engine.klines.get_bars", return_value=bars):
+            s._maybe_fast_exit_on_dual_ma_break(bars[-1][4], 60.0)
+        s._close_all.assert_called_once()
 
 
 if __name__ == "__main__":

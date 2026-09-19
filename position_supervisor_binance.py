@@ -18561,6 +18561,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         self._patience_trail_dist = (
             float(meta.get("trail_distance") or 0) if self._patience_active else 0.0
         )
+        # 2026-09-19新增：DUAL_MA_EXIT(双均线破位快速平仓)专用的浮盈进度
+        # 门槛——见radar_reentry_mixin.py::_maybe_fast_exit_on_dual_ma_break
+        # 顶部注释。跟_patience_active同一个zone来源，但门槛低得多(只要
+        # 越过TP1即可，不用等到TP2 sticky)：pre_tp1阶段一律不评估，给刚
+        # 开仓/雷达刚激活的位置留呼吸空间，硬止损继续当唯一安全网。
+        self._dual_ma_exit_profit_gate_passed = str((meta or {}).get("zone") or "pre_tp1") != "pre_tp1"
         if self._patience_active:
             # 每笔持仓(side|entry)只在首次进入耐心模式时播报一次——不依赖任何
             # 跨持仓重置，新持仓自然是新 key。
