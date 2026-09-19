@@ -622,6 +622,37 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vwap_ema_regime 加载失败: {_e}")
 
+# 2026-09-20新增：宝贝要求"整个AI界/GitHub/所有平台"找更多好策略——挑了
+# 4个同一准入门槛(有真实公开发表历史/可考证track record/公式确定，
+# 排除黑箱)的经典战法，擂台里跟现有机制都不重叠：
+try:
+    from strategy_engine.strategies import clenow_momentum
+    STRATEGIES["clenow_momentum"] = clenow_momentum.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] clenow_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ehlers_fisher_transform
+    STRATEGIES["ehlers_fisher_transform"] = ehlers_fisher_transform.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ehlers_fisher_transform 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import williams_alligator
+    STRATEGIES["williams_alligator"] = williams_alligator.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] williams_alligator 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import vortex_indicator
+    STRATEGIES["vortex_indicator"] = vortex_indicator.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] vortex_indicator 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -1310,6 +1341,36 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "cross_momentum/dual_momentum(对全25品种两头排名)区别：篮子更小"
         "专注 ETH 生态，大盘锚是 ETH 本身、外加资金费率拥挤度否决。资金"
         "费率走币安公开端点(无Key)，只在 live 擂台跑。4H。"
+    ),
+    "clenow_momentum": (
+        "Clenow动量排名——Andreas Clenow《Stocks on the Move》(2015年公开"
+        "出版，真实基金经理ACIES Asset Management)原版公式：年化(指数回归"
+        "斜率)×R²给篮子排名，做多最强25%、做空最弱25%。跟'cross_momentum'"
+        "(v2用ATR%简化标准化)是同一个'给动量排名加波动率修正'思路的另一种"
+        "公开实现，这套是原书完整定义(回归斜率+拟合优度)，不是简化版。"
+        "lookback=90根(直接用原书数字)。4h。"
+    ),
+    "ehlers_fisher_transform": (
+        "Ehlers Fisher Transform——John F. Ehlers公开发表(MESA Software"
+        "创始人，原始论文'Using The Fisher Transform'公开可查)。把价格先"
+        "压缩映射再做y=0.5×ln((1+x)/(1-x))变换，转成近似正态分布，对付"
+        "传统震荡指标在极值区间钝化的通病，转折信号更尖锐。Fisher线上/"
+        "下穿它自己上一根的值(trigger)进出场，period=9(Ehlers原始默认值)。"
+        "擂台里唯一'先把价格分布正态化再找拐点'的战法。1h。"
+    ),
+    "williams_alligator": (
+        "Williams Alligator——Bill Williams公开发表(《Trading Chaos》"
+        "《New Trading Dimensions》)。三条斐波那契周期SMMA(前移8/5/3根)"
+        "构造'鳄鱼睡觉/张嘴/进食'趋势状态机：三线按顺序展开且间距扩大="
+        "张嘴(趋势启动)，价格站上/跌破整个嘴部顺势进场，顺序被打破(缠绕/"
+        "反转)离场。公式/规则完全确定，不是主观形态判断。4h。"
+    ),
+    "vortex_indicator": (
+        "Vortex Indicator——Etienne Botes与Douglas Siepman公开发表于"
+        "《Technical Analysis of Stocks & Commodities》杂志2010年1月刊。"
+        "受Wilder DMI/ADX启发，VM+=|当根高-上根低|、VM-=|当根低-上根高|，"
+        "各自除以同期真实波幅之和得VI+/VI-，代表多空拉扯的推力对比。"
+        "VI+上穿VI-做多，VI-上穿VI+做空，period=14(原始论文默认)。4h。"
     ),
 }
 

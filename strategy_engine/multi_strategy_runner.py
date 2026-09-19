@@ -28,6 +28,7 @@ import position_supervisor_binance，不碰任何账户凭证/真实下单，符
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -325,23 +326,50 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         _open_from_signal(symbol, strategy, timeframe, sig)
 
 
+_TIMEFRAME_BARS_PER_YEAR = {
+    "15m": 365 * 24 * 4, "30m": 365 * 24 * 2, "1h": 365 * 24, "2h": 365 * 12,
+    "4h": 365 * 6, "6h": 365 * 4, "8h": 365 * 3, "12h": 365 * 2, "1d": 365,
+}
+
+
 def _compute_universe_returns(
     symbols: List[str], timeframe: str, lookback_bars: int, cache: Dict[tuple, list],
-    vol_scale: bool = False,
+    vol_scale: bool = False, clenow: bool = False,
 ) -> Dict[str, float]:
     """vol_scale=False(默认，原行为逐字不变)：原始收益率排名——高波动品种
     天然更容易冲进"最强/最弱"区间，本质上更像"选高波动品种"而不是纯动量。
     vol_scale=True(2026-09-19新增，cross_momentum_v2/dual_momentum_v2用)：
     收益率除以自身ATR%做波动率标准化(Moskowitz/Barroso-Santa-Clara一类
     截面动量文献的标准做法)，让不同波动特征的品种排名可比，不是新拍的
-    经验参数，是量纲修正。"""
+    经验参数，是量纲修正。
+
+    clenow=True(2026-09-19新增，clenow_momentum.py用)：Andreas Clenow
+    《Stocks on the Move》(2015年公开出版)的原版公式——对整个lookback窗口
+    的ln(close)做线性回归，动量分=年化(exp(slope)-1)×R²，不再是vol_scale
+    那种"只看两个端点"的简化。R²高=价格沿趋势线走得干净(低噪音)，年化
+    slope越陡说明趋势越强，两者相乘同时惩罚"趋势弱"和"趋势脏"。年化
+    倍数按timeframe换算成每年根数(_TIMEFRAME_BARS_PER_YEAR)，不是硬编码
+    的252(那是股票交易日惯例，加密货币24/7)。"""
     out = {}
+    bars_per_year = _TIMEFRAME_BARS_PER_YEAR.get(str(timeframe or "").lower(), 365)
     for s in symbols:
         # 2026-09-04：改成走 _cached_bars(拉 BARS_LIMIT 根)，跟同一轮里
         # 该品种@该周期的信号用K线共用缓存，少打一次接口。只用末尾的
         # bars[-1] / bars[-1-lookback] 两个点，多拉的历史不影响结果。
         bars = _cached_bars(cache, s, timeframe, BARS_LIMIT)
         if len(bars) < lookback_bars + 1:
+            continue
+        if clenow:
+            window = bars[-lookback_bars:]
+            closes_ln = [math.log(float(b["c"])) for b in window if float(b["c"]) > 0]
+            if len(closes_ln) < lookback_bars:
+                continue
+            slope, r2 = indicators.linreg_slope_r2(closes_ln)
+            try:
+                annualized = math.exp(slope * bars_per_year) - 1.0
+            except OverflowError:
+                continue
+            out[s] = annualized * r2
             continue
         c_now = float(bars[-1]["c"])
         c_then = float(bars[-1 - lookback_bars]["c"])
@@ -364,7 +392,8 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     lookback = int(entry.get("lookback_bars") or 20)
     fn = get_strategy(strategy)
     universe_returns = _compute_universe_returns(
-        symbols, timeframe, lookback, cache, vol_scale=bool(entry.get("vol_scale_rank")),
+        symbols, timeframe, lookback, cache,
+        vol_scale=bool(entry.get("vol_scale_rank")), clenow=bool(entry.get("clenow_rank")),
     )
     if len(universe_returns) < 2:
         return

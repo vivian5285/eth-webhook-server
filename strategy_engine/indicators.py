@@ -542,3 +542,43 @@ def cci(bars: Sequence[dict], period: int = 20) -> List[float]:
         else:
             out.append((tp[i] - m) / (0.015 * mad))
     return out
+
+
+def smma(values: Sequence[float], period: int) -> List[float]:
+    """平滑移动平均(Smoothed Moving Average，Wilder提出的递归平滑，跟
+    RSI/ATR是同一族递归公式——SMMA_t = (SMMA_{t-1}×(period-1) + v_t)/period，
+    种子用前period根的SMA)。Bill Williams的Alligator/Awesome/AC三个指标
+    原始定义全部构建在SMMA之上(不是普通SMA/EMA)，2026-09-19新增供
+    williams_alligator.py用。"""
+    if period <= 0 or len(values) < period:
+        return []
+    seed = sum(values[:period]) / period
+    out = [seed]
+    for v in values[period:]:
+        out.append((out[-1] * (period - 1) + v) / period)
+    return out
+
+
+def linreg_slope_r2(values: Sequence[float]) -> tuple:
+    """对values做普通最小二乘线性回归(x=0..n-1)，返回(slope, r2)。
+    2026-09-19新增供clenow_momentum.py用——Andreas Clenow《Stocks on the
+    Move》(2015年公开出版)的动量排名公式是"年化指数回归斜率×R²"，这里
+    先对ln(values)做回归，调用方自己按bar周期把slope年化。"""
+    n = len(values)
+    if n < 3:
+        return 0.0, 0.0
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(values) / n
+    ss_xy = sum((xs[i] - mean_x) * (values[i] - mean_y) for i in range(n))
+    ss_xx = sum((x - mean_x) ** 2 for x in xs)
+    if ss_xx <= 0:
+        return 0.0, 0.0
+    slope = ss_xy / ss_xx
+    intercept = mean_y - slope * mean_x
+    ss_tot = sum((v - mean_y) ** 2 for v in values)
+    if ss_tot <= 0:
+        return slope, 0.0
+    ss_res = sum((values[i] - (intercept + slope * xs[i])) ** 2 for i in range(n))
+    r2 = max(0.0, 1.0 - ss_res / ss_tot)
+    return slope, r2

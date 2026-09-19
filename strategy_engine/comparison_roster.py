@@ -457,6 +457,11 @@ SINGLE_SYMBOL_ROSTER = (
     # ── 2026-09-05：TV真实策略复刻拉进擂台 ────────────────────────────────
     + _TV_MIRROR_ROSTER
     + _TV_MIRROR_V2_ROSTER
+    # ── 2026-09-20：宝贝要求找更多"整个AI界/GitHub/所有平台"的公开验证
+    # 战法，4套同一准入门槛、机制跟擂台已有的都不重叠 ──────────────────
+    + [{"symbol": s, "strategy": "ehlers_fisher_transform", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "williams_alligator", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "vortex_indicator", "timeframe": "4h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
@@ -472,6 +477,17 @@ UNIVERSE_ROSTER = [
         "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
+    },
+    # 2026-09-20新增：Clenow动量排名(见strategies/clenow_momentum.py顶部
+    # 说明)——lookback_bars=90直接用《Stocks on the Move》原书数字，不是
+    # 重新拍的经验值。clenow_rank是_tick_universe_entry独立读取的roster
+    # 级开关，让_compute_universe_returns走年化回归斜率×R²那条计算路径。
+    {
+        "strategy": "clenow_momentum",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 90,
+        "clenow_rank": True,
     },
     # 2026-09-10 第四批：cross/dual_momentum 去止盈封顶对照版——逐字复用
     # 同一份代码(strategies/__init__.py 里 cross_momentum_runwin/dual_momentum_
