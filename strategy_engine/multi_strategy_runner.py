@@ -78,6 +78,25 @@ def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: i
     return cache[key]
 
 
+def _entered_this_bar(pos: dict, bar_time: int) -> bool:
+    """2026-09-19修复：止损/止盈/战法自己的CLOSE判断，都不能用"入场那一根
+    K线"自己的high/low/close去检——入场价锚定的是这根K线的**收盘价**(比如
+    vwap_mean_reversion的2σ偏离判断本来就是拿close算的)，但这根K线的
+    high/low横跨的是**整根K线周期**，包含了收盘之前发生的价格路径。宝贝
+    实测抓到过一个真实案例(XLMUSDT@45m，vwap_mean_reversion_45m)：45m
+    K线由3根15m合成，前15分钟先探底到0.18658，后30分钟才涨到0.19053触发
+    SHORT入场——但止盈线0.18717在这根K线自己的低点范围内，被判定"同一根
+    K线立刻触及止盈"，实际上那个低点发生在入场信号出现**之前**，现实里
+    根本不可能吃到。这是标准的"未来函数"：不能拿入场决策还没做出来之前
+    就已经发生的价格路径去判定这笔仓位的止损/止盈——只能从**下一根**K线
+    开始才允许离场判断。用 entry_bar_time 全局排查过：几乎全部65套战法
+    都不同程度受影响(1.5%~95.8%不等)，不是单个策略的bug，是
+    _tick_single_symbol_entry/_tick_universe_entry/_tick_pairs_entry
+    三条调度路径共用的同一处架构缺陷，这里统一收口，一次修好全部策略。"""
+    entry_bar_time = pos.get("entry_bar_time")
+    return entry_bar_time is not None and int(bar_time) <= int(entry_bar_time)
+
+
 def _check_stop_tp(pos: dict, bar: dict):
     """跟backtest_runner.py::_check_stop_tp同一套简化口径：一根K线内到底
     先碰到止损还是先碰到止盈无法从OHLC里还原真实顺序，保守假设止损优先。
@@ -265,6 +284,8 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     last_bar = bars[-1]
 
     if pos:
+        if _entered_this_bar(pos, last_bar["t"]):
+            return  # 入场那根K线自己的high/low/close不能用来判离场，见_entered_this_bar
         exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)
         if exit_kind:
             reason = "触及模拟强平(5x杠杆)" if exit_kind == "liq" else "触及止损"
@@ -325,6 +346,8 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
                   **(entry.get("params") or {})}
 
         if pos:
+            if _entered_this_bar(pos, last_bar["t"]):
+                continue  # 见_entered_this_bar：入场那根K线自己不能用来判离场
             exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)
             if exit_kind:
                 reason = "触及模拟强平(5x杠杆)" if exit_kind == "liq" else "触及止损"
@@ -451,6 +474,9 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             return
         last_bar_time = max(int(bars_a[-1]["t"]), int(bars_b[-1]["t"]))
         price_a, price_b = float(bars_a[-1]["c"]), float(bars_b[-1]["c"])
+
+        if _entered_this_bar(p, last_bar_time):
+            return  # 见_entered_this_bar：入场那根K线自己不能用来判离场
 
         # 安全网1：任一腿碰到ATR止损——配对逻辑本身靠价差收敛离场，这条
         # 只防极端脱钩(比如某个品种下架/插针)，故意给宽(atr_stop_mult默认3)
