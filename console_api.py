@@ -172,7 +172,40 @@ def api_overview():
         "risk": rm_status,
         "stats": _pnl_stats(),
         "symbol_settings": sym_settings,
+        "recent_exits": _recent_exit_history(),
     })
+
+
+def _recent_exit_history(limit=40):
+    """2026-09-19新增(本周问题总结item6"控制面板显示每笔平仓原因")：
+    跨全部活动品种的supervisor，读各自的close journal(position_
+    supervisor_binance.py::_journal_close新增)，合并按时间倒序取最近
+    limit条——不去读交易所自己的REALIZED_PNL(那边没有exit_source这个
+    VPS自己算出来的概念，也没有tier/entry_px这些字段)，纯粹读VPS自己
+    刚落的journal文件。单品种/单条记录解析失败不该拖垮整个列表。"""
+    from position_supervisor_binance import SUPERVISORS
+    rows = []
+    for sym, sup in (SUPERVISORS or {}).items():
+        try:
+            entries = sup._iter_journal_entries("close", symbol_only=True)
+        except Exception as e:
+            logger.debug(f"[console] {sym} 平仓journal读取跳过: {e}")
+            continue
+        for e in entries:
+            rows.append({
+                "symbol": sym,
+                "ts": e.get("ts"),
+                "side": e.get("side"),
+                "entry_px": e.get("entry_px"),
+                "exit_px": e.get("exit_px"),
+                "qty": e.get("qty"),
+                "pnl_pct": e.get("pnl_pct"),
+                "exit_source": e.get("exit_source") or "",
+                "exit_source_label": e.get("exit_source_label") or "",
+                "tier": e.get("tier"),
+            })
+    rows.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+    return rows[:limit]
 
 
 def _pnl_stats():

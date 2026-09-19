@@ -6510,10 +6510,33 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         except Exception as e:
             logger.debug(f"[{self.symbol}] TIER_LOG 记录跳过: {e}")
 
+    def _journal_close(self, meta):
+        """2026-09-19新增(本周问题总结item6"控制面板显示每笔平仓原因")：
+        每次平仓落一条"close"kind的品种隔离journal(复用_append_journal/
+        _journal_path同一套TV/open/exchange journal机制)，供console_api.py
+        的/api/console/overview读出来做"最近平仓原因"列表。exit_source/
+        exit_source_label此前只进了钉钉通知文案和journalctl的TIER_LOG
+        行，从没被持久化成可查询的结构化记录——这里补上，不影响任何
+        交易决策，纯记录。"""
+        try:
+            self._append_journal(self._journal_path("close"), {
+                "side": meta.get("side"),
+                "entry_px": self._safe_float(meta.get("entry_px")),
+                "exit_px": self._safe_float(meta.get("live_exit_px")),
+                "qty": self._safe_float(meta.get("closed_qty")),
+                "pnl_pct": meta.get("pnl_pct"),
+                "exit_source": meta.get("exit_source") or "",
+                "exit_source_label": meta.get("exit_source_label") or "",
+                "tier": getattr(self, "tv_open_tier", None),
+            })
+        except Exception as e:
+            logger.debug(f"[{self.symbol}] 平仓journal记录跳过: {e}")
+
     def _report_flat_close(self, reason, swept_dust=False, close_meta=None, curr_px=0.0):
         """平仓/止盈收网钉钉：REST 核查重试，与 Pine 四标签对齐"""
         meta = self._enrich_close_meta_live(close_meta, curr_px)
         self._log_tier_close_stats(meta)
+        self._journal_close(meta)
         flat = self._wait_verify(self._verify_flat, retries=6, delay=0.5)
         base_note = "盘口无持仓 | 挂单已清空 | 智慧大脑复位待命"
         if swept_dust:
