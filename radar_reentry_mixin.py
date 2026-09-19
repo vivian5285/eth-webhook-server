@@ -355,10 +355,14 @@ DUAL_MA_EXIT_KLINE_LIMIT = 80
 DUAL_MA_EXIT_REFRESH_SEC = 300.0  # 跟REVERSAL_LOCK同一节流窗口，够及时又不刷REST
 DUAL_MA_EXIT_SOFT_TIGHTEN_BUFFER_ATR = 0.3  # 假突破疑似时的收紧缓冲(×ATR)
 DUAL_MA_EXIT_INTERVAL_MIN = {
-    # 2026-09-13：OPENAI从120分钟改成45分钟(宝贝把TV alert周期改了，跟其
-    # 余品种统一，实盘目前只剩SNDK还是75分钟)。
-    "BNBUSDT": 45, "XPDUSDT": 45, "SNDKUSDT": 75, "OPENAIUSDT": 45,
-    "XAUUSDT": 45, "XPTUSDT": 45, "XRPUSDT": 45, "SOLUSDT": 45,
+    # 2026-09-19核对TV警报截图重新校准：宝贝反馈"有的品种的时间周期有
+    # 做改变"——2026-09-13那版(BNB/XPD/OPENAI/XAU=45分钟, SNDK=75分钟)
+    # 已经跟TV实际在用的周期对不上，直接拿今天的真实截图数字校正。
+    "BNBUSDT": 65, "XPDUSDT": 49, "SNDKUSDT": 91, "OPENAIUSDT": 65,
+    "XAUUSDT": 50,
+    # 下面几个当前已暂停(不在active_binance_symbols白名单)，没有最新TV
+    # 截图数据，暂时保留2026-09-13那版旧值——恢复交易前需要重新核对。
+    "XPTUSDT": 45, "XRPUSDT": 45, "SOLUSDT": 45,
 }
 DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN = 45  # 未登记品种(尚无B系统专属周期校准)的兜底
 

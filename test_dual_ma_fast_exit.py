@@ -221,7 +221,8 @@ class TestDualMaFastExit(unittest.TestCase):
         self.assertEqual(DUAL_MA_EXIT_SLOW_LEN, 30)
 
     def test_uses_symbol_specific_interval(self):
-        """OPENAI应该用45分钟(2026-09-13起，TV alert周期从120分钟改成45分钟)。"""
+        """OPENAI应该用宝贝当前TV截图的真实周期(2026-09-19核对截图重新
+        校准为65分钟，2026-09-13那版45分钟已经过期)。"""
         from radar_reentry_mixin import DUAL_MA_EXIT_INTERVAL_MIN
         s = _mk_supervisor(symbol="OPENAIUSDT")
         bars = _make_bars(decline_n=50, rally_n=0)
@@ -229,7 +230,7 @@ class TestDualMaFastExit(unittest.TestCase):
             s._maybe_fast_exit_on_dual_ma_break(bars[-1][4], 60.0)
             args, kwargs = mock_klines.call_args
             self.assertEqual(args[1], f"{DUAL_MA_EXIT_INTERVAL_MIN['OPENAIUSDT']}m")
-            self.assertEqual(DUAL_MA_EXIT_INTERVAL_MIN["OPENAIUSDT"], 45)
+            self.assertEqual(DUAL_MA_EXIT_INTERVAL_MIN["OPENAIUSDT"], 65)
 
 
 class TestProfitProgressGateZoneDerivation(unittest.TestCase):
