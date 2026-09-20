@@ -42,12 +42,22 @@ def _make_bars(n=90, start=700.0, step=0.5, period_min=45):
     # 来的TP1/TP2/TP3两两之差可能在四舍五入后小于0.01而被误判乱序。
     # 这里只关心"open_atr/current_atr为0时会不会现算ATR"这个时序修复
     # 本身，换成不撞这个精度问题的价格量级即可，不影响验证目标。
+    #
+    # 2026-09-20修正：strategy_engine.klines.get_bars()线上真实返回的是
+    # dict列表({"t","o","h","l","c","v"})，不是[t,o,h,l,c,v]的list——
+    # 之前这里直接mock成list，绕开了_synthesize_fallback_tp_from_atr内部
+    # "dict转list"这一步的真实校验，没能捕获过calc_smart_hard_stop_price
+    # 按下标取值(bars[i][2]等)碰到dict时的KeyError。改成dict格式以匹配
+    # 真实契约。
     bars = []
     t0 = 1_700_000_000_000
     px = start
     for i in range(n):
         px += step
-        bars.append([t0 + i * period_min * 60000, px - step, px + 0.4, px - 0.4, px, 100.0])
+        bars.append({
+            "t": t0 + i * period_min * 60000,
+            "o": px - step, "h": px + 0.4, "l": px - 0.4, "c": px, "v": 100.0,
+        })
     return bars
 
 

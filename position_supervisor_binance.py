@@ -2915,9 +2915,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN,
                 )
                 from strategy_engine import klines as _sk_klines
-                bars = _sk_klines.get_bars(
+                bars_raw = _sk_klines.get_bars(
                     self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT,
                 )
+                # get_bars返回dict列表({"t","o","h","l","c","v"})，
+                # _atr_last按下标读list，这里转一次格式(同CoinW
+                # _get_risk_klines的转法)。
+                bars = [
+                    [b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]]
+                    for b in (bars_raw or [])
+                ]
                 from smart_hard_stop import calc_smart_hard_stop_price
                 _hard, _meta, _ok, _err = calc_smart_hard_stop_price(
                     side, entry, bars or [], tier=1,
@@ -3223,9 +3230,16 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN,
             )
             from strategy_engine import klines as _sk_klines
-            bars = _sk_klines.get_bars(
+            bars_raw = _sk_klines.get_bars(
                 self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT,
             )
+            # get_bars返回dict列表({"t","o","h","l","c","v"})，
+            # _atr_last按下标读list，这里转一次格式(同CoinW
+            # _get_risk_klines的转法)。
+            bars = [
+                [b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]]
+                for b in (bars_raw or [])
+            ]
             from smart_hard_stop import calc_smart_hard_stop_price
             computed, meta, calc_ok, err = calc_smart_hard_stop_price(
                 self.current_side, entry, bars or [], tier=1,

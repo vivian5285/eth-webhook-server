@@ -36,12 +36,21 @@ import position_supervisor_binance as psb  # noqa: E402
 
 
 def _make_bars(n=90, start=1.30, step=0.001, period_min=45):
+    """2026-09-20修正：strategy_engine.klines.get_bars()线上真实返回的是
+    dict列表({"t","o","h","l","c","v"})，不是[t,o,h,l,c,v]的list——之前
+    这里直接mock成list，绕开了_compute_manual_takeover_hard_stop/
+    _synthesize_fallback_tp_from_atr内部"dict转list"这一步的真实校验，
+    没能捕获过calc_smart_hard_stop_price按下标取值(bars[i][2]等)碰到
+    dict时的KeyError。改成dict格式以匹配真实契约。"""
     bars = []
     t0 = 1_700_000_000_000
     px = start
     for i in range(n):
         px += step
-        bars.append([t0 + i * period_min * 60000, px - step, px + 0.0004, px - 0.0004, px, 100.0])
+        bars.append({
+            "t": t0 + i * period_min * 60000,
+            "o": px - step, "h": px + 0.0004, "l": px - 0.0004, "c": px, "v": 100.0,
+        })
     return bars
 
 
