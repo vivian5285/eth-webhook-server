@@ -487,6 +487,13 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "ehlers_fisher_transform", "timeframe": "1h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "williams_alligator", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "vortex_indicator", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝问"4h/6h/8h/12h均值回归有没有搞头")：CCI均值回归，
+    # 4个周期并排跑，用真实数据看哪个周期有边际，不是猜。见
+    # strategies/cci_mean_reversion.py顶部说明。
+    + [{"symbol": s, "strategy": "cci_mean_reversion", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "cci_mean_reversion_6h", "timeframe": "6h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "cci_mean_reversion_8h", "timeframe": "8h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "cci_mean_reversion_12h", "timeframe": "12h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

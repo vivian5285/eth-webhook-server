@@ -680,6 +680,21 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] vortex_indicator 加载失败: {_e}")
 
+# 2026-09-20新增：CCI均值回归——宝贝问"4h/6h/8h/12h做均值回归有没有搞头"。
+# 擂台此前唯一的均值回归战法(vwap_mean_reversion)只做到45m，日线级别的
+# (connors_rsi2/bollinger_rsi_contrarian)又太慢，这个波段区间完全没人
+# 覆盖。同一份代码注册4个周期变体，用真实数据看哪个周期有边际，见
+# cci_mean_reversion.py顶部说明。
+try:
+    from strategy_engine.strategies import cci_mean_reversion
+    STRATEGIES["cci_mean_reversion"] = cci_mean_reversion.generate_signal
+    STRATEGIES["cci_mean_reversion_6h"] = cci_mean_reversion.generate_signal
+    STRATEGIES["cci_mean_reversion_8h"] = cci_mean_reversion.generate_signal
+    STRATEGIES["cci_mean_reversion_12h"] = cci_mean_reversion.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] cci_mean_reversion 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -1439,6 +1454,27 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "跟'mtf_ema_macd_cci'同一套多周期多因子逻辑/参数，唯一变量是"
         "启用了'盘中提前入场'——见文件顶部本批说明。base=4h，理论上能省"
         "下最多几小时的收盘等待。"
+    ),
+    # 2026-09-20新增(宝贝问"4h/6h/8h/12h均值回归有没有搞头")：CCI均值回归
+    # 4个周期变体共用同一句说明——Donald Lambert公开发表CCI，±100代表极端，
+    # 反向操作赌回归，跟kdj_cross(39笔0次碰止损、64.1%胜率，擂台目前机制
+    # 最干净的均值回归战法)同一副骨架，只是换成CCI+更慢周期。默认带ADX<25
+    # 的非趋势闸门，防止逆势抄底摸顶被真趋势打穿。见cci_mean_reversion.py。
+    "cci_mean_reversion": (
+        "CCI均值回归4h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "cci_mean_reversion_6h": (
+        "CCI均值回归6h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "cci_mean_reversion_8h": (
+        "CCI均值回归8h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "cci_mean_reversion_12h": (
+        "CCI均值回归12h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
     ),
 }
 
