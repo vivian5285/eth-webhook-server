@@ -501,6 +501,27 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "rsi_mean_reversion_6h", "timeframe": "6h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "rsi_mean_reversion_8h", "timeframe": "8h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "rsi_mean_reversion_12h", "timeframe": "12h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_1d", "timeframe": "1d"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝要求"20/80也一起排擂台，甚至日线都加上，数据
+    # 为王")：跟70/30矩阵完全对照的5个周期，只有ob/os阈值不同。同时把
+    # ob_tier2/os_tier2从默认80/20收紧到90/10——不然进场条件本身就是
+    # rsi≥80，会跟tier2判定阈值(默认也是80)撞在一起，导致这个变体所有
+    # 单子永远判tier2，tier概念形同虚设，见rsi_mean_reversion.py顶部说明。
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_2080", "timeframe": "4h",
+        "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
+       for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_2080_6h", "timeframe": "6h",
+        "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
+       for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_2080_8h", "timeframe": "8h",
+        "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
+       for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_2080_12h", "timeframe": "12h",
+        "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
+       for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_2080_1d", "timeframe": "1d",
+        "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
+       for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置

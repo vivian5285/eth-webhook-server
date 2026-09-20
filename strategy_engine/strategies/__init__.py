@@ -705,6 +705,16 @@ try:
     STRATEGIES["rsi_mean_reversion_6h"] = rsi_mean_reversion.generate_signal
     STRATEGIES["rsi_mean_reversion_8h"] = rsi_mean_reversion.generate_signal
     STRATEGIES["rsi_mean_reversion_12h"] = rsi_mean_reversion.generate_signal
+    # 2026-09-20新增(宝贝要求"数据为王"，把70/30矩阵补上日线，再加一套
+    # 20/80更严格的阈值矩阵一起对照)：同一份代码，只是params换ob/os或
+    # timeframe换1d，逐字复用cross_momentum_runwin那种"复用代码换参数"
+    # 的既有做法。
+    STRATEGIES["rsi_mean_reversion_1d"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_2080"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_2080_6h"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_2080_8h"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_2080_12h"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_2080_1d"] = rsi_mean_reversion.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] rsi_mean_reversion 加载失败: {_e}")
@@ -1511,6 +1521,34 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     "rsi_mean_reversion_12h": (
         "RSI均值回归12h版——见文件顶部本批说明，跟其余3个周期变体同一套"
         "逻辑/参数，唯一变量是周期。"
+    ),
+    "rsi_mean_reversion_1d": (
+        "RSI均值回归1d版——补上70/30矩阵的日线周期，跟其余4个周期变体"
+        "同一套逻辑/参数，唯一变量是周期。"
+    ),
+    # 2026-09-20新增(宝贝要求"20/80也一起排擂台，数据为王")：20/80是比
+    # 70/30更严格的超买超卖阈值(更少触发、但触发时的极端程度更深)，5个
+    # 周期(4h/6h/8h/12h/1d)跟70/30矩阵完全对照，只有ob/os参数不同。
+    "rsi_mean_reversion_2080": (
+        "RSI均值回归20/80版(4h)——跟'rsi_mean_reversion'同一套逻辑，"
+        "阈值从70/30收紧到80/20(更少触发、但更极端才进场)，用真实数据看"
+        "哪组阈值更好。"
+    ),
+    "rsi_mean_reversion_2080_6h": (
+        "RSI均值回归20/80版(6h)——见'rsi_mean_reversion_2080'说明，唯一"
+        "变量是周期。"
+    ),
+    "rsi_mean_reversion_2080_8h": (
+        "RSI均值回归20/80版(8h)——见'rsi_mean_reversion_2080'说明，唯一"
+        "变量是周期。"
+    ),
+    "rsi_mean_reversion_2080_12h": (
+        "RSI均值回归20/80版(12h)——见'rsi_mean_reversion_2080'说明，唯一"
+        "变量是周期。"
+    ),
+    "rsi_mean_reversion_2080_1d": (
+        "RSI均值回归20/80版(1d)——见'rsi_mean_reversion_2080'说明，唯一"
+        "变量是周期。"
     ),
 }
 
