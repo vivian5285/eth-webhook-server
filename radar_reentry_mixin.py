@@ -360,6 +360,7 @@ DUAL_MA_EXIT_INTERVAL_MIN = {
     # 已经跟TV实际在用的周期对不上，直接拿今天的真实截图数字校正。
     "BNBUSDT": 65, "XPDUSDT": 49, "SNDKUSDT": 91, "OPENAIUSDT": 65,
     "XAUUSDT": 50,
+    "MUUSDT": 91,  # 2026-09-20新增：重新上线，TV周期91分钟
     # 下面几个当前已暂停(不在active_binance_symbols白名单)，没有最新TV
     # 截图数据，暂时保留2026-09-13那版旧值——恢复交易前需要重新核对。
     "XPTUSDT": 45, "XRPUSDT": 45, "SOLUSDT": 45,

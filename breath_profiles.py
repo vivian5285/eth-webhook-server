@@ -1027,6 +1027,42 @@ BREATH_SNDK_B: Dict[str, Any] = {
     "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SNDK)
 }
 
+# MU(B系统) —— 2026-09-20新增专属档：宝贝要求把MU的usdt永续合约重新
+# 加回币安B系统+CoinW，"时间周期雷达系数统一用币安的91分钟"——此前
+# BREATH_MU(A系统/共用)是2026-09-05按55分钟K线校准的，跟当前91分钟不
+# 一致，不能只改周期不改呼吸系数，新建B系统专属档(方法同BREATH_SNDK_B)。
+# 用真实币安1m K线合成91分钟K线重测(scratch_calibrate_mu_91m.py，方法
+# 同scratch_calibrate_xau_skhynix.py)：81.2天1285根合成K线、243个真实
+# 摆动点、188个回调样本，P50=2.42×ATR P75=3.87×ATR P90=5.68×ATR，
+# ATR%=0.47%。step_trigger/step_advance推算沿用既定方法(0.375×
+# breath_tp12/0.65×step_trigger)。min/max比例沿用A系统MU自己的比例
+# (4.2/5.9=0.712)。
+BREATH_MU_B: Dict[str, Any] = {
+    "name": "MU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.91,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.42,  # 实测中位数回调(2.42)
+    "breath_tp23": 3.87,  # 实测75分位回调(3.87)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.3,      # 0.712×max_mult（沿用A系统MU的min/max比例）
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.68)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(MU)
+}
+
 # XPT(铂金) —— 2026-09-13新增品种首次校准，B系统专属(45分钟周期，跟同为
 # 贵金属TradFi商品的XAU/XPD同族)。用真实币安15m K线合成45分钟K线测
 # (91.1天2916根合成K线、418个真实摆动点识别回调样本)：中位数回调
@@ -1129,6 +1165,9 @@ _BY_BINANCE_B = {
     # BREATH_SNDK_B顶部注释——之前"A/B周期本来就一样、直接共用"这条旧
     # 注释已经过期。
     "SNDKUSDT": BREATH_SNDK_B,
+    # 2026-09-20新增：MU重新上线，周期改91分钟(A系统仍是55分钟)，见上方
+    # BREATH_MU_B顶部注释。
+    "MUUSDT": BREATH_MU_B,
 }
 
 _BY_COINW_B = {

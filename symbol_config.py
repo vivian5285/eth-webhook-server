@@ -615,14 +615,16 @@ def active_binance_symbols():
     # 删除，恢复直接把品种加回下面default_list/VPS .env即可)。SOL当时
     # 还有持仓，按跟0deff95同样的既定语义处理：暂停只挡新开仓，已有
     # 仓位交给引擎自己的硬止损/雷达管到自然平仓，不强制清仓。
+    # 2026-09-20：宝贝要求把MU重新加回来(usdt永续合约)，周期改91分钟，
+    # 币安B系统+CoinW都新增，见breath_profiles.py::BREATH_MU_B顶部注释。
     _smart_mode = str(os.getenv("SMART_HARD_STOP_ENABLED", "0")).strip().lower() in (
         "1", "true", "yes",
     )
     if _smart_mode:
-        default_list = "BNBUSDT,XPDUSDT,SNDKUSDT,OPENAIUSDT,XAUUSDT"
+        default_list = "BNBUSDT,XPDUSDT,SNDKUSDT,OPENAIUSDT,XAUUSDT,MUUSDT"
         raw = os.getenv("BINANCE_SYMBOLS_B", default_list)
     else:
-        default_list = "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT"
+        default_list = "BNBUSDT,OPENAIUSDT,XPDUSDT,SNDKUSDT,MUUSDT"
         raw = os.getenv("BINANCE_SYMBOLS", default_list)
     out = []
     for part in str(raw).split(","):
