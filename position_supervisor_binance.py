@@ -5120,6 +5120,13 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
         返回0.0，调用方会自动回退到A系统那套久经考验的TV缓冲垫+ATR应急
         兜底路径，不会因为这条新路径失败就让仓位裸奔——B系统的"强壮"
         程度不能低于A系统。
+
+        2026-09-20新增breath_atr：MU实盘复现止损距entry仅0.22%(tight模式
+        无下限，30分钟ATR/结构位本身就比品种真实呼吸周期91分钟短很多)，
+        额外拉一次品种自己DUAL_MA_EXIT_INTERVAL_MIN原生周期的K线算ATR，
+        传给calc_smart_hard_stop_price做tight模式下限参考——拉取失败时
+        传None，函数内部退回用30分钟K线自己的ATR做下限(见该函数顶部
+        注释，覆盖面变窄但不会整体失败)。
         """
         try:
             from smart_hard_stop import (
@@ -5127,6 +5134,7 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                 STRUCT_LOOKBACK_BARS,
                 ATR_PERIOD,
                 STRUCT_CONFIRM,
+                _atr_last,
             )
             need_bars = STRUCT_LOOKBACK_BARS + ATR_PERIOD + STRUCT_CONFIRM + 10
             klines = binance_client.fetch_klines(
@@ -5137,9 +5145,29 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                     f"⚠️ [{self.symbol}] 综合硬止损：K线拉取为空"
                 )
                 return 0.0
+            breath_atr = None
+            try:
+                interval_min = DUAL_MA_EXIT_INTERVAL_MIN.get(
+                    self.symbol, DUAL_MA_EXIT_DEFAULT_INTERVAL_MIN,
+                )
+                from strategy_engine import klines as _sk_klines
+                breath_bars_raw = _sk_klines.get_bars(
+                    self.symbol, f"{interval_min}m", limit=DUAL_MA_EXIT_KLINE_LIMIT,
+                )
+                # get_bars返回dict列表({"t","o","h","l","c","v"})，
+                # _atr_last按下标读list，这里转一次格式(同CoinW
+                # _get_risk_klines的转法)。
+                breath_bars = [
+                    [b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]]
+                    for b in (breath_bars_raw or [])
+                ]
+                breath_atr = _atr_last(breath_bars, ATR_PERIOD) or None
+            except Exception as e:
+                logger.debug(f"[{self.symbol}] 综合硬止损：呼吸周期ATR拉取失败(退回30m自算下限): {e}")
             tier = getattr(self, "tv_open_tier", None)
             price, meta, ok, err = calc_smart_hard_stop_price(
                 side=side, entry_price=float(fill or 0), klines=klines, tier=tier,
+                breath_atr=breath_atr,
             )
             if not ok:
                 logger.warning(

@@ -61,6 +61,22 @@ ATR_PERIOD = 14
 # (1500.95-entry ≈ 1.68× k×ATR)。
 WIDE_MODE_CEILING_MULT = 1.5
 
+# 2026-09-20新增：宝贝实盘发现MU(币安B+CoinW两边都)、以及CoinW当天XPD/XAU
+# 两笔真实止损出局，止损距entry仅0.1~0.2%——根因是tight模式(弱/中tier，
+# 也是最常见的信号强度)完全没有最小距离下限，而这里算ATR/结构摆动点用的
+# 固定30分钟K线，本身就比策略呼吸空间校准用的品种原生TV周期(49~91分钟，
+# 见DUAL_MA_EXIT_INTERVAL_MIN)短得多，30分钟ATR天然偏小，k×ATR/结构位
+# 两个候选只要恰好都薄，止损就能薄到一个正常波动就打穿——比wide模式那次
+# OPENAI事故(止损太宽)反过来的镜像问题(止损太紧)。
+# 修复：调用方现在可以传入breath_atr(品种真实呼吸周期上现算的ATR，跟
+# breath_profiles.py呼吸系数校准用的同一个周期)，tight模式下止损距离不能
+# 小于TIGHT_MODE_FLOOR_MULT×breath_atr；不传时退回用本函数自己算出来的
+# atr自身做下限参考(仍能防住"结构摆动点比30分钟ATR带还近"这一种情形，
+# 只是防不住"30分钟ATR本身就偏小"这一种，覆盖面比传了breath_atr时小)。
+# 0.7是折中：比tier=0的k=1.5明显更紧(留给弱信号该有的克制)，但不会薄到
+# 今天这种一个正常波动就打穿的程度。
+TIGHT_MODE_FLOOR_MULT = 0.7
+
 VOLUME_CONFIRM_LOOKBACK = 20   # 基准量能取这个窗口内、最近N根之前的均量
 VOLUME_CONFIRM_RECENT_N = 3    # 最近几根的均量拿来跟基准比
 VOLUME_CONFIRM_MULT = 1.3      # 最近量能 ≥ 基准 × 此倍数 才算"真放量"
@@ -144,6 +160,8 @@ def calc_smart_hard_stop_price(
     atr_period: int = ATR_PERIOD,
     k_tier: Optional[Dict[int, float]] = None,
     strong_tier: int = 2,
+    breath_atr: Optional[float] = None,
+    tight_floor_mult: float = TIGHT_MODE_FLOOR_MULT,
 ) -> Tuple[float, Dict[str, Any], bool, str]:
     """
     综合硬止损：结构摆动点(fractal pivot) + 分档ATR保护带，取更保守者。
@@ -159,7 +177,10 @@ def calc_smart_hard_stop_price(
 
     combo_mode：
       "tight"（弱/中tier，或强tier但没查到真放量）——struct/ATR两个候选
-        取更靠近成交价的那个（多头取更高、空头取更低），宁紧不松。
+        取更靠近成交价的那个（多头取更高、空头取更低），宁紧不松。但
+        距离不能小于tight_floor_mult×breath_atr(品种真实呼吸周期ATR，
+        breath_atr不传时退回用本函数自己算出的atr)——防止30分钟K线上
+        恰好都薄(结构位近+ATR带窄)时止损薄到一个正常波动就打穿。
       "wide"（强tier且查到真放量确认）——反过来取更远离成交价的那个，
         允许趋势呼吸，不被恰好路过的摆动点/过紧ATR带提前打出去。
     """
@@ -192,6 +213,9 @@ def calc_smart_hard_stop_price(
 
     wide_ceiling_dist = WIDE_MODE_CEILING_MULT * k * atr
     ceiling_applied = False
+    floor_ref_atr = float(breath_atr) if breath_atr and float(breath_atr) > 0 else atr
+    floor_dist = tight_floor_mult * floor_ref_atr
+    floor_applied = False
     if side == "LONG":
         atr_stop = entry_price - k * atr
         if pivot is not None:
@@ -202,6 +226,9 @@ def calc_smart_hard_stop_price(
         if wide_mode and (entry_price - hard_sl) > wide_ceiling_dist:
             hard_sl = entry_price - wide_ceiling_dist
             ceiling_applied = True
+        if not wide_mode and (entry_price - hard_sl) < floor_dist:
+            hard_sl = entry_price - floor_dist
+            floor_applied = True
         if hard_sl >= entry_price:
             return 0.0, {}, False, f"stop_above_entry_long:{hard_sl}>={entry_price}"
     else:
@@ -214,6 +241,9 @@ def calc_smart_hard_stop_price(
         if wide_mode and (hard_sl - entry_price) > wide_ceiling_dist:
             hard_sl = entry_price + wide_ceiling_dist
             ceiling_applied = True
+        if not wide_mode and (hard_sl - entry_price) < floor_dist:
+            hard_sl = entry_price + floor_dist
+            floor_applied = True
         if hard_sl <= entry_price:
             return 0.0, {}, False, f"stop_below_entry_short:{hard_sl}<={entry_price}"
 
@@ -232,5 +262,11 @@ def calc_smart_hard_stop_price(
         # 收紧到上限，日志/人工核查时能看出这次不是"自然"的wide结果。
         "wide_ceiling_applied": ceiling_applied,
         "wide_ceiling_dist": round(wide_ceiling_dist, 4) if wide_mode else 0.0,
+        # 2026-09-20新增：tight模式下限是否生效——生效时说明struct/ATR两个
+        # 候选算出来的距离都比tight_floor_mult×breath_atr近，已经被拉宽到
+        # 下限，日志/人工核查时能看出这次不是"自然"的tight结果。
+        "breath_atr": round(floor_ref_atr, 4),
+        "tight_floor_dist": round(floor_dist, 4) if not wide_mode else 0.0,
+        "tight_floor_applied": floor_applied,
     }
     return round(hard_sl, 2), meta, True, ""
