@@ -695,6 +695,20 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] cci_mean_reversion 加载失败: {_e}")
 
+# 2026-09-20新增：RSI均值回归——宝贝接着问"这几个周期的RSI均值回归要不要
+# 一起并排测试"。kdj_cross是RSI的近亲(随机振荡器家族)但只在4h一个周期跑，
+# 真正"RSI(14)经典70/30、4h~12h波段周期"这个组合之前是空白。跟
+# cci_mean_reversion同一套周期矩阵，见rsi_mean_reversion.py顶部说明。
+try:
+    from strategy_engine.strategies import rsi_mean_reversion
+    STRATEGIES["rsi_mean_reversion"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_6h"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_8h"] = rsi_mean_reversion.generate_signal
+    STRATEGIES["rsi_mean_reversion_12h"] = rsi_mean_reversion.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] rsi_mean_reversion 加载失败: {_e}")
+
 
 STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     # tv_multiscore_v1不在STRATEGIES注册表里(它是shadow_engine.py自己的
@@ -1474,6 +1488,28 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     ),
     "cci_mean_reversion_12h": (
         "CCI均值回归12h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    # 2026-09-20新增(宝贝问"RSI均值回归要不要一起并排测试")：RSI均值回归
+    # 4个周期变体共用同一句说明——Welles Wilder公开发表RSI，70/30是他原始
+    # 定义的超买超卖边界，比CCI±100更"教科书"的均值回归读法。跟kdj_cross
+    # (RSI近亲、同一副骨架、39笔0次碰止损)同一个思路，但kdj_cross只在4h
+    # 跑，这里补上4h/6h/8h/12h完整矩阵，跟cci_mean_reversion并排对照。见
+    # rsi_mean_reversion.py。
+    "rsi_mean_reversion": (
+        "RSI均值回归4h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "rsi_mean_reversion_6h": (
+        "RSI均值回归6h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "rsi_mean_reversion_8h": (
+        "RSI均值回归8h版——见文件顶部本批说明，跟其余3个周期变体同一套"
+        "逻辑/参数，唯一变量是周期。"
+    ),
+    "rsi_mean_reversion_12h": (
+        "RSI均值回归12h版——见文件顶部本批说明，跟其余3个周期变体同一套"
         "逻辑/参数，唯一变量是周期。"
     ),
 }

@@ -494,6 +494,13 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "cci_mean_reversion_6h", "timeframe": "6h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "cci_mean_reversion_8h", "timeframe": "8h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "cci_mean_reversion_12h", "timeframe": "12h"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝问"RSI均值回归要不要一起并排测试")：跟
+    # cci_mean_reversion同一套周期矩阵，见strategies/rsi_mean_reversion.py
+    # 顶部说明。
+    + [{"symbol": s, "strategy": "rsi_mean_reversion", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_6h", "timeframe": "6h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_8h", "timeframe": "8h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "rsi_mean_reversion_12h", "timeframe": "12h"} for s in _ALL_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
