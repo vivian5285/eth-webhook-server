@@ -345,6 +345,13 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "mtf_ema_macd_cci_v2", "timeframe": "4h", "mtf": ["1d"],
         "params": {"exit_struct_lookback": 10, "max_breakout_extension_atr_mult": 0.5}}
        for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝要求给头部盈利战法提升"进场敏捷"，参考实盘级别
+    # 反应速度)：mtf_ema_macd_cci_agile——跟原版同一套逻辑/参数(含mtf日线)，
+    # 只加early_entry开关，见multi_strategy_runner.py::_try_early_entry
+    # 和strategies/__init__.py顶部本批说明。
+    + [{"symbol": s, "strategy": "mtf_ema_macd_cci_agile", "timeframe": "4h", "mtf": ["1d"],
+        "early_entry": True}
+       for s in _ALL_SYMBOLS]
     # 2026-09-10：DualThrust 区间突破（base=1h + 日线 n 日 Range）
     + [{"symbol": s, "strategy": "dual_thrust", "timeframe": "1h", "mtf": ["1d"]} for s in _ALL_SYMBOLS]
     # 2026-09-10：三板块特化战法——每套只挂本板块品种(不进 _ALL_SYMBOLS)。
@@ -389,6 +396,10 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "heikin_ashi_trend_v2", "timeframe": "4h",
         "params": {"require_growing_body": False, "require_clean_entry_bar": True,
                    "wick_exit_atr_floor_frac": 0.15, "use_ema_direction_filter": True}}
+       for s in _ALL_SYMBOLS]
+    # 2026-09-20新增：heikin_ashi_trend_agile——跟原版同一套逻辑/参数，
+    # 只加early_entry开关，见mtf_ema_macd_cci_agile同一批说明。
+    + [{"symbol": s, "strategy": "heikin_ashi_trend_agile", "timeframe": "4h", "early_entry": True}
        for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # 2026-09-12：vwap_ema_regime——ADX(2h)状态开关：趋势腿走2h EMA(10/30)，
@@ -438,7 +449,17 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "ichimoku_cloud", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "parabolic_sar_flip", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "macd_histogram", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝要求逐个优化胜率)：macd_histogram_v2——见
+    # strategies/__init__.py同名条目说明。hist_min_atr_frac过滤零轴噪音
+    # 变号，adx_gate只在真趋势里吃信号，20是ADX文献常引用的趋势判定值。
+    + [{"symbol": s, "strategy": "macd_histogram_v2", "timeframe": "4h",
+        "params": {"hist_min_atr_frac": 0.15, "adx_gate": 20.0}}
+       for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kaufman_ama", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增(宝贝要求逐个优化胜率)：kaufman_ama_v2——见
+    # strategies/__init__.py同名条目说明，同一个adx_gate=20.0。
+    + [{"symbol": s, "strategy": "kaufman_ama_v2", "timeframe": "4h", "params": {"adx_gate": 20.0}}
+       for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "raschke_adx_pullback", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "keltner_channel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第二批新增2套(DeepSeek建议剥离出的纯规则版) ────────────
@@ -452,6 +473,10 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "turtle_system2", "timeframe": "4h", "params": _TURTLE_SYSTEM2_PARAMS} for s in _TURTLE_SYMBOLS]
     # ── 2026-09-05第四批新增3套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "hma_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-20新增：hma_trend_agile——跟原版同一套逻辑/参数，只加
+    # early_entry开关，见mtf_ema_macd_cci_agile同一批说明。
+    + [{"symbol": s, "strategy": "hma_trend_agile", "timeframe": "4h", "early_entry": True}
+       for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "cvd_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "oi_price_confirm", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05：TV真实策略复刻拉进擂台 ────────────────────────────────
@@ -533,6 +558,24 @@ UNIVERSE_ROSTER = [
         "lookback_bars": 20,
         "vol_scale_rank": True,
         "params": {"abs_momentum_hurdle_mult": 0.5, "use_ema_direction_filter": True},
+    },
+    # 2026-09-20新增(宝贝要求给头部盈利战法提升"进场敏捷"，参考实盘级别
+    # 反应速度)：cross_momentum_agile/dual_momentum_agile——跟各自原版
+    # 同一套排名/参数，只加early_entry开关，见strategies/__init__.py顶部
+    # 本批说明、multi_strategy_runner.py::_try_early_entry。
+    {
+        "strategy": "cross_momentum_agile",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "early_entry": True,
+    },
+    {
+        "strategy": "dual_momentum_agile",
+        "timeframe": "4h",
+        "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 20,
+        "early_entry": True,
     },
     # 2026-09-10：币圈 ETH 系列板块特化——只在 ETH 生态小篮子里做，
     # ETH 大盘 beta 门 + 相对强弱 + 资金费率拥挤度否决(见 strategies/

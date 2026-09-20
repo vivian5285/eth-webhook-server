@@ -41,6 +41,15 @@ DEFAULT_PARAMS = {
     "signal": 9,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    # 2026-09-20新增(macd_histogram_v2用，原版默认0.0不生效、逐字不变)：
+    # 排查过擂台真实平仓记录——97笔里一大批是柱状图在0.00001~0.0001量级
+    # (零轴附近噪音)变号触发的假信号，不是真反转。hist_min_atr_frac要求
+    # 变号那一刻|柱状图值|至少达到这个比例×ATR才算数，过滤零轴抖动。
+    "hist_min_atr_frac": 0.0,
+    # 2026-09-20新增(macd_histogram_v2用，原版默认0.0不生效)：ADX(14)至少
+    # 达到这个值才允许开仓——只在真趋势里吃MACD交叉信号，跟tv_multiscore_
+    # v1的MIN_ADX=17.0同一个经典Wilder用法，这里取ADX文献常引用的20。
+    "adx_gate": 0.0,
 }
 
 
@@ -85,6 +94,17 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     atr = indicators.wilder_atr(bars, atr_len)
     if atr <= 0:
         return None
+
+    hist_min_frac = float(p.get("hist_min_atr_frac") or 0)
+    if hist_min_frac > 0 and abs(h_now) < hist_min_frac * atr:
+        return None  # 零轴附近噪音变号，幅度不够，不算数
+
+    adx_gate = float(p.get("adx_gate") or 0)
+    if adx_gate > 0:
+        adx = indicators.wilder_adx(bars, atr_len)
+        if adx < adx_gate:
+            return None  # 不在真趋势里，MACD交叉信号先不吃
+
     action = "LONG" if crossed_up else "SHORT"
     d = 1 if action == "LONG" else -1
 

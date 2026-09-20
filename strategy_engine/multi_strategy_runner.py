@@ -47,6 +47,13 @@ COMPARISON_TICK_INTERVAL_SEC = 300  # 5分钟一轮，足够及时捕捉最快�
 # 到480根(~20天)。550给两边都留出安全余量。
 BARS_LIMIT = 550
 
+# 2026-09-20新增(宝贝要求给头部趋势战法提升"进场敏捷"，参考实盘级别
+# 反应速度)：盘中提前入场的动能门槛，跟shadow_engine.py::EARLY_BODY_ATR_
+# MULT同一个值——照抄真实TV Pine源码barstate.isrealtime/useEarlyEntry
+# 那套(宝贝确认TV实盘本身也开着这个开关)，本仓库另一套引擎(tv_multiscore_
+# v1)已经验证过这个思路，这里port成这65套公开战法都能复用的通用版本。
+EARLY_ENTRY_BODY_ATR_MULT = 0.5
+
 # in-process内存态：每个(symbol, strategy)当前是否有模拟持仓，避免每个
 # tick都查一次sqlite——跟shadow_engine.py的ShadowPosition内存态同一惯例，
 # 但这里不需要ShadowPosition那么重的对象，直接存对我们有用的字段。
@@ -251,6 +258,52 @@ def _same_bar_reentry_blocked(symbol: str, strategy: str, sig: dict) -> bool:
     )
 
 
+def _try_early_entry(symbol: str, strategy: str, timeframe: str, bars_by_tf: Dict[str, list],
+                      call_params: dict, fn) -> Optional[dict]:
+    """盘中提前入场——只在roster条目显式带"early_entry":True时才会被
+    _tick_single_symbol_entry/_tick_universe_entry调用，默认关闭，对现有
+    65套战法的行为逐字不变。
+
+    思路照抄shadow_engine.py::check_early_trigger + 真实TV Pine源码
+    barstate.isrealtime/useEarlyEntry(宝贝确认TV实盘本身也开着这个开关)：
+    不等base周期这根K线真正收盘，用klines.get_current_bar查"当前还没走
+    完的那根K线"，接在已闭合K线序列末尾当"提前收盘"，重新跑一遍战法
+    自己的generate_signal——如果这根K线真收盘时战法本来就会给出信号，
+    现在用当前实时价提前确认，不用再等到它真正收盘(4h/90m/150m这些
+    周期下，这一等可能是几个小时)。加一道最小实体/ATR的动能门槛
+    (EARLY_ENTRY_BODY_ATR_MULT=0.5，跟shadow_engine同一个值)，只有
+    当前这根还在走的K线已经有足够动能时才值得多算一次，避免任何一点点
+    无意义的抖动都去重跑战法本身、也避免白打API。
+
+    跟f49ec73那次修的"未来函数"是两回事，方向相反：那次是拿入场信号
+    出现**之后**才发生的K线high/low去判离场(用了决策时刻还不存在的
+    数据)；这里是拿入场信号出现**之前**、当前这一刻已经真实成交的
+    实时价格去判入场(决策时刻确实存在、确实可得的数据)，不会重蹈
+    同一个bug。"""
+    base_bars = bars_by_tf.get("base") or []
+    if len(base_bars) < 20:
+        return None
+    atr = indicators.wilder_atr(base_bars, 14)
+    if atr <= 0:
+        return None
+    current_bar = klines.get_current_bar(symbol, timeframe)
+    if not current_bar:
+        return None
+    o, c = float(current_bar["o"]), float(current_bar["c"])
+    if abs(c - o) < EARLY_ENTRY_BODY_ATR_MULT * atr:
+        return None  # 动能不够，先不提前，等真正收盘再说
+
+    provisional = dict(bars_by_tf)
+    provisional["base"] = base_bars + [current_bar]
+    sig = fn(provisional, call_params, None)
+    if not sig or sig.get("action") not in ("LONG", "SHORT"):
+        return None
+    sig = dict(sig)
+    sig["price"] = c
+    sig["bar_time"] = int(current_bar["t"])
+    return sig
+
+
 def _hydrate_keys_from_db(keys: List[tuple]) -> None:
     """进程重启后从sqlite恢复内存态持仓——跟shadow_engine.py同类恢复逻辑
     同一惯例，避免重启后"账本记得开过仓、内存不知道"导致重复开仓。
@@ -333,6 +386,8 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         return
 
     sig = fn(bars_by_tf, call_params, None)
+    if not sig and entry.get("early_entry"):
+        sig = _try_early_entry(symbol, strategy, timeframe, bars_by_tf, call_params, fn)
     if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
         _open_from_signal(symbol, strategy, timeframe, sig)
 
@@ -443,6 +498,8 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             continue
 
         sig = fn({"base": bars}, params, None)
+        if not sig and entry.get("early_entry"):
+            sig = _try_early_entry(symbol, strategy, timeframe, {"base": bars}, params, fn)
         if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
             _open_from_signal(symbol, strategy, timeframe, sig)
 

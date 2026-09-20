@@ -108,6 +108,11 @@ try:
     # frac=0.45(进出场阈值拉开，排名边界抖动不再反复开平仓)+ EMA(7/25)
     # 方向确认，详见cross_momentum.py DEFAULT_PARAMS注释。
     STRATEGIES["cross_momentum_v2"] = cross_momentum.generate_signal
+    # 2026-09-20新增：同一份代码注册_agile对照名，配合multi_strategy_
+    # runner.py新增的通用"盘中提前入场"(early_entry roster开关)——跟
+    # cross_momentum同一套逻辑/参数，唯一变量是敢不敢不等K线收盘就用
+    # 当前实时价提前确认信号，见_try_early_entry注释。
+    STRATEGIES["cross_momentum_agile"] = cross_momentum.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] cross_momentum 加载失败: {_e}")
@@ -152,6 +157,9 @@ try:
     # 还原Antonacci原书"要求收益显著、不是无风险利率噪音"的本意，
     # 再加EMA(7/25)方向确认，详见dual_momentum.py DEFAULT_PARAMS注释。
     STRATEGIES["dual_momentum_v2"] = dual_momentum.generate_signal
+    # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
+    # 同一批说明。
+    STRATEGIES["dual_momentum_agile"] = dual_momentum.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] dual_momentum 加载失败: {_e}")
@@ -315,6 +323,11 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import macd_histogram
     STRATEGIES["macd_histogram"] = macd_histogram.generate_signal
+    # 2026-09-20新增(宝贝要求逐个优化胜率)：macd_histogram_v2——原版胜率
+    # 34%、去掉Top3笔就倒亏，真实平仓记录里一大批是柱状图零轴附近噪音
+    # 变号触发的假信号。v2传hist_min_atr_frac/adx_gate两道过滤，详见
+    # macd_histogram.py DEFAULT_PARAMS注释。原版保留不动当基准。
+    STRATEGIES["macd_histogram_v2"] = macd_histogram.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] macd_histogram 加载失败: {_e}")
@@ -322,6 +335,11 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import kaufman_ama
     STRATEGIES["kaufman_ama"] = kaufman_ama.generate_signal
+    # 2026-09-20新增(宝贝要求逐个优化胜率)：kaufman_ama_v2——原版胜率24%
+    # (本擂台盈利策略里最低)，只靠盈亏比撑住正期望。v2传adx_gate加ADX
+    # 趋势强度确认，详见kaufman_ama.py DEFAULT_PARAMS注释。原版保留不动
+    # 当基准。
+    STRATEGIES["kaufman_ama_v2"] = kaufman_ama.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] kaufman_ama 加载失败: {_e}")
@@ -406,6 +424,9 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import hma_trend
     STRATEGIES["hma_trend"] = hma_trend.generate_signal
+    # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
+    # 同一批说明。
+    STRATEGIES["hma_trend_agile"] = hma_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] hma_trend 加载失败: {_e}")
@@ -449,6 +470,9 @@ try:
     # (max_breakout_extension_atr_mult)，详见DEFAULT_PARAMS注释。日线
     # EMA7/30继续只当tier参考、不gate，遵守宝贝原话的设计规则。
     STRATEGIES["mtf_ema_macd_cci_v2"] = mtf_ema_macd_cci.generate_signal
+    # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
+    # 同一批说明——这套base=4h，提前入场理论上能省下最多几小时的等待。
+    STRATEGIES["mtf_ema_macd_cci_agile"] = mtf_ema_macd_cci.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] mtf_ema_macd_cci 加载失败: {_e}")
@@ -601,6 +625,9 @@ try:
     # 趋零过度敏感，加EMA(7/25)方向确认。明确不加固定止盈，详见
     # DEFAULT_PARAMS注释。
     STRATEGIES["heikin_ashi_trend_v2"] = heikin_ashi_trend.generate_signal
+    # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
+    # 同一批说明。
+    STRATEGIES["heikin_ashi_trend_agile"] = heikin_ashi_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] heikin_ashi_trend 加载失败: {_e}")
@@ -981,6 +1008,13 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "和'差值本身的EMA'，是二阶平滑，比单纯双均线交叉更能过滤高频假"
         "交叉。4H周期。"
     ),
+    "macd_histogram_v2": (
+        "跟'macd_histogram'同一套MACD柱状图逻辑，加两道过滤：①最小柱状图"
+        "幅度(相对ATR)，排查真实平仓记录发现原版一大批触发点是零轴附近"
+        "0.0001量级的噪音变号，不是真反转；②ADX趋势闸门，只在真趋势里"
+        "吃MACD交叉信号。原版胜率34%、去掉Top3笔倒亏，v2验证这两道过滤"
+        "能不能把假信号筛掉。"
+    ),
     "kaufman_ama": (
         "考夫曼自适应均线(Kaufman's AMA/KAMA，Perry Kaufman《Trading "
         "Systems and Methods》公开发表，本人真实管理过量化基金)——"
@@ -990,6 +1024,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "adx_regime_switch要另外接ADX开关切状态。价格穿越KAMA且KAMA自身"
         "同向才进场，是本批里唯一贴近'AI/自适应'概念、但规则完全公开"
         "透明、发明人真实可考的战法。4H周期。"
+    ),
+    "kaufman_ama_v2": (
+        "跟'kaufman_ama'同一套KAMA自适应逻辑，加ADX趋势强度确认门槛。"
+        "原版胜率24%(本擂台盈利策略里最低，靠盈亏比撑正期望)，噪音行情"
+        "里KAMA走平时仍会被偶发穿越骗到，v2验证独立的ADX确认能不能把"
+        "这类假穿越筛掉。"
     ),
     "raschke_adx_pullback": (
         "Raschke ADX回踩系统\"Holy Grail\"(Linda Raschke与Larry Connors"
@@ -1371,6 +1411,34 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "受Wilder DMI/ADX启发，VM+=|当根高-上根低|、VM-=|当根低-上根高|，"
         "各自除以同期真实波幅之和得VI+/VI-，代表多空拉扯的推力对比。"
         "VI+上穿VI-做多，VI-上穿VI+做空，period=14(原始论文默认)。4h。"
+    ),
+    # 2026-09-20新增(宝贝要求给头部盈利战法提升"进场敏捷"，参考实盘级别
+    # 反应速度)：5个"_agile"对照名共用同一句说明——跟各自原版战法逐字
+    # 同一套信号逻辑/参数，唯一变量是multi_strategy_runner.py新增的
+    # early_entry开关：不等base周期K线真正收盘，一旦当前还在走的那根
+    # K线动能(实体≥0.5×ATR)已经确认了原本要等收盘才能确认的方向，就用
+    # 当前实时价提前入场，照抄真实TV Pine源码barstate.isrealtime/
+    # useEarlyEntry同一个思路(宝贝确认TV实盘本身也开着这个开关)。
+    "dual_momentum_agile": (
+        "跟'dual_momentum'同一套双重动量逻辑/参数，唯一变量是启用了"
+        "'盘中提前入场'——见文件顶部本批说明。"
+    ),
+    "cross_momentum_agile": (
+        "跟'cross_momentum'同一套相对动量逻辑/参数，唯一变量是启用了"
+        "'盘中提前入场'——见文件顶部本批说明。"
+    ),
+    "heikin_ashi_trend_agile": (
+        "跟'heikin_ashi_trend'同一套Heikin-Ashi趋势逻辑/参数，唯一变量"
+        "是启用了'盘中提前入场'——见文件顶部本批说明。"
+    ),
+    "hma_trend_agile": (
+        "跟'hma_trend'同一套HMA趋势逻辑/参数，唯一变量是启用了'盘中提前"
+        "入场'——见文件顶部本批说明。"
+    ),
+    "mtf_ema_macd_cci_agile": (
+        "跟'mtf_ema_macd_cci'同一套多周期多因子逻辑/参数，唯一变量是"
+        "启用了'盘中提前入场'——见文件顶部本批说明。base=4h，理论上能省"
+        "下最多几小时的收盘等待。"
     ),
 }
 

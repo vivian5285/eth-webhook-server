@@ -55,6 +55,13 @@ DEFAULT_PARAMS = {
     "slow": 30,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    # 2026-09-20新增(kaufman_ama_v2用，原版默认0.0不生效、逐字不变)：真实
+    # 擂台数据里这套胜率只有24%(本擂台所有盈利策略里最低，靠盈亏比撑住
+    # 正期望)——原版只用"价格穿越KAMA+KAMA自身同向"两个条件，没有任何
+    # 独立的趋势强度确认，噪音行情里KAMA走平时仍会被偶发的价格穿越骗到。
+    # adx_gate要求ADX(14)至少达到这个值才允许开仓，跟macd_histogram_v2/
+    # tv_multiscore_v1同一个经典Wilder用法。
+    "adx_gate": 0.0,
 }
 
 
@@ -107,6 +114,12 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     atr = indicators.wilder_atr(bars, atr_len)
     if atr <= 0:
         return None
+
+    adx_gate = float(p.get("adx_gate") or 0)
+    if adx_gate > 0:
+        adx = indicators.wilder_adx(bars, atr_len)
+        if adx < adx_gate:
+            return None  # ER看着像趋势，但ADX确认强度不够，先不进
 
     return {
         "action": action,
