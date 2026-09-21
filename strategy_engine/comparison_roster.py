@@ -401,6 +401,10 @@ SINGLE_SYMBOL_ROSTER = (
     # 只加early_entry开关，见mtf_ema_macd_cci_agile同一批说明。
     + [{"symbol": s, "strategy": "heikin_ashi_trend_agile", "timeframe": "4h", "early_entry": True}
        for s in _ALL_SYMBOLS]
+    # 2026-09-21新增(宝贝要求思考怎么优化)：heikin_ashi_trend_v3——要求
+    # 连续2根反色HA K线才离场，见strategies/__init__.py同名条目说明。
+    + [{"symbol": s, "strategy": "heikin_ashi_trend_v3", "timeframe": "4h",
+        "params": {"exit_confirm_bars": 2}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # 2026-09-12：vwap_ema_regime——ADX(2h)状态开关：趋势腿走2h EMA(10/30)，
     # 震荡腿走 vwap_mean_reversion 原版逻辑但要 15m 分辨率，靠 "mtf":["15m"]
@@ -460,6 +464,10 @@ SINGLE_SYMBOL_ROSTER = (
     # strategies/__init__.py同名条目说明，同一个adx_gate=20.0。
     + [{"symbol": s, "strategy": "kaufman_ama_v2", "timeframe": "4h", "params": {"adx_gate": 20.0}}
        for s in _ALL_SYMBOLS]
+    # 2026-09-21新增(宝贝要求思考怎么优化)：kaufman_ama_v3——离场加KAMA
+    # 转向确认，堵上跟入场的不对称，见strategies/__init__.py同名条目说明。
+    + [{"symbol": s, "strategy": "kaufman_ama_v3", "timeframe": "4h",
+        "params": {"require_kama_turn_for_exit": True}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "raschke_adx_pullback", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "keltner_channel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第二批新增2套(DeepSeek建议剥离出的纯规则版) ────────────
@@ -477,6 +485,10 @@ SINGLE_SYMBOL_ROSTER = (
     # early_entry开关，见mtf_ema_macd_cci_agile同一批说明。
     + [{"symbol": s, "strategy": "hma_trend_agile", "timeframe": "4h", "early_entry": True}
        for s in _ALL_SYMBOLS]
+    # 2026-09-21新增(宝贝要求思考怎么优化)：hma_trend_v2——加最小拐头
+    # 幅度+ADX闸门，见strategies/__init__.py同名条目说明。
+    + [{"symbol": s, "strategy": "hma_trend_v2", "timeframe": "4h",
+        "params": {"min_slope_atr_frac": 0.1, "adx_gate": 20.0}} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "cvd_divergence", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "oi_price_confirm", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05：TV真实策略复刻拉进擂台 ────────────────────────────────

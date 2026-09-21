@@ -62,6 +62,19 @@ DEFAULT_PARAMS = {
     # adx_gate要求ADX(14)至少达到这个值才允许开仓，跟macd_histogram_v2/
     # tv_multiscore_v1同一个经典Wilder用法。
     "adx_gate": 0.0,
+    # 2026-09-21新增(kaufman_ama_v3对照实验，宝贝要求思考怎么优化)：v2上线
+    # 后早期数据更差(0%胜率/13笔全亏)，回头查代码发现一处不对称——入场
+    # 要求"价格穿越KAMA"+"KAMA自身也同向"两个条件都满足，离场却只要求
+    # "价格穿越KAMA"一个条件，不管KAMA自己有没有转向。KAMA走平/微幅波动
+    # 时价格很容易来回穿越一条几乎没动的均线，入场时这条"KAMA同向"门槛
+    # 挡住了假信号，离场时却没有同一道门槛挡，等于拿比入场松得多的标准
+    # 去决定"要不要现在退出"，大概率是提前把仓位震出去的真正原因。
+    # require_kama_turn_for_exit(默认False=原行为不变)：True时离场除了
+    # "价格穿越KAMA"，还要求KAMA自身也确实转向(跟入场同一套kama_rising/
+    # kama_falling判断)，不对称就消除了。跟adx_gate(入场端加强)是两个
+    # 独立变量，v3只测这一个，不跟adx_gate叠加，方便看清到底哪个才是
+    # 真正起作用的那个。
+    "require_kama_turn_for_exit": False,
 }
 
 
@@ -84,25 +97,28 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     bar_time = int(last["t"])
     prev_price = cs[-2]
     k_now, k_prev = kama[-1], kama[-2]
+    kama_rising = k_now > k_prev
+    kama_falling = k_now < k_prev
 
     if position:
         side = str(position.get("side") or "").upper()
-        if side == "LONG" and price < k_now and prev_price >= k_prev:
+        require_turn = bool(p.get("require_kama_turn_for_exit"))
+        if side == "LONG" and price < k_now and prev_price >= k_prev and (not require_turn or kama_falling):
             return {
                 "action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
-                "reason": f"收盘跌破KAMA({k_now:.6f})", "bar_time": bar_time,
+                "reason": f"收盘跌破KAMA({k_now:.6f})" + ("且KAMA转向" if require_turn else ""),
+                "bar_time": bar_time,
             }
-        if side == "SHORT" and price > k_now and prev_price <= k_prev:
+        if side == "SHORT" and price > k_now and prev_price <= k_prev and (not require_turn or kama_rising):
             return {
                 "action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
-                "reason": f"收盘突破KAMA({k_now:.6f})", "bar_time": bar_time,
+                "reason": f"收盘突破KAMA({k_now:.6f})" + ("且KAMA转向" if require_turn else ""),
+                "bar_time": bar_time,
             }
         return None
 
     crossed_up = prev_price < k_prev and price >= k_now
     crossed_down = prev_price > k_prev and price <= k_now
-    kama_rising = k_now > k_prev
-    kama_falling = k_now < k_prev
 
     if crossed_up and kama_rising:
         action, d = "LONG", 1

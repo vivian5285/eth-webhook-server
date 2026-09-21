@@ -340,6 +340,13 @@ try:
     # 趋势强度确认，详见kaufman_ama.py DEFAULT_PARAMS注释。原版保留不动
     # 当基准。
     STRATEGIES["kaufman_ama_v2"] = kaufman_ama.generate_signal
+    # 2026-09-21新增(宝贝要求思考怎么优化)：kaufman_ama_v3——v2(adx_gate)
+    # 上线后早期更差(0%胜率/13笔全亏)，回查代码发现真正的不对称在离场：
+    # 入场要求"价格穿越KAMA"+"KAMA自身也同向"两个条件，离场只要求价格
+    # 穿越一个条件，KAMA走平时价格来回穿越很容易提前把仓位震出去。v3传
+    # require_kama_turn_for_exit=True堵上这个不对称，只测这一个变量，
+    # 不跟adx_gate叠加，方便看清哪个才是真正起作用的。
+    STRATEGIES["kaufman_ama_v3"] = kaufman_ama.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] kaufman_ama 加载失败: {_e}")
@@ -427,6 +434,12 @@ try:
     # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
     # 同一批说明。
     STRATEGIES["hma_trend_agile"] = hma_trend.generate_signal
+    # 2026-09-21新增(宝贝要求思考怎么优化)：hma_trend_v2——真实数据152笔
+    # 胜率33.6%、去掉Top3笔基本打平(107.7%)，怀疑相当一部分是HMA单根
+    # 斜率微弱抖动触发的假拐头。传min_slope_atr_frac=0.1(拐头幅度至少
+    # 0.1×ATR才算数)+adx_gate=20.0(只在真趋势里吃拐头信号)，同一个工具箱
+    # 跟macd_histogram_v2/kaufman_ama_v2一致。
+    STRATEGIES["hma_trend_v2"] = hma_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] hma_trend 加载失败: {_e}")
@@ -628,6 +641,12 @@ try:
     # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
     # 同一批说明。
     STRATEGIES["heikin_ashi_trend_agile"] = heikin_ashi_trend.generate_signal
+    # 2026-09-21新增(宝贝要求思考怎么优化)：heikin_ashi_trend_v3——原版
+    # 单根反色HA K线就砍仓，趋势中段一根孤立回调反色很常见，系统性提前
+    # 腰斩winner，跟"不设固定止盈"的设计初衷矛盾。v3传exit_confirm_bars=2，
+    # 要求连续2根反色才触发"趋势转弱"离场，wick_frac那条应急离场不受影响。
+    # 只测这一个变量，不跟v2(入场质量+EMA确认)/agile(提前入场)叠加。
+    STRATEGIES["heikin_ashi_trend_v3"] = heikin_ashi_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] heikin_ashi_trend 加载失败: {_e}")
@@ -1070,6 +1089,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "里KAMA走平时仍会被偶发穿越骗到，v2验证独立的ADX确认能不能把"
         "这类假穿越筛掉。"
     ),
+    "kaufman_ama_v3": (
+        "跟'kaufman_ama'同一套KAMA自适应逻辑，堵上入场/离场的不对称——"
+        "入场要求价格穿越KAMA+KAMA自身同向两个条件，原版离场只要求价格"
+        "穿越一个条件。v3离场额外要求KAMA自身也确实转向，跟v2(加ADX)是"
+        "独立的两个变量，对照哪个才是真正起作用的。"
+    ),
     "raschke_adx_pullback": (
         "Raschke ADX回踩系统\"Holy Grail\"(Linda Raschke与Larry Connors"
         "《Street Smarts》1996年公开发表，Raschke本人是真实注册CTA)——"
@@ -1180,6 +1205,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "cross_7_30(双线交叉)、kaufman_ama(效率比自适应变速)都不同——"
         "这套只用一条均线，靠\"加权+差分\"的特殊构造方式本身降低滞后，"
         "是本擂台第三种不同的\"减少均线滞后\"思路。4H周期。"
+    ),
+    "hma_trend_v2": (
+        "跟'hma_trend'同一套HMA拐头逻辑，加两道默认关闭的过滤(min_slope_"
+        "atr_frac+adx_gate)——原版单根斜率翻转就进出场，真实数据152笔"
+        "胜率33.6%、去掉Top3笔基本打平，怀疑部分是斜率微弱抖动触发的假"
+        "拐头，v2验证过滤后能不能更干净。"
     ),
     "cvd_divergence": (
         "累计成交量差值背离(CVD/Delta)——2026-09-05新增。用币安K线接口"
@@ -1330,6 +1361,13 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "②修离场判断对十字星(HA实体收缩趋近0)过度敏感的分母问题，加ATR"
         "兜底；③加EMA(7/25)方向确认。明确不加固定止盈——这套收益全靠"
         "让利润奔跑的肥尾，加止盈会把胜率做好看但期望值大概率变差。"
+    ),
+    "heikin_ashi_trend_v3": (
+        "跟'heikin_ashi_trend'同一套HA顺势思路，只改离场：原版单根反色"
+        "HA K线就砍仓，趋势中段一根孤立回调反色很常见，系统性提前腰斩"
+        "winner，跟'不设固定止盈'的设计初衷矛盾。v3要求连续2根反色才触发"
+        "离场，wick_frac那条应急离场不受影响。只测这一个变量，不跟v2/"
+        "agile叠加。"
     ),
     "kdj_cross": (
         "KDJ 金叉/死叉(9,3,3；宝贝点名)——2026-09-10新增。K 上穿 D 且 K<20 = "

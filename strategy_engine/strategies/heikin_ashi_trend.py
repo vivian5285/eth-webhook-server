@@ -59,6 +59,15 @@ DEFAULT_PARAMS = {
     "use_ema_direction_filter": False,
     "ema_fast_len": 7,
     "ema_slow_len": 25,
+    # 2026-09-21新增(heikin_ashi_trend_v3对照实验，宝贝要求思考怎么优化)：
+    # 原版离场只看"当前这一根HA是不是反色"——单根反色就砍仓，但趋势中段
+    # 出现一根孤立的回调反色K线很常见，不代表趋势真的结束，这样砍等于
+    # 系统性地把winner提前腰斩，跟这套战法自己"不设固定止盈、让利润奔跑"
+    # 的设计初衷矛盾。exit_confirm_bars(默认1=原行为不变)：要求连续这么
+    # 多根反色HA K线才触发"趋势转弱"离场，给单根回调噪音留缓冲——明确
+    # 不影响wick_frac那条独立的"明显反向影线"应急离场，那条本来就该对
+    # 单根异常保持敏感，不属于本次修改范围。
+    "exit_confirm_bars": 1,
 }
 
 
@@ -102,17 +111,19 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
 
     if position:
         side = str(position.get("side") or "").upper()
+        confirm_n = max(1, int(p.get("exit_confirm_bars") or 1))
+        recent = ha[-confirm_n:] if len(ha) >= confirm_n else ha
         if side == "LONG":
-            if not _green(cur):
+            if len(recent) >= confirm_n and all(not _green(x) for x in recent):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
-                        "reason": "HA 转阴，趋势转弱", "bar_time": bar_time}
+                        "reason": f"连续{confirm_n}根HA转阴，趋势转弱", "bar_time": bar_time}
             if (cur["o"] - cur["l"]) > float(p["wick_frac"]) * max(_body(cur), wick_floor):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 阳线现明显下影，上涨承压", "bar_time": bar_time}
         elif side == "SHORT":
-            if _green(cur):
+            if len(recent) >= confirm_n and all(_green(x) for x in recent):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
-                        "reason": "HA 转阳，趋势转弱", "bar_time": bar_time}
+                        "reason": f"连续{confirm_n}根HA转阳，趋势转弱", "bar_time": bar_time}
             if (cur["h"] - cur["o"]) > float(p["wick_frac"]) * max(_body(cur), wick_floor):
                 return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6),
                         "reason": "HA 阴线现明显上影，下跌承压", "bar_time": bar_time}
