@@ -300,23 +300,19 @@ def _close_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) 
     state[symbol] = {**rec, "status": "closing"}
     _save_state(state)
 
-    # 1) 先撤掉已知的止损/止盈挂单(容忍"订单不存在")。止损是
-    # place_stop_market_order(quantity=None→closePosition=true)挂的，
-    # 交易所把它算成"算法订单"，标准futures_cancel_order撤不掉，必须
-    # 用cancel_algo_order——这个坑2026-09-20在MU止损单上踩过一次，
-    # 这里直接用对的方法，不重蹈覆辙。止盈是显式quantity+reduceOnly
-    # 挂的普通单，走标准撤单接口。
-    sl_oid = rec.get("sl_order_id")
-    if sl_oid:
-        try:
-            binance_client.cancel_algo_order(symbol=symbol, algo_id=int(sl_oid))
-        except Exception:
-            pass
-    for oid in (rec.get("tp_order_ids") or []):
+    # 1) 先撤掉已知的止损/止盈挂单(容忍"订单不存在")。2026-09-22实盘
+    # 核实：STOP_MARKET(closePosition=true)和TAKE_PROFIT_MARKET(哪怕
+    # 显式quantity+reduceOnly)在这个交易所/API版本下**都**被算成"算法
+    # 订单"(futures_get_open_orders原生端点根本查不到，标准
+    # futures_cancel_order直接返回-2011 Unknown order)——止损这条坑
+    # 2026-09-20在MU上踩过一次，这次连止盈也一起踩了，直接实测确认后
+    # 两者统一用cancel_algo_order，不再区分。
+    all_oids = [rec.get("sl_order_id")] + list(rec.get("tp_order_ids") or [])
+    for oid in all_oids:
         if not oid:
             continue
         try:
-            binance_client.client.futures_cancel_order(symbol=symbol, orderId=int(oid))
+            binance_client.cancel_algo_order(symbol=symbol, algo_id=int(oid))
         except Exception:
             pass
 
