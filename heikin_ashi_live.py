@@ -111,6 +111,17 @@ FALLBACK_LEVERAGE_INFO = (20, 0.025)  # 万一品种不在表里(理论不该发
 LIQUIDATION_SAFETY_MULT = 1.5
 MIN_LEVERAGE = 3.0
 
+# 2026-09-23新增：组合层面仓位上限，照搬擂台strategy_engine/position_
+# sizing.py::clamp_qty_to_portfolio_cap(commit 2c9d287)——那次是宝贝实测
+# 从cross_momentum持仓页面抓到"无限子弹"问题：heikin_ashi_trend这类跑满
+# 27个品种独立触发的策略，行情一致时会同时开很多笔，全库最严重的策略
+# 名义敞口到过净值10.89倍，真实账户扛不住、也会被交易所保证金不足拒单。
+# 这个上限只在CoinW/擂台那次审计范围内验证过，币安这份是新移植，同样
+# 适用同一个担忧(2026-09-23干跑一次就实测过7/27个品种同时有信号)。按
+# "这个引擎账上已经占用了多少名义仓位"把新仓位等比缩小，额度用满就是
+# 这笔开不了(等同真实账户保证金不足)，不是主动跳过信号。
+MAX_TOTAL_NOTIONAL_MULT = 3.0
+
 TICK_INTERVAL_SEC = 300  # 5分钟一轮，跟擂台/CoinW版本一致
 
 STATE_FILE = os.path.join(
@@ -228,6 +239,17 @@ def _calc_qty_and_leverage(symbol: str, price: float, stop_loss: float):
     return qty, leverage
 
 
+def _clamp_qty_to_portfolio_cap(qty: float, price: float, existing_notional: float, equity: float) -> float:
+    if price <= 0 or qty <= 0:
+        return 0.0
+    cap = equity * MAX_TOTAL_NOTIONAL_MULT
+    remaining = cap - existing_notional
+    if remaining <= 0:
+        return 0.0
+    desired = qty * price
+    return qty if desired <= remaining else remaining / price
+
+
 def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -> None:
     side = signal["action"]  # LONG / SHORT
     price = float(signal["price"])
@@ -236,6 +258,23 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
     qty, leverage = _calc_qty_and_leverage(symbol, price, float(signal["stop_loss"]))
     if qty <= 0 or leverage <= 0:
         return
+
+    equity = binance_client.get_total_equity("USDT")
+    existing_notional = sum(
+        float(r.get("entry_price") or 0) * float(r.get("qty") or 0)
+        for r in state.values() if isinstance(r, dict)
+    )
+    clamped_qty = _clamp_qty_to_portfolio_cap(qty, price, existing_notional, equity)
+    clamped_qty = binance_client.format_quantity(clamped_qty, symbol)
+    if clamped_qty <= 0:
+        logger.info(
+            f"⚠️ [{symbol}] 组合名义仓位已达上限(已占用${existing_notional:.2f}/"
+            f"净值×{MAX_TOTAL_NOTIONAL_MULT:.0f}=${equity * MAX_TOTAL_NOTIONAL_MULT:.2f})，这笔开不了，跳过"
+        )
+        return
+    if clamped_qty < qty:
+        logger.info(f"[{symbol}] 组合额度不足，仓位从{qty}缩小到{clamped_qty}")
+    qty = clamped_qty
 
     lev_result = binance_client.set_leverage(symbol, leverage=leverage)
     if lev_result is None:
