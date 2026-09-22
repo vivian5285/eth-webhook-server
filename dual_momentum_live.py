@@ -214,15 +214,32 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
         logger.error(f"[{symbol}] 市价开仓失败: {signal}")
         return
 
-    # 2026-09-22实盘复现(SNDK)：signal["price"]是上一根已收盘4h K线的
-    # 收盘价，不是这一刻的真实成交价——SNDK从信号算出来到市价单真正
-    # 成交这几秒之间，真实价格已经涨了6%(tokenized股票代币，本身波动
-    # 就大)，用陈旧价算出来的止损直接被交易所拒("-2021 立即触发"，
-    # 相当于止损线已经落在成交价的盈利那一侧)。改成拿真实成交价
-    # (avgPrice)重新按同一套ATR倍数锚定止损/止盈，跟主TV系统"开仓成交
-    # 后绑定：TP按空间重锚"是同一个道理，同一套修法。avgPrice缺失/为0
-    # 时才退回signal的原始价，不整体失败。
-    fill_price = float(order.get("avgPrice") or 0) or price
+    # 2026-09-22实盘复现两次(SNDK/BCH，B账户+E账户各中一次)：
+    # signal["price"]是上一根已收盘4h K线的收盘价，不是这一刻的真实
+    # 成交价——这几个品种从信号算出来到市价单真正成交这几秒之间，真实
+    # 价格已经涨了6~20%(tokenized股票代币本身波动就大)，用陈旧价算出
+    # 来的止损/止盈直接被交易所拒("-2021 立即触发")。第一次修复时想当
+    # 然地读order.get("avgPrice")，结果发现币安市价单的REST同步响应
+    # 里avgPrice经常是"0"(真实成交均价要过一小会儿才会在订单状态里
+    # 反映出来，是币安期货API的已知行为，不是本仓库的问题)——那次修复
+    # 完全没生效，等于白改。改成下单成功后直接查一次真实持仓
+    # (futures_position_information的entryPrice)，带短暂重试，这才是
+    # 真正拿得到成交价的地方。查不到时才退回signal的原始价，不整体
+    # 失败。
+    fill_price = 0.0
+    for _ in range(5):
+        try:
+            positions = binance_client.client.futures_position_information(symbol=symbol)
+            for p in positions:
+                fill_price = abs(float(p.get("entryPrice") or 0))
+        except Exception:
+            fill_price = 0.0
+        if fill_price > 0:
+            break
+        time.sleep(1.0)
+    if fill_price <= 0:
+        logger.warning(f"[{symbol}] 查真实成交价失败，退回用信号价(可能不精确)")
+        fill_price = price
     direction = 1.0 if side == "LONG" else -1.0
     if abs(fill_price - price) / price > 0.001:
         logger.warning(
