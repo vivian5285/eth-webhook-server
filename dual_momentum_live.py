@@ -84,7 +84,20 @@ TIMEFRAME = "4h"
 LOOKBACK_BARS = 20
 DUAL_MOMENTUM_TIER = 1  # dual_momentum.py::generate_signal固定"tier":1(中)
 LEG_RATIOS = (0.10, 0.20, 0.70)  # TP1/TP2/TP3分批比例，本仓库既有惯例
-EXCHANGE_LEVERAGE = 5  # 真实交易所杠杆，跟FIXED_LEVERAGE(仓位公式里的杠杆假设)对齐
+# 2026-09-23：宝贝要求"权重金额不变，把杠杆调高腾出保证金空间，方便
+# 9个品种全触发时都能开得进"——查了B/E两账户的真实持仓明细核实这条
+# 思路站得住：multiAssetsMargin=True、每笔isolated=False，是全仓
+# (cross)模式，maintMargin(真正决定强平的那道线)只跟notional×该品种
+# 保证金率挂钩(比如ENA: maintMargin/notional=0.58/58.06=1.0%，正好
+# 等于它的maintMarginRatio)，完全不受这里设的leverage影响——调高
+# leverage只是减少下单那一刻锁定的initialMargin(=notional/leverage)，
+# 腾出可用余额去开下一笔，不会让已经开的仓位更容易被强平。9个品种
+# 全开(总名义≈1.575×权益)在5倍杠杆下也只占用31.5%保证金，理论上够用，
+# 但留更宽裕的余量、也给以后可能新增品种/提权重留空间，从5倍提到
+# 10倍(9笔全开时保证金占用降到15.75%)——没有直接顶到交易所对这几个
+# 品种给的75~100倍上限，那样强平前几乎没有缓冲，没必要冒这个险换取
+# 用不上的保证金空间。
+EXCHANGE_LEVERAGE = 10
 
 # 2026-09-23：宝贝核实后发现——擂台自己纸面验证那418笔(+39.85%)用的
 # 是strategy_engine/position_sizing.py::TIER_NOTIONAL_MULT
