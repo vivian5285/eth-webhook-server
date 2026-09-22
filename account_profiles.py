@@ -191,7 +191,7 @@ def get_symbol_settings(symbol: str) -> Dict[str, Any]:
         "risk_pct": float(entry.get("risk_pct", DEFAULT_RISK_PCT)),
         "leverage": float(entry.get("leverage", DEFAULT_LEVERAGE)),
         "principal_override": float(entry.get("principal_override") or 0) or None,
-        "mode": str(entry.get("mode", "risk")),  # "risk" | "fixed_amount"
+        "mode": str(entry.get("mode", "risk")),  # "risk" | "fixed_amount" | "equity_notional"
         "fixed_amount": float(entry.get("fixed_amount", 0) or 0),
         # 2026-08-26：账户级交易开关（如某账户尚未接受交易所对该品种的
         # 前置协议，-4411 TradFi-Perps agreement 之类）。默认True不影响
@@ -238,7 +238,7 @@ def set_symbol_settings(
     if principal_override is not None:
         entry["principal_override"] = float(principal_override) if principal_override > 0 else 0
     if mode is not None:
-        entry["mode"] = str(mode) if mode in ("risk", "fixed_amount") else "risk"
+        entry["mode"] = str(mode) if mode in ("risk", "fixed_amount", "equity_notional") else "risk"
     if fixed_amount is not None:
         entry["fixed_amount"] = max(0.0, float(fixed_amount))
     if trading_enabled is not None:

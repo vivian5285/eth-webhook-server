@@ -6131,7 +6131,12 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
           stop_loss 可选收紧；TV.qty 可选 soft-cap（非必须）
         ATR/stop 仍用于雷达 initialStop 账本；ATR 缺失时仍允许纯名义 sizing。
         """
-        # per-symbol 固定金额模式（前端直接设 USDT 数量）
+        # per-symbol 固定金额模式（前端直接设 USDT 数量）/ 本金等值模式
+        # （2026-09-23宝贝要求，币安B系统C账户SNDK专用：下单名义价值永远
+        # 等于账户权益本身、1倍敞口，不查B_TIER_LEVERAGE/FIXED_LEVERAGE
+        # 任何杠杆倍数表——跟fixed_amount同一个"提前return跳过下面整套
+        # tier×杠杆公式"写法，只是本金来源换成实时权益，随账户权益增减
+        # 自动跟着变，不用手动改配置）
         px = float(curr_px or self.tv_price or 0)
         try:
             from account_profiles import get_symbol_settings
@@ -6155,8 +6160,26 @@ class PositionSupervisorBinance(PipelineBridgeMixin, RadarReentryMixin):
                         "symbol": self.symbol,
                         "sizing_mode": "FIXED_AMOUNT",
                     }
+            if s.get("mode") == "equity_notional" and s.get("enabled"):
+                eq_principal = self._resolve_cap_sizing_base()
+                if eq_principal > 0 and px > 0:
+                    step = float(getattr(self, "qty_step", 0.001) or 0.001)
+                    min_q = float(getattr(self, "min_qty", 0.001) or 0.001)
+                    raw = eq_principal / px
+                    qty_eq = math.floor(raw / step) * step if step > 0 else raw
+                    qty_eq = qty_eq if qty_eq >= min_q else 0.0
+                    logger.info(
+                        f"💰 [{self.symbol}] 本金等值模式(1倍敞口不加杠杆)：权益{eq_principal:.2f} ÷ {px} = {qty_eq} {getattr(self,'unit_label','')}"
+                    )
+                    return qty_eq, {
+                        "mode": "equity_notional",
+                        "principal": eq_principal,
+                        "price": px,
+                        "symbol": self.symbol,
+                        "sizing_mode": "EQUITY_NOTIONAL_1X",
+                    }
         except Exception as e:
-            logger.debug(f"[{self.symbol}] fixed_amount check: {e}")
+            logger.debug(f"[{self.symbol}] fixed_amount/equity_notional check: {e}")
 
         principal = self._resolve_cap_sizing_base()
         tv_qty = float(getattr(self, "tv_suggested_qty", 0) or 0)
