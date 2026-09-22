@@ -233,6 +233,11 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
     logger.info(f"🚀 [{symbol}] 开仓成交 {side} qty={qty} @{price} | {signal.get('reason')}")
 
     close_side = "SHORT" if side == "LONG" else "LONG"
+    # place_stop_market_order内部自己会把LONG/SHORT转成BUY/SELL，但下面
+    # 直接调futures_create_order是裸API调用，必须自己先转成BUY/SELL——
+    # 2026-09-22实盘复现：ENA/UNI两笔的TP挂单最初直接传了"SHORT"/"LONG"
+    # 进去，交易所返回-1117 Invalid side，止损挂上了但止盈完全没挂上。
+    close_side_api = "SELL" if side == "LONG" else "BUY"
 
     sl_id = _place_stop(symbol, close_side, stop_loss)
     if sl_id:
@@ -257,7 +262,7 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
             continue
         try:
             tp_order = binance_client.client.futures_create_order(
-                symbol=symbol, side=close_side, type="TAKE_PROFIT_MARKET",
+                symbol=symbol, side=close_side_api, type="TAKE_PROFIT_MARKET",
                 stopPrice=binance_client.format_price(float(tp_px), symbol),
                 quantity=leg_qty, reduceOnly=True, workingType="CONTRACT_PRICE",
             )
