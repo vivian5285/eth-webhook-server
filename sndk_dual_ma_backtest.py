@@ -39,7 +39,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from market_engine import wilder_atr, wilder_adx
-from strategy_engine.klines import fetch_klines_paged, to_ohlcv_dicts, merge_bars
+from strategy_engine.klines import fetch_klines_raw, to_ohlcv_dicts, merge_bars
 
 import sndk_dual_ma_strategy as strat
 
@@ -62,10 +62,38 @@ FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 
 def fetch_all_1m_bars() -> List[list]:
     """公开端点，全部可用历史(SNDKUSDT 2026-04-07上线，没有2年数据，
-    见文件头部说明)。"""
+    见文件头部说明)。自己实现分页(不用strategy_engine.klines.
+    fetch_klines_paged)——那个函数对429限流的处理是"当成拉到头了，直接
+    停止翻页"(fetch_klines_raw内部只重试5xx，429<500被当成确定性错误
+    立刻返回[]，跟"真的没有更多数据"完全无法区分)，实测这次回测真的
+    撞上过一次429，导致早期~50天数据被静默漏掉而不自知。这里改成收到
+    空结果就退避重试，只有连续重试仍失败才真正停止翻页，并且每页之间
+    留一点间隔主动避免触发限流。"""
     print("拉取1分钟K线全部可用历史...")
-    raw = fetch_klines_paged(SYMBOL, "1m", total_limit=400000, max_pages=300)
-    dict_bars = to_ohlcv_dicts(raw)
+    all_raw: List[list] = []
+    cursor_end: Optional[int] = None
+    page = 0
+    while True:
+        page += 1
+        raw = None
+        for attempt in range(5):
+            raw = fetch_klines_raw(SYMBOL, "1m", limit=1500, end_time_ms=cursor_end)
+            if raw:
+                break
+            wait = 2.0 * (attempt + 1)
+            print(f"  第{page}页拉取失败/限流，{wait:.0f}秒后重试(第{attempt + 1}/5次)")
+            time.sleep(wait)
+        if not raw:
+            print(f"  第{page}页连续重试5次仍失败，停止翻页(已拉到{len(all_raw)}根，可能不完整)")
+            break
+        all_raw = raw + all_raw
+        cursor_end = int(raw[0][0]) - 1
+        if len(raw) < 1500:
+            break  # 已经拉到交易所最早的数据
+        if page % 20 == 0:
+            print(f"  已拉{page}页...")
+        time.sleep(0.25)  # 页间隔，主动避免再次触发限流
+    dict_bars = to_ohlcv_dicts(all_raw)
     print(f"共拉到{len(dict_bars)}根1分钟K线")
     return [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in dict_bars]
 
