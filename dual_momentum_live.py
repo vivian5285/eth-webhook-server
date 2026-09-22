@@ -18,10 +18,11 @@ stop_loss/atr、叠加雷达自己的跟涨/保本逻辑，让实盘行为偏离
 过412笔的回测逻辑(固定2.5×ATR止损+纯排名/动量反转离场，不含雷达)。
 完全隔离才能保证"验证的是什么，实盘跑的就是什么"。
 
-仓位公式直接复用webhook_parser.compute_fixed_order_qty(币安B系统自己
-的下单权重计算：principal×0.20×5×tier权重)，dual_momentum固定
-tier=1(中档)，对应TIER_NOTIONAL_MULT[1]=0.1225——单笔约占账户总权益
-12.25%名义仓位，跟B系统自己既定的中档风险预算完全一致。
+仓位公式直接复用webhook_parser.compute_fixed_order_qty(principal×0.20×
+5×tier权重)，tier权重用DUAL_MOMENTUM_TIER_WEIGHT(见下方常量顶部注释
+——2026-09-23宝贝拍板"适当提高"，从B系统当前tier=1真实值0.1225调到
+0.175，不是照抄擂台回测用的0.245，取的是B系统tier=2/强档现成的
+权重，单笔约占账户总权益17.5%名义仓位)。
 
 只读账户余额/持仓，只对TRADED_SYMBOLS这个白名单动手，绝不碰白名单外
 任何品种——跟这次会话反复验证过的"非本引擎开的仓位绝不自动接管"是
@@ -45,7 +46,6 @@ from webhook_parser import (
     compute_fixed_order_qty,
     FIXED_RISK_PCT,
     FIXED_LEVERAGE,
-    TIER_NOTIONAL_MULT,
 )
 from strategy_engine.klines import get_bars
 from strategy_engine.strategies.dual_momentum import generate_signal
@@ -85,6 +85,21 @@ LOOKBACK_BARS = 20
 DUAL_MOMENTUM_TIER = 1  # dual_momentum.py::generate_signal固定"tier":1(中)
 LEG_RATIOS = (0.10, 0.20, 0.70)  # TP1/TP2/TP3分批比例，本仓库既有惯例
 EXCHANGE_LEVERAGE = 5  # 真实交易所杠杆，跟FIXED_LEVERAGE(仓位公式里的杠杆假设)对齐
+
+# 2026-09-23：宝贝核实后发现——擂台自己纸面验证那418笔(+39.85%)用的
+# 是strategy_engine/position_sizing.py::TIER_NOTIONAL_MULT
+# ={0:0.14,1:0.245,2:0.35}，比webhook_parser.py当前真实值
+# {0:0.07,1:0.1225,2:0.175}整整大2倍(那份sizing.py是2026-08-29抄的，
+# 之后B系统自己的tier权重经过几轮下调，擂台那份从没跟着改)——2026-
+# 09-22首次部署直接借用了B系统"当前真实值"(0.1225)，仓位只有回测
+# 验证过的一半。宝贝拍板"适当提高"，不是照抄擂台的0.245(账户已经
+# 占用72%左右，翻倍会在多品种同时触发时不够保证金)，也不是继续用
+# 保守的0.1225——选0.175：币安B系统tier表里本来就有的"强档"权重(不是
+# 凭空发明的新数字)，介于两者中间，理由是"品种已经收窄到擂台数据里
+# 验证过有正贡献的子集，比原始更宽泛的27品种/更保守的tier=1权重更值
+# 得给一点confidence"。只影响新开的仓位，已经开的12笔(B账户6笔+E
+# 账户6笔)不做回溯调整。
+DUAL_MOMENTUM_TIER_WEIGHT = 0.175
 
 TICK_INTERVAL_SEC = 300  # 5分钟一轮，跟擂台系统自己的tick间隔一致
 KLINES_LIMIT = LOOKBACK_BARS + 5  # 排名只需要lookback_bars+1根，多拉几根兜底
@@ -161,7 +176,7 @@ def _calc_qty(symbol: str, price: float, stop_loss: float) -> float:
     if equity <= 0:
         logger.error(f"[{symbol}] 权益查询失败或为0，跳过本次开仓")
         return 0.0
-    effective_leverage = FIXED_LEVERAGE * TIER_NOTIONAL_MULT[DUAL_MOMENTUM_TIER]
+    effective_leverage = FIXED_LEVERAGE * DUAL_MOMENTUM_TIER_WEIGHT
     qty_raw, meta = compute_fixed_order_qty(
         principal=equity, price=price,
         margin_pct=FIXED_RISK_PCT, leverage=effective_leverage,
