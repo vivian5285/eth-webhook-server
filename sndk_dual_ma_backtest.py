@@ -32,6 +32,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -53,11 +54,30 @@ SLIPPAGE_PCT = 0.0003    # 0.03%，计划书要求
 MAX_BARS_WINDOW = strat.DEEP_BARS_TARGET  # 跟实盘一致的指标深度上限
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
-TRADES_CSV = os.path.join(OUT_DIR, "sndk_dual_ma_backtest_trades.csv")
-EQUITY_CSV = os.path.join(OUT_DIR, "sndk_dual_ma_backtest_equity.csv")
-CHART_PNG = os.path.join(OUT_DIR, "sndk_dual_ma_backtest_equity.png")
+_SUFFIX = "_staticstop" if "--static-stop-only" in sys.argv else ""
+TRADES_CSV = os.path.join(OUT_DIR, f"sndk_dual_ma_backtest_trades{_SUFFIX}.csv")
+EQUITY_CSV = os.path.join(OUT_DIR, f"sndk_dual_ma_backtest_equity{_SUFFIX}.csv")
+CHART_PNG = os.path.join(OUT_DIR, f"sndk_dual_ma_backtest_equity{_SUFFIX}.png")
 
 FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
+
+# 2026-09-23新增对照组：--static-stop-only时只用开仓那一刻算死的
+# 2.5×ATR固定止损，一碰即触发(不追踪/不移动/不设防插针宽限)——这才是
+# 跟TV Pine源码自己的strategy.exit(stop=longStopPrice)完全对齐的止损
+# 行为(TV那份+234%的回测报告，测的就是这个，从来没有模拟过VPS这层
+# 保本+ADX吊灯追踪)。用来诊断：VPS这层动态止损到底是在保护利润，还是
+# 在提前腰斩本该继续跑的趋势——如果这个对照组表现明显更好，说明差距
+# 主要来自止损层设计取舍，不是入场/出场信号逻辑本身有bug。
+STATIC_STOP_ONLY = "--static-stop-only" in sys.argv
+
+
+def _evaluate_static_stop(position: Dict[str, Any], price: float) -> tuple:
+    side = position["side"]
+    hard_stop = position["hard_stop"]
+    breached = (price <= hard_stop) if side == "LONG" else (price >= hard_stop)
+    if breached:
+        return True, "固定硬止损触发(对照组，无追踪无防插针)"
+    return False, ""
 
 
 def fetch_all_1m_bars() -> List[list]:
@@ -248,10 +268,13 @@ def run_backtest() -> None:
         #   (实盘是20秒轮询实时价格，1分钟K线是历史数据能给的最细粒度，
         #   见文件头部说明)
         if position is not None:
-            should_close, reason = strat.evaluate_protective_stop(
-                position, close_px, cached_atr, cached_adx,
-                cached_struct_low, cached_struct_high, now_ms / 1000.0,
-            )
+            if STATIC_STOP_ONLY:
+                should_close, reason = _evaluate_static_stop(position, close_px)
+            else:
+                should_close, reason = strat.evaluate_protective_stop(
+                    position, close_px, cached_atr, cached_adx,
+                    cached_struct_low, cached_struct_high, now_ms / 1000.0,
+                )
             if should_close:
                 equity, trade = _execute_close(position, close_px, now_ms, reason, equity)
                 trades.append(trade)
@@ -311,8 +334,9 @@ def _report(trades: List[Dict[str, Any]], equity_curve: List[tuple],
     end_dt = datetime.datetime.fromtimestamp(end_ms / 1000, datetime.timezone.utc)
     days = (end_ms - start_ms) / 86400000
 
+    mode_label = "【对照组：固定止损，不追踪，对齐TV自己的strategy.exit】" if STATIC_STOP_ONLY else "【完整版：含VPS保本+ADX吊灯追踪+结构位止损】"
     print("\n" + "=" * 60)
-    print(f"SNDK 91分钟双均线(EMA7/30)策略回测报告")
+    print(f"SNDK 91分钟双均线(EMA7/30)策略回测报告 {mode_label}")
     print("=" * 60)
     print(f"回测区间: {start_dt:%Y-%m-%d} ~ {end_dt:%Y-%m-%d} (共{days:.0f}天，SNDKUSDT全部可用历史)")
     print(f"初始资金: {INITIAL_EQUITY:.2f} USDT")
