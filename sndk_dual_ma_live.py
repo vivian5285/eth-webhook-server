@@ -3,56 +3,32 @@
 """
 SNDK 91分钟双均线(EMA7/30)全自动实盘引擎 - 2026-09-23
 
-宝贝拍板：SNDK不再接TV，交易逻辑完全搬到VPS本地。2026-09-23按宝贝发来
-的真实Pine策略源码("EMA7 & EMA30 纯裸K微结构突破")逐条核对重写——
-第一版曾照着文字版计划书写成EMA25/无实体过滤/无斜率确认/90分钟，
-这次全部对齐权威来源：
+宝贝拍板：SNDK不再接TV，交易逻辑完全搬到VPS本地。按宝贝发来的真实Pine
+策略源码("EMA7 & EMA30 纯裸K微结构突破")逐条核对实现，周期91分钟
+(宝贝确认TradingView回测用的91分钟K线，跟radar_reentry_mixin.py::
+DUAL_MA_EXIT_INTERVAL_MIN里SNDKUSDT登记的91分钟互相印证)。
 
-1. 慢线是 EMA30，不是EMA25(文字计划书写错了，源码才是权威)。
-2. 开仓多一条"实体够大"过滤：|close-open| >= 0.2×ATR(bodyMulti)，
-   十字星/小实体的假突破不算数。
-3. 开仓多一条"快线自身斜率"确认：emaFastUp=EMA7本身在上升(比上一根
-   已收盘bar的EMA7高)，emaFastDown同理——单纯"现价站上EMA7"不够，
-   EMA7自己也得在朝这个方向走。
-4. 周期是91分钟，不是90分钟——宝贝确认TradingView回测用的91分钟K线，
-   跟radar_reentry_mixin.py::DUAL_MA_EXIT_INTERVAL_MIN里SNDKUSDT登记的
-   91分钟(2026-09-19照真实TV警报截图校准)完全对得上，两个独立信息源
-   互相印证。
+2026-09-23重构：所有不碰账户/网络的纯信号/风控逻辑(参数常量+EMA/ATR/
+ADX判定+止损状态机)已经拆到sndk_dual_ma_strategy.py——回测脚本
+(sndk_dual_ma_backtest.py)需要测的是这同一套逻辑，不能自己另外抄一遍
+容易悄悄走样，"验证的是什么，实盘跑的就是什么"。本文件现在只剩：拉
+实时数据、真实下单、状态持久化到本地json、钉钉告警、主循环节奏。
 
-数据层：91分钟不是币安任何原生K线周期(1/3/5/15/30/60...分钟)的整数倍，
-改用仓库里已经在生产环境跑着的"任意周期"通用合成器
-strategy_engine/klines.py::get_bars——dual_momentum_live.py和
-DUAL_MA_EXIT都在用同一个模块，91分钟这种周期它会自动退化到用1分钟
-K线合成(91没有能整除它的原生周期)，内置分页/UTC epoch对齐(跟
-TradingView图表同一套锚点)，不用自己另外写一套。
+数据层：91分钟不是币安任何原生K线周期的整数倍，用仓库里已经在生产
+环境跑着的"任意周期"通用合成器strategy_engine/klines.py::get_bars
+(dual_momentum_live.py、DUAL_MA_EXIT都在用)，91分钟会自动退化到1分钟
+K线合成，内置分页/UTC epoch对齐。
 
-指标精度：宝贝要求"VPS算出来的EMA7/EMA30/ATR14跟TradingView误差<0.1%"。
-EMA/ATR/ADX都是递归指标，warmup的历史越深，起始种子的影响衰减得越
-干净、跟TV(近乎无限历史)的差距越小。这版把每次重算指标用的K线深度
-从80根大幅拉到~1000根(get_bars内置分页，SNDK这类新上市代币历史不够
-1000根时自动退化用能拿到的全部)，同时把"多久重算一次"从"每个20秒
-tick都重算"改成"只在91分钟bucket边界真正跨越时才重算一次"(纯本地
-时间戳判断，不额外多打API)——这样重算频率(每91分钟一次)本身就比
-计划书要求的"每日UTC0点校准一次"更频繁，天然覆盖了那条要求，不用
-另外再起一个每日定时校准任务。20秒tick循环只做两件轻量的事：查现价
-(ticker，便宜)+用上一次bucket边界重算出的缓存ATR/ADX/结构位跑止损
-状态机，不会每20秒都去重新拉一遍上千根K线。
+指标精度：每次重算指标用的K线深度~1000根(get_bars内置分页，SNDK这类
+新上市代币历史不够时自动退化用能拿到的全部)，只在91分钟bucket边界真正
+跨越时才重算(纯本地时间戳判断)，比计划书要求的"每日UTC0点校准"更频繁，
+天然覆盖。20秒tick循环只做两件轻量的事：查现价(ticker)+用缓存的ATR/
+ADX/结构位跑止损状态机。
 
-风控三层(跟计划书完全一致，这次没有改动)：2.5×ATR初始硬止损+防插针
-状态机(持续击穿15分钟未收回才真止损)；浮盈1.0×ATR保本上移(entry+
-0.05%)；浮盈1.5×ATR启动ADX自适应吊灯追踪止损(ADX>30→3.5×ATR /
-<20→1.5×ATR / 其余2.5×ATR)，叠加20根结构位(-0.2×ATR)兜底，两者取
-更靠近现价者。刻意不在交易所挂止损条件单——纯VPS内存状态机盯盘，这是
-防插针机制本身的要求(挂单没法区分插针秒回和真突破)，代价是VPS进程
-若挂了、仓位在恢复前没有交易所侧保护网，用独立钉钉告警部分缓解(复用
-binance-gateway/gateway.py同一份WATCHDOG_DINGTALK_*环境变量)。
-
-仓位：账户权益×98%÷现价(留2%手续费缓冲，源码这版明确要求)，交易所
-杠杆锁1倍。
-
-跟dual_momentum_live.py同一种完全独立于position_supervisor_binance.py
-的隔离架构，只对SNDKUSDT动手，启动核对铁律"本地无记录的仓位绝不自动
-接管"。
+刻意不在交易所挂止损条件单——纯VPS内存状态机盯盘，这是防插针机制本身
+的要求(挂单没法区分插针秒回和真突破)，代价是VPS进程若挂了、仓位在
+恢复前没有交易所侧保护网，用独立钉钉告警部分缓解(复用binance-gateway/
+gateway.py同一份WATCHDOG_DINGTALK_*环境变量)。
 
 跑法：
   常驻:  venv/bin/python sndk_dual_ma_live.py
@@ -72,11 +48,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from binance_client import binance_client
 from market_engine import wilder_atr, wilder_adx, bucket_open_ms
 from strategy_engine.klines import get_bars as _sk_get_bars
+
+import sndk_dual_ma_strategy as strat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,46 +62,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== 策略参数(照Pine源码"EMA7 & EMA30 纯裸K微结构突破"逐条对齐) ====================
-SYMBOL = "SNDKUSDT"
-# 2026-09-23修正：宝贝确认TradingView回测用的是91分钟K线，不是计划书
-# 文字版写的90分钟——跟radar_reentry_mixin.py::DUAL_MA_EXIT_INTERVAL_MIN
-# 里SNDKUSDT登记的91分钟(2026-09-19照真实TV警报截图校准)完全对得上，
-# 独立信息源互相印证。91不是30的整数倍，原来用market_engine.py的
-# merge_30m_to_period(只支持30分钟整数倍)合成不出来，改用
-# strategy_engine/klines.py::get_bars——这是仓库里已经在生产环境跑着的
-# "任意周期"通用合成器(dual_momentum_live.py、DUAL_MA_EXIT都在用)，
-# 91分钟这种周期它会自动退化到用1分钟K线合成(91没有能整除它的原生周期)，
-# 内置分页，不需要我们自己再写一遍。
-PERIOD_MIN = 91
-PERIOD_MS = PERIOD_MIN * 60 * 1000
-PERIOD_STR = f"{PERIOD_MIN}m"
-FAST_LEN = 7
-SLOW_LEN = 30  # 2026-09-23修正：源码是EMA30，不是文字计划书写的EMA25
-BREAKOUT_LOOKBACK = 5      # breakoutBars
-BODY_MIN_ATR_MULT = 0.2    # bodyMulti：|close-open| >= 此倍数×ATR才算有效实体
-STRUCT_LOOKBACK = 20
-ATR_PERIOD = 14
-ADX_PERIOD = 14
-
-INITIAL_STOP_ATR_MULT = 2.5
-BREAKEVEN_TRIGGER_ATR = 1.0
-BREAKEVEN_BUFFER_PCT = 0.0005  # 0.05%，覆盖手续费
-TRAIL_TRIGGER_ATR = 1.5
-TRAIL_MULT_STRONG = 3.5   # ADX > 30
-TRAIL_MULT_WEAK = 1.5     # ADX < 20
-TRAIL_MULT_NORMAL = 2.5   # 其余
-ADX_STRONG_BOUND = 30.0
-ADX_WEAK_BOUND = 20.0
-STRUCT_BUFFER_ATR = 0.2
-
-SPIKE_FORCE_CLOSE_SEC = 15 * 60  # 硬止损击穿持续这么久仍未收回 → 强制平仓
-
-EXCHANGE_LEVERAGE = 1     # 交易所真实杠杆锁1倍，等同于现货满仓
-EQUITY_USAGE_PCT = 0.98   # 2026-09-23：账户权益98%开仓，留2%手续费缓冲(源码要求)
-
-DEEP_BARS_TARGET = 1000   # 目标91m bar深度，供EMA/ATR/ADX warmup(误差<0.1%要求)
-MIN_BARS_NEEDED = max(SLOW_LEN, STRUCT_LOOKBACK, ADX_PERIOD * 2 + 2) + BREAKOUT_LOOKBACK
+SYMBOL = strat.SYMBOL
+PERIOD_MS = strat.PERIOD_MS
+PERIOD_STR = strat.PERIOD_STR
+ATR_PERIOD = strat.ATR_PERIOD
+ADX_PERIOD = strat.ADX_PERIOD
+STRUCT_LOOKBACK = strat.STRUCT_LOOKBACK
+DEEP_BARS_TARGET = strat.DEEP_BARS_TARGET
+MIN_BARS_NEEDED = strat.MIN_BARS_NEEDED
+EXCHANGE_LEVERAGE = strat.EXCHANGE_LEVERAGE
+EQUITY_USAGE_PCT = strat.EQUITY_USAGE_PCT
 
 TICK_INTERVAL_SEC = 20  # 本地盯盘轮询间隔(只查现价，便宜)；防插针窗口是分钟级，20秒足够及时
 RECONCILE_EVERY_N_TICKS = 15  # ≈5分钟一次核对真实持仓，防止本地状态跟交易所长期漂移
@@ -220,8 +168,8 @@ def _fetch_bars(target_bars: int = DEEP_BARS_TARGET) -> List[list]:
     不需要API Key，内置分页+"退化到能整除目标周期的最粗原生周期"逻辑
     (91分钟没有能整除它的原生周期，会自动退化到1分钟K线合成)。转换成
     [open_time, o, h, l, c, v]的list行格式，兼容market_engine.wilder_atr/
-    wilder_adx等既有只读list-index函数，不用重写它们。SNDK这类较新品种
-    交易所历史可能不足target_bars根，拉不满时用能拿到的全部，不当失败。"""
+    wilder_adx等既有只读list-index函数。SNDK这类较新品种交易所历史可能
+    不足target_bars根，拉不满时用能拿到的全部，不当失败。"""
     dict_bars = _sk_get_bars(SYMBOL, PERIOD_STR, limit=target_bars)
     return [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in dict_bars]
 
@@ -235,110 +183,10 @@ def _live_price() -> float:
         return 0.0
 
 
-# ==================== EMA(本地连续递归，跟Pine ta.ema同一套SMA种子+递归写法) ====================
-
-def _ema_last(closes: List[float], n: int) -> float:
-    """closes末尾对应"当前bar"；传closes[:-1]即可拿到"上一根bar的EMA值"
-    (跟Pine里emaFast[1]同一个含义)——因为种子用的是同一批最早的n个值，
-    只是递归少走一步，数学上等价于同一条连续EMA序列往回退一格，不是
-    从别的起点重新播种。"""
-    if len(closes) < n:
-        return 0.0
-    seed = sum(closes[:n]) / n
-    k = 2.0 / (n + 1)
-    m = seed
-    for v in closes[n:]:
-        m = v * k + m * (1.0 - k)
-    return m
-
-
-# ==================== 信号判定(91分钟收盘时评估，逐条对齐Pine源码条件) ====================
-
-def _entry_signal(bars: List[list]) -> Optional[Dict[str, Any]]:
-    """最新已收盘91m bar是否满足开多/开空条件。跟Pine源码longCondition/
-    shortCondition逐条对齐：快线斜率+阳阴线+站上/跌破双均线+实体过滤+
-    突破前5根高低点，六个条件全部满足才算数。None=无信号。"""
-    if len(bars) < MIN_BARS_NEEDED:
-        return None
-    closes = [float(b[4]) for b in bars]
-    cur = bars[-1]
-    o, c = float(cur[1]), float(cur[4])
-
-    atr_now = wilder_atr(bars, ATR_PERIOD)
-    if atr_now <= 0:
-        return None
-
-    ema_fast_now = _ema_last(closes, FAST_LEN)
-    ema_fast_prev = _ema_last(closes[:-1], FAST_LEN)
-    ema_slow_now = _ema_last(closes, SLOW_LEN)
-
-    prior5 = bars[-(BREAKOUT_LOOKBACK + 1):-1]
-    prior5_high = max(float(b[2]) for b in prior5)
-    prior5_low = min(float(b[3]) for b in prior5)
-
-    body_size = abs(c - o)
-    is_body_valid = body_size >= atr_now * BODY_MIN_ATR_MULT
-    is_bull = c > o
-    is_bear = c < o
-    ema_fast_up = ema_fast_now > ema_fast_prev
-    ema_fast_down = ema_fast_now < ema_fast_prev
-
-    long_ok = (
-        ema_fast_up and is_bull and c > ema_fast_now and c > ema_slow_now
-        and is_body_valid and c > prior5_high
-    )
-    short_ok = (
-        ema_fast_down and is_bear and c < ema_fast_now and c < ema_slow_now
-        and is_body_valid and c < prior5_low
-    )
-    if long_ok:
-        return {"action": "LONG", "price": c, "bar_time": int(cur[0]), "atr": atr_now}
-    if short_ok:
-        return {"action": "SHORT", "price": c, "bar_time": int(cur[0]), "atr": atr_now}
-    return None
-
-
-def _exit_signal(bars: List[list], side: str) -> Optional[Dict[str, Any]]:
-    """持仓方向在最新91m收盘时是否该"纯平仓"或"反手"。closeLongCondition/
-    closeShortCondition跟Pine源码一致：只看是否跌破/站上双均线，不要求
-    实体/突破——那两条只在判断"要不要反手"时才需要，走_entry_signal同一
-    份完整六条件判定。"""
-    if len(bars) < MIN_BARS_NEEDED:
-        return None
-    closes = [float(b[4]) for b in bars]
-    cur = bars[-1]
-    c = float(cur[4])
-    ema_fast_now = _ema_last(closes, FAST_LEN)
-    ema_slow_now = _ema_last(closes, SLOW_LEN)
-    entry_sig = _entry_signal(bars)
-
-    if side == "LONG":
-        close_cond = c < ema_fast_now and c < ema_slow_now
-        if not close_cond:
-            return None
-        if entry_sig and entry_sig["action"] == "SHORT":
-            return {
-                "action": "REVERSE_SHORT", "price": c, "bar_time": int(cur[0]),
-                "atr": entry_sig["atr"],
-            }
-        return {"action": "CLOSE_ONLY", "price": c, "bar_time": int(cur[0])}
-    else:
-        close_cond = c > ema_fast_now and c > ema_slow_now
-        if not close_cond:
-            return None
-        if entry_sig and entry_sig["action"] == "LONG":
-            return {
-                "action": "REVERSE_LONG", "price": c, "bar_time": int(cur[0]),
-                "atr": entry_sig["atr"],
-            }
-        return {"action": "CLOSE_ONLY", "price": c, "bar_time": int(cur[0])}
-
-
 # ==================== 下单 ====================
 
 def _calc_qty(price: float) -> float:
-    """本金等值(1倍不加杠杆)：qty = 账户权益×98% / 现价——98%是2026-09-23
-    源码明确要求的"留2%手续费缓冲"，不是账户全部权益都拿去做名义仓位。"""
+    """本金等值(1倍不加杠杆)：qty = 账户权益×98% / 现价。"""
     equity = binance_client.get_total_equity("USDT")
     if equity <= 0 or price <= 0:
         logger.error(f"权益或现价异常 equity={equity} price={price}，跳过开仓")
@@ -384,26 +232,12 @@ def _open_position(action: str, price: float, bar_time: int, atr_hint: float,
         fill_price = price
 
     atr = atr_hint if atr_hint and atr_hint > 0 else fill_price * 0.005
-    direction = 1.0 if side == "LONG" else -1.0
-    hard_stop = fill_price - direction * INITIAL_STOP_ATR_MULT * atr
-
-    state["position"] = {
-        "side": side,
-        "entry_price": fill_price,
-        "qty": qty,
-        "atr_at_entry": atr,
-        "entry_bar_time": bar_time,
-        "hard_stop": hard_stop,
-        "extreme_price": fill_price,
-        "breakeven_active": False,
-        "trail_active": False,
-        "current_stop": hard_stop,
-        "spike_breach_start_ts": None,
-        "opened_at": time.time(),
-    }
+    pos = strat.new_position(side, fill_price, atr, bar_time, time.time())
+    pos["qty"] = qty
+    state["position"] = pos
     _save_state(state)
-    logger.info(f"🚀 开仓成交 {side} qty={qty} @{fill_price} 硬止损={hard_stop:.6f} ATR={atr:.6f}")
-    _alert(f"🚀 开仓 {side} SNDKUSDT qty={qty} @{fill_price:.4f} 硬止损{hard_stop:.4f}")
+    logger.info(f"🚀 开仓成交 {side} qty={qty} @{fill_price} 硬止损={pos['hard_stop']:.6f} ATR={atr:.6f}")
+    _alert(f"🚀 开仓 {side} SNDKUSDT qty={qty} @{fill_price:.4f} 硬止损{pos['hard_stop']:.4f}")
 
 
 def _close_position(reason: str, state: Dict[str, Any]) -> bool:
@@ -435,85 +269,6 @@ def _close_position(reason: str, state: Dict[str, Any]) -> bool:
     logger.error(f"🚨 市价平仓失败！原因={reason}，需要人工立刻核查")
     _alert(f"🚨 市价平仓失败！原因={reason}，需要人工立刻核查交易所")
     return False
-
-
-# ==================== 止损状态机(每个tick评估，intrabar，用缓存指标) ====================
-
-def _evaluate_protective_stop(pos: Dict[str, Any], price: float, atr_now: float,
-                               adx_now: float, struct_low: Optional[float],
-                               struct_high: Optional[float], now_ts: float) -> Tuple[bool, str]:
-    """返回(是否该市价平仓, 原因)。硬止损阶段做防插针(持续击穿超15分钟
-    才真平)；保本/追踪阶段一碰即触发(源码只在初始硬止损这层用TV内部
-    固定止损做兜底，后两档是VPS这边"立刻市价全平")。"""
-    side = pos["side"]
-    direction = 1.0 if side == "LONG" else -1.0
-    entry = pos["entry_price"]
-    atr0 = pos.get("atr_at_entry") or atr_now
-
-    if side == "LONG":
-        pos["extreme_price"] = max(pos.get("extreme_price", entry), price)
-    else:
-        pos["extreme_price"] = min(pos.get("extreme_price", entry), price)
-
-    profit_atr = direction * (price - entry) / atr0 if atr0 > 0 else 0.0
-
-    if not pos.get("breakeven_active") and profit_atr >= BREAKEVEN_TRIGGER_ATR:
-        pos["breakeven_active"] = True
-        logger.info(f"🛡️ 浮盈达到{BREAKEVEN_TRIGGER_ATR}倍ATR，止损移动到保本位")
-
-    if not pos.get("trail_active") and profit_atr >= TRAIL_TRIGGER_ATR:
-        pos["trail_active"] = True
-        logger.info(f"📈 浮盈达到{TRAIL_TRIGGER_ATR}倍ATR，启动ADX自适应吊灯追踪止损")
-
-    candidates = [pos["hard_stop"]]
-
-    if pos.get("breakeven_active"):
-        be = entry * (1 + BREAKEVEN_BUFFER_PCT) if side == "LONG" else entry * (1 - BREAKEVEN_BUFFER_PCT)
-        candidates.append(be)
-
-    if pos.get("trail_active") and atr_now > 0:
-        if adx_now > ADX_STRONG_BOUND:
-            mult = TRAIL_MULT_STRONG
-        elif adx_now < ADX_WEAK_BOUND:
-            mult = TRAIL_MULT_WEAK
-        else:
-            mult = TRAIL_MULT_NORMAL
-        chandelier = pos["extreme_price"] - direction * mult * atr_now
-
-        if struct_low is not None and struct_high is not None:
-            if side == "LONG":
-                struct_level = struct_low - STRUCT_BUFFER_ATR * atr_now
-                trail_final = max(chandelier, struct_level)
-            else:
-                struct_level = struct_high + STRUCT_BUFFER_ATR * atr_now
-                trail_final = min(chandelier, struct_level)
-            candidates.append(trail_final)
-        else:
-            candidates.append(chandelier)
-
-    active_stop = max(candidates) if side == "LONG" else min(candidates)
-    pos["current_stop"] = active_stop
-
-    breached = (price <= active_stop) if side == "LONG" else (price >= active_stop)
-
-    if not breached:
-        pos["spike_breach_start_ts"] = None
-        return False, ""
-
-    if pos.get("breakeven_active") or pos.get("trail_active"):
-        return True, ("移动追踪止损触发" if pos.get("trail_active") else "保本止损触发")
-
-    # 仍在初始硬止损阶段：防插针状态机。持续击穿超15分钟未收回才真止损；
-    # 期间只要有一个tick价格收回(breached=False)，上面就把计时器清零，
-    # 天然实现"5分钟内收回就取消"的效果。
-    if pos.get("spike_breach_start_ts") is None:
-        pos["spike_breach_start_ts"] = now_ts
-        logger.info(f"⚡ 价格击穿硬止损{active_stop:.6f}，开始15分钟观察窗口(防插针)")
-        return False, ""
-    elapsed = now_ts - pos["spike_breach_start_ts"]
-    if elapsed >= SPIKE_FORCE_CLOSE_SEC:
-        return True, f"硬止损击穿持续{elapsed / 60:.1f}分钟未收回"
-    return False, ""
 
 
 # ==================== 启动核对 ====================
@@ -576,7 +331,7 @@ def _refresh_indicators_and_act(state: Dict[str, Any]) -> Dict[str, Any]:
     if state.get("last_bar_time") != bar_time:
         pos = state.get("position")
         if pos:
-            sig = _exit_signal(bars, pos["side"])
+            sig = strat.exit_signal(bars, pos["side"])
             if sig:
                 action = sig["action"]
                 if action == "CLOSE_ONLY":
@@ -587,7 +342,7 @@ def _refresh_indicators_and_act(state: Dict[str, Any]) -> Dict[str, Any]:
                         new_action = "LONG" if action == "REVERSE_LONG" else "SHORT"
                         _open_position(new_action, sig["price"], sig["bar_time"], sig.get("atr", atr_now), state)
         else:
-            sig = _entry_signal(bars)
+            sig = strat.entry_signal(bars)
             if sig:
                 _open_position(sig["action"], sig["price"], sig["bar_time"], sig.get("atr", atr_now), state)
         state["last_bar_time"] = bar_time
@@ -609,7 +364,7 @@ def run_once(state: Dict[str, Any]) -> Dict[str, Any]:
         adx_now = float(state.get("cached_adx") or 0.0)
         struct_low = state.get("cached_struct_low")
         struct_high = state.get("cached_struct_high")
-        should_close, reason = _evaluate_protective_stop(
+        should_close, reason = strat.evaluate_protective_stop(
             pos, price, atr_now, adx_now, struct_low, struct_high, time.time(),
         )
         state["position"] = pos
@@ -635,9 +390,9 @@ def dry_run_check() -> None:
     price = _live_price()
     atr = wilder_atr(bars, ATR_PERIOD)
     adx = wilder_adx(bars, ADX_PERIOD)
-    ema_fast_now = _ema_last(closes, FAST_LEN)
-    ema_fast_prev = _ema_last(closes[:-1], FAST_LEN)
-    ema_slow_now = _ema_last(closes, SLOW_LEN)
+    ema_fast_now = strat.ema_last(closes, strat.FAST_LEN)
+    ema_fast_prev = strat.ema_last(closes[:-1], strat.FAST_LEN)
+    ema_slow_now = strat.ema_last(closes, strat.SLOW_LEN)
     logger.info(
         f"[干跑] 最新已收盘91m bar open={float(cur[1]):.4f} close={float(cur[4]):.4f} "
         f"现价={price:.4f} ATR14={atr:.6f} ADX14={adx:.2f}"
@@ -647,10 +402,10 @@ def dry_run_check() -> None:
         f"(斜率{'向上' if ema_fast_now > ema_fast_prev else '向下' if ema_fast_now < ema_fast_prev else '持平'}) "
         f"EMA30now={ema_slow_now:.4f}"
     )
-    entry = _entry_signal(bars)
+    entry = strat.entry_signal(bars)
     logger.info(f"[干跑] 当前空仓假设下的入场信号={entry}")
     for side in ("LONG", "SHORT"):
-        exit_sig = _exit_signal(bars, side)
+        exit_sig = strat.exit_signal(bars, side)
         logger.info(f"[干跑] 若持有{side}仓位，出场/反手信号={exit_sig}")
 
 
@@ -658,10 +413,10 @@ def main() -> None:
     once = "--once" in sys.argv
     dry_run = "--dry-run" in sys.argv
     if dry_run:
-        logger.info(f"SNDK双均线引擎【干跑模式，不下单】| 品种={SYMBOL} 周期={PERIOD_MIN}min")
+        logger.info(f"SNDK双均线引擎【干跑模式，不下单】| 品种={SYMBOL} 周期={strat.PERIOD_MIN}min")
         dry_run_check()
         return
-    logger.info(f"SNDK双均线实盘引擎启动 | 品种={SYMBOL} 周期={PERIOD_MIN}min once={once}")
+    logger.info(f"SNDK双均线实盘引擎启动 | 品种={SYMBOL} 周期={strat.PERIOD_MIN}min once={once}")
     state = _load_state()
     state = _reconcile(state)
     _save_state(state)
