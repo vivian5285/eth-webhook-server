@@ -892,15 +892,29 @@ class BinanceClient:
 
     def format_price(self, price, symbol="ETHUSDT"):
         sym = self._load_symbol_filters(symbol)
-        tick = 0.01
+        tick_str = "0.01"
         for f in sym.get("filters", []):
             if f.get("filterType") == "PRICE_FILTER":
-                tick = float(f.get("tickSize", tick))
+                tick_str = str(f.get("tickSize", tick_str))
                 break
+        tick = float(tick_str)
         p = float(price)
         if tick > 0:
-            p = round(round(p / tick) * tick, 8)
-        return f"{p:.2f}" if tick <= 0.01 else str(p)
+            p = round(round(p / tick) * tick, 10)
+        # 2026-09-22实盘复现(dual_momentum_live.py首次上ENA/DOGE/1000PEPE
+        # 这类低价品种)：旧逻辑"tick<=0.01就固定截2位小数"对这仓库过去
+        # 只交易的高价品种(BNB/XAU/MU等，tick本来就是0.01两位小数)恰好
+        # 蒙对了，但ENA(tick=0.00001)/DOGE(tick=0.00001)/1000PEPE
+        # (tick=0.0000001)同样tick<=0.01却需要5~7位小数——旧逻辑把
+        # 0.178232壓成0.18、0.0049321直接壓成0.00(归零)，止损/止盈价
+        # 全错。改成从tick_size的原始字符串反推真实需要的小数位数(不用
+        # float(tick)再算log，避免浮点误差)，两位小数的老品种结果完全
+        # 不变，低价新品种才是这次真正修的对象。
+        decimals = 2
+        if "." in tick_str:
+            frac = tick_str.split(".", 1)[1].rstrip("0")
+            decimals = len(frac) if frac else 0
+        return f"{p:.{decimals}f}"
 
     def set_leverage(self, symbol="ETHUSDT", leverage=None):
         """设置杠杆：必须显式传入 TV leverage，禁止回退固定 25x。"""
