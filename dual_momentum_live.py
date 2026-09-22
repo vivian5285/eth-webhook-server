@@ -214,23 +214,43 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
         logger.error(f"[{symbol}] 市价开仓失败: {signal}")
         return
 
+    # 2026-09-22实盘复现(SNDK)：signal["price"]是上一根已收盘4h K线的
+    # 收盘价，不是这一刻的真实成交价——SNDK从信号算出来到市价单真正
+    # 成交这几秒之间，真实价格已经涨了6%(tokenized股票代币，本身波动
+    # 就大)，用陈旧价算出来的止损直接被交易所拒("-2021 立即触发"，
+    # 相当于止损线已经落在成交价的盈利那一侧)。改成拿真实成交价
+    # (avgPrice)重新按同一套ATR倍数锚定止损/止盈，跟主TV系统"开仓成交
+    # 后绑定：TP按空间重锚"是同一个道理，同一套修法。avgPrice缺失/为0
+    # 时才退回signal的原始价，不整体失败。
+    fill_price = float(order.get("avgPrice") or 0) or price
+    direction = 1.0 if side == "LONG" else -1.0
+    if abs(fill_price - price) / price > 0.001:
+        logger.warning(
+            f"[{symbol}] 成交价{fill_price}偏离信号价{price}"
+            f"({(fill_price / price - 1) * 100:+.2f}%)，止损/止盈按真实成交价重锚"
+        )
+    stop_loss = round(fill_price - direction * atr * 2.5, 8)
+    tp_prices = [
+        round(fill_price + direction * atr * mult, 8) for mult in (1.2, 2.2, 3.5)
+    ] if signal.get("tp1") else [None, None, None]
+
     # 成交后立刻落盘(entry_pending_sl)，防止下面挂止损止盈中途崩溃时
     # 变成"没有本地记录的裸仓"——重启核对时会因为"本地无记录+交易所
     # 有仓位"报错跳过、绝不当成真裸仓自动接管，见_reconcile_on_start。
     state[symbol] = {
         "side": side,
-        "entry_price": price,
+        "entry_price": fill_price,
         "qty": qty,
         "atr_at_entry": atr,
         "stop_loss": stop_loss,
         "sl_order_id": None,
-        "tp_prices": [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")],
+        "tp_prices": tp_prices,
         "tp_order_ids": [None, None, None],
         "last_acted_bar_time": signal.get("bar_time"),
         "status": "entry_pending_sl",
     }
     _save_state(state)
-    logger.info(f"🚀 [{symbol}] 开仓成交 {side} qty={qty} @{price} | {signal.get('reason')}")
+    logger.info(f"🚀 [{symbol}] 开仓成交 {side} qty={qty} @{fill_price} | {signal.get('reason')}")
 
     close_side = "SHORT" if side == "LONG" else "LONG"
     # place_stop_market_order内部自己会把LONG/SHORT转成BUY/SELL，但下面
