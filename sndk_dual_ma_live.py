@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SNDK 90分钟双均线(EMA7/30)全自动实盘引擎 - 2026-09-23
+SNDK 91分钟双均线(EMA7/30)全自动实盘引擎 - 2026-09-23
 
 宝贝拍板：SNDK不再接TV，交易逻辑完全搬到VPS本地。2026-09-23按宝贝发来
 的真实Pine策略源码("EMA7 & EMA30 纯裸K微结构突破")逐条核对重写——
-第一版曾照着文字版计划书写成EMA25/无实体过滤/无斜率确认，跟这份能
-回测出+234%的真实源码有三处出入，这次全部对齐：
+第一版曾照着文字版计划书写成EMA25/无实体过滤/无斜率确认/90分钟，
+这次全部对齐权威来源：
 
 1. 慢线是 EMA30，不是EMA25(文字计划书写错了，源码才是权威)。
 2. 开仓多一条"实体够大"过滤：|close-open| >= 0.2×ATR(bodyMulti)，
    十字星/小实体的假突破不算数。
 3. 开仓多一条"快线自身斜率"确认：emaFastUp=EMA7本身在上升(比上一根
-   90m bar的EMA7高)，emaFastDown同理——单纯"现价站上EMA7"不够，EMA7
-   自己也得在朝这个方向走。
+   已收盘bar的EMA7高)，emaFastDown同理——单纯"现价站上EMA7"不够，
+   EMA7自己也得在朝这个方向走。
+4. 周期是91分钟，不是90分钟——宝贝确认TradingView回测用的91分钟K线，
+   跟radar_reentry_mixin.py::DUAL_MA_EXIT_INTERVAL_MIN里SNDKUSDT登记的
+   91分钟(2026-09-19照真实TV警报截图校准)完全对得上，两个独立信息源
+   互相印证。
 
-数据层：币安30m原始K线现场合成90m bar(3根30m=1根90m，UTC epoch对齐，
-跟TradingView 90分钟图同一套锚点)。数学上跟"18根5m合成"完全等价——
-OHLCV的开高低收量在同一个对齐窗口内跟用多细的子K线合成无关(High取
-子K线里的最大值、Low取最小值、Open取第一根、Close取最后一根、Volume
-求和，这几个运算对"3根30m"和"18根5m"给出的结果逐位相同)，只是30m
-拉取的K线条数少得多，REST开销小很多，这里保留用30m，不是抄近路。
+数据层：91分钟不是币安任何原生K线周期(1/3/5/15/30/60...分钟)的整数倍，
+改用仓库里已经在生产环境跑着的"任意周期"通用合成器
+strategy_engine/klines.py::get_bars——dual_momentum_live.py和
+DUAL_MA_EXIT都在用同一个模块，91分钟这种周期它会自动退化到用1分钟
+K线合成(91没有能整除它的原生周期)，内置分页/UTC epoch对齐(跟
+TradingView图表同一套锚点)，不用自己另外写一套。
 
 指标精度：宝贝要求"VPS算出来的EMA7/EMA30/ATR14跟TradingView误差<0.1%"。
 EMA/ATR/ADX都是递归指标，warmup的历史越深，起始种子的影响衰减得越
 干净、跟TV(近乎无限历史)的差距越小。这版把每次重算指标用的K线深度
-从80根90m大幅拉到~1000根(现场分页拉取30m K线，SNDK这类新上市代币
-历史不够1000根时自动退化用能拿到的全部)，同时把"多久重算一次"从
-"每个20秒tick都重算"改成"只在90分钟bucket边界真正跨越时才重算一次"
-(纯本地时间戳判断，不额外多打API)——这样重算频率(每90分钟一次)本身
-就比计划书要求的"每日UTC0点校准一次"更频繁，天然覆盖了那条要求，不用
+从80根大幅拉到~1000根(get_bars内置分页，SNDK这类新上市代币历史不够
+1000根时自动退化用能拿到的全部)，同时把"多久重算一次"从"每个20秒
+tick都重算"改成"只在91分钟bucket边界真正跨越时才重算一次"(纯本地
+时间戳判断，不额外多打API)——这样重算频率(每91分钟一次)本身就比
+计划书要求的"每日UTC0点校准一次"更频繁，天然覆盖了那条要求，不用
 另外再起一个每日定时校准任务。20秒tick循环只做两件轻量的事：查现价
 (ticker，便宜)+用上一次bucket边界重算出的缓存ATR/ADX/结构位跑止损
 状态机，不会每20秒都去重新拉一遍上千根K线。
@@ -71,7 +75,8 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from binance_client import binance_client
-from market_engine import merge_30m_to_period, wilder_atr, wilder_adx, bucket_open_ms
+from market_engine import wilder_atr, wilder_adx, bucket_open_ms
+from strategy_engine.klines import get_bars as _sk_get_bars
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,8 +86,18 @@ logger = logging.getLogger(__name__)
 
 # ==================== 策略参数(照Pine源码"EMA7 & EMA30 纯裸K微结构突破"逐条对齐) ====================
 SYMBOL = "SNDKUSDT"
-PERIOD_MIN = 90
+# 2026-09-23修正：宝贝确认TradingView回测用的是91分钟K线，不是计划书
+# 文字版写的90分钟——跟radar_reentry_mixin.py::DUAL_MA_EXIT_INTERVAL_MIN
+# 里SNDKUSDT登记的91分钟(2026-09-19照真实TV警报截图校准)完全对得上，
+# 独立信息源互相印证。91不是30的整数倍，原来用market_engine.py的
+# merge_30m_to_period(只支持30分钟整数倍)合成不出来，改用
+# strategy_engine/klines.py::get_bars——这是仓库里已经在生产环境跑着的
+# "任意周期"通用合成器(dual_momentum_live.py、DUAL_MA_EXIT都在用)，
+# 91分钟这种周期它会自动退化到用1分钟K线合成(91没有能整除它的原生周期)，
+# 内置分页，不需要我们自己再写一遍。
+PERIOD_MIN = 91
 PERIOD_MS = PERIOD_MIN * 60 * 1000
+PERIOD_STR = f"{PERIOD_MIN}m"
 FAST_LEN = 7
 SLOW_LEN = 30  # 2026-09-23修正：源码是EMA30，不是文字计划书写的EMA25
 BREAKOUT_LOOKBACK = 5      # breakoutBars
@@ -107,8 +122,7 @@ SPIKE_FORCE_CLOSE_SEC = 15 * 60  # 硬止损击穿持续这么久仍未收回 �
 EXCHANGE_LEVERAGE = 1     # 交易所真实杠杆锁1倍，等同于现货满仓
 EQUITY_USAGE_PCT = 0.98   # 2026-09-23：账户权益98%开仓，留2%手续费缓冲(源码要求)
 
-DEEP_BARS_TARGET = 1000   # 目标90m bar深度，供EMA/ATR/ADX warmup(误差<0.1%要求)
-RAW_PER_CALL = 1500       # 币安futures_klines单次limit上限
+DEEP_BARS_TARGET = 1000   # 目标91m bar深度，供EMA/ATR/ADX warmup(误差<0.1%要求)
 MIN_BARS_NEEDED = max(SLOW_LEN, STRUCT_LOOKBACK, ADX_PERIOD * 2 + 2) + BREAKOUT_LOOKBACK
 
 TICK_INTERVAL_SEC = 20  # 本地盯盘轮询间隔(只查现价，便宜)；防插针窗口是分钟级，20秒足够及时
@@ -199,33 +213,17 @@ def _save_state(state: Dict[str, Any]) -> None:
     os.replace(tmp, STATE_FILE)
 
 
-# ==================== K线(深度分页拉取，只在90m bucket边界触发) ====================
+# ==================== K线(strategy_engine通用任意周期合成器，只在91m bucket边界触发) ====================
 
-def _fetch_90m_bars(target_bars: int = DEEP_BARS_TARGET) -> List[list]:
-    """分页拉取30m原始K线现场合成90m bar，目标覆盖target_bars根已闭合
-    90m bar(默认1000根，供EMA30/ADX14 warmup达到<0.1%精度要求)。SNDK这
-    类新上市代币交易所历史可能不足，拉不满时用能拿到的全部，不当失败。"""
-    needed_30m = target_bars * 3 + 60
-    all_raw: List[list] = []
-    end_time: Optional[int] = None
-    attempts = 0
-    while len(all_raw) < needed_30m and attempts < 6:
-        attempts += 1
-        try:
-            kwargs: Dict[str, Any] = {"symbol": SYMBOL, "interval": "30m", "limit": RAW_PER_CALL}
-            if end_time is not None:
-                kwargs["endTime"] = end_time
-            batch = binance_client.client.futures_klines(**kwargs)
-        except Exception as e:
-            logger.warning(f"深度K线拉取失败(第{attempts}批): {e}")
-            break
-        if not batch:
-            break
-        all_raw = batch + all_raw
-        end_time = int(batch[0][0]) - 1
-        if len(batch) < RAW_PER_CALL:
-            break  # 已经拉到交易所最早的数据，没有更多了
-    return merge_30m_to_period(all_raw, PERIOD_MS)
+def _fetch_bars(target_bars: int = DEEP_BARS_TARGET) -> List[list]:
+    """用strategy_engine.klines.get_bars合成91分钟bar——公开行情端点，
+    不需要API Key，内置分页+"退化到能整除目标周期的最粗原生周期"逻辑
+    (91分钟没有能整除它的原生周期，会自动退化到1分钟K线合成)。转换成
+    [open_time, o, h, l, c, v]的list行格式，兼容market_engine.wilder_atr/
+    wilder_adx等既有只读list-index函数，不用重写它们。SNDK这类较新品种
+    交易所历史可能不足target_bars根，拉不满时用能拿到的全部，不当失败。"""
+    dict_bars = _sk_get_bars(SYMBOL, PERIOD_STR, limit=target_bars)
+    return [[b["t"], b["o"], b["h"], b["l"], b["c"], b["v"]] for b in dict_bars]
 
 
 def _live_price() -> float:
@@ -254,10 +252,10 @@ def _ema_last(closes: List[float], n: int) -> float:
     return m
 
 
-# ==================== 信号判定(90分钟收盘时评估，逐条对齐Pine源码条件) ====================
+# ==================== 信号判定(91分钟收盘时评估，逐条对齐Pine源码条件) ====================
 
 def _entry_signal(bars: List[list]) -> Optional[Dict[str, Any]]:
-    """最新已收盘90m bar是否满足开多/开空条件。跟Pine源码longCondition/
+    """最新已收盘91m bar是否满足开多/开空条件。跟Pine源码longCondition/
     shortCondition逐条对齐：快线斜率+阳阴线+站上/跌破双均线+实体过滤+
     突破前5根高低点，六个条件全部满足才算数。None=无信号。"""
     if len(bars) < MIN_BARS_NEEDED:
@@ -301,7 +299,7 @@ def _entry_signal(bars: List[list]) -> Optional[Dict[str, Any]]:
 
 
 def _exit_signal(bars: List[list], side: str) -> Optional[Dict[str, Any]]:
-    """持仓方向在最新90m收盘时是否该"纯平仓"或"反手"。closeLongCondition/
+    """持仓方向在最新91m收盘时是否该"纯平仓"或"反手"。closeLongCondition/
     closeShortCondition跟Pine源码一致：只看是否跌破/站上双均线，不要求
     实体/突破——那两条只在判断"要不要反手"时才需要，走_entry_signal同一
     份完整六条件判定。"""
@@ -550,8 +548,8 @@ def _reconcile(state: Dict[str, Any]) -> Dict[str, Any]:
 # ==================== 主循环 ====================
 
 def _should_refresh_indicators(state: Dict[str, Any], now_ms: int) -> bool:
-    """纯本地时间戳判断是否跨过了一个新的90m bucket边界，不额外打API
-    去"看一眼"有没有新bar——90m bar固定在UTC epoch整90分钟边界收盘，
+    """纯本地时间戳判断是否跨过了一个新的91m bucket边界，不额外打API
+    去"看一眼"有没有新bar——91m bar固定在UTC epoch整91分钟边界收盘，
     可以直接算。"""
     cur_bucket = bucket_open_ms(now_ms, PERIOD_MS)
     last_bar = state.get("last_bar_time")
@@ -561,7 +559,7 @@ def _should_refresh_indicators(state: Dict[str, Any], now_ms: int) -> bool:
 
 
 def _refresh_indicators_and_act(state: Dict[str, Any]) -> Dict[str, Any]:
-    bars = _fetch_90m_bars()
+    bars = _fetch_bars()
     if len(bars) < MIN_BARS_NEEDED:
         logger.warning(f"K线不足({len(bars)}/{MIN_BARS_NEEDED})，本轮跳过指标刷新")
         return state
@@ -627,8 +625,8 @@ def dry_run_check() -> None:
     """只读体检：拉真实深度K线，把EMA7/30/ATR14/ADX14/入场出场判定都
     打出来，完全不下单、不碰状态文件——改动策略参数后应该先跑这个人工
     核对数字，再放开实盘循环。"""
-    bars = _fetch_90m_bars()
-    logger.info(f"[干跑] 拉到{len(bars)}根已闭合90m bar(需要至少{MIN_BARS_NEEDED}根，目标{DEEP_BARS_TARGET}根)")
+    bars = _fetch_bars()
+    logger.info(f"[干跑] 拉到{len(bars)}根已闭合91m bar(需要至少{MIN_BARS_NEEDED}根，目标{DEEP_BARS_TARGET}根)")
     if len(bars) < MIN_BARS_NEEDED:
         logger.warning("[干跑] bar数不够，指标不可信，先别启用实盘")
         return
@@ -641,7 +639,7 @@ def dry_run_check() -> None:
     ema_fast_prev = _ema_last(closes[:-1], FAST_LEN)
     ema_slow_now = _ema_last(closes, SLOW_LEN)
     logger.info(
-        f"[干跑] 最新已收盘90m bar open={float(cur[1]):.4f} close={float(cur[4]):.4f} "
+        f"[干跑] 最新已收盘91m bar open={float(cur[1]):.4f} close={float(cur[4]):.4f} "
         f"现价={price:.4f} ATR14={atr:.6f} ADX14={adx:.2f}"
     )
     logger.info(
