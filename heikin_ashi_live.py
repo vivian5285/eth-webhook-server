@@ -276,6 +276,13 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
         logger.info(f"[{symbol}] 组合额度不足，仓位从{qty}缩小到{clamped_qty}")
     qty = clamped_qty
 
+    # 2026-09-23新增：开仓前先确保逐仓——实盘复现过C账户历史遗留的
+    # 保证金模式不统一(有的品种全仓/有的逐仓)，本引擎的强平安全计算假设
+    # 的是逐仓，不统一会让部分品种的实际强平行为偏离设计假设。只对"即将
+    # 开的这个新仓位"生效，不影响已有持仓(币安规则本来就不允许对有仓位
+    # /挂单的品种改保证金模式)。
+    binance_client.set_margin_type(symbol, margin_type="ISOLATED")
+
     lev_result = binance_client.set_leverage(symbol, leverage=leverage)
     if lev_result is None:
         logger.error(f"[{symbol}] 设置杠杆{leverage}x失败，放弃开仓(避免用未知杠杆下单)")

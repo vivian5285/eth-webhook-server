@@ -935,6 +935,31 @@ class BinanceClient:
             logger.error(f"[设置杠杆失败] {symbol} → {lev}x: {e}")
             return None
 
+    def set_margin_type(self, symbol="ETHUSDT", margin_type="ISOLATED"):
+        """设置逐仓/全仓。2026-09-23新增：heikin_ashi_live.py实盘复现C账户
+        持仓里有的品种全仓、有的逐仓(历史遗留，没人显式设过，交易所对每个
+        品种的保证金模式是各自独立记忆、不会自动统一)，而该引擎的杠杆
+        安全计算(强平价≥1.5×止损距离)公式假设的是逐仓——不统一会导致
+        部分品种的实际强平逻辑跟公式假设的不一致。只在开仓前调用，币安
+        规则是"该品种当前有持仓/挂单时不能改保证金模式"，所以只对新开的
+        仓位生效，已经开着的老仓位不会被这个函数动。已经是目标模式时
+        交易所返回code=-4046("No need to change margin type")，这里当
+        成功处理，不是失败。"""
+        mt = str(margin_type or "ISOLATED").upper()
+        if mt not in ("ISOLATED", "CROSSED"):
+            mt = "ISOLATED"
+        try:
+            result = self.client.futures_change_margin_type(symbol=symbol, marginType=mt)
+            logger.info(f"[设置保证金模式成功] {symbol} → {mt}")
+            return result
+        except Exception as e:
+            msg = str(e)
+            if "-4046" in msg or "No need to change margin type" in msg:
+                logger.debug(f"[保证金模式已是目标值] {symbol} → {mt}，无需改")
+                return {"already": mt}
+            logger.error(f"[设置保证金模式失败] {symbol} → {mt}: {e}")
+            return None
+
     def _set_ws_price(self, symbol, price):
         with self._price_lock:
             self._price_cache[symbol] = price
