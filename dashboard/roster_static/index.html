@@ -138,6 +138,7 @@
   .strat-rank{ font-size: 10.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
   .strat-name{ font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .strat-open{ font-size: 10.5px; color: var(--accent); margin-top: 1px; }
+  .strat-costs{ display:grid; grid-template-columns:auto auto; gap:2px 10px; margin-top:3px; font-size:10px; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
   .strat-side{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; flex-shrink:0; }
   .strat-ret{ font-size: 13.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .strat-ret.good{ color: var(--good); }
@@ -149,17 +150,18 @@
   .detail-inner{ max-width: 880px; }
 
   .detail-head{ display:flex; align-items:flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .detail-title{ font-size: 26px; font-weight: 680; letter-spacing: -0.01em; text-wrap: balance; }
+  .detail-head > div{ min-width:0; max-width:100%; }
+  .detail-title{ font-size: 26px; font-weight: 680; letter-spacing: -0.01em; text-wrap: balance; overflow-wrap:anywhere; }
   .detail-desc{ color: var(--ink-soft); font-size: 14px; margin-top: 8px; line-height: 1.6; max-width: 62ch; }
 
   .kpi-row{ display:grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin: 24px 0 8px; }
   .kpi-card{
     background: var(--glass); border: 1px solid var(--glass-border);
     backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px;
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; min-width:0;
   }
-  .kpi-card .label{ font-size: 11.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; }
-  .kpi-card .value{ font-size: 22px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .kpi-card .label{ font-size: 11.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; overflow-wrap:anywhere; }
+  .kpi-card .value{ font-size: 22px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; overflow-wrap:anywhere; }
   .kpi-card .value.good{ color: var(--good); }
   .kpi-card .value.bad{ color: var(--bad); }
 
@@ -212,6 +214,7 @@
           <span class="sub" id="heroSub">策略对比 · 纸面模拟</span>
         </div>
         <div style="display:flex; align-items:center; gap:22px;">
+          <a href="/shadow/" style="color:#006e67;font-weight:700;text-decoration:none;white-space:nowrap;">组合影子</a>
           <div class="top-stats" id="topStats">
             <div class="top-stat">策略数<b id="statStrategies">–</b></div>
             <div class="top-stat">品种数<b id="statSymbols">–</b></div>
@@ -236,7 +239,7 @@
           <button class="view-btn" data-view="symbol">按币种</button>
           <button class="view-btn" data-view="stock">按美股</button>
         </div>
-        <div class="sidebar-label" id="sidebarLabel">按收益率排名</div>
+        <div class="sidebar-label" id="sidebarLabel">按已实现扣费收益率排名</div>
         <div id="sidebarList"><div class="loading-row">加载中…</div></div>
       </aside>
 
@@ -298,6 +301,10 @@ function fmtUsd0(v){
   if (v === null || v === undefined) return '–';
   return `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:0})}`;
 }
+function fmtUsdAbs(v){
+  if (v === null || v === undefined) return '–';
+  return `$${Math.abs(Number(v)).toFixed(2)}`;
+}
 // epoch ms -> "MM-DD HH:mm"（浏览器本地时区，宝贝在 UTC+8）
 function fmtTime(ms){
   if (!ms) return '–';
@@ -327,7 +334,7 @@ async function loadMeta(){
 function renderSidebar(){
   const list = document.getElementById('sidebarList');
   list.innerHTML = rosterRows.map((row, i) => {
-    const ret = row.equity_return_pct;
+    const ret = row.net_return_after_fees_pct;
     const tone = toneClass(ret);
     const active = row.strategy === currentStrategy ? 'active' : '';
     const openTag = row.open_count > 0 ? `<div class="strat-open">● ${row.open_count} 笔持仓中</div>` : '';
@@ -336,11 +343,12 @@ function renderSidebar(){
         <div class="strat-main">
           <div class="strat-rank">#${i+1}</div>
           <div class="strat-name">${row.strategy}</div>
+          <div class="strat-costs"><span>手续费 ${fmtUsdAbs(row.total_fees_usd)}</span><span class="${toneClass(row.open_unrealized_pnl_usd)}">实时浮盈 ${fmtUsdSimple(row.open_unrealized_pnl_usd)}</span></div>
           ${openTag}
         </div>
         <div class="strat-side">
           <div class="strat-ret ${tone}">${fmtPct(ret)}</div>
-          <div class="strat-eq">${fmtUsd0(row.equity)}</div>
+          <div class="strat-eq">${fmtUsd0(row.net_equity_after_fees)}</div>
         </div>
       </div>`;
   }).join('');
@@ -504,7 +512,7 @@ function switchCexView(view){
   currentSymbol = null;
   document.querySelectorAll('.view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   document.getElementById('sidebarLabel').textContent =
-    view === 'strategy' ? '按收益率排名' : (view === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏');
+    view === 'strategy' ? '按已实现扣费收益率排名' : (view === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏');
   if (view === 'strategy'){
     renderSidebar();
     if (currentStrategy){ renderDetailHeader(); loadTab(); }
@@ -720,7 +728,7 @@ function switchCategory(cat){
   document.getElementById('viewToggle').style.display = cat === 'cex' ? '' : 'none';
   if (cat === 'cex'){
     if (cexView === 'strategy'){
-      document.getElementById('sidebarLabel').textContent = '按收益率排名';
+      document.getElementById('sidebarLabel').textContent = '按已实现扣费收益率排名';
       renderSidebar();
       if (currentStrategy){ renderDetailHeader(); loadTab(); }
       else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
@@ -791,7 +799,7 @@ function renderDetailHeader(){
   const row = rosterRows.find(r => r.strategy === currentStrategy);
   const inner = document.getElementById('detailInner');
   if (!row){ inner.innerHTML = '<div class="empty-note">选一套策略查看详情</div>'; renderedStrategy = null; return; }
-  const tone = toneClass(row.equity_return_pct);
+  const tone = toneClass(row.net_return_after_fees_pct);
   inner.innerHTML = `
     <div class="detail-head">
       <div>
@@ -800,10 +808,25 @@ function renderDetailHeader(){
       </div>
     </div>
     <div class="kpi-row">
-      <div class="kpi-card"><div class="label">收益率</div><div class="value ${tone}" id="kpiRet">${fmtPct(row.equity_return_pct)}</div></div>
+      <div class="kpi-card"><div class="label">已实现扣费收益率</div><div class="value ${tone}" id="kpiRet">${fmtPct(row.net_return_after_fees_pct)}</div></div>
       <div class="kpi-card"><div class="label">胜率</div><div class="value" id="kpiWin">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
       <div class="kpi-card"><div class="label">已平仓</div><div class="value" id="kpiTrades">${row.trades ?? 0}</div></div>
-      <div class="kpi-card"><div class="label">净值</div><div class="value" id="kpiEq">${fmtUsd0(row.equity ?? 0)}</div></div>
+      <div class="kpi-card"><div class="label">已实现扣费净值</div><div class="value" id="kpiEq">${fmtUsd0(row.net_equity_after_fees ?? 0)}</div></div>
+      <div class="kpi-card" title="已平仓交易实际计入的手续费"><div class="label">已实现手续费</div><div class="value" id="kpiFees">${fmtUsdAbs(row.total_fees_usd)}</div></div>
+      <div class="kpi-card"><div class="label">已实现扣费净利润</div><div class="value ${toneClass(row.net_pnl_after_fees_usd)}" id="kpiNetPnl">${fmtUsdSimple(row.net_pnl_after_fees_usd)}</div></div>
+      <div class="kpi-card"><div class="label">持仓浮动盈亏</div><div class="value ${toneClass(row.open_unrealized_pnl_usd)}" id="kpiOpenPnl">${fmtUsdSimple(row.open_unrealized_pnl_usd)}</div></div>
+      <div class="kpi-card"><div class="label">持仓往返费用估算</div><div class="value" id="kpiOpenFees">${fmtUsdAbs(row.open_estimated_fees_usd)}</div></div>
+      <div class="kpi-card"><div class="label">盯市扣费收益率</div><div class="value ${toneClass(row.mtm_return_after_fees_pct)}" id="kpiRealized">${fmtPct(row.mtm_return_after_fees_pct)}</div></div>
+      <div class="kpi-card"><div class="label">资金费率净收支</div><div class="value ${toneClass(row.total_funding_pnl_usd)}" id="kpiFunding">${fmtUsdSimple(row.total_funding_pnl_usd)}</div></div>
+      <div class="kpi-card"><div class="label">名义敞口</div><div class="value" id="kpiExposure">${Number(row.gross_exposure_mult || 0).toFixed(2)}×</div></div>
+      <div class="kpi-card"><div class="label">止损风险</div><div class="value" id="kpiStopRisk">${fmtPct(row.stop_risk_pct)}</div></div>
+      <div class="kpi-card"><div class="label">风险状态</div><div class="value" id="kpiRegime" style="font-size:16px">${row.risk_regime || 'waiting'}${row.new_entries_blocked ? ' · 冻结开仓' : ''}</div></div>
+      <div class="kpi-card"><div class="label">动态敞口上限</div><div class="value" id="kpiGuardCap">${row.dynamic_gross_cap != null ? Number(row.dynamic_gross_cap).toFixed(1) + '×' : '–'}</div></div>
+      ${row.realized_max_drawdown_pct != null ? `
+      <div class="kpi-card"><div class="label">已平仓扣费最大回撤</div><div class="value" id="kpiExperimentDd">${fmtPct(row.realized_max_drawdown_pct)}</div></div>
+      <div class="kpi-card"><div class="label">成交额 / 初始净值</div><div class="value" id="kpiExperimentTurnover">${Number(row.turnover_mult || 0).toFixed(2)}×</div></div>
+      <div class="kpi-card"><div class="label">止损次数</div><div class="value" id="kpiExperimentStops">${row.stop_count ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">最差单笔扣费损益</div><div class="value ${toneClass(row.worst_trade_net_usd)}" id="kpiExperimentWorst">${row.worst_trade_net_usd == null ? '–' : fmtUsdSimple(row.worst_trade_net_usd)}</div></div>` : ''}
     </div>
     <div class="tabs">
       <button class="tab-btn ${currentTab==='symbols'?'active':''}" data-tab="symbols">按品种</button>
@@ -826,13 +849,41 @@ function patchStrategyKpis(){
   const row = rosterRows.find(r => r.strategy === currentStrategy);
   if (!row) return;
   const ret = document.getElementById('kpiRet');
-  if (ret){ ret.textContent = fmtPct(row.equity_return_pct); ret.className = 'value ' + toneClass(row.equity_return_pct); }
+  if (ret){ ret.textContent = fmtPct(row.net_return_after_fees_pct); ret.className = 'value ' + toneClass(row.net_return_after_fees_pct); }
   const win = document.getElementById('kpiWin');
   if (win) win.textContent = row.win_rate != null ? row.win_rate + '%' : '–';
   const tr = document.getElementById('kpiTrades');
   if (tr) tr.textContent = row.trades ?? 0;
   const eq = document.getElementById('kpiEq');
-  if (eq) eq.textContent = fmtUsd0(row.equity ?? 0);
+  if (eq) eq.textContent = fmtUsd0(row.net_equity_after_fees ?? 0);
+  const fees = document.getElementById('kpiFees');
+  if (fees) fees.textContent = fmtUsdAbs(row.total_fees_usd);
+  const net = document.getElementById('kpiNetPnl');
+  if (net){ net.textContent = fmtUsdSimple(row.net_pnl_after_fees_usd); net.className = 'value ' + toneClass(row.net_pnl_after_fees_usd); }
+  const openPnl = document.getElementById('kpiOpenPnl');
+  if (openPnl){ openPnl.textContent = fmtUsdSimple(row.open_unrealized_pnl_usd); openPnl.className = 'value ' + toneClass(row.open_unrealized_pnl_usd); }
+  const openFees = document.getElementById('kpiOpenFees');
+  if (openFees) openFees.textContent = fmtUsdAbs(row.open_estimated_fees_usd);
+  const realized = document.getElementById('kpiRealized');
+  if (realized){ realized.textContent = fmtPct(row.mtm_return_after_fees_pct); realized.className = 'value ' + toneClass(row.mtm_return_after_fees_pct); }
+  const funding = document.getElementById('kpiFunding');
+  if (funding){ funding.textContent = fmtUsdSimple(row.total_funding_pnl_usd); funding.className = 'value ' + toneClass(row.total_funding_pnl_usd); }
+  const exposure = document.getElementById('kpiExposure');
+  if (exposure) exposure.textContent = Number(row.gross_exposure_mult || 0).toFixed(2) + '×';
+  const risk = document.getElementById('kpiStopRisk');
+  if (risk) risk.textContent = fmtPct(row.stop_risk_pct);
+  const regime = document.getElementById('kpiRegime');
+  if (regime) regime.textContent = (row.risk_regime || 'waiting') + (row.new_entries_blocked ? ' · 冻结开仓' : '');
+  const guardCap = document.getElementById('kpiGuardCap');
+  if (guardCap) guardCap.textContent = row.dynamic_gross_cap != null ? Number(row.dynamic_gross_cap).toFixed(1) + '×' : '–';
+  const experimentDd = document.getElementById('kpiExperimentDd');
+  if (experimentDd) experimentDd.textContent = fmtPct(row.realized_max_drawdown_pct);
+  const experimentTurnover = document.getElementById('kpiExperimentTurnover');
+  if (experimentTurnover) experimentTurnover.textContent = Number(row.turnover_mult || 0).toFixed(2) + '×';
+  const experimentStops = document.getElementById('kpiExperimentStops');
+  if (experimentStops) experimentStops.textContent = row.stop_count ?? 0;
+  const experimentWorst = document.getElementById('kpiExperimentWorst');
+  if (experimentWorst){ experimentWorst.textContent = row.worst_trade_net_usd == null ? '–' : fmtUsdSimple(row.worst_trade_net_usd); experimentWorst.className = 'value ' + toneClass(row.worst_trade_net_usd); }
 }
 
 function _posOpenTable(rows, firstCol, firstColKey){
@@ -845,15 +896,18 @@ function _posOpenTable(rows, firstCol, firstColKey){
 }
 function _posClosedTable(rows, firstCol, firstColKey){
   return `<div class="table-wrap"><table>
-    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>盈亏</th></tr></thead>
+    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>毛利润</th><th>手续费统计</th><th>资金费率</th><th>净利润</th></tr></thead>
     <tbody>${rows.map(p => {
-      const pnl = p.realized_pnl_atr_weighted != null && p.atr0 && p.qty ? p.realized_pnl_atr_weighted*p.atr0*p.qty : null;
+      const pnl = p.gross_pnl_usd;
       const exitMs = p.exit_bar_time || (p.closed_at ? p.closed_at*1000 : null);
       return `<tr><td>${p[firstColKey]}</td><td>${p.side}</td>
         <td>${fmtTime(p.entry_bar_time)}</td><td>${fmtTime(exitMs)}</td>
         <td>${p.entry}</td><td>${p.exit_price ?? '–'}</td>
         <td>${p.exit_reason || '–'}</td>
-        <td class="num ${toneClass(pnl)}">${fmtUsdSimple(pnl)}</td></tr>`;
+        <td class="num ${toneClass(pnl)}">${fmtUsdSimple(pnl)}</td>
+        <td class="num">${fmtUsdAbs(p.fees_usd)}</td>
+        <td class="num ${toneClass(p.funding_pnl_usd)}">${fmtUsdSimple(p.funding_pnl_usd)}</td>
+        <td class="num ${toneClass(p.net_pnl_after_fees_usd)}">${fmtUsdSimple(p.net_pnl_after_fees_usd)}</td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
 

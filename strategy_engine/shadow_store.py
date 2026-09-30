@@ -13,6 +13,7 @@ dashboard"策略"tab如果还在读，不受影响。
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -127,6 +128,12 @@ def _init_db() -> None:
             # _check_stop_tp里liq_price为None时自然只用战法自己的止损，
             # 不需要为老仓位单独处理(见multi_strategy_runner.py注释)。
             ("liq_price", "REAL"),
+            # Arena execution/risk additions. Existing rows remain NULL and are
+            # handled by the backward-compatible derived-cost fallback.
+            ("entry_stage", "TEXT"),
+            ("context_bar_time", "INTEGER"),
+            ("fee_usd", "REAL"),
+            ("funding_pnl_usd", "REAL"),
         ):
             try:
                 conn.execute(f"ALTER TABLE shadow_positions_v2 ADD COLUMN {col} {coltype}")
@@ -140,6 +147,23 @@ def _init_db() -> None:
                 updated_at REAL NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_risk_state (
+                strategy TEXT PRIMARY KEY,
+                peak_equity REAL NOT NULL,
+                daily_start_equity REAL NOT NULL,
+                daily_date TEXT NOT NULL,
+                last_regime TEXT,
+                dynamic_gross_cap REAL,
+                stop_heat_cap REAL,
+                cluster_cap_frac REAL,
+                drawdown_pct REAL,
+                daily_loss_pct REAL,
+                new_entries_blocked INTEGER DEFAULT 0,
+                reason TEXT,
+                updated_at REAL NOT NULL
+            )
+        """)
         conn.commit()
 
 
@@ -148,10 +172,55 @@ _init_db()
 _UPDATABLE_FIELDS = (
     "tp1_price", "tp2_price", "stop", "last_ratchet_price",
     "tp1_done", "tp2_done", "realized_frac", "realized_pnl_atr_weighted",
-    "liq_price",
+    "liq_price", "entry_stage", "context_bar_time", "fee_usd", "funding_pnl_usd",
 )
 
 DEFAULT_STARTING_EQUITY = 1000.0
+SIM_TAKER_FEE_RATE = float(os.getenv("SIM_TAKER_FEE_RATE", "0.0005"))
+SIM_SLIPPAGE_BPS = float(os.getenv("SIM_SLIPPAGE_BPS", "2.0"))
+
+
+def apply_simulated_slippage(price: float, side: str, is_entry: bool) -> float:
+    """Return a conservative fill after configurable one-way slippage."""
+    px = float(price or 0.0)
+    if px <= 0:
+        return px
+    direction = 1.0 if str(side or "").upper() in ("LONG", "BUY") else -1.0
+    adverse_sign = direction if is_entry else -direction
+    return px * (1.0 + adverse_sign * SIM_SLIPPAGE_BPS / 10000.0)
+
+
+def estimate_closed_trade_fees_usd(row: Dict[str, Any]) -> float:
+    """按双边taker费率估算一笔完整交易成本，兼容分批止盈的加权盈亏。"""
+    try:
+        if row.get("fee_usd") is not None:
+            return round(float(row["fee_usd"]), 8)
+        qty = abs(float(row.get("qty") or 0))
+        entry_notional = abs(float(row.get("entry") or 0) * qty)
+        gross_pnl = (
+            float(row.get("realized_pnl_atr_weighted") or 0)
+            * float(row.get("atr0") or 0) * qty
+        )
+        direction = 1.0 if str(row.get("side") or "").upper() in ("LONG", "BUY") else -1.0
+        exit_notional = max(0.0, entry_notional + direction * gross_pnl)
+        return round((entry_notional + exit_notional) * SIM_TAKER_FEE_RATE, 8)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def augment_closed_trade_cost(row: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(row)
+    gross_pnl = (
+        float(out.get("realized_pnl_atr_weighted") or 0)
+        * float(out.get("atr0") or 0) * float(out.get("qty") or 0)
+    )
+    fees = estimate_closed_trade_fees_usd(out)
+    funding_pnl = float(out.get("funding_pnl_usd") or 0.0)
+    out["gross_pnl_usd"] = round(gross_pnl, 2)
+    out["fees_usd"] = round(fees, 2)
+    out["funding_pnl_usd"] = round(funding_pnl, 2)
+    out["net_pnl_after_fees_usd"] = round(gross_pnl - fees + funding_pnl, 2)
+    return out
 
 
 def get_equity(strategy: str) -> float:
@@ -182,6 +251,129 @@ def set_equity(strategy: str, value: float) -> None:
             conn.commit()
     except Exception as e:
         logger.warning(f"[shadow_store] set_equity 跳过: {e}")
+
+
+def get_cost_totals(strategy: str) -> Dict[str, float]:
+    """Return cumulative closed-trade fees and funding for one strategy."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                """SELECT
+                       COALESCE(SUM(CASE
+                           WHEN status='open' THEN COALESCE(
+                               fee_usd, ? * ABS(entry * COALESCE(qty, 0))
+                           )
+                           ELSE COALESCE(
+                               fee_usd,
+                               ? * (
+                                   ABS(entry * COALESCE(qty, 0))
+                                   + MAX(0, ABS(entry * COALESCE(qty, 0))
+                                       + CASE
+                                           WHEN UPPER(side) IN ('LONG', 'BUY')
+                                           THEN COALESCE(realized_pnl_atr_weighted * atr0 * qty, 0)
+                                           ELSE -COALESCE(realized_pnl_atr_weighted * atr0 * qty, 0)
+                                         END)
+                               )
+                           )
+                       END), 0) AS fees,
+                       COALESCE(SUM(COALESCE(funding_pnl_usd, 0)), 0) AS funding
+                   FROM shadow_positions_v2
+                   WHERE strategy=?""",
+                (SIM_TAKER_FEE_RATE, SIM_TAKER_FEE_RATE, strategy),
+            ).fetchone()
+            return {"fees": float(row["fees"] or 0), "funding": float(row["funding"] or 0)}
+    except Exception as e:
+        logger.warning(f"[shadow_store] get_cost_totals 失败: {e}")
+        return {"fees": 0.0, "funding": 0.0}
+
+
+def get_net_equity(strategy: str) -> float:
+    """Net equity used by all future position sizing.
+
+    strategy_equity remains the gross ledger for backward compatibility. The
+    arena sizes new risk from gross equity minus paid fees plus funding cashflow.
+    """
+    gross_equity = get_equity(strategy)
+    costs = get_cost_totals(strategy)
+    return gross_equity - costs["fees"] + costs["funding"]
+
+
+def get_strategy_risk_baseline(strategy: str, net_equity: float) -> Dict[str, Any]:
+    """Atomically maintain peak and UTC-day-start equity for circuit breakers."""
+    equity = float(net_equity or 0.0)
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    try:
+        with _lock, _connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM strategy_risk_state WHERE strategy=?", (strategy,),
+            ).fetchone()
+            if row is None:
+                peak = max(DEFAULT_STARTING_EQUITY, equity)
+                daily_start = equity
+                last_regime = None
+                conn.execute(
+                    """INSERT INTO strategy_risk_state
+                       (strategy, peak_equity, daily_start_equity, daily_date, updated_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (strategy, peak, daily_start, today, time.time()),
+                )
+            else:
+                peak = max(float(row["peak_equity"] or 0), equity)
+                last_regime = row["last_regime"]
+                daily_start = (
+                    equity if str(row["daily_date"] or "") != today
+                    else float(row["daily_start_equity"] or equity)
+                )
+                conn.execute(
+                    """UPDATE strategy_risk_state
+                       SET peak_equity=?, daily_start_equity=?, daily_date=?, updated_at=?
+                       WHERE strategy=?""",
+                    (peak, daily_start, today, time.time(), strategy),
+                )
+            conn.commit()
+            return {
+                "peak_equity": peak, "daily_start_equity": daily_start,
+                "daily_date": today, "last_regime": last_regime,
+            }
+    except Exception as e:
+        logger.warning(f"[shadow_store] get_strategy_risk_baseline 失败: {e}")
+        return {
+            "peak_equity": max(DEFAULT_STARTING_EQUITY, equity),
+            "daily_start_equity": equity,
+            "daily_date": today,
+            "last_regime": None,
+        }
+
+
+def save_strategy_guard_state(strategy: str, decision: Dict[str, Any]) -> None:
+    try:
+        with _lock, _connect() as conn:
+            conn.execute(
+                """UPDATE strategy_risk_state SET
+                       last_regime=?, dynamic_gross_cap=?, stop_heat_cap=?,
+                       cluster_cap_frac=?, drawdown_pct=?, daily_loss_pct=?,
+                       new_entries_blocked=?, reason=?, updated_at=?
+                   WHERE strategy=?""",
+                (
+                    decision.get("regime"), decision.get("gross_cap_mult"),
+                    decision.get("stop_heat_cap_pct"), decision.get("cluster_cap_frac"),
+                    decision.get("drawdown_pct"), decision.get("daily_loss_pct"),
+                    int(bool(decision.get("blocked"))), decision.get("reason"),
+                    time.time(), strategy,
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[shadow_store] save_strategy_guard_state 失败: {e}")
+
+
+def list_strategy_risk_states() -> List[dict]:
+    try:
+        with _connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM strategy_risk_state").fetchall()]
+    except Exception as e:
+        logger.warning(f"[shadow_store] list_strategy_risk_states 失败: {e}")
+        return []
 
 
 def settle_trade_on_equity(strategy: str, pnl_atr_weighted: float, atr0: float, qty: float) -> float:
@@ -237,35 +429,61 @@ def get_open_row(symbol: str, strategy: str) -> Optional[dict]:
 def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
     try:
         with _lock, _connect() as conn:
+            columns = (
+                "symbol", "strategy", "timeframe", "side", "entry", "atr0", "tier", "adx",
+                "entry_bar_time", "score_bar_time", "last_bar_time", "tp1_price", "tp2_price",
+                "stop", "last_ratchet_price", "tp1_done", "tp2_done", "realized_frac",
+                "realized_pnl_atr_weighted", "qty", "pair_key", "pair_base_price",
+                "pair_formation_mean", "pair_formation_std", "liq_price", "entry_stage",
+                "context_bar_time", "fee_usd", "funding_pnl_usd",
+            )
+            values = (
+                row["symbol"], row["strategy"], row["timeframe"], row["side"],
+                row["entry"], row["atr0"], row["tier"], row.get("adx"),
+                row["entry_bar_time"], row.get("score_bar_time"), row["entry_bar_time"],
+                row.get("tp1_price"), row.get("tp2_price"), row.get("stop"),
+                row.get("last_ratchet_price"), int(row.get("tp1_done") or 0),
+                int(row.get("tp2_done") or 0), row.get("realized_frac") or 0,
+                row.get("realized_pnl_atr_weighted") or 0, row.get("qty") or 0.0,
+                row.get("pair_key"), row.get("pair_base_price"), row.get("pair_formation_mean"),
+                row.get("pair_formation_std"), row.get("liq_price"), row.get("entry_stage"),
+                row.get("context_bar_time"), row.get("fee_usd"), row.get("funding_pnl_usd"),
+            )
+            placeholders = ",".join("?" for _ in columns)
             cur = conn.execute(
-                """INSERT INTO shadow_positions_v2
-                   (symbol, strategy, timeframe, side, entry, atr0, tier, adx,
-                    entry_bar_time, score_bar_time, last_bar_time, tp1_price, tp2_price,
-                    stop, last_ratchet_price, tp1_done, tp2_done,
-                    realized_frac, realized_pnl_atr_weighted, qty,
-                    pair_key, pair_base_price, pair_formation_mean, pair_formation_std,
-                    liq_price, status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
-                (
-                    row["symbol"], row["strategy"], row["timeframe"], row["side"],
-                    row["entry"], row["atr0"], row["tier"], row.get("adx"),
-                    row["entry_bar_time"], row.get("score_bar_time"), row["entry_bar_time"],
-                    row.get("tp1_price"), row.get("tp2_price"),
-                    row.get("stop"), row.get("last_ratchet_price"),
-                    int(row.get("tp1_done") or 0), int(row.get("tp2_done") or 0),
-                    row.get("realized_frac") or 0, row.get("realized_pnl_atr_weighted") or 0,
-                    row.get("qty") or 0.0,
-                    row.get("pair_key"), row.get("pair_base_price"),
-                    row.get("pair_formation_mean"), row.get("pair_formation_std"),
-                    row.get("liq_price"),
-                    time.time(),
-                ),
+                f"INSERT INTO shadow_positions_v2 ({','.join(columns)}, status, created_at) "
+                f"VALUES ({placeholders}, 'open', ?)",
+                values + (time.time(),),
             )
             conn.commit()
             return int(cur.lastrowid)
     except Exception as e:
         logger.warning(f"[shadow_store] insert_open_row 跳过: {e}")
         return None
+
+
+def add_to_open_row(position_id: int, updates: Dict[str, Any], bar_time: int) -> bool:
+    """Persist a staged add without exposing these fields to generic updates."""
+    allowed = (
+        "entry", "atr0", "qty", "stop", "liq_price", "entry_stage",
+        "context_bar_time", "fee_usd",
+    )
+    fields = [field for field in allowed if field in updates]
+    if not fields:
+        return False
+    try:
+        set_clause = ", ".join(f"{field}=?" for field in fields) + ", last_bar_time=?"
+        values = [updates[field] for field in fields] + [bar_time, position_id]
+        with _lock, _connect() as conn:
+            cur = conn.execute(
+                f"UPDATE shadow_positions_v2 SET {set_clause} WHERE id=? AND status='open'",
+                values,
+            )
+            conn.commit()
+            return cur.rowcount == 1
+    except Exception as e:
+        logger.warning(f"[shadow_store] add_to_open_row 跳过: {e}")
+        return False
 
 
 def get_open_pair_legs(pair_key: str) -> List[dict]:
@@ -361,7 +579,7 @@ def get_last_closed_meta(symbol: str, strategy: str) -> Optional[dict]:
     try:
         with _connect() as conn:
             row = conn.execute(
-                """SELECT side, entry_bar_time, score_bar_time FROM shadow_positions_v2
+                """SELECT side, entry_bar_time, score_bar_time, exit_bar_time, exit_reason FROM shadow_positions_v2
                    WHERE symbol=? AND strategy=? AND status='closed'
                    ORDER BY id DESC LIMIT 1""",
                 (symbol, strategy),
@@ -413,10 +631,24 @@ def summary_by_strategy() -> List[dict]:
                           ROUND(SUM(realized_pnl_atr_weighted), 4) AS total_pnl_atr,
                           ROUND(AVG(realized_pnl_atr_weighted), 4) AS avg_pnl_atr,
                           ROUND(MIN(realized_pnl_atr_weighted), 4) AS worst_trade_atr,
-                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd
+                          ROUND(SUM(realized_pnl_atr_weighted * atr0 * qty), 2) AS total_pnl_usd,
+                           ROUND(SUM(COALESCE(
+                               fee_usd,
+                               ? * (
+                                   ABS(entry * COALESCE(qty, 0))
+                                   + MAX(0, ABS(entry * COALESCE(qty, 0))
+                                       + CASE
+                                           WHEN UPPER(side) IN ('LONG', 'BUY')
+                                           THEN COALESCE(realized_pnl_atr_weighted * atr0 * qty, 0)
+                                           ELSE -COALESCE(realized_pnl_atr_weighted * atr0 * qty, 0)
+                                         END)
+                               )
+                           )), 2) AS total_fees_usd,
+                           ROUND(SUM(COALESCE(funding_pnl_usd, 0)), 2) AS total_funding_pnl_usd
                    FROM shadow_positions_v2
                    WHERE status='closed'
-                   GROUP BY strategy ORDER BY strategy"""
+                   GROUP BY strategy ORDER BY strategy""",
+                (SIM_TAKER_FEE_RATE,),
             ).fetchall()
             out = [dict(r) for r in rows]
             open_counts = conn.execute(
@@ -436,13 +668,29 @@ def summary_by_strategy() -> List[dict]:
                         "strategy": strat, "trades": 0, "wins": 0,
                         "total_pnl_atr": 0.0, "avg_pnl_atr": None,
                         "worst_trade_atr": None, "total_pnl_usd": 0.0,
+                        "total_fees_usd": 0.0,
+                        "total_funding_pnl_usd": 0.0,
                         "open_count": int(cnt), "win_rate": None,
                     })
             for row in out:
                 equity = get_equity(row["strategy"])
+                costs = get_cost_totals(row["strategy"])
+                fees = float(costs["fees"])
+                funding_pnl = float(costs["funding"])
+                gross_pnl = float(row.get("total_pnl_usd") or 0)
+                net_equity = equity - fees + funding_pnl
                 row["equity"] = round(equity, 2)
+                row["total_fees_usd"] = round(fees, 2)
+                row["total_funding_pnl_usd"] = round(funding_pnl, 2)
                 row["equity_return_pct"] = round(
                     100.0 * (equity - DEFAULT_STARTING_EQUITY) / DEFAULT_STARTING_EQUITY, 2,
+                )
+                row["net_pnl_after_fees_usd"] = round(gross_pnl - fees + funding_pnl, 2)
+                row["net_equity_after_fees"] = round(net_equity, 2)
+                row["net_return_after_fees_pct"] = round(
+                    100.0 * (net_equity - DEFAULT_STARTING_EQUITY)
+                    / DEFAULT_STARTING_EQUITY,
+                    2,
                 )
             return out
     except Exception as e:

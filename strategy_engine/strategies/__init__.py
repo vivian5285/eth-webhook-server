@@ -151,6 +151,8 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import dual_momentum
     STRATEGIES["dual_momentum"] = dual_momentum.generate_signal
+    STRATEGIES["dual_momentum_stocks"] = dual_momentum.generate_signal
+    STRATEGIES["dual_momentum_crypto"] = dual_momentum.generate_signal
     # 2026-09-19新增：同一份代码注册_v2对照名。原版"绝对动量"门槛own_ret>0
     # 实测形同虚设(胜率跟cross_momentum完全一样)，_v2用
     # abs_momentum_hurdle_mult=0.5换成按自身ATR%缩放的非零门槛，
@@ -375,6 +377,37 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] chanlun_pivot 加载失败: {_e}")
 
+# 2026-09-30：宝贝看到chanlun_pivot自己文档里诚实标注的两处简化，主动
+# 问"能不能优化"——两个对照实验，各自只改一处，不跟chanlun_pivot本体
+# 混着改，好归因是哪一处变化真的有用。见各自模块顶部说明。
+try:
+    from strategy_engine.strategies import chanlun_pivot_duan
+    STRATEGIES["chanlun_pivot_duan"] = chanlun_pivot_duan.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] chanlun_pivot_duan 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import chanlun_pivot_mtf_div
+    STRATEGIES["chanlun_pivot_mtf_div"] = chanlun_pivot_mtf_div.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] chanlun_pivot_mtf_div 加载失败: {_e}")
+
+# 2026-09-30：宝贝反映实盘这轮BTC/DOGE/SOL同一个15分钟窗口同时爆量反向
+# 拉升、均线/ADX这类靠K线收盘算的指标反应不过来、连续打了好几单止损，
+# 问"策略针对突然的量能拉升不够及时？思考如何优化？"——诊断结论是这是
+# 所有"等K线收盘"指标的结构性盲区，方向1是不等收盘、用klines.get_current_bar
+# 查还在走的这根K线做盘中成交量+价格异动早期离场(volume_sentinel.py，
+# detect_adverse_volume_spike)。宝贝明确要求"先在擂台单独搭一个实验策略
+# 验证这套机制真的有用、不会误伤正常波动，再考虑要不要上实盘"——这里
+# 直接复用chanlun_pivot(当前实盘权重最高、验证最充分的crypto sleeve)的
+# generate_signal，入场信号逐字一致，只在multi_strategy_runner.py里给这个
+# 独立身份额外挂一个离场哨兵(SENTINEL_STRATEGIES)，两条身份各自独立$1000
+# 净权益、同样的开仓信号，纯粹对照"提前离场 vs 扛到正常止损/止盈"哪个
+# 最终收益更好，不混进chanlun_pivot本体的统计。
+STRATEGIES["chanlun_pivot_sentinel"] = STRATEGIES.get("chanlun_pivot")
+
 try:
     from strategy_engine.strategies import adx_efficiency_zscore
     STRATEGIES["adx_efficiency_zscore"] = adx_efficiency_zscore.generate_signal
@@ -431,6 +464,7 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import hma_trend
     STRATEGIES["hma_trend"] = hma_trend.generate_signal
+    STRATEGIES["hma_trend_crypto"] = hma_trend.generate_signal
     # 2026-09-20新增：同一份代码注册_agile对照名，见cross_momentum_agile
     # 同一批说明。
     STRATEGIES["hma_trend_agile"] = hma_trend.generate_signal
@@ -440,6 +474,18 @@ try:
     # 0.1×ATR才算数)+adx_gate=20.0(只在真趋势里吃拐头信号)，同一个工具箱
     # 跟macd_histogram_v2/kaufman_ama_v2一致。
     STRATEGIES["hma_trend_v2"] = hma_trend.generate_signal
+    STRATEGIES["hma_trend_reversal_control"] = hma_trend.generate_signal
+    from strategy_engine.strategies import hma_reversal_experiment
+    STRATEGIES["hma_trend_reverse_strong"] = hma_reversal_experiment.generate_signal
+    STRATEGIES["hma_trend_reverse_tiered"] = hma_reversal_experiment.generate_signal
+    # 2026-09-28新增(宝贝提出4h天生反应慢，举了DOGE已经跌下去才在4h支撑
+    # 位开空的例子)：同一份代码换个更短的完整收盘周期对照，不是agile那种
+    # 半根就抢的提前入场——agile已经测过"提前"这条路，crypto桶从+135.16%
+    # 变-24.54%，明显更差。这次测的是"周期本身更短、依然等收盘"，机制不
+    # 同，没测过。2h是币安原生周期，150m靠klines.py::get_bars内建的15m
+    # 合成(跟TV复刻90m/150m同一条既有机制)，都不需要新代码。
+    STRATEGIES["hma_trend_2h"] = hma_trend.generate_signal
+    STRATEGIES["hma_trend_150m"] = hma_trend.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] hma_trend 加载失败: {_e}")
@@ -559,9 +605,18 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import residual_momentum
     STRATEGIES["residual_momentum"] = residual_momentum.generate_signal
+    STRATEGIES["residual_momentum_crypto"] = residual_momentum.generate_signal
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] residual_momentum 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import asset_class_trend_ensemble
+    STRATEGIES["trend_ensemble_crypto"] = asset_class_trend_ensemble.generate_signal
+    STRATEGIES["trend_ensemble_stocks"] = asset_class_trend_ensemble.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] asset_class_trend_ensemble 加载失败: {_e}")
 
 try:
     from strategy_engine.strategies import fiftytwo_week_high
@@ -604,6 +659,23 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import ttm_squeeze
     STRATEGIES["ttm_squeeze"] = ttm_squeeze.generate_signal
+    # 2026-09-28新增：跟hma_trend_2h/hma_trend_150m同一批，周期缩短对照。
+    STRATEGIES["ttm_squeeze_2h"] = ttm_squeeze.generate_signal
+    STRATEGIES["ttm_squeeze_150m"] = ttm_squeeze.generate_signal
+    # 2026-09-29新增(宝贝要求测"出场逻辑本身"，跟"要不要开仓"分开看)：
+    # ttm_squeeze_tight_stop/wide_stop——同一份代码，止损宽度靠roster
+    # params覆盖(atr_stop_mult 2.0→1.2/3.0)，不需要新代码；ttm_squeeze_trail
+    # ——同一份代码，止损宽度不变，但由multi_strategy_runner.py新增的
+    # _maybe_trail_atr持续棘轮式跟踪(不再是入场时定死)；ttm_squeeze_tp/
+    # ttm_squeeze_pyramid——见ttm_squeeze_variants.py，分别测固定止盈梯度
+    # 和"试探仓+确认补仓"两种加仓节奏。四个方向、四个对照名，跟base版
+    # 一起跑，样本积累够了按分桶方法论对比。
+    STRATEGIES["ttm_squeeze_tight_stop"] = ttm_squeeze.generate_signal
+    STRATEGIES["ttm_squeeze_wide_stop"] = ttm_squeeze.generate_signal
+    STRATEGIES["ttm_squeeze_trail"] = ttm_squeeze.generate_signal
+    from strategy_engine.strategies import ttm_squeeze_variants
+    STRATEGIES["ttm_squeeze_tp"] = ttm_squeeze_variants.generate_signal_tp
+    STRATEGIES["ttm_squeeze_pyramid"] = ttm_squeeze_variants.generate_signal_pyramid
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] ttm_squeeze 加载失败: {_e}")
@@ -614,6 +686,74 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] schaff_trend_cycle 加载失败: {_e}")
+
+# 2026-09-29新增：Renko砖形图趋势系统(宝贝要求找"逻辑公开透明、规则不是
+# hyperopt调出来"的新思路)——本仓库第一个"先把K线重新构造成价格驱动、
+# 跟时间无关的图表，再在新图表上找信号"的策略，不是又一个同周期指标。
+# 详细说明见renko_trend.py顶部；砖块大小按ATR动态算，不是固定绝对价格。
+try:
+    from strategy_engine.strategies import renko_trend
+    STRATEGIES["renko_trend"] = renko_trend.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] renko_trend 加载失败: {_e}")
+
+# 2026-09-29新增：斐波那契回撤反弹系统，说明见fibonacci_retracement.py
+# 顶部——跟renko_trend同批新增，宝贝要求补的经典公开策略之二。
+try:
+    from strategy_engine.strategies import fibonacci_retracement
+    STRATEGIES["fibonacci_retracement"] = fibonacci_retracement.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] fibonacci_retracement 加载失败: {_e}")
+
+# 2026-09-29新增：双均线(7/25)站上/跌破系统，宝贝要求同一份代码注册1h/90m
+# 两个独立周期，说明见dual_ema_band_7_25.py顶部——跟ema_cross_7_30是两回事
+# (那个判两条线互相交叉，这个判收盘价相对两条线的位置)，别合并谈。
+try:
+    from strategy_engine.strategies import dual_ema_band_7_25
+    STRATEGIES["dual_ema_band_7_25_1h"] = dual_ema_band_7_25.generate_signal
+    STRATEGIES["dual_ema_band_7_25_90m"] = dual_ema_band_7_25.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_ema_band_7_25 加载失败: {_e}")
+
+# 2026-09-30新增：1倍本金"现货式"仓位对照组——同一份信号代码
+# (dual_ema_band_7_25.generate_signal，不改一个字)，只是开仓数量公式
+# 换成multi_strategy_runner.py::_open_from_signal里的
+# SPOT_EQUIVALENT_STRATEGIES专属分支(权益÷价格，不乘参考杠杆、不按
+# 止损距离收紧)，只在SNDK/OPENAI/MU三个品种上注册(见comparison_
+# roster.py)，不是全品种铺开。
+try:
+    STRATEGIES["dual_ema_spot_7_25_1h"] = dual_ema_band_7_25.generate_signal
+    STRATEGIES["dual_ema_spot_7_25_90m"] = dual_ema_band_7_25.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_ema_spot_7_25 加载失败: {_e}")
+
+# 2026-09-29新增：双均线+雷达ADX分级移动止盈版，说明见
+# dual_ema_band_7_25_radar.py顶部——止损状态机由multi_strategy_runner.py
+# 的_maybe_radar_trail维护，这里只登记入场/反转离场信号函数。
+try:
+    from strategy_engine.strategies import dual_ema_band_7_25_radar
+    STRATEGIES["dual_ema_band_7_25_radar_1h"] = dual_ema_band_7_25_radar.generate_signal
+    STRATEGIES["dual_ema_band_7_25_radar_90m"] = dual_ema_band_7_25_radar.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] dual_ema_band_7_25_radar 加载失败: {_e}")
+
+# 2026-09-30新增：crypto组合协同实验，见crypto_combo_experiment.py顶部——
+# _blend是对照组(逐字复刻实盘CRYPTO_SLEEVES纯加权blend，不含residual_
+# momentum)，_coordinated是实验组(同样4个sleeve + residual_momentum高
+# 确信让权机制)。两者跑在同一批品种、同一套引擎风控上，目的是拿真实数据
+# 回答"协同是否真的比纯blend好"，不是凭直觉直接改实盘。
+try:
+    from strategy_engine.strategies import crypto_combo_experiment
+    STRATEGIES["crypto_combo_blend_4h"] = crypto_combo_experiment.generate_signal_blend
+    STRATEGIES["crypto_combo_coordinated_4h"] = crypto_combo_experiment.generate_signal_coordinated
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] crypto_combo_experiment 加载失败: {_e}")
 
 try:
     from strategy_engine.strategies import td_sequential
@@ -632,6 +772,9 @@ except Exception as _e:
 try:
     from strategy_engine.strategies import heikin_ashi_trend
     STRATEGIES["heikin_ashi_trend"] = heikin_ashi_trend.generate_signal
+    # 原版所有规则不变，只增加“收盘价与EMA7/25同侧且快慢线同向”门槛，
+    # 用于跟原版做单变量A/B，不混入v2的入场影线和离场分母改动。
+    STRATEGIES["heikin_ashi_trend_ema7_25"] = heikin_ashi_trend.generate_signal
     # 2026-09-19新增：同一份代码注册_v2对照名——require_clean_entry_bar
     # 换掉require_growing_body(原版把入场锁定在streak里实体最夸张的
     # 那一根，系统性偏晚)，wick_exit_atr_floor_frac修十字星场景对分母
@@ -650,6 +793,13 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] heikin_ashi_trend 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import heikin_ashi_adaptive_probe
+    STRATEGIES["heikin_ashi_adaptive_probe"] = heikin_ashi_adaptive_probe.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] heikin_ashi_adaptive_probe 加载失败: {_e}")
 
 try:
     from strategy_engine.strategies import kdj_cross
@@ -838,6 +988,16 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "多加一道'绝对动量'过滤——候选池里的品种，还必须自己这段时间真的"
         "是同方向涨跌，不是'矮子里拔将军'。回答'多这道过滤到底是减少假"
         "信号还是错过真实机会'，直接对照cross_momentum就是最干净的实验。"
+    ),
+    "dual_momentum_stocks": (
+        "双重动量的美股代币篮子对照。与原版保持同一份信号代码、4h周期、"
+        "20根回看、仓位和止盈止损；只在美股代币内部排名，不与币圈及黄金"
+        "比较。独立$1000纸面账户，不能直接推断共享资金实盘收益。"
+    ),
+    "dual_momentum_crypto": (
+        "双重动量的币圈篮子对照。与原版保持同一份信号代码、4h周期、"
+        "20根回看、仓位和止盈止损；只在币圈内部排名，不与美股代币及黄金"
+        "比较。独立$1000纸面账户，不能直接推断共享资金实盘收益。"
     ),
     "dual_momentum_v2": (
         "跟'dual_momentum'同一套双重动量思路，修两处：①绝对动量门槛原版"
@@ -1206,11 +1366,30 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "这套只用一条均线，靠\"加权+差分\"的特殊构造方式本身降低滞后，"
         "是本擂台第三种不同的\"减少均线滞后\"思路。4H周期。"
     ),
+    "hma_trend_crypto": (
+        "HMA原版的币圈纯作用域对照。信号、参数和成本口径完全不变，只排除"
+        "当前样本中拖累HMA的美股代币与黄金，用来检验榜首优势究竟来自HMA"
+        "本身还是恰好来自币圈资产选择。4h。"
+    ),
     "hma_trend_v2": (
         "跟'hma_trend'同一套HMA拐头逻辑，加两道默认关闭的过滤(min_slope_"
         "atr_frac+adx_gate)——原版单根斜率翻转就进出场，真实数据152笔"
         "胜率33.6%、去掉Top3笔基本打平，怀疑部分是斜率微弱抖动触发的假"
         "拐头，v2验证过滤后能不能更干净。"
+    ),
+    "hma_trend_reverse_strong": (
+        "HMA 4h收盘强翻转即时反手实验。其余信号与原版相同；"
+        "拐头斜率至少0.10 ATR且ADX至少20时，平旧仓后同根开反向仓。"
+        "止损触发不反手，开新仓仍经过原组合风险预算。"
+    ),
+    "hma_trend_reversal_control": (
+        "HMA 4h原版规则的同期对照账本。只从本实验启动时计算收益，"
+        "信号、手续费、滑点和风险预算与原版完全一致。"
+    ),
+    "hma_trend_reverse_tiered": (
+        "HMA 4h收盘分级反转实验。强翻转同根反手；"
+        "中等强度拐头(斜率至少0.05 ATR、ADX至少15)等下一根收盘确认；"
+        "弱翻转只平仓。所有新仓仍经原组合风险预算。"
     ),
     "cvd_divergence": (
         "累计成交量差值背离(CVD/Delta)——2026-09-05新增。用币安K线接口"
@@ -1352,6 +1531,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "先把 K 线本身平滑掉再看颜色，对单根插针不敏感。擂台唯一'改造 K 线"
         "本身'的趋势跟随。4h，不设固定止盈。"
     ),
+    "heikin_ashi_trend_ema7_25": (
+        "Heikin-Ashi原版的纯EMA7/25对照组——连续3根同色且实体放大的原版"
+        "入场、单根反色/明显反向影线离场、ATR止损全部不变；唯一新增门槛是"
+        "做多要求收盘价>EMA7>EMA25，做空要求收盘价<EMA7<EMA25。用相同"
+        "币安K线、成本和风险口径与原版并跑，检验均线降噪是否抵得过滞后。"
+    ),
     "heikin_ashi_trend_v2": (
         "跟'heikin_ashi_trend'同一套HA顺势思路，修两处：①原版要求streak"
         "里实体一根比一根大，这个条件把入场锁定在这波同色行情里实体最"
@@ -1368,6 +1553,12 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "winner，跟'不设固定止盈'的设计初衷矛盾。v3要求连续2根反色才触发"
         "离场，wick_frac那条应急离场不受影响。只测这一个变量，不跟v2/"
         "agile叠加。"
+    ),
+    "heikin_ashi_adaptive_probe": (
+        "Heikin-Ashi自适应试探版——只使用已收盘K线：连续2根4h HA同向且"
+        "EMA(7/25)同向后，由已收盘1h突破触发1/3试探仓；下一根4h完成原版"
+        "3连同色+实体放大才补足余下2/3，否则退出试探仓。过滤过热1h实体、"
+        "均线距离和极端资金费率；不使用未收盘4h K线，不设固定止盈。"
     ),
     "kdj_cross": (
         "KDJ 金叉/死叉(9,3,3；宝贝点名)——2026-09-10新增。K 上穿 D 且 K<20 = "
@@ -1407,6 +1598,22 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "扣 beta 再看残差。残差动量标准化成 t 值量纲，|score|≥1 且自身"
         "EMA(10/40)同向进场，回到 ±0.25 内离场。1d，走 UNIVERSE_ROSTER，"
         "BTC 自己不开仓(它是因子)。"
+    ),
+    "residual_momentum_crypto": (
+        "残差动量的币圈纯作用域修正版。仍以BTC为市场因子，但只作用于加密"
+        "资产，不再用BTC解释美股代币和黄金收益；参数与原版保持一致，作为"
+        "单变量资产分类对照。1d。"
+    ),
+    "trend_ensemble_crypto": (
+        "币圈趋势组合候选：严格HA(收盘>EMA7>EMA25或反向)负责触发，HMA"
+        "趋势状态或MTF的EMA30+MACD柱+CCI状态至少一个同向才进场；两者都"
+        "同向升为tier2。HA反色时若趋势状态仍一致则继续持有，明显反向影线"
+        "仍立即退出。仅纸面模拟。"
+    ),
+    "trend_ensemble_stocks": (
+        "美股代币趋势组合候选：严格HA负责触发，MTF的EMA30+MACD柱+CCI"
+        "必须同向；不使用当前样本在美股代币上为负的HMA。日线EMA7/30只"
+        "提高仓位档位并辅助确认退出。仅纸面模拟。"
     ),
     "fiftytwo_week_high": (
         "52周新高锚定(George & Hwang 2004，Journal of Finance)——2026-09-10"
@@ -1587,6 +1794,34 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
     "rsi_mean_reversion_2080_1d": (
         "RSI均值回归20/80版(1d)——见'rsi_mean_reversion_2080'说明，唯一"
         "变量是周期。"
+    ),
+    "crypto_combo_blend_4h": (
+        "Crypto组合协同实验·对照组——逐字复刻实盘CRYPTO_SLEEVES的纯加权"
+        "blend(hma_trend15%+ttm_squeeze50%+keltner_channel20%+"
+        "turtle_breakout15%)，不含residual_momentum，作为'现状'基线。"
+    ),
+    "crypto_combo_coordinated_4h": (
+        "Crypto组合协同实验·实验组——同样4个sleeve的blend之上叠加"
+        "residual_momentum'高确信让权'：残差动量沉默时行为跟对照组逐字"
+        "一致；它开火且方向一致时加权确认；方向冲突时常规sleeve打折、"
+        "residual_momentum获得更大但非绝对的话语权。"
+    ),
+    "chanlun_pivot_duan": (
+        "chanlun_pivot优化实验·线段感知版——正统缠论中枢建立在'线段'这一"
+        "级之上，原版跳过线段直接用相邻三笔重叠区间当中枢，会把'碰巧重叠"
+        "但其实跨越一次真正趋势转折'的笔也当成中枢。这版把笔序列自己当"
+        "特征序列再跑一层分型算法找线段边界，只用同一线段内仍在发展中的"
+        "笔构造中枢，跨线段边界的笔不参与——中枢数量会变少，但理论上边界"
+        "质量更干净。入场/离场其余逻辑跟chanlun_pivot完全一致，只改中枢"
+        "构造这一处，方便归因。"
+    ),
+    "chanlun_pivot_mtf_div": (
+        "chanlun_pivot优化实验·多级别背驰确认版——正统缠论强调背驰要跟"
+        "更大级别对比确认，原版只在4h这一级自己内部比较MACD力度。这版在"
+        "4h背驰条件满足后，额外要求1d级别MACD柱状图力度也确实在减弱才真"
+        "离场(1d数据不够时退化为原版单级别判断)。入场和结构失效离场跟"
+        "chanlun_pivot逐字一致，只让背驰离场更谨慎，符合本仓库'少砍利润"
+        "让趋势喘气'的一贯偏好，只改这一处，方便归因。"
     ),
 }
 

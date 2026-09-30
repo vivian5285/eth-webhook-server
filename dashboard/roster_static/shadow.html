@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>组合影子 · 擂台</title>
+<style>
+  :root{color-scheme:light;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#14222b;background:#f5f7f8}
+  *{box-sizing:border-box}body{margin:0}a{color:#056a65;text-decoration:none}a:hover{text-decoration:underline}
+  header{background:#fff;border-bottom:1px solid #dfe5e8;padding:16px max(18px,calc((100vw - 1360px)/2));display:flex;justify-content:space-between;align-items:center;gap:20px}
+  h1{font-size:22px;margin:0;letter-spacing:0}header small{color:#657680}main{max-width:1360px;margin:auto;padding:24px 18px 44px}
+  .status{font-size:13px;font-weight:600;color:#087168}.status.warn{color:#aa5700}
+  .metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:16px;border-bottom:1px solid #dfe5e8;padding:0 0 24px;margin-bottom:24px}
+  .metric{min-width:0}.metric span{display:block;color:#60717b;font-size:12px;margin-bottom:6px}.metric strong{font-size:21px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .negative{color:#bc3b35}.positive{color:#087168}.section-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;margin:22px 0 8px}
+  h2{font-size:16px;margin:0} .sub{font-size:12px;color:#64747d} .table-wrap{overflow:auto;border-top:1px solid #dfe5e8;border-bottom:1px solid #dfe5e8;background:#fff}
+  table{width:100%;border-collapse:collapse;font-size:13px;white-space:nowrap}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #edf0f2;font-variant-numeric:tabular-nums}th{color:#667780;font-weight:600;background:#f9fbfb;position:sticky;top:0}tr:last-child td{border-bottom:0}
+  .chart{height:180px;width:100%;background:#fff;border-top:1px solid #dfe5e8;border-bottom:1px solid #dfe5e8}
+  .note{font-size:12px;color:#61727c;line-height:1.6;margin:12px 0 0}
+  @media(max-width:1000px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:600px){header{align-items:flex-start;flex-direction:column}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.metric strong{font-size:18px}.section-head{display:block}.section-head .sub{display:block;margin-top:5px;line-height:1.5}}
+</style>
+</head>
+<body>
+<header><div><a href="/">← 擂台</a><h1>组合影子</h1><small>共享 $1,000 · 前向纸面账户</small></div><div id="status" class="status">连接中</div></header>
+<main>
+  <section class="metrics">
+    <div class="metric"><span>盯市净值</span><strong id="equity">—</strong></div>
+    <div class="metric"><span>现金余额</span><strong id="cash">—</strong></div>
+    <div class="metric"><span>持仓浮盈亏</span><strong id="unrealized">—</strong></div>
+    <div class="metric"><span>总名义敞口</span><strong id="gross">—</strong></div>
+    <div class="metric"><span>已扣手续费</span><strong id="fees">—</strong></div>
+    <div class="metric"><span>资金费收支</span><strong id="funding">—</strong></div>
+  </section>
+  <div class="section-head"><h2>净值</h2><span class="sub" id="risk">—</span></div><canvas class="chart" id="chart"></canvas>
+  <p class="note" id="alerts"></p>
+  <div class="section-head"><h2>净仓与 Sleeve</h2><span class="sub" id="positionsCount">—</span></div>
+  <div class="table-wrap"><table><thead><tr><th>品种</th><th>净方向</th><th>净数量</th><th>均价</th><th>保护止损</th><th>活跃 sleeve</th></tr></thead><tbody id="positions"></tbody></table></div>
+  <div class="section-head"><h2>最近事件</h2><span class="sub" id="updated">—</span></div>
+  <div class="table-wrap"><table><thead><tr><th>时间</th><th>品种</th><th>事件</th><th>数量变化</th><th>价格/金额</th><th>费用</th><th>原因</th></tr></thead><tbody id="events"></tbody></table></div>
+  <p class="note" id="note">纸面模拟，独立于实盘与单策略排名。报价按可成交买卖盘并加滑点，手续费按 taker 估算；不代表历史回测或实盘成交。</p>
+</main>
+<script>
+const $=id=>document.getElementById(id),usd=n=>(Number(n)<0?'-$':'$')+Math.abs(Number(n||0)).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}),num=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:6});
+function put(id,value){$(id).textContent=value}
+function cell(tr,value){const td=document.createElement('td');td.textContent=value;tr.appendChild(td)}
+function color(id,value){$(id).classList.toggle('negative',Number(value)<0);$(id).classList.toggle('positive',Number(value)>0)}
+function draw(history){const c=$('chart'),ctx=c.getContext('2d'),w=c.clientWidth,h=c.clientHeight,dpr=window.devicePixelRatio||1;c.width=w*dpr;c.height=h*dpr;ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);if(!history.length)return;const values=history.map(x=>Number(x.equity)),lo=Math.min(...values),hi=Math.max(...values),pad=Math.max((hi-lo)*.15,1);ctx.strokeStyle='#dfe5e8';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(0,h-24);ctx.lineTo(w,h-24);ctx.stroke();ctx.strokeStyle='#087168';ctx.lineWidth=2;ctx.beginPath();values.forEach((v,i)=>{const x=18+(w-36)*(i/Math.max(1,values.length-1)),y=18+(h-42)*(1-(v-lo+pad)/(hi-lo+2*pad));i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();const x=values.length===1?18:w-18,y=18+(h-42)*(1-(values.at(-1)-lo+pad)/(hi-lo+2*pad));ctx.fillStyle='#087168';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill()}
+async function refresh(){try{const r=await fetch('/api/roster/shared-shadow',{cache:'no-store'}),d=await r.json();if(d.status!=='ok'||!d.snapshot){put('status','尚未开始');$('status').classList.add('warn');return}const s=d.snapshot,a=d.account||{};put('equity',usd(s.equity));put('cash',usd(s.cash));put('unrealized',usd(s.unrealized));put('gross',usd(s.gross)+' · '+(s.gross/s.equity).toFixed(2)+'×');put('fees',usd(s.fees));put('funding',usd(s.funding));color('unrealized',s.unrealized);color('funding',s.funding);put('risk',`${s.regime} · ${s.guard} · 回撤 ${(s.drawdown*100).toFixed(2)}% · 多 ${usd(s.long)} / 空 ${usd(s.short)}`);put('positionsCount',`${s.positions} 个净仓 · ${Object.values(a.sleeves||{}).reduce((n,x)=>n+Object.keys(x).length,0)} 个 sleeve`);put('updated','更新 '+new Date(d.updated_ms).toLocaleString('zh-CN'));const frozen=Object.keys(s.frozen||{}).length;put('status',d.stale?'数据已过期':frozen?`${frozen} 品种冻结`:'运行中');$('status').classList.toggle('warn',!!(d.stale||frozen));put('alerts',Object.entries(s.frozen||{}).map(([k,v])=>`${k}: ${v}`).join(' · '));const body=$('positions');body.replaceChildren();for(const [symbol,p] of Object.entries(a.positions||{}).sort()){const tr=document.createElement('tr');cell(tr,symbol);cell(tr,p.qty>0?'LONG':'SHORT');cell(tr,num(p.qty));cell(tr,num(p.entry));cell(tr,num((a.stops||{})[symbol]));cell(tr,Object.keys((a.sleeves||{})[symbol]||{}).join(' · '));body.appendChild(tr)}const events=$('events');events.replaceChildren();for(const e of d.events||[]){const tr=document.createElement('tr');cell(tr,new Date(e.ts).toLocaleString('zh-CN'));cell(tr,e.symbol);cell(tr,e.type);cell(tr,e.delta===undefined?'—':num(e.delta));cell(tr,e.type==='funding'?usd(e.amount):num(e.price));cell(tr,e.fee===undefined?'—':usd(e.fee));cell(tr,e.reason||'—');events.appendChild(tr)}draw(d.history||[]);put('note',`纸面模拟，从空仓前向启动，独立于实盘与单策略排名。报价按可成交买卖盘并加滑点，手续费按 taker 估算；不模拟真实挂单成交或清算。冻结源码版本：${(d.manifest?.live_source_sha256?.['live_config.py']||'').slice(0,12)}。`)}catch(e){put('status','数据不可用');$('status').classList.add('warn')}}
+refresh();setInterval(refresh,30000);window.addEventListener('resize',refresh);
+</script>
+</body>
+</html>

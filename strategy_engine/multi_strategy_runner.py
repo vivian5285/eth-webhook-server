@@ -32,11 +32,10 @@ import math
 import time
 from typing import Any, Dict, List, Optional
 
-from strategy_engine import indicators, klines, shadow_store
+from strategy_engine import funding, indicators, klines, portfolio_guard, shadow_store
 from strategy_engine.strategies import get_strategy, pairs_trading
-from strategy_engine.position_sizing import (
-    compute_qty, compute_liquidation_price, clamp_qty_to_portfolio_cap, LEVERAGE,
-)
+from strategy_engine.position_sizing import compute_qty
+from strategy_engine.volume_sentinel import detect_adverse_volume_spike
 
 logger = logging.getLogger(__name__)
 
@@ -107,35 +106,267 @@ def _entered_this_bar(pos: dict, bar_time: int) -> bool:
     return entry_bar_time is not None and int(bar_time) <= int(entry_bar_time)
 
 
+# 2026-09-27: 纯"信号反转退出+固定ATR止损"的战法(跟已经实盘的hma_trend/
+# ttm_squeeze/heikin_ashi_trend同门派)完全没有止损跟踪——赢麻了的仓位止损
+# 还钉在开仓时的老位置，portfolio_guard按entry-to-stop/mark-to-stop算出
+# 来的止损风险因此虚高，冻结开仓不是风控过度保守，是在正确反映"浮盈没被
+# 收回保护"这个真实缺口。这里补一个只收紧不放松的一次性保本锁：浮盈到1
+# 倍原始风险(1R)，止损上移到保本+覆盖手续费，不影响策略自己"等信号反转
+# 才出场"这个核心逻辑，只是不让反转触发前的等待期里，一笔已经赚了1R的
+# 仓位被行情倒灌回真实亏损。只对没有自己止盈梯度、也不是均值回归类的
+# 战法生效(有tp1/tp2或均值回归退出的战法有自己的一套，加这个是画蛇添足
+# 甚至冲突)。
+BREAKEVEN_LOCK_R_MULT = 1.0
+BREAKEVEN_LOCK_FEE_BUFFER_PCT = 0.0015
+BREAKEVEN_LOCK_STRATEGIES = {
+    "hma_trend", "ttm_squeeze", "heikin_ashi_trend",
+    "kaufman_ama", "keltner_channel", "macd_histogram", "supertrend_adx",
+    "vortex_indicator", "ichimoku_cloud", "schaff_trend_cycle", "wavetrend",
+    "weinstein_stage", "williams_alligator", "parabolic_sar_flip",
+    "livermore_pivotal_point", "chanlun_pivot", "td_sequential", "darvas_box",
+    "donchian_reversal", "breakout_retest", "opening_range_breakout",
+    "raschke_adx_pullback", "kdj_cross", "obv_divergence", "oi_price_confirm",
+    "funding_oi_divergence", "funding_trend", "eth_kdj_exempt_narrow",
+    "gold_session_breakout", "gold_trend_pullback", "us_stock_rth_momentum",
+    "ehlers_fisher_transform", "fiftytwo_week_high",
+    "asset_class_trend_ensemble", "tsmom_agile", "heikin_ashi_adaptive_probe",
+    "hma_reversal_experiment",
+    # 2026-09-29新增：ttm_squeeze的止损宽度/加仓节奏对照名，为了让它们
+    # 跟base ttm_squeeze(已经在这份名单里)只有"自己测的那一个维度"不同，
+    # 其余机制对齐——tight/wide_stop只改止损宽度，pyramid只改加仓节奏，
+    # 都该保留保本锁。trail(自己就是另一套止损机制，会跟保本锁抢着改
+    # 同一个stop字段)和tp(测试的是"要不要固定止盈"，故意不叠加别的止损
+    # 改动)刻意不放进来，见ATR_TRAIL_STRATEGIES/ttm_squeeze_variants.py。
+    "ttm_squeeze_tight_stop", "ttm_squeeze_wide_stop", "ttm_squeeze_pyramid",
+    # 2026-09-29新增：renko_trend、fibonacci_retracement、dual_ema_band_7_25
+    # 的1h/90m两个周期都是纯趋势/反转离场，没有自己的止盈梯度。
+    "renko_trend", "fibonacci_retracement",
+    "dual_ema_band_7_25_1h", "dual_ema_band_7_25_90m",
+    # 2026-09-30新增：1倍本金现货式对照组，信号/离场逻辑跟不带_spot的
+    # 版本完全一样，同样没有自己的止盈梯度，保本锁一样适用。
+    "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
+}
+
+
+def _maybe_lock_breakeven(pos: dict, mark_price: float, bar_time: int) -> None:
+    """浮盈够1R就把pos["stop_loss"]原地上移到保本+手续费缓冲，并写回DB。
+    只收紧不放松：已经锁过的不会重复处理(用stop相对entry的位置判断)。"""
+    strategy = pos.get("strategy")
+    if strategy not in BREAKEVEN_LOCK_STRATEGIES:
+        return
+    side = str(pos.get("side") or "").upper()
+    entry = float(pos.get("entry") or 0.0)
+    stop = float(pos.get("stop_loss") or 0.0)
+    if entry <= 0 or stop <= 0 or side not in ("LONG", "SHORT") or mark_price <= 0:
+        return
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return
+    d = 1.0 if side == "LONG" else -1.0
+    r_multiple = d * (mark_price - entry) / risk
+    if r_multiple < BREAKEVEN_LOCK_R_MULT:
+        return
+    locked_stop = entry + d * entry * BREAKEVEN_LOCK_FEE_BUFFER_PCT
+    already_locked = (
+        stop >= locked_stop - 1e-9 if side == "LONG" else stop <= locked_stop + 1e-9
+    )
+    if already_locked:
+        return
+    pid = pos.get("id")
+    if pid is None:
+        return
+    if shadow_store.add_to_open_row(pid, {"stop": locked_stop}, bar_time):
+        pos["stop_loss"] = locked_stop
+        pos["stop"] = locked_stop
+
+
+# 2026-09-29新增：宝贝要求测"出场逻辑本身"(止盈/移动止损规则)，跟"要不要
+# 开仓"分开看。只对ttm_squeeze_trail这个新对照名生效(base ttm_squeeze
+# 完全不受影响)——用position自己的atr0(入场时的ATR，跟_add_to_position
+# 补仓时更新的是同一个字段)做连续ATR吊灯止损(chandelier exit)：每次tick
+# 都算一遍"现价-方向×ATR_TRAIL_MULT×atr0"当候选止损，只收紧不放松，
+# 靠这个单向棘轮特性天然实现"从最高/最低点回撤ATR_TRAIL_MULT倍才出场"，
+# 不需要额外存历史最高价。浮盈够ATR_TRAIL_MIN_R_MULT(0.5R，比保本锁的
+# 1R更早启动)才开始跟踪，避免刚入场就被正常波动扫损。
+ATR_TRAIL_MULT = 2.0
+ATR_TRAIL_MIN_R_MULT = 0.5
+ATR_TRAIL_STRATEGIES = {"ttm_squeeze_trail"}
+
+
+def _maybe_trail_atr(pos: dict, mark_price: float, bar_time: int) -> None:
+    strategy = pos.get("strategy")
+    if strategy not in ATR_TRAIL_STRATEGIES:
+        return
+    side = str(pos.get("side") or "").upper()
+    entry = float(pos.get("entry") or 0.0)
+    stop = float(pos.get("stop_loss") or 0.0)
+    atr0 = float(pos.get("atr0") or 0.0)
+    if entry <= 0 or stop <= 0 or atr0 <= 0 or side not in ("LONG", "SHORT") or mark_price <= 0:
+        return
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return
+    d = 1.0 if side == "LONG" else -1.0
+    r_multiple = d * (mark_price - entry) / risk
+    if r_multiple < ATR_TRAIL_MIN_R_MULT:
+        return
+    candidate = mark_price - d * atr0 * ATR_TRAIL_MULT
+    new_stop = max(stop, candidate) if side == "LONG" else min(stop, candidate)
+    if abs(new_stop - stop) < 1e-9:
+        return
+    pid = pos.get("id")
+    if pid is None:
+        return
+    if shadow_store.add_to_open_row(pid, {"stop": new_stop}, bar_time):
+        pos["stop_loss"] = new_stop
+        pos["stop"] = new_stop
+
+
+# 2026-09-29新增：宝贝要求把TV镜像雷达系统真实在用的止损状态机(照抄
+# sndk_dual_ma_strategy.py::evaluate_protective_stop，SNDK账户实盘正在
+# 跑的同一套逻辑)搬进擂台，给dual_ema_band_7_25_radar这两个新对照名用。
+# 三段式：浮盈达1R先保本，达1.5R后启动移动止损，移动止损的呼吸空间按
+# ADX分级(ADX>30强趋势给3.5倍ATR空间，ADX<20弱趋势收紧到1.5倍，居中给
+# 2.5倍)——这就是"雷达根据趋势ADX不同，呼吸空间不同"。
+#
+# 跟原版的两处简化(不是偷工减料，是这个引擎的数据结构决定的)：①原版
+# 用逐笔持续追踪的extreme_price(仓位生命周期内的最高/最低价)算移动止损
+# 基准，这里没有为此单独加一个持久化字段，改用当前markPrice——因为
+# 止损只收紧不放松(下面的单向棘轮逻辑)，多轮tick累积下来效果上等价于
+# "从峰值回撤N倍ATR才出场"，不需要额外存历史极值。②原版硬止损阶段有
+# 15分钟插针防护(击穿要持续够久才真平)，这里没有实现(保本/追踪阶段
+# 原版本来就没有这层防护，直接触发；只有最初的硬止损阶段原版才给缓冲)，
+# 简化成硬止损也是一碰即触发——这个引擎本来就是5分钟一轮扫描，插针
+# 防护的实际意义比15分钟粒度的实盘要小得多。
+RADAR_BREAKEVEN_TRIGGER_ATR = 1.0
+RADAR_BREAKEVEN_BUFFER_PCT = 0.0005
+RADAR_TRAIL_TRIGGER_ATR = 1.5
+RADAR_TRAIL_MULT_STRONG = 3.5
+RADAR_TRAIL_MULT_WEAK = 1.5
+RADAR_TRAIL_MULT_NORMAL = 2.5
+RADAR_ADX_STRONG_BOUND = 30.0
+RADAR_ADX_WEAK_BOUND = 20.0
+RADAR_ADX_PERIOD = 14
+# 2026-09-30应宝贝要求("现货1倍这个仓位我们也要加移动雷达跟踪比较好")，
+# 现货等价仓位(SPOT_EQUIVALENT_STRATEGIES)也接入同一套雷达移动止盈——
+# 双均线本身仍是绝对主控的开平仓方向，雷达只管插针防守，见下面
+# SAME_TICK_REVERSAL_STRATEGIES的注释。
+RADAR_TRAIL_STRATEGIES = {
+    "dual_ema_band_7_25_radar_1h", "dual_ema_band_7_25_radar_90m",
+    "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
+}
+
+
+def _maybe_radar_trail(pos: dict, bars: list, mark_price: float, bar_time: int) -> None:
+    strategy = pos.get("strategy")
+    if strategy not in RADAR_TRAIL_STRATEGIES:
+        return
+    side = str(pos.get("side") or "").upper()
+    entry = float(pos.get("entry") or 0.0)
+    stop = float(pos.get("stop_loss") or 0.0)
+    atr0 = float(pos.get("atr0") or 0.0)
+    if entry <= 0 or stop <= 0 or atr0 <= 0 or side not in ("LONG", "SHORT") or mark_price <= 0:
+        return
+    if not bars or len(bars) < RADAR_ADX_PERIOD * 2 + 2:
+        return
+    d = 1.0 if side == "LONG" else -1.0
+    profit_atr = d * (mark_price - entry) / atr0
+    if profit_atr < RADAR_BREAKEVEN_TRIGGER_ATR:
+        return
+
+    candidates = [stop]
+    be = entry * (1 + RADAR_BREAKEVEN_BUFFER_PCT) if side == "LONG" else entry * (1 - RADAR_BREAKEVEN_BUFFER_PCT)
+    candidates.append(be)
+
+    if profit_atr >= RADAR_TRAIL_TRIGGER_ATR:
+        atr_ser = indicators.atr_series(bars, RADAR_ADX_PERIOD)
+        if atr_ser:
+            atr_now = float(atr_ser[-1])
+            if atr_now > 0:
+                adx_now = indicators.wilder_adx(bars, RADAR_ADX_PERIOD)
+                if adx_now > RADAR_ADX_STRONG_BOUND:
+                    mult = RADAR_TRAIL_MULT_STRONG
+                elif adx_now < RADAR_ADX_WEAK_BOUND:
+                    mult = RADAR_TRAIL_MULT_WEAK
+                else:
+                    mult = RADAR_TRAIL_MULT_NORMAL
+                chandelier = mark_price - d * mult * atr_now
+                candidates.append(chandelier)
+
+    new_stop = max(candidates) if side == "LONG" else min(candidates)
+    tightened = new_stop > stop if side == "LONG" else new_stop < stop
+    if not tightened:
+        return
+    pid = pos.get("id")
+    if pid is None:
+        return
+    if shadow_store.add_to_open_row(pid, {"stop": new_stop}, bar_time):
+        pos["stop_loss"] = new_stop
+        pos["stop"] = new_stop
+
+
+# 2026-09-30：盘中成交量哨兵实验(宝贝要求"先在擂台单独搭一个实验策略
+# 验证这套机制真的有用、不会误伤正常波动，再考虑要不要上实盘")——只挂
+# 在chanlun_pivot_sentinel这一个独立身份上(见strategies/__init__.py同名
+# 注册+comparison_roster.py同名条目的说明)，跟chanlun_pivot本体完全隔离，
+# 不影响任何其它65+套战法。用volume_sentinel.py::detect_adverse_volume_spike
+# 查还在走的这根K线，量能+价格异动都够格才提前离场，见该模块docstring里
+# 2026-09-30记录的"累计量vs整根基线"量纲bug修复过程。
+SENTINEL_STRATEGIES = {"chanlun_pivot_sentinel"}
+
+
+def _maybe_volume_sentinel(pos: dict, key: tuple, symbol: str, timeframe: str, bars: list) -> bool:
+    """命中就直接调_close_position平仓，返回True告诉调用方这笔仓位已经
+    没了，不要再往下摸pos的其它字段。"""
+    strategy = pos.get("strategy")
+    if strategy not in SENTINEL_STRATEGIES:
+        return False
+    side = str(pos.get("side") or "").upper()
+    entry = float(pos.get("entry") or 0.0)
+    stop = float(pos.get("stop_loss") or 0.0)
+    if entry <= 0 or stop <= 0 or side not in ("LONG", "SHORT"):
+        return False
+    if not bars or len(bars) < 15:
+        return False
+    current_bar = klines.get_current_bar(symbol, timeframe)
+    if not current_bar:
+        return False
+    bar_duration_min = klines.timeframe_to_minutes(timeframe)
+    if not bar_duration_min or bar_duration_min <= 0:
+        return False
+    elapsed_min = (time.time() * 1000.0 - float(current_bar.get("t") or 0)) / 60000.0
+    result = detect_adverse_volume_spike(
+        side=side, entry_price=entry, stop_price=stop,
+        recent_closed_bars=bars, current_bar=current_bar,
+        elapsed_minutes=elapsed_min, bar_duration_minutes=float(bar_duration_min),
+    )
+    if not result:
+        return False
+    symbol_, strategy_ = key
+    logger.info(
+        f"🚨 [多策略][{strategy_}][{symbol_}] 成交量哨兵提前离场 "
+        f"vol_ratio={result['volume_ratio']:.1f} progress_frac={result['progress_frac']:.2f} "
+        f"close={result['current_close']}"
+    )
+    _close_position(key, float(result["current_close"]), int(current_bar["t"]), result["reason"])
+    return True
+
+
 def _check_stop_tp(pos: dict, bar: dict):
     """跟backtest_runner.py::_check_stop_tp同一套简化口径：一根K线内到底
     先碰到止损还是先碰到止盈无法从OHLC里还原真实顺序，保守假设止损优先。
 
-    2026-09-05新增"模拟强平价"这道安全网：宝贝指出擂台排名可能被"模拟盘
-    扛住了现实中会强平的深度浮亏"这种假象带偏——42套战法各自的ATR止损
-    宽窄不一，但整个引擎从没算过"5倍杠杆下价格反向走多远会被交易所强平"；
-    如果某套战法自己设的止损比强平价还宽(宽止损搏大趋势的战法尤其容易
-    这样)，模拟盘会一直扛到战法自己的止损才平仓，真实账户早就被强平出局，
-    两边盈亏对不上。
-
-    这里把"战法自己的止损"和"开仓时按LEVERAGE算好的模拟强平价"放在一起
-    比较，**取离入场价更近(更容易先触发)的那个**当真正生效的止损线——
-    这正是现实中会发生的事：不管战法自己想不想止损，价格先碰到哪个就先
-    在哪个位置离场。返回(exit_kind, exit_price, hit_tp)，exit_kind是
-    None/'stop'/'liq'，调用方用它区分记录"触及止损"还是"触及强平"
-    (后者对判断"这套战法能不能上真实杠杆"是最直接的证据)。老仓位(这次
-    改动之前开的)liq_price是NULL，candidates里只有stop一项，行为完全
-    不变，不需要单独处理。"""
+    2026-09-24改为组合全仓口径：旧版把每一腿当成独立5x逐仓并计算liq_price，
+    会在全仓账户仍有共享保证金时错误地提前判强平。现在不再用这个遗留列做
+    单腿强平；风险由组合总敞口、止损热度、相关簇和回撤熔断统一约束。止损
+    跳空时按该K线开盘价(更差者)成交，再叠加模拟滑点。"""
     side = pos["side"]
     stop = pos.get("stop_loss")
-    liq = pos.get("liq_price")
     tp1 = pos.get("tp1")
 
     candidates = []
     if stop is not None:
         candidates.append(("stop", float(stop)))
-    if liq:  # liq_price为None或0(计算失败)都不参与比较
-        candidates.append(("liq", float(liq)))
 
     exit_kind, exit_price = None, None
     if candidates:
@@ -147,6 +378,12 @@ def _check_stop_tp(pos: dict, bar: dict):
             hit = float(bar["h"]) >= price
         if hit:
             exit_kind, exit_price = kind, price
+            bar_open = float(bar.get("o") or price)
+            # A stop cannot fill at the stale stop level after a gap through it.
+            if side == "LONG" and bar_open < price:
+                exit_price = bar_open
+            elif side == "SHORT" and bar_open > price:
+                exit_price = bar_open
 
     if side == "LONG":
         hit_tp = tp1 is not None and float(bar["h"]) >= float(tp1)
@@ -164,40 +401,92 @@ def _pnl_atr_weighted(pos: dict, exit_price: float) -> float:
     return round(direction * (exit_price - float(pos["entry"])) / atr0, 4)
 
 
-def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> Optional[int]:
-    tier = int(sig.get("tier") or 1)
-    equity = shadow_store.get_equity(strategy)
-    qty = compute_qty(equity, float(sig["price"]), sig.get("stop_loss"), tier)
-    # 2026-09-19新增：组合层面仓位约束(见position_sizing.py顶部注释)——
-    # 按这个策略账上已经占用的名义仓位，把这一笔等比缩小到剩余额度内。
-    # 额度已用满(clamped_qty<=0)时不落这条记录，等同于真实账户"保证金
-    # 不够，这笔开不了"——不是策略/风控层面故意跳过信号。
-    existing_notional = sum(
-        float(r.get("entry") or 0) * float(r.get("qty") or 0)
-        for r in shadow_store.list_open(strategy=strategy)
+def _guarded_qty(
+    symbol: str,
+    strategy: str,
+    side: str,
+    desired_qty: float,
+    price: float,
+    stop_price: Optional[float],
+    equity: float,
+    bars: Optional[List[dict]],
+) -> tuple[float, portfolio_guard.GuardDecision]:
+    baseline = shadow_store.get_strategy_risk_baseline(strategy, equity)
+    decision = portfolio_guard.evaluate_entry(
+        symbol=symbol,
+        side=side,
+        desired_qty=desired_qty,
+        price=price,
+        stop_price=stop_price,
+        equity=equity,
+        open_rows=shadow_store.list_open(strategy=strategy),
+        bars=bars or [],
+        peak_equity=baseline["peak_equity"],
+        daily_start_equity=baseline["daily_start_equity"],
+        minimum_regime=baseline.get("last_regime"),
     )
-    clamped_qty = clamp_qty_to_portfolio_cap(qty, float(sig["price"]), existing_notional, equity)
-    if clamped_qty <= 0:
+    shadow_store.save_strategy_guard_state(strategy, decision.to_dict())
+    return decision.allowed_qty, decision
+
+
+# 2026-09-30新增：宝贝要求搭一套完全独立于compute_qty(风险资金×5倍参考
+# 杠杆)的仓位公式——"永远用当下本金的1倍去开单"，本金1000元开仓就是
+# 1000元名义敞口，不因为止损距离远近而变、也不乘那个隐藏的参考杠杆，
+# 更贴近"就是拿这笔钱去买这只股票"的现货直觉。同时开2-3个品种时，每笔
+# 都各自按"当下权益"算，天然叠加成2-3倍名义敞口(每个策略在擂台里本来
+# 就是自己独立一份净值，不是共用同一份，"当下权益"不会因为已经开着
+# 别的仓位而减少)——对应宝贝原话"开2个美股就相当于买了2个美股持仓"。
+# 只对下面这个专属品种池生效(SNDK/OPENAI/MU三个)，不影响其余任何策略/
+# 品种的正常compute_qty。注意：portfolio_guard的regime性风险上限依然
+# 会在后面_guarded_qty这一步生效——这是刻意保留的，不是设计疏漏，1倍
+# 本金只是"目标仓位怎么算"，不代表要绕开账户级的止损热度/资产类别上限
+# 这类真实风险防线。
+SPOT_EQUIVALENT_STRATEGIES = {"dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m"}
+
+
+def _open_from_signal(
+    symbol: str,
+    strategy: str,
+    timeframe: str,
+    sig: dict,
+    bars: Optional[List[dict]] = None,
+) -> Optional[int]:
+    tier = int(sig.get("tier") or 1)
+    equity = shadow_store.get_net_equity(strategy)
+    raw_price = float(sig["price"])
+    entry_price = shadow_store.apply_simulated_slippage(raw_price, sig["action"], True)
+    if strategy in SPOT_EQUIVALENT_STRATEGIES:
+        desired_qty = (equity / entry_price) if entry_price > 0 else 0.0
+    else:
+        desired_qty = compute_qty(equity, entry_price, sig.get("stop_loss"), tier)
+    desired_qty *= float(sig.get("position_fraction") or 1.0)
+    qty, guard = _guarded_qty(
+        symbol, strategy, sig["action"], desired_qty, entry_price,
+        sig.get("stop_loss"), equity, bars,
+    )
+    if qty <= 0:
         logger.info(
-            f"⚠️ [多策略][{strategy}][{symbol}] 组合名义仓位已达上限"
-            f"(已占用${existing_notional:.2f}/净值${equity:.2f})，这笔开不了，跳过"
+            f"⚠️ [多策略][{strategy}][{symbol}] portfolio_guard拒绝开仓 "
+            f"regime={guard.regime} reason={guard.reason} 净权益=${equity:.2f}"
         )
         return None
-    qty = clamped_qty
     # 2026-09-05新增：开仓那一刻按LEVERAGE(5x，跟compute_qty同一套杠杆
     # 假设)算好模拟强平价存下来，_check_stop_tp用它跟战法自己的止损
     # 取更紧的那个当真正生效的止损线(见该函数注释)。
-    liq_price = compute_liquidation_price(float(sig["price"]), sig["action"], LEVERAGE)
+    entry_fee = abs(entry_price * qty) * shadow_store.SIM_TAKER_FEE_RATE
     row = {
         "symbol": symbol, "strategy": strategy, "timeframe": timeframe,
-        "side": sig["action"], "entry": float(sig["price"]), "atr0": float(sig.get("atr") or 0),
+        "side": sig["action"], "entry": entry_price, "atr0": float(sig.get("atr") or 0),
         "tier": tier, "adx": None,
         "entry_bar_time": int(sig["bar_time"]), "score_bar_time": int(sig["bar_time"]),
         "tp1_price": sig.get("tp1"), "tp2_price": None,
         "stop": sig.get("stop_loss"), "last_ratchet_price": None,
         "tp1_done": 0, "tp2_done": 0,
         "realized_frac": 0, "realized_pnl_atr_weighted": 0, "qty": qty,
-        "liq_price": liq_price,
+        "liq_price": None,
+        "entry_stage": sig.get("entry_stage") or "confirmed",
+        "context_bar_time": sig.get("context_bar_time"),
+        "fee_usd": entry_fee,
     }
     pid = shadow_store.insert_open_row(row)
     if pid is None:
@@ -208,9 +497,9 @@ def _open_from_signal(symbol: str, strategy: str, timeframe: str, sig: dict) -> 
     mem["tp1"] = row["tp1_price"]
     _open_positions[(symbol, strategy)] = mem
     logger.info(
-        f"📈 [多策略][{strategy}][{symbol}] 开仓 {sig['action']} @ {sig['price']:.6f} "
-        f"qty={qty:.6f}(净值${equity:.2f}·T{tier}) stop={sig.get('stop_loss')} tp1={sig.get('tp1')} "
-        f"liq≈{liq_price:.6f}"
+        f"📈 [多策略][{strategy}][{symbol}] 开仓 {sig['action']} @ {entry_price:.6f} "
+        f"qty={qty:.6f}(净权益${equity:.2f}·T{tier}) stop={sig.get('stop_loss')} "
+        f"guard={guard.regime}/{guard.gross_cap_mult:.1f}x fee=${entry_fee:.4f} cross-margin"
     )
     return pid
 
@@ -219,22 +508,98 @@ def _close_position(key: tuple, exit_price: float, bar_time: int, reason: str) -
     pos = _open_positions.pop(key, None)
     if not pos:
         return
-    pnl = _pnl_atr_weighted(pos, exit_price)
+    fill_price = shadow_store.apply_simulated_slippage(exit_price, pos["side"], False)
+    pnl = _pnl_atr_weighted(pos, fill_price)
+    qty = float(pos.get("qty") or 0)
+    entry_fee = pos.get("fee_usd")
+    if entry_fee is None:
+        entry_fee = abs(float(pos.get("entry") or 0) * qty) * shadow_store.SIM_TAKER_FEE_RATE
+    total_fee = float(entry_fee or 0) + abs(fill_price * qty) * shadow_store.SIM_TAKER_FEE_RATE
+    funding_pnl = funding.estimate_funding_pnl_usd(
+        pos.get("symbol") or key[0], pos["side"], qty,
+        int(pos.get("entry_bar_time") or 0), int(bar_time), float(pos.get("entry") or 0),
+    )
     shadow_store.close_row(
         pos["id"],
-        {"exit_price": round(exit_price, 6), "exit_reason": reason,
-         "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl},
+        {"exit_price": round(fill_price, 6), "exit_reason": reason,
+         "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl,
+         "fee_usd": total_fee, "funding_pnl_usd": funding_pnl},
         bar_time,
     )
     symbol, strategy = key
-    new_equity = shadow_store.settle_trade_on_equity(
+    shadow_store.settle_trade_on_equity(
         strategy, pnl, float(pos.get("atr0") or 0), float(pos.get("qty") or 0),
     )
+    new_equity = shadow_store.get_net_equity(strategy)
     pnl_usd = pnl * float(pos.get("atr0") or 0) * float(pos.get("qty") or 0)
     logger.info(
-        f"📉 [多策略][{strategy}][{symbol}] 平仓 @ {exit_price:.6f} "
-        f"pnl={pnl:+.2f}×ATR(${pnl_usd:+.2f}) 净值→${new_equity:.2f} | {reason}"
+        f"📉 [多策略][{strategy}][{symbol}] 平仓 @ {fill_price:.6f} "
+        f"毛pnl={pnl:+.2f}×ATR(${pnl_usd:+.2f}) fee=${total_fee:.2f} "
+        f"funding=${funding_pnl:+.2f} 净权益→${new_equity:.2f} | {reason}"
     )
+
+
+def _add_to_position(
+    key: tuple,
+    timeframe: str,
+    sig: dict,
+    bars: Optional[List[dict]] = None,
+) -> bool:
+    pos = _open_positions.get(key)
+    if not pos or str(pos.get("entry_stage") or "") != "probe":
+        return False
+    symbol, strategy = key
+    side = str(pos.get("side") or "").upper()
+    if str(sig.get("side") or side).upper() != side:
+        return False
+    equity = shadow_store.get_net_equity(strategy)
+    raw_price = float(sig["price"])
+    add_price = shadow_store.apply_simulated_slippage(raw_price, side, True)
+    tier = int(sig.get("tier") or pos.get("tier") or 1)
+    desired_add = compute_qty(equity, add_price, sig.get("stop_loss"), tier)
+    desired_add *= float(sig.get("position_fraction") or (2.0 / 3.0))
+    add_qty, guard = _guarded_qty(
+        symbol, strategy, side, desired_add, add_price,
+        sig.get("stop_loss"), equity, bars,
+    )
+    if add_qty <= 0:
+        logger.info(
+            f"⚠️ [多策略][{strategy}][{symbol}] probe确认但补仓被portfolio_guard拒绝 "
+            f"regime={guard.regime} reason={guard.reason}"
+        )
+        if shadow_store.add_to_open_row(
+            pos["id"], {"entry_stage": "confirmed"}, int(sig["bar_time"]),
+        ):
+            pos["entry_stage"] = "confirmed"
+        return False
+    old_qty = float(pos.get("qty") or 0)
+    new_qty = old_qty + add_qty
+    if new_qty <= 0:
+        return False
+    new_entry = (float(pos["entry"]) * old_qty + add_price * add_qty) / new_qty
+    old_atr = float(pos.get("atr0") or 0)
+    add_atr = float(sig.get("atr") or old_atr)
+    new_atr = (old_atr * old_qty + add_atr * add_qty) / new_qty if new_qty > 0 else old_atr
+    old_stop = float(pos.get("stop") or 0)
+    add_stop = float(sig.get("stop_loss") or old_stop)
+    if old_stop > 0 and add_stop > 0:
+        new_stop = max(old_stop, add_stop) if side == "LONG" else min(old_stop, add_stop)
+    else:
+        new_stop = add_stop or old_stop
+    new_fee = float(pos.get("fee_usd") or 0) + abs(add_price * add_qty) * shadow_store.SIM_TAKER_FEE_RATE
+    updates = {
+        "entry": new_entry, "atr0": new_atr, "qty": new_qty, "stop": new_stop,
+        "liq_price": None, "entry_stage": "confirmed", "fee_usd": new_fee,
+    }
+    if not shadow_store.add_to_open_row(pos["id"], updates, int(sig["bar_time"])):
+        return False
+    pos.update(updates)
+    pos["stop_loss"] = new_stop
+    logger.info(
+        f"📈 [多策略][{strategy}][{symbol}] 4h确认补仓 @ {add_price:.6f} "
+        f"add_qty={add_qty:.6f} total_qty={new_qty:.6f} guard={guard.regime}"
+    )
+    return True
 
 
 def _same_bar_reentry_blocked(symbol: str, strategy: str, sig: dict) -> bool:
@@ -251,6 +616,12 @@ def _same_bar_reentry_blocked(symbol: str, strategy: str, sig: dict) -> bool:
     重复行，不是真实信号质量。只堵"完全相同的(方向,K线)"，方向变了
     或者K线真收出新的一根都不受影响。"""
     last_closed = shadow_store.get_last_closed_meta(symbol, strategy)
+    if (
+        strategy in {"hma_trend_reverse_strong", "hma_trend_reverse_tiered"}
+        and last_closed
+        and int(last_closed.get("exit_bar_time") or -1) == int(sig["bar_time"])
+    ):
+        return True
     return bool(
         last_closed
         and str(last_closed.get("side")) == str(sig.get("action"))
@@ -354,8 +725,36 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     key = (symbol, strategy)
     pos = _open_positions.get(key)
     last_bar = bars[-1]
+    if int(last_bar["t"]) <= int(entry.get("experiment_start_after_bar") or 0):
+        return
 
     if pos:
+        _maybe_lock_breakeven(pos, float(last_bar["c"]), int(last_bar["t"]))
+        _maybe_trail_atr(pos, float(last_bar["c"]), int(last_bar["t"]))
+        _maybe_radar_trail(pos, bars, float(last_bar["c"]), int(last_bar["t"]))
+        if _maybe_volume_sentinel(pos, key, symbol, timeframe, bars):
+            return
+        strategy_position = dict(pos)
+        strategy_position["entry_price"] = pos["entry"]
+        if str(pos.get("entry_stage") or "") == "probe":
+            fast_bars = bars_by_tf.get("1h") or []
+            if fast_bars and not _entered_this_bar(pos, int(fast_bars[-1]["t"])):
+                exit_kind, exit_price, hit_tp = _check_stop_tp(pos, fast_bars[-1])
+                if exit_kind:
+                    _close_position(key, exit_price, int(fast_bars[-1]["t"]), "试探仓触及止损")
+                    return
+                if hit_tp:
+                    _close_position(key, float(pos["tp1"]), int(fast_bars[-1]["t"]), "试探仓触及止盈")
+                    return
+            sig = fn(bars_by_tf, call_params, strategy_position)
+            if sig and sig.get("action") == "ADD":
+                _add_to_position(key, timeframe, sig, bars)
+            elif sig and str(sig.get("action", "")).startswith("CLOSE"):
+                _close_position(
+                    key, float(sig["price"]), int(sig["bar_time"]),
+                    str(sig.get("reason") or sig["action"]),
+                )
+            return
         if _entered_this_bar(pos, last_bar["t"]):
             return  # 入场那根K线自己的high/low/close不能用来判离场，见_entered_this_bar
         exit_kind, exit_price, hit_tp = _check_stop_tp(pos, last_bar)
@@ -366,10 +765,7 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         if hit_tp:
             _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")
             return
-        sig = fn(bars_by_tf, call_params, {
-            "side": pos["side"], "entry_price": pos["entry"],
-            "entry_bar_time": pos["entry_bar_time"],
-        })
+        sig = fn(bars_by_tf, call_params, strategy_position)
         if sig and str(sig.get("action", "")).startswith("CLOSE") and int(sig["bar_time"]) > int(pos["entry_bar_time"]):
             # 2026-09-20修复：早前的_entered_this_bar用last_bar(base周期
             # 自己的bar_time)当门槛，对vwap_ema_regime这种战法自己内部用
@@ -383,13 +779,36 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             # 代理判断，从根上堵死这类时钟不一致的战法也可能触发的同一
             # 类问题。
             _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
+            # 2026-09-30应宝贝要求("反手和平仓可以同时进行...平仓和反手
+            # 开仓几乎是一个东西")新增双均线三兄弟(band/band_radar/spot，
+            # spot复用band的generate_signal同一个函数对象)：跟hma_trend_
+            # reverse_*同一套机制，刚平仓那一刻立即用position=None重新
+            # 问一遍战法有没有新鲜的反向信号，opposite.reverse_now由战法
+            # 自己在entry_signals里打(dual_ema_band_7_25.py/dual_ema_
+            # band_7_25_radar.py，非radar版本离场条件跟反向入场条件数学
+            # 恒等，radar版本会真的重新校验快慢线是否已经排好队)。
+            if strategy in {
+                "hma_trend_reverse_strong", "hma_trend_reverse_tiered",
+                "dual_ema_band_7_25_1h", "dual_ema_band_7_25_90m",
+                "dual_ema_band_7_25_radar_1h", "dual_ema_band_7_25_radar_90m",
+                "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
+            }:
+                opposite = fn(bars_by_tf, call_params, None)
+                if (
+                    opposite and opposite.get("reverse_now")
+                    and opposite.get("action") in ("LONG", "SHORT")
+                    and opposite["action"] != pos["side"]
+                    and int(opposite["bar_time"]) == int(sig["bar_time"])
+                    and shadow_store.get_open_row(symbol, strategy) is None
+                ):
+                    _open_from_signal(symbol, strategy, timeframe, opposite, bars)
         return
 
     sig = fn(bars_by_tf, call_params, None)
     if not sig and entry.get("early_entry"):
         sig = _try_early_entry(symbol, strategy, timeframe, bars_by_tf, call_params, fn)
     if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
-        _open_from_signal(symbol, strategy, timeframe, sig)
+        _open_from_signal(symbol, strategy, timeframe, sig, bars)
 
 
 _TIMEFRAME_BARS_PER_YEAR = {
@@ -456,6 +875,19 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     strategy, timeframe = entry["strategy"], entry["timeframe"]
     symbols = entry["symbols"]
     lookback = int(entry.get("lookback_bars") or 20)
+    if entry.get("require_aligned_bars"):
+        bar_times = set()
+        for symbol in symbols:
+            bars = _cached_bars(cache, symbol, timeframe, BARS_LIMIT)
+            if len(bars) < max(30, lookback + 1):
+                return
+            bar_times.add(int(bars[-1]["t"]))
+        minutes = klines.timeframe_to_minutes(timeframe)
+        if len(bar_times) != 1 or not minutes:
+            return
+        last_bar_time = next(iter(bar_times))
+        if time.time() * 1000 > last_bar_time + 2 * minutes * 60_000 + 120_000:
+            return
     fn = get_strategy(strategy)
     universe_returns = _compute_universe_returns(
         symbols, timeframe, lookback, cache,
@@ -488,10 +920,9 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             if hit_tp:
                 _close_position(key, float(pos["tp1"]), int(last_bar["t"]), "触及止盈")
                 continue
-            sig = fn({"base": bars}, params, {
-                "side": pos["side"], "entry_price": pos["entry"],
-                "entry_bar_time": pos["entry_bar_time"],
-            })
+            strategy_position = dict(pos)
+            strategy_position["entry_price"] = pos["entry"]
+            sig = fn({"base": bars}, params, strategy_position)
             if sig and str(sig.get("action", "")).startswith("CLOSE") and int(sig["bar_time"]) > int(pos["entry_bar_time"]):
                 # 见_tick_single_symbol_entry同一处2026-09-20修复的注释
                 _close_position(key, float(sig["price"]), int(sig["bar_time"]), str(sig.get("reason") or sig["action"]))
@@ -501,7 +932,7 @@ def _tick_universe_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         if not sig and entry.get("early_entry"):
             sig = _try_early_entry(symbol, strategy, timeframe, {"base": bars}, params, fn)
         if sig and sig.get("action") in ("LONG", "SHORT") and not _same_bar_reentry_blocked(symbol, strategy, sig):
-            _open_from_signal(symbol, strategy, timeframe, sig)
+            _open_from_signal(symbol, strategy, timeframe, sig, bars)
 
 
 def _pair_leg_pnl(side: str, entry: float, atr0: float, exit_price: float) -> float:
@@ -558,23 +989,37 @@ def _close_pair(exit_price_a: float, exit_price_b: float, bar_time: int, reason:
     p = _open_pair
     if not p:
         return
-    pnl_a = _pair_leg_pnl(p["side_a"], p["entry_a"], p["atr0_a"], exit_price_a)
-    pnl_b = _pair_leg_pnl(p["side_b"], p["entry_b"], p["atr0_b"], exit_price_b)
-    shadow_store.close_row(
-        p["id_a"], {"exit_price": round(exit_price_a, 6), "exit_reason": reason,
-                     "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl_a}, bar_time,
+    fill_a = shadow_store.apply_simulated_slippage(exit_price_a, p["side_a"], False)
+    fill_b = shadow_store.apply_simulated_slippage(exit_price_b, p["side_b"], False)
+    pnl_a = _pair_leg_pnl(p["side_a"], p["entry_a"], p["atr0_a"], fill_a)
+    pnl_b = _pair_leg_pnl(p["side_b"], p["entry_b"], p["atr0_b"], fill_b)
+    fee_a = (abs(p["entry_a"] * p["qty_a"]) + abs(fill_a * p["qty_a"])) * shadow_store.SIM_TAKER_FEE_RATE
+    fee_b = (abs(p["entry_b"] * p["qty_b"]) + abs(fill_b * p["qty_b"])) * shadow_store.SIM_TAKER_FEE_RATE
+    funding_a = funding.estimate_funding_pnl_usd(
+        p["symbol_a"], p["side_a"], p["qty_a"], p["entry_bar_time"], bar_time, p["entry_a"],
+    )
+    funding_b = funding.estimate_funding_pnl_usd(
+        p["symbol_b"], p["side_b"], p["qty_b"], p["entry_bar_time"], bar_time, p["entry_b"],
     )
     shadow_store.close_row(
-        p["id_b"], {"exit_price": round(exit_price_b, 6), "exit_reason": reason,
-                     "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl_b}, bar_time,
+        p["id_a"], {"exit_price": round(fill_a, 6), "exit_reason": reason,
+                     "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl_a,
+                     "fee_usd": fee_a, "funding_pnl_usd": funding_a}, bar_time,
+    )
+    shadow_store.close_row(
+        p["id_b"], {"exit_price": round(fill_b, 6), "exit_reason": reason,
+                     "realized_frac": 1.0, "realized_pnl_atr_weighted": pnl_b,
+                     "fee_usd": fee_b, "funding_pnl_usd": funding_b}, bar_time,
     )
     shadow_store.settle_trade_on_equity(strategy, pnl_a, p["atr0_a"], p["qty_a"])
-    new_equity = shadow_store.settle_trade_on_equity(strategy, pnl_b, p["atr0_b"], p["qty_b"])
+    shadow_store.settle_trade_on_equity(strategy, pnl_b, p["atr0_b"], p["qty_b"])
+    new_equity = shadow_store.get_net_equity(strategy)
     pnl_usd = pnl_a * p["atr0_a"] * p["qty_a"] + pnl_b * p["atr0_b"] * p["qty_b"]
     logger.info(
-        f"📉 [多策略][{strategy}] 配对平仓 {p['symbol_a']}({p['side_a']}@{exit_price_a:.4f})/"
-        f"{p['symbol_b']}({p['side_b']}@{exit_price_b:.4f}) "
-        f"合计pnl=${pnl_usd:+.2f} 净值→${new_equity:.2f} | {reason}"
+        f"📉 [多策略][{strategy}] 配对平仓 {p['symbol_a']}({p['side_a']}@{fill_a:.4f})/"
+        f"{p['symbol_b']}({p['side_b']}@{fill_b:.4f}) 合计毛pnl=${pnl_usd:+.2f} "
+        f"fee=${fee_a + fee_b:.2f} funding=${funding_a + funding_b:+.2f} "
+        f"净权益→${new_equity:.2f} | {reason}"
     )
     _open_pair = None
 
@@ -625,7 +1070,16 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
             or (p["side_b"] == "SHORT" and float(bars_b[-1]["h"]) >= float(stop_b))
         )
         if hit_a or hit_b:
-            _close_pair(price_a, price_b, last_bar_time, "任一腿触及ATR止损(配对脱钩)", strategy)
+            exit_a, exit_b = price_a, price_b
+            if hit_a:
+                stop = float(stop_a)
+                bar_open = float(bars_a[-1].get("o") or stop)
+                exit_a = min(stop, bar_open) if p["side_a"] == "LONG" else max(stop, bar_open)
+            if hit_b:
+                stop = float(stop_b)
+                bar_open = float(bars_b[-1].get("o") or stop)
+                exit_b = min(stop, bar_open) if p["side_b"] == "LONG" else max(stop, bar_open)
+            _close_pair(exit_a, exit_b, last_bar_time, "任一腿触及ATR止损(配对脱钩)", strategy)
             return
 
         # 安全网2：持有太久——原始论文用固定6个月交易期，这里改成根数上限，
@@ -668,20 +1122,41 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     ):
         return
     pair_key = f"{sym_a}|{sym_b}|{bar_time}"
-    price_a, price_b = closes_a[-1], closes_b[-1]
+    price_a = shadow_store.apply_simulated_slippage(closes_a[-1], sig["side_a"], True)
+    price_b = shadow_store.apply_simulated_slippage(closes_b[-1], sig["side_b"], True)
 
     atr_a = indicators.wilder_atr(bars_a, atr_len)
     atr_b = indicators.wilder_atr(bars_b, atr_len)
     if atr_a <= 0 or atr_b <= 0:
         return
 
-    equity = shadow_store.get_equity(strategy)
+    equity = shadow_store.get_net_equity(strategy)
     dir_a = 1.0 if sig["side_a"] == "LONG" else -1.0
     dir_b = 1.0 if sig["side_b"] == "LONG" else -1.0
     stop_a = round(price_a - dir_a * atr_stop_mult * atr_a, 6)
     stop_b = round(price_b - dir_b * atr_stop_mult * atr_b, 6)
-    qty_a = compute_qty(equity, price_a, stop_a, tier=1)
-    qty_b = compute_qty(equity, price_b, stop_b, tier=1)
+    desired_a = compute_qty(equity, price_a, stop_a, tier=1)
+    desired_b = compute_qty(equity, price_b, stop_b, tier=1)
+    baseline = shadow_store.get_strategy_risk_baseline(strategy, equity)
+    open_rows = shadow_store.list_open(strategy=strategy)
+    decision_a = portfolio_guard.evaluate_entry(
+        symbol=sym_a, side=sig["side_a"], desired_qty=desired_a, price=price_a,
+        stop_price=stop_a, equity=equity, open_rows=open_rows, bars=bars_a,
+        peak_equity=baseline["peak_equity"], daily_start_equity=baseline["daily_start_equity"],
+        minimum_regime=baseline.get("last_regime"),
+    )
+    provisional_a = {
+        "symbol": sym_a, "side": sig["side_a"], "entry": price_a,
+        "qty": decision_a.allowed_qty, "stop": stop_a,
+    }
+    decision_b = portfolio_guard.evaluate_entry(
+        symbol=sym_b, side=sig["side_b"], desired_qty=desired_b, price=price_b,
+        stop_price=stop_b, equity=equity, open_rows=open_rows + [provisional_a], bars=bars_b,
+        peak_equity=baseline["peak_equity"], daily_start_equity=baseline["daily_start_equity"],
+        minimum_regime=baseline.get("last_regime"),
+    )
+    shadow_store.save_strategy_guard_state(strategy, decision_b.to_dict())
+    qty_a, qty_b = decision_a.allowed_qty, decision_b.allowed_qty
     if qty_a <= 0 or qty_b <= 0:
         return
 
@@ -690,6 +1165,7 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         "side": sig["side_a"], "entry": price_a, "atr0": atr_a, "tier": 1,
         "entry_bar_time": bar_time, "score_bar_time": bar_time,
         "qty": qty_a, "stop": stop_a,
+        "fee_usd": abs(price_a * qty_a) * shadow_store.SIM_TAKER_FEE_RATE,
         "pair_key": pair_key, "pair_base_price": sig["base_price_a"],
         "pair_formation_mean": sig["formation_mean"], "pair_formation_std": sig["formation_std"],
     })
@@ -698,6 +1174,7 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
         "side": sig["side_b"], "entry": price_b, "atr0": atr_b, "tier": 1,
         "entry_bar_time": bar_time, "score_bar_time": bar_time,
         "qty": qty_b, "stop": stop_b,
+        "fee_usd": abs(price_b * qty_b) * shadow_store.SIM_TAKER_FEE_RATE,
         "pair_key": pair_key, "pair_base_price": sig["base_price_b"],
         "pair_formation_mean": sig["formation_mean"], "pair_formation_std": sig["formation_std"],
     })
@@ -719,8 +1196,47 @@ def _tick_pairs_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     logger.info(
         f"📈 [多策略][{strategy}] 配对开仓 {sym_a}({sig['side_a']}@{price_a:.4f})/"
         f"{sym_b}({sig['side_b']}@{price_b:.4f}) z={sig['zscore']:+.2f} "
-        f"qty={qty_a:.4f}/{qty_b:.4f}(净值${equity:.2f})"
+        f"qty={qty_a:.4f}/{qty_b:.4f}(净权益${equity:.2f}, guard={decision_b.regime})"
     )
+
+
+def _refresh_guard_states(
+    single_roster: List[dict],
+    universe_roster: List[dict],
+    pairs_roster: List[dict],
+    cache: Dict[tuple, list],
+) -> None:
+    """Persist each strategy's worst current closed-bar regime once per round."""
+    observed: Dict[str, List[str]] = {}
+
+    def consider(strategy: str, symbol: str, timeframe: str, limit: int) -> None:
+        bars = cache.get((symbol, timeframe, int(limit))) or []
+        if not bars:
+            return
+        regime = portfolio_guard.classify_regime(bars)
+        observed.setdefault(strategy, []).append(regime)
+
+    for entry in single_roster:
+        consider(
+            entry["strategy"], entry["symbol"], entry["timeframe"],
+            int(entry.get("bars_limit") or BARS_LIMIT),
+        )
+    for entry in universe_roster:
+        for symbol in entry["symbols"]:
+            consider(entry["strategy"], symbol, entry["timeframe"], BARS_LIMIT)
+    for entry in pairs_roster:
+        limit = max(BARS_LIMIT, int(entry.get("formation_bars") or pairs_trading.DEFAULT_PARAMS["formation_bars"]) + 10)
+        for symbol in entry["symbols"]:
+            consider(entry["strategy"], symbol, entry["timeframe"], limit)
+
+    for strategy, regimes in observed.items():
+        regime = portfolio_guard.aggregate_regimes(regimes)
+        equity = shadow_store.get_net_equity(strategy)
+        baseline = shadow_store.get_strategy_risk_baseline(strategy, equity)
+        decision = portfolio_guard.status_for_regime(
+            regime, equity, baseline["peak_equity"], baseline["daily_start_equity"],
+        )
+        shadow_store.save_strategy_guard_state(strategy, decision.to_dict())
 
 
 def run_comparison_once(
@@ -748,6 +1264,7 @@ def run_comparison_once(
             _tick_pairs_entry(entry, cache)
         except Exception as e:
             logger.warning(f"[多策略][{entry['strategy']}] 配对巡检异常，跳过: {e}")
+    _refresh_guard_states(single_roster, universe_roster, pairs_roster or [], cache)
 
 
 def main_loop():

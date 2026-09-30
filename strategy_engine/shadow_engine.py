@@ -46,6 +46,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from . import indicators as ind
+from . import funding
 from . import klines
 from . import shadow_store
 from . import tv_symbol_params
@@ -469,10 +470,20 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
         for b in new_bars:
             done = pos.update_on_bar(b)
             if done:
-                shadow_store.close_row(open_row["id"], _position_to_row(pos), int(b["t"]))
-                new_equity = shadow_store.settle_trade_on_equity(
+                updates = _position_to_row(pos)
+                entry_fee = open_row.get("fee_usd")
+                if entry_fee is None:
+                    entry_fee = abs(pos.entry * qty) * shadow_store.SIM_TAKER_FEE_RATE
+                updates["fee_usd"] = float(entry_fee or 0) + abs(float(pos.exit_price or 0) * qty) * shadow_store.SIM_TAKER_FEE_RATE
+                updates["funding_pnl_usd"] = funding.estimate_funding_pnl_usd(
+                    symbol, pos.side, qty, int(open_row.get("entry_bar_time") or 0),
+                    int(b["t"]), pos.entry,
+                )
+                shadow_store.close_row(open_row["id"], updates, int(b["t"]))
+                shadow_store.settle_trade_on_equity(
                     STRATEGY_NAME, pos.realized_pnl_atr_weighted, pos.atr0, qty,
                 )
+                new_equity = shadow_store.get_net_equity(STRATEGY_NAME)
                 logger.info(
                     f"✅ [影子] {symbol} 平仓 {pos.side} entry={pos.entry:.4f} "
                     f"exit={pos.exit_price:.4f}({pos.exit_reason}) "
@@ -486,10 +497,20 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
             if check_reversal_exit(bars_4h, pos.side):
                 curr_px = float(bars[-1]["c"])
                 pos.force_close(curr_px, int(bars[-1]["t"]), "4h_reversal")
-                shadow_store.close_row(open_row["id"], _position_to_row(pos), int(bars[-1]["t"]))
-                new_equity = shadow_store.settle_trade_on_equity(
+                updates = _position_to_row(pos)
+                entry_fee = open_row.get("fee_usd")
+                if entry_fee is None:
+                    entry_fee = abs(pos.entry * qty) * shadow_store.SIM_TAKER_FEE_RATE
+                updates["fee_usd"] = float(entry_fee or 0) + abs(curr_px * qty) * shadow_store.SIM_TAKER_FEE_RATE
+                updates["funding_pnl_usd"] = funding.estimate_funding_pnl_usd(
+                    symbol, pos.side, qty, int(open_row.get("entry_bar_time") or 0),
+                    int(bars[-1]["t"]), pos.entry,
+                )
+                shadow_store.close_row(open_row["id"], updates, int(bars[-1]["t"]))
+                shadow_store.settle_trade_on_equity(
                     STRATEGY_NAME, pos.realized_pnl_atr_weighted, pos.atr0, qty,
                 )
+                new_equity = shadow_store.get_net_equity(STRATEGY_NAME)
                 logger.info(
                     f"✅ [影子] {symbol} 4H裸K放量反转平仓 {pos.side} "
                     f"entry={pos.entry:.4f} exit={curr_px:.4f} "
@@ -533,13 +554,15 @@ def run_symbol_tick(symbol: str, tv_tf_sec: int, breath: dict, tiers: List[dict]
         entry_bar_time = score["bar_time"]
         entry_mode = "close"
 
+    entry_px = shadow_store.apply_simulated_slippage(entry_px, side, True)
     pos = ShadowPosition(symbol, side, entry_px, score["atr"], tier, entry_bar_time, breath, tier_cfg)
     row = _open_row_from_position(pos, interval, score["adx"], score["bar_time"])
     # 2026-08-29新增：qty按实盘真实公式(position_sizing.compute_qty)算，
     # 用这套策略自己当前的模拟净值(从1000 USDT起步、按已平仓盈亏复利)，
     # 不是每笔都固定1000重算——这样"最终战绩"才是真实的净值曲线，不是
     # 一堆互相独立、看不出复利效果的单笔快照。
-    row["qty"] = compute_qty(shadow_store.get_equity(STRATEGY_NAME), entry_px, pos.stop, tier)
+    row["qty"] = compute_qty(shadow_store.get_net_equity(STRATEGY_NAME), entry_px, pos.stop, tier)
+    row["fee_usd"] = abs(entry_px * row["qty"]) * shadow_store.SIM_TAKER_FEE_RATE
     shadow_store.insert_open_row(row)
     logger.info(
         f"📥 [影子] {symbol} 开仓({entry_mode}) {side} @ {entry_px:.4f} "

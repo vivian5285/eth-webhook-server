@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Heikin Ashi 趋势 —— 2026-09-10 应宝贝"加著名指标"要求新增。平均K线
-(Heikin-Ashi) 是把 OHLC 做递归平滑的经典 K 线变换，"骑趋势"最常用的
-可视化方法之一，规则完全确定。
+Heikin Ashi 趋势 —— 2026-09-23 从CoinW实盘版(/home/coinw/coinw-hft-server/
+heikin_ashi_strategy.py，本身又是从擂台系统187.53.133.188
+strategy_engine/strategies/heikin_ashi_trend.py原样搬过去的)逐字节复制到
+币安账户C。138笔纸面交易、38.5%胜率、盈亏比2.25、最大回撤8.85(ATR加权
+单位)，是宝贝选中要在真实账户复刻的策略。
+
+跨仓库复制而不是import：币安这边是完全独立的代码库/VPS，没有
+strategy_engine这个包。为了保证"验证的是什么，实盘跑的就是什么"，
+DEFAULT_PARAMS跟擂台/CoinW两份逐字节一致，不做任何参数调整。
 
 HA 计算：
   HA_close = (o + h + l + c) / 4
@@ -12,23 +18,15 @@ HA 计算：
   HA_low   = min(l, HA_open, HA_close)
 
 规则：
-  · 连续 streak_len(3) 根同色 HA K 线（阳：HA_close>HA_open）→ 第 streak_len
-    根顺势进场。可选加强：要求这几根 HA 实体在放大（趋势在加速）。
-  · 止损：ATR × atr_stop_mult。
-  · 离场：出现第一根反色 HA K 线（趋势转弱信号），或出现明显反向影线
-    （阳线里 HA_open−HA_low > 实体的 wick_frac 倍 = 下方承压），或 ATR 止损。
-    不设固定止盈——HA 的用途就是"一直待在趋势里直到颜色变"。
-
-跟擂台已有趋势跟随的区别：turtle/ema_cross/supertrend/hma 都是在**原始
-价格**上算指标；HA 是先把 K 线本身平滑掉再看颜色，对单根插针不敏感，
-连续同色 = 趋势的"视觉确认"。是这一簇里唯一"改造 K 线本身"的做法。
-周期 4h。
+  · 连续 streak_len(3) 根同色 HA K 线 → 第 streak_len 根顺势进场，且要求
+    这几根 HA 实体递增放大(趋势在加速)。
+  · 止损：ATR × 2.0（初始值，实盘引擎里会按真实成交价重锚）。
+  · 离场：出现反色 HA K 线，或出现明显反向影线，不设固定止盈——让利润
+    奔跑直到颜色变。
 """
 from __future__ import annotations
 
 from typing import Dict, List, Optional
-
-from strategy_engine import indicators
 
 DEFAULT_PARAMS = {
     "streak_len": 3,
@@ -36,42 +34,44 @@ DEFAULT_PARAMS = {
     "wick_frac": 1.0,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
-    # 2026-09-19新增(heikin_ashi_trend_v2对照实验，宝贝要求)：
-    # require_growing_body原版要求streak里"实体一根比一根大"——这个条件
-    # 恰好把入场点锁定在这波HA同色行情里实体最夸张、最延伸的那一根，是
-    # 系统性的偏晚入场，不是随机噪音。HA本身的经典读法是"强势K线下影极短"，
-    # 但这套代码只把这条读法用在离场(wick_frac)上，入场反而没用——等于
-    # 拿HA自己的强弱标准去晚出场，却不用来挑好入场点。
-    # require_clean_entry_bar(默认False=原行为不变)：True时不再要求实体
-    # 递增，改成要求streak最后一根(触发进场那一根)本身下影(多)/上影(空)
-    # 够短——用HA自身已有的定义去"评分入场质量"，而不是新造一个参数。
     "require_clean_entry_bar": False,
-    # wick_exit_atr_floor_frac(默认0.0=原行为不变，分母floor仍是1e-9)：
-    # 原版离场判断 (cur.o - cur.l) > wick_frac × max(实体, 1e-9) —— HA实体
-    # 收缩趋近0(十字星，趋势中段很常见的犹豫K线)时分母趋近1e-9，任何一点
-    # 下影线都会触发离场，等于对十字星极度敏感、经常提前把仓位震出去。
-    # 传大于0的值(比如0.15)后分母floor改成max(实体, floor_frac×ATR)，
-    # 用ATR兜住十字星场景，不再对分母趋零敏感——这是数值稳定性修正，
-    # 不是新的择时逻辑。
     "wick_exit_atr_floor_frac": 0.0,
-    # use_ema_direction_filter：额外要求EMA(7)相对EMA(25)的站上/跌破方向
-    # 跟HA颜色方向一致，过滤"HA刚好连续同色但大周期其实还在盘整"的情况。
     "use_ema_direction_filter": False,
     "ema_fast_len": 7,
     "ema_slow_len": 25,
-    # 纯变量EMA对照版使用：除快慢线多空排列外，还要求收盘价位于两条
-    # 均线同一侧。默认False，保证原版和既有v2行为不变。
     "ema_require_price_side": False,
-    # 2026-09-21新增(heikin_ashi_trend_v3对照实验，宝贝要求思考怎么优化)：
-    # 原版离场只看"当前这一根HA是不是反色"——单根反色就砍仓，但趋势中段
-    # 出现一根孤立的回调反色K线很常见，不代表趋势真的结束，这样砍等于
-    # 系统性地把winner提前腰斩，跟这套战法自己"不设固定止盈、让利润奔跑"
-    # 的设计初衷矛盾。exit_confirm_bars(默认1=原行为不变)：要求连续这么
-    # 多根反色HA K线才触发"趋势转弱"离场，给单根回调噪音留缓冲——明确
-    # 不影响wick_frac那条独立的"明显反向影线"应急离场，那条本来就该对
-    # 单根异常保持敏感，不属于本次修改范围。
     "exit_confirm_bars": 1,
 }
+
+
+def wilder_atr(bars: List[dict], period: int = 14) -> float:
+    """跟strategy_engine/indicators.py::wilder_atr完全同一套公式(Wilder
+    平滑的真实波幅均值)，独立复制一份避免跨仓库依赖。"""
+    if len(bars) < period + 1:
+        return 0.0
+    trs = []
+    prev_close = float(bars[0]["c"])
+    for b in bars[1:]:
+        h, l, c = float(b["h"]), float(b["l"]), float(b["c"])
+        tr = max(h - l, abs(h - prev_close), abs(l - prev_close))
+        trs.append(tr)
+        prev_close = c
+    if len(trs) < period:
+        return 0.0
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return float(atr)
+
+
+def ema(values: List[float], period: int) -> List[float]:
+    if period <= 0 or len(values) < period:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    out = [sum(values[:period]) / period]
+    for value in values[period:]:
+        out.append(value * alpha + out[-1] * (1.0 - alpha))
+    return out
 
 
 def _ha(bars: List[dict]) -> List[dict]:
@@ -108,7 +108,7 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return abs(x["c"] - x["o"])
 
     cur = ha[-1]
-    atr = indicators.wilder_atr(bars, atr_len)
+    atr = wilder_atr(bars, atr_len)
     floor_frac = float(p.get("wick_exit_atr_floor_frac") or 0.0)
     wick_floor = max(floor_frac * atr, 1e-9) if atr > 0 else 1e-9
 
@@ -153,19 +153,19 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return None
 
     if bool(p.get("use_ema_direction_filter")):
-        closes = indicators.closes(bars)
-        ema_f = indicators.ema(closes, int(p["ema_fast_len"]))
-        ema_s = indicators.ema(closes, int(p["ema_slow_len"]))
-        if not ema_f or not ema_s:
+        closes = [float(b["c"]) for b in bars]
+        ema_fast = ema(closes, int(p["ema_fast_len"]))
+        ema_slow = ema(closes, int(p["ema_slow_len"]))
+        if not ema_fast or not ema_slow:
             return None
-        long_ema_ok = ema_f[-1] > ema_s[-1]
-        short_ema_ok = ema_f[-1] < ema_s[-1]
+        long_ok = ema_fast[-1] > ema_slow[-1]
+        short_ok = ema_fast[-1] < ema_slow[-1]
         if bool(p.get("ema_require_price_side")):
-            long_ema_ok = long_ema_ok and price > ema_f[-1] and price > ema_s[-1]
-            short_ema_ok = short_ema_ok and price < ema_f[-1] and price < ema_s[-1]
-        if all_green and not long_ema_ok:
+            long_ok = long_ok and price > ema_fast[-1] and price > ema_slow[-1]
+            short_ok = short_ok and price < ema_fast[-1] and price < ema_slow[-1]
+        if all_green and not long_ok:
             return None
-        if all_red and not short_ema_ok:
+        if all_red and not short_ok:
             return None
 
     d = 1 if all_green else -1
@@ -174,5 +174,5 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         "price": round(price, 6), "atr": round(atr, 6),
         "stop_loss": round(price - d * atr * float(p["atr_stop_mult"]), 6),
         "tier": 1, "bar_time": bar_time,
-        "reason": f"连续 {sk} 根 HA {'阳' if d == 1 else '阴'}线{'(实体放大)' if p['require_growing_body'] else ''}",
+        "reason": f"连续 {sk} 根 HA {'阳' if d == 1 else '阴'}线(实体放大)",
     }

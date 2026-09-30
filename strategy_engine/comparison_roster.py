@@ -215,6 +215,15 @@ TOKENIZED_STOCK_SYMBOLS = [
     "SNDKUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "GSUSDT",
     "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT",
     "SKHYNIXUSDT", "ASMLUSDT",
+    # 2026-09-28新增：宝贝提出"美股AI系列、存储系列可能走自己的独立行情，
+    # 跟币圈联动没那么强"，查了一下现有名单——ANTHROPIC/OPENAI(AI)、
+    # SKHYNIX/SNDK/MU(存储)已经各占了不少，但都是相对间接的代理标的。
+    # NVDAUSDT是AI硬件里流动性/代表性最强的纯血标的，AMD/AVGO/SMCI是同
+    # 主题的算力硬件链条补充，WDCUSDT是存储链条里跟SKHYNIX/SNDK/MU同类
+    # 的另一家直接同行。5个都在币安核实过K线能正常拉取(futures_klines
+    # 4h测试通过)。先只加进擂台纸面跟踪，不碰实盘——按老流程，积累够
+    # 样本、走完分桶+近期窗口+实时回撤那套方法论验证过再考虑上真钱。
+    "NVDAUSDT", "AMDUSDT", "AVGOUSDT", "SMCIUSDT", "WDCUSDT",
 ]
 
 _ALL_SYMBOLS = [
@@ -381,10 +390,66 @@ SINGLE_SYMBOL_ROSTER = (
     # 2026-09-10 第六批：6 个著名指标/组合战法（宝贝要求"全面搜索"）。
     #   td_sequential 用 1d（DeMark 原始日线级别）；其余 5 个 4h。
     + [{"symbol": s, "strategy": "ttm_squeeze", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-28新增：宝贝提出4h天生反应慢(举了DOGE已经跌下去才在4h支撑
+    # 位开空的例子)，问要不要缩短周期做前瞻判断。09-20的agile实验已经测过
+    # "提前入场"这条路(不等K线收盘，半根就抢)，crypto桶从+135.16%变
+    # -24.54%，明显更差；这次测的是"周期本身更短、依然等完整收盘"，机制
+    # 不同，没测过。2h是币安原生周期；150m靠klines.py::get_bars内建的15m
+    # 合成(跟TV复刻90m/150m同一条既有机制)。同一份代码、同一套参数，只
+    # 换timeframe，不猜、跑一段时间用真实数据按分桶方法论对照4h基础版。
+    + [{"symbol": s, "strategy": "ttm_squeeze_2h", "timeframe": "2h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ttm_squeeze_150m", "timeframe": "150m"} for s in _ALL_SYMBOLS]
+    # 2026-09-29新增：出场逻辑/加仓节奏对照实验，全部基于ttm_squeeze
+    # (当前实盘权重最高的策略)，说明见strategies/__init__.py同一批注释。
+    # 止损宽度两个纯params覆盖(base是2.0x)：tight=1.2x更快止损保护本金，
+    # wide=3.0x给趋势更多呼吸空间；trail=不改初始止损宽度，但入场后
+    # 持续用ATR吊灯止损跟踪(引擎侧新增_maybe_trail_atr)；tp=入场即挂
+    # 3.0x ATR固定止盈(跟base"不设止盈"反着测)；pyramid=先开50%试探仓，
+    # 下一根确认没反转就补满(跟base一次性满仓反着测)。
+    + [{"symbol": s, "strategy": "ttm_squeeze_tight_stop", "timeframe": "4h",
+        "params": {"atr_stop_mult": 1.2}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ttm_squeeze_wide_stop", "timeframe": "4h",
+        "params": {"atr_stop_mult": 3.0}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ttm_squeeze_trail", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ttm_squeeze_tp", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "ttm_squeeze_pyramid", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "schaff_trend_cycle", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-29新增：Renko砖形图趋势系统，说明见renko_trend.py顶部——
+    # 全品种铺开测(不只是黄金)，跟其余策略一样先看真实数据再决定要不要
+    # 局限在特定资产类别。
+    + [{"symbol": s, "strategy": "renko_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-29新增：斐波那契回撤反弹，说明见fibonacci_retracement.py顶部。
+    + [{"symbol": s, "strategy": "fibonacci_retracement", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-29新增：双均线(7/25)站上/跌破，宝贝要求的1h/90m两个独立周期，
+    # 各自单独开单，不互相确认。90m靠klines.py内建15m合成，无需新代码。
+    + [{"symbol": s, "strategy": "dual_ema_band_7_25_1h", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "dual_ema_band_7_25_90m", "timeframe": "90m"} for s in _ALL_SYMBOLS]
+    # 2026-09-30新增：1倍本金"现货式"仓位对照组，只注册在SNDK/OPENAI/MU
+    # 三个品种上(宝贝点名的、最早开始跑的美股，历史上单月涨跌都见过
+    # 10%+)，不是全品种——仓位公式说明见multi_strategy_runner.py顶部
+    # SPOT_EQUIVALENT_STRATEGIES注释。
+    + [{"symbol": s, "strategy": "dual_ema_spot_7_25_1h", "timeframe": "1h"}
+       for s in ("SNDKUSDT", "OPENAIUSDT", "MUUSDT")]
+    + [{"symbol": s, "strategy": "dual_ema_spot_7_25_90m", "timeframe": "90m"}
+       for s in ("SNDKUSDT", "OPENAIUSDT", "MUUSDT")]
+    # 2026-09-29新增：双均线+雷达ADX分级移动止盈版，止损状态机见
+    # multi_strategy_runner.py::_maybe_radar_trail。
+    + [{"symbol": s, "strategy": "dual_ema_band_7_25_radar_1h", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "dual_ema_band_7_25_radar_90m", "timeframe": "90m"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "td_sequential", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "wavetrend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "heikin_ashi_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-24新增纯变量A/B：原版规则一个不动，只加收盘价与EMA7/25
+    # 同侧且快慢线同向的方向门槛；不混入v2其它入场/离场改动。
+    + [{"symbol": s, "strategy": "heikin_ashi_trend_ema7_25", "timeframe": "4h",
+        "params": {"use_ema_direction_filter": True, "ema_require_price_side": True}}
+       for s in _ALL_SYMBOLS]
+    # 2026-09-24：资产分类组合对照。币圈允许HMA或MTF任一确认HA；美股
+    # 代币排除当前样本为负的HMA，只用HA+MTF。黄金无正优势，暂不硬凑。
+    + [{"symbol": s, "strategy": "trend_ensemble_crypto", "timeframe": "4h", "mtf": ["1d"],
+        "params": {"asset_class": "crypto"}} for s in _CRYPTO_ONLY_SYMBOLS]
+    + [{"symbol": s, "strategy": "trend_ensemble_stocks", "timeframe": "4h", "mtf": ["1d"],
+        "params": {"asset_class": "stocks"}} for s in _US_STOCK_SECTOR_SYMBOLS]
     # 2026-09-19新增：heikin_ashi_trend_v2——原版require_growing_body要求
     # streak里实体一根比一根大，等于系统性地把入场锁定在这波HA同色行情
     # 最夸张、最延伸的那一根(偏晚入场)；离场用的"下影线过长"判断反而没用
@@ -405,6 +470,11 @@ SINGLE_SYMBOL_ROSTER = (
     # 连续2根反色HA K线才离场，见strategies/__init__.py同名条目说明。
     + [{"symbol": s, "strategy": "heikin_ashi_trend_v3", "timeframe": "4h",
         "params": {"exit_confirm_bars": 2}} for s in _ALL_SYMBOLS]
+    # 2026-09-24新增：不再把未收盘4h K线临时当收盘线。两根已闭合4h HA
+    # 建立方向后，用已闭合1h突破先开1/3试探；下一根已闭合4h满足原版
+    # 三连同色+实体放大才补余下2/3，否则试探仓退出。最终目标权重不变。
+    + [{"symbol": s, "strategy": "heikin_ashi_adaptive_probe", "timeframe": "4h",
+        "mtf": ["1h"]} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "kdj_cross", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # 2026-09-12：vwap_ema_regime——ADX(2h)状态开关：趋势腿走2h EMA(10/30)，
     # 震荡腿走 vwap_mean_reversion 原版逻辑但要 15m 分辨率，靠 "mtf":["15m"]
@@ -472,6 +542,18 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "keltner_channel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第二批新增2套(DeepSeek建议剥离出的纯规则版) ────────────
     + [{"symbol": s, "strategy": "chanlun_pivot", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-30：chanlun_pivot两个优化对照实验，见各自模块顶部说明；
+    # 跟chanlun_pivot同一批品种、同一个4h基准，duan版不需要额外周期，
+    # mtf_div版额外拿1d给大级别背驰确认用。
+    + [{"symbol": s, "strategy": "chanlun_pivot_duan", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "chanlun_pivot_mtf_div", "timeframe": "4h", "mtf": ["1d"]}
+       for s in _ALL_SYMBOLS]
+    # 2026-09-30：成交量哨兵实验身份(宝贝要求"先在擂台单独搭一个实验策略
+    # 验证...再考虑要不要上实盘")——跟chanlun_pivot开仓信号逐字一致(见
+    # strategies/__init__.py同名注册说明)，唯一区别是multi_strategy_runner.py
+    # 给它额外挂了盘中成交量哨兵离场(SENTINEL_STRATEGIES)，独立$1000净
+    # 权益，纯对照"提前离场"这一项改动的净效果。
+    + [{"symbol": s, "strategy": "chanlun_pivot_sentinel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "adx_efficiency_zscore", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第三批新增5套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "donchian_reversal", "timeframe": "1d"} for s in _ALL_SYMBOLS]
@@ -481,6 +563,20 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "turtle_system2", "timeframe": "4h", "params": _TURTLE_SYSTEM2_PARAMS} for s in _TURTLE_SYMBOLS]
     # ── 2026-09-05第四批新增3套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "hma_trend", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-09-28新增：同一批周期缩短对照，说明见上面ttm_squeeze_2h/150m
+    # 注释。
+    + [{"symbol": s, "strategy": "hma_trend_2h", "timeframe": "2h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "hma_trend_150m", "timeframe": "150m"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "hma_trend_reversal_control", "timeframe": "4h",
+        "experiment_start_after_bar": 1790294400000}
+       for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "hma_trend_reverse_strong", "timeframe": "4h",
+        "experiment_start_after_bar": 1790294400000,
+        "params": {"reversal_mode": "strong_immediate"}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "hma_trend_reverse_tiered", "timeframe": "4h",
+        "experiment_start_after_bar": 1790294400000,
+        "params": {"reversal_mode": "tiered_confirm"}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "hma_trend_crypto", "timeframe": "4h"} for s in _CRYPTO_ONLY_SYMBOLS]
     # 2026-09-20新增：hma_trend_agile——跟原版同一套逻辑/参数，只加
     # early_entry开关，见mtf_ema_macd_cci_agile同一批说明。
     + [{"symbol": s, "strategy": "hma_trend_agile", "timeframe": "4h", "early_entry": True}
@@ -534,6 +630,15 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "rsi_mean_reversion_2080_1d", "timeframe": "1d",
         "params": {"ob": 80.0, "os": 20.0, "ob_tier2": 90.0, "os_tier2": 10.0}}
        for s in _ALL_SYMBOLS]
+    # 2026-09-30新增：crypto组合协同实验(见crypto_combo_experiment.py顶部
+    # 说明)——对照组(纯blend)vs实验组(blend+residual_momentum让权)，跑
+    # 在跟实盘CRYPTO_SLEEVES同一个纯加密品种范围(_CRYPTO_ONLY_SYMBOLS)、
+    # 同一个4h基准周期上，只有实验组需要额外拿1d给residual_momentum用。
+    + [{"symbol": s, "strategy": "crypto_combo_blend_4h", "timeframe": "4h"}
+       for s in _CRYPTO_ONLY_SYMBOLS]
+    + [{"symbol": s, "strategy": "crypto_combo_coordinated_4h", "timeframe": "4h",
+        "mtf": ["1d"]}
+       for s in _CRYPTO_ONLY_SYMBOLS]
 )
 
 # 跨品种战法：一个篮子整体参与，不是逐品种配置
@@ -549,6 +654,22 @@ UNIVERSE_ROSTER = [
         "timeframe": "4h",
         "symbols": _ALL_SYMBOLS,
         "lookback_bars": 20,
+    },
+    # Asset-bucket control: same dual-momentum rules, only the ranking pool changes.
+    # Keep costs, timeframe, sizing and exits identical to the mixed-universe baseline.
+    {
+        "strategy": "dual_momentum_stocks",
+        "timeframe": "4h",
+        "symbols": _US_STOCK_SECTOR_SYMBOLS,
+        "lookback_bars": 20,
+        "require_aligned_bars": True,
+    },
+    {
+        "strategy": "dual_momentum_crypto",
+        "timeframe": "4h",
+        "symbols": _CRYPTO_ONLY_SYMBOLS,
+        "lookback_bars": 20,
+        "require_aligned_bars": True,
     },
     # 2026-09-20新增：Clenow动量排名(见strategies/clenow_momentum.py顶部
     # 说明)——lookback_bars=90直接用《Stocks on the Move》原书数字，不是
@@ -642,6 +763,12 @@ UNIVERSE_ROSTER = [
         "strategy": "residual_momentum",
         "timeframe": "1d",
         "symbols": _ALL_SYMBOLS,
+        "lookback_bars": 30,
+    },
+    {
+        "strategy": "residual_momentum_crypto",
+        "timeframe": "1d",
+        "symbols": _CRYPTO_ONLY_SYMBOLS,
         "lookback_bars": 30,
     },
 ]

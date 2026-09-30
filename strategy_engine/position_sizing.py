@@ -66,14 +66,14 @@ def compute_liquidation_price(entry_price: float, side: str, leverage: float = L
 # 同时开13-14笔，heikin_ashi_trend这类跑满27个品种独立触发的趋势策略行情
 # 一致时也会同时开20+笔——全库排查过，65套策略里最严重的time_series_
 # momentum_v2同时名义敞口达到净值的10.89倍，真实账户根本扛不住，也大概率
-# 会被交易所保证金不足拒单。MAX_TOTAL_NOTIONAL_MULT=3.0参考本项目一贯的
-# 低杠杆纪律(vwap_live真账户用3倍杠杆)，不是随手拍的数字。
+# 会被交易所保证金不足拒单。2026-09-24起与三账户实盘口径统一为6.6倍
+# 总名义敞口；真实杠杆只影响保证金效率，不改变这里的下单名义权重。
 #
 # 这里选择"按剩余额度等比缩小新仓位"而不是"额度不够就跳过信号"——后者
 # 违反宝贝对vwap_live定下的"信号来了必须开仓"原则；缩小仓位才是真实资金
 # 有限时该有的行为(仓位越占越满，新仓位自然越开越小，额度用完新仓位趋于
 # 0但不会主动拒绝信号本身)。
-MAX_TOTAL_NOTIONAL_MULT = 3.0
+MAX_TOTAL_NOTIONAL_MULT = 6.6
 
 
 def clamp_qty_to_portfolio_cap(

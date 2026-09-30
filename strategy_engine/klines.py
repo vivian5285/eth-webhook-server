@@ -34,6 +34,52 @@ NATIVE_INTERVALS = {
 
 _MINUTE_MS = 60 * 1000
 
+# Shared within one paper-runner process. A rejected IP must not be retried for
+# every roster entry, and a closed candle need not be downloaded every 5 minutes.
+_hard_block_until = 0.0
+_soft_pause_until = 0.0
+_last_request_at = 0.0
+_closed_bars_cache: dict[tuple, tuple[float, List[dict]]] = {}
+
+
+def _wait_for_market_data_slot() -> bool:
+    global _last_request_at
+    now = time.monotonic()
+    if now < _hard_block_until:
+        return False
+    if now < _soft_pause_until:
+        time.sleep(_soft_pause_until - now)
+    wait = _last_request_at + 0.25 - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_at = time.monotonic()
+    return True
+
+
+def _observe_request_weight(headers) -> None:
+    global _soft_pause_until
+    try:
+        used = int(headers.get("X-MBX-USED-WEIGHT-1M") or 0)
+    except (TypeError, ValueError):
+        return
+    if used >= 1200:
+        # Leave at least half of the published 2400/min IP budget for other
+        # processes sharing this VPS. Binance's minute window resets on UTC time.
+        pause = 62.0 - (time.time() % 60.0)
+        _soft_pause_until = max(_soft_pause_until, time.monotonic() + pause)
+        logger.warning("[klines] IP weight=%s; pause %.0fs until next minute", used, pause)
+
+
+def _cache_closed_bars(key: Optional[tuple], interval: str, bars: List[dict]) -> None:
+    if not key or not bars:
+        return
+    minutes = timeframe_to_minutes(interval)
+    if not minutes:
+        return
+    next_close = int(bars[-1]["t"]) / 1000.0 + 2 * minutes * 60 + 5
+    if next_close > time.time():
+        _closed_bars_cache[key] = (next_close, bars)
+
 
 def _minutes_of(interval: str) -> Optional[int]:
     """把 '90m'/'150m' 这类非原生周期解析成分钟数；原生/无法解析返回 None。"""
@@ -187,11 +233,24 @@ def fetch_klines_raw(
     url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
     last_err = None
     for attempt in range(max(1, retries)):
+        if not _wait_for_market_data_slot():
+            return []
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "strategy-engine-readonly"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                _observe_request_weight(resp.headers)
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            if e.code in (418, 429):
+                global _hard_block_until
+                try:
+                    retry_after = float(e.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                wait = retry_after if retry_after > 0 else (900.0 if e.code == 418 else 60.0)
+                _hard_block_until = max(_hard_block_until, time.monotonic() + wait + 2.0)
+                logger.warning("[klines] HTTP %s; all Kline requests paused %.0fs", e.code, wait)
+                return []
             logger.warning(f"[klines] {symbol} {interval} HTTP {e.code}: {e.reason}")
             if e.code < 500:
                 return []
@@ -293,6 +352,12 @@ def get_bars(
     因为 merge_bars/币安接口本身都不会吐出还没走完的K线）。
     """
     s = str(interval or "").strip().lower()
+    cache_key = None
+    if start_time_ms is None and end_time_ms is None and limit:
+        cache_key = (symbol.upper(), s, int(limit))
+        hit = _closed_bars_cache.get(cache_key)
+        if hit and time.time() < hit[0]:
+            return hit[1]
     if s in NATIVE_INTERVALS:
         if start_time_ms:
             raw = fetch_klines_raw(symbol, s, limit=limit, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
@@ -302,7 +367,9 @@ def get_bars(
         # 币安REST最后一根可能是当前未收盘K线，直接扔掉最保险
         if bars and end_time_ms is None:
             bars = bars[:-1]
-        return bars[-limit:] if limit else bars
+        result = bars[-limit:] if limit else bars
+        _cache_closed_bars(cache_key, s, result)
+        return result
 
     target_minutes = _minutes_of(s)
     if not target_minutes:
@@ -329,4 +396,6 @@ def get_bars(
     if src_bars and end_time_ms is None:
         src_bars = src_bars[:-1]  # 丢掉源周期未收盘的最后一根
     merged = merge_bars(src_bars, target_minutes)
-    return merged[-limit:] if limit else merged
+    result = merged[-limit:] if limit else merged
+    _cache_closed_bars(cache_key, s, result)
+    return result

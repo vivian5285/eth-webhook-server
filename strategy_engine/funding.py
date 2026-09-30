@@ -37,6 +37,7 @@ FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 _CACHE_TTL_SEC = 1800
 # {symbol: {"ts": float, "rates": [float, ...]}}  —— rates 按时间升序，最后一个最新
 _cache: dict = {}
+_raw_cache: dict = {}
 
 
 def _fetch_raw(symbol: str, limit: int, timeout: float = 10.0, retries: int = 3) -> List[dict]:
@@ -74,7 +75,13 @@ def get_funding_rates(symbol: str, limit: int = 500) -> List[float]:
     if hit and (now - hit["ts"] < _CACHE_TTL_SEC) and hit["rates"]:
         return hit["rates"]
 
-    raw = _fetch_raw(sym, limit)
+    raw_hit = _raw_cache.get(sym)
+    if raw_hit and now - raw_hit["ts"] < _CACHE_TTL_SEC and raw_hit["events"]:
+        raw = raw_hit["events"][-limit:]
+    else:
+        raw = _fetch_raw(sym, max(limit, 1000))
+        if raw:
+            _raw_cache[sym] = {"ts": now, "events": raw}
     rates: List[float] = []
     for r in raw:
         try:
@@ -87,6 +94,64 @@ def get_funding_rates(symbol: str, limit: int = 500) -> List[float]:
     # 拉取失败：宁可返回上一份稍旧的缓存也不返回空(过滤器用稍旧的分位数
     # 分布依然合理)，实在一次都没成功过才返回空
     return hit["rates"] if hit else []
+
+
+def get_funding_events(symbol: str, limit: int = 1000) -> List[dict]:
+    """Return recent raw funding settlements with a short process cache."""
+    sym = str(symbol or "").upper()
+    now = time.time()
+    hit = _raw_cache.get(sym)
+    if hit and now - hit["ts"] < _CACHE_TTL_SEC and hit["events"]:
+        return list(hit["events"][-limit:])
+    raw = _fetch_raw(sym, limit)
+    if raw:
+        _raw_cache[sym] = {"ts": now, "events": raw}
+        return raw
+    return list(hit["events"][-limit:]) if hit else []
+
+
+def estimate_funding_pnl_usd(
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_bar_time: int,
+    exit_bar_time: int,
+    fallback_price: float,
+) -> float:
+    """Estimate settled funding cashflow while a paper position was open.
+
+    Positive funding is paid by longs and received by shorts. Binance's raw
+    history normally includes markPrice; the entry/average price is used only
+    as a fallback for older or incomplete responses.
+    """
+    try:
+        start_ms = int(entry_bar_time or 0)
+        end_ms = int(exit_bar_time or 0)
+        if 0 < start_ms < 100_000_000_000:
+            start_ms *= 1000
+        if 0 < end_ms < 100_000_000_000:
+            end_ms *= 1000
+        qty_abs = abs(float(qty or 0.0))
+        fallback = float(fallback_price or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not symbol or qty_abs <= 0 or start_ms <= 0 or end_ms <= start_ms:
+        return 0.0
+    side_sign = -1.0 if str(side or "").upper() in ("LONG", "BUY") else 1.0
+    cashflow = 0.0
+    for event in get_funding_events(symbol, 1000):
+        try:
+            funding_time = int(event.get("fundingTime") or 0)
+            if not (start_ms < funding_time <= end_ms):
+                continue
+            rate = float(event.get("fundingRate") or 0.0)
+            mark_price = float(event.get("markPrice") or fallback)
+            if mark_price <= 0:
+                mark_price = fallback
+            cashflow += side_sign * qty_abs * mark_price * rate
+        except (TypeError, ValueError):
+            continue
+    return round(cashflow, 8)
 
 
 def funding_percentile(symbol: str, limit: int = 500) -> Optional[float]:

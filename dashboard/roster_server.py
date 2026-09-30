@@ -41,7 +41,7 @@ from flask_cors import CORS
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from strategy_engine import shadow_store  # noqa: E402
+from strategy_engine import position_sizing, shadow_store  # noqa: E402
 from strategy_engine.comparison_roster import (  # noqa: E402
     PAIRS_ROSTER,
     SINGLE_SYMBOL_ROSTER,
@@ -60,7 +60,7 @@ CORS(app)
 
 STATIC_DIR = Path(__file__).resolve().parent / "roster_static"
 
-BINANCE_PRICE_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
+BINANCE_PRICE_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 
 _ALL_STRATEGY_NAMES = sorted(set(
     [e["strategy"] for e in SINGLE_SYMBOL_ROSTER]
@@ -76,6 +76,76 @@ _ALL_SYMBOLS = sorted(set(
 
 _price_cache = {"ts": 0.0, "data": {}}
 _PRICE_CACHE_TTL_SEC = 10
+_HMA_EXPERIMENTS = (
+    "hma_trend_reversal_control",
+    "hma_trend_reverse_strong",
+    "hma_trend_reverse_tiered",
+)
+
+
+def _hma_experiment_metrics():
+    """Closed-trade drawdown plus executed turnover from the common start."""
+    out = {name: {
+        "realized_max_drawdown_pct": 0.0,
+        "turnover_mult": 0.0,
+        "stop_count": 0,
+        "worst_trade_net_usd": None,
+    } for name in _HMA_EXPERIMENTS}
+    marks = ",".join("?" for _ in _HMA_EXPERIMENTS)
+    uri = f"file:{shadow_store.DB_PATH}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=3) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM shadow_positions_v2 WHERE strategy IN ({marks}) "
+            "ORDER BY COALESCE(exit_bar_time, entry_bar_time), id",
+            _HMA_EXPERIMENTS,
+        ).fetchall()
+    equity = {name: float(shadow_store.DEFAULT_STARTING_EQUITY) for name in out}
+    peak = dict(equity)
+    for raw in rows:
+        row = dict(raw)
+        name = row["strategy"]
+        metrics = out[name]
+        qty = abs(float(row.get("qty") or 0))
+        entry = float(row.get("entry") or 0)
+        exit_price = float(row.get("exit_price") or 0)
+        metrics["turnover_mult"] += abs(entry * qty)
+        if row.get("status") != "closed":
+            continue
+        metrics["turnover_mult"] += abs(exit_price * qty)
+        gross = (
+            float(row.get("realized_pnl_atr_weighted") or 0)
+            * float(row.get("atr0") or 0) * qty
+        )
+        net = (
+            gross - shadow_store.estimate_closed_trade_fees_usd(row)
+            + float(row.get("funding_pnl_usd") or 0)
+        )
+        equity[name] += net
+        peak[name] = max(peak[name], equity[name])
+        drawdown = 100 * (peak[name] - equity[name]) / max(peak[name], 0.01)
+        metrics["realized_max_drawdown_pct"] = max(
+            metrics["realized_max_drawdown_pct"], drawdown,
+        )
+        if metrics["worst_trade_net_usd"] is None:
+            metrics["worst_trade_net_usd"] = net
+        else:
+            metrics["worst_trade_net_usd"] = min(
+                metrics["worst_trade_net_usd"], net,
+            )
+        reason = str(row.get("exit_reason") or "").lower()
+        if "止损" in reason or "强平" in reason or "stop" in reason or "liq" in reason:
+            metrics["stop_count"] += 1
+    for metrics in out.values():
+        metrics["turnover_mult"] = round(
+            metrics["turnover_mult"] / shadow_store.DEFAULT_STARTING_EQUITY, 2,
+        )
+        metrics["realized_max_drawdown_pct"] = round(
+            metrics["realized_max_drawdown_pct"], 2,
+        )
+        if metrics["worst_trade_net_usd"] is not None:
+            metrics["worst_trade_net_usd"] = round(metrics["worst_trade_net_usd"], 2)
+    return out
 
 
 def _fetch_live_prices():
@@ -92,7 +162,11 @@ def _fetch_live_prices():
             raw = resp.read().decode("utf-8")
         rows = json.loads(raw)
         wanted = set(_ALL_SYMBOLS)
-        data = {r["symbol"]: float(r["price"]) for r in rows if r.get("symbol") in wanted}
+        data = {
+            r["symbol"]: float(r.get("markPrice") or r.get("price"))
+            for r in rows
+            if r.get("symbol") in wanted and (r.get("markPrice") or r.get("price"))
+        }
         _price_cache["ts"] = now
         _price_cache["data"] = data
         return data
@@ -121,9 +195,89 @@ def _augment_open_rows(rows):
     return rows
 
 
+def _strategy_open_risk_metrics():
+    """按当前标记价格汇总敞口、浮盈亏、止损风险和假设立即平仓的费用。"""
+    rows = shadow_store.list_open()
+    prices = _fetch_live_prices()
+    out = {}
+    for row in rows:
+        strategy = row.get("strategy")
+        if not strategy:
+            continue
+        entry = float(row.get("entry") or 0)
+        raw_mark = prices.get(row.get("symbol"))
+        mark = float(raw_mark or entry)
+        qty = abs(float(row.get("qty") or 0))
+        stop = float(row.get("stop") or 0)
+        direction = 1.0 if str(row.get("side") or "").upper() == "LONG" else -1.0
+        metrics = out.setdefault(strategy, {
+            "gross_exposure_usd": 0.0,
+            "open_unrealized_pnl_usd": 0.0,
+            "open_estimated_fees_usd": 0.0,
+            "stop_risk_usd": 0.0,
+            "priced_open_count": 0,
+            "unpriced_open_count": 0,
+        })
+        if raw_mark is None:
+            metrics["unpriced_open_count"] += 1
+        else:
+            metrics["priced_open_count"] += 1
+        metrics["gross_exposure_usd"] += abs(mark * qty)
+        metrics["open_unrealized_pnl_usd"] += direction * (mark - entry) * qty
+        metrics["open_estimated_fees_usd"] += shadow_store.SIM_TAKER_FEE_RATE * (
+            abs(entry * qty) + abs(mark * qty)
+        )
+        if stop > 0:
+            remaining_loss = (mark - stop) * qty if direction > 0 else (stop - mark) * qty
+            metrics["stop_risk_usd"] += max(0.0, remaining_loss)
+    return out
+
+
+def _augment_closed_rows(rows):
+    return [shadow_store.augment_closed_trade_cost(row) for row in rows]
+
+
 @app.route("/")
 def index():
     return send_from_directory(str(STATIC_DIR), "index.html")
+
+
+@app.route("/shadow/")
+def shadow_portfolio_page():
+    return send_from_directory(str(STATIC_DIR), "shadow.html")
+
+
+@app.route("/api/roster/shared-shadow")
+def api_shared_shadow():
+    db_path = _REPO_ROOT / "shadow_combo" / "data" / "shared_shadow_v2.db"
+    if not db_path.exists():
+        return jsonify({"status": "warming_up", "account": None})
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3) as conn:
+            account = conn.execute(
+                "SELECT state_json, source_manifest, updated_ms FROM account WHERE id=1"
+            ).fetchone()
+            snapshot = conn.execute(
+                "SELECT payload_json FROM snapshots ORDER BY ts DESC LIMIT 1"
+            ).fetchone()
+            events = conn.execute(
+                "SELECT payload_json FROM events ORDER BY ts DESC LIMIT 80"
+            ).fetchall()
+            history = conn.execute(
+                "SELECT payload_json FROM snapshots ORDER BY ts DESC LIMIT 288"
+            ).fetchall()
+        return jsonify({
+            "status": "ok", "account": json.loads(account[0]) if account else None,
+            "manifest": json.loads(account[1]) if account else None,
+            "updated_ms": account[2] if account else None,
+            "stale": not account or int(time.time() * 1000) - account[2] > 15 * 60 * 1000,
+            "snapshot": json.loads(snapshot[0]) if snapshot else None,
+            "events": [json.loads(row[0]) for row in events],
+            "history": [json.loads(row[0]) for row in reversed(history)],
+        })
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        logger.warning("Shared shadow read failed: %s", exc)
+        return jsonify({"status": "unavailable", "account": None}), 503
 
 
 @app.route("/api/roster/meta")
@@ -136,6 +290,9 @@ def api_meta():
         "universe_entries": len(UNIVERSE_ROSTER),
         "pairs_entries": len(PAIRS_ROSTER),
         "starting_equity": shadow_store.DEFAULT_STARTING_EQUITY,
+        "taker_fee_rate": shadow_store.SIM_TAKER_FEE_RATE,
+        "slippage_bps": shadow_store.SIM_SLIPPAGE_BPS,
+        "max_total_notional_mult": position_sizing.MAX_TOTAL_NOTIONAL_MULT,
         "tick_interval_sec": 300,
         "server_ts": time.time(),
     })
@@ -148,6 +305,9 @@ def api_compare():
     没有记录就从列表里消失)。"""
     rows = shadow_store.summary_by_strategy()
     by_strategy = {r["strategy"]: r for r in rows}
+    open_risk = _strategy_open_risk_metrics()
+    guard_states = {r["strategy"]: r for r in shadow_store.list_strategy_risk_states()}
+    experiment_metrics = _hma_experiment_metrics()
     out = []
     for strat in _ALL_STRATEGY_NAMES:
         row = dict(by_strategy.get(strat) or {
@@ -155,14 +315,87 @@ def api_compare():
             "total_pnl_atr": 0.0, "avg_pnl_atr": None, "worst_trade_atr": None,
             "total_pnl_usd": 0.0, "open_count": 0, "win_rate": None,
             "equity": shadow_store.DEFAULT_STARTING_EQUITY, "equity_return_pct": 0.0,
+            "total_fees_usd": 0.0, "net_pnl_after_fees_usd": 0.0,
+            "total_funding_pnl_usd": 0.0,
+            "net_equity_after_fees": shadow_store.DEFAULT_STARTING_EQUITY,
+            "net_return_after_fees_pct": 0.0,
         })
+        metrics = open_risk.get(strat) or {}
+        row.update({
+            "gross_exposure_usd": round(float(metrics.get("gross_exposure_usd") or 0), 2),
+            "open_unrealized_pnl_usd": round(float(metrics.get("open_unrealized_pnl_usd") or 0), 2),
+            "open_estimated_fees_usd": round(float(metrics.get("open_estimated_fees_usd") or 0), 2),
+            "stop_risk_usd": round(float(metrics.get("stop_risk_usd") or 0), 2),
+            "priced_open_count": int(metrics.get("priced_open_count") or 0),
+            "unpriced_open_count": int(metrics.get("unpriced_open_count") or 0),
+        })
+        row["mtm_equity_after_fees"] = round(
+            float(row.get("net_equity_after_fees") or shadow_store.DEFAULT_STARTING_EQUITY)
+            + row["open_unrealized_pnl_usd"]
+            - row["open_estimated_fees_usd"],
+            2,
+        )
+        row["mtm_net_pnl_after_fees_usd"] = round(
+            row["mtm_equity_after_fees"] - shadow_store.DEFAULT_STARTING_EQUITY,
+            2,
+        )
+        row["mtm_return_after_fees_pct"] = round(
+            100.0 * row["mtm_net_pnl_after_fees_usd"]
+            / shadow_store.DEFAULT_STARTING_EQUITY,
+            2,
+        )
+        current_equity = max(
+            0.01,
+            row["mtm_equity_after_fees"],
+        )
+        row["gross_exposure_mult"] = round(row["gross_exposure_usd"] / current_equity, 2)
+        row["stop_risk_pct"] = round(100.0 * row["stop_risk_usd"] / current_equity, 2)
+        guard = guard_states.get(strat) or {}
+        row.update({
+            "risk_regime": guard.get("last_regime") or "waiting",
+            "dynamic_gross_cap": guard.get("dynamic_gross_cap"),
+            "dynamic_stop_heat_cap_pct": (
+                round(100.0 * float(guard["stop_heat_cap"]), 2)
+                if guard.get("stop_heat_cap") is not None else None
+            ),
+            "risk_drawdown_pct": (
+                round(100.0 * float(guard["drawdown_pct"]), 2)
+                if guard.get("drawdown_pct") is not None else None
+            ),
+            "new_entries_blocked": bool(guard.get("new_entries_blocked")),
+            "guard_reason": guard.get("reason") or "",
+        })
+        over_gross_cap = (
+            row["dynamic_gross_cap"] is not None
+            and row["gross_exposure_mult"] >= float(row["dynamic_gross_cap"])
+        )
+        over_stop_heat = (
+            row["dynamic_stop_heat_cap_pct"] is not None
+            and row["stop_risk_pct"] >= float(row["dynamic_stop_heat_cap_pct"])
+        )
+        if over_gross_cap or over_stop_heat:
+            row["new_entries_blocked"] = True
+            budget_reason = "gross_cap_full" if over_gross_cap else "stop_heat_full"
+            row["guard_reason"] = ",".join(filter(None, [row["guard_reason"], budget_reason]))
         row["description"] = STRATEGY_DESCRIPTIONS.get(strat, "")
+        if strat in experiment_metrics:
+            row.update(experiment_metrics[strat])
         out.append(row)
-    out.sort(key=lambda r: (r.get("equity_return_pct") is None, -(r.get("equity_return_pct") or -1e9)))
+    # 排名只看已经平仓、已经扣费的落袋收益。浮动盈亏仍实时计算并返回，
+    # 但不让尚未兑现的仓位改变榜单名次。
+    out.sort(key=lambda r: -(
+        float(r["net_return_after_fees_pct"])
+        if r.get("net_return_after_fees_pct") is not None else -1e9
+    ))
     return jsonify({
         "status": "ok",
         "strategies": out,
         "starting_equity": shadow_store.DEFAULT_STARTING_EQUITY,
+        "taker_fee_rate": shadow_store.SIM_TAKER_FEE_RATE,
+        "slippage_bps": shadow_store.SIM_SLIPPAGE_BPS,
+        "fee_basis": "mark_to_market_closed_plus_open_roundtrip_taker_plus_funding",
+        "ranking_basis": "net_return_after_fees_pct",
+        "risk_model": "adaptive_gross_stop_heat_cluster_drawdown_v3",
     })
 
 
@@ -182,6 +415,7 @@ def api_compare_positions(strategy):
     else:
         rows = shadow_store.list_closed(strategy=strategy, limit=limit)
         rows.sort(key=lambda r: r.get("closed_at") or 0, reverse=True)
+        rows = _augment_closed_rows(rows)
     return jsonify({"status": "ok", "positions": rows})
 
 
