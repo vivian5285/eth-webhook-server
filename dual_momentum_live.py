@@ -99,23 +99,32 @@ LEG_RATIOS = (0.10, 0.20, 0.70)  # TP1/TP2/TP3分批比例，本仓库既有惯�
 # 用不上的保证金空间。
 EXCHANGE_LEVERAGE = 10
 
-# 2026-09-23：宝贝核实后发现——擂台自己纸面验证那418笔(+39.85%)用的
-# 是strategy_engine/position_sizing.py::TIER_NOTIONAL_MULT
-# ={0:0.14,1:0.245,2:0.35}，比webhook_parser.py当前真实值
-# {0:0.07,1:0.1225,2:0.175}整整大2倍(那份sizing.py是2026-08-29抄的，
-# 之后B系统自己的tier权重经过几轮下调，擂台那份从没跟着改)——2026-
-# 09-22首次部署直接借用了B系统"当前真实值"(0.1225)，仓位只有回测
-# 验证过的一半。宝贝拍板"适当提高"，不是照抄擂台的0.245(账户已经
-# 占用72%左右，翻倍会在多品种同时触发时不够保证金)，也不是继续用
-# 保守的0.1225——选0.175：币安B系统tier表里本来就有的"强档"权重(不是
-# 凭空发明的新数字)，介于两者中间，理由是"品种已经收窄到擂台数据里
-# 验证过有正贡献的子集，比原始更宽泛的27品种/更保守的tier=1权重更值
-# 得给一点confidence"。只影响新开的仓位，已经开的12笔(B账户6笔+E
-# 账户6笔)不做回溯调整。
-DUAL_MOMENTUM_TIER_WEIGHT = 0.175
+# 2026-09-23二次拍板：0.175(见上一版本这里的注释，介于B系统tier=1/2
+# 之间的折中值)是当时因为顾虑"账户已占用72%左右保证金"选的保守值，
+# 但今天实测核实B/E两账户当前真实保证金占用只有4.8%~5.9%(远低于顾虑
+# 时设想的72%，EXCHANGE_LEVERAGE从5倍提到10倍之后余量更宽)，9个品种
+# 全开在0.245下也只到约22%占用——支撑那次保守决定的前提不成立了。
+# 宝贝拍板直接改成跟擂台纸面验证那418笔(+39.85%)完全一致的0.245
+# (strategy_engine/position_sizing.py::TIER_NOTIONAL_MULT[1])，仓位
+# 权重、止损/离场逻辑、品种范围三者都跟回测同源，不再打折扣。只影响
+# 新开的仓位，已经开的仓位不做回溯调整。
+DUAL_MOMENTUM_TIER_WEIGHT = 0.245
 
 TICK_INTERVAL_SEC = 300  # 5分钟一轮，跟擂台系统自己的tick间隔一致
 KLINES_LIMIT = LOOKBACK_BARS + 5  # 排名只需要lookback_bars+1根，多拉几根兜底
+
+# 2026-09-23新增：开平仓都改限价单，降低市价单滑点成本——宝贝要求所有
+# 实盘擂台策略统一"更优价限价买卖"。币安place_limit_order原生支持
+# reduceOnly，一way模式下反方向reduceOnly单就是正常平仓，不会像CoinW
+# 那样有误判成反向开新仓的风险，入场出场都能直接用。
+# 入场：挂在信号价(上一根4h收盘价)，超时不成交就撤单放弃这次信号——
+# dual_momentum是动量策略，价格可能已经朝信号方向跑开一截，不保证
+# 每次都能等到成交，这是"用限价换低滑点"必然的取舍，不追价。
+# 出场：挂在信号价，超时不成交就改市价强制离场——出场的确定性比省
+# 滑点更重要，仓位不能一直暴露着等一个不确定会不会来的价格。
+LIMIT_FILL_POLL_SEC = 8
+LIMIT_ENTRY_TIMEOUT_SEC = 180
+LIMIT_EXIT_TIMEOUT_SEC = 180
 
 STATE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "dual_momentum_live_state.json"
@@ -237,9 +246,37 @@ def _open_position(symbol: str, signal: Dict[str, Any], state: Dict[str, Any]) -
         logger.error(f"[{symbol}] 设置杠杆失败，放弃这次开仓(避免用未知杠杆下单)")
         return
 
-    order = binance_client.place_market_order(side, qty, symbol=symbol, reduce_only=False)
+    tag = f"DMlim{int(time.time()) % 100000000}"
+    order = binance_client.place_limit_order(side, qty, price, symbol=symbol, reduce_only=False, client_order_id=tag)
     if not order:
-        logger.error(f"[{symbol}] 市价开仓失败: {signal}")
+        logger.error(f"[{symbol}] 限价开仓挂单失败: {signal}")
+        return
+
+    order_id = order.get("orderId")
+    filled = False
+    deadline = time.time() + LIMIT_ENTRY_TIMEOUT_SEC
+    while time.time() < deadline:
+        try:
+            positions = binance_client.client.futures_position_information(symbol=symbol)
+            amt = 0.0
+            for p in positions:
+                amt = float(p.get("positionAmt") or 0)
+            if amt != 0:
+                filled = True
+                break
+        except Exception:
+            pass
+        time.sleep(LIMIT_FILL_POLL_SEC)
+    if not filled:
+        if order_id:
+            try:
+                binance_client.cancel_order(symbol=symbol, order_id=order_id)
+            except Exception:
+                pass
+        logger.info(
+            f"[{symbol}] 限价开仓{LIMIT_ENTRY_TIMEOUT_SEC}秒未成交，撤单放弃这次信号"
+            f"(避免追价吃滑点，等下一轮重新判断) | {signal.get('reason')}"
+        )
         return
 
     # 2026-09-22实盘复现两次(SNDK/BCH，B账户+E账户各中一次)：
