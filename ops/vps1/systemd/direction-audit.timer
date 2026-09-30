@@ -1,0 +1,8 @@
+[Unit]
+Description=Run direction_audit.py every 15 minutes
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=30sec
+[Install]
+WantedBy=timers.target

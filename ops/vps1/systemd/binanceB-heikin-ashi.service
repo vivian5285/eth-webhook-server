@@ -1,0 +1,16 @@
+[Unit]
+Description=BinanceB heikin_ashi_trend Live Engine (standalone, bypasses position_supervisor)
+After=network.target
+
+[Service]
+User=binanceB
+WorkingDirectory=/home/binanceB/binance-engine
+Environment="PATH=/home/binanceB/binance-engine/venv/bin:/usr/bin:/bin"
+ExecStart=/home/binanceB/binance-engine/venv/bin/python heikin_ashi_live.py
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

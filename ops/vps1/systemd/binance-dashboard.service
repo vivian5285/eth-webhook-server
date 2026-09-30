@@ -1,0 +1,14 @@
+[Unit]
+Description=Binance Three-Account Read-Only Monitoring Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/binance-dashboard
+ExecStart=/root/binance-dashboard/venv/bin/python /root/binance-dashboard/server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

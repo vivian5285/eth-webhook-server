@@ -1,0 +1,9 @@
+[Unit]
+Description=Independent read-only watchdog: TV vs live execution check + DingTalk alerts
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/watchdog
+EnvironmentFile=/root/watchdog/.env
+ExecStart=/home/binanceB/binance-engine/venv/bin/python /root/watchdog/check.py

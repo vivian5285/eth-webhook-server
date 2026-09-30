@@ -1,0 +1,1098 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+独立只读监控：每轮检查三个币安账户的健康/持仓/TV信号一致性/幽灵单/真实ERROR，
+异常发钉钉（30分钟内同一异常去重），每天08:00/20:00发心跳汇总。
+
+只读原则：只调用 binance_client 的查询方法（跑在各账户自己的venv里，
+复用它们各自的.env凭证），不导入 position_supervisor_*，不下单不撤单。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import time
+from datetime import datetime, timezone
+
+from dingtalk_notify import send_text
+
+ACCOUNTS = [
+    # 2026-09-23：妈妈的币安B系统TV引擎暂停监控——账户资金还在，但TV/
+    # 综合硬止损这条流水线已经手动stop，账户交给dual_momentum_live.py
+    # 独立引擎打理(binanceB-dual-momentum.service，不受本watchdog管辖)。
+    # monitor=False只跳过针对TV引擎这条线的检查(心跳/持仓/止损巡检)，
+    # 避免对着一个故意关掉的服务持续报"服务未运行"假警报——跟D账户
+    # 2026-08-20那次monitor=False同一个道理。哪天TV引擎恢复，把这行
+    # monitor=False删掉即可恢复监控。
+    {"name": "B", "port": 5007, "dir": "/home/binanceB/binance-engine", "service": "binanceB-engine", "monitor": False},
+    # 2026-09-23：C账户的币安B系统TV引擎也停用了——SNDK改成完全独立的
+    # sndk_dual_ma_live.py本地双均线引擎(binanceC-sndk-dualma.service，
+    # 不接TV)，binanceC-engine这条TV pipeline现在没有任何品种在跑。
+    # monitor=False跳过对它的检查，理由同B/E两行。新引擎自己有独立钉钉
+    # 告警(开仓/平仓/止损/严重异常)，不复用本watchdog。
+    {"name": "C", "port": 5008, "dir": "/home/binanceC/binance-engine", "service": "binanceC-engine", "monitor": False},
+    # 2026-08-20：D账户暂停监控——没放资金(权益0)也没接TV，任何健康/持仓/
+    # 开仓检查对它来说本来就该是空的，反而容易制造假警报(比如今天验证网格
+    # 套利闸门时D的"sizing拒绝：权益=0.0"就是预期内的正常拒绝，不是故障)。
+    # monitor=False只是跳过检查，D账户本身/binance_vps_state文件都还在，
+    # 以后放资金接TV了，把这行改回True (或直接删掉这个key) 即可恢复监控。
+    {"name": "D", "port": 5009, "dir": "/home/binanceD/binance-engine", "service": "binanceD-engine", "monitor": False},
+    # 2026-09-23：MARIO(客户)的币安B系统TV引擎同理暂停监控，账户现在交给
+    # binanceE-dual-momentum.service打理，理由同上方B账户注释。
+    {"name": "E", "port": 5010, "dir": "/home/binanceE/binance-engine", "service": "binanceE-engine", "monitor": False},
+]
+MONITORED_ACCOUNTS = [a for a in ACCOUNTS if a.get("monitor", True)]
+# 2026-09-04：宝贝确认ASMLUSDT/SKHYNIXUSDT胜率太低、已从symbol_config.py::
+# active_binance_symbols()和各账户.env删除（commit e45383d）。watchdog自己
+# 独立维护的这份SYMBOLS清单当时漏改了——导致这两个品种的TV心跳(我们已经
+# 不再监听/处理，本来就该"没有更新")被误判成"心跳失效"持续报异常
+# (heartbeat_silent)，宝贝发现"监督狗可能还不知道我们删除了一些币"，
+# 一猜就中。这里同步删掉，跟dashboard/server.py那次(同一天，同一类问题)
+# 是完全一样的根因。
+# 2026-09-05：宝贝要求把SKHYNIXUSDT重新接回实盘，这里同步加回来（跟各
+# 账户.env/symbol_config.py一起改，避免又漏改成误报心跳失效）。ASMLUSDT
+# 不动，仍是删除状态。
+# 2026-09-13：审计发现DELLUSDT/GEVUSDT/STXXUSDT(2026-09-06/09-08新增)当时
+# 漏改了这份独立清单——跟2026-09-04 ASML/SKHYNIX那次同一个根因(watchdog
+# 故意不import引擎的active_binance_symbols()，新增品种必须手动同步这里，
+# 容易漏)。本次一并补上这三个 + 新增的XPTUSDT(铂金，币安B系统/CoinW同批
+# 上线)，四个都在TV可能实际发信号的名单里，遗漏会导致这几个品种的幽灵单/
+# 裸仓/心跳失效检测形同虚设。
+SYMBOLS = ["ETHUSDT", "XAUUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT", "SNDKUSDT", "PAXGUSDT", "XPDUSDT", "OPENAIUSDT", "ANTHROPICUSDT", "SKHYNIXUSDT", "GSUSDT", "MUUSDT", "LITEUSDT", "TSLAUSDT", "METAUSDT", "DELLUSDT", "GEVUSDT", "STXXUSDT", "XPTUSDT"]
+
+STATE_PATH = os.path.join(os.path.dirname(__file__), "watchdog_state.json")
+ALERT_DEDUPE_SEC = 30 * 60
+HEARTBEAT_HOURS = {0}  # 健康日志每天一条；默认不推送正常消息
+# 2026-08-24：原来一天只在8点/20点发两次"监控正常运行中"，用户反馈
+# 从来没刚好在这两个时间点看到过，纯告警式监控有个经典盲区——健康的
+# 时候完全沉默，用户没法区分"系统真没事"和"watchdog自己挂了没人管"。
+# 改成每6小时一次(0/6/12/18 UTC)，不是无脑调密(避免刷屏)，是在"够勤快
+# 让人放心"和"别变成骚扰"之间找一个更合理的点。
+# 2026-08-20：TV心跳失联二级监控——只对"以前真的收到过心跳"的品种生效，
+# 阈值故意给得很宽松(24小时)，够盖住所有品种(哪怕BCH/XMR这种6小时一根
+# K线的)正常的心跳间隔，不会跟任何品种的正常节奏撞车误报，真出问题
+# (比如某个品种的TV心跳代码被改坏/漏发)也不会拖太久才被发现。watchdog
+# 刻意不import引擎自己的reentry_profiles.py(保持独立，引擎有bug也不
+# 连累watchdog)，所以不按各品种精确TV周期算，直接用一个足够宽的固定值。
+HEARTBEAT_SILENCE_SEC = 24 * 3600.0
+NOISE_ERROR_PATTERNS = (
+    "AttributeError: 'Client' object has no attribute 'session'",
+    "NoneType' object has no attribute 'sock' - goodbye",
+    "穿价 TP1 推离市价",
+    "code=-4509",
+    # 2026-08-20：今天连续部署了7轮(每轮D→B→C共21次重启)后发现watchdog噪音
+    # 几乎全部集中在重启那几秒——"终检防线未齐"是重启后终检瞬间的正常过渡
+    # 状态，实测两次(B账户OPENAI/C账户SKHYNIX)都是不到1秒内就被同一进程
+    # 自己补挂修好("强制闭环"这四个字本身就是代码在原地自愈)，从没见过
+    # 它自愈失败的情况，直接当噪音过滤，不用等证据。
+    "终检防线未齐",
+    # Telegram单次超时(还有重试机会)不算真失败，只有attempt=3/3(最后一次
+    # 还失败)才算真的通知不出去，需要保留上报。
+    "notify fail channel=telegram attempt=1/",
+    "notify fail channel=telegram attempt=2/",
+    # 2026-08-29：宝贝反馈watchdog"老是说异常"——当天3次IP限流(11:10单
+    # 账户/13:02单账户/15:14三账户同时)追查下来全部是良性、自愈的：
+    # "🧊 [IP限流] REST全局冷却"本身只是纯提示("接下来60秒暂停REST"，
+    # 不代表任何操作失败)；"[获取挂单失败]...preemptive_weight_limit"
+    # 是只读查询被限流，代码自己会退回用非空缓存(见binance_client.py同一
+    # 批日志里紧跟着的"仅用非空缓存")，不影响实际保护。这两类当噪音过滤，
+    # 别再跟真正的失败一起刷屏，读的人会脱敏。
+    # 刻意不过滤"[止损单失败]"/"[开仓失败]"/"[平仓失败]"这类写操作失败——
+    # 15:14那次C账户止损单确实先失败后来重试成功了(人工核实过交易所
+    # 真实止损单还在)，但"先失败"这件事本身值得留一条痕迹，万一哪次
+    # 重试没成功，这条线是唯一的报警来源，不能跟着一起被吞掉。
+    "🧊 [IP限流] REST 全局冷却至",
+    "preemptive_weight_limit",
+    # 2026-09-01：宝贝反馈"异常动不动几十上百条，好吓人"追查出的两类，
+    # 跟dashboard/server.py同一批修复(那边独立解析同一份journalctl，
+    # 历史上多次跟watchdog不同步，这次反过来watchdog落后)：
+    # 1) 哨兵自愈本身——_ensure_sentinel_running发现哨兵线程死了、自己
+    #    重启，日志文案"哨兵自愈：_sentinel_active=True但线程已死"，是
+    #    系统自己发现问题并修好，不是新故障。
+    # 2) 反转锁盈(08-29上线)平仓/撤单撞上IP限流，原文自己写"等待下次
+    #    机会"，是已知IP限流噪音同一类，只是这个功能比前几轮筛查晚。
+    "哨兵自愈：_sentinel_active=True但线程已死",
+    # 注意：这里必须用"挂单查询失败(IP限流)"这个更具体的子串，不能用
+    # 泛化的"反转保护"——同一个功能还会打"全平后挂单未净：剩余N单"这类
+    # 不带IP限流上下文的独立文案，那条不是这次要过滤的对象(可能是真
+    # 问题，见2026-09-01当天C账户XPDUSDT的排查)，NOISE_ERROR_PATTERNS
+    # 是纯子串匹配(见下方any(p in line))，泛化的"反转保护"会连它一起吞掉。
+    "挂单查询失败(IP限流)",
+    # 2026-09-01第三批：宝贝反馈"隔一会又几十条"——跟dashboard/server.py
+    # 同一批修复。"ip_rate_limited remaining=Ns"是IpRateLimitedError
+    # 专用固定文案(binance_client.py唯一出处)，只在代码自己主动拒绝
+    # REST时抛出，从不代表交易所真的报错，各种操作([撤单失败]/[止损单
+    # 失败]/[限价单失败]/[Algo止损失败]等)外面套的都是同一个信号，用
+    # 这条通用子串一次性覆盖。"不可确认（禁止谎称已有）"：挂单查询
+    # 失败时宁可如实说"不确认"也不敢谎称"已经有止损了"，原文自己就是
+    # 保守声明，不是故障。
+    "ip_rate_limited remaining=",
+    "不可确认（禁止谎称已有）",
+    "接管上下文补全: 挂单查询失败",
+)
+
+
+def _load_state() -> dict:
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"last_alert": {}, "last_heartbeat_date_hour": ""}
+
+
+def _save_state(state: dict) -> None:
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _run(cmd: list, timeout: int = 20, cwd: str | None = None) -> str:
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, cwd=cwd)
+        if r.returncode != 0:
+            err = r.stderr.decode("utf-8", errors="replace")[-300:]
+            return f"__ERR__rc={r.returncode} {err}"
+        return r.stdout.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"__ERR__{e}"
+
+
+# 2026-08-23：多品种账户(B/C/E各13个品种)重启后要逐品种核对TP/止损，实测
+# 单线程gunicorn(-w1 --threads1)重启恢复期间/health经常5分钟以上才能腾出
+# 手响应——check_health原有的"5次×3秒≈15秒"重试预算是很久以前只针对单一
+# 品种校准的，早就跟不上现在的品种数量。同一天两轮部署重启都在这个窗口
+# 里被watchdog误判成"健康异常"发钉钉，跟真故障混在一起容易让人脱敏。这
+# 里不是无脑加长重试预算(那样真故障也要多等好几分钟才会报警)，而是让
+# check_health能识别"是不是刚重启不久"，只有这种情况才放宽，真正长期
+# 无响应还是照样第一时间报。
+RESTART_GRACE_SEC = 480.0
+
+
+def _service_uptime_sec(service: str):
+    """服务自上次(re)start以来经过的秒数。用monotonic时钟(/proc/uptime +
+    ActiveEnterTimestampMonotonic)算，不解析systemctl的wall-clock时间戳
+    字符串——那个格式受locale/systemd版本影响，用strptime解析容易踩坑，
+    纯数字的monotonic时钟没有这个问题。取不到(systemctl不可用/服务不
+    存在)返回None，调用方必须按"不知道，保守当真异常处理"，不能因为
+    拿不到时间戳就悄悄放过真正的故障。"""
+    out = _run(["systemctl", "show", service, "--property=ActiveEnterTimestampMonotonic", "--value"])
+    if out.startswith("__ERR__"):
+        return None
+    try:
+        active_since_us = float(out.strip())
+    except (TypeError, ValueError):
+        return None
+    if active_since_us <= 0:
+        return None
+    try:
+        with open("/proc/uptime", "r") as f:
+            uptime_now_sec = float(f.read().split()[0])
+    except Exception:
+        return None
+    return uptime_now_sec - (active_since_us / 1_000_000.0)
+
+
+def check_health(acct: dict) -> dict:
+    """
+    2026-08-12：部署重启(systemctl restart)几秒内端口会短暂无响应，
+    单次curl失败就报警会跟运维自己的正常重启撞车产生假警报（当晚
+    实盘复现两次，时间点跟deploy_safe_restart.sh的重启时刻精确重合）。
+    2026-08-20：单轮部署实测(B/C各5个真实持仓品种)偶尔重启恢复比原来
+    校准时(单一/少量品种)更久，9s窗口有几次跟watchdog的10分钟轮询撞上，
+    再次假警报——重试从3次/3s(9s)放宽到5次/3s(15s)，正常重启仍能扛住，
+    真的挂了(>15s持续无响应)才报警。
+    2026-08-23：品种数量涨到13个之后，15s这个预算又不够了——单线程
+    gunicorn重启后要逐品种核对TP/止损，实测繁忙账户经常5分钟以上都还
+    在恢复中，两轮当天的部署重启都被当成"健康异常"发了钉钉，吓人还没用
+    (真相是重启在正常进行，不是故障)。不再无脑加长这15s的重试预算(那样
+    真故障也要多等好几分钟才会报警)，而是5次重试仍无响应时，额外查一下
+    这个服务是不是最近才(re)start的(_service_uptime_sec)——是的话判定
+    为"重启恢复中"，不算异常；查不到重启时间/重启已经超过宽限期还是没
+    响应，才当真异常处理。
+    """
+    out = ""
+    for attempt in range(5):
+        out = _run(["curl", "-sf", "--max-time", "5", f"http://127.0.0.1:{acct['port']}/health"])
+        if not out.startswith("__ERR__") and out.strip():
+            break
+        if attempt < 4:
+            time.sleep(3)
+    if out.startswith("__ERR__") or not out.strip():
+        uptime = _service_uptime_sec(acct["service"])
+        if uptime is not None and 0 <= uptime < RESTART_GRACE_SEC:
+            return {
+                "ok": False,
+                "restarting": True,
+                "detail": f"重启后{uptime:.0f}s仍无响应(判定为多品种核对中，非异常)",
+                "open_in_progress": {},
+                "catchup_active": {},
+                "chase_watch_active": {},
+            }
+        return {
+            "ok": False, "restarting": False, "detail": "无响应(重试5次仍失败)",
+            "open_in_progress": {}, "catchup_active": {}, "chase_watch_active": {},
+        }
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {
+            "ok": False, "detail": "响应无法解析",
+            "open_in_progress": {}, "catchup_active": {}, "chase_watch_active": {},
+        }
+    paused = data.get("trading_paused") or {}
+    paused_syms = [s for s, v in paused.items() if v]
+    return {
+        "ok": data.get("status") == "ok" and not paused_syms,
+        "paused_syms": paused_syms,
+        "open_in_progress": data.get("open_in_progress") or {},
+        # 2026-08-24: 幽灵单检测要用——追回/追单确认武装期间，仓位本来
+        # 就是空的(qty=0)但会挂着一张真实限价单等成交，这是设计内的正常
+        # 状态，不该被当"幽灵单"报警
+        "catchup_active": data.get("catchup_active") or {},
+        "chase_watch_active": data.get("chase_watch_active") or {},
+        # 2026-09-13新增：该账户当前真实的活跃品种清单——直接来自引擎
+        # /health的symbols字段(active_binance_symbols()的实时结果，已经
+        # 是A/B系统mode-aware的)，不是watchdog自己独立维护的静态SYMBOLS
+        # 全量清单。心跳失联检测改用这个动态清单来判断"这个品种现在还
+        # 归这个账户管吗"，从根源解决"账户切换系统/品种被暂停后，历史
+        # hb_ts>0的品种永远误报心跳失效"这类问题(ASML/SKHYNIX
+        # 2026-09-04、DELL/GEV/STXX 2026-09-13都是同一个根因)。
+        "symbols": data.get("symbols") or [],
+    }
+
+
+def check_dashboard() -> dict:
+    """面板本身是否存活（跟三个交易账户是独立进程，各自可能单独挂掉）。"""
+    out = _run(["curl", "-sf", "--max-time", "5", "http://127.0.0.1:8877/api/status"])
+    if out.startswith("__ERR__") or not out.strip():
+        return {"ok": False, "detail": "无响应"}
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {"ok": False, "detail": "响应无法解析"}
+    return {"ok": bool(data.get("ok", True)), "detail": ""}
+
+
+def check_account_systems() -> dict:
+    """
+    2026-09-13新增：宝贝要求——"以后我设置哪些交易所账户运行的哪个系统，
+    监督狗一样要根据我设置的来监督，不能我都更改了，监督狗还不知道，
+    傻傻报错"。直接问控制面板的/api/control/account_system(跟dashboard/
+    server.py::_account_current_system同一个实时判定：systemctl is-active
+    +.env SMART_HARD_STOP_ENABLED)，拿到每个账户"现在真的在跑A/B/VWAP，
+    还是压根没跑(OFF)"。查询失败时返回空dict——调用方按"未知"处理，
+    保守地照常检查(fail-open，不能因为拿不到这份状态就干脆全都不查)。
+    """
+    out = _run(["curl", "-sf", "--max-time", "5", "http://127.0.0.1:8877/api/control/account_system"])
+    if out.startswith("__ERR__") or not out.strip():
+        return {}
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {}
+    accounts = data.get("accounts") or {}
+    return {k: (v or {}).get("system") for k, v in accounts.items() if isinstance(v, dict)}
+
+
+def check_gateway() -> dict:
+    """
+    2026-08-15：新增。广播网关(binance-gateway.service, 127.0.0.1:5006)
+    是部分品种TV警报唯一入口（TV订阅上限20条警报，这些品种改走网关
+    一条警报覆盖B/C/D三账户）——网关若挂了，这些品种会静默漏单，
+    比单独一个账户的/health异常更隐蔽（不会体现在ACCOUNTS的健康检查
+    里），必须单独探活。
+    """
+    out = _run(["curl", "-sf", "--max-time", "5", "http://127.0.0.1:5006/health"])
+    if out.startswith("__ERR__") or not out.strip():
+        return {"ok": False, "detail": "无响应"}
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {"ok": False, "detail": "响应无法解析"}
+    return {"ok": data.get("status") == "ok", "detail": ""}
+
+
+def check_nginx() -> dict:
+    """
+    检查 nginx 进程和当前使用的 dashboard 入口。旧 TV 引擎的
+    /binance-b/health 已停用，不能再拿它的 502 判断当前实盘状态。
+    """
+    svc = _run(["systemctl", "is-active", "nginx"])
+    if svc.strip() != "active":
+        return {"ok": False, "detail": f"nginx服务未运行(is-active={svc.strip()})"}
+    # 旧的 /binance-b/health 已指向停用的 TV 引擎，502 不是当前实盘故障。
+    # dashboard 有 Basic Auth，401 表示 nginx 路由和认证层正常；后端另由
+    # check_dashboard() 直连检查。
+    out = _run([
+        "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+        "--max-time", "5", "http://127.0.0.1/dashboard/",
+    ])
+    if out.startswith("__ERR__") or out.strip() not in {"200", "401"}:
+        return {"ok": False, "detail": f"dashboard反代异常(HTTP={out.strip()})"}
+    return {"ok": True, "detail": ""}
+
+
+# B/C/E 当前由 heikin-ashi 独立引擎承载资产分组组合。旧 TV 服务仍在
+# ACCOUNTS 中保持 monitor=False；这里检查真实引擎及最近日志。
+STANDALONE_ENGINES = [
+    {"name": name, "service": f"binance{name}-heikin-ashi.service"}
+    for name in ("B", "C", "E")
+]
+
+
+def check_standalone_engines() -> list:
+    """返回异常列表(每条{key,text})，跟run_once()里其它检查同一种格式，
+    直接extend进最终anomalies即可。"""
+    out = []
+    for eng in STANDALONE_ENGINES:
+        state = _run(["systemctl", "is-active", eng["service"]]).strip()
+        if state != "active":
+            out.append({
+                "key": f"standalone_engine:{eng['service']}",
+                "text": (
+                    f"🛑 独立引擎 {eng['name']}({eng['service']}) 不在运行"
+                    f"(systemctl状态={state or '未知'})——该账户当前实盘交易的"
+                    f"这条线可能已经停摆，需要人工核查"
+                ),
+                "severity": "critical",
+            })
+            continue
+        journal = _run([
+            "journalctl", "-u", eng["service"], "--since", "30 minutes ago",
+            "--no-pager", "-o", "cat", "-n", "1",
+        ], timeout=10)
+        if journal.startswith("__ERR__") or not journal.strip():
+            out.append({
+                "key": f"standalone_stale:{eng['service']}",
+                "text": f"⚠️ {eng['name']}账户实盘引擎运行中，但30分钟无日志，请核查是否卡死",
+                "severity": "warning",
+            })
+    return out
+
+
+LIVE_VALIDATOR = os.path.join(os.path.dirname(__file__), "validate_live_v3.py")
+
+
+def check_live_invariants() -> list:
+    """用只读交易所查询核对真实仓位、虚拟账本及保护止损。"""
+    anomalies = []
+    for name in ("B", "C", "E"):
+        engine_dir = f"/home/binance{name}/binance-engine"
+        env = os.environ.copy()
+        env["ACCOUNT_ENGINE_DIR"] = engine_dir
+        env["HA_STATE_FILE"] = os.path.join(engine_dir, "heikin_ashi_live_state.json")
+        try:
+            result = subprocess.run(
+                [os.path.join(engine_dir, "venv/bin/python"), LIVE_VALIDATOR],
+                cwd=engine_dir, env=env, capture_output=True, text=True,
+                timeout=90,
+            )
+            report = json.loads(result.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            anomalies.append({
+                "key": f"{name}:live_audit_unavailable",
+                "text": f"⚠️ {name}账户交易所安全核查不可用({type(exc).__name__})",
+                "severity": "warning",
+            })
+            continue
+        if not report.get("one_way"):
+            anomalies.append({
+                "key": f"{name}:position_mode",
+                "text": f"🆘 {name}账户持仓模式不是预期的单向模式",
+                "severity": "critical",
+            })
+        unreadable = []
+        for item in report.get("positions", []) + report.get("virtual_flat", []):
+            symbol = str(item.get("symbol") or "?")
+            if item.get("error") == "unmanaged_live_position":
+                anomalies.append({
+                    "key": f"{name}:{symbol}:unmanaged",
+                    "text": f"🆘 {name}账户 {symbol} 有未纳入策略账本的真实仓位",
+                    "severity": "critical",
+                })
+                continue
+            if not item.get("net_ok") or not item.get("state_ok"):
+                anomalies.append({
+                    "key": f"{name}:{symbol}:state_mismatch",
+                    "text": f"🆘 {name}账户 {symbol} 真实仓位与策略状态不一致",
+                    "severity": "critical",
+                })
+            if "orders_readable" not in item:
+                continue
+            if not item["orders_readable"]:
+                unreadable.append(symbol)
+            elif item.get("protective_stop_count") != 1:
+                count = item.get("protective_stop_count")
+                anomalies.append({
+                    "key": f"{name}:{symbol}:stop_count",
+                    "text": f"🆘 {name}账户 {symbol} 保护止损数量={count}，预期为1",
+                    "severity": "critical",
+                })
+        if unreadable:
+            anomalies.append({
+                "key": f"{name}:orders_unreadable",
+                "text": f"⚠️ {name}账户 {len(unreadable)} 个持仓的保护单无法查询",
+                "severity": "warning",
+            })
+        if result.returncode not in (0, 2):
+            anomalies.append({
+                "key": f"{name}:live_audit_error",
+                "text": f"⚠️ {name}账户安全核查进程异常退出({result.returncode})",
+                "severity": "warning",
+            })
+    return anomalies
+
+
+def check_disk_space(threshold_pct: int = 85) -> dict:
+    """磁盘满了会静默拖垮日志/状态文件写入，属于容易被忽略的运维隐患。"""
+    out = _run(["df", "--output=pcent", "/"], timeout=10)
+    if out.startswith("__ERR__"):
+        return {"ok": True, "pct": -1}  # 查询失败不报警，避免噪音
+    try:
+        pct_line = out.strip().splitlines()[-1].strip().rstrip("%")
+        pct = int(pct_line)
+    except Exception:
+        return {"ok": True, "pct": -1}
+    return {"ok": pct < threshold_pct, "pct": pct}
+
+
+def fetch_positions_and_orders(acct: dict) -> dict:
+    """
+    subprocess跑进账户自己的venv，用它自己的.env凭证，纯只读查询。
+    2026-08-15：批量重写——原逐品种循环（每品种最多2次REST：持仓+挂单）
+    在10品种规模下实测耗时42.3s，超过subprocess 40s超时导致B/C/D三账户
+    全部"持仓查询子进程失败"（XPD是第10个新增品种，压垮了这条链路，跟
+    2026-08-14修的TV信号查询是同一类"逐品种循环REST不随品种数扩展"的
+    问题）。改为3次账户级批量REST：futures_position_information(全量
+    持仓)+futures_get_open_orders(全量普通挂单)+openAlgoOrders(全量条件
+    单)，均不带symbol参数返回整个账户，本地按symbol分组；algo订单用
+    orderType填充'type'字段，跟_normalize_algo_order的语义对齐，
+    确保has_stop检测(扫type含'STOP')不因这次重写而漏判。实测<1s，
+    且品种数再涨也不会再变慢。
+    额外读取每个品种自己的本地状态文件（binance_vps_state_{SYM}.json，
+    纯文件读取，不import position_supervisor_*），带出radar_activated/
+    radar_activation_price/mark，供run_once()做雷达卡死检测（实盘复现
+    过：XAU真实价格冲过激活线，账本radar_activated却一直是False，当时
+    是靠人工翻K线才发现，现在watchdog独立核对一遍）。
+    """
+    code = (
+        "import json\n"
+        "from binance_client import binance_client\n"
+        # 2026-09-01修复(E账户实盘复现)：这一行原来没包try/except——
+        # _refresh_all_positions(force=True)撞上IP限流(-1003)时如果是
+        # 直接抛异常(而不是内部吞掉返回空dict)，整个子进程在算出
+        # _rate_limited标记之前就崩了，走不到下面futures_get_open_
+        # orders/algo那两条早就有的异常兜底，run_once()收到的是完全
+        # 空的{}，被当成"query_failed·可能venv/凭证问题"这种更吓人的
+        # 误报，而不是正确的"IP限流，跳过本轮"。B/C同一轮撞上同样的
+        # 限流窗口，只是这一行没炸，靠下面已有的_rate_limited判定正常
+        # 识别成IP限流——纯粹是时序运气，不是账户之间逻辑不一样。
+        "try:\n"
+        "    all_pos = binance_client._refresh_all_positions(force=True) or {}\n"
+        "    _pos_rate_limited = False\n"
+        "except Exception:\n"
+        "    all_pos = {}\n"
+        "    _pos_rate_limited = True\n"
+        # 同一次修复：这一行也是裸调用，同样的-1003会同样炸穿子进程，
+        # 一并包上try/except，跟上面all_pos那条用同一套兜底方式。
+        "try:\n"
+        "    all_orders = list(binance_client.client.futures_get_open_orders() or [])\n"
+        "except Exception:\n"
+        "    all_orders = []\n"
+        "    _pos_rate_limited = True\n"
+        "_rate_limited = _pos_rate_limited or float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
+        "try:\n"
+        "    algo_raw = binance_client.client._request_futures_api('get', 'openAlgoOrders', signed=True, data={}) or []\n"
+        "except Exception:\n"
+        "    algo_raw = []\n"
+        "    _rate_limited = True\n"
+        "_rate_limited = _rate_limited or float(binance_client.ip_rate_limit_remaining() or 0) > 0\n"
+        "for a in algo_raw:\n"
+        "    all_orders.append({'symbol': a.get('symbol'), 'type': a.get('orderType') or a.get('type') or '', 'orderId': a.get('algoId')})\n"
+        "orders_by_sym = {}\n"
+        "for o in all_orders:\n"
+        "    s = str((o or {}).get('symbol') or '').upper()\n"
+        "    if s:\n"
+        "        orders_by_sym.setdefault(s, []).append(o)\n"
+        "out = {}\n"
+        f"for sym in {SYMBOLS!r}:\n"
+        "    p = all_pos.get(sym)\n"
+        "    amt = float(p.get('positionAmt', 0) or 0) if p else 0.0\n"
+        "    orders = orders_by_sym.get(sym, [])\n"
+        "    has_stop = False\n"
+        "    for o in orders:\n"
+        "        ot = str((o or {}).get('type', '') or '').upper()\n"
+        "        if 'STOP' in ot:\n"
+        "            has_stop = True\n"
+        "            break\n"
+        "    radar_activated = None\n"
+        "    gate = 0.0\n"
+        "    hb_side = None\n"
+        "    hb_ts = 0.0\n"
+        "    try:\n"
+        "        with open(f'binance_vps_state_{sym}.json') as f:\n"
+        "            st = json.load(f)\n"
+        "        radar_activated = bool(st.get('radar_activated'))\n"
+        "        gate = float(st.get('radar_activation_price') or 0)\n"
+        "        hb_side = st.get('tv_heartbeat_side')\n"
+        "        hb_ts = float(st.get('tv_heartbeat_ts') or 0)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    out[sym] = {\n"
+        "        'side': ('LONG' if amt > 0 else 'SHORT') if amt != 0 else None,\n"
+        "        'qty': abs(amt),\n"
+        "        'entry': p.get('entryPrice') if p else None,\n"
+        "        'mark': float(p.get('markPrice') or 0) if p else 0.0,\n"
+        "        'orders': len(orders),\n"
+        "        'has_stop': has_stop,\n"
+        "        'radar_activated': radar_activated,\n"
+        "        'radar_gate': gate,\n"
+        "        'hb_side': hb_side,\n"
+        "        'hb_ts': hb_ts,\n"
+        "    }\n"
+        "out['__rate_limited__'] = _rate_limited\n"
+        "print(json.dumps(out))\n"
+    )
+    out = _run(
+        [f"{acct['dir']}/venv/bin/python", "-c", code], timeout=40, cwd=acct["dir"],
+    )
+    if out.startswith("__ERR__"):
+        print(f"[watchdog] {acct['name']} 持仓查询子进程失败: {out[:200]}")
+        return {}
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except Exception as e:
+        print(f"[watchdog] {acct['name']} 持仓查询输出解析失败: {e} | raw={out[:200]!r}")
+        return {}
+
+
+TV_SIGNAL_RE = re.compile(r"\[Webhook\] \[(\w+USDT)\] TV .*?【(LONG|SHORT)】")
+
+
+def fetch_last_tv_signals_all(acct: dict, minutes: int = 15) -> dict:
+    """
+    2026-08-14：六品种升级——原来每个品种各自调一次journalctl（3账户×6品种=
+    18次子进程），现在per-account只拉一次journalctl，一次性解析出全部品种
+    最近的TV开仓信号，品种数再涨也只是多几行正则匹配，不会再多起journalctl
+    子进程，跑一轮总耗时不随品种数线性增长。
+    返回 {symbol: {"side":..., "line":...}}。
+    """
+    out = _run([
+        "journalctl", "-u", acct["service"], "--no-pager", "-S", f"{minutes} min ago",
+    ], timeout=20)
+    last_by_sym: dict = {}
+    for line in out.splitlines():
+        if "[Webhook]" not in line:
+            continue
+        m = TV_SIGNAL_RE.search(line)
+        if m:
+            last_by_sym[m.group(1)] = {"side": m.group(2), "line": line}
+    return last_by_sym
+
+
+TV_CLOSE_RE = re.compile(r"\[Webhook\] \[(\w+USDT)\] TV .*?【(CLOSE_QUICK_EXIT|CLOSE\w*)】")
+
+
+def fetch_recent_tv_closes(acct: dict, seconds: int = 60) -> set:
+    """
+    2026-08-26：TV主动平仓(CLOSE_QUICK_EXIT等)是"先撤单再市价平仓"两步走，
+    实盘复现(XMRUSDT/C、BCHUSDT/E)撤单成功到市价平仓成功之间有~10-13秒的
+    正常过渡窗口——这段时间里仓位qty还在但止损单已经被撤掉，会被裸仓检查
+    误判。跟TV_SIGNAL_RE故意分开一条独立正则+独立短窗口query：TV_SIGNAL_RE
+    只认LONG/SHORT给"信号vs实盘方向"核对用，若直接把CLOSE_QUICK_EXIT塞进
+    那条正则的返回值里，会让side_mismatch检查把"TV信号=CLOSE_QUICK_EXIT"
+    误判成跟仓位方向不一致，引入新的一类误报。
+    返回最近seconds秒内收到过TV主动平仓信号的品种集合。
+    """
+    out = _run([
+        "journalctl", "-u", acct["service"], "--no-pager", "-S", f"{seconds} sec ago",
+    ], timeout=20)
+    syms = set()
+    for line in out.splitlines():
+        if "[Webhook]" not in line:
+            continue
+        m = TV_CLOSE_RE.search(line)
+        if m:
+            syms.add(m.group(1))
+    return syms
+
+
+CLOSING_CHATTER_RE = re.compile(
+    r"止损单失败.*Order would immediately trigger|"
+    r"TP后永久硬止损缺失且补挂失败|"
+    r"限价单失败.*ReduceOnly Order is rejected|"
+    r"❌ (挂|补挂|UPDATE_TP 挂) TP\d|"
+    r"核武轮.*补挂=0|"
+    r"止损 @[\d.]+ 已穿/贴市.*禁止推宽.*紧急平仓|"
+    # 2026-08-24新增：实盘复现(C账户PAXG)确认这条也是同一类"平仓过程中
+    # TP刷新撞上仓位已经归零"的收尾噪音——跟"确认空仓：WS+REST均为0"
+    # 几乎同一秒出现，不是真裸奔。跟其它几条一样，仍然只有能在FLAT_CONFIRM_
+    # WINDOW_SEC/DEFENSE_RESTORED_WINDOW_SEC内找到自愈证据才降级，真正长时间
+    # 缺TP123的情况不受影响，照常报警。
+    r"TV/账本/盘口均无有效 TP123"
+)
+FLAT_CONFIRM_RE = re.compile(
+    r"确认空仓：WS\+REST均为0|"
+    r"止损挂单未核实但复查仓位已归零|"
+    r"仓位已由雷达/TP实际平仓，无需再挂止损|"
+    r"确认平仓.*清除stale本地状态|"
+    r"雷达/防线账本已清零"  # 2026-08-17：实测这条才是平仓/账本清零最常见的实际文案，
+                            # 原来四条都对不上导致这次117秒后才平仓的场景没被降级
+)
+# 2026-08-17：只靠"最终仓位清零"当证据太粗——中间那段止损缺失窗口如果长达
+# 一两分钟，等到真正平仓才降级，会把"曾经短暂裸奔过但后来自己走了"和"根本
+# 没裸奔、几秒内就补上另一层防线了"这两种情况混为一谈。这次实测（B账户ETH，
+# 05:39:55止损补挂失败→05:39:59雷达止损4秒内就补上→05:41:53才真正平仓，
+# 中间隔了117秒，超过90秒窗口，原逻辑没能识别）就是后一种——裸奔窗口其实
+# 只有4秒，不该报警。新增一条"防线很快就补上了"的证据，独立于"最终平仓"
+# 判断，覆盖率更高也更贴近真实风险（裸奔了多久，而不是仓位最终有没有平）。
+DEFENSE_RESTORED_RE = re.compile(
+    r"place (HARD|RADAR) stop|"
+    r"雷达止损已挂|"
+    r"硬止损已挂"
+)
+DEFENSE_RESTORED_WINDOW_SEC = 30
+LOG_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+")
+FLAT_CONFIRM_WINDOW_SEC = 90
+
+# 2026-08-20：币安公开/私有WS偶尔断线是长连接的正常背景噪音（实测24小时内
+# 每账户4-6次，跟当前有没有持仓无关），断线到自动重连一般1秒多就完事，
+# 之前这类[ERROR]被原样当真异常报出去，面板"异常"角标一直亮着，D账户
+# 空仓也照样报，容易让人误以为出了真问题。跟上面CLOSING_CHATTER_RE同一
+# 思路：只有能在断线后短窗口内找到"Websocket connected"重连成功证据才
+# 降级为噪音；真断了没重连回来（网络/VPS层面问题）依然照常上报，不会漏报。
+WS_DISCONNECT_RE = re.compile(r"Connection to remote host was lost\. - goodbye")
+WS_RECONNECTED_RE = re.compile(r"Websocket connected")
+WS_SELFHEAL_WINDOW_SEC = 10  # 实测重连约1.3秒完成，留出余量
+
+
+def fetch_real_errors(acct: dict, minutes: int = 12) -> list:
+    """
+    2026-08-13：跟面板同款去噪——"平仓过程中TP重挂失败/ReduceOnly被拒"这类
+    chatter，只要90秒内能找到"确认空仓"类日志，就是仓位已经正常清空后的
+    正常噪音（实盘复现：C账户BNB止损离场，5条这类chatter被当真ERROR连发
+    5条钉钉），不是真异常，不该报警刷屏。跟丢弃逻辑一样，只在能找到
+    "确认空仓"证据时才降级，找不到证据的ERROR照常上报，不会漏报真问题。
+    """
+    out = _run([
+        "journalctl", "-u", acct["service"], "--no-pager", "-S", f"{minutes} min ago",
+    ], timeout=20)
+    lines = out.splitlines()
+
+    flat_confirm_ts = []
+    defense_restored_ts = []
+    ws_reconnect_ts = []
+    for line in lines:
+        m = None
+        if FLAT_CONFIRM_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    flat_confirm_ts.append(
+                        datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    )
+                except Exception:
+                    pass
+        if DEFENSE_RESTORED_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    defense_restored_ts.append(
+                        datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    )
+                except Exception:
+                    pass
+        if WS_RECONNECTED_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    ws_reconnect_ts.append(
+                        datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    )
+                except Exception:
+                    pass
+
+    errs = []
+    for line in lines:
+        if "ERROR" not in line:
+            continue
+        if any(p in line for p in NOISE_ERROR_PATTERNS):
+            continue
+        if WS_DISCONNECT_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    healed = any(
+                        0 <= (r - ts).total_seconds() <= WS_SELFHEAL_WINDOW_SEC
+                        for r in ws_reconnect_ts
+                    )
+                    if healed:
+                        continue
+                except Exception:
+                    pass
+        if CLOSING_CHATTER_RE.search(line):
+            m = LOG_TS_RE.search(line)
+            if m:
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    # 两条证据任一满足即降级为噪音：① 短时间内（30秒）另一层
+                    # 防线已经补上，裸奔窗口很短；② 稍长时间内（90秒）仓位
+                    # 本身已经被正常路径平掉，压根不需要再挂。只要都没证据，
+                    # 照常上报，不会漏报真正长时间裸奔的情况。
+                    restored = any(
+                        0 <= (r - ts).total_seconds() <= DEFENSE_RESTORED_WINDOW_SEC
+                        for r in defense_restored_ts
+                    )
+                    flattened = any(
+                        abs((ts - c).total_seconds()) <= FLAT_CONFIRM_WINDOW_SEC
+                        for c in flat_confirm_ts
+                    )
+                    if restored or flattened:
+                        continue
+                except Exception:
+                    pass
+        errs.append(line)
+    return errs[-5:]
+
+
+MIN_QTY_DUST = 0.001  # 低于这个数量不当真实仓位看，避免灰尘仓误报
+
+
+def run_once() -> list:
+    """跑一轮全部检查，返回异常列表（每条是个dict: key, text）。"""
+    anomalies = []
+
+    dash = check_dashboard()
+    if not dash["ok"]:
+        anomalies.append({
+            "key": "dashboard:health",
+            "text": f"🖥️ 监控面板(8877)异常: {dash.get('detail', '')}",
+        })
+
+    gw = check_gateway()
+    if not gw["ok"]:
+        anomalies.append({
+            "key": "gateway:health",
+            "text": f"📡 广播网关(5006)异常: {gw.get('detail', '')} —— 走网关的品种TV信号可能已漏单！",
+        })
+
+    ngx = check_nginx()
+    if not ngx["ok"]:
+        anomalies.append({
+            "key": "nginx:health",
+            "text": f"🚪 nginx异常: {ngx.get('detail', '')} —— 控制面板入口可能失联",
+        })
+
+    disk = check_disk_space()
+    if not disk["ok"]:
+        anomalies.append({
+            "key": "vps:disk",
+            "text": f"💽 VPS磁盘使用率 {disk['pct']}% 已过高，可能拖累日志/状态写入",
+        })
+
+    anomalies.extend(check_standalone_engines())
+    anomalies.extend(check_live_invariants())
+
+    # 2026-09-13新增：每轮先问一次控制面板"每个账户现在真的在跑哪个
+    # 系统"，OFF(账户被宝贝主动停掉，比如C账户暂时不放资金)/VWAP(擂台
+    # 策略，本脚本不覆盖，有独立的watchdog逻辑归属)的账户直接跳过——
+    # 不去查它的/health(反正没在跑binance引擎，查了也是"无响应"，之前
+    # 这种情况被误判成"健康异常"发过钉钉，见2026-09-13修复)。查询失败
+    # (dashboard自己也挂了)时account_systems是空dict，下面.get(name)
+    # 拿到None，按"未知"处理，照常检查——不能因为拿不到这份状态就干脆
+    # 全都不查。
+    account_systems = check_account_systems()
+    for acct in MONITORED_ACCOUNTS:
+        name = acct["name"]
+        acct_sys = account_systems.get(name)
+        if acct_sys in ("OFF", "VWAP"):
+            print(f"[跳过·{acct_sys}] {name}:health | 该账户当前不在跑币安引擎，不算异常")
+            continue
+        h = check_health(acct)
+        if not h["ok"]:
+            if h.get("restarting"):
+                # 判定为重启恢复窗口内，不算异常也不发钉钉，但这轮仍然
+                # 没法拿到真实数据，照样跳过这个账户其它检查。
+                print(f"[跳过·重启中] {name}:health | {h.get('detail')}")
+                continue
+            detail = h.get("detail") or f"trading_paused={h.get('paused_syms')}"
+            anomalies.append({
+                "key": f"{name}:health",
+                "text": f"⚠️ {name}账户({acct['port']}) 健康异常: {detail}",
+            })
+            continue  # 健康都不行，跳过这个账户其它检查，避免连锁误报
+
+        pos_data = fetch_positions_and_orders(acct)
+        if not pos_data:
+            anomalies.append({
+                "key": f"{name}:query_failed",
+                "text": f"⚠️ {name}账户 持仓查询失败(可能是venv/凭证问题，需要人工确认)",
+            })
+            continue
+
+        # 2026-08-29修复：_refresh_all_positions(force=True)撞上IP限流/
+        # preemptive_weight_limit时会静默返回空dict而不是报错，导致这一
+        # 整轮全部品种的持仓都读成"空仓"，而挂单查询走的是另一条REST、
+        # 未必同时被限流——两边一凑就变成"仓位空但挂单还在"的幽灵单假
+        # 阳性，而且是一整个账户所有品种同时假阳性(实盘复现：B/C/E三
+        # 账户各自7个持仓品种同时报幽灵单，全是这个原因，不是真的同时
+        # 出事)。fetch_positions_and_orders现在会把子进程查询那一刻的
+        # ip_rate_limit_remaining()状态一起带出来，这里限流时直接跳过
+        # 这一整个账户本轮的幽灵单/裸仓检测(数据不可信，宁可漏检一轮
+        # 也不误报一整批)，等下一轮限流解除后自然恢复正常检测。
+        if pos_data.get("__rate_limited__"):
+            print(f"[跳过·IP限流] {name}:position_checks | 本轮持仓数据可能不可信，跳过幽灵单/裸仓检测")
+            continue
+
+        open_in_progress = h.get("open_in_progress") or {}
+        catchup_active = h.get("catchup_active") or {}
+        chase_watch_active = h.get("chase_watch_active") or {}
+        # 2026-09-13新增：该账户当前真实活跃品种(A/B系统mode-aware，见
+        # check_health里的注释)，只用来限定心跳失联检测的范围——幽灵单/
+        # 裸仓/雷达失活这些检测本来就是按"有没有真实持仓"判断，跟品种是
+        # 否在白名单无关，不用额外限定。
+        active_syms_now = set(h.get("symbols") or [])
+        tv_signals = fetch_last_tv_signals_all(acct, minutes=15)
+        tv_recent_closes = fetch_recent_tv_closes(acct, seconds=60)
+
+        for sym in SYMBOLS:
+            info = pos_data.get(sym) or {}
+            side = info.get("side")
+            qty = float(info.get("qty") or 0)
+            orders_n = info.get("orders", -1)
+            has_stop = bool(info.get("has_stop"))
+
+            # 幽灵单：仓位空但挂单在——2026-08-24修复：TV心跳追回/追单确认
+            # 武装期间，仓位本来就是空的(等成交)但会挂着一张真实限价单，
+            # 这是设计内的正常状态(实盘复现：C账户ASML追回限价TTL刷新那
+            # 一刻被误判成幽灵单)，不是残留，跳过不报
+            if (
+                side is None and orders_n and orders_n > 0
+                and not catchup_active.get(sym)
+                and not chase_watch_active.get(sym)
+            ):
+                anomalies.append({
+                    "key": f"{name}:{sym}:ghost_order",
+                    "text": f"👻 {name}账户 {sym} 仓位已空但还有{orders_n}张挂单未清",
+                })
+
+            # 裸仓：有真实仓位但一张止损单都没有——最高优先级检查，
+            # 跳过正在开仓执行中的品种(open_in_progress)，避免撞上
+            # 开仓成交到止损挂出之间那几百毫秒的正常过渡窗口误报。
+            # 2026-08-26新增：TV主动平仓(CLOSE_QUICK_EXIT)是"先撤单再市价
+            # 平仓"两步走，撤单成功到市价平仓成交之间实测有~10-13秒正常
+            # 过渡窗口，此时止损已撤但仓位还没完全平掉，同理跳过不报。
+            if (
+                side is not None
+                and qty > MIN_QTY_DUST
+                and not has_stop
+                and not open_in_progress.get(sym, False)
+                and sym not in tv_recent_closes
+            ):
+                anomalies.append({
+                    "key": f"{name}:{sym}:naked",
+                    "text": (
+                        f"🆘 {name}账户 {sym} 持仓{side} {qty} 但盘口没有任何止损单，"
+                        f"疑似裸仓，请立即人工核查！"
+                    ),
+                })
+
+            # 雷达卡死检测：仓位在、雷达未激活、但实时mark已经越过激活线——
+            # 实盘复现过一次(XAU)：真实markPrice冲过了激活线，账本
+            # best_price却卡住没跟上，radar_activated一直是False，
+            # 位置本身还有硬止损兜底不算裸仓，但雷达失效意味着错过保本锁利。
+            # 这里独立用REST查到的mark去核对，不依赖账本自己的best_price，
+            # 跟VPS内部那道120秒强制核对互为备份，双保险。
+            radar_activated = info.get("radar_activated")
+            gate = float(info.get("radar_gate") or 0)
+            mark = float(info.get("mark") or 0)
+            if (
+                side is not None
+                and qty > MIN_QTY_DUST
+                and radar_activated is False
+                and gate > 0
+                and mark > 0
+                and not open_in_progress.get(sym, False)
+            ):
+                crossed = (
+                    (side == "LONG" and mark >= gate)
+                    or (side == "SHORT" and mark <= gate)
+                )
+                if crossed:
+                    anomalies.append({
+                        "key": f"{name}:{sym}:radar_stale",
+                        "text": (
+                            f"📡⚠️ {name}账户 {sym} 现价{mark}已越过激活线{gate}，"
+                            f"但雷达仍未激活，疑似WS/账本卡死，错过保本锁利"
+                        ),
+                    })
+
+            # TV信号 vs 实盘方向核对（只在有实盘仓位时比对，避免信号还没成交就误报）
+            tv = tv_signals.get(sym)
+            if tv and side and tv["side"] != side:
+                anomalies.append({
+                    "key": f"{name}:{sym}:side_mismatch",
+                    "text": (
+                        f"🔀 {name}账户 {sym} TV最近信号={tv['side']} 但实盘方向={side}，"
+                        f"可能未同步或执行异常"
+                    ),
+                })
+
+            # 2026-08-20新增：TV心跳失联检测——只对"以前收到过心跳"的品种
+            # 才检查(hb_ts>0)，还没被加上心跳代码的品种(hb_ts恒为0)不算
+            # 失联，不然13个品种里没加完的那些会天天报警。心跳一旦收到过
+            # 却超过HEARTBEAT_SILENCE_SEC(固定24小时，足够盖住所有品种
+            # 正常的TV周期，不怕误报)没再更新，说明TV那边的心跳代码可能
+            # 被改坏/漏加了，没人会主动发现这种"安静失效"，单独探测一次。
+            # 2026-09-13修复：只对"当前真的还在这个账户白名单里"的品种做
+            # 心跳失联检测——不然账户切换系统(A→B)或品种被暂停后，早年
+            # hb_ts>0的历史品种会永远误报"心跳失效"(本轮实测：MU/LITE/
+            # TSLA/META/DELL/GEV/STXX/ETH/XAU/ZEC/BCH/XMR/PAXG/ANTHROPIC/
+            # SKHYNIX/GS等十几个已经不在任何账户当前白名单里的品种同时
+            # 报警，跟2026-09-04 ASML/SKHYNIX那次同一个根因)。active_syms_now
+            # 直接来自引擎/health的symbols字段(mode-aware实时结果)。
+            # 2026-09-20停用：宝贝确认TV那边已经主动取消了心跳播报——心跳
+            # 播报只存在于币安A系统的策略版本里，B系统/CoinW用的策略版本
+            # 从设计上就没有心跳这个概念，不是"心跳代码失效"。当前没有任何
+            # 账户在跑A系统实盘，这条检测对现在所有活跃账户/品种永远只会
+            # 误报，整体停用；如果以后A系统重新上实盘，需要针对A系统账户
+            # 单独恢复。
+            hb_ts = float(info.get("hb_ts") or 0)
+            if False and hb_ts > 0 and sym in active_syms_now:
+                silent_sec = time.time() - hb_ts
+                if silent_sec > HEARTBEAT_SILENCE_SEC:
+                    anomalies.append({
+                        "key": f"{name}:{sym}:heartbeat_silent",
+                        "text": (
+                            f"💔 {name}账户 {sym} TV心跳已连续{silent_sec / 3600:.1f}小时"
+                            f"没更新，疑似该品种TV策略的心跳代码失效"
+                        ),
+                    })
+
+        errs = fetch_real_errors(acct)
+        for e in errs:
+            # 用错误文本前60字符做key，避免同一类错误刷屏但不同参数被当成新异常
+            snippet = e[-120:] if len(e) > 120 else e
+            # 2026-08-24修复：内置hash()按进程加了随机种子(PYTHONHASHSEED
+            # 默认random)，每次hash(相同字符串)在不同Python进程里返回不同值。
+            # check.py是每轮独立起进程的oneshot服务，这行key每次运行都会变，
+            # 30分钟去重窗口形同虚设——同一条还在12分钟回看窗口内的历史ERROR，
+            # 每轮都被当成"新异常"重新发送，钉钉反复刷同一件事(实盘复现：
+            # 同一条PAXGUSDT错误11:49和11:59两轮都被判定为"新发送")。改用
+            # hashlib.md5，同一段文本在任何进程里结果都一样，去重窗口才能
+            # 真正生效。
+            key = f"{name}:error:{hashlib.md5(snippet[:60].encode('utf-8')).hexdigest()[:8]}"
+            anomalies.append({"key": key, "text": f"🚨 {name}账户 真实ERROR: {snippet}"})
+
+    return anomalies
+
+
+def maybe_send_heartbeat(state: dict) -> None:
+    now = datetime.now(timezone.utc)
+    tag = f"{now.date()}:{now.hour}"
+    if now.hour in HEARTBEAT_HOURS and state.get("last_heartbeat_date_hour") != tag:
+        print(f"[HEALTH] {now.strftime('%Y-%m-%d %H:%M UTC')} watchdog运行中，正常状态不推送")
+        state["last_heartbeat_date_hour"] = tag
+        _save_state(state)
+
+
+NAKED_DEDUPE_SEC = 5 * 60   # 裸仓级别最高优先，不能被30分钟去重窗口捂住
+RADAR_STALE_DEDUPE_SEC = 10 * 60  # 雷达卡死次优先，比裸仓宽松但也不能等30分钟
+HEARTBEAT_SILENT_DEDUPE_SEC = 6 * 3600  # 心跳失联不是分钟级紧急事件，6小时提醒一次够了
+
+
+def _dedupe_window_for(key: str) -> int:
+    if ":naked" in key:
+        return NAKED_DEDUPE_SEC
+    if ":radar_stale" in key:
+        return RADAR_STALE_DEDUPE_SEC
+    if ":heartbeat_silent" in key:
+        return HEARTBEAT_SILENT_DEDUPE_SEC
+    return ALERT_DEDUPE_SEC
+
+
+def plan_notifications(state: dict, anomalies: list, now_ts: float) -> tuple[list, list]:
+    """故障首次出现/持续提醒/恢复由持久化状态决定，不按巡检次数刷屏。"""
+    active = state.setdefault("active_alerts", {})
+    pending = state.setdefault("pending_alerts", {})
+    current = {item["key"]: item for item in anomalies}
+    messages = []
+    sent_keys = []
+
+    for key, item in current.items():
+        severity = item.get("severity", "warning")
+        pending[key] = pending.get(key, 0) + 1
+        if key not in active:
+            if severity != "critical" and pending[key] < 2:
+                continue
+            active[key] = {
+                "text": item["text"], "severity": severity,
+                "since": now_ts, "last_sent": 0,
+            }
+        else:
+            active[key]["text"] = item["text"]
+            active[key]["severity"] = severity
+        reminder_sec = 3600 if severity == "critical" else 6 * 3600
+        if not active[key].get("last_sent") or now_ts - active[key]["last_sent"] >= reminder_sec:
+            prefix = "持续" if active[key].get("last_sent") else "新发"
+            messages.append(f"[{prefix}] {item['text']}")
+            sent_keys.append(key)
+
+    for key in list(pending):
+        if key not in current:
+            del pending[key]
+
+    recovered = []
+    for key in list(active):
+        if key in current:
+            continue
+        account = key.split(":", 1)[0]
+        if f"{account}:live_audit_unavailable" in current:
+            continue
+        if ":stop_count" in key and f"{account}:orders_unreadable" in current:
+            continue
+        recovered.append(key)
+        del active[key]
+    if recovered:
+        messages.append("[恢复] " + ", ".join(recovered))
+    return messages, sent_keys
+
+
+def main():
+    state = _load_state()
+    anomalies = run_once()
+    now_ts = time.time()
+    dry_run = os.getenv("WATCHDOG_DRY_RUN") == "1"
+    to_send, sent_keys = plan_notifications(state, anomalies, now_ts)
+    if to_send:
+        header = f"【watchdog状态变化】{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        if dry_run:
+            print("[DRY_RUN] " + header + "\n".join(to_send))
+        elif send_text(header + "\n".join(to_send)):
+            for key in sent_keys:
+                state["active_alerts"][key]["last_sent"] = now_ts
+
+    if not dry_run:
+        _save_state(state)
+        maybe_send_heartbeat(state)
+
+    if anomalies:
+        # 2026-08-18：之前这里只打印一行计数，被去重吞掉的异常详情就彻底
+        # 丢了（DingTalk 30分钟内同一异常不重发，但问题其实一直存在）。
+        # dashboard 的"监督狗日志"面板要展示真实明细，所以这里把每条异常
+        # 原文也打进 journalctl——每轮都打，不受钉钉去重影响，读日志的人
+        # 能看到问题从第一次出现到消失的完整过程。
+        for a in anomalies:
+            print(f"[ANOMALY] {a['key']} | {a['text']}")
+        print(f"本轮发现 {len(anomalies)} 条异常，{len(to_send)} 条状态变化待发送")
+    else:
+        print("本轮无异常")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,8 @@
+[Unit]
+Description=Read-only B/C/E combo direction audit (net vs sleeves, orphan, stop side, arena side) + DingTalk
+After=network.target
+[Service]
+Type=oneshot
+WorkingDirectory=/root/watchdog
+EnvironmentFile=/root/watchdog/.env
+ExecStart=/home/binanceB/binance-engine/venv/bin/python /root/watchdog/direction_audit.py
