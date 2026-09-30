@@ -4,6 +4,7 @@ import logging
 import json
 import time
 import threading
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from binance.client import Client
 import os
 from dotenv import load_dotenv
@@ -412,6 +413,10 @@ class BinanceClient:
             or "margin is insufficient" in low
             # -2022: ReduceOnly Order is rejected（持仓数据同步延迟时触发，重试通常可解决）
             or "-2022" in text
+            # -5022 is a normal GTX/post-only race (the quote would take).
+            # It contains the substring "502", so it must be excluded before
+            # the generic HTTP-502 transient marker below.
+            or "-5022" in text
         ):
             return False
         markers = (
@@ -741,6 +746,8 @@ class BinanceClient:
             "reduceOnly": raw.get("reduceOnly"),
             "status": raw.get("algoStatus") or raw.get("status"),
             "positionSide": raw.get("positionSide"),
+            "workingType": raw.get("workingType"),
+            "priceProtect": raw.get("priceProtect"),
         }
 
     def get_open_algo_orders(self, symbol="ETHUSDT"):
@@ -889,6 +896,96 @@ class BinanceClient:
         if step > 0:
             q = round(round(q / step) * step, 8)
         return q
+
+    def format_entry_quantity(self, qty, symbol="ETHUSDT", price=0.0):
+        """Conservatively quantize a new position; never exceed its risk limit."""
+        try:
+            requested = Decimal(str(qty))
+            mark = Decimal(str(price))
+            if not requested.is_finite() or requested <= 0 or not mark.is_finite() or mark <= 0:
+                return 0.0
+            filters = self._load_symbol_filters(symbol).get("filters", [])
+            lot = next((f for f in filters if f.get("filterType") == "LOT_SIZE"), None)
+            if lot is None:
+                logger.warning(f"[合约规格] {symbol} 缺少LOT_SIZE，禁止新开仓")
+                return 0.0
+            result = requested
+            quantity_filters = [lot] + [
+                f for f in filters if f.get("filterType") == "MARKET_LOT_SIZE"
+            ]
+            for item in quantity_filters:
+                step = Decimal(str(item.get("stepSize") or "0"))
+                minimum = Decimal(str(item.get("minQty") or "0"))
+                if step > 0:
+                    result = (result / step).to_integral_value(rounding=ROUND_DOWN) * step
+                if result < minimum:
+                    return 0.0
+            if any(
+                Decimal(str(item.get("stepSize") or "0")) > 0
+                and result % Decimal(str(item.get("stepSize"))) != 0
+                for item in quantity_filters
+            ):
+                logger.warning(f"[合约规格] {symbol} 数量步长不兼容，禁止新开仓")
+                return 0.0
+            for item in filters:
+                if item.get("filterType") in ("MIN_NOTIONAL", "NOTIONAL"):
+                    minimum = Decimal(str(item.get("notional") or item.get("minNotional") or "0"))
+                    if result * mark < minimum:
+                        return 0.0
+            return float(result)
+        except (InvalidOperation, TypeError, ValueError, ZeroDivisionError) as exc:
+            logger.warning(f"[合约规格] {symbol} 开仓数量无效，禁止新开仓: {exc}")
+            return 0.0
+
+    def minimum_entry_quantity(self, symbol, price=0.0, safety_buffer_frac=0.10):
+        """2026-09-30新增：交易所允许的最小可下单数量(同时满足LOT_SIZE/
+        MARKET_LOT_SIZE的minQty和MIN_NOTIONAL/NOTIONAL的最小名义金额)，
+        向上取整到合法步长——专给"目标仓位算出来是正的、但被format_entry_
+        quantity(向下取整)判成0"这种情况托底用，不是替代format_entry_
+        quantity本身的保守取整语义。查不到合约规格/price无效时返回0.0，
+        调用方按老规矩当作"不可开仓"处理，不额外猜测。
+
+        2026-09-30实盘真实复现过一次：算的时候notional=$20.15(刚好卡在
+        $20门槛上方一点点)，但从算出目标到真的挂单，中间隔了7分钟(账户
+        要扫完27个品种，同一轮里排在后面的品种天然会晚几分钟才轮到)，
+        这7分钟里LINKUSDT跌了1.6%，实际挂单时notional掉回$20以下，被
+        交易所-4164拒单。所以这里不是卡着最小名义金额的边缘算，而是按
+        safety_buffer_frac(默认10%)多留一点缓冲，扛得住"算的时候"到
+        "真下单的时候"之间正常的价格漂移，不是无谓地放大仓位——10%对应
+        的$仓位增量本身就很小(比如$20门槛变成$22)。"""
+        try:
+            mark = Decimal(str(price))
+            if not mark.is_finite() or mark <= 0:
+                return 0.0
+            filters = self._load_symbol_filters(symbol).get("filters", [])
+            lot = next((f for f in filters if f.get("filterType") == "LOT_SIZE"), None)
+            if lot is None:
+                return 0.0
+            step = Decimal(str(lot.get("stepSize") or "0"))
+            if step <= 0:
+                return 0.0
+            buffer_mult = Decimal("1") + Decimal(str(max(0.0, float(safety_buffer_frac))))
+            result = Decimal(str(lot.get("minQty") or "0"))
+            for item in filters:
+                if item.get("filterType") == "MARKET_LOT_SIZE":
+                    m_min = Decimal(str(item.get("minQty") or "0"))
+                    if m_min > result:
+                        result = m_min
+                if item.get("filterType") in ("MIN_NOTIONAL", "NOTIONAL"):
+                    min_notional = Decimal(str(item.get("notional") or item.get("minNotional") or "0"))
+                    if min_notional > 0:
+                        needed_qty = (min_notional * buffer_mult) / mark
+                        steps_up = (needed_qty / step).to_integral_value(rounding=ROUND_UP)
+                        candidate = steps_up * step
+                        if candidate > result:
+                            result = candidate
+            # 确保满足minQty后仍是合法步长的整数倍(above可能因为minQty本身
+            # 不是step整数倍而错位，这里再向上取整一次锁死步长合规)。
+            result = (result / step).to_integral_value(rounding=ROUND_UP) * step
+            return float(result)
+        except (InvalidOperation, TypeError, ValueError, ZeroDivisionError) as exc:
+            logger.warning(f"[合约规格] {symbol} 最小可下单数量计算失败: {exc}")
+            return 0.0
 
     def format_price(self, price, symbol="ETHUSDT"):
         sym = self._load_symbol_filters(symbol)
@@ -1901,7 +1998,8 @@ class BinanceClient:
                 return o
         return None
 
-    def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False, emergency=False):
+    def place_market_order(self, side, quantity, symbol="ETHUSDT", reduce_only=False,
+                           emergency=False, client_order_id=None):
         qty = self.format_quantity(quantity, symbol)
         if qty <= 0:
             logger.error(f"[市价单跳过] 数量无效 {quantity}")
@@ -1915,6 +2013,9 @@ class BinanceClient:
             }
             if reduce_only:
                 params["reduceOnly"] = True
+            coid = str(client_order_id or "").strip()[:36] or None
+            if coid:
+                params["newClientOrderId"] = coid
             order = self.client.futures_create_order(**params)
             tag = "平仓" if reduce_only else "开仓"
             logger.info(f"[市价{tag}成功] {side} {qty} {symbol}")
@@ -1931,6 +2032,18 @@ class BinanceClient:
             tag = "平仓" if reduce_only else "开仓"
             logger.error(f"[市价{tag}失败] {side} {qty} {symbol}: {e}")
             return None
+
+    def get_tick_size(self, symbol="ETHUSDT"):
+        """2026-09-26新增：post-only挂单需要知道最小变动价位来让价，
+        避免摸盘口和真正下单之间的一瞬间被对手价反超，触发-5022。"""
+        sym = self._load_symbol_filters(symbol)
+        for f in sym.get("filters", []):
+            if f.get("filterType") == "PRICE_FILTER":
+                try:
+                    return float(f.get("tickSize", 0.01))
+                except (TypeError, ValueError):
+                    return 0.01
+        return 0.01
 
     def get_best_bid_ask(self, symbol="ETHUSDT"):
         """
@@ -2038,7 +2151,8 @@ class BinanceClient:
         return filled
 
     def place_limit_order(self, side, quantity, price, symbol="ETHUSDT",
-                          reduce_only=True, client_order_id=None):
+                          reduce_only=True, client_order_id=None,
+                          time_in_force="GTC"):
         """
         限价挂单。client_order_id → newClientOrderId（订单标签幂等）。
         查单失败 fail-closed；同价/同标签已存在则复用，禁止狂挂。
@@ -2049,8 +2163,14 @@ class BinanceClient:
             logger.error(f"[限价单跳过] 数量无效 {quantity}")
             return None
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
-        want_px = round(float(px_str), 2)
+        # 价格必须按品种tick精度比较；round(..., 2)会把PEPE等低价品种
+        # 全部压成0，导致不同价格的挂单被错误当作同一张。
+        want_px = str(px_str)
         coid = str(client_order_id or "").strip()[:36] or None
+        tif = str(time_in_force or "GTC").strip().upper()
+        if tif not in ("GTC", "GTX"):
+            logger.error(f"[限价单跳过] 不支持的timeInForce={tif}")
+            return None
         key = (symbol, want_side, want_px, coid or "")
         legacy_key = (symbol, want_side, want_px)  # 兼容旧缓存键
 
@@ -2084,17 +2204,19 @@ class BinanceClient:
             # else: 维持 None = 冷启动 fail-closed
         else:
             want_side_check = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
-            want_px_check = round(float(px_str), 2)
+            want_px_check = str(px_str)
             for o in book or []:
                 if str(o.get("type") or "").upper() != "LIMIT":
                     continue
                 if str(o.get("side") or "").upper() != want_side_check:
                     continue
+                if coid and str(o.get("clientOrderId") or "") != coid:
+                    continue
                 try:
-                    opx = round(float(o.get("price") or 0), 2)
+                    opx = str(self.format_price(o.get("price") or 0, symbol))
                 except (TypeError, ValueError):
                     continue
-                if abs(opx - want_px_check) <= 0.02:
+                if opx == want_px_check:
                     exist = o
                     break
 
@@ -2125,7 +2247,7 @@ class BinanceClient:
                     symbol=symbol,
                     side=want_side,
                     type="LIMIT",
-                    timeInForce="GTC",
+                    timeInForce=tif,
                     quantity=qty,
                     price=px_str,
                     reduceOnly=reduce_only,
@@ -2192,7 +2314,7 @@ class BinanceClient:
             self._throttle_rest(symbol)
             params = {
                 "symbol": symbol, "side": want_side, "type": "LIMIT",
-                "timeInForce": "GTC", "quantity": qty, "price": px_str,
+                "timeInForce": tif, "quantity": qty, "price": px_str,
             }
             if reduce_only:
                 params["reduceOnly"] = True
@@ -2221,7 +2343,8 @@ class BinanceClient:
 
     def place_algo_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
                                      close_position=True, quantity=None,
-                                     client_order_id=None):
+                                     client_order_id=None, working_type=None,
+                                     price_protect=None):
         """Algo 通道 STOP_MARKET：优先 quantity+reduceOnly；否则 closePosition。"""
         binance_side = "BUY" if side.upper() in ["BUY", "LONG"] else "SELL"
         params = {
@@ -2234,6 +2357,10 @@ class BinanceClient:
         coid = str(client_order_id or "").strip()[:36] or None
         if coid:
             params["clientAlgoId"] = coid
+        if working_type:
+            params["workingType"] = str(working_type).upper()
+        if price_protect is not None:
+            params["priceProtect"] = "true" if bool(price_protect) else "false"
         if quantity is not None:
             qty = self.format_quantity(quantity, symbol)
             if qty <= 0:
@@ -2290,7 +2417,8 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(self, side, stop_price, symbol="ETHUSDT",
-                                quantity=None, client_order_id=None, emergency=False):
+                                quantity=None, client_order_id=None, emergency=False,
+                                working_type=None, price_protect=None):
         want_side = "BUY" if str(side).upper() in ("BUY", "LONG") else "SELL"
         want_px = round(float(stop_price or 0), 2)
         coid = str(client_order_id or "").strip()[:36] or None
@@ -2333,6 +2461,10 @@ class BinanceClient:
             }
             if coid:
                 params["newClientOrderId"] = coid
+            if working_type:
+                params["workingType"] = str(working_type).upper()
+            if price_protect is not None:
+                params["priceProtect"] = "true" if bool(price_protect) else "false"
             if quantity is not None:
                 qty = self.format_quantity(quantity, symbol)
                 if qty <= 0:
@@ -2366,6 +2498,8 @@ class BinanceClient:
                     close_position=(quantity is None),
                     quantity=quantity,
                     client_order_id=coid,
+                    working_type=working_type,
+                    price_protect=price_protect,
                 )
                 if order:
                     with self._place_dedupe_lock:

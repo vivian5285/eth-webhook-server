@@ -68,6 +68,19 @@ DEFAULT_PARAMS = {
     "cci_len": 20,
     "atr_len": 14,
     "atr_stop_mult": 2.5,
+    # 2026-09-19新增(mtf_ema_macd_cci_v2对照实验，宝贝要求)：
+    # max_breakout_extension_atr_mult(默认0.0=原行为不变，不设上限)——原版
+    # 对"追多高"没有上限，只要收盘突破近brk_lookback根高点就进场，不管
+    # 这根放量K线本身已经冲出了多远；止损却是固定atr_stop_mult倍ATR，
+    # 突破得越远，止损预算被这根入场K线自己的波动吃掉得越多。传大于0的
+    # 值(比如0.5)后，要求收盘价不能超过被突破高/低点太多(超过
+    # mult×ATR就放弃这次信号，等回踩/下一次更贴近的突破)，把入场质量
+    # 和止损预算重新挂钩。
+    # exit_struct_lookback默认还是5，v2在注册时通过params覆盖成跟
+    # brk_lookback一致(10)——用来确认"趋势开始"的证据窗口比用来确认
+    # "趋势结束"的证据窗口宽一倍，是不对称的，这里不改代码，只在roster
+    # 注册时把两个窗口对齐，是最小改动。
+    "max_breakout_extension_atr_mult": 0.0,
 }
 
 
@@ -192,6 +205,13 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     atr = indicators.wilder_atr(base, atr_len)
     if atr <= 0:
         return None
+
+    ext_mult = float(p.get("max_breakout_extension_atr_mult") or 0.0)
+    if ext_mult > 0:
+        broken_level = hh if d > 0 else ll
+        extension = (price - broken_level) if d > 0 else (broken_level - price)
+        if extension > ext_mult * atr:
+            return None  # 追得太高/杀得太低，止损预算已经被这根K线自己吃掉太多
 
     tier = 2 if (d > 0 and daily_bias > 0) or (d < 0 and daily_bias < 0) else 1
     dref = "同向(tier2)" if tier == 2 else ("参考:多" if daily_bias > 0 else "参考:空" if daily_bias < 0 else "参考:中性")

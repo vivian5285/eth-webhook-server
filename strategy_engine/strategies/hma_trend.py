@@ -43,6 +43,16 @@ DEFAULT_PARAMS = {
     "period": 20,
     "atr_len": 14,
     "atr_stop_mult": 2.0,
+    # 2026-09-21新增(hma_trend_v2对照实验，宝贝要求思考怎么优化)：原版
+    # HMA为了降滞后天然更敏感——单根斜率符号翻转就进出场，真实数据152笔
+    # 里胜率只有33.6%、去掉Top3笔基本打平(107.7%)，怀疑相当一部分是"斜率
+    # 微弱抖动"级别的假拐头，不是真趋势转向。两道默认关闭的过滤，跟
+    # macd_histogram_v2同一个工具箱：
+    # min_slope_atr_frac：拐头那一刻HMA自己的变化量(|h[-1]-h[-2]|)至少要
+    #   达到这个比例×ATR才算数，过滤微弱抖动。
+    # adx_gate：ADX(14)至少达到这个值才允许开仓，只在真趋势里吃HMA拐头。
+    "min_slope_atr_frac": 0.0,
+    "adx_gate": 0.0,
 }
 
 
@@ -89,6 +99,16 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     atr = indicators.wilder_atr(bars, atr_len)
     if atr <= 0:
         return None
+
+    min_slope_frac = float(p.get("min_slope_atr_frac") or 0)
+    if min_slope_frac > 0 and abs(h[-1] - h[-2]) < min_slope_frac * atr:
+        return None  # 拐头幅度太小，大概率是噪音抖动不是真转向
+
+    adx_gate = float(p.get("adx_gate") or 0)
+    if adx_gate > 0:
+        adx = indicators.wilder_adx(bars, atr_len)
+        if adx < adx_gate:
+            return None  # 不在真趋势里，HMA拐头信号先不吃
 
     action = "LONG" if flipped_up else "SHORT"
     d = 1 if action == "LONG" else -1

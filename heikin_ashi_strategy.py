@@ -39,6 +39,7 @@ DEFAULT_PARAMS = {
     "use_ema_direction_filter": False,
     "ema_fast_len": 7,
     "ema_slow_len": 25,
+    "ema_require_price_side": False,
     "exit_confirm_bars": 1,
 }
 
@@ -61,6 +62,16 @@ def wilder_atr(bars: List[dict], period: int = 14) -> float:
     for tr in trs[period:]:
         atr = (atr * (period - 1) + tr) / period
     return float(atr)
+
+
+def ema(values: List[float], period: int) -> List[float]:
+    if period <= 0 or len(values) < period:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    out = [sum(values[:period]) / period]
+    for value in values[period:]:
+        out.append(value * alpha + out[-1] * (1.0 - alpha))
+    return out
 
 
 def _ha(bars: List[dict]) -> List[dict]:
@@ -140,6 +151,22 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
 
     if atr <= 0:
         return None
+
+    if bool(p.get("use_ema_direction_filter")):
+        closes = [float(b["c"]) for b in bars]
+        ema_fast = ema(closes, int(p["ema_fast_len"]))
+        ema_slow = ema(closes, int(p["ema_slow_len"]))
+        if not ema_fast or not ema_slow:
+            return None
+        long_ok = ema_fast[-1] > ema_slow[-1]
+        short_ok = ema_fast[-1] < ema_slow[-1]
+        if bool(p.get("ema_require_price_side")):
+            long_ok = long_ok and price > ema_fast[-1] and price > ema_slow[-1]
+            short_ok = short_ok and price < ema_fast[-1] and price < ema_slow[-1]
+        if all_green and not long_ok:
+            return None
+        if all_red and not short_ok:
+            return None
 
     d = 1 if all_green else -1
     return {
