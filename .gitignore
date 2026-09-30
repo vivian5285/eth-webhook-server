@@ -44,3 +44,8 @@ test_stop_*.py
 test_tv_*.py
 test_two_*.py
 test_dc_*.py
+
+# 2026-10-01: 本地运行产物
+scratch_*.txt
+.claude/scheduled_tasks.lock
+.claude/worktrees/

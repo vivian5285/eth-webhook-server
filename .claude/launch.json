@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "roster-dashboard",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["dashboard/roster_server.py"],
+      "port": 8878
+    }
+  ]
+}
