@@ -1,0 +1,17 @@
+[Unit]
+Description=vwap_live - VWAP均值回归真账户测试(两道闸门未开=观察模式)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/vwap_live
+ExecStart=/usr/bin/python3 -u /root/vwap_live/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
