@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import os
 import sys
@@ -41,6 +42,20 @@ ARENA_ALIAS = {"heikin_ashi_trend_ema7_25": "heikin_ashi_trend"}
 MIRROR_START_BAR_MS = calendar.timegm((2026, 9, 30, 12, 0, 0)) * 1000
 MIRROR_LAG_MS = 4 * 3600 * 1000
 NET_REL_TOL = 0.05
+SHADOW_URL = "http://187.53.133.188:8878/api/roster/shared-shadow"
+LIVE_CODE_FILES = (
+    "heikin_ashi_live.py", "asset_class_combo_strategy.py", "virtual_netting.py",
+    "heikin_ashi_strategy.py", "binance_client.py", "strategy_engine/portfolio_guard.py",
+    "strategy_engine/indicators.py",
+)
+# 影子文件名 -> 实盘源文件(影子钉的是"还原import后"的原始实盘哈希)
+SHADOW_PIN_MAP = {
+    "live_config.py": "asset_class_combo_strategy.py",
+    "live_guard.py": "strategy_engine/portfolio_guard.py",
+    "virtual_netting.py": "virtual_netting.py",
+    "heikin_ashi_strategy.py": "heikin_ashi_strategy.py",
+    "live_indicators.py": "strategy_engine/indicators.py",
+}
 STATE_FILE = "/root/watchdog/direction_audit_state.json"
 REALERT_SEC = 6 * 3600
 
@@ -64,8 +79,43 @@ def _arena_index(strategies):
     return index
 
 
+def _sha256(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def code_drift_checks(alerts: list, infos: list) -> None:
+    """2026-09-30新增：(a) B/C/E三账户实盘代码必须逐字节一致；(b) 擂台
+    /shadow/组合影子钉住的实盘配置哈希必须等于现行实盘文件——不一致说明
+    实盘又调了配置，影子需要开新一期才继续有对照意义。"""
+    engines = {a: os.path.dirname(p) for a, p in ACCOUNTS.items()}
+    for rel in LIVE_CODE_FILES:
+        hashes = {}
+        for acct, root in engines.items():
+            try:
+                hashes[acct] = _sha256(os.path.join(root, rel))
+            except OSError as e:
+                hashes[acct] = f"unreadable:{e.__class__.__name__}"
+        if len(set(hashes.values())) > 1:
+            alerts.append((f"code_drift:{rel}:{'/'.join(sorted(set(v[:8] for v in hashes.values())))}",
+                           f"B/C/E实盘代码不一致：{rel} " + " ".join(f"{a}={h[:8]}" for a, h in hashes.items())))
+    try:
+        pinned = (_get(SHADOW_URL, timeout=15).get("manifest") or {}).get("live_source_sha256") or {}
+    except Exception as e:
+        infos.append(f"组合影子接口读取失败，跳过配置对齐检查: {e}")
+        return
+    root = engines["B"]
+    for shadow_name, live_rel in SHADOW_PIN_MAP.items():
+        want = pinned.get(shadow_name)
+        have = _sha256(os.path.join(root, live_rel))
+        if want and want != have:
+            alerts.append((f"shadow_stale:{shadow_name}:{have[:8]}",
+                           f"组合影子(/shadow/)配置已落后实盘：{live_rel} 实盘={have[:8]} 影子钉住={want[:8]}，需开新一期"))
+
+
 def audit():
     alerts, infos = [], []
+    code_drift_checks(alerts, infos)
     positions = _get(DASHBOARD_URL, timeout=90)["accounts"]
     states = {}
     for acct, path in ACCOUNTS.items():
