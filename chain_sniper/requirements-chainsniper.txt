@@ -1,0 +1,6 @@
+web3>=6.15,<7
+eth-account
+solders
+requests
+python-dotenv
+flask

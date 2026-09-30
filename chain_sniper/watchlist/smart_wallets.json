@@ -1,0 +1,26 @@
+{
+  "_comment": "人工维护的聪明钱种子名单。每条: address/chain/label/added_date/realized_pnl_notes。Phase 1 起加载进 DB。",
+  "wallets": [
+    {
+      "address": "H6dcfVrS2BjnST4URAwvQa3Kpzbi4dyB9CMvcTKgHprP",
+      "chain": "solana",
+      "label": "种子地址1",
+      "added_date": "2026-08-12",
+      "realized_pnl_notes": ""
+    },
+    {
+      "address": "ApshcqqKUERYoRRBBno4yr3ZdVTW6Ytu3nyePkFub2Js",
+      "chain": "solana",
+      "label": "种子地址2",
+      "added_date": "2026-08-12",
+      "realized_pnl_notes": ""
+    },
+    {
+      "address": "64LFARmAfM4YnLwzPVXo17yqZxAQ8qCcLALmYt17BVJx",
+      "chain": "solana",
+      "label": "种子地址3",
+      "added_date": "2026-08-12",
+      "realized_pnl_notes": ""
+    }
+  ]
+}

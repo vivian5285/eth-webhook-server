@@ -1,0 +1,13 @@
+[Unit]
+Description=chain_sniper 聪明钱种子名单自动发现（GeckoTerminal 无 key，跑完即退）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/chain_sniper
+EnvironmentFile=/root/chain_sniper/.env
+ExecStart=/root/chain_sniper/venv/bin/python -m discovery.wallet_finder
+# 跑一次 10-25 分钟——GeckoTerminal 免费接口限速很凶、还会给触发过大量请求的
+# IP 加长冷却，脚本里已有 429 指数退避，宁可慢也别打崩。给足超时。
+TimeoutStartSec=2400
+Nice=10

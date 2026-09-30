@@ -1,0 +1,5 @@
+py-clob-client
+websockets
+python-dotenv
+requests
+httpx[socks]   # py-clob-client 的 http 客户端在走 SOCKS 代理的环境下需要这个 extra；VPS 若直连公网可不装，装了也无害

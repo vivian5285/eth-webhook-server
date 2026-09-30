@@ -1,0 +1,9 @@
+venv/
+data/
+logs/
+__pycache__/
+*.db
+*.db-*
+.env
+.env.bak*
+discovery/last_run.json

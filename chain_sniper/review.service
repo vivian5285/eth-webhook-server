@@ -1,0 +1,11 @@
+[Unit]
+Description=chain_sniper 每周复盘（真相账本总结 + Telegram 摘要）
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/chain_sniper
+EnvironmentFile=/root/chain_sniper/.env
+ExecStart=/root/chain_sniper/venv/bin/python /root/chain_sniper/review.py --days 14 --tg
+TimeoutStartSec=300
+Nice=10

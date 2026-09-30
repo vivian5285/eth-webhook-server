@@ -1,0 +1,10 @@
+[Unit]
+Description=每周日 08:10 UTC 跑 chain_sniper 复盘
+
+[Timer]
+OnCalendar=Sun 08:10
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=chain_sniper always-on BSC+Solana momentum sniper
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/chain_sniper
+EnvironmentFile=/root/chain_sniper/.env
+ExecStart=/root/chain_sniper/venv/bin/python /root/chain_sniper/main.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

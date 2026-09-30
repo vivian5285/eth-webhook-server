@@ -1,0 +1,12 @@
+[Unit]
+Description=每周两次跑聪明钱名单自动发现
+
+[Timer]
+# 周一、周四 06:15 UTC。发现频率不用高——名单成熟本来就要几周，
+# 而且每跑一次要打 ~80 个 GeckoTerminal 请求。
+OnCalendar=Mon,Thu 06:15
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

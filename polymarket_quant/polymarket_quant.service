@@ -1,0 +1,14 @@
+[Unit]
+Description=polymarket_quant always-on crypto up/down dislocation trader
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/polymarket_quant
+EnvironmentFile=/root/polymarket_quant/.env
+ExecStart=/root/polymarket_quant/venv/bin/python /root/polymarket_quant/main.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
