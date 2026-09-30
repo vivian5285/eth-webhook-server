@@ -261,6 +261,8 @@ def evaluate_entry(
     daily_start_equity: Optional[float] = None,
     minimum_regime: Optional[str] = None,
     budget_scale: float = 1.0,
+    direction_relative_check: bool = False,
+    direction_relative_frac: Optional[float] = None,
 ) -> GuardDecision:
     desired_qty = max(0.0, float(desired_qty or 0.0))
     price = float(price or 0.0)
@@ -302,6 +304,12 @@ def evaluate_entry(
         for row in open_rows
         if str(row.get("side") or "").upper() == normalized_side
     )
+    existing_asset_class_direction = sum(
+        _row_notional(row)
+        for row in open_rows
+        if asset_class(row.get("symbol")) == target_asset_class
+        and str(row.get("side") or "").upper() == normalized_side
+    )
 
     total_cap_usd = equity * gross_cap
     # 2026-09-30: 用status.base_gross_cap_mult(单sleeve基准，不含
@@ -322,6 +330,30 @@ def evaluate_entry(
         ),
         max(0.0, direction_cap_usd - existing_direction),
     )
+
+    # 2026-09-30新增：跨sleeve方向一致性检查(opt-in，只有实盘显式传
+    # direction_relative_check=True才生效，擂台不受影响)——上面那道
+    # direction_cap_usd是固定$上限，账户总仓位远小于上限时完全拦不住
+    # "好几个独立sleeve碰巧都看空"这种情况，9-29和9-30两次真实撞见过
+    # crypto桶被砸到92%~97%单方向。这里换一个更直接的检查：算"如果这笔
+    # 单子成交了，这个资产类别里净仓会变成百分之多少同一个方向"，不让
+    # 结果超过direction_relative_frac(默认复用DIRECTION_CAP_FRAC=0.75)。
+    # 解方程(existing_asset_class_direction+x)/(existing_asset_class+x)
+    # <=frac，得到x的上限。existing_asset_class low于bootstrap_floor时
+    # 不做这道检查——账户里这个资产类别刚开始建仓、只有一两笔时，任何
+    # 一笔天然就是"100%同方向"，这不是sleeve扎堆的问题，是正常的起步
+    # 状态，不该被这道闸门拦住。
+    if direction_relative_check:
+        rel_frac = (
+            DIRECTION_CAP_FRAC if direction_relative_frac is None
+            else float(direction_relative_frac)
+        )
+        bootstrap_floor = equity * 0.05
+        if existing_asset_class >= bootstrap_floor and rel_frac < 1.0:
+            numerator = rel_frac * existing_asset_class - existing_asset_class_direction
+            rel_allowed_notional = max(0.0, numerator / (1.0 - rel_frac))
+            allowed_notional = min(allowed_notional, rel_allowed_notional)
+
     allowed_qty = min(desired_qty, allowed_notional / price)
 
     stop = float(stop_price or 0.0)

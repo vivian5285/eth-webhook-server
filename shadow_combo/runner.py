@@ -16,14 +16,16 @@ from . import engine, store
 
 LOG = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
-DB_PATH = os.environ.get("SHADOW_COMBO_DB", str(ROOT / "data" / "shared_shadow_v2.db"))
+DB_PATH = os.environ.get("SHADOW_COMBO_DB", str(ROOT / "data" / "shared_shadow_v3.db"))
 BASE = "https://fapi.binance.com"
 PINNED_FILES = {
-    "live_config.py": "41d97f7bd2fd7a48ed7742bb4a6057e1d029628d46ad0a770c25f49fa50947d8",
+    "live_config.py": "d53761cfa202de3260450f55b91d3b90338d296bee62bfced6575d1f3d36312e",
     "heikin_ashi_strategy.py": "5a667ce7e3e1974a6ea8e9646caf62b0612944a611ce8bdce0aadaa4f3f7aec8",
     "virtual_netting.py": "b2d92f7cc1f0bcca8e4cc17218199ce6d6ba12897b62bf732cc52b8f1cb4fde5",
-    "live_guard.py": "8294a1a5530e9c18cdedfffab285260dd56888d602f94a724cfc982dd46b0f4b",
+    "live_guard.py": "ef85626d4849dc32f6e38195d7f535c16cbda6a9f2352d635d21a8455fdf50ef",
     "live_indicators.py": "981a55b265a718a60317370a1d58092b07397892384f0be3397ceb9f91f4b72b",
+    # v3 (2026-09-30): verbatim heikin_ashi_live.py breakeven lock + giveback brake
+    "live_overlays.py": "f996033d2541765077acda32c81430eff9801ba2f1adfff6cc4a3705c3989834",
 }
 STRATEGY_FILES = {
     "hma_trend": "135475a59e3a041e766b3ef36392983b205da56e3c4c56b5f7fc24e16dbd127e",
@@ -61,7 +63,7 @@ def manifest() -> dict:
         actual = _sha(strategy_dir / f"{name}.py")
         if actual != expected:
             raise RuntimeError(f"strategy source drift: {name} {actual} != {expected}")
-    return {"kind": "shared_shadow_v2", "live_source_sha256": PINNED_FILES,
+    return {"kind": "shared_shadow_v3", "live_source_sha256": PINNED_FILES,
             "paper_copy_sha256": files, "strategy_sha256": STRATEGY_FILES,
             "simulator_sha256": {name: _sha(ROOT / name) for name in ("engine.py", "store.py", "runner.py")},
             "fee_rate": engine.FEE_RATE, "slippage_rate": engine.SLIPPAGE_RATE,

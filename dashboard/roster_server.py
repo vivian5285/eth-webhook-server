@@ -249,7 +249,7 @@ def shadow_portfolio_page():
 
 @app.route("/api/roster/shared-shadow")
 def api_shared_shadow():
-    db_path = _REPO_ROOT / "shadow_combo" / "data" / "shared_shadow_v2.db"
+    db_path = _REPO_ROOT / "shadow_combo" / "data" / "shared_shadow_v3.db"
     if not db_path.exists():
         return jsonify({"status": "warming_up", "account": None})
     try:

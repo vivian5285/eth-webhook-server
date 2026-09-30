@@ -64,12 +64,33 @@ PREVIOUS_STRATEGY_VERSIONS = {"stable_asset_combo_v2"}
 # 是验证后的收益率/天数据，不是并发持仓假设。给20%，其余4个sleeve按
 # 比例各让20%(乘0.8)，不是平分——ttm_squeeze仍是样本最深、边际最确定
 # 的sleeve，不该被新进来的一视同仁削弱太多。
+# 2026-09-30五次校准：宝贝在擂台UI上直接发现ttm_squeeze"排名最不稳定、
+# 浮亏也多"，按老规矩分桶(crypto-only)+年龄归一化+近窗口复核了一遍全部
+# 5个crypto候选，不只看UI截图的当日数字：
+#   ttm_squeeze: 全期n=28(明显比hma_trend153/chanlun_pivot73薄)，3天
+#     胜率16.7%/均笔-1.14(真实转弱)，7天/14天回正但不算突出，实盘当前
+#     真实回撤5.73%——本来给40%(全场最大)是几轮前"样本最深、边际最
+#     确定"的判断，现在这两个前提都在弱化，不该继续占最大权重。
+#   hma_trend: 实盘当前真实回撤6.31%，是5个里最差的(比ttm_squeeze还差)，
+#     3天也是负的——上一轮(09-29)已经从20%连续砍到12%，这次数据没有
+#     反转这个判断，继续小幅下调，不是新问题，是同一个rough patch还没
+#     走出来。
+#   keltner_channel: 7天胜率80%/均笔+3.80，14天胜率68.8%/均笔+2.44，
+#     当前回撤仅1.13%——现在5个里最健康的之一，权重明显偏低。
+#   turtle_breakout: 7天/14天均笔都在+1.8~+3.0，回撤仅0.39%，但全期
+#     样本仍是5个里最薄(n=25)，给的加码要比keltner/chanlun_pivot保守，
+#     不能因为最近好看就重仓一个证据基础还薄的sleeve。
+#   chanlun_pivot: 3天胜率66.7%/均笔+3.53，7天/14天都稳定为正，当前
+#     回撤0.02%(基本在峰值)——5个里现在最强、最健康，权重应该继续加。
+# 调法：ttm_squeeze 40%→24%，hma_trend 12%→8%，让出的24点分给keltner_
+# channel(16%→24%)、chanlun_pivot(20%→28%)、turtle_breakout(12%→16%，
+# 样本薄给的加码最保守)。
 CRYPTO_SLEEVES = (
-    ("hma_trend", 0.12),
-    ("ttm_squeeze", 0.40),
-    ("keltner_channel", 0.16),
-    ("turtle_breakout", 0.12),
-    ("chanlun_pivot", 0.20),
+    ("hma_trend", 0.08),
+    ("ttm_squeeze", 0.24),
+    ("keltner_channel", 0.24),
+    ("turtle_breakout", 0.16),
+    ("chanlun_pivot", 0.28),
 )
 # 2026-09-29再校准：按最新擂台数据全量复核所有实盘验证名单——hma_trend
 # 自己的回撤从6.38%(09-28)恶化到8.26%，刚跨过drawdown_crisis阈值(8%)。

@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
-from . import live_config, live_guard, virtual_netting
+from . import live_config, live_guard, live_overlays, virtual_netting
 
 SYMBOLS = (
     "1000PEPEUSDT", "ANTHROPICUSDT", "ASMLUSDT", "BCHUSDT", "BNBUSDT",
@@ -197,7 +197,8 @@ def _size(state: dict, item: dict, symbol: str, marks: dict, filters: dict,
         symbol=symbol, side=signal["action"], desired_qty=desired, price=price,
         stop_price=stop, equity=value, open_rows=_risk_rows(provisional), bars=bars,
         peak_equity=state["peak_equity"], daily_start_equity=state["daily_start_equity"],
-        minimum_regime=state["regime"], budget_scale=3.0)
+        minimum_regime=state["regime"], budget_scale=3.0,
+        direction_relative_check=True)
     allowed = _floor_step(decision.allowed_qty, step)
     return allowed if allowed * price >= float(filters[symbol]["min_notional"]) else 0.0
 
@@ -275,15 +276,19 @@ def step(state: dict, data: dict[str, dict], quotes: dict[str, tuple[float, floa
                 continue
         sleeves = copy.deepcopy(state["sleeves"].get(symbol) or {})
         last_price = float(bars[-1]["c"])
-        for name, sleeve in sleeves.items():
-            if name not in {"hma_trend", "ttm_squeeze", "keltner_channel", "turtle_breakout",
-                            "chanlun_pivot", "heikin_ashi_trend_ema7_25", "mtf_ema_macd_cci"}:
-                continue
-            entry, stop = float(sleeve["entry_price"]), float(sleeve["stop_loss"])
-            direction = 1 if sleeve["side"] == "LONG" else -1
-            if abs(entry - stop) > 0 and direction * (last_price - entry) >= abs(entry - stop):
-                locked = entry + direction * entry * 0.0015
-                sleeve["stop_loss"] = max(stop, locked) if direction > 0 else min(stop, locked)
+        # v3 cohort: same overlays as live, verbatim (breakeven lock + per-symbol
+        # giveback brake), in the same order heikin_ashi_live._process_virtual_combo
+        # applies them. Stop tightening only; persisted via the sleeve dicts.
+        live_overlays._apply_breakeven_lock(sleeves, last_price)
+        live_overlays._apply_giveback_brake(sleeves, last_price, symbol)
+        if sleeves != (state["sleeves"].get(symbol) or {}):
+            # v2 tightened a throwaway copy only (never persisted unless a fill
+            # happened the same bar); persist exactly like _rebalance's no-fill branch.
+            held = float(state["positions"].get(symbol, {}).get("qty") or 0)
+            state["sleeves"][symbol] = copy.deepcopy(sleeves)
+            state["stops"][symbol] = virtual_netting.protective_stop(
+                sleeves, held, previous_stop=float(state["stops"].get(symbol) or 0),
+                previous_signed_qty=held)
         exits = [(name, live_config.exit_signal(name, bars_by_tf, sleeve))
                  for name, sleeve in sleeves.items()]
         exits = [(name, sig) for name, sig in exits if sig]
