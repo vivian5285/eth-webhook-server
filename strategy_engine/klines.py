@@ -3,9 +3,11 @@
 """
 公开K线拉取 + 任意周期合成。
 
-跟账户交易代码完全隔离：只打币安公开行情端点（无需 API Key、无需签名），
-不 import binance_client.py（那个 client 是拿账户凭证初始化的，绑死单账户
-限流预算不合适——这里服务的是全部品种，理应独立）。
+跟账户交易代码完全隔离：只打Gate.io永续公开行情端点（无需 API Key、无需
+签名），不 import binance_client.py / 任何账户凭证模块——这里服务的是
+全部品种，理应独立。2026-10-03从币安端点切到Gate.io(详见同日
+patch_klines_to_gate.py的改动说明)：擂台VPS要跟实盘合并到一台机器，
+两边都打币安会撞限流，换一家交易所彻底physically隔离请求配额。
 
 参考 market_engine.py 的"桶对齐合成"思路（merge_30m_to_90m）泛化成任意
 源周期→目标周期，同样遵守"只有该桶该有的K线全部到齐才产出一根已闭合K"
@@ -23,13 +25,20 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://fapi.binance.com/fapi/v1/klines"
+BASE_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 
-# 币安期货原生支持的K线周期，能直接拉就直接拉，不用合成
+# Gate.io期货实际支持的K线周期(逐个探测过，2026-10-03)。比币安原生集合
+# 少"1M"(Gate不支持月线，当前roster也没用到)，多"7d"替代"1w"的写法。
 NATIVE_INTERVALS = {
     "1m", "3m", "5m", "15m", "30m",
     "1h", "2h", "4h", "6h", "8h", "12h",
-    "1d", "3d", "1w", "1M",
+    "1d", "3d", "7d",
+}
+
+_INTERVAL_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800, "12h": 43200,
+    "1d": 86400, "3d": 259200, "7d": 604800,
 }
 
 _MINUTE_MS = 60 * 1000
@@ -57,17 +66,36 @@ def _wait_for_market_data_slot() -> bool:
 
 
 def _observe_request_weight(headers) -> None:
+    """Gate.io用x-gate-ratelimit-requests-remain/limit/reset-timestamp这三个
+    响应头(实测过，不是猜的)，跟币安的X-MBX-USED-WEIGHT-1M是不同的计量
+    方式但同样的"剩余额度不多就主动歇一会"思路。"""
     global _soft_pause_until
     try:
-        used = int(headers.get("X-MBX-USED-WEIGHT-1M") or 0)
+        remain = int(headers.get("x-gate-ratelimit-requests-remain") or -1)
+        reset_ts = float(headers.get("x-gate-ratelimit-reset-timestamp") or 0)
     except (TypeError, ValueError):
         return
-    if used >= 1200:
-        # Leave at least half of the published 2400/min IP budget for other
-        # processes sharing this VPS. Binance's minute window resets on UTC time.
-        pause = 62.0 - (time.time() % 60.0)
+    if remain < 0 or reset_ts <= 0:
+        return
+    if remain <= 20:
+        pause = max(0.5, reset_ts - time.time() + 0.5)
         _soft_pause_until = max(_soft_pause_until, time.monotonic() + pause)
-        logger.warning("[klines] IP weight=%s; pause %.0fs until next minute", used, pause)
+        logger.warning("[klines] Gate剩余额度=%s; 暂停%.1fs等窗口重置", remain, pause)
+
+
+def _symbol_to_gate_contract(symbol: str) -> str:
+    """币安"ETHUSDT"->Gate"ETH_USDT"；币安用"1000"价格乘数前缀的品种
+    (如1000PEPEUSDT)，Gate合约名没有这个前缀，报价是未乘1000的原始单价
+    (2026-10-03核实：Gate的PEPE_USDT最新价约$0.0000042，币安1000PEPEUSDT
+    约$0.0042，正好1000倍，跟各自命名约定一致，不是数据错误)。"""
+    s = str(symbol or "").strip().upper()
+    if s.endswith("USDT"):
+        base = s[:-4]
+    else:
+        base = s
+    if base.startswith("1000") and len(base) > 4:
+        base = base[4:]
+    return f"{base}_USDT"
 
 
 def _cache_closed_bars(key: Optional[tuple], interval: str, bars: List[dict]) -> None:
@@ -221,15 +249,39 @@ def fetch_klines_raw(
 ) -> List[list]:
     """
     公开端点，无需签名/API Key。失败返回空列表，绝不抛异常给调用方。
-    瞬时网络/SSL错误（跟长跨度回测的多页请求撞在一起概率不低，2026-08-17
-    实测 SKHYNIXUSDT/ASMLUSDT 413天回测复现过 SSL EOF）重试几次再放弃，
-    4xx 之类确定性错误（品种名错等）不重试。
+    瞬时网络/SSL错误重试几次再放弃，4xx 之类确定性错误（品种名错等）
+    不重试。
+
+    2026-10-03从币安端点切到Gate.io：对外返回值形状保持跟币安原始数组
+    一致([open_time_ms,o,h,l,c,v,close_time_ms,quote_v,n/a,taker_buy_v])，
+    下游to_ohlcv_dicts完全不用改——Gate自己的响应是dict列表(字段
+    t/o/h/l/c/v/sum)，在这个函数内部转换成币安形状再return。
+
+    Gate的from/to(单位：秒，不是毫秒)+limit组合语义没有文档说清楚、实测
+    发现只给from或只给to时limit会被忽略(返回条数由Gate自己决定，不可控)，
+    所以这里改成：只要指定了start_time_ms或end_time_ms，就自己同时算出
+    from和to两个边界(而不是只传一个让Gate猜)，返回条数完全由我们自己
+    控制，不依赖Gate的默认行为。
     """
-    params = {"symbol": symbol.upper(), "interval": interval, "limit": min(max(int(limit or 500), 1), 1500)}
-    if start_time_ms:
-        params["startTime"] = int(start_time_ms)
-    if end_time_ms:
-        params["endTime"] = int(end_time_ms)
+    contract = _symbol_to_gate_contract(symbol)
+    lim = min(max(int(limit or 500), 1), 2000)
+    interval_sec = _INTERVAL_SECONDS.get(str(interval).lower())
+    params = {"contract": contract, "interval": interval}
+
+    if start_time_ms or end_time_ms:
+        if not interval_sec:
+            logger.warning(f"[klines] 未知周期{interval}无法换算from/to")
+            return []
+        to_sec = int(end_time_ms / 1000) if end_time_ms else int(time.time())
+        if start_time_ms:
+            from_sec = int(start_time_ms / 1000)
+        else:
+            from_sec = to_sec - lim * interval_sec
+        params["from"] = from_sec
+        params["to"] = to_sec
+    else:
+        params["limit"] = lim
+
     url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
     last_err = None
     for attempt in range(max(1, retries)):
@@ -239,15 +291,26 @@ def fetch_klines_raw(
             req = urllib.request.Request(url, headers={"User-Agent": "strategy-engine-readonly"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 _observe_request_weight(resp.headers)
-                return json.loads(resp.read().decode("utf-8"))
+                raw = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(raw, list):
+                    logger.warning(f"[klines] {symbol} {interval} 非预期响应: {raw}")
+                    return []
+                out = []
+                for r in raw:
+                    try:
+                        t_ms = int(r["t"]) * 1000
+                        out.append([
+                            t_ms, r["o"], r["h"], r["l"], r["c"], r.get("sum", r.get("v", 0)),
+                            t_ms + (interval_sec or 0) * 1000 - 1, r.get("sum", 0), 0, 0.0, 0.0, "0",
+                        ])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                out.sort(key=lambda row: row[0])
+                return out
         except urllib.error.HTTPError as e:
-            if e.code in (418, 429):
+            if e.code in (429, 403):
                 global _hard_block_until
-                try:
-                    retry_after = float(e.headers.get("Retry-After") or 0)
-                except (TypeError, ValueError):
-                    retry_after = 0.0
-                wait = retry_after if retry_after > 0 else (900.0 if e.code == 418 else 60.0)
+                wait = 60.0
                 _hard_block_until = max(_hard_block_until, time.monotonic() + wait + 2.0)
                 logger.warning("[klines] HTTP %s; all Kline requests paused %.0fs", e.code, wait)
                 return []

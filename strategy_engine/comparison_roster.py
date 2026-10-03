@@ -554,6 +554,30 @@ SINGLE_SYMBOL_ROSTER = (
     # 给它额外挂了盘中成交量哨兵离场(SENTINEL_STRATEGIES)，独立$1000净
     # 权益，纯对照"提前离场"这一项改动的净效果。
     + [{"symbol": s, "strategy": "chanlun_pivot_sentinel", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-10-01：EMA7/25微结构突破(SNDK实盘同款策略，慢线周期从30改成25
+    # ——宝贝确认TV实盘真实用的是25，见strategies/__init__.py同名注册
+    # 说明)，只跑SNDKUSDT一个品种、90分钟周期(对齐9-30回测里表现最好、
+    # 也是实盘实际在用的那组参数；90m是回测拉K线的周期，跟慢线周期是
+    # 两回事，不用跟着改)。四个对照身份各自隔离改一个维度：对照组固定
+    # 仓位、early版提前进出场、pyramid版2级试探仓确认补满、pyramid3版
+    # 三级金字塔加仓(新增，见该策略文件头注释——宝贝转发DeepSeek"VPS
+    # 智能雷达交易架构"讨论后要求的，专注做深SNDK一个品种而不是摊开)。
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout", "timeframe": "90m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_early", "timeframe": "90m",
+        "early_entry": True}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid", "timeframe": "90m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid3", "timeframe": "90m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_strength_add", "timeframe": "90m"}]
+    # 2026-10-03新增：ZEC四个对照身份，同一套模板(宝贝贴出ZEC真实Pine
+    # 源码后确认快线8/慢线30)。timeframe用"1h"——ZEC真实TV周期就是1
+    # 小时，没有像SNDK那样做过独立的周期选择回测，直接用真实周期拉K线，
+    # 不另外猜一个"回测最优周期"。
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout", "timeframe": "1h"}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_early", "timeframe": "1h",
+        "early_entry": True}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_pyramid", "timeframe": "1h"}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_pyramid3", "timeframe": "1h"}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_strength_add", "timeframe": "1h"}]
     + [{"symbol": s, "strategy": "adx_efficiency_zscore", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第三批新增5套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "donchian_reversal", "timeframe": "1d"} for s in _ALL_SYMBOLS]

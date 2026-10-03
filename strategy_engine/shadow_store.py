@@ -134,6 +134,13 @@ def _init_db() -> None:
             ("context_bar_time", "INTEGER"),
             ("fee_usd", "REAL"),
             ("funding_pnl_usd", "REAL"),
+            # 2026-10-01新增：多级金字塔加仓(ema7_25_micro_breakout_pyramid3)
+            # 专用——entry_stage留在"probe"状态贯穿试探仓→stage1→stage2整个
+            # 建仓过程(不能提前改成别的值，否则multi_strategy_runner.py
+            # 那条`== "probe"`闸门会提前关掉，不再调用策略检查后续加仓)，
+            # 真正记录"已经加到第几级"的是这一列。老策略/老行从不设置这个
+            # 字段，NULL按0处理，行为不变。
+            ("pyramid_stage", "INTEGER"),
         ):
             try:
                 conn.execute(f"ALTER TABLE shadow_positions_v2 ADD COLUMN {col} {coltype}")
@@ -435,7 +442,7 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                 "stop", "last_ratchet_price", "tp1_done", "tp2_done", "realized_frac",
                 "realized_pnl_atr_weighted", "qty", "pair_key", "pair_base_price",
                 "pair_formation_mean", "pair_formation_std", "liq_price", "entry_stage",
-                "context_bar_time", "fee_usd", "funding_pnl_usd",
+                "context_bar_time", "fee_usd", "funding_pnl_usd", "pyramid_stage",
             )
             values = (
                 row["symbol"], row["strategy"], row["timeframe"], row["side"],
@@ -448,6 +455,7 @@ def insert_open_row(row: Dict[str, Any]) -> Optional[int]:
                 row.get("pair_key"), row.get("pair_base_price"), row.get("pair_formation_mean"),
                 row.get("pair_formation_std"), row.get("liq_price"), row.get("entry_stage"),
                 row.get("context_bar_time"), row.get("fee_usd"), row.get("funding_pnl_usd"),
+                int(row.get("pyramid_stage") or 0),
             )
             placeholders = ",".join("?" for _ in columns)
             cur = conn.execute(
@@ -466,7 +474,7 @@ def add_to_open_row(position_id: int, updates: Dict[str, Any], bar_time: int) ->
     """Persist a staged add without exposing these fields to generic updates."""
     allowed = (
         "entry", "atr0", "qty", "stop", "liq_price", "entry_stage",
-        "context_bar_time", "fee_usd",
+        "context_bar_time", "fee_usd", "pyramid_stage",
     )
     fields = [field for field in allowed if field in updates]
     if not fields:

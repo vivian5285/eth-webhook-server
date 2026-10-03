@@ -408,6 +408,129 @@ except Exception as _e:
 # 最终收益更好，不混进chanlun_pivot本体的统计。
 STRATEGIES["chanlun_pivot_sentinel"] = STRATEGIES.get("chanlun_pivot")
 
+# 2026-10-01：EMA7/30微结构突破(SNDK实盘正在用的同一套策略，见9-30那轮
+# 回测scratch_backtest_ema7_30_micro.py)——宝贝这次问两件事：①箱体震荡
+# 期要不要把仓位权重缩小、真趋势才给满仓；②VPS要不要不等TV收盘、自己
+# 拉K线更快进出场。三个独立身份各自隔离测一个维度，不混在一起：
+#   - ema7_30_micro_breakout：对照组，入场/离场逐字照抄Pine脚本，固定
+#     1.0倍仓位，走正常"等K线收盘"节奏。
+#   - ema7_30_micro_breakout_early：跟对照组完全同一份generate_signal，
+#     唯一区别是roster条目带"early_entry":True，复用擂台早就验证过的
+#     _try_early_entry机制(2026-08尾/9月初就有，不是新写的)——不等base
+#     周期这根K线真正收盘，用klines.get_current_bar查当前还没走完的
+#     那根K线提前确认信号，回答"②VPS自己拉K线能不能更快进出场"。
+#   - ema7_30_micro_breakout_scaled：独立文件，入场/离场条件逐字一致，
+#     但开仓那一刻按ADX+EMA7/30价差÷ATR算一个"趋势质量分"动态缩放仓位
+#     (position_fraction字段，跑腿代码2026-09-30搭本金等值仓位那批就
+#     建好了，直接复用)，回答"①震荡期缩小仓位、真趋势给满仓"这个思路
+#     到底有没有用。
+try:
+    from strategy_engine.strategies import ema7_30_micro_breakout
+    STRATEGIES["ema7_30_micro_breakout"] = ema7_30_micro_breakout.generate_signal
+    STRATEGIES["ema7_30_micro_breakout_early"] = ema7_30_micro_breakout.generate_signal
+except Exception as _e:
+    logging.getLogger(__name__).error(f"[strategies] ema7_30_micro_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ema7_30_micro_breakout_scaled
+    STRATEGIES["ema7_30_micro_breakout_scaled"] = ema7_30_micro_breakout_scaled.generate_signal
+except Exception as _e:
+    logging.getLogger(__name__).error(f"[strategies] ema7_30_micro_breakout_scaled 加载失败: {_e}")
+
+# 2026-10-01：宝贝发现ema7_30_micro_breakout_scaled(ADX三档静态缩放)的
+# 真实设计缺陷——ADX滞后，真趋势刚启动时ADX大概率还没走高，那版恰好会
+# 在最该重仓的起涨点给最小仓位(0.4倍)。改用"试探仓→确认补仓"两级模式，
+# 不再开仓那一刻预判趋势强弱，让价格自己证明——见该模块顶部说明。
+# ema7_30_micro_breakout_scaled保留注册(没有roster条目指向它，等于
+# 停用但不删代码，随时可查)，comparison_roster.py里的品种条目已经从
+# scaled改指向pyramid。
+try:
+    from strategy_engine.strategies import ema7_30_micro_breakout_pyramid
+    STRATEGIES["ema7_30_micro_breakout_pyramid"] = ema7_30_micro_breakout_pyramid.generate_signal
+except Exception as _e:
+    logging.getLogger(__name__).error(f"[strategies] ema7_30_micro_breakout_pyramid 加载失败: {_e}")
+
+# 2026-10-01：宝贝确认TV实盘真实用的慢线周期是25，不是上面ema7_30_*那批
+# 文件名暗示的30(Pine源码input默认值30，但TradingView界面上被改掉了、
+# 没反映在贴过来的源码文本里)。ema7_30_*三个注册保留(不删，同上面
+# scaled的"停用不删"惯例，随时可查对照)，comparison_roster.py的品种
+# 条目改成下面这三个ema7_25_*。
+try:
+    from strategy_engine.strategies import ema7_25_micro_breakout
+    STRATEGIES["ema7_25_micro_breakout"] = ema7_25_micro_breakout.generate_signal
+    STRATEGIES["ema7_25_micro_breakout_early"] = ema7_25_micro_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema7_25_micro_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ema7_25_micro_breakout_pyramid
+    STRATEGIES["ema7_25_micro_breakout_pyramid"] = ema7_25_micro_breakout_pyramid.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema7_25_micro_breakout_pyramid 加载失败: {_e}")
+
+# 2026-10-01：三级金字塔加仓版(40%试探→70%确认1→100%确认2，纯价格确认
+# 不读ADX，每次加仓后止损收紧)——宝贝转发DeepSeek"VPS智能雷达交易架构"
+# 讨论后要求的新增模拟策略，只跑SNDKUSDT一个品种，专注做深不摊开品种。
+# 见该模块文件头注释，详细说明了跟DeepSeek原方案"ADX>30才加仓"的分歧
+# 和理由。需要shadow_store.py/multi_strategy_runner.py新增的pyramid_
+# stage字段配合(同批改的)。
+try:
+    from strategy_engine.strategies import ema7_25_micro_breakout_pyramid3
+    STRATEGIES["ema7_25_micro_breakout_pyramid3"] = ema7_25_micro_breakout_pyramid3.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema7_25_micro_breakout_pyramid3 加载失败: {_e}")
+
+# 2026-10-01：趋势确认走强加仓版——跟上面pyramid3不是一回事：这版开仓
+# 就是满仓(1.0倍，严格对齐TV/实盘现在的仓位逻辑)，只在EMA7/25均线发散
+# 度(按ATR归一化)真实确认走强(阈值用真实SNDK 91分钟数据P75校准，不是
+# 拍的)时才补加一次。源头：宝贝核实"实盘加仓路径被架构上明确禁用"后，
+# 明确要求"先在擂台验证，证明有效再考虑引进实盘"——这个新增身份就是
+# 那次讨论的落地，见该模块文件头注释。
+try:
+    from strategy_engine.strategies import ema7_25_micro_breakout_strength_add
+    STRATEGIES["ema7_25_micro_breakout_strength_add"] = ema7_25_micro_breakout_strength_add.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema7_25_micro_breakout_strength_add 加载失败: {_e}")
+
+# 2026-10-03新增：ZEC专用四个对照身份(宝贝贴出ZEC真实Pine源码后确认
+# 快线8/慢线30，不是源码input默认值7/30——TradingView界面覆盖过源码
+# 默认值，两个品种都踩过同一个坑)。核心入场/平仓逻辑(_core_signals)
+# 直接复用已经按真实Pine源码修复过的SNDK同款代码，品种无关，只改了
+# fast_period/slow_period和strength_add的均线发散阈值(用真实ZEC 1
+# 小时K线校准，P75=1.293)。
+try:
+    from strategy_engine.strategies import ema8_30_micro_breakout
+    STRATEGIES["ema8_30_micro_breakout"] = ema8_30_micro_breakout.generate_signal
+    STRATEGIES["ema8_30_micro_breakout_early"] = ema8_30_micro_breakout.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema8_30_micro_breakout 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ema8_30_micro_breakout_pyramid
+    STRATEGIES["ema8_30_micro_breakout_pyramid"] = ema8_30_micro_breakout_pyramid.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema8_30_micro_breakout_pyramid 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ema8_30_micro_breakout_pyramid3
+    STRATEGIES["ema8_30_micro_breakout_pyramid3"] = ema8_30_micro_breakout_pyramid3.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema8_30_micro_breakout_pyramid3 加载失败: {_e}")
+
+try:
+    from strategy_engine.strategies import ema8_30_micro_breakout_strength_add
+    STRATEGIES["ema8_30_micro_breakout_strength_add"] = ema8_30_micro_breakout_strength_add.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] ema8_30_micro_breakout_strength_add 加载失败: {_e}")
+
 try:
     from strategy_engine.strategies import adx_efficiency_zscore
     STRATEGIES["adx_efficiency_zscore"] = adx_efficiency_zscore.generate_signal
