@@ -441,7 +441,29 @@ def _guarded_qty(
 # 会在后面_guarded_qty这一步生效——这是刻意保留的，不是设计疏漏，1倍
 # 本金只是"目标仓位怎么算"，不代表要绕开账户级的止损热度/资产类别上限
 # 这类真实风险防线。
-SPOT_EQUIVALENT_STRATEGIES = {"dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m"}
+SPOT_EQUIVALENT_STRATEGIES = {
+    "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
+    # 2026-10-01：EMA7/30微结构突破三个身份改名+ema7_30本身保留注册
+    # (停用不删，同strategies/__init__.py同一说明)。
+    "ema7_30_micro_breakout", "ema7_30_micro_breakout_early", "ema7_30_micro_breakout_pyramid",
+    # 2026-10-01：EMA7/25微结构突破四个对照身份(SNDK实盘同款策略，慢线
+    # 周期改成25)，跟SNDK实盘的equity_notional仓位口径保持一致——本金
+    # 1倍现货等价，pyramid版试探仓/确认补仓各自乘position_fraction
+    # (0.5/0.5)，pyramid3版三级金字塔各自乘position_fraction
+    # (0.4/0.3/0.3)，加起来都凑满1.0倍(见各策略文件generate_signal的
+    # position_fraction字段，下面desired_qty那行/_add_to_position里都
+    # 已经原生支持这个乘数)。
+    "ema7_25_micro_breakout", "ema7_25_micro_breakout_early",
+    "ema7_25_micro_breakout_pyramid", "ema7_25_micro_breakout_pyramid3",
+    # 2026-10-01：趋势确认走强加仓版——开仓满仓(position_fraction=1.0)，
+    # 均线发散确认后再加strength_add_fraction(0.3)，同一套equity_
+    # notional口径，道理跟上面一致。
+    "ema7_25_micro_breakout_strength_add",
+    # 2026-10-03新增：ZEC四个对照身份，同一套equity_notional口径。
+    "ema8_30_micro_breakout", "ema8_30_micro_breakout_early",
+    "ema8_30_micro_breakout_pyramid", "ema8_30_micro_breakout_pyramid3",
+    "ema8_30_micro_breakout_strength_add",
+}
 
 
 def _open_from_signal(
@@ -487,6 +509,7 @@ def _open_from_signal(
         "entry_stage": sig.get("entry_stage") or "confirmed",
         "context_bar_time": sig.get("context_bar_time"),
         "fee_usd": entry_fee,
+        "pyramid_stage": int(sig.get("pyramid_stage") or 0),
     }
     pid = shadow_store.insert_open_row(row)
     if pid is None:
@@ -587,9 +610,22 @@ def _add_to_position(
     else:
         new_stop = add_stop or old_stop
     new_fee = float(pos.get("fee_usd") or 0) + abs(add_price * add_qty) * shadow_store.SIM_TAKER_FEE_RATE
+    # 2026-10-01：entry_stage/pyramid_stage改成战法自己说了算(sig里带)，
+    # 不再硬编码死"confirmed"——多级金字塔战法(ema7_25_micro_breakout_
+    # pyramid3)需要在中间级继续留在"probe"状态(这个闸门字符串是
+    # multi_strategy_runner.py上面`== "probe"`那条判断是否继续调用战法
+    # 检查后续加仓的唯一开关，提前改掉就再也不会被回调了)，靠
+    # pyramid_stage这个新字段单独记录"已经加到第几级"。旧的2级战法
+    # (pyramid.py)从不在sig里带这两个字段，走默认值"confirmed"/
+    # pos+1，行为完全不变。
+    next_stage = sig.get("entry_stage") or "confirmed"
+    next_pyramid_stage = sig.get("pyramid_stage")
+    if next_pyramid_stage is None:
+        next_pyramid_stage = int(pos.get("pyramid_stage") or 0) + 1
     updates = {
         "entry": new_entry, "atr0": new_atr, "qty": new_qty, "stop": new_stop,
-        "liq_price": None, "entry_stage": "confirmed", "fee_usd": new_fee,
+        "liq_price": None, "entry_stage": next_stage, "fee_usd": new_fee,
+        "pyramid_stage": int(next_pyramid_stage),
     }
     if not shadow_store.add_to_open_row(pos["id"], updates, int(sig["bar_time"])):
         return False
@@ -1269,14 +1305,25 @@ def run_comparison_once(
 
 def main_loop():
     from strategy_engine.comparison_roster import SINGLE_SYMBOL_ROSTER, UNIVERSE_ROSTER, PAIRS_ROSTER
+    from strategy_engine.pruned_strategies import PRUNED_STRATEGIES
+
+    # 2026-10-03 擂台策略去重归档：只在这里过滤"这一轮要不要巡检"，
+    # comparison_roster.py里的原始定义/参数/历史注释全部保持不动——
+    # 以后想重新验证某个策略，去pruned_strategies.py里的名单删掉名字
+    # 即可重新启用，不用重写roster。详细淘汰理由见pruned_strategies.py。
+    active_single = [e for e in SINGLE_SYMBOL_ROSTER if e["strategy"] not in PRUNED_STRATEGIES]
+    active_universe = [e for e in UNIVERSE_ROSTER if e["strategy"] not in PRUNED_STRATEGIES]
+    active_pairs = [e for e in PAIRS_ROSTER if e["strategy"] not in PRUNED_STRATEGIES]
     logger.info(
-        f"[多策略] 启动，单品种战法{len(SINGLE_SYMBOL_ROSTER)}条 + "
-        f"篮子战法{len(UNIVERSE_ROSTER)}条 + 配对战法{len(PAIRS_ROSTER)}条，"
+        f"[多策略] 启动，单品种战法{len(active_single)}条(原{len(SINGLE_SYMBOL_ROSTER)}条，"
+        f"归档{len(SINGLE_SYMBOL_ROSTER)-len(active_single)}条) + "
+        f"篮子战法{len(active_universe)}条(原{len(UNIVERSE_ROSTER)}条) + "
+        f"配对战法{len(active_pairs)}条(原{len(PAIRS_ROSTER)}条)，"
         f"间隔{COMPARISON_TICK_INTERVAL_SEC}s"
     )
     while True:
         t0 = time.time()
-        run_comparison_once(SINGLE_SYMBOL_ROSTER, UNIVERSE_ROSTER, PAIRS_ROSTER)
+        run_comparison_once(active_single, active_universe, active_pairs)
         elapsed = time.time() - t0
         time.sleep(max(1.0, COMPARISON_TICK_INTERVAL_SEC - elapsed))
 
