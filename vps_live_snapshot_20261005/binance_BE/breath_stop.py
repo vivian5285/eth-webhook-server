@@ -1,0 +1,861 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+雷达止损引擎（被动跟随）
+
+规格 v2.1 边界：
+  · 雷达激活前不调用本引擎推进止损
+  · 激活时机 = 中点激活（首次=(TP1+TP2)/2，重入=TP2，TP1是否成交仅记日志不阻塞）
+  · 激活臂 = 保本起步 entry ± tick ± fee_cover（禁止跳到 TP1 底线）
+  · 阶梯：step_trigger / step_advance × initial_atr（按 ADX 档，v2.1大幅放宽）
+  · 分区呼吸：TP1–TP2 / TP2–TP3 / TP3+ 使用 breath_tp12 / breath_tp23 / trail(min~max)
+  · 取消 TP1/TP2 强制底线；浮盈≥phase_switch_atr(默认3) 切入动态追踪阶段
+  · 禁用早保本抢跑（early_be_atr=0）
+  · 规格 §5.0 提前保本检查点已废除
+  · 规格 §5.1 雷达激活 = (TP1+TP2)/2（首次）/ TP2（重入）
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+from breath_profiles import (
+    BREATH_ETH,
+    cold_start_multiplier,
+    default_breath_profile,
+    trail_distance_multiplier,
+)
+
+INITIAL_SL_ATR = float(BREATH_ETH.get("initial_sl_atr") or 0.0)
+STEP_TRIGGER_ATR = float(BREATH_ETH["step_trigger_atr"])
+STEP_ADVANCE_ATR = float(BREATH_ETH["step_advance_atr"])
+BREAKEVEN_TRIGGER_ATR = float(BREATH_ETH["phase_switch_atr"])
+TP1_ATR = float(BREATH_ETH["tp1_atr"])
+TP1_FLOOR_ATR = float(BREATH_ETH.get("tp1_floor_atr") or 0.0)
+TP2_ATR = float(BREATH_ETH["tp2_atr"])
+TP2_FLOOR_ATR = float(BREATH_ETH.get("tp2_floor_atr") or 0.0)
+STOP_EXEC_BUFFER_USD = float(BREATH_ETH["stop_exec_buffer"])
+FEE_COVER_PCT = float(BREATH_ETH.get("fee_cover_pct") or 0.0008)
+
+# 兼容旧 import
+ADX_WEAK_BOUND = 20.0
+ADX_STRONG_BOUND = 30.0
+TRAIL_DIST_WEAK_ATR = 1.2
+TRAIL_DIST_STRONG_ATR = 2.5
+ADX_FALLBACK = 25.0
+
+# 2026-09-01新增：雷达动态止损硬地板——宝贝跟今晚GSUSDT实盘复现之后，
+# 明确要求给"雷达追多紧"设一条最终底线，不再依赖一个个具体触发场景
+# (TP1过期/首次武装跳档/进场延迟吃空间/重启时序……)分别打补丁——那些
+# 补丁解决的都是"ATR阶梯猜错空间"的某一种具体成因，成因永远列不完；
+# 但TV自己的止损空间是已知确切数字，不用猜。硬止损那条线早就锚定了
+# 这个数字(|TV价-TV止损|×1.15)，雷达的动态追踪止损从来没有——这条
+# 地板补上这个缺口：不管ATR阶梯/呼吸系数怎么算，雷达止损离最优价的
+# 距离永远不能小于TV自己止损空间的TV_STOP_FLOOR_FRAC——比例定多宽是
+# 宝贝的风险偏好判断，跟宝贝确认后先设0.5(雷达最多只能比TV自己紧一半)。
+# 2026-09-02再调宽(0.5→0.65)："TV还持有、实盘已经没了"这个模式今晚
+# 反复出现(BNB/LITE/XAU/ANTHROPIC……)，宝贝直接翻了TV真实Pine源码
+# (eth_pingkai_buhuchi.py)问"TV是不是按趋势强度用不一样系数追踪"——
+# 查到TV自己有一条use_staged_exit_gate(分级放行)：价格一旦突破TP2
+# 距离，直接关掉评分反转/RSI反转/连续逆势K线三条快速离场通道，只留
+# 4H裸K放量反转——TV深度盈利后会变得极度有耐心，只认真正的大级别
+# 反转，正常回撤/短线噪音完全不理。VPS雷达是连续价格距离追踪，哲学
+# 上跟TV这套"事件/形态触发"完全不同，是这个反复出现模式的根子。完整
+# 移植"分级放行"这套形态触发机制是下一步的架构工作，需要专门写+测；
+# 今晚先把已经验证过的地板机制统一调宽，直接、低风险地给所有品种
+# (币+代币化美股)更多呼吸空间，不是新机制，只是把宝贝之前确认过的
+# "雷达最多比TV紧一半"放宽到"最多比TV紧35%"。
+TV_STOP_FLOOR_FRAC = 0.65
+
+# 2026-09-02新增：pre_tp1区呼吸空间地板——见_zone_trail_atr内pre_tp1
+# 分支顶部同日期注释。不管ADX档位把呼吸空间收窄到多少，pre_tp1区最少
+# 要给到TV自己TP1目标距离的这个比例，不能小于这个数。跟TV_STOP_FLOOR_
+# FRAC同一个"别让判断依据以外的因素(这里是tier档位)顺带收紧了本不该
+# 它管的空间"的思路，取同样的0.5起步。
+# 2026-09-02跟TV_STOP_FLOOR_FRAC同批调宽(0.5→0.65)，理由同上。
+PRE_TP1_TP1_DIST_FRAC = 0.65
+
+# 2026-09-02新增：pre_tp1区"起步呼吸地板"——LITEUSDT实盘复现：雷达武装
+# 那一刻价格刚走了1.03×ATR，还没攒够第一整档(step_trigger_atr门槛更高)，
+# step_count=0；这一档的止损公式是"起步锚点(保本价)+0步进度=保本价本身"，
+# 完全没有任何呼吸空间参与——因为pre_tp1区的呼吸空间上限(trail_ceil/
+# trail_floor)在2026-08-17那次修复里被故意排除在阶梯封顶之外(那次是为了
+# 修"阶梯被摁在保本位永远推进不了"，见_zone_trail_atr内pre_tp1分支/
+# calculate_stop_long顶部同日期注释)。那次修复本身没错，但副作用是
+# step_count=0这个必经的起步瞬间，呼吸空间对止损零参与，只剩裸保本——
+# 跟TV_STOP_FLOOR_FRAC/PRE_TP1_TP1_DIST_FRAC两条地板一样，起步瞬间数值
+# 上已经比它们都更松，两条地板都拉不动，LITEUSDT这次870.81进场、最优价
+# 857.71(浮盈13.1点/1.03×ATR)，止损焊死在870.10(仅0.71点耐心)，价格
+# 正常回撤到870附近就止损离场(+0.04%，TV止损885.61远没到)。
+# 修复：给pre_tp1区起步止损再补一条独立地板，参照的是这个品种/这个
+# 价位区间自己的呼吸空间宽度(trail_dist，即zone本该给的呼吸空间，比如
+# LITE这次是28.86点)本身，取其PRE_TP1_BREATH_FLOOR_FRAC。跟宝贝确认过
+# 这里有取舍：系数越大，允许武装后价格倒退越多才止损，包括可能倒退
+# 过entry变成小额浮亏(不再绝对保证"武装后绝不倒亏")；宝贝选择要更多
+# 耐心、接受这个代价，取0.5(半份呼吸空间)——LITE这次会变成
+# 857.71+0.5×28.86≈872.14，允许价格倒退到entry之上一点点(约1.33点
+# 浮亏空间)才止损，而不是一回到entry附近就出局。跟前两条地板同样，
+# 只做加宽、不做收紧的独立最终夹取，不经过trail_floor/trail_ceil/
+# step_stop那条内部管道(教训见PRE_TP1_TP1_DIST_FRAC顶部注释)。只在
+# step_count==0时生效——一旦阶梯已经用best/lowest棘轮真实累进过至少
+# 一档，说明价格已经合法赚到了比这条地板更紧的进度，必须让位，不能
+# 反过来把已经赚到的进度重新拉松(本地测试已覆盖这个回归场景)。
+# 2026-09-02跟前两条地板同批调宽(0.5→0.65)，理由同TV_STOP_FLOOR_FRAC
+# 顶部注释。
+PRE_TP1_BREATH_FLOOR_FRAC = 0.65
+
+# 2026-09-02新增：深度盈利耐心模式(架构级移植TV的use_staged_exit_gate
+# 「分级放行」)——今晚"TV还持有、实盘已经没了"这个模式在BNB/LITE/XAU/
+# ANTHROPIC等反复出现，三轮地板式调宽(上面三条0.65)治标不治本。宝贝直接
+# 翻了TV真实Pine源码复刻eth_pingkai_buhuchi.py，查到根本性哲学差异：
+#   · TV的_past_tp2_stage()：价格(用K线high/low极值判断)一旦突破过TP2
+#     距离，staged_gate_open=False，直接关掉「评分反转/RSI反转/连续逆势
+#     K线」三条快速离场，只留_decisive_reversal()「4H裸K放量反转」一条
+#     ——TV深度盈利之后变得极度有耐心，正常回撤/短线噪音完全不理会。
+#   · VPS雷达一直是「连续价距追踪」：不管盈利多深，止损始终是"离best多远"
+#     的连续逻辑，哲学上跟TV「事件/形态触发、赚多了更有耐心」完全不同。
+# 移植方案(2026-09-02跟宝贝逐条确认，见radar_reentry_mixin.py同日期注释)：
+#   1) 触发：粘性判定best(多=highest/空=lowest，只进不退)是否触过TP2价
+#      (tv_tps[1]，缺失回退entry±tp2_atr×atr)。一旦触过永久成立，正常
+#      回撤不退出——跟_past_tp2_stage用极值判断的口径一致。
+#   2) 命中后：追踪区当tp3_plus处理，zone="tp2_patience"，用最宽的coeff
+#      追踪距离(live_tp3_trail_mult按ADX/动量插值、已按品种校准，约4-6×
+#      ATR)，取max(coeff, breath_tp23)保证永远不比旧的tp2_tp3/tp3_confirm
+#      更紧(只放宽、不收紧)。下游既有的 min(step_stop, trail_floor) 封顶
+#      会自然把阶梯压到这条宽线上 = 阶梯冻结，不需要单独写冻结代码。
+#   3) 「4H裸K放量反转」那一半TV哲学：radar_reentry_mixin.py::_maybe_lock_
+#      profit_on_reversal(2026-08-29已上线，判据本就跟_decisive_reversal
+#      同款：实体比≥0.55+量≥近20根均量×1.15，用已收盘4H K线)原样接管，
+#      不新增检测代码。
+#   4) 耐心模式下「利润回吐刹车」(_maybe_tighten_on_profit_giveback)让位
+#      ——它min_peak_atr低到1.0、专门设计成比宽追踪更早更紧地收网，正好是
+#      耐心模式的反面；「TV已平仓滞涨刹车」改成只收紧到耐心距离、不再贴
+#      现价；「反转锁盈」「大赢家地板」原样保留。真实TV CLOSE信号仍立即
+#      平仓(宝贝："按照TV的平仓")，耐心模式不拦真实CLOSE。
+# 这不是新参数、不是调系数，是把「连续价距追踪」在深盈段替换成「宽追踪
+# +只认4H形态反转」——比逐场景打补丁更本质。
+#
+# 2026-09-04纠正范围（第一次，当天已撤回，见下面v2说明）：上面移植依据
+# 的"eth_pingkai_buhuchi.py设定use_staged_exit_gate=True[截图确认]"这个
+# 前提，核对后发现来源是2026-08-20对另一份更早ETH源码的截图，不是TV实际
+# 在用的01/02版本。把01~04版本+BNB共5份TV Pine源码全部读完+grep核对，
+# 真实"TP2分级放行"机制只存在于03版本(META/LITE/MU/GS/OPENAI/SKHYNIX/
+# SNDK共7个品种)，01/02(ETH/XAU/XMR/BCH/XPD)/04(TSLA/ANTHROPIC/PAXG/
+# ZEC)/BNB都没有。据此曾经把tp2_patience收窄成只对这7个品种生效
+# (breath_profiles.py加has_staged_exit_gate字段做门槛)。
+#
+# 2026-09-04撤回收窄(v2)：宝贝当天反馈——ETH/XAU/XMR/BCH/XPD/BNB/TSLA/
+# ANTHROPIC/PAXG/ZEC这10个品种"很多时候就是出现实盘被止损，TV还持有的
+# 情况"，需要放宽，不认同收窄。复核后确认这次是我自己混淆了两件不同的
+# 事：①shadow_engine自己重新实现TV评分/出场逻辑时，"TV是否真的会忽略
+# 自己的评分/RSI/连续逆势信号"这件事必须跟真实源码一致——这个判断只对
+# strategy_engine/strategies/eth_pingkai_buhuchi.py这类"重新实现TV自己
+# 怎么判断"的代码成立，has_staged_exit_gate在那边继续按真实情况区分。
+# ②但live radar的耐心模式从来没有"拦截TV真实信号"这回事——TV发真实
+# CLOSE(CLOSE_QUICK_EXIT/CLOSE_RSI_EXIT)永远立即_close_all()，耐心模式
+# 只改雷达自己的追踪距离宽窄+giveback刹车/tv-exit-stall刹车这两个"雷达
+# 自己多紧"的独立决策，从没有替TV做过"这条信号该不该理"的判断。既然雷达
+# 的耐心宽窄本来就是雷达自己的风险取舍(不是在模仿TV有没有对应机制)，用
+# "TV是否真有这个开关"卡live radar这半天走窄了——宝贝的真实交易观察(这
+# 10个品种照样反复出现"TV还持有、雷达先打掉")才是live radar该不该放宽
+# 唯一该看的证据，不是TV源码里有没有对应的input.bool。所以撤回
+# _zone_trail_atr里has_staged_exit_gate那道门槛，tp2_patience宽追踪恢复
+# 对全部17个品种生效；has_staged_exit_gate字段保留在breath_profiles.py
+# 里(纯文档/供eth_pingkai_buhuchi.py等shadow策略参考用)，但live radar
+# 这条路径不再读它。三条0.65地板、反转锁盈、大赢家地板一直是通用机制，
+# 从未受这两轮改动影响。
+
+
+def _profile(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if isinstance(profile, dict) and profile:
+        return profile
+    return default_breath_profile()
+
+
+def trail_distance_by_adx(adx_val: float) -> float:
+    """兼容旧测试：弱/强边界按白皮书 20/30。"""
+    try:
+        adx = float(adx_val)
+    except (TypeError, ValueError):
+        adx = ADX_FALLBACK
+    if adx < ADX_WEAK_BOUND:
+        return TRAIL_DIST_WEAK_ATR
+    if adx > ADX_STRONG_BOUND:
+        return TRAIL_DIST_STRONG_ATR
+    ratio = (adx - ADX_WEAK_BOUND) / (ADX_STRONG_BOUND - ADX_WEAK_BOUND)
+    return TRAIL_DIST_WEAK_ATR + ratio * (TRAIL_DIST_STRONG_ATR - TRAIL_DIST_WEAK_ATR)
+
+
+def get_breathing_coefficient(
+    current_atr_1h: float,
+    initial_atr: float,
+    ratio_history: Optional[List[float]] = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> Tuple[float, float, List[float]]:
+    """
+    TP3+ 动态追踪带宽系数（min_mult~max_mult 插值），按 1h ATR / 开仓 ATR 比值。
+
+    2026-08-10 现状核查：生产代码里没有任何地方在调用这个函数（只有
+    check_vps_logic.py 这个手跑诊断脚本还在引用），position_supervisor_binance.py
+    的 _refresh_breathing_coefficient 早在 v16.4.0 删 VPS ATR 拉取时就
+    被简化成硬编码返回 1.0，never 调用过这里；当天晚些时候 TP3+ 系数
+    已经改用另一套机制（reentry_profiles.live_tp3_trail_mult，按实时ADX
+    插值，不依赖 1h ATR）接管。这个函数留着没删，是怕破坏
+    check_vps_logic.py 里的引用，但生产链路已经不吃它了，不要被这个
+    docstring误导成"这就是现在在用的TP3+系数逻辑"。
+    """
+    p = _profile(profile)
+    init = float(initial_atr or 0)
+    cur = float(current_atr_1h or 0)
+    hist = list(ratio_history or [])
+
+    if init <= 0:
+        cold = cold_start_multiplier(p)
+        return float(cold), 1.0, hist
+
+    if cur <= 0:
+        if not hist:
+            cold = cold_start_multiplier(p)
+            return float(cold), 1.0, hist
+        smooth = sum(hist) / len(hist)
+        return float(trail_distance_multiplier(smooth, p)), float(smooth), hist
+
+    ratio = cur / init
+    hist.append(ratio)
+    if len(hist) > 3:
+        hist = hist[-3:]
+    smooth = sum(hist) / len(hist)
+    coeff = trail_distance_multiplier(smooth, p)
+    return float(coeff), float(smooth), hist
+
+
+def initial_stop_price(
+    side: str,
+    entry_price: float,
+    initial_atr: float = 0.0,
+    profile: Optional[Dict[str, Any]] = None,
+) -> float:
+    """
+    雷达激活臂（保本起步）：
+      多 = entry + tick + fee_cover
+      空 = entry − tick − fee_cover
+    initial_atr 保留签名兼容；不再用于跳到 ±0.5ATR。
+    """
+    _ = initial_atr
+    p = _profile(profile)
+    entry = float(entry_price or 0)
+    if entry <= 0:
+        return 0.0
+    side = str(side or "").strip().upper()
+    # 旧路径：若 profile 仍带正 initial_sl_atr，保留兼容
+    mult = float(p.get("initial_sl_atr") or 0)
+    atr = float(initial_atr or 0)
+    if mult > 0 and atr > 0:
+        if side == "SHORT":
+            return round(entry + mult * atr, 2)
+        return round(entry - mult * atr, 2)
+    tick = _tick_size(p)
+    try:
+        fee_pct = abs(float(p.get("fee_cover_pct") or FEE_COVER_PCT))
+    except (TypeError, ValueError):
+        fee_pct = FEE_COVER_PCT
+    fee = entry * fee_pct
+    if side == "SHORT":
+        return round(entry - tick - fee, 2)
+    if side == "LONG":
+        return round(entry + tick + fee, 2)
+    return 0.0
+
+
+def order_stop_price(
+    side: str,
+    initial_stop: float,
+    buffer_usd: Optional[float] = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> float:
+    """盘口挂单止损 = initialStop ± buffer 执行缓冲（向外扩）。"""
+    p = _profile(profile)
+    stop = float(initial_stop or 0)
+    if buffer_usd is None:
+        buf = abs(float(p.get("stop_exec_buffer") or STOP_EXEC_BUFFER_USD))
+    else:
+        buf = abs(float(buffer_usd or 0))
+    if stop <= 0:
+        return 0.0
+    side = str(side or "").strip().upper()
+    if side == "SHORT":
+        return round(stop + buf, 2)
+    return round(stop - buf, 2)
+
+
+def _tick_size(profile: Dict[str, Any]) -> float:
+    try:
+        t = float(profile.get("tick_size") or 0.01)
+    except (TypeError, ValueError):
+        t = 0.01
+    return t if t > 0 else 0.01
+
+
+TP3_CONFIRM_ATR = 1.0  # 刚过TP3但还没走出这么远之前，呼吸空间暂不放宽到tp3_plus
+
+
+def _zone_trail_atr(
+    *,
+    side: str,
+    price: float,
+    entry: float,
+    atr: float,
+    profile: Dict[str, Any],
+    coeff: float,
+    tp1_px: float = 0.0,
+    tp2_px: float = 0.0,
+    tp3_px: float = 0.0,
+    best: float = 0.0,
+) -> Tuple[float, str]:
+    """
+    按价格相对 TP 进度返回呼吸空间（×ATR）与区名。
+    TP1–TP2 → breath_tp12；TP2–TP3 → breath_tp23；
+    刚过TP3但还没走出 tp3_confirm_atr(默认1×ATR) → tp3_confirm，仍用 breath_tp23
+    这么紧（专防"一冲到TP3就立刻回落"的假突破，不需要另挂一张TP3限价单跟雷达
+    抢单——那条路 v15.9.0 试过，两条腿都在场时有实打实的竞态成交风险，
+    v16.4.0 已经把它连同竞态处理代码一起删掉了）；
+    确认走出这段缓冲、真延续了 → tp3_plus，放开到 coeff(min~max)。
+
+    2026-09-02新增 tp2_patience（深度盈利耐心模式，见顶部同日期注释）：best
+    极值(多=highest/空=lowest，调用方传入，只进不退)一旦触过 TP2 价，就把
+    追踪区当 tp3_plus 处理——用 max(coeff, breath_tp23) 的宽追踪距离，粘性
+    永久成立（正常回撤不退出），移植 TV use_staged_exit_gate「过TP2后只认
+    4H形态反转、不理正常回撤」的哲学。
+
+    2026-09-04：曾经加过"只在profile['has_staged_exit_gate']为真时才进
+    tp2_patience"的门槛，当天已撤回——雷达自己的追踪宽窄是雷达自己的风险
+    取舍，从不代表"在模仿TV有没有对应机制"，TV真实CLOSE信号从来不受这里
+    影响，宝贝的真实持仓反馈(这10个品种一样反复出现"TV还持有、雷达先打
+    掉")才是该不该放宽的证据。对全部17个品种统一生效（见顶部v2说明）。
+    """
+    side_u = str(side or "").upper()
+    b12 = float(profile.get("breath_tp12") or 1.2)
+    b23 = float(profile.get("breath_tp23") or 1.6)
+    tp1_a = float(profile.get("tp1_atr") or TP1_ATR)
+    tp2_a = float(profile.get("tp2_atr") or TP2_ATR)
+    confirm_atr = float(
+        profile.get("tp3_confirm_atr")
+        if profile.get("tp3_confirm_atr") is not None
+        else TP3_CONFIRM_ATR
+    )
+
+    # 深度盈利耐心模式：best极值(只进不退)是否触过TP2——粘性，一旦触过
+    # 永久成立，正常回撤不退出（tp2_px缺失回退 entry±tp2_atr×atr）。
+    b = float(best or 0)
+    # 耐心追踪距离取 max(coeff, breath_tp23)：保证永远不比旧的 tp2_tp3/
+    # tp3_confirm(都用 b23)更紧，只放宽不收紧。
+    patience_mult = max(float(coeff), b23)
+    if side_u == "LONG":
+        tp3_ref = tp3_px if tp3_px > 0 else entry + (tp2_a + 1.0) * atr
+        past_tp3 = price >= tp3_ref
+        past_tp3_confirmed = price >= tp3_ref + confirm_atr * atr
+        tp2_ref_sticky = tp2_px if tp2_px > 0 else entry + tp2_a * atr
+        past_tp2_sticky = b > 0 and tp2_ref_sticky > 0 and b >= tp2_ref_sticky
+        past_tp2 = (tp2_px > 0 and price >= tp2_px) or (
+            tp2_px <= 0 and price >= entry + tp2_a * atr
+        )
+        past_tp1 = (tp1_px > 0 and price >= tp1_px) or (
+            tp1_px <= 0 and price >= entry + tp1_a * atr
+        )
+    else:
+        tp3_ref = tp3_px if tp3_px > 0 else entry - (tp2_a + 1.0) * atr
+        past_tp3 = price <= tp3_ref
+        past_tp3_confirmed = price <= tp3_ref - confirm_atr * atr
+        tp2_ref_sticky = tp2_px if tp2_px > 0 else entry - tp2_a * atr
+        past_tp2_sticky = b > 0 and tp2_ref_sticky > 0 and b <= tp2_ref_sticky
+        past_tp2 = (tp2_px > 0 and price <= tp2_px) or (
+            tp2_px <= 0 and price <= entry - tp2_a * atr
+        )
+        past_tp1 = (tp1_px > 0 and price <= tp1_px) or (
+            tp1_px <= 0 and price <= entry - tp1_a * atr
+        )
+
+    # 2026-09-04：has_staged_exit_gate门槛当天已撤回（见顶部v2说明）——
+    # 触过TP2直接进耐心宽追踪，对全部17个品种统一生效。
+    patience_engaged = past_tp2_sticky
+
+    if past_tp3_confirmed:
+        return float(coeff), "tp3_plus"
+    if past_tp3:
+        # 假突破防御仍用 b23；但若已在粘性耐心模式，不允许比耐心宽度更紧
+        return (patience_mult, "tp2_patience") if patience_engaged else (b23, "tp3_confirm")
+    if patience_engaged:
+        # 触过TP2 → 深度盈利耐心模式：宽追踪，阶梯经既有 trail_floor 封顶自然冻结
+        return patience_mult, "tp2_patience"
+    if past_tp2:
+        return b23, "tp2_tp3"
+    if past_tp1:
+        return b12, "tp1_tp2"
+    # 激活后尚未到 TP1：用较宽的 tp12 空间，避免过紧
+    return b12, "pre_tp1"
+
+
+def calculate_stop_long(
+    price: float,
+    entry_price: float,
+    initial_atr: float,
+    initial_stop: float,
+    current_stop: float,
+    highest_price: float,
+    breakeven_phase: bool,
+    breathing_coefficient: float = 1.0,
+    adx_val: float = ADX_FALLBACK,
+    profile: Optional[Dict[str, Any]] = None,
+    early_be_done: bool = False,
+    prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
+    tp1_px: float = 0.0,
+    tp2_px: float = 0.0,
+    tp3_px: float = 0.0,
+) -> Tuple[float, float, bool, int, bool]:
+    """多单。返回：(新止损, 新最高, 新阶段, step_count, early_be_done)"""
+    p = _profile(profile)
+    price = float(price or 0)
+    entry_price = float(entry_price or 0)
+    initial_atr = float(initial_atr or 0)
+    initial_stop = float(initial_stop or 0)
+    current_stop = float(current_stop or 0)
+    highest_price = float(highest_price or entry_price or 0)
+    early_be_done = bool(early_be_done)
+    coeff = float(breathing_coefficient or 1.0)
+    if coeff <= 0:
+        coeff = cold_start_multiplier(p)
+
+    step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
+    step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
+
+    new_highest = max(highest_price, price) if price > 0 else highest_price
+    new_stop = current_stop
+    step_count = 0
+
+    if entry_price <= 0 or initial_atr <= 0 or price <= 0:
+        return new_stop, new_highest, bool(breakeven_phase), step_count, early_be_done
+
+    trail_mult, zone = _zone_trail_atr(
+        side="LONG", price=price, entry=entry_price, atr=initial_atr,
+        profile=p, coeff=coeff,
+        tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=new_highest,
+    )
+    trail_dist = trail_mult * initial_atr
+    # 分区呼吸：止损不得远落后于最高价超过 trail_dist（先算出来，阶梯要用它封顶）
+    trail_floor = new_highest - trail_dist
+    # 浮盈≥phase_switch → 动态追踪阶段；或已过 TP3；或已进入深度盈利耐心模式
+    phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
+    mfe_atr = (new_highest - entry_price) / initial_atr if initial_atr > 0 else 0.0
+    new_phase = zone in ("tp3_plus", "tp2_patience") or (phase_sw > 0 and mfe_atr >= phase_sw)
+
+    # 阶梯跟进：价格每涨 step_trigger，止损上移 step_advance（从保本位推进）
+    step_trigger = step_trig * initial_atr
+    # 2026-09-01再修复(B账户LITEUSDT实盘复现，宝贝抓到"有的账户还持有，
+    # 有的莫名其妙被平仓")：这里原来用price(当前这一tick的实时价)算已经
+    # 走了几档，不是用new_highest(本轮持仓的最高价棘轮)。价格从entry一路
+    # 推到best后正常回撤(entry=870.81→best=857.71，浮盈13点/1.03×ATR，
+    # 之后价格回撤到864~867区间)，这段时间(price-entry)算出来的档位又
+    # 缩回0——已经用real best换来的那一档"记忆"凭空消失，止损公式全程
+    # 卡在保本位一步没推进，回撤把entry附近的初始止损打中，白白平仓
+    # (退出时pnl仅+0.04%，本该锁住至少1档的浮盈)。价格总会有正常回撤，
+    # 阶梯"已经走了几档"这个判断必须钉在new_highest(只进不退的棘轮)上，
+    # 跟best_price/trail_floor用的是同一个基准，不能拿会来回摆动的实时价
+    # 去算这本该单调递增的量。
+    step_count = max(0, int((new_highest - entry_price) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01修复(B账户GSUSDT实盘复现，宝贝直接点破"雷达跟得太紧"这个
+    # 判断)：一开始以为只是重启时序问题，深挖发现是全局性的——雷达激活线
+    # 本来就设在(TP1+TP2)/2这个离entry已经很远的价位(首次开仓设计如此，
+    # 等有像样浮盈才武装)，所以*任何*一笔单子只要走到激活线、雷达第一次
+    # 开始算止损，(price-entry)/step_trigger当场就会算出好几档(GSUSDT这次
+    # 是3档)，止损瞬间从保本位跳到贴近best_price——中间跳过的那些台阶从没
+    # 被逐档确认过，等于开局就把整段浮盈的呼吸空间一次性收紧掉，跟着一次
+    # 稀松平常的回调就把仓扫了。实盘复现：GSUSDT同一晚三个账户武装雷达时
+    # 都独立算出了这种激进跳档(B落地1008.83只剩0.84×ATR，C落地1011.06，
+    # E算到1003.73更紧、只是挂单被IP限流打失败才侥幸没生效)——不是巧合，
+    # 是这条公式在"雷达刚武装、上一档记录是0"这个必经阶段的通病。
+    # 修复：不管是刚武装(prev=0)还是运行中评估，止损这一次最多只能比上次
+    # 持久化的step_count前进一档，多出来的台阶留到后面的tick一档一档补——
+    # 正常逐tick运行时价格很难一次跑完一整档，这条封顶几乎不生效；只有
+    # "激活瞬间/久未评估"这种一次性追平一大截的场景才会被真正拦住。
+    step_count = min(step_count, int(prev_step_count) + 1)
+    step_stop = initial_stop + step_count * step_adv * initial_atr
+    # v2.10（2026-08-11）：阶梯止损不能收得比当前呼吸空间(trail_floor)更紧——
+    # 阶梯是阶段一的稳定过渡保护，步进节奏不跟TP振幅缩放（今天专门拆开的，
+    # 保证捕获速度不被稀释），但这也意味着宽止盈信号上，阶梯攒了很多档之后
+    # 可能比同一时刻trail_floor(呼吸空间，会跟着TP振幅放宽)还紧，止损公式
+    # 取两者更紧的那个，宽呼吸空间就白算了(2026-08-11实盘复现：BNB宽止盈单，
+    # 阶梯早锁到608附近，trail_floor本该给到605.7附近的宽呼吸空间全程没
+    # 用上)。这里给阶梯的贡献封个顶，不让它比trail_floor还紧；trail_floor
+    # 本身依旧只进不退（下面candidate的ratchet逻辑不变），不影响已经锁定
+    # 的止损倒退，只是不让阶梯自己在trail_floor之前抢跑到更紧的位置。
+    # v2.11（2026-08-17）：这条封顶只该管"已经在追踪阶段(过了TP1)"的阶梯，
+    # pre_tp1区排除在外——pre_tp1的呼吸空间(breath_tp12)是给"入场到TP1之间
+    # 别被正常波动打掉"用的，天生比entry到TP1的实际距离宽得多，trail_floor
+    # 算出来几乎必然落在保本锚点下方，导致这条封顶从雷达激活第一秒就把阶梯
+    # 死死摁住——13个品种全部复现：只要还没摸到TP1，阶梯止损全程锁死在
+    # 保本位，一步都推进不了(2026-08-17 SKHYNIXUSDT实盘复现：涨了1.5×ATR、
+    # 只差1点到TP1，止损三小时纹丝不动)。pre_tp1阶段跳过这条封顶，让阶梯
+    # 按自己的步进节奏(step_trigger_atr/step_advance_atr)正常推进；追踪阶段
+    # (tp1_tp2及以后)的原有保护不变。
+    if trail_floor > 0 and zone != "pre_tp1":
+        step_stop = min(step_stop, trail_floor)
+    candidate = max(float(new_stop or 0), float(current_stop or 0), float(step_stop or 0))
+    candidate = max(candidate, trail_floor)
+
+    # 规格 v1.0：禁止 TP1/TP2 强制底线抬升（floor_atr<=0 跳过）
+    f1 = float(p.get("tp1_floor_atr") or 0.0)
+    f2 = float(p.get("tp2_floor_atr") or 0.0)
+    if f2 > 0 and zone in ("tp2_tp3", "tp3_confirm", "tp3_plus"):
+        candidate = max(candidate, entry_price + f2 * initial_atr)
+    elif f1 > 0 and zone == "tp1_tp2":
+        candidate = max(candidate, entry_price + f1 * initial_atr)
+
+    # 2026-09-01新增：TV止损空间硬地板——见TV_STOP_FLOOR_FRAC顶部注释。
+    # 不管上面阶梯/呼吸算出的candidate有多紧，离最高价的距离都不能小于
+    # TV自己止损空间的TV_STOP_FLOOR_FRAC；candidate比这条地板还紧(还高)
+    # 就拉回地板本身。tv_stop_dist<=0(缺TV止损参考)时不设限，安全跳过。
+    if tv_stop_dist > 0:
+        tv_floor = new_highest - TV_STOP_FLOOR_FRAC * float(tv_stop_dist)
+        if candidate > 0:
+            candidate = min(candidate, tv_floor)
+        else:
+            candidate = tv_floor
+
+    # 2026-09-02新增(B/C两账户BNBUSDT实盘复现，宝贝直接指出"雷达普遍跟
+    # 得太紧，90%以上都是TV还持有、实盘先没了")：TV_STOP_FLOOR_FRAC那条
+    # 地板锚定的是TV止损空间，但pre_tp1区真正该参照的是"离TP1还有多远"
+    # ——BNBUSDT这次TV止损空间只有4.87点，TP1却在30点开外，光靠TV止损
+    # 空间这条地板根本护不到"还没到TP1就被阶梯提前收网"这件事。之前
+    # 试过把这条地板做进_zone_trail_atr/trail_floor那条路径，结果撞上
+    # trail_floor棘轮的另一层保护，反而把地板变成摆设(本地测试当场
+    # 暴露、已改用这里这种跟TV_STOP_FLOOR_FRAC完全同款的独立最终夹取，
+    # 不再经过trail_floor那条路)。只在pre_tp1区生效，tp1_px缺失时不
+    # 设限、安全跳过；过了TP1之后TV_STOP_FLOOR_FRAC和阶梯/呼吸自身的
+    # 逻辑接管，不再需要这条地板。
+    if zone == "pre_tp1" and tp1_px > 0:
+        pre_tp1_floor = new_highest - PRE_TP1_TP1_DIST_FRAC * abs(tp1_px - entry_price)
+        if candidate > 0:
+            candidate = min(candidate, pre_tp1_floor)
+        else:
+            candidate = pre_tp1_floor
+
+    # 2026-09-02新增：pre_tp1区起步呼吸地板——见PRE_TP1_BREATH_FLOOR_FRAC
+    # 顶部注释(LITEUSDT实盘复现)。只在step_count==0(一步都还没攒够，含
+    # 刚武装那一刻)时生效——这是唯一真正的空洞：这个状态下step_stop=
+    # initial_stop(裸保本)，上面两条地板锚定的TV止损空间/TP1距离数值上
+    # 又可能比裸保本更紧、拉不动，起步止损就会原样焊死在保本价。一旦
+    # step_count>=1(阶梯已经真实累进过至少一档)，说明价格已经用best/
+    # lowest棘轮换来了合法的进度，这条地板必须让位，不能反过来把已经
+    # 更紧、已经合法赚到的进度重新拉松(测试用例已验证过这个回归场景)。
+    #
+    # 2026-09-04修正锚点(GSUSDT实盘复现，B/C/E三个账户同一晚)：原公式
+    # 锚在new_highest(最优价)上——但pre_tp1区按定义价格离entry的距离
+    # 天生有限(最多到tp1_px)，而trail_dist是给"过了TP1"整个追踪阶段
+    # 校准的宽度，量级通常比entry→tp1这一小段更大。GSUSDT这次trail_dist
+    # =7.90点，entry→tp1只有4.98点，new_highest最多摸到6.0点(还没到tp1)
+    # ——new_highest−0.65×7.90算出来的地板落在entry+0.87附近，比裸保本
+    # (entry+0.84)只多松0.03点，等于形同虚设，跟没修一样：价格从best回撤
+    # 一点点就直接把裸保本打穿，止损全程没跟progress挪动分毫，被一次
+    # 稀松平常的回撤打掉——TV自己止损(1030.70)远没到，白白磨损。
+    # 根子是锚点选错：这条地板的本意是"给entry往下留出trail_dist的一部分
+    # 空间"，锚在new_highest上会被"new_highest已经比entry高出多少"这个
+    # 跟地板初衷无关的量倒扣掉，pre_tp1区新高本来就没走远，扣完所剩无几。
+    # 改锚点到entry_price——不随new_highest抬高被稀释，从武装那一刻起就
+    # 给到entry−0.65×trail_dist这个真实空间，值不变(0.65，之前批准过)，
+    # 只是让这个值第一次真正生效。
+    #
+    # 安全上限：entry−0.65×trail_dist单独算，在trail_dist明显比TV止损
+    # 空间更宽的品种上(GSUSDT这次trail_dist=13.43点，是tv_stop_dist=
+    # 6.52点的2倍多)可能比TV自己的止损空间(entry−tv_stop_dist)还松——
+    # 雷达给的耐心不该超过TV自己愿意承担的风险。tv_stop_dist>0时用
+    # entry−tv_stop_dist(TV止损空间100%，不是TV_STOP_FLOOR_FRAC那65%)
+    # 兜底夹一次，两条地板哪个更紧(更靠近价格)取哪个。
+    # 2026-09-15"悬崖变坡道"：上面这条地板只在step_count==0生效，但激活线
+    # 本身离entry就有约1.9×step_trigger那么远(2026-09-01注释已经点破同一
+    # 根因)，价格一摸线，step_count在武装后第一个tick就已经跳到1(上面
+    # 2026-08-17"每次最多前进一档"的棘轮保护，反而让它立刻跳过了0)——这
+    # 条本该给最早期缓冲的地板在实盘里几乎打不到，武装后止损直接从纯
+    # 保本跳到阶梯第一档，宝贝原话"雷达是不断锁住部分利润，不是掐着市价
+    # 的脖子走""让市价多奔跑，只要硬止损挂好就行，然后盈利了才慢慢推
+    # 雷达"，说的正是这个悬崖。改成随价格从entry走到TP1的进度连续收窄
+    # 的坡道：进度=0(刚武装)时坡道宽度=硬止损自己的距离(tv_stop_dist)，
+    # 进度=1(价格走到TP1)时收窄到跟现有pre_tp1标称宽度(trail_dist)一致，
+    # 不引入新的不衔接点；不依赖step_count，不会再被"武装第一tick就跳过
+    # 0"打穿。
+    if zone == "pre_tp1" and trail_dist > 0:
+        if tp1_px > 0:
+            tp1_dist = abs(float(tp1_px) - entry_price)
+        else:
+            tp1_dist = float(p.get("tp1_atr") or TP1_ATR) * initial_atr
+        progress = 0.0
+        if tp1_dist > 0:
+            progress = max(0.0, min(1.0, (new_highest - entry_price) / tp1_dist))
+        if tv_stop_dist > 0:
+            # 坡道公式是tv_stop_dist→trail_dist的线性插值。当trail_dist>
+            # tv_stop_dist(硬止损本身比pre_tp1标称宽度还紧，GSUSDT实盘
+            # 就是这种形状：trail_dist=7.90 > tv_stop_dist=6.52)时，
+            # 原始插值会在中间progress上短暂超出tv_stop_dist——"雷达给的
+            # 耐心不该超过TV自己愿意承担的风险"(2026-09-04注释)，这里补
+            # 一道min(...,tv_stop_dist)硬上限，这种形状下坡道退化成常数
+            # tv_stop_dist，不会比硬止损本身还松。
+            ramp_dist = float(tv_stop_dist) - (float(tv_stop_dist) - float(trail_dist)) * progress
+            ramp_dist = max(ramp_dist, float(trail_dist))
+            ramp_dist = min(ramp_dist, float(tv_stop_dist))
+            breath_floor = entry_price - ramp_dist
+        else:
+            breath_floor = entry_price - PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if candidate > 0:
+            candidate = min(candidate, breath_floor)
+        else:
+            candidate = breath_floor
+
+    new_stop = candidate
+    return (
+        round(float(new_stop), 2),
+        round(float(new_highest), 2),
+        bool(new_phase),
+        int(step_count),
+        bool(early_be_done),
+    )
+
+
+def calculate_stop_short(
+    price: float,
+    entry_price: float,
+    initial_atr: float,
+    initial_stop: float,
+    current_stop: float,
+    lowest_price: float,
+    breakeven_phase: bool,
+    breathing_coefficient: float = 1.0,
+    adx_val: float = ADX_FALLBACK,
+    profile: Optional[Dict[str, Any]] = None,
+    early_be_done: bool = False,
+    prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
+    tp1_px: float = 0.0,
+    tp2_px: float = 0.0,
+    tp3_px: float = 0.0,
+) -> Tuple[float, float, bool, int, bool]:
+    """空单对称。"""
+    p = _profile(profile)
+    price = float(price or 0)
+    entry_price = float(entry_price or 0)
+    initial_atr = float(initial_atr or 0)
+    initial_stop = float(initial_stop or 0)
+    current_stop = float(current_stop or 0)
+    lowest_price = float(lowest_price or entry_price or 0)
+    early_be_done = bool(early_be_done)
+    coeff = float(breathing_coefficient or 1.0)
+    if coeff <= 0:
+        coeff = cold_start_multiplier(p)
+
+    step_trig = float(p.get("step_trigger_atr") or STEP_TRIGGER_ATR)
+    step_adv = float(p.get("step_advance_atr") or STEP_ADVANCE_ATR)
+
+    new_lowest = min(lowest_price, price) if (lowest_price > 0 and price > 0) else (
+        price if price > 0 else lowest_price
+    )
+    if lowest_price <= 0 and price > 0:
+        new_lowest = price
+    new_stop = current_stop
+    step_count = 0
+
+    if entry_price <= 0 or initial_atr <= 0 or price <= 0:
+        return new_stop, new_lowest, bool(breakeven_phase), step_count, early_be_done
+
+    trail_mult, zone = _zone_trail_atr(
+        side="SHORT", price=price, entry=entry_price, atr=initial_atr,
+        profile=p, coeff=coeff,
+        tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=new_lowest,
+    )
+    trail_dist = trail_mult * initial_atr
+    trail_ceil = new_lowest + trail_dist
+    phase_sw = float(p.get("phase_switch_atr") or BREAKEVEN_TRIGGER_ATR or 3.0)
+    mfe_atr = (entry_price - new_lowest) / initial_atr if initial_atr > 0 else 0.0
+    new_phase = zone in ("tp3_plus", "tp2_patience") or (phase_sw > 0 and mfe_atr >= phase_sw)
+
+    step_trigger = step_trig * initial_atr
+    # 2026-09-01再修复(B账户LITEUSDT实盘复现，SHORT对称版)：同calculate_
+    # stop_long顶部同日期注释——用new_lowest(本轮持仓最低价棘轮，只进不退)
+    # 算已经走了几档，不能用price(会随正常回撤来回摆动的实时价)，否则价格
+    # 从best回撤后，已经用best换来的档位记忆凭空消失，止损全程卡在保本位，
+    # 正常回撤就把entry附近的初始止损打中，白白平仓（实盘复现：entry=
+    # 870.81，best一度到857.71/浮盈1.03×ATR，回撤到864~867区间时step_
+    # count被现价重新算成0，止损从头到尾没推进过，退出时pnl仅+0.04%）。
+    step_count = max(0, int((entry_price - new_lowest) / step_trigger)) if step_trigger > 0 else 0
+    # 2026-09-01修复(B账户GSUSDT实盘复现，SHORT对称版)：同calculate_stop_
+    # long顶部注释——雷达激活线本来就设在离entry已经很远的价位，任何一笔
+    # 单子第一次武装雷达时(prev_step_count=0这个必经阶段)，(entry-price)/
+    # step_trigger当场就会算出好几档，止损瞬间跳到贴近best_price，中间的
+    # 台阶从没被逐档确认过。每次最多比上次持久化的step_count前进一档，
+    # 刚武装(prev=0)时同样适用(最多先给1档)，多出来的留到下个tick补。
+    step_count = min(step_count, int(prev_step_count) + 1)
+    step_stop = initial_stop - step_count * step_adv * initial_atr
+    # v2.10：SHORT对称版——阶梯不能比trail_ceil(呼吸空间上限)更紧，
+    # 理由同LONG侧，见calculate_stop_long对应注释。
+    # v2.11：同LONG侧修复，pre_tp1区排除在外，见calculate_stop_long对应注释。
+    if trail_ceil > 0 and zone != "pre_tp1":
+        step_stop = max(step_stop, trail_ceil)
+    refs = [x for x in (current_stop, new_stop, step_stop) if x > 0]
+    candidate = min(refs) if refs else step_stop
+
+    if candidate <= 0:
+        candidate = trail_ceil
+    else:
+        candidate = min(candidate, trail_ceil)
+
+    # 规格 v1.0：禁止 TP1/TP2 强制底线（floor_atr<=0 跳过）
+    f1 = float(p.get("tp1_floor_atr") or 0.0)
+    f2 = float(p.get("tp2_floor_atr") or 0.0)
+    if f2 > 0 and zone in ("tp2_tp3", "tp3_confirm", "tp3_plus"):
+        floor = entry_price - f2 * initial_atr
+        candidate = min(candidate, floor) if candidate > 0 else floor
+    elif f1 > 0 and zone == "tp1_tp2":
+        floor = entry_price - f1 * initial_atr
+        candidate = min(candidate, floor) if candidate > 0 else floor
+
+    # 2026-09-01新增：TV止损空间硬地板，SHORT对称版——见calculate_stop_long
+    # 对应注释+TV_STOP_FLOOR_FRAC顶部注释。candidate比这条地板还紧(还低)
+    # 就拉回地板本身。tv_stop_dist<=0时不设限。
+    if tv_stop_dist > 0:
+        tv_floor = new_lowest + TV_STOP_FLOOR_FRAC * float(tv_stop_dist)
+        if candidate > 0:
+            candidate = max(candidate, tv_floor)
+        else:
+            candidate = tv_floor
+
+    # 2026-09-02新增：pre_tp1区TP1距离地板，SHORT对称版——见calculate_
+    # stop_long同日期注释(BNBUSDT实盘复现，B/C两账户)。只在pre_tp1区
+    # 生效，tp1_px缺失时不设限。
+    if zone == "pre_tp1" and tp1_px > 0:
+        pre_tp1_floor = new_lowest + PRE_TP1_TP1_DIST_FRAC * abs(tp1_px - entry_price)
+        if candidate > 0:
+            candidate = max(candidate, pre_tp1_floor)
+        else:
+            candidate = pre_tp1_floor
+
+    # 2026-09-02新增：pre_tp1区起步呼吸地板，SHORT对称版——见calculate_
+    # stop_long同日期注释+PRE_TP1_BREATH_FLOOR_FRAC顶部注释(LITEUSDT
+    # 实盘复现：870.81进场、最优价857.71、step_count=0，起步止损焊死
+    # 870.10只有0.71点耐心，正常回撤即出局)。只在step_count==0时生效，
+    # 已合法累进至少一档后必须让位，不倒退已经赚到的进度。
+    #
+    # 2026-09-04修正锚点，SHORT对称版——见calculate_stop_long同日期注释
+    # (GSUSDT实盘复现)。原锚点new_lowest同样的问题：pre_tp1区价格离
+    # entry的距离天生有限，new_lowest+0.65×trail_dist几乎必然落在裸保本
+    # 附近，地板形同虚设。改锚点到entry_price，真正给到entry+0.65×
+    # trail_dist这个空间，不再被"new_lowest已经比entry低出多少"倒扣掉。
+    #
+    # 安全上限，SHORT对称版——见calculate_stop_long同日期注释。
+    # 2026-09-15"悬崖变坡道"，SHORT对称版——见calculate_stop_long同日期
+    # 注释。
+    if zone == "pre_tp1" and trail_dist > 0:
+        if tp1_px > 0:
+            tp1_dist = abs(float(tp1_px) - entry_price)
+        else:
+            tp1_dist = float(p.get("tp1_atr") or TP1_ATR) * initial_atr
+        progress = 0.0
+        if tp1_dist > 0:
+            progress = max(0.0, min(1.0, (entry_price - new_lowest) / tp1_dist))
+        if tv_stop_dist > 0:
+            ramp_dist = float(tv_stop_dist) - (float(tv_stop_dist) - float(trail_dist)) * progress
+            ramp_dist = max(ramp_dist, float(trail_dist))
+            ramp_dist = min(ramp_dist, float(tv_stop_dist))
+            breath_floor = entry_price + ramp_dist
+        else:
+            breath_floor = entry_price + PRE_TP1_BREATH_FLOOR_FRAC * float(trail_dist)
+        if candidate > 0:
+            candidate = max(candidate, breath_floor)
+        else:
+            candidate = breath_floor
+
+    new_stop = candidate
+    return (
+        round(float(new_stop), 2),
+        round(float(new_lowest), 2),
+        bool(new_phase),
+        int(step_count),
+        bool(early_be_done),
+    )
+
+
+def calculate_breath_stop(
+    side: str,
+    price: float,
+    entry_price: float,
+    initial_atr: float,
+    initial_stop: float,
+    current_stop: float,
+    best_price: float,
+    breakeven_phase: bool,
+    breathing_coefficient: float = 1.0,
+    adx_val: float = ADX_FALLBACK,
+    profile: Optional[Dict[str, Any]] = None,
+    early_be_done: bool = False,
+    prev_step_count: int = 0,
+    tv_stop_dist: float = 0.0,
+    tp1_px: float = 0.0,
+    tp2_px: float = 0.0,
+    tp3_px: float = 0.0,
+    **_kw,
+):
+    """
+    统一入口。best_price = 多单 highest / 空单 lowest。
+    返回 dict: stop, best, breakeven_phase, early_be_done, meta
+    """
+    p = _profile(profile)
+    side = str(side or "").strip().upper()
+    atr = float(initial_atr or 0)
+    entry = float(entry_price or 0)
+    px = float(price or 0)
+    coeff = float(breathing_coefficient or 1.0)
+    if coeff <= 0:
+        coeff = cold_start_multiplier(p)
+    trail_mult, zone = _zone_trail_atr(
+        side=side, price=px, entry=entry, atr=atr, profile=p, coeff=coeff,
+        tp1_px=float(tp1_px or 0), tp2_px=float(tp2_px or 0), tp3_px=float(tp3_px or 0),
+        best=float(best_price or 0),
+    )
+    meta = {
+        "trail_atr": trail_mult,
+        "breathing_coefficient": coeff,
+        "phase2_trail_mult": 1.0,
+        "profile": p.get("name") or "ETH",
+        "adx": float(adx_val or 0),
+        "zone": zone,
+        "phase": "trail" if zone in ("tp3_plus", "tp2_patience") else "ladder",
+        "step_count": 0,
+        "early_be_done": bool(early_be_done),
+        "tv_stop_dist": float(tv_stop_dist or 0),
+        "tv_floor_frac": TV_STOP_FLOOR_FRAC,
+    }
+    if side == "SHORT":
+        stop, best, phase, step_count, early = calculate_stop_short(
+            px, entry, atr, initial_stop, current_stop, best_price,
+            breakeven_phase, breathing_coefficient=coeff, profile=p,
+            early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
+            tv_stop_dist=float(tv_stop_dist or 0),
+            tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
+        )
+    else:
+        stop, best, phase, step_count, early = calculate_stop_long(
+            px, entry, atr, initial_stop, current_stop, best_price,
+            breakeven_phase, breathing_coefficient=coeff, profile=p,
+            early_be_done=early_be_done, prev_step_count=int(prev_step_count or 0),
+            tv_stop_dist=float(tv_stop_dist or 0),
+            tp1_px=tp1_px, tp2_px=tp2_px, tp3_px=tp3_px,
+        )
+    meta["step_count"] = int(step_count)
+    meta["phase"] = "trail" if phase else "ladder"
+    meta["early_be_done"] = bool(early)
+    meta["trail_distance"] = round(atr * trail_mult, 4) if atr > 0 else 0.0
+    return {
+        "stop": stop,
+        "best": best,
+        "breakeven_phase": phase,
+        "early_be_done": bool(early),
+        "meta": meta,
+    }

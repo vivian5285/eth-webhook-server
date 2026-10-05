@@ -1,0 +1,1381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+按品种呼吸参数档（ETH / XAU）。执行引擎共用，只在配置层区分。
+
+规格 v2.1：
+  - 雷达激活 = 中点激活（首次=(TP1+TP2)/2，重入=TP2）
+  - 呼吸空间大幅增加（市价前面跑，雷达保持安全距离跟在后面）
+  - 步进参数同步大幅放宽（约40-60%）
+  - 硬止损呼吸垫已迁至 defense_profiles 统一 1.15（本文件不管 buffer）
+  - 本文件存基线；运行时 apply_tier_to_breath_profile 覆盖 step/breath/trail
+  - 规格 §5.0 提前保本检查点已废除
+  - 规格 §5.1 雷达激活 = (TP1+TP2)/2（首次）/ TP2（重入）
+  - 规格 §5.2/§5.3 雷达跟踪步长、呼吸空间按档位查 reentry_tiers.json
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+# 共用边界（ATR 比插值；TP3+ 实际 min/max 由档位 overlay）
+RATIO_FLOOR = 0.6
+RATIO_CEILING = 2.2
+
+# ETH 基线（中趋势档会 overlay，规格 v2.1：步进大幅放宽）
+# 2026-08-13：策略切到90分钟周期后重新校准——用真实ETH 30m K线合成
+# 90分钟K线，量了400根样本的"回调深度/ATR"分布：中位数≈3.26×ATR，
+# 75分位≈4.84×ATR，90分位≈5.58×ATR。原breath_tp12=2.00比中位数回调
+# 窄了近40%，同批(XAU/BNB/ZEC)排查下来是系统性偏紧，不是XAU独有。
+# 2026-09-01再校准：用户把ETH周期从90分钟改成150分钟。150分钟不能被
+# 30整除，能被15整除(15×10)，用真实15m K线合成150分钟K线测(90天888根
+# 合成K线、124个真实摆动点识别回调样本)：中位数回调2.55×ATR、75分位
+# 3.53×ATR、90分位5.01×ATR，ATR%=1.10%，覆盖旧的90分钟时代数值。注意：
+# ETH是其余多个品种(ANTHROPIC/XAU/GS等)三档步进缩放比例sqrt(own_p50/
+# ETH_p50)的参照基准——那些品种的缩放比例是它们自己校准那一刻用当时
+# 的ETH数值算出来的、已经写进各自的历史注释里，不需要因为ETH自己改了
+# 周期就回头重算，只有ETH自己这份基线需要更新。
+# 2026-09-06再校准：宝贝把ETH周期改成59分钟。59是质数，不能被5/15/30
+# 整除，只能用1分钟原始K线×59合成（同SKHYNIX 101分钟那次的手法）。
+# 分页拉了87606根1m原始K线覆盖约60.8天，测了1484根合成K线、255个真实
+# 摆动点识别回调样本：中位数回调2.37×ATR、75分位3.43×ATR、90分位
+# 4.92×ATR，ATR%=0.39%。ETH自己的mid档三个核心字段直接取实测值(同
+# 09-01注释)，不是其它品种用的"0.375×breath_tp12"跨品种比例公式。
+BREATH_ETH: Dict[str, Any] = {
+    "name": "ETH",
+    "initial_sl_atr": 0.0,  # 规格 v2.1：激活用保本位，不用 ATR 臂
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.37,   # 2026-09-08再校准(75min)：覆盖实测中位数回调
+    "step_advance_atr": 1.54,   # 2026-09-08再校准(75min)：覆盖实测中位数回调×0.65
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.37,  # 2026-09-08再校准(75min)：覆盖实测中位数回调(2.37)
+    "breath_tp23": 3.51,  # 2026-09-08再校准(75min)：覆盖实测75分位回调(3.51)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.9,      # 2026-09-08再校准(75min)
+    "max_mult": 5.4,      # 2026-09-08再校准(75min)：覆盖实测90分位回调(5.08)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测显示ETH受益，但当时
+    # ETH真实生产周期是90分钟——用30m合成90分钟K线重新回测后发现：只有
+    # min_mult(最冷/最不常见的低波动状态)差值为正，mid_mult/max_mult
+    # (更常见的正常/高波动状态)差值持续为负，即使把阈值收紧两档依然负
+    # (-0.08~-0.56×ATR/笔)。说明4H近似掩盖了ETH真实短周期上"深回调后
+    # 仍常继续走"的特性，故意不启用。2026-09-01/09-06/09-08：ETH周期已
+    # 连续三次变更(→150分钟→59分钟→75分钟)，这条结论是否还成立始终没有
+    # 用最新周期重新验证过，继续保持不启用，不要因为周期变了就顺手打开，
+    # 除非用ETH自己当前生产周期(75分钟)K线重新测出正收益。
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    # 2026-09-04：ETH真实TV源码(01版本.pine)里没有use_staged_exit_gate这个
+    # 开关(全文读完+grep核对，零匹配)，所以是False——纯记录TV源码里的真实
+    # 情况，给strategy_engine/strategies/eth_pingkai_buhuchi.py这类"重新
+    # 实现TV自己评分/出场逻辑"的shadow策略引用用。**当天验证过、live radar
+    # (breath_stop.py::_zone_trail_atr / position_supervisor_binance.py::
+    # _apply_breath_stop_tick)不再读这个字段**——雷达自己的追踪宽窄是雷达
+    # 自己的风险取舍，不代表"在模仿TV有没有对应机制"，宝贝反馈这些品种一样
+    # 有"TV还持有、雷达先打掉"，耐心模式对live radar已恢复全品种统一生效。
+    "has_staged_exit_gate": False,
+}
+
+# BNB 基线（150分钟周期）
+# 2026-08-14修正：昨天误以为BNB是90分钟（看错了TV警报截图），按90分钟
+# 校准过一版；用户确认BNB两个账户其实都是150分钟，那版作废。用真实BNB
+# 150分钟K线（30m合成）重新量了300根样本的回调分布：中位数≈2.94×ATR，
+# 75分位≈3.57×ATR，90分位≈4.57×ATR（90分位比90分钟那版算出来的5.72要
+# 低，150分钟周期上BNB的回调分布反而更集中，没有那么长的尾巴）。
+# ATR%=0.58%。
+BREATH_BNB: Dict[str, Any] = {
+    "name": "BNB",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.95,
+    "step_advance_atr": 0.62,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.95,  # 覆盖实测中位数回调(2.94)
+    "breath_tp23": 3.60,  # 覆盖实测75分位回调
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,
+    "max_mult": 5.3,      # 覆盖实测90分位回调(4.57)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    # 2026-08-31新增：利润回吐刹车。最初用4H K线近似回测三档trail_mult
+    # 差值均为正(+0.22~+0.80×ATR/笔)，启用；随后用BNB真实生产周期(150min，
+    # 30m合成)重新回测复核，三档差值不降反升(+0.91~+1.06×ATR/笔)，比4H
+    # 近似更强，确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
+}
+
+# ZEC 基线（130分钟周期）
+# 2026-08-13：用真实ZEC 30m K线合成150分钟K线，量了300根样本的回调分布：
+# 中位数≈3.10×ATR，75分位≈4.28×ATR，90分位≈5.89×ATR——三个品种里周期
+# 最长、回调分布也最宽，呼吸空间给得也最松。
+# 2026-09-06再校准：用户把ZEC周期从150分钟改成130分钟。130分钟能被5分钟
+# 整除，用真实5m K线合成后测(81.9天907根合成K线、132个回调样本)：中位数
+# 回调2.54×ATR、75分位3.42×ATR、90分位4.52×ATR，ATR%=2.64%——覆盖旧的
+# 150分钟时代数值，周期缩短后相对回调幅度跟着收窄。跟PAXG同款130分钟
+# 再校准(2026-08-27)同一套公式：step_trigger_atr/breath_tp12直接取中位数、
+# step_advance_atr=step_trigger×0.65、max_mult=90分位+0.3缓冲、min_mult=
+# max_mult×0.72。
+BREATH_ZEC: Dict[str, Any] = {
+    "name": "ZEC",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.54,
+    "step_advance_atr": 1.65,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.54,  # 09-06再校准(130min)：覆盖实测中位数回调(2.54)
+    "breath_tp23": 3.42,  # 09-06再校准(130min)：覆盖实测75分位回调(3.42)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.5,
+    "max_mult": 4.8,      # 09-06再校准(130min)：覆盖实测90分位回调(4.52)以上
+    # 2026-08-31：利润回吐刹车最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本转正/打平(+0.52/+0.12/-0.08×ATR/笔)，一度启用；
+    # 随后用ZEC真实生产周期(150min，30m合成)重新回测复核，三档差值全部
+    # 转为明确负值(-0.33~-0.39×ATR/笔，触发子集更差达-0.69×ATR/笔)——
+    # 4H近似在ZEC身上是误导性的，真实周期上ZEC回调深但更常继续走，跟
+    # XAU/PAXG是同一类特性。故意不启用，不要照抄别的品种加上。2026-09-06：
+    # ZEC周期已改成130分钟，此回测结论基于旧的150分钟周期，尚未用新周期
+    # 重新复核——维持"不启用"结论不变，但如果之后要重新考虑打开这个
+    # 开关，应先用130分钟真实数据重新回测，不能直接沿用旧结论。
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XAU 基线
+# 2026-08-14再次修正：用户把XAU策略从90分钟改回50分钟（原因：90分钟反应
+# 太慢），90分钟那版作废。用真实XAU 5分钟K线精确合成50分钟K线（5m×10，
+# 分页拉了4000根5m K线覆盖约14天，避免样本量太小），量了400根样本的
+# 回调分布：中位数≈2.88×ATR，75分位≈4.32×ATR，90分位≈5.46×ATR。
+# ATR%=0.33%。
+# 2026-08-25再次修正：用户把XAU策略从50分钟改回90分钟。用真实30m K线
+# 合成90分钟K线（分页拉了3950根30m原始K线覆盖约82天，同ASML/ANTHROPIC
+# 90分钟品种一致的合成比例），用真实摆动点识别(fractal pivot，±3根确认，
+# 跟08-18那批OPENAI/ANTHROPIC/ASML/SKHYNIX同方法)测了1316根合成K线、
+# 204个摆动回调样本的分布：中位数≈2.49×ATR，75分位≈4.10×ATR，90分位≈
+# 5.90×ATR。ATR%=0.50%。step_trigger_atr按现有7个已校准品种step_trigger/
+# breath_tp12比值的均值(≈0.375)推算，step_advance_atr=step_trigger×0.65
+# （这个比值在全部7个品种里高度一致，0.647~0.657，视为固定规律）；
+# min_mult按均值比例(max_mult×0.75)估，这项各品种实测差异较大(0.63~0.91)，
+# 没有统一公式，如后续实盘发现跟同期呼吸空间(breath_tp23)顶得太紧或太松，
+# 需要单独复核这一项。
+BREATH_XAU: Dict[str, Any] = {
+    "name": "XAU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.5,
+    "early_be_atr": 0.0,  # 提前保本检查点已废除
+    "step_trigger_atr": 0.93,
+    "step_advance_atr": 0.60,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.49,  # 覆盖实测中位数回调(2.49)
+    "breath_tp23": 4.10,  # 覆盖实测75分位回调(4.10)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.6,
+    "max_mult": 6.2,      # 覆盖实测90分位回调(5.90)以上
+    # 2026-08-31：利润回吐刹车方案回测过XAU，三档trail_mult差值全部
+    # 显著为负(-0.85~-1.03×ATR/笔)——XAU趋势内深回调后继续走的概率明显
+    # 更高，提前收紧反而砍断真实趋势。故意不加giveback_brake，以后
+    # 校准/重构时不要顺手照抄别的品种把这个加上。
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 1,
+    "exit_score": 1,
+}
+
+# XMR 基线（新增品种，2026-08-14）
+# 2026-08-14修正：昨天先按90分钟假设校准的，用户确认XMR实际是6小时周期，
+# 用真实XMR 6h K线（币安原生6h间隔，不用合成）重新量了500根样本的回调
+# 分布：中位数≈3.01×ATR，75分位≈3.79×ATR，90分位≈4.99×ATR。ATR%=2.07%。
+# （90分钟那版数值已作废，这版才是实际生效的）
+# 2026-08-26再校准（第一次）：用户把XMR周期从6小时(360min)改成145分钟，
+# 后来又改主意（145分钟对"替补品种"来说交易太频繁，回撤也更大），最终
+# 定为8小时——这版145分钟的数值已作废，保留注释供追溯。当时实测：
+# 62天616根合成K线、96个回调样本，中位数回调2.35×ATR、75分位3.14×ATR、
+# 90分位4.44×ATR。
+# 2026-08-26再校准（第二次·最终）：用户确认XMR最终定为8小时周期，"反正
+# 是替补选手，不是主要的"——8小时是币安原生间隔，不用合成，直接拉K线
+# 测(scratch_calibrate_xmr_145.py改参数复用，223天670根原生8h K线、115个
+# 回调样本)：中位数回调2.33×ATR、75分位3.11×ATR、90分位4.45×ATR，ATR%=
+# 3.83%。跟145分钟那版几乎一样(2.33 vs 2.35)，说明XMR的回调/ATR相对比例
+# 在这个品种上对周期不太敏感，不是巧合凑出来的数字。
+BREATH_XMR: Dict[str, Any] = {
+    "name": "XMR",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.33,
+    "step_advance_atr": 1.51,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.33,  # 08-26再校准(8h)：覆盖实测中位数回调(2.33)
+    "breath_tp23": 3.11,  # 08-26再校准(8h)：覆盖实测75分位回调(3.11)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.4,
+    "max_mult": 4.7,      # 08-26再校准(8h)：覆盖实测90分位回调(4.45)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测(阈值收紧到1.5/0.45/
+    # 0.60后)三档差值基本打平微正(+0.18/-0.07/+0.03×ATR/笔)，一度启用；
+    # 随后用XMR真实生产周期(8H原生K线)重新回测复核，三档差值全部转为
+    # 明确正值(+0.30~+0.43×ATR/笔)，比4H近似更强，确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
+}
+
+# META 基线（新增品种，2026-08-27，4小时周期，币安TRADIFI_PERPETUAL
+# underlyingType=EQUITY，Meta(脸书)股票代币化永续，跟GS/MU/LITE/TSLA同类）。
+# 4小时是币安原生间隔，不用合成，直接拉K线测(154天924根原生4h K线、133个
+# 回调样本，样本量很充足)：中位数回调2.58×ATR、75分位3.67×ATR、90分位
+# 5.52×ATR，ATR%=1.09%。
+BREATH_META: Dict[str, Any] = {
+    "name": "META",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.58,
+    "step_advance_atr": 1.68,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.58,  # 覆盖实测中位数回调(2.58)
+    "breath_tp23": 3.67,  # 覆盖实测75分位回调(3.67)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.2,
+    "max_mult": 5.8,      # 覆盖实测90分位回调(5.52)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(META)
+}
+
+# TSLA 基线（新增品种，2026-08-27，6小时周期，币安TRADIFI_PERPETUAL
+# underlyingType=EQUITY，特斯拉股票代币化永续，跟GS/MU/LITE同类）。
+# 6小时是币安原生间隔，不用合成，直接拉K线测(scratch_calibrate_xmr_145.py
+# 改参数复用，210.5天842根原生6h K线、120个回调样本)：中位数回调
+# 3.40×ATR、75分位4.36×ATR、90分位5.77×ATR，ATR%=1.35%。
+BREATH_TSLA: Dict[str, Any] = {
+    "name": "TSLA",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 3.40,
+    "step_advance_atr": 2.21,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 3.40,  # 覆盖实测中位数回调(3.40)
+    "breath_tp23": 4.36,  # 覆盖实测75分位回调(4.36)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.4,
+    "max_mult": 6.1,      # 覆盖实测90分位回调(5.77)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# BCH 基线（2026-08-14：用户重新启用BCH的TV，6小时周期，独立校准）
+# 用真实BCH 6h K线（币安原生6h间隔）量了500根样本的回调分布：
+# 中位数≈3.76×ATR，75分位≈4.51×ATR，90分位≈6.02×ATR。ATR%=1.56%。
+BREATH_BCH: Dict[str, Any] = {
+    "name": "BCH",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.25,
+    "step_advance_atr": 0.80,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 3.75,  # 覆盖实测中位数回调(3.76)
+    "breath_tp23": 4.50,  # 覆盖实测75分位回调
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.3,
+    "max_mult": 6.8,      # 覆盖实测90分位回调(6.02)以上
+    # 2026-08-31：利润回吐刹车。最初用4H K线近似回测三档差值均为正
+    # (+0.27~+0.69×ATR/笔)，启用；随后用BCH真实生产周期(6H原生K线)重新
+    # 回测复核，三档差值不降反升(+0.41~+0.60×ATR/笔)，比4H近似更强，
+    # 确认启用没有问题。
+    "giveback_brake": {"min_peak_atr": 1.0, "trigger_frac": 0.35, "retain_frac": 0.55},
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# SNDK 基线——2026-09-05重新校准：宝贝反映"sndk变成75分钟周期"，原
+# 08-14那版是按90分钟合成K线测的，周期变了必须用真实75分钟K线重新测
+# 回调分布，不能只改tv_tf_sec不改呼吸系数。75分钟能被15分钟整除，用
+# 真实15m K线合成（分页拉了8790根15m原始K线覆盖约91.5天），真实摆动点
+# 识别(fractal pivot，±3根确认，同08-18/08-25那批方法)测了1757根合成
+# K线、265个摆动回调样本：中位数≈2.25×ATR，75分位≈4.02×ATR，90分位≈
+# 5.92×ATR。ATR%=0.94%（原90分钟版本2.37%，周期变短、波动率regime也
+# 可能变化，双重因素共同作用，以本次实测为准）。step_trigger_atr/
+# step_advance_atr推算方法同XAU/SKHYNIX/GS/MU 08-25/09-05注释（跨品种
+# 均值比例：step_trigger≈0.375×breath_tp12，step_advance≈0.65×
+# step_trigger），不是脚本粗算建议里直接拿p50当step_trigger那版。
+BREATH_SNDK: Dict[str, Any] = {
+    "name": "SNDK",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.84,
+    "step_advance_atr": 0.55,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.25,  # 覆盖实测中位数回调(2.25)
+    "breath_tp23": 4.02,  # 覆盖实测75分位回调(4.02)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.5,
+    "max_mult": 6.2,      # 覆盖实测90分位回调(5.92)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SNDK)
+}
+
+# PAXG 基线（新增品种，2026-08-14，150分钟周期）
+# 用真实PAXG 30m K线合成150分钟K线（分页拉了4000根30m原始K线覆盖约83天），
+# 量了800根合成样本、53个回调样本的分布：中位数≈3.75×ATR，75分位≈
+# 6.20×ATR，90分位≈8.88×ATR。ATR%=0.55%——单价波动率不高（跟BNB
+# 0.58%接近），但回调分布尾巴很肥（金价类品种常见的慢速大幅度回撤特征），
+# 呼吸空间给得也相应更宽。保本激活门槛：1.5×ATR%≈0.82%，跟BNB/ETH/XAU
+# 同一量级，不需要像ZEC那样额外加百分比腿，用共用公式即可。
+# 2026-08-27再校准：用户把PAXG周期从150分钟改成130分钟。130分钟能被5分钟
+# 整除，用真实5m K线合成后测(61.8天685根合成K线、96个回调样本)：中位数
+# 回调3.03×ATR、75分位4.44×ATR、90分位6.44×ATR，ATR%=0.56%，覆盖旧的150
+# 分钟时代数值——周期缩短后相对回调幅度也跟着收窄。
+BREATH_PAXG: Dict[str, Any] = {
+    "name": "PAXG",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 3.03,
+    "step_advance_atr": 1.97,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 3.03,  # 08-27再校准(130min)：覆盖实测中位数回调(3.03)
+    "breath_tp23": 4.44,  # 08-27再校准(130min)：覆盖实测75分位回调(4.44)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.8,
+    "max_mult": 6.7,      # 08-27再校准(130min)：覆盖实测90分位回调(6.44)以上
+    # 2026-08-31：利润回吐刹车方案回测过PAXG，三档trail_mult差值全部
+    # 显著为负(-1.03~-1.31×ATR/笔，跟同为贵金属类的XAU结论一致)——故意
+    # 不加giveback_brake，以后不要顺手照抄别的品种加上。
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# SKHYNIX 基线（新增品种，2026-08-15，150分钟周期）
+# 币安新品类TRADIFI_PERPETUAL(underlyingType=KR_EQUITY)，韩国SK海力士股票
+# 代币化永续。用真实30m K线合成150分钟K线（分页拉了3532根原始K线，该
+# 品种上线时间较短，覆盖约73.5天，比其它品种拿到的样本略短），量了706根
+# 合成样本、47个回调样本的分布：中位数≈2.97×ATR，75分位≈4.85×ATR，
+# 90分位≈8.31×ATR。ATR%=2.27%——个股代币化产品波动率明显高于XAU/PAXG等
+# 传统贵金属类，回调尾巴也偏肥，呼吸空间给得相应更宽。保本激活门槛：
+# 1.5×ATR%≈3.4%，比BNB/ETH/XAU这一档明显更宽，但沿用共用公式即可（不是
+# ZEC那种"ATR腿本身就过紧导致该保护时候没触发"的情况，属于品种自身波动
+# 率偏大，不需要额外百分比腿）。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样700根K线、128个摆动回调
+# 样本，中位数≈2.61×ATR，75分位≈3.73×ATR，90分位≈5.53×ATR——比08-15那版收窄
+# 12.3%~33.4%。
+# 2026-08-25再次修正：用户把SKHYNIX策略周期从150分钟改成101分钟（不能被
+# 5/15/30分钟整除，用真实1分钟K线×101合成，分页拉了66811根1m原始K线覆盖
+# 约46天），真实摆动点识别(fractal pivot，±3根确认，同08-18方法)测了661根
+# 合成K线、84个摆动回调样本：中位数≈2.71×ATR，75分位≈4.13×ATR，90分位≈
+# 6.35×ATR。ATR%=1.86%。step_trigger_atr/step_advance_atr推算方法同XAU
+# 08-25注释（跨品种均值比例，非本品种独立反推）。
+BREATH_SKHYNIX: Dict[str, Any] = {
+    "name": "SKHYNIX",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,
+    "step_advance_atr": 0.66,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.71,  # 08-25再校准(101min)：覆盖实测中位数回调(2.71)
+    "breath_tp23": 4.13,  # 08-25再校准(101min)：覆盖实测75分位回调(4.13)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.0,
+    "max_mult": 6.65,     # 08-25再校准(101min)：覆盖实测90分位回调(6.35)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SKHYNIX)
+}
+
+# XPD 基线（新增品种，2026-08-15，150分钟周期，钯金）
+# 用真实30m K线合成150分钟K线（分页拉了4000根原始K线，覆盖约83天），量了
+# 800根合成样本、58个回调样本的分布：中位数≈3.25×ATR，75分位≈5.15×ATR，
+# 90分位≈6.68×ATR。ATR%=0.76%——贵金属类波动率跟BNB(0.58%)接近，中位数
+# 回调(3.25)跟ETH(3.26)几乎一致，是巧合但数据支持直接对齐ETH的呼吸空间量级。
+BREATH_XPD: Dict[str, Any] = {
+    "name": "XPD",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.07,
+    "step_advance_atr": 0.70,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 3.25,  # 覆盖实测中位数回调(3.25)
+    "breath_tp23": 5.15,  # 覆盖实测75分位回调(5.15)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.5,
+    "max_mult": 7.0,      # 覆盖实测90分位回调(6.68)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# OPENAI 基线（新增品种，2026-08-15，150分钟周期，PREMARKET未上市股权盘前品种）
+# 用真实30m K线合成150分钟K线（分页拉了3886根原始K线，该品种上线较短覆盖约81天），
+# 量了777根合成样本、55个回调样本的分布：中位数≈2.59×ATR，75分位≈4.11×ATR，
+# 90分位≈7.16×ATR。ATR%=1.66%——盘前品种波动率明显偏高，回调分布也有肥尾特征。
+# 注：24h成交量约449万U，流动性比其它TradFi品种薄，实盘留意滑点。
+# 2026-08-18再校准：用真实摆动点识别（fractal pivot，±3根确认）重新采样800根
+# K线、173个摆动回调样本，中位数≈2.10×ATR，75分位≈3.22×ATR，90分位≈5.26×ATR——
+# 比08-15那版全线收窄18.8%~26.5%，最近行情比刚上线校准时走得更干脆（震荡幅度
+# 相对ATR变小）。用户确认这是"随行情变化定期再校准"的常规操作，不是一次性的。
+BREATH_OPENAI: Dict[str, Any] = {
+    "name": "OPENAI",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.85,
+    "step_advance_atr": 0.55,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.10,  # 08-18再校准：覆盖实测中位数回调(2.10)
+    "breath_tp23": 3.22,  # 08-18再校准：覆盖实测75分位回调(3.22)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.4,
+    "max_mult": 5.5,      # 08-18再校准：覆盖实测90分位回调(5.26)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(OPENAI)
+}
+
+# ANTHROPIC 基线（新增品种，2026-08-15，90分钟周期，PREMARKET未上市股权盘前品种）
+# 用真实30m K线合成90分钟K线（分页拉了4500根原始K线，覆盖约93.75天），量了1186根
+# 合成样本、84个回调样本的分布：中位数≈3.01×ATR，75分位≈4.65×ATR，90分位≈7.97×ATR。
+# ATR%=0.98%。注：24h成交量约612万U，同样偏薄，实盘留意滑点。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1150根K线、262个摆动回调
+# 样本，中位数≈2.22×ATR，75分位≈3.23×ATR，90分位≈5.23×ATR——比08-15那版全线
+# 收窄26.2%~34.3%，四个"美股"品种里漂移幅度最大的一个。
+# 2026-08-27再校准：用户把ANTHROPIC周期从90分钟改成4小时。4小时是币安原生
+# 间隔，不用合成，直接拉K线测(86天516根原生4h K线、61个回调样本)：中位数
+# 回调2.24×ATR、75分位3.69×ATR、90分位5.47×ATR，ATR%=1.21%，覆盖旧的90
+# 分钟时代数值。
+# 2026-08-31再校准：用户把ANTHROPIC周期从4小时改成105分钟。105分钟不能被
+# 30整除，能被15整除(15m×7)，用真实15m K线合成105分钟K线测(90天1234根
+# 合成K线、170个真实摆动点识别(fractal pivot±3根确认)回调样本)：中位数
+# 回调2.38×ATR、75分位3.41×ATR、90分位5.27×ATR，ATR%=0.74%，覆盖旧的4
+# 小时时代数值。跟以往同批(XAU/SKHYNIX/OpenAI/ASML等)周期变更后的重校准
+# 用同一套方法(scratch_calibrate_xau_skhynix.py::run_symbol)。
+# 2026-09-08再校准：宝贝截图核实TV面板真实周期是101分钟(不是配置里过期
+# 的105分钟，跟SKHYNIX同周期)。101是质数，不能被5/15/30整除，只能用1
+# 分钟原始K线合成，分页拉了66811根1m原始K线覆盖约46.3天(ANTHROPIC样本
+# 历史本来就偏薄，76个真实摆动点识别回调样本略薄但可用)：中位数回调
+# 2.48×ATR、75分位3.30×ATR、90分位6.69×ATR，ATR%=1.28%，覆盖旧的105
+# 分钟时代数值。
+BREATH_ANTHROPIC: Dict[str, Any] = {
+    "name": "ANTHROPIC",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.48,
+    "step_advance_atr": 1.61,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.48,  # 2026-09-08再校准(101min)：覆盖实测中位数回调(2.48)
+    "breath_tp23": 3.30,  # 2026-09-08再校准(101min)：覆盖实测75分位回调(3.30)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.0,
+    "max_mult": 7.0,      # 2026-09-08再校准(101min)：覆盖实测90分位回调(6.69)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# ASML 基线（新增品种，2026-08-15，90分钟周期，已上市正股EQUITY类）
+# 用真实30m K线合成90分钟K线（分页拉了3163根原始K线，覆盖约66天），量了
+# 1054根合成样本、69个回调样本的分布：中位数≈3.10×ATR，75分位≈4.55×ATR，
+# 90分位≈7.51×ATR。ATR%=0.27%——已上市正股类波动率很低（比XAU的0.33%
+# 还低），回调分布尾巴仍偏肥。
+# 2026-08-18再校准：真实摆动点识别（±3根确认）重新采样1050根K线、211个摆动回调
+# 样本，中位数≈2.50×ATR，75分位≈3.75×ATR，90分位≈6.18×ATR——比08-15那版收窄
+# 17.5%~19.4%。同期ATR%从0.27%涨到0.52%（波动率翻倍），但回调/ATR比值反而更
+# 窄，说明最近走出了一段更干脆的单边行情。
+BREATH_ASML: Dict[str, Any] = {
+    "name": "ASML",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,
+    "step_advance_atr": 0.66,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.50,  # 08-18再校准：覆盖实测中位数回调(2.50)
+    "breath_tp23": 3.75,  # 08-18再校准：覆盖实测75分位回调(3.75)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.9,
+    "max_mult": 6.5,      # 08-18再校准：覆盖实测90分位回调(6.18)以上
+    # 2026-08-31新增：利润回吐刹车——起因是当天ASML在B/C/E三账户同时
+    # 遭遇急跌(SHORT)，雷达自己的跟踪腿被现价越过、连续重挂失败50次，
+    # 靠更宽的永久硬止损才接住(全程没有裸奔，但暴露出中等赢家在这段
+    # 反转初期完全没有比永久硬止损更早介入的保护)。用ASML真实90分钟
+    # 周期(30m合成×3)回测两组阈值，三档trail_mult下差值全部明确为正，
+    # 收紧版(同XMR/ZEC)比宽松版(同ETH/BNB)更强(+0.86~+1.43 vs +0.82~
+    # +1.18×ATR/笔)，用收紧版启用。
+    "giveback_brake": {"min_peak_atr": 1.5, "trigger_frac": 0.45, "retain_frac": 0.60},
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# GS 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟ASML/
+# SKHYNIX同类）。用真实30m K线合成90分钟K线（该品种2026-07-29才上线，只
+# 拉到1289根30m原始K线覆盖约26.8天，样本量比其它品种薄，后续需要按"周期性
+# 呼吸再校准"惯例尽快补测），真实摆动点识别(fractal pivot，±3根确认，同
+# 08-18那批方法)测了429根合成K线、61个摆动回调样本：中位数≈2.06×ATR，
+# 75分位≈2.99×ATR，90分位≈4.35×ATR。ATR%=0.45%——跟XAU(0.50%)/ASML(0.52%)
+# 同一量级，不算高波动品种。step_trigger_atr/step_advance_atr推算方法同
+# XAU/SKHYNIX 08-25注释（跨品种均值比例：step_trigger≈0.375×breath_tp12，
+# step_advance≈0.65×step_trigger）。
+BREATH_GS: Dict[str, Any] = {
+    "name": "GS",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.77,
+    "step_advance_atr": 0.50,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.06,  # 覆盖实测中位数回调(2.06)
+    "breath_tp23": 2.99,  # 覆盖实测75分位回调(2.99)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.4,
+    "max_mult": 4.65,     # 覆盖实测90分位回调(4.35)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(GS)
+}
+
+# MU 基线——2026-09-05重新校准：宝贝反映"mu的tv挂载55分钟周期了"，原
+# 08-25那版是按90分钟合成K线测的，周期变了必须用真实55分钟K线重新测
+# 回调分布，不能只改tv_tf_sec不改呼吸系数(旧系数是拿90分钟的"跑腿距离"
+# 校出来的，直接套到55分钟上会明显偏松)。55分钟能被5分钟整除，用真实
+# 5m K线合成（分页拉了23304根5m原始K线覆盖约80.9天），真实摆动点识别
+# (fractal pivot，±3根确认，同08-18/08-25那批方法)测了2118根合成K线、
+# 317个摆动回调样本：中位数≈2.50×ATR，75分位≈3.71×ATR，90分位≈
+# 5.56×ATR。ATR%=0.47%（周期变短后ATR的价格占比也相应变小，符合预期）。
+# step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS 08-25注释
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger），不是脚本粗算建议里直接拿p50当step_trigger那版。
+BREATH_MU: Dict[str, Any] = {
+    "name": "MU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.94,
+    "step_advance_atr": 0.61,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.50,  # 覆盖实测中位数回调(2.50)
+    "breath_tp23": 3.71,  # 覆盖实测75分位回调(3.71)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.2,
+    "max_mult": 5.9,      # 覆盖实测90分位回调(5.56)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(MU)
+}
+
+# LITE 基线（新增品种，2026-08-25，90分钟周期，已上市正股EQUITY类，跟
+# ASML/GS/MU同类）。用真实30m K线合成90分钟K线（分页拉了3950根30m原始
+# K线覆盖约82天），真实摆动点识别(fractal pivot，±3根确认，同批方法)
+# 测了1316根合成K线、176个摆动回调样本：中位数≈2.71×ATR，75分位≈
+# 4.18×ATR，90分位≈6.56×ATR。ATR%=1.40%。step_trigger_atr/step_advance_atr
+# 推算方法同上。
+BREATH_LITE: Dict[str, Any] = {
+    "name": "LITE",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,
+    "step_advance_atr": 0.66,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.71,  # 覆盖实测中位数回调(2.71)
+    "breath_tp23": 4.18,  # 覆盖实测75分位回调(4.18)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 5.2,
+    "max_mult": 6.9,      # 覆盖实测90分位回调(6.56)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(LITE)
+}
+
+# DELL 基线（新增品种，2026-09-06，3小时周期，已上市正股EQUITY类，跟
+# GS/MU/LITE/TSLA/META同类）。180分钟能被30整除，用真实30m K线合成
+# （分页拉了4526根30m原始K线覆盖约94.2天），真实摆动点识别(fractal
+# pivot，±3根确认，同批方法)测了754根合成K线、112个摆动回调样本：
+# 中位数≈2.74×ATR，75分位≈3.98×ATR，90分位≈5.70×ATR。ATR%=1.63%。
+# step_trigger_atr/step_advance_atr推算方法同XAU/SKHYNIX/GS/MU/SNDK
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger）。has_staged_exit_gate未核实真实TV Pine源码，
+# 默认False（同大多数品种惯例，只有verified的7个品种才标True）。
+BREATH_DELL: Dict[str, Any] = {
+    "name": "DELL",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.03,
+    "step_advance_atr": 0.67,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.74,  # 覆盖实测中位数回调(2.74)
+    "breath_tp23": 3.98,  # 覆盖实测75分位回调(3.98)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.3,
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.70)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
+# GEV 基线（新增品种，2026-09-06，4小时周期，原生K线，已上市正股EQUITY类，
+# 跟GS/MU/LITE/TSLA/META同类，周期跟META一致）。用真实4h原生K线（分页
+# 拉了344根，覆盖约57.3天，2026年才上市，样本量比老品种薄，后续需要按
+# "周期性呼吸再校准"惯例尽快补测），真实摆动点识别(fractal pivot，±3根
+# 确认，同批方法)测了344根K线、49个摆动回调样本：中位数≈2.65×ATR，
+# 75分位≈3.87×ATR，90分位≈5.46×ATR。ATR%=1.13%。step_trigger_atr/
+# step_advance_atr推算方法同DELL。has_staged_exit_gate同DELL，未核实
+# 默认False。
+BREATH_GEV: Dict[str, Any] = {
+    "name": "GEV",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.99,
+    "step_advance_atr": 0.64,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.65,  # 覆盖实测中位数回调(2.65)
+    "breath_tp23": 3.87,  # 覆盖实测75分位回调(3.87)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.2,
+    "max_mult": 5.8,      # 覆盖实测90分位回调(5.46)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
+# STXX 基线（新增品种，2026-09-08，75分钟周期，已上市正股EQUITY类，跟
+# GS/MU/LITE/TSLA/META/DELL/GEV同类，交易所filter(stepSize=0.01/minQty=
+# 0.01/tickSize=0.01)也跟同族其它TradFi品种一致）。75分钟不是币安原生
+# 间隔(原生只有1m/3m/5m/15m/30m/1h/2h/4h/6h/8h/12h)，能被15整除，用
+# 15m原始K线合成（分页拉了8310根15m原始K线覆盖约86.5天，STXXUSDT交易所
+# onboardDate=2026-06-11，86.5天已覆盖上线以来几乎全部历史），真实摆动
+# 点识别(fractal pivot，±3根确认，同批方法)测了1661根合成K线、234个
+# 摆动回调样本：中位数≈2.46×ATR，75分位≈4.03×ATR，90分位≈6.26×ATR。
+# ATR%=0.64%。step_trigger_atr/step_advance_atr推算方法同DELL/GEV
+# （跨品种均值比例：step_trigger≈0.375×breath_tp12，step_advance≈
+# 0.65×step_trigger）。has_staged_exit_gate未核实真实TV Pine源码，
+# 默认False（同大多数品种惯例）。
+BREATH_STXX: Dict[str, Any] = {
+    "name": "STXX",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,
+    "step_advance_atr": 0.60,
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.46,  # 覆盖实测中位数回调(2.46)
+    "breath_tp23": 4.03,  # 覆盖实测75分位回调(4.03)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.8,
+    "max_mult": 6.6,      # 覆盖实测90分位回调(6.26)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": False,
+}
+
+# 2026-09-04：has_staged_exit_gate=True 只标在这7个品种上（META/LITE/MU/
+# GS/OPENAI/SKHYNIX/SNDK，全是03版本.pine"平开不互斥版"家族）——核实过
+# 真实TV Pine源码只有这7个有useStagedExitGate，其余全部False（含ETH/XAU/
+# XMR/BCH/XPD/BNB/TSLA/ANTHROPIC/PAXG/ZEC/ASML）。**这个字段只是记录TV
+# 源码里的真实情况，供shadow_engine自己重新实现TV评分/出场逻辑时引用**
+# （比如eth_pingkai_buhuchi.py的use_staged_exit_gate要不要=True，需要跟
+# 这里一致）。live radar(breath_stop.py::_zone_trail_atr / position_
+# supervisor_binance.py::_apply_breath_stop_tick)当天试过用这个字段卡
+# "深度盈利耐心模式"要不要对某品种生效，但宝贝反馈没有这个TV机制的品种
+# 一样反复出现"TV还持有、雷达先打掉"，撤回了这道门槛——live radar现在
+# 不读这个字段，耐心模式对全部17个品种统一生效。
+# ============================================================
+# 币安B系统专属呼吸档（"综合硬止损"体系，跟CoinW币赢同一套体系/同一批
+# TV周期，2026-09-13新增）——A系统继续用上面各BREATH_*不变，这里只是
+# 平行的一套B系统专属校准，通过get_breath_profile(system="B")按账户
+# 当前SMART_HARD_STOP_ENABLED状态动态选用，不影响A系统任何现有品种。
+# ============================================================
+
+# BNB(B系统) —— 2026-09-19重新校准：宝贝核对TV警报截图反馈周期从45
+# 分钟改成了65分钟，2026-09-12那版(池化45分钟数据)已经不对应实际信号
+# 周期，作废。用真实币安5m K线合成65分钟K线重测(scratch_calibrate_
+# 5symbols_20260919.py，方法同scratch_calibrate_xau_skhynix.py：真实
+# 摆动点识别fractal pivot，±3根确认)：91.0天2016根合成K线、382个摆动
+# 点、314个回调样本，P50=2.61×ATR P75=3.68×ATR P90=4.89×ATR，
+# ATR%=0.64%。step_trigger/step_advance推算沿用既定方法(step_trigger≈
+# 0.375×breath_tp12，step_advance≈0.65×step_trigger，不是脚本粗算建议
+# 里直接拿p50当step_trigger那版)。min/max比例沿用BNB自己45分钟那版的
+# 比例(3.9/5.4=0.722)。
+BREATH_BNB_B: Dict[str, Any] = {
+    "name": "BNB",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.98,   # 0.375×breath_tp12
+    "step_advance_atr": 0.64,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.61,  # 实测中位数回调(2.61)
+    "breath_tp23": 3.68,  # 实测75分位回调(3.68)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.722×max_mult（沿用BNB自己的min/max比例）
+    "max_mult": 5.2,      # 覆盖实测90分位回调(4.89)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XPD(B系统，钯金) —— 2026-09-19重新校准：宝贝核对TV警报截图反馈周期
+# 从45分钟改成了49分钟(不能被5/15/30整除，只能用1分钟原始K线合成)，
+# 2026-09-12那版(池化45分钟数据)已经不对应实际信号周期，作废。用真实
+# 币安1m K线合成49分钟K线重测：60.7天1783根合成K线、337个摆动点、254个
+# 回调样本，P50=2.40×ATR P75=3.65×ATR P90=5.71×ATR，ATR%=0.24%。
+# step_trigger/step_advance推算沿用既定方法(0.375×breath_tp12/0.65×
+# step_trigger)。min/max比例沿用XPD自己45分钟那版的比例(4.9/6.2=0.79)。
+BREATH_XPD_B: Dict[str, Any] = {
+    "name": "XPD",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.90,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.40,  # 实测中位数回调(2.40)
+    "breath_tp23": 3.65,  # 实测75分位回调(3.65)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.7,      # 0.79×max_mult（沿用XPD自己的min/max比例）
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.71)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# OPENAI(B系统) —— 2026-09-19重新校准：宝贝核对TV警报截图反馈周期从45
+# 分钟改成了65分钟(2026-09-13那版45分钟已经不对应实际信号周期，作废)。
+# 用真实币安5m K线合成65分钟K线重测(scratch_calibrate_5symbols_
+# 20260919.py，方法同scratch_calibrate_xau_skhynix.py)：91.0天2016根
+# 合成K线、374个摆动点、279个回调样本，P50=2.39×ATR P75=3.32×ATR
+# P90=5.39×ATR，ATR%=0.61%。step_trigger/step_advance推算沿用既定方法
+# (0.375×breath_tp12/0.65×step_trigger)。min/max比例沿用OPENAI自己
+# 45分钟那版的比例(4.8/6.1=0.79)。
+BREATH_OPENAI_B: Dict[str, Any] = {
+    "name": "OPENAI",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.90,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.39,  # 实测中位数回调(2.39)
+    "breath_tp23": 3.32,  # 实测75分位回调(3.32)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.5,      # 0.79×max_mult（沿用OPENAI自己的min/max比例）
+    "max_mult": 5.7,      # 覆盖实测90分位回调(5.39)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XAU(B系统) —— 2026-09-19重新校准：宝贝核对TV警报截图反馈周期从45
+# 分钟改成了50分钟(A系统XAU维持90分钟不变，两套并存，不受影响)。用真实
+# 币安5m K线合成50分钟K线重测(scratch_calibrate_5symbols_20260919.py，
+# 方法同scratch_calibrate_xau_skhynix.py)：90.8天2616根合成K线、511个
+# 摆动点、392个回调样本，P50=2.69×ATR P75=3.97×ATR P90=6.03×ATR，
+# ATR%=0.11%。step_trigger/step_advance推算沿用既定方法(0.375×
+# breath_tp12/0.65×step_trigger)。min/max比例沿用XAU自己45分钟那版的
+# 比例(4.8/6.5=0.738)。
+BREATH_XAU_B: Dict[str, Any] = {
+    "name": "XAU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.5,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.01,   # 0.375×breath_tp12
+    "step_advance_atr": 0.66,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.69,  # 实测中位数回调(2.69)
+    "breath_tp23": 3.97,  # 实测75分位回调(3.97)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.7,      # 0.738×max_mult（沿用XAU自己的min/max比例）
+    "max_mult": 6.3,      # 覆盖实测90分位回调(6.03)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 1,
+    "exit_score": 1,
+}
+
+# SNDK(B系统) —— 2026-09-19新增专属档：此前SNDK的B系统周期(75分钟)跟
+# A系统BREATH_SNDK本来就一样，直接共用(见下方_BY_BINANCE_B旧注释)。宝贝
+# 核对TV警报截图反馈SNDK周期改成了91分钟，跟A系统的75分钟不再一致，
+# 不能再共用一份，这里新建B系统专属档。用真实币安1m K线合成91分钟K线
+# 重测(scratch_calibrate_5symbols_20260919.py，方法同scratch_
+# calibrate_xau_skhynix.py)：61.2天969根合成K线、191个摆动点、141个
+# 回调样本(样本数偏少，91分钟周期本身K线密度低，后续可以随数据积累
+# 再校准一次)，P50=2.23×ATR P75=4.17×ATR P90=5.89×ATR，ATR%=0.79%——
+# 数值上跟A系统75分钟那版(P50=2.25 P75=4.02 P90=5.92)非常接近，91分钟
+# 对75分钟只是量级上的适度延长，没有出现异常跳变，实测结果可信。
+# step_trigger/step_advance推算沿用既定方法(0.375×breath_tp12/0.65×
+# step_trigger)。min/max比例沿用A系统SNDK自己的比例(4.5/6.2=0.726)。
+BREATH_SNDK_B: Dict[str, Any] = {
+    "name": "SNDK",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.84,   # 0.375×breath_tp12
+    "step_advance_atr": 0.55,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    # 2026-10-01宝贝要求(EMA7/30微结构突破反手策略专用)："不设置止盈，
+    # 全程靠雷达移动止损止盈"——breath_stop.py读tp1_atr/tp2_atr用的是
+    # `profile.get("tp1_atr") or TP1_ATR`这种or兜底写法，0.0是falsy，
+    # 设成0不会禁用、反而会掉回ETH的默认值，踩了一次坑才确认。
+    # 2026-10-01二次调整：第一版直接给999(天文数字/等效无穷大)，宝贝
+    # 反问"考虑设置较远的价格吧"——有道理，参照smart_hard_stop.py里
+    # WIDE_MODE_CEILING_MULT那次真实教训(宽松止损模式原来没有上限，
+    # 结构止损能离谱地远到接近2倍预期距离，加了硬上限才收住)：止盈也
+    # 不该留成真正的无穷大，该给一个"远，但有边界"的灾难兜底值，万一
+    # 雷达本身出故障/极端跳空，还有一道最后防线，不是完全没有止盈。
+    # 改成10.0×ATR——远超phase_switch_atr(3.0)，正常趋势下雷达的
+    # 步进追踪(0.84起)/phase2追踪早就接管止损位置，10倍ATR这个位置
+    # 在任何正常行情里实际不会被碰到，只有真正极端的单边行情才可能
+    # 触及，作为兜底完全合理，不会抢在雷达前面打断正常趋势。
+    # 2026-10-01三次修复(实盘真实事故)：第一次实盘信号一来就被
+    # webhook_parser.py::validate_tp_prices_for_side的`prices[0] <
+    # prices[1]`单调性校验卡住——tp1_atr跟tp2_atr给了同一个值(10.0)，
+    # 算出来的TP1/TP2价格完全相等，不满足"严格递增"，导致
+    # _synthesize_fallback_tp_from_atr这道兜底每次都失败，B/E两个账户
+    # 开仓后陷入"TV/账本/盘口均无有效TP123"的死循环报警(每分钟刷一次，
+    # 钉钉/Telegram跟着狂推)。改成9.0/10.0两个有真实间隔但都依然远到
+    # 不会被正常行情碰到的值，满足tp1<tp2这条隐藏约束，同时保留"远距离
+    # 灾难兜底"的本意不变。
+    "tp1_atr": 9.0,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 10.0,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.23,  # 实测中位数回调(2.23)
+    "breath_tp23": 4.17,  # 实测75分位回调(4.17)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.5,      # 0.726×max_mult（沿用A系统SNDK的min/max比例）
+    "max_mult": 6.2,      # 覆盖实测90分位回调(5.89)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(SNDK)
+}
+
+# MU(B系统) —— 2026-09-20新增专属档：宝贝要求把MU的usdt永续合约重新
+# 加回币安B系统+CoinW，"时间周期雷达系数统一用币安的91分钟"——此前
+# BREATH_MU(A系统/共用)是2026-09-05按55分钟K线校准的，跟当前91分钟不
+# 一致，不能只改周期不改呼吸系数，新建B系统专属档(方法同BREATH_SNDK_B)。
+# 用真实币安1m K线合成91分钟K线重测(scratch_calibrate_mu_91m.py，方法
+# 同scratch_calibrate_xau_skhynix.py)：81.2天1285根合成K线、243个真实
+# 摆动点、188个回调样本，P50=2.42×ATR P75=3.87×ATR P90=5.68×ATR，
+# ATR%=0.47%。step_trigger/step_advance推算沿用既定方法(0.375×
+# breath_tp12/0.65×step_trigger)。min/max比例沿用A系统MU自己的比例
+# (4.2/5.9=0.712)。
+BREATH_MU_B: Dict[str, Any] = {
+    "name": "MU",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.91,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.42,  # 实测中位数回调(2.42)
+    "breath_tp23": 3.87,  # 实测75分位回调(3.87)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.3,      # 0.712×max_mult（沿用A系统MU的min/max比例）
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.68)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+    "has_staged_exit_gate": True,  # 03版本.pine真实有useStagedExitGate(MU)
+}
+
+# XPT(铂金) —— 2026-09-13新增品种首次校准，B系统专属(45分钟周期，跟同为
+# 贵金属TradFi商品的XAU/XPD同族)。用真实币安15m K线合成45分钟K线测
+# (91.1天2916根合成K线、418个真实摆动点识别回调样本)：中位数回调
+# 2.71×ATR、75分位3.91×ATR、90分位5.74×ATR，ATR%=0.13%。全新品种没有
+# 自己的历史min/max比例可循，借用同周期(45分钟)、同为贵金属商品的XPD
+# 比例(4.9/6.2=0.79)。
+BREATH_XPT: Dict[str, Any] = {
+    "name": "XPT",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 1.02,   # 0.375×breath_tp12
+    "step_advance_atr": 0.66,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.71,  # 实测中位数回调(2.71)
+    "breath_tp23": 3.91,  # 实测75分位回调(3.91)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 4.7,      # 0.79×max_mult（借用同族XPD的min/max比例）
+    "max_mult": 6.0,      # 覆盖实测90分位回调(5.74)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# XRP(瑞波币) —— 2026-09-13新增品种，B系统专属(45分钟周期)。用真实币安
+# 15m K线合成45分钟K线测(91.1天2916根合成K线、453个真实摆动点识别回调
+# 样本)：中位数回调2.42×ATR、75分位3.50×ATR、90分位4.96×ATR，
+# ATR%=0.47%。普通主流加密货币(不是贵金属/TradFi类)，min/max比例借用
+# 同为B系统45分钟主流币的BNB比例(3.9/5.4=0.72)。
+BREATH_XRP: Dict[str, Any] = {
+    "name": "XRP",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.91,   # 0.375×breath_tp12
+    "step_advance_atr": 0.59,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.42,  # 实测中位数回调(2.42)
+    "breath_tp23": 3.50,  # 实测75分位回调(3.50)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.72×max_mult（借用同族BNB的min/max比例）
+    "max_mult": 5.3,      # 覆盖实测90分位回调(4.96)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.0001,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# SOL(Solana) —— 2026-09-13新增品种，B系统专属(45分钟周期)。用真实币安
+# 15m K线合成45分钟K线测(91.1天2916根合成K线、439个真实摆动点识别回调
+# 样本)：中位数回调2.46×ATR、75分位3.48×ATR、90分位5.01×ATR，
+# ATR%=0.45%。同XRP借用BNB的min/max比例(0.72)。
+BREATH_SOL: Dict[str, Any] = {
+    "name": "SOL",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 0.92,   # 0.375×breath_tp12
+    "step_advance_atr": 0.60,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 1.35,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 2.5,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.46,  # 实测中位数回调(2.46)
+    "breath_tp23": 3.48,  # 实测75分位回调(3.48)
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.72×max_mult（借用同族BNB的min/max比例）
+    "max_mult": 5.3,      # 覆盖实测90分位回调(5.01)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+# 2026-10-03新增：ZEC接入B系统EMA7/25微结构突破策略专属档——TV真实
+# 周期1小时(宝贝确认)，用真实ZEC 1小时K线重新测(65.8天1580根原生K线、
+# 307个摆动点、238个回调样本)：P50=2.35×ATR P75=3.37×ATR P90=4.95×ATR，
+# ATR%=1.56%。min/max比例沿用SNDK自己的0.726比例(没有ZEC自己的历史
+# 比例可参考)。tp1_atr/tp2_atr沿用SNDK同款"不设置止盈,全程靠雷达"的
+# 灾难兜底写法，不是真正生效的止盈目标。
+BREATH_ZEC_B: Dict[str, Any] = {
+    "name": "ZEC",
+    "initial_sl_atr": 0.0,
+    "fee_cover_pct": 0.0008,
+    "stop_exec_buffer": 0.3,
+    "early_be_atr": 0.0,
+    "step_trigger_atr": 2.35,   # 0.375×breath_tp12附近，实测P50
+    "step_advance_atr": 1.53,   # 0.65×step_trigger
+    "phase_switch_atr": 3.0,
+    "tp1_atr": 9.0,
+    "tp1_floor_atr": 0.0,
+    "tp2_atr": 10.0,
+    "tp2_floor_atr": 0.0,
+    "breath_tp12": 2.35,  # 实测中位数回调
+    "breath_tp23": 3.37,  # 实测75分位回调
+    "phase2_trail_mult": 1.0,
+    "min_mult": 3.8,      # 0.726×max_mult
+    "max_mult": 5.2,      # 覆盖实测90分位回调(4.95)以上
+    "ratio_floor": RATIO_FLOOR,
+    "ratio_ceiling": RATIO_CEILING,
+    "tick_size": 0.01,
+    "entry_score": 3,
+    "exit_score": 2,
+}
+
+_BY_BINANCE_B = {
+    "BNBUSDT": BREATH_BNB_B,
+    "XPDUSDT": BREATH_XPD_B,
+    "OPENAIUSDT": BREATH_OPENAI_B,
+    "XAUUSDT": BREATH_XAU_B,
+    "XPTUSDT": BREATH_XPT,
+    "XRPUSDT": BREATH_XRP,
+    "SOLUSDT": BREATH_SOL,
+    # 2026-09-19新增：SNDK周期(91分钟)已经跟A系统(75分钟)不一致，见上方
+    # BREATH_SNDK_B顶部注释——之前"A/B周期本来就一样、直接共用"这条旧
+    # 注释已经过期。
+    "SNDKUSDT": BREATH_SNDK_B,
+    "ZECUSDT": BREATH_ZEC_B,
+    # 2026-09-20新增：MU重新上线，周期改91分钟(A系统仍是55分钟)，见上方
+    # BREATH_MU_B顶部注释。
+    "MUUSDT": BREATH_MU_B,
+}
+
+_BY_COINW_B = {
+    "XPT": BREATH_XPT,
+}
+
+_BY_BINANCE = {
+    "ETHUSDT": BREATH_ETH,
+    "XAUUSDT": BREATH_XAU,
+    "BNBUSDT": BREATH_BNB,   # 2026-08-13：从共用BREATH_ETH改为独立校准
+    "ZECUSDT": BREATH_ZEC,   # 2026-08-13：从共用BREATH_ETH改为独立校准
+    "BCHUSDT": BREATH_BCH,   # 2026-08-14：TV重新启用，从共用BREATH_ETH改为独立校准
+    "XMRUSDT": BREATH_XMR,  # 2026-08-14：新增
+    "SNDKUSDT": BREATH_SNDK,  # 2026-08-14：新增
+    "PAXGUSDT": BREATH_PAXG,  # 2026-08-14：新增
+    "SKHYNIXUSDT": BREATH_SKHYNIX,  # 2026-08-15：新增
+    "XPDUSDT": BREATH_XPD,  # 2026-08-15：新增
+    "OPENAIUSDT": BREATH_OPENAI,  # 2026-08-15：新增
+    "ANTHROPICUSDT": BREATH_ANTHROPIC,  # 2026-08-15：新增
+    "ASMLUSDT": BREATH_ASML,  # 2026-08-15：新增
+    "GSUSDT": BREATH_GS,  # 2026-08-25：新增
+    "MUUSDT": BREATH_MU,  # 2026-08-25：新增
+    "LITEUSDT": BREATH_LITE,  # 2026-08-25：新增
+    "TSLAUSDT": BREATH_TSLA,  # 2026-08-27：新增
+    "METAUSDT": BREATH_META,  # 2026-08-27：新增
+    "DELLUSDT": BREATH_DELL,  # 2026-09-06：新增
+    "GEVUSDT": BREATH_GEV,  # 2026-09-06：新增
+    "STXXUSDT": BREATH_STXX,  # 2026-09-08：新增
+    "XPTUSDT": BREATH_XPT,  # 2026-09-13：新增，全品种只有一份45分钟校准，A/B共用
+    "XRPUSDT": BREATH_XRP,  # 2026-09-13：新增，同上，只有一份45分钟校准
+    "SOLUSDT": BREATH_SOL,  # 2026-09-13：新增，同上，只有一份45分钟校准
+}
+
+_BY_DEEPCOIN = {
+    "ETH-USDT-SWAP": BREATH_ETH,
+    "XAU-USDT-SWAP": BREATH_XAU,
+}
+
+
+def get_breath_profile(symbol: str, exchange: str = "binance", system: str = "A") -> Dict[str, Any]:
+    """
+    2026-09-13新增system参数："B"=币安B系统("综合硬止损"体系，跟CoinW
+    同一套体系)专属呼吸档，缺省不传/传"A"=原A系统档，行为跟改动前完全
+    一致，A系统零影响。只有_BY_BINANCE_B里显式登记过的品种才会真的换用
+    B档；没登记的品种自动落回A档，不会出现"查不到"的情况(2026-09-19起
+    BNB/XPD/OPENAI/XAU/SNDK这5个焦点品种A/B周期已经全部分化，全都在
+    _BY_BINANCE_B里显式登记了自己的专属档)。
+    """
+    sym = str(symbol or "").strip().upper()
+    if exchange == "deepcoin":
+        return dict(_BY_DEEPCOIN.get(sym) or BREATH_ETH)
+    if str(system or "A").strip().upper() == "B":
+        b_profile = _BY_BINANCE_B.get(sym)
+        if b_profile:
+            return dict(b_profile)
+    return dict(_BY_BINANCE.get(sym) or BREATH_ETH)
+
+
+def get_giveback_brake_config(symbol: str, exchange: str = "binance") -> Optional[Dict[str, float]]:
+    """2026-08-31新增：按品种查"利润回吐刹车"参数，见各BREATH_*里
+    giveback_brake字段的校准注释。没有这个key = 该品种未启用(默认关闭，
+    例如XAU/PAXG经回测证明会伤害趋势捕获，故意不给)。"""
+    profile = get_breath_profile(symbol, exchange)
+    cfg = profile.get("giveback_brake")
+    if isinstance(cfg, dict) and cfg.get("min_peak_atr") and cfg.get("trigger_frac") and cfg.get("retain_frac"):
+        return cfg
+    return None
+
+
+def trail_distance_multiplier(ratio: float, profile: Optional[Dict[str, Any]] = None) -> float:
+    """
+    连续线性插值（TP3+ 动态追踪带宽）：
+      ratio<=floor → minMult
+      ratio>=ceiling → maxMult
+      否则线性
+    """
+    p = profile if isinstance(profile, dict) and profile else BREATH_ETH
+    lo = float(p.get("ratio_floor") if p.get("ratio_floor") is not None else RATIO_FLOOR)
+    hi = float(p.get("ratio_ceiling") if p.get("ratio_ceiling") is not None else RATIO_CEILING)
+    mn = float(p.get("min_mult") if p.get("min_mult") is not None else 2.0)
+    mx = float(p.get("max_mult") if p.get("max_mult") is not None else 2.5)
+    r = float(ratio or 0.0)
+    if r <= lo:
+        return mn
+    if r >= hi:
+        return mx
+    if hi <= lo:
+        return mx
+    t = (r - lo) / (hi - lo)
+    return mn + (mx - mn) * t
+
+
+def cold_start_multiplier(profile: Optional[Dict[str, Any]] = None) -> float:
+    """0 次采样：ratio=1.0 代入公式。"""
+    return trail_distance_multiplier(1.0, profile)
+
+
+def map_coeff_from_tiers(smooth_ratio: float, tiers: Optional[List] = None) -> float:
+    """兼容旧名：现改为连续插值。"""
+    profile = None
+    if isinstance(tiers, dict):
+        profile = tiers
+    return trail_distance_multiplier(float(smooth_ratio or 0), profile)
+
+
+def default_breath_profile() -> Dict[str, Any]:
+    return dict(BREATH_ETH)
+
+
+class LockedInitialAtr:
+    """
+    initial_atr 开仓写入后锁定；仅 clear_on_flat 可清零。
+    非开仓路径赋值 raise / 忽略（strict 模式 raise）。
+    """
+
+    def __init__(self, strict: bool = True):
+        self._value = 0.0
+        self._locked = False
+        self._strict = bool(strict)
+
+    @property
+    def value(self) -> float:
+        return float(self._value or 0.0)
+
+    @property
+    def locked(self) -> bool:
+        return bool(self._locked)
+
+    def set_on_open(self, atr: float) -> float:
+        v = float(atr or 0)
+        if v <= 0:
+            raise ValueError("set_on_open requires atr>0")
+        self._value = v
+        self._locked = True
+        return self._value
+
+    def clear_on_flat(self) -> None:
+        self._value = 0.0
+        self._locked = False
+
+    def try_set(self, atr: float, *, allow_while_locked: bool = False) -> float:
+        """持仓期禁止写入；allow_while_locked 仅测试/迁移用。"""
+        if self._locked and not allow_while_locked:
+            if self._strict:
+                raise RuntimeError(
+                    f"initial_atr locked at {self._value}; refuse write {atr}"
+                )
+            return self._value
+        v = float(atr or 0)
+        if v > 0:
+            self._value = v
+        return self._value
+
+    def upgrade_to_vps(self, atr: float) -> float:
+        """已废除：VPS 不得覆盖 TV 锁定 atr；保留方法以免旧调用崩，直接返回现值。"""
+        return self._value
