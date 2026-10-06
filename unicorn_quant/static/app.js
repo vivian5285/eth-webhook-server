@@ -117,8 +117,9 @@ function applyMarkers() {
   const have = new Set(S.bars.map(b => b.t));
   const mk = S.bt.markers.filter(m => have.has(m.t)).map(m => {
     const long = m.side === 'LONG', entry = m.kind === 'entry';
-    return entry ? { time: sec(m.t), position: long ? 'belowBar' : 'aboveBar', color: long ? '#40B66B' : '#FF5F52', shape: long ? 'arrowUp' : 'arrowDown', text: long ? '多' : '空' }
-      : { time: sec(m.t), position: long ? 'aboveBar' : 'belowBar', color: '#FC72FF', shape: 'circle', text: /止损|止盈/.test(m.text || '') ? m.text : '平' };
+    const stop = /止损/.test(m.text || '');
+    return entry ? { time: sec(m.t), position: long ? 'belowBar' : 'aboveBar', color: long ? '#40B66B' : '#FF5F52', shape: long ? 'arrowUp' : 'arrowDown', text: long ? '开多' : '开空' }
+      : { time: sec(m.t), position: long ? 'aboveBar' : 'belowBar', color: stop ? '#FF9F1A' : '#FC72FF', shape: stop ? 'square' : 'circle', text: stop ? '硬止损' : (long ? '平多' : '平空') };
   }).sort((a, b) => a.time - b.time);
   candle.setMarkers(mk);
 }

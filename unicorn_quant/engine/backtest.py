@@ -19,36 +19,45 @@ _PERIOD_MS = {"4h": 4 * 3600_000, "1d": 86400_000}
 
 # ---------------- 内置策略 ----------------
 def dual_ema_band(bars_by_tf, params, position):
-    """截图里的策略：EMA7/EMA25 双均线带。
-    开空：收盘跌破两条均线，且快线<慢线（立即做空）
-    平空/开多：阳线实体站上两条均线、且快线>慢线
-    反向同理。"""
-    p = {"fast": 7, "slow": 25, **(params or {})}
+    """图中策略（EMA7/EMA25 双均线带，4H）：
+    开空：阴线收盘跌破双均线 且 快线<慢线
+    平空：阳线站上双均线（若同时快线>慢线则反手开多，否则只平仓）
+    开多：阳线站上双均线 且 快线>慢线
+    平多：阴线跌破双均线（若同时快线<慢线则反手开空，否则只平仓）
+    硬止损：开仓价 ∓ ATR(14)×stop_atr（stop_atr=0 关闭）"""
+    p = {"fast": 7, "slow": 25, "stop_atr": 2.5, **(params or {})}
     bars = bars_by_tf["base"]
-    n = int(p["slow"]) + 3
-    if len(bars) < n:
+    if len(bars) < int(p["slow"]) + 16:
         return None
-    c = [b["c"] for b in bars]
+    c = [x["c"] for x in bars]
     f, s = ta.ema(c, int(p["fast"])), ta.ema(c, int(p["slow"]))
     if f[-1] is None or s[-1] is None:
         return None
     b = bars[-1]
     px = b["c"]
     top, bot = max(f[-1], s[-1]), min(f[-1], s[-1])
-    bull_body = b["c"] > b["o"] and min(b["o"], b["c"]) > bot and b["c"] > top
-    below = px < bot and f[-1] < s[-1]
-    above = bull_body and f[-1] > s[-1]
+    bear_break = b["c"] < b["o"] and px < bot
+    bull_above = b["c"] > b["o"] and px > top
     side = (position or {}).get("side")
     base = {"price": px, "bar_time": b["t"]}
-    if side == "LONG" and below:
-        return {**base, "action": "SHORT", "reason": "收盘跌破双均线，平多反手空"}
-    if side == "SHORT" and above:
-        return {**base, "action": "LONG", "reason": "阳线实体站上双均线，平空反手多"}
+    stop_n = float(p["stop_atr"])
+    a = ta.atr(bars, 14)[-1] if stop_n > 0 else None
+
+    def opened(act):
+        out = {**base, "action": act, "reason": "开多" if act == "LONG" else "开空"}
+        if a:
+            out["stop_loss"] = px - a * stop_n if act == "LONG" else px + a * stop_n
+        return out
+
+    if side == "LONG" and bear_break:
+        return opened("SHORT") if f[-1] < s[-1] else {**base, "action": "CLOSE_QUICK_EXIT", "reason": "平多"}
+    if side == "SHORT" and bull_above:
+        return opened("LONG") if f[-1] > s[-1] else {**base, "action": "CLOSE_QUICK_EXIT", "reason": "平空"}
     if side is None:
-        if below:
-            return {**base, "action": "SHORT", "reason": "快线下穿慢线且收盘在双均线下方"}
-        if above:
-            return {**base, "action": "LONG", "reason": "阳线站上双均线且快线在慢线上方"}
+        if bear_break and f[-1] < s[-1]:
+            return opened("SHORT")
+        if bull_above and f[-1] > s[-1]:
+            return opened("LONG")
     return None
 
 
@@ -93,8 +102,8 @@ def rsi_revert(bars_by_tf, params, position):
 
 
 BUILTIN: Dict[str, dict] = {
-    "dual_ema_band": {"fn": dual_ema_band, "title": "双均线带 EMA7/25", "params": {"fast": 7, "slow": 25},
-                      "desc": "快慢线+K线实体站上/跌破双均线，多空互换（图中策略）"},
+    "dual_ema_band": {"fn": dual_ema_band, "title": "双均线带 EMA7/25", "params": {"fast": 7, "slow": 25, "stop_atr": 2.5},
+                      "desc": "阴线跌破双均线且快<慢开空，阳线站上且快>慢开多，反向破位平仓，ATR硬止损（图中策略）"},
     "ema_cross": {"fn": ema_cross, "title": "EMA 金叉死叉", "params": {"fast": 7, "slow": 30},
                   "desc": "快线上穿慢线做多，下穿做空"},
     "rsi_revert": {"fn": rsi_revert, "title": "RSI 超买超卖", "params": {"n": 14, "lo": 30, "hi": 70},
@@ -131,12 +140,12 @@ def _check_exit(pos, bar):
     side, stop, tp = pos["side"], pos.get("stop"), pos.get("tp")
     if side == "LONG":
         if stop is not None and bar["l"] <= stop:
-            return stop, "止损"
+            return stop, "硬止损"
         if tp is not None and bar["h"] >= tp:
             return tp, "止盈"
     else:
         if stop is not None and bar["h"] >= stop:
-            return stop, "止损"
+            return stop, "硬止损"
         if tp is not None and bar["l"] <= tp:
             return tp, "止盈"
     return None
