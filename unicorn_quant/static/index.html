@@ -7,7 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%23FC72FF'/%3E%3Cpath d='M9 22l3-12 4 7 4-9 3 14z' fill='white'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css?v=7">
+<link rel="stylesheet" href="/static/app.css?v=9">
 </head>
 <body>
 <div class="bg"><i class="orb o1"></i><i class="orb o2"></i><i class="orb o3"></i></div>
@@ -20,7 +20,7 @@
     <span>独角兽量化</span>
   </div>
   <nav class="pills" id="mainNav">
-    <a data-go="chart" class="on">图表</a><a data-go="strategy">回测工作台</a><a data-go="trade">交易</a><a data-go="records">账户</a>
+    <a data-go="chart" class="on">图表</a><a data-go="strategy">回测工作台</a><a data-go="us">美股研究</a><a data-go="trade">交易</a><a data-go="records">账户</a>
   </nav>
   <div class="search" id="navSearch"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M10.5 4a6.5 6.5 0 105.1 10.5l4.5 4.5 1.4-1.4-4.5-4.5A6.5 6.5 0 0010.5 4zm0 2a4.5 4.5 0 110 9 4.5 4.5 0 010-9z" fill="currentColor"/></svg><span>搜索交易对</span><kbd>/</kbd></div>
   <div class="nav-right">
@@ -65,6 +65,7 @@
       <div class="wb-ctrl">
         <label>根数<select id="stBars"><option value="500">500</option><option value="1000">1000</option><option value="1500" selected>1500</option><option value="3000">3000</option><option value="6000">6000</option></select></label>
         <label>杠杆<input id="stLev" value="1" inputmode="decimal"></label>
+        <label class="chk"><input type="checkbox" id="stLong">仅做多</label>
         <label class="grow">参数<input id="stParams" placeholder='JSON，可空' spellcheck="false"></label>
         <button class="btn-pink sm" id="btBtn">运行回测</button>
       </div>
@@ -123,7 +124,8 @@
 <!-- 交易对选择 -->
 <div class="modal" id="mdPair" hidden><div class="sheet">
   <div class="sh-head"><b>选择交易对</b><button class="x" data-close>✕</button></div>
-  <input id="pairQ" placeholder="搜索名称，如 BTC / ETH / SNDK" autocomplete="off">
+  <div class="seg wide" id="pairTabs" style="margin:0 0 10px"><button class="on" data-pt="crypto">加密货币</button><button data-pt="stock">美股</button></div>
+  <input id="pairQ" placeholder="搜索名称，如 BTC / ETH / NVDA / 苹果" autocomplete="off">
   <div class="popular" id="popular"></div>
   <div class="plist" id="pairList"></div>
 </div></div>
@@ -131,6 +133,22 @@
 <div class="modal" id="mdInd" hidden><div class="sheet sm">
   <div class="sh-head"><b>添加指标</b><button class="x" data-close>✕</button></div>
   <div class="ind-grid" id="indGrid"></div>
+</div></div>
+<!-- 美股研究 -->
+<div class="modal" id="mdMx" hidden><div class="sheet xl">
+  <div class="sh-head"><b>美股策略适配矩阵 <span class="mut small" id="mxSub"></span></b><button class="x" data-close>✕</button></div>
+  <div class="mx-ctl">
+    <div class="seg" id="mxMode"><button data-mode="lo" class="on">仅做多</button><button data-mode="ls">多空双向</button></div>
+    <label class="small mut">排序<select id="mxMetric"><option value="sh">夏普比率</option><option value="rd">收益/回撤比</option><option value="r">总收益</option><option value="ex">超额(对买入持有)</option></select></label>
+    <label class="small mut">最少笔数<select id="mxMin"><option>3</option><option>5</option><option selected>8</option><option>15</option><option>30</option></select></label>
+    <label class="small mut chk2"><input type="checkbox" id="mxRobust" checked>仅稳健(前/后半段都盈利)</label>
+    <span class="sp"></span><button class="btn-pink sm" id="mxGo">重新扫描</button>
+  </div>
+  <div class="prog"><i id="mxBar"></i></div><div class="mut small" id="mxStat">加载中…</div>
+  <div class="tabs" id="mxTabs" style="margin:10px 0 6px"><a class="on" data-mt="rec">个股推荐</a><a data-mt="heat">热力图</a><a data-mt="strat">策略总览</a></div>
+  <div class="spills" id="mxSectors"></div>
+  <div class="mx-body" id="mxBody"></div>
+  <div class="hint" style="text-align:left">口径：Yahoo 日线(约5年，拆股调整，不含分红)，初始1万、满仓、单边0.05%手续费、无滑点；「稳健」指把区间平分为前后两半，两半都盈利。扫描是同一段历史上的样本内表现，从上千个组合里挑最好的有选择偏差——请当作"候选清单"而不是"买入信号"，并在其他周期/时间段继续验证。美股仅支持看图与回测。</div>
 </div></div>
 <!-- 策略库 -->
 <div class="modal" id="mdSt" hidden><div class="sheet lg">
@@ -163,6 +181,6 @@
 <div class="toasts" id="toasts"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
-<script src="/static/app.js?v=7"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>

@@ -57,7 +57,7 @@ def main():
                 signal.alarm(PER_STRATEGY_TIMEOUT)
             p = s["params"] or None
             r = backtest.run(bars, s["id"], p, None if s["source"] == "builtin" else mtf, 10000, 1.0,
-                             window=150 if s["source"] == "builtin" else 600, symbol=sym, hist=hist)
+                             window=260 if s["source"] == "builtin" else 600, symbol=sym, hist=hist)
             x = r["stats"]
             row.update(trades=x["trades"], ret=x["total_return"], ann=x["annualized"], dd=x["max_drawdown"],
                        sharpe=x["sharpe"], win=x["win_rate"], pf=x["profit_factor"], bh=x["buy_hold"])

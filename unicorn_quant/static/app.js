@@ -30,6 +30,8 @@ const pct = v => (v >= 0 ? '+' : '') + fmt(v, 2) + '%';
 const cls = v => v >= 0 ? 'up' : 'dn';
 const tstr = ms => { const d = new Date(ms); return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const base = s => s.replace(/USDT$/, '');
+const isStock = s => !/USDT$/.test(s || '');
+const STK_ITV = ['1h', '1d', '1w'];
 
 /* ---------- 主题 ---------- */
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -178,6 +180,7 @@ function updateTop() {
   el.textContent = fmt(last.c); if (prev && prev !== last.c) { el.classList.remove('flash-up', 'flash-dn'); void el.offsetWidth; el.classList.add(last.c > prev ? 'flash-up' : 'flash-dn'); }
   const tk = S.tickers[S.symbol]; const ch = $('#chg');
   if (tk) { ch.textContent = pct(tk.chg) + ' 24h'; ch.className = 'chg ' + cls(tk.chg); }
+  else if (S.bars.length > 1) { const pc = S.bars[S.bars.length - 2].c, g = (last.c / pc - 1) * 100; ch.textContent = pct(g) + ' 较上根'; ch.className = 'chg ' + cls(g); }
   legendMove(null); calcTrade(); if (S.tickers[S.symbol]) renderWidgets();
 }
 async function tick() {
@@ -236,24 +239,32 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') { setTool(''
 /* ---------- 品种/周期 ---------- */
 function renderItv() {
   const L = { '1m': '1分', '5m': '5分', '15m': '15分', '30m': '30分', '1h': '1时', '2h': '2时', '4h': '4时', '6h': '6时', '12h': '12时', '1d': '1天', '1w': '1周' };
-  $('#itvSeg').innerHTML = Object.keys(L).map(k => `<button data-i="${k}" class="${k === S.interval ? 'on' : ''}">${L[k]}</button>`).join('');
+  const stk = isStock(S.symbol);
+  $('#itvSeg').innerHTML = Object.keys(L).map(k => `<button data-i="${k}" class="${k === S.interval ? 'on' : ''} ${stk && !STK_ITV.includes(k) ? 'off' : ''}" ${stk && !STK_ITV.includes(k) ? 'title="美股只支持1时/1天/1周"' : ''}>${L[k]}</button>`).join('');
 }
 function setPairUI() {
+  const _em = $('.pair em'); if (_em) { _em.textContent = isStock(S.symbol) ? '美股' : '永续'; $('#pairBtn').classList.toggle('stk', isStock(S.symbol)); }
   $('#pairName').textContent = S.symbol; $('#pairIco').textContent = base(S.symbol)[0]; $('#outSym').textContent = base(S.symbol); $('#outIco').textContent = base(S.symbol)[0];
   document.title = `${S.symbol} · 独角兽量化`; if (typeof updateGo === 'function') updateGo();
 }
 async function setSymbol(sym) {
-  S.symbol = sym; localStorage.uq_sym = sym; setPairUI(); loadDraw(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading();
+  S.symbol = sym; localStorage.uq_sym = sym; if (isStock(sym) && !STK_ITV.includes(S.interval)) { S.interval = '1d'; localStorage.uq_itv = '1d'; } renderItv(); setPairUI(); loadDraw(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading();
   await loadChart(); renderCurPos(); renderRec(); autoSignals();
 }
+S.pairTab = 'crypto'; S.stockQ = null;
+const STK_POP = ['AAPL', 'NVDA', 'MSFT', 'TSLA', 'AMZN', 'META', 'GOOGL', 'AMD'];
 function openPair() {
-  $('#mdPair').hidden = false; $('#pairQ').value = ''; renderPairs(''); setTimeout(() => $('#pairQ').focus(), 50);
+  $('#mdPair').hidden = false; $('#pairQ').value = ''; S.pairTab = isStock(S.symbol) ? 'stock' : 'crypto'; renderPairs(''); setTimeout(() => $('#pairQ').focus(), 50);
 }
+async function loadStockQ() { if (S.stockQ) return; S.stockQ = {}; try { const r = await api('stocks'); r.stocks.forEach(x => S.stockQ[x.symbol] = x); renderPairs($('#pairQ').value); } catch (e) { S.stockQ = null; } }
 function renderPairs(q) {
-  q = q.trim().toUpperCase();
-  $('#popular').innerHTML = COMMON.map(s => `<span class="chip" data-sym="${s}"><i class="ico sm">${base(s)[0]}</i>${base(s)}</span>`).join('');
-  let list = S.symbols.filter(s => !q || s.symbol.includes(q)); list.sort((a, b) => ((S.tickers[b.symbol] || {}).vol || 0) - ((S.tickers[a.symbol] || {}).vol || 0));
-  $('#pairList').innerHTML = list.slice(0, 80).map(s => { const t = S.tickers[s.symbol] || {}; return `<div class="pitem" data-sym="${s.symbol}"><i class="ico">${s.base[0]}</i><div class="nm"><b>${s.base}${s.tradfi ? ' <span class="tag s" style="background:var(--pink-bg);color:var(--pink)">TradFi</span>' : ''}</b><span>${s.symbol}</span></div><div class="pr">${t.price ? fmt(t.price) : ''}<div class="${cls(t.chg || 0)}" style="font-size:12px">${t.chg != null ? pct(t.chg) : ''}</div></div></div>`; }).join('') || '<div class="empty">没有匹配的交易对</div>';
+  q = q.trim().toUpperCase(); const stk = S.pairTab === 'stock';
+  $$('#pairTabs button').forEach(b => b.classList.toggle('on', b.dataset.pt === S.pairTab));
+  if (stk) loadStockQ();
+  $('#popular').innerHTML = (stk ? STK_POP : COMMON).map(s => `<span class="chip" data-sym="${s}"><i class="ico sm">${base(s)[0]}</i>${base(s)}</span>`).join('');
+  let list = S.symbols.filter(s => !!s.stock === stk && (!q || s.symbol.includes(q) || (s.name || '').toUpperCase().includes(q)));
+  if (!stk) list.sort((a, b) => ((S.tickers[b.symbol] || {}).vol || 0) - ((S.tickers[a.symbol] || {}).vol || 0));
+  $('#pairList').innerHTML = list.slice(0, 80).map(s => { const t = stk ? ((S.stockQ || {})[s.symbol] || {}) : (S.tickers[s.symbol] || {}); return `<div class="pitem" data-sym="${s.symbol}"><i class="ico">${s.base[0]}</i><div class="nm"><b>${s.base}${s.tradfi ? ' <span class="tag s" style="background:var(--pink-bg);color:var(--pink)">TradFi</span>' : ''}${s.name ? ' <span style="font-weight:400;color:var(--t2)">' + s.name + '</span>' : ''}</b><span>${stk ? (s.sector || '美股') : s.symbol}</span></div><div class="pr">${t.price ? fmt(t.price) : ''}<div class="${cls(t.chg || 0)}" style="font-size:12px">${t.chg != null ? pct(t.chg) : ''}</div></div></div>`; }).join('') || '<div class="empty">没有匹配的交易对</div>';
 }
 
 /* ---------- 指标弹窗 ---------- */
@@ -271,7 +282,7 @@ function calcTrade() {
 }
 function setSide(s) { S.side = s; $$('#sideSeg button').forEach(b => b.classList.toggle('on', b.dataset.s === s)); updateGo(); }
 function setMode(m) { S.mode = m; $$('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === m)); $('#infMode').textContent = m === 'paper' ? '模拟盘' : '实盘验证单'; $('#modeHint').textContent = m === 'paper' ? '模拟盘用币安实时价撮合，不动真钱。' : '只向交易所提交"验证单"，校验账户/精度/规则，不会成交。真实下单需服务器端显式开启。'; updateGo(); }
-function updateGo() { const b = $('#goBtn'); b.className = 'btn-pink big ' + (S.side === 'LONG' ? 'long' : 'short'); b.textContent = S.authed ? (S.mode === 'paper' ? (S.side === 'LONG' ? '开多 ' : '开空 ') + base(S.symbol) : '提交验证单') : '连接后交易'; }
+function updateGo() { const b = $('#goBtn'); if (isStock(S.symbol)) { b.className = 'btn-pink big'; b.disabled = true; b.textContent = '美股仅支持看图与回测'; return; } b.disabled = false; b.className = 'btn-pink big ' + (S.side === 'LONG' ? 'long' : 'short'); b.textContent = S.authed ? (S.mode === 'paper' ? (S.side === 'LONG' ? '开多 ' : '开空 ') + base(S.symbol) : '提交验证单') : '连接后交易'; }
 async function submitOrder() {
   if (!S.authed) return openLogin();
   const body = { symbol: S.symbol, side: S.side, usdt: amt(), leverage: lev() };
@@ -306,16 +317,16 @@ function renderPills() { $('#stPills').innerHTML = (S.fav || []).map(id => `<a d
 function syncPills() { localStorage.uq_st = $('#stSel').value; renderPills(); }
 function showStDesc() { const s = S.strategies.find(x => x.id === $('#stSel').value); $('#stDesc').textContent = s ? (s.desc || '').slice(0, 90) : ''; $('#stParams').value = s && s.params && Object.keys(s.params).length ? JSON.stringify(s.params) : ''; }
 function selectStrategy(id) { $('#stSel').value = id; showStDesc(); syncPills(); return runBacktest(); }
-function btLoading() { const b = $('#wbBody'); b && b.classList.add('loading'); $('#btCtx').textContent = `${S.symbol} · ${S.interval} · 回测中…`; }
+function btLoading() { const b = $('#wbBody'); if (b && !S.bt) b.innerHTML = '<div class="empty">回测中…</div>'; b && b.classList.add('loading'); $('#btCtx').textContent = `${S.symbol} · ${S.interval} · 回测中…`; }
 async function runBacktest(silent) {
   if (!S.authed) return silent ? 0 : openLogin();
   const my = ++btSeq, b = $('#btBtn'); b.disabled = true; b.textContent = '回测中…'; btLoading();
   const done = () => { if (my === btSeq) { b.disabled = false; b.textContent = '运行回测'; $('#wbBody').classList.remove('loading'); } };
   let params = null; try { params = $('#stParams').value.trim() ? JSON.parse($('#stParams').value) : null; } catch (e) { done(); return toast('参数不是合法 JSON', 'err'); }
   try {
-    const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: $('#stSel').value, limit: +$('#stBars').value, leverage: +$('#stLev').value || 1, params });
+    const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: $('#stSel').value, limit: +$('#stBars').value, leverage: +$('#stLev').value || 1, params, long_only: $('#stLong').checked });
     if (my !== btSeq || r.symbol !== S.symbol || r.interval !== S.interval) return;
-    S.bt = r; $('#btCtx').textContent = `${r.symbol} · ${r.interval} · ${r.stats.bars}根 · ${r.stats.days}天 · ${stTitle(r.strategy)}`;
+    S.bt = r; $('#btCtx').textContent = `${r.symbol} · ${r.interval} · ${r.stats.bars}根 · ${r.stats.days}天 · ${stTitle(r.strategy)}${$('#stLong').checked ? ' · 仅做多' : ''}`;
     renderBT(); drawAll(); done();
     if (!silent) toast(`回测完成：${r.stats.trades} 笔，收益 ${pct(r.stats.total_return)}`, 'ok');
   } catch (e) { done(); $('#wbBody').innerHTML = `<div class="empty">${e.message}</div>`; if (!silent) toast(e.message, 'err'); }
@@ -415,6 +426,66 @@ function renderSweep(r) {
   $('#scanTbl').innerHTML = rows.length ? `<table><tr><th>策略</th><th>分类</th><th>总收益</th><th>超额(对买入持有)</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>胜率</th><th>PF</th><th>笔数</th></tr>${rows.map(x => { const m = S.strategies.find(s => s.id === x.id) || {}; return `<tr data-run="${x.id}"><td>${stTitle(x.id)}</td><td>${m.cat || ''}</td><td class="${cls(x.ret)}">${pct(x.ret)}</td><td class="${cls(x.ret - x.bh)}">${pct(x.ret - x.bh)}</td><td>${x.ann == null ? '--' : pct(x.ann)}</td><td class="dn">-${fmt(x.dd, 1)}%</td><td>${nn(x.sharpe)}</td><td>${fmt(x.win, 1)}%</td><td>${nn(x.pf)}</td><td>${x.trades}</td></tr>`; }).join('')}</table>` + (errs ? `<div class="hint" style="text-align:left">另有 ${errs} 个策略运行出错/超时，未列入。</div>` : '') : `<div class="empty">${run ? '等待第一批结果…' : '没有满足条件的结果'}</div>`;
 }
 
+/* ---------- 美股研究 ---------- */
+S.mx = { d: null, tab: 'rec', mode: 'lo', metric: 'sh', min: 8, robust: true, sector: '全部', heat: 'r' };
+const MX_ITV = '1d', MX_LIM = 1260;
+let mxTimer = null, mxLast = 0;
+async function openMx() { $('#mdMx').hidden = false; $('#mxBody').innerHTML = '<div class="empty">加载中…</div>'; if (!S.symbols.length) { try { const sy = await api('symbols'); S.symbols = sy.symbols; } catch (e) { } } await loadMx(true); }
+async function loadMx(full) {
+  clearTimeout(mxTimer);
+  try {
+    const running = S.mx.d && S.mx.d.status === 'running', lite = !full && running && Date.now() - mxLast < 12000;
+    const r = await api(`matrix/status?interval=${MX_ITV}&limit=${MX_LIM}${lite ? '&lite=1' : ''}`);
+    if (lite) Object.assign(S.mx.d, r); else { S.mx.d = r; mxLast = Date.now(); }
+    renderMx();
+    if (r.status === 'running' || r.status === 'starting') mxTimer = setTimeout(() => loadMx(false), 4000);
+  } catch (e) { $('#mxStat').textContent = e.message; }
+}
+async function startMx() {
+  try { const r = await api('matrix/start', { interval: MX_ITV, limit: MX_LIM }); S.mx.d = { ...r, rows: [], bh: {} }; renderMx(); mxTimer = setTimeout(() => loadMx(true), 3000); } catch (e) { toast(e.message, 'err'); }
+}
+const stkMeta = s => S.symbols.find(x => x.symbol === s) || {};
+function mxRows() {
+  const d = S.mx.d; if (!d || !d.rows) return [];
+  return d.rows.filter(x => x.m === S.mx.mode && !x.err && x.n != null).map(x => { const b = (d.bh || {})[x.s] || {}; return { ...x, bhr: b.r, bhd: b.d, ex: x.r - (b.r || 0), rd: x.r / Math.max(x.d, 1) }; });
+}
+const mxOK = x => x.n >= S.mx.min && (!S.mx.robust || (x.h1 > 0 && x.h2 > 0));
+const mxKey = x => S.mx.metric === 'sh' ? (x.sh ?? -9) : x[S.mx.metric];
+function renderMx() {
+  const d = S.mx.d; if (!d) return;
+  const run = d.status === 'running' || d.status === 'starting', p = d.total ? d.done / d.total * 100 : 0;
+  $('#mxBar').style.width = p + '%'; $('#mxGo').disabled = run; $('#mxGo').textContent = run ? '扫描中…' : d.status === 'none' ? '开始扫描' : '重新扫描';
+  const left = run && d.done ? Math.max(1, Math.round((d.total - d.done) * ((Date.now() / 1000 - d.started) / d.done) / 60)) : 0;
+  $('#mxStat').textContent = d.status === 'none' ? '还没有扫描结果，点右上角「开始扫描」（约 30-50 分钟，后台运行，可关闭页面）' : run ? `扫描中 ${d.done}/${d.total}（约剩 ${left} 分钟）· 结果会边扫边出现` : `完成：${d.done}/${d.total} 个组合 · ${(d.symbols || []).length} 只标的 × ${(d.strategies || []).length} 个策略 × 两种模式${d.errors ? ' · ' + d.errors + ' 个出错/超时' : ''}`;
+  $('#mxSub').textContent = d.bh && Object.keys(d.bh).length ? `日线 · 约${Math.round((Object.values(d.bh)[0].days || 0) / 365 * 10) / 10}年` : '';
+  const secs = ['全部', ...new Set((d.symbols || []).map(s => stkMeta(s).sector).filter(Boolean))];
+  $('#mxSectors').innerHTML = secs.map(c => `<a data-sec="${c}" class="${c === S.mx.sector ? 'on' : ''}">${c}</a>`).join('');
+  $$('#mxTabs a').forEach(a => a.classList.toggle('on', a.dataset.mt === S.mx.tab));
+  const el = $('#mxBody');
+  if (!d.rows || !d.rows.length) { el.innerHTML = '<div class="empty">暂无结果</div>'; return; }
+  const rows = mxRows(), syms = (d.symbols || []).filter(s => S.mx.sector === '全部' || stkMeta(s).sector === S.mx.sector);
+  if (S.mx.tab === 'rec') {
+    el.innerHTML = '<div class="mxgrid">' + syms.map(s => {
+      const m = stkMeta(s), b = (d.bh || {})[s] || {}, v = rows.filter(x => x.s === s && mxOK(x)).sort((a, b2) => mxKey(b2) - mxKey(a)).slice(0, 3);
+      return `<div class="mxc"><div class="mxh"><b>${s}</b><span>${m.name || ''} · ${m.sector || ''}</span><span class="bh">买入持有 <b class="${cls(b.r)}" style="font-size:13px">${b.r == null ? '--' : pct(b.r)}</b> · 回撤 <span class="dn">-${fmt(b.d || 0, 0)}%</span></span></div>`
+        + (v.length ? v.map(x => `<div class="mxr" data-open="${x.s}|${x.i}|${x.m}"><div class="t">${stTitle(x.i)}<small>${x.h1 > 0 && x.h2 > 0 ? '<span class="ok">前后半段均盈利</span>' : '<span class="no">非稳健</span>'} · ${x.n}笔 · 胜率 ${fmt(x.w, 0)}%</small></div><div class="${cls(x.r)}">${pct(x.r)}<small class="${cls(x.ex)}">${x.ex >= 0 ? '跑赢' : '跑输'}持有 ${fmt(Math.abs(x.ex), 0)}%</small></div><div class="dn">-${fmt(x.d, 1)}%<small>最大回撤</small></div><div>${nn(x.sh)}<small>夏普</small></div><div>${nn(x.rd, 1)}<small>回报比</small></div></div>`).join('') : '<div class="mut small" style="padding:10px 4px">没有满足条件的策略（可放宽「最少笔数」或取消「仅稳健」）</div>') + '</div>';
+    }).join('') + '</div>';
+  } else if (S.mx.tab === 'heat') {
+    const strs = d.strategies || [], idx = new Map(rows.map(x => [x.s + '|' + x.i, x])), key = S.mx.heat;
+    const val = x => key === 'r' ? x.r : key === 'ex' ? x.ex : (x.sh ?? 0), sc = key === 'sh' ? 2 : 80;
+    el.innerHTML = `<div class="mx-ctl" style="margin:0 0 6px"><div class="seg" id="mxHeatSeg"><button data-h="r" class="${key === 'r' ? 'on' : ''}">总收益%</button><button data-h="ex" class="${key === 'ex' ? 'on' : ''}">超额%</button><button data-h="sh" class="${key === 'sh' ? 'on' : ''}">夏普</button></div><span class="mut small">颜色=好坏，暗淡=笔数不足；点格子打开该组合</span></div><table class="heat"><tr><th></th>${strs.map(i => `<th><div>${stTitle(i)}</div></th>`).join('')}</tr>${syms.map(s => `<tr><td class="rn">${s}</td>${strs.map(i => { const x = idx.get(s + '|' + i); if (!x) return '<td></td>'; const v = val(x), a = Math.min(Math.abs(v) / sc, 1) * .85; return `<td class="${x.n < S.mx.min ? 'dim' : ''}" style="background:${v >= 0 ? `rgba(64,182,107,${a})` : `rgba(255,95,82,${a})`}" data-open="${s}|${i}|${x.m}" title="${s} · ${stTitle(i)}\n收益 ${pct(x.r)} / 超额 ${pct(x.ex)} / 夏普 ${nn(x.sh)} / ${x.n}笔 / 回撤 -${fmt(x.d, 1)}%">${key === 'sh' ? fmt(v, 1) : fmt(v, 0)}</td>`; }).join('')}</tr>`).join('')}</table>`;
+  } else {
+    const by = {}; rows.filter(x => syms.includes(x.s)).forEach(x => (by[x.i] ||= []).push(x));
+    const mean = a => a.reduce((t, x) => t + x, 0) / a.length, med = a => { const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
+    const agg = Object.entries(by).map(([id, arr]) => { const v = arr.filter(x => x.n >= S.mx.min); if (v.length < 3) return null; const rb = v.filter(x => x.h1 > 0 && x.h2 > 0); return { id, nsym: v.length, mr: mean(v.map(x => x.r)), md: med(v.map(x => x.r)), dd: mean(v.map(x => x.d)), sh: mean(v.map(x => x.sh ?? 0)), win: v.filter(x => x.r > 0).length / v.length * 100, beat: v.filter(x => x.ex > 0).length / v.length * 100, rob: rb.length, best: v.filter(x => !S.mx.robust || (x.h1 > 0 && x.h2 > 0)).sort((a, b) => mxKey(b) - mxKey(a)).slice(0, 4) }; }).filter(Boolean).sort((a, b) => b.rob - a.rob || b.sh - a.sh);
+    el.innerHTML = `<table class="agg"><tr><th>策略</th><th>分类</th><th>样本股数</th><th>平均收益</th><th>中位收益</th><th>平均回撤</th><th>平均夏普</th><th>赚钱占比</th><th>跑赢持有占比</th><th>稳健股数</th><th>最适配个股</th></tr>${agg.map(a => `<tr><td>${stTitle(a.id)}</td><td>${(S.strategies.find(x => x.id === a.id) || {}).cat || ''}</td><td>${a.nsym}</td><td class="${cls(a.mr)}">${pct(a.mr)}</td><td class="${cls(a.md)}">${pct(a.md)}</td><td class="dn">-${fmt(a.dd, 1)}%</td><td>${nn(a.sh)}</td><td>${fmt(a.win, 0)}%</td><td>${fmt(a.beat, 0)}%</td><td>${a.rob}/${a.nsym}</td><td>${a.best.map(x => `<span class="chp" data-open="${x.s}|${x.i}|${x.m}">${x.s} ${pct(x.r)}</span>`).join('')}</td></tr>`).join('')}</table>`;
+  }
+}
+async function openCombo(sym, id, mode) {
+  $('#mdMx').hidden = true; S.interval = MX_ITV; localStorage.uq_itv = MX_ITV; $('#stLong').checked = mode === 'lo';
+  $('#stSel').value = id; showStDesc(); syncPills(); await setSymbol(sym); $('#sec-chart').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 /* ---------- 行情组件：跑马灯/自选/涨跌统计/状态栏 ---------- */
 function renderWidgets() {
   const tk = S.tickers, top = Object.entries(tk).filter(([k]) => k.endsWith('USDT')).sort((a, b) => b[1].vol - a[1].vol).slice(0, 16);
@@ -452,9 +523,10 @@ function bind() {
   document.addEventListener('click', async e => {
     const t = e.target;
     const c = t.closest('[data-close]'); if (c || t.classList.contains('modal')) { (t.closest('.modal') || {}).hidden = true; if (c) c.closest('.modal').hidden = true; return; }
+    const ptb = t.closest('#pairTabs button'); if (ptb) { S.pairTab = ptb.dataset.pt; return renderPairs($('#pairQ').value); }
     if (t.closest('#pairBtn') || t.closest('#navSearch') || t.closest('#tokenBtn2')) return openPair();
     const sym = t.closest('[data-sym]'); if (sym) { $('#mdPair').hidden = true; return setSymbol(sym.dataset.sym); }
-    const itv = t.closest('#itvSeg button'); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading(); await loadChart(); return autoSignals(); }
+    const itv = t.closest('#itvSeg button'); if (itv && itv.classList.contains('off')) return toast('美股只支持 1时 / 1天 / 1周', ''); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading(); await loadChart(); return autoSignals(); }
     const rm = t.closest('[data-rm]'); if (rm) { S.inds.splice(+rm.dataset.rm, 1); localStorage.uq_inds = JSON.stringify(S.inds); return loadChart(true); }
     const chip = t.closest('#indChips .chip'); if (chip && /^(rsi|macd|atr)/.test(chip.dataset.s)) { S.sub = chip.dataset.s; return loadChart(true); }
     if (t.closest('#addInd')) return openInd();
@@ -468,6 +540,12 @@ function bind() {
     if (t.closest('[data-reset]')) { if (confirm('重置模拟账户为 10,000 USDT？')) { await api('paper/reset', {}); loadPaper(); } return; }
     if (t.closest('#btBtn')) return runBacktest();
     if (t.closest('#sigBtn')) return setSig(!S.sig);
+    const op = t.closest('[data-open]'); if (op) { const [a, b2, c2] = op.dataset.open.split('|'); return openCombo(a, b2, c2); }
+    const mmode = t.closest('#mxMode button'); if (mmode) { S.mx.mode = mmode.dataset.mode; $$('#mxMode button').forEach(b => b.classList.toggle('on', b === mmode)); return renderMx(); }
+    const mt = t.closest('#mxTabs a'); if (mt) { S.mx.tab = mt.dataset.mt; return renderMx(); }
+    const msec = t.closest('#mxSectors a'); if (msec) { S.mx.sector = msec.dataset.sec; return renderMx(); }
+    const mh = t.closest('#mxHeatSeg button'); if (mh) { S.mx.heat = mh.dataset.h; return renderMx(); }
+    if (t.closest('#mxGo')) return startMx();
     if (t.closest('[data-more]')) return openSt('browse');
     const sp = t.closest('[data-st]'); if (sp) return selectStrategy(sp.dataset.st);
     const stt = t.closest('#stTabs a'); if (stt) return setStTab(stt.dataset.t);
@@ -485,8 +563,12 @@ function bind() {
     if (t.closest('#authBtn')) return S.authed ? (await api('logout', {}), setAuth(false), toast('已断开')) : openLogin();
     if (t.closest('#loginGo')) return doLogin();
     if (t.closest('#themeBtn')) return setTheme(S.theme === 'dark' ? 'light' : 'dark');
-    const nv = t.closest('#mainNav a'); if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : go === 'strategy' ? $('#sec-bt') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    const nv = t.closest('#mainNav a'); if (nv && nv.dataset.go === 'us') return openMx();
+    if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : go === 'strategy' ? $('#sec-bt') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   });
+  $('#mxMetric').addEventListener('change', e => { S.mx.metric = e.target.value; renderMx(); });
+  $('#mxMin').addEventListener('change', e => { S.mx.min = +e.target.value; renderMx(); });
+  $('#mxRobust').addEventListener('change', e => { S.mx.robust = e.target.checked; renderMx(); });
   $('#stQ').addEventListener('input', e => { S.q = e.target.value; renderStList(); });
   $('#scanMin').addEventListener('change', () => pollSweep());
   $('#pairQ').addEventListener('input', e => renderPairs(e.target.value));
@@ -494,6 +576,7 @@ function bind() {
   $('#amt').addEventListener('input', calcTrade); $('#lev').addEventListener('input', calcTrade);
   $('#stSel').addEventListener('change', () => { showStDesc(); syncPills(); autoSignals(); });
   $('#stBars').addEventListener('change', autoSignals);
+  $('#stLong').addEventListener('change', autoSignals);
   window.addEventListener('resize', () => S.bt && eqDraw());
   document.addEventListener('keydown', e => { if (e.key === '/' && !/INPUT|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); openPair(); } });
 }

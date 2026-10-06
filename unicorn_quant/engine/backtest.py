@@ -106,11 +106,154 @@ def rsi_revert(bars_by_tf, params, position):
     return None
 
 
+
+def _sig(bars, act, reason, stop=None):
+    b = bars[-1]
+    out = {"price": b["c"], "bar_time": b["t"], "action": act, "reason": reason}
+    if stop is not None:
+        out["stop_loss"] = stop
+    return out
+
+
+def supertrend_flip(bt, params, position):
+    """Supertrend(10,3) 趋势翻转：多头趋势持多，空头趋势持空；止损=Supertrend线本身。"""
+    p = {"n": 10, "mult": 3.0, **(params or {})}
+    bars = bt["base"]
+    if len(bars) < int(p["n"]) + 5:
+        return None
+    line, dirs = ta.supertrend(bars, int(p["n"]), float(p["mult"]))
+    if not dirs[-1] or line[-1] is None:
+        return None
+    want = "LONG" if dirs[-1] == 1 else "SHORT"
+    side = (position or {}).get("side")
+    if side != want:
+        return _sig(bars, want, "Supertrend转多" if want == "LONG" else "Supertrend转空", line[-1])
+    return None
+
+
+def boll_breakout(bt, params, position):
+    """布林带突破：收盘突破上轨做多/下轨做空，回到中轨平仓。"""
+    p = {"n": 20, "k": 2.0, **(params or {})}
+    bars = bt["base"]
+    if len(bars) < int(p["n"]) + 2:
+        return None
+    c = [x["c"] for x in bars]
+    up, mid, lo = ta.boll(c, int(p["n"]), float(p["k"]))
+    if mid[-1] is None:
+        return None
+    side = (position or {}).get("side")
+    if side is None:
+        if c[-1] > up[-1]:
+            return _sig(bars, "LONG", "突破布林上轨", mid[-1])
+        if c[-1] < lo[-1]:
+            return _sig(bars, "SHORT", "跌破布林下轨", mid[-1])
+    elif side == "LONG" and c[-1] < mid[-1]:
+        return _sig(bars, "CLOSE_QUICK_EXIT", "回落中轨")
+    elif side == "SHORT" and c[-1] > mid[-1]:
+        return _sig(bars, "CLOSE_QUICK_EXIT", "回升中轨")
+    return None
+
+
+def boll_revert(bt, params, position):
+    """布林带回归：收盘跌破下轨做多/突破上轨做空，回到中轨平仓。"""
+    p = {"n": 20, "k": 2.0, "stop_atr": 3.0, **(params or {})}
+    bars = bt["base"]
+    if len(bars) < int(p["n"]) + 16:
+        return None
+    c = [x["c"] for x in bars]
+    up, mid, lo = ta.boll(c, int(p["n"]), float(p["k"]))
+    a = ta.atr(bars, 14)[-1]
+    if mid[-1] is None or not a:
+        return None
+    side = (position or {}).get("side")
+    if side is None:
+        if c[-1] < lo[-1]:
+            return _sig(bars, "LONG", "下轨超卖", c[-1] - a * float(p["stop_atr"]))
+        if c[-1] > up[-1]:
+            return _sig(bars, "SHORT", "上轨超买", c[-1] + a * float(p["stop_atr"]))
+    elif side == "LONG" and c[-1] >= mid[-1]:
+        return _sig(bars, "CLOSE_QUICK_EXIT", "回到中轨")
+    elif side == "SHORT" and c[-1] <= mid[-1]:
+        return _sig(bars, "CLOSE_QUICK_EXIT", "回到中轨")
+    return None
+
+
+def donchian_trend(bt, params, position):
+    """唐奇安通道趋势(海龟式)：突破N日高做多/跌破N日低做空，反向M日通道平仓。"""
+    p = {"entry": 20, "exit": 10, **(params or {})}
+    bars = bt["base"]
+    ne, nx = int(p["entry"]), int(p["exit"])
+    if len(bars) < ne + 2:
+        return None
+    prev = bars[-ne - 1:-1]
+    hi, lo = max(x["h"] for x in prev), min(x["l"] for x in prev)
+    prx = bars[-nx - 1:-1]
+    xhi, xlo = max(x["h"] for x in prx), min(x["l"] for x in prx)
+    c = bars[-1]["c"]
+    side = (position or {}).get("side")
+    if side is None:
+        if c > hi:
+            return _sig(bars, "LONG", f"突破{ne}周期高点", xlo)
+        if c < lo:
+            return _sig(bars, "SHORT", f"跌破{ne}周期低点", xhi)
+    elif side == "LONG" and c < xlo:
+        return _sig(bars, "CLOSE_QUICK_EXIT", f"跌破{nx}周期低点")
+    elif side == "SHORT" and c > xhi:
+        return _sig(bars, "CLOSE_QUICK_EXIT", f"突破{nx}周期高点")
+    return None
+
+
+def macd_cross(bt, params, position):
+    """MACD(12,26,9) 线上穿/下穿信号线，多空互换。"""
+    p = {"fast": 12, "slow": 26, "sig": 9, **(params or {})}
+    bars = bt["base"]
+    if len(bars) < int(p["slow"]) + int(p["sig"]) + 5:
+        return None
+    c = [x["c"] for x in bars]
+    m, sg, _ = ta.macd(c, int(p["fast"]), int(p["slow"]), int(p["sig"]))
+    if None in (m[-1], m[-2], sg[-1], sg[-2]):
+        return None
+    if m[-2] <= sg[-2] and m[-1] > sg[-1]:
+        return _sig(bars, "LONG", "MACD金叉")
+    if m[-2] >= sg[-2] and m[-1] < sg[-1]:
+        return _sig(bars, "SHORT", "MACD死叉")
+    return None
+
+
+def sma_cross(bt, params, position):
+    """SMA 50/200 金叉死叉（经典长线趋势）。"""
+    p = {"fast": 50, "slow": 200, **(params or {})}
+    bars = bt["base"]
+    if len(bars) < int(p["slow"]) + 3:
+        return None
+    c = [x["c"] for x in bars]
+    f, s_ = ta.sma(c, int(p["fast"])), ta.sma(c, int(p["slow"]))
+    if None in (f[-1], f[-2], s_[-1], s_[-2]):
+        return None
+    if f[-2] <= s_[-2] and f[-1] > s_[-1]:
+        return _sig(bars, "LONG", "金叉")
+    if f[-2] >= s_[-2] and f[-1] < s_[-1]:
+        return _sig(bars, "SHORT", "死叉")
+    return None
+
+
 BUILTIN: Dict[str, dict] = {
     "dual_ema_band": {"fn": dual_ema_band, "title": "双均线带 EMA7/25", "params": {"fast": 7, "slow": 25, "stop_atr": 2.5},
                       "desc": "阴线跌破双均线且快<慢开空，阳线站上且快>慢开多，反向破位平仓，ATR硬止损（图中策略）"},
     "ema_cross": {"fn": ema_cross, "title": "EMA 金叉死叉", "params": {"fast": 7, "slow": 30},
                   "desc": "快线上穿慢线做多，下穿做空"},
+    "supertrend_flip": {"fn": supertrend_flip, "title": "Supertrend 翻转", "params": {"n": 10, "mult": 3.0},
+                        "desc": "Supertrend(10,3)趋势翻转，多空互换，止损=Supertrend线"},
+    "boll_breakout": {"fn": boll_breakout, "title": "布林带突破", "params": {"n": 20, "k": 2.0},
+                      "desc": "收盘突破上/下轨顺势开仓，回到中轨平仓"},
+    "boll_revert": {"fn": boll_revert, "title": "布林带回归", "params": {"n": 20, "k": 2.0, "stop_atr": 3.0},
+                    "desc": "收盘跌破下轨做多、突破上轨做空，回到中轨平仓，ATR止损"},
+    "donchian_trend": {"fn": donchian_trend, "title": "唐奇安通道(海龟)", "params": {"entry": 20, "exit": 10},
+                       "desc": "突破20周期高/低点入场，反向10周期通道离场"},
+    "macd_cross": {"fn": macd_cross, "title": "MACD 金叉死叉", "params": {"fast": 12, "slow": 26, "sig": 9},
+                   "desc": "MACD线上穿/下穿信号线，多空互换"},
+    "sma_cross": {"fn": sma_cross, "title": "SMA 50/200 均线交叉", "params": {"fast": 50, "slow": 200},
+                  "desc": "经典长线金叉死叉"},
     "rsi_revert": {"fn": rsi_revert, "title": "RSI 超买超卖", "params": {"n": 14, "lo": 30, "hi": 70},
                    "desc": "RSI从超卖区回升做多，超买区回落做空，回到50平仓"},
 }
@@ -137,7 +280,7 @@ def _meta(name: str, fn) -> dict:
         if any(k in name for k in kws):
             cat = c
             break
-    flag, doc = None, ""
+    flag, doc, mtf_flag = None, "", False
     try:
         mod = inspect.getmodule(fn)
         src = inspect.getsource(mod)
@@ -145,6 +288,8 @@ def _meta(name: str, fn) -> dict:
         names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | \
                 {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | \
                 {a.asname or a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+        consts = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        mtf_flag = bool(consts & {"240", "D", "1D", "720"})
         if names & {"funding", "open_interest"}:
             flag = "ext"      # 依赖资金费率/持仓量历史，回测引擎暂未提供
         elif getattr(mod, "NEEDS_UNIVERSE", False) and ("universe_returns" in names or "universe" in names):
@@ -153,7 +298,7 @@ def _meta(name: str, fn) -> dict:
         doc = next((x.strip() for x in d if x.strip() and not x.strip().startswith(("#", "-", "=", "!"))), "")[:110]
     except Exception:
         pass
-    _META[name] = {"cat": cat, "flag": flag, "doc": doc}
+    _META[name] = {"cat": cat, "flag": flag, "doc": doc, "mtf": mtf_flag}
     return _META[name]
 
 
@@ -168,7 +313,7 @@ def list_strategies() -> List[dict]:
             m = _meta(k, STRATEGIES[k])
             hm = re.search(r"_(1m|5m|15m|30m|45m|1h|2h|4h|6h|8h|12h|1d|90m|150m)$", k)
             out.append({"id": k, "title": k, "desc": m["doc"], "params": {}, "source": "repo",
-                        "cat": m["cat"], "flag": m["flag"], "hint": hm.group(1) if hm else ("1d" if "residual" in k else None)})
+                        "cat": m["cat"], "flag": m["flag"], "mtf": m["mtf"], "hint": hm.group(1) if hm else ("1d" if "residual" in k else None)})
     except Exception as e:  # 策略库缺失不影响内置策略
         out.append({"id": "_repo_error", "title": "策略库未加载", "desc": str(e)[:120], "params": {}, "source": "error",
                     "cat": "其他", "flag": None})
@@ -249,19 +394,19 @@ def _check_exit(pos, bar):
 
 def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Optional[Dict[str, List[dict]]] = None,
         equity0: float = 10000.0, leverage: float = 1.0, warmup: int = 60, window: int = 600,
-        symbol: Optional[str] = None, hist: Optional[Hist] = None) -> dict:
+        symbol: Optional[str] = None, hist: Optional[Hist] = None, long_only: bool = False) -> dict:
     if symbol and "symbol" not in (params or {}):
         params = {**(params or {}), "symbol": symbol.upper()}
     if hist is not None:
         _install_patch()
         _tls.sim = {"hist": hist, "now_close": 0}
     try:
-        return _run(bars, strategy, params, mtf, equity0, leverage, warmup, window)
+        return _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_only)
     finally:
         _tls.sim = None
 
 
-def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window) -> dict:
+def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_only=False) -> dict:
     fn = resolve(strategy)
     bar_ms0 = (bars[1]["t"] - bars[0]["t"]) if len(bars) > 1 else 14400000
     equity = equity0
@@ -308,7 +453,10 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window) -> dict
         if sig:
             act = str(sig.get("action", "")).upper()
             px = float(sig.get("price") or bar["c"])
-            if act in ("LONG", "SHORT"):
+            if long_only and act == "SHORT":
+                if pos and pos["side"] == "LONG":
+                    close(px, bar["t"], "平多")
+            elif act in ("LONG", "SHORT"):
                 if pos and pos["side"] != act:
                     close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空")
                 if not pos:
@@ -387,5 +535,14 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window) -> dict
         "buy_hold": round((bars[-1]["c"] / c0 - 1) * 100, 2) if len(bars) > warmup else 0,
         "bars": len(bars) - warmup, "days": round(days, 1),
     }
+    if len(curve) > 4:
+        m = len(curve) // 2
+        stats["ret_h1"] = round((curve[m]["v"] / equity0 - 1) * 100, 2)
+        stats["ret_h2"] = round((curve[-1]["v"] / curve[m]["v"] - 1) * 100, 2)
+        bpk, bdd = 0.0, 0.0
+        for x in curve:
+            bpk = max(bpk, x["bh"])
+            bdd = max(bdd, (bpk - x["bh"]) / bpk if bpk else 0)
+        stats["bh_dd"] = round(bdd * 100, 2)
     return {"stats": stats, "long": side_stats("LONG"), "short": side_stats("SHORT"), "trades": trades,
             "equity": curve, "open": open_pos}

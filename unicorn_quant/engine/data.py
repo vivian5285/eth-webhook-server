@@ -66,6 +66,9 @@ def _raw(symbol, interval, limit, end=None):
 
 def get_klines(symbol: str, interval: str, limit: int = 500, closed_only: bool = False) -> List[dict]:
     symbol = symbol.upper()
+    from . import stocks
+    if stocks.is_stock(symbol):
+        return stocks.get_klines(symbol, interval, limit, closed_only)
     if interval not in INTERVALS:
         raise ValueError(f"不支持的周期 {interval}")
     limit = max(10, min(int(limit), 6000))
@@ -102,7 +105,10 @@ def symbols() -> List[dict]:
                 out.append({"symbol": s["symbol"], "base": s["baseAsset"],
                             "tradfi": s.get("contractType") == "TRADIFI_PERPETUAL"})
         return sorted(out, key=lambda x: x["symbol"])
-    return _cached("symbols", 3600, load)
+    from . import stocks
+    stk = [{"symbol": k, "base": k, "tradfi": False, "stock": True, "name": v["name"], "sector": v["sector"]}
+           for k, v in stocks.SYMBOLS.items()]
+    return _cached("symbols", 3600, load) + stk
 
 
 def last_price(symbol: str) -> float:

@@ -12,7 +12,7 @@ from functools import wraps
 
 from flask import Flask, jsonify, request, send_from_directory, session
 
-from engine import backtest, data, exchange, paper, ta
+from engine import backtest, data, exchange, paper, stocks, ta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
@@ -160,7 +160,7 @@ def run_backtest():
     if len(bars) < 100:
         raise ValueError("K线不足，无法复盘")
     mtf = None
-    if name not in backtest.BUILTIN:
+    if name not in backtest.BUILTIN and not stocks.is_stock(sym):
         names = {"240", "D"}  # 多周期策略常用的4H/日线，默认都给
         try:
             from strategy_engine.symbol_registry import get_symbol_config
@@ -176,7 +176,7 @@ def run_backtest():
                     mtf[n] = data.get_klines(sym, iv, 1500, closed_only=True)
                 except Exception:
                     pass
-    key = (sym.upper(), itv, name, json.dumps(b.get("params") or None, sort_keys=True), limit, lev,
+    key = (sym.upper(), itv, name, json.dumps(b.get("params") or None, sort_keys=True), limit, lev, bool(b.get("long_only")),
            float(b.get("equity", 10000)), bars[-1]["t"])
     with _bt_lock:
         hit = _bt_cache.get(key)
@@ -184,7 +184,8 @@ def run_backtest():
         return jsonify(hit[1])
     with _bt_sem:
         res = backtest.run(bars, name, b.get("params") or None, mtf, float(b.get("equity", 10000)), lev,
-                           window=150 if name in backtest.BUILTIN else 600, symbol=sym, hist=_hist(bars))
+                           window=260 if name in backtest.BUILTIN else 600, symbol=sym, hist=_hist(bars),
+                           long_only=bool(b.get("long_only")))
     res["symbol"], res["interval"], res["strategy"] = sym.upper(), itv, name
     res["range"] = [bars[0]["t"], bars[-1]["t"]]
     with _bt_lock:
@@ -266,6 +267,58 @@ def sweep_status():
     return jsonify(_read_sweep(_sweep_path(sym, itv, limit)) or {"status": "none", "rows": [], "done": 0, "total": 0})
 
 
+@app.get("/api/stocks")
+@api
+def stock_list():
+    from concurrent.futures import ThreadPoolExecutor
+    syms = list(stocks.SYMBOLS)
+    with ThreadPoolExecutor(6) as ex:
+        qs = list(ex.map(stocks.quote, syms))
+    return jsonify(stocks=[{"symbol": k, **stocks.SYMBOLS[k], **(q or {})} for k, q in zip(syms, qs)],
+                   intervals=stocks.INTERVALS)
+
+
+def _matrix_path(itv, limit):
+    os.makedirs(SWEEP_DIR, exist_ok=True)
+    return os.path.join(SWEEP_DIR, f"US_{itv}_{limit}.json")
+
+
+@app.post("/api/matrix/start")
+@api
+def matrix_start():
+    import subprocess
+    import sys
+    b = request.get_json(silent=True) or {}
+    itv = b.get("interval", "1d")
+    if itv not in stocks.INTERVALS:
+        raise ValueError("周期不支持")
+    limit = max(300, min(int(b.get("limit", 1260)), 3000))
+    syms = ",".join(x.upper() for x in (b.get("symbols") or []))
+    path = _matrix_path(itv, limit)
+    cur = _read_sweep(path)
+    if cur and cur.get("status") == "running":
+        return jsonify({k: v for k, v in cur.items() if k != "rows"})
+    for f in os.listdir(SWEEP_DIR):
+        if f.endswith(".json") and (_read_sweep(os.path.join(SWEEP_DIR, f)) or {}).get("status") == "running":
+            raise ValueError("已有一个扫描在运行，请等它结束")
+    subprocess.Popen([sys.executable, os.path.join(HERE, "sweep_stocks.py"), itv, str(limit), syms], cwd=HERE,
+                     stdout=subprocess.DEVNULL, stderr=open(os.path.join(SWEEP_DIR, "sweep.err"), "a"),
+                     start_new_session=True)
+    time.sleep(0.8)
+    cur = _read_sweep(path) or {"status": "starting", "done": 0, "total": 0}
+    return jsonify({k: v for k, v in cur.items() if k != "rows"})
+
+
+@app.get("/api/matrix/status")
+@api
+def matrix_status():
+    itv, limit = request.args.get("interval", "1d"), int(request.args.get("limit", 1260))
+    st = _read_sweep(_matrix_path(itv, limit)) or {"status": "none", "rows": [], "done": 0, "total": 0}
+    if request.args.get("lite"):
+        st = {k: v for k, v in st.items() if k != "rows"}
+    return jsonify(st)
+
+
 # ---------- 模拟盘 ----------
 @app.get("/api/paper")
 @api
@@ -277,6 +330,8 @@ def paper_state():
 @api
 def paper_open():
     b = request.get_json(silent=True) or {}
+    if stocks.is_stock(b.get("symbol", "")):
+        raise ValueError("美股仅支持看图与回测，暂不支持下单")
     r = paper.open_pos(b["symbol"], b["side"], float(b["usdt"]), float(b.get("leverage", 1)))
     return jsonify(r)
 
@@ -305,6 +360,8 @@ def ex_status():
 @api
 def ex_order():
     b = request.get_json(silent=True) or {}
+    if stocks.is_stock(b.get("symbol", "")):
+        raise ValueError("美股仅支持看图与回测，暂不支持下单")
     return jsonify(exchange.place_market(b["symbol"], b["side"], float(b["usdt"]), float(b.get("leverage", 1)),
                                          bool(b.get("confirm"))))
 
