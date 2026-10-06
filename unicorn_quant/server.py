@@ -27,6 +27,10 @@ _bt_lock = threading.Lock()
 MTF_NAME = {"240": "4h", "D": "1d", "1D": "1d", "60": "1h", "720": "12h"}
 
 
+def _hist(bars):
+    return backtest.Hist(lambda sy, iv, n: data.get_klines(sy, iv, n, closed_only=True), bars[-1]["t"] - bars[0]["t"])
+
+
 def api(fn):
     @wraps(fn)
     def w(*a, **kw):
@@ -157,14 +161,21 @@ def run_backtest():
         raise ValueError("K线不足，无法复盘")
     mtf = None
     if name not in backtest.BUILTIN:
-        try:  # 需要大周期的仓库策略：按品种登记表补齐
+        names = {"240", "D"}  # 多周期策略常用的4H/日线，默认都给
+        try:
             from strategy_engine.symbol_registry import get_symbol_config
             cfg = get_symbol_config(sym).get("mtf") or {}
-            names = list(cfg.keys()) if isinstance(cfg, dict) else list(cfg)
-            mtf = {n: data.get_klines(sym, MTF_NAME.get(str(n), str(n)), 1500, closed_only=True)
-                   for n in names if MTF_NAME.get(str(n), str(n)) in data.INTERVALS}
+            names |= set(cfg.keys() if isinstance(cfg, dict) else cfg)
         except Exception:
-            mtf = None
+            pass
+        mtf = {}
+        for n in names:
+            iv = MTF_NAME.get(str(n), str(n))
+            if iv in data.INTERVALS:
+                try:
+                    mtf[n] = data.get_klines(sym, iv, 1500, closed_only=True)
+                except Exception:
+                    pass
     key = (sym.upper(), itv, name, json.dumps(b.get("params") or None, sort_keys=True), limit, lev,
            float(b.get("equity", 10000)), bars[-1]["t"])
     with _bt_lock:
@@ -173,7 +184,7 @@ def run_backtest():
         return jsonify(hit[1])
     with _bt_sem:
         res = backtest.run(bars, name, b.get("params") or None, mtf, float(b.get("equity", 10000)), lev,
-                           window=150 if name in backtest.BUILTIN else 600)
+                           window=150 if name in backtest.BUILTIN else 600, symbol=sym, hist=_hist(bars))
     res["symbol"], res["interval"], res["strategy"] = sym.upper(), itv, name
     res["range"] = [bars[0]["t"], bars[-1]["t"]]
     with _bt_lock:
@@ -203,6 +214,56 @@ def compare():
             except Exception as e:
                 rows.append({"id": n, "error": str(e)[:80]})
     return jsonify(rows=rows, symbol=sym.upper(), interval=itv)
+
+
+# ---------- 全库扫描（后台子进程，结果落盘，多worker共享） ----------
+SWEEP_DIR = os.path.join(HERE, "sweeps")
+
+
+def _sweep_path(sym, itv, limit):
+    os.makedirs(SWEEP_DIR, exist_ok=True)
+    return os.path.join(SWEEP_DIR, f"{sym.upper()}_{itv}_{limit}.json")
+
+
+def _read_sweep(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return None
+    if st.get("status") == "running" and time.time() - st.get("updated", 0) > 180:
+        st["status"] = "stalled"
+    return st
+
+
+@app.post("/api/sweep/start")
+@api
+def sweep_start():
+    import subprocess
+    import sys
+    b = request.get_json(silent=True) or {}
+    sym, itv = b.get("symbol", "BTCUSDT").upper(), b.get("interval", "4h")
+    limit = max(300, min(int(b.get("limit", 1000)), 3000))
+    path = _sweep_path(sym, itv, limit)
+    cur = _read_sweep(path)
+    if cur and cur.get("status") == "running":
+        return jsonify(cur)
+    running = [f for f in os.listdir(SWEEP_DIR) if f.endswith(".json") and (_read_sweep(os.path.join(SWEEP_DIR, f)) or {}).get("status") == "running"]
+    if running:
+        raise ValueError("已有一个扫描在运行，请等它结束")
+    subprocess.Popen([sys.executable, os.path.join(HERE, "sweep.py"), sym, itv, str(limit)], cwd=HERE,
+                     stdout=subprocess.DEVNULL, stderr=open(os.path.join(SWEEP_DIR, "sweep.err"), "a"),
+                     start_new_session=True)
+    time.sleep(0.6)
+    return jsonify(_read_sweep(path) or {"status": "starting", "rows": [], "done": 0, "total": 0})
+
+
+@app.get("/api/sweep/status")
+@api
+def sweep_status():
+    sym, itv = request.args.get("symbol", "BTCUSDT").upper(), request.args.get("interval", "4h")
+    limit = int(request.args.get("limit", 1000))
+    return jsonify(_read_sweep(_sweep_path(sym, itv, limit)) or {"status": "none", "rows": [], "done": 0, "total": 0})
 
 
 # ---------- 模拟盘 ----------

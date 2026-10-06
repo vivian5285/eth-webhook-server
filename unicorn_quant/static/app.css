@@ -176,3 +176,17 @@ footer{padding-bottom:56px}
 .kpi2 .tile b{display:block;white-space:nowrap;margin-top:2px}.kpi2 .tile small{display:block;font-size:11px;color:var(--t3);white-space:nowrap}
 .kpi .tile b{white-space:nowrap}
 .tile b span{display:inline!important;font-size:inherit!important;color:inherit}.tile b span.up{color:var(--up)}.tile b span.dn{color:var(--dn)}
+
+/* 策略库 */
+.sheet.lg{width:min(1000px,calc(100vw - 24px));max-height:88vh}
+.stlist{max-height:46vh;overflow:auto;margin:6px -6px 0;padding:0 6px}
+.strow{display:flex;align-items:center;gap:12px;padding:9px 10px;border-radius:14px;transition:.12s}.strow:hover{background:var(--card)}
+.strow input[type=checkbox]{accent-color:var(--pink);width:16px;height:16px}
+.strow .nm{flex:1;min-width:0}.strow .nm b{font-weight:500;margin-right:8px}.strow .nm span{display:block;font-size:12px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bdg{font-size:11px;padding:1px 7px;border-radius:8px;background:var(--card2);color:var(--t2);margin-right:4px}.bdg.w{background:rgba(255,159,26,.15);color:#FF9F1A}.bdg.p{background:var(--pink-bg);color:var(--pink)}
+.stfoot{display:flex;align-items:center;gap:14px;margin-top:12px}.lnk{color:var(--pink);font-size:13px;cursor:pointer}
+#stQ{margin:12px 0 4px}
+.scan-top{display:flex;align-items:center;gap:12px;margin:12px 0 8px;flex-wrap:wrap}.scan-top select{width:auto;margin:0 0 0 4px;padding:5px 8px;border-radius:10px}
+.prog{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;margin:6px 0}.prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,#FF8AF2,#7B61FF);transition:width .5s}
+.scan-tbl{max-height:44vh;overflow:auto;margin-top:8px}
+.scan-tbl tr[data-run]{cursor:pointer}

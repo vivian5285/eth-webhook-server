@@ -290,7 +290,7 @@ function renderCurPos() {
 }
 
 /* ---------- 回测工作台 ---------- */
-const FAV = ['dual_ema_band', 'ema_cross', 'rsi_revert', 'hma_trend', 'ttm_squeeze', 'keltner_channel', 'turtle_breakout', 'chanlun_pivot', 'supertrend_adx', 'heikin_ashi_trend'];
+const FAV = ['dual_ema_band', 'ema_cross', 'rsi_revert', 'macd_histogram', 'mtf_ema_macd_cci', 'cci_mean_reversion', 'chanlun_pivot', 'residual_momentum', 'hma_trend', 'ttm_squeeze', 'keltner_channel', 'turtle_breakout', 'supertrend_adx', 'heikin_ashi_trend'];
 let btSeq = 0;
 const stTitle = id => (S.strategies.find(x => x.id === id) || {}).title || id;
 async function loadStrategies() {
@@ -302,7 +302,7 @@ async function loadStrategies() {
     showStDesc(); renderPills();
   } catch (e) { }
 }
-function renderPills() { $('#stPills').innerHTML = (S.fav || []).map(id => `<a data-st="${id}" class="${id === $('#stSel').value ? 'on' : ''}">${stTitle(id)}</a>`).join(''); }
+function renderPills() { $('#stPills').innerHTML = (S.fav || []).map(id => `<a data-st="${id}" class="${id === $('#stSel').value ? 'on' : ''}">${stTitle(id)}</a>`).join('') + `<a data-more="1" style="color:var(--pink);border-color:var(--pink)">更多策略 ${S.strategies.length} ▾</a>`; }
 function syncPills() { localStorage.uq_st = $('#stSel').value; renderPills(); }
 function showStDesc() { const s = S.strategies.find(x => x.id === $('#stSel').value); $('#stDesc').textContent = s ? (s.desc || '').slice(0, 90) : ''; $('#stParams').value = s && s.params && Object.keys(s.params).length ? JSON.stringify(s.params) : ''; }
 function selectStrategy(id) { $('#stSel').value = id; showStDesc(); syncPills(); return runBacktest(); }
@@ -347,11 +347,11 @@ function renderPane() {
     el.innerHTML = `<div class="cmp-bar"><button class="btn-pink sm" id="cmpBtn">${rows && S.cmpDone ? '重新对比' : rows ? '对比中…' : '运行对比'}</button><span class="mut small">同品种同周期同根数，按总收益排序；点击一行切换策略</span></div>` + (rows ? `<table><tr><th>策略</th><th>总收益</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>胜率</th><th>PF</th><th>笔数</th></tr>${rows.slice().sort((a, b) => (b.stats?.total_return ?? -1e9) - (a.stats?.total_return ?? -1e9)).map(x => x.error ? `<tr><td>${stTitle(x.id)}</td><td colspan="7" class="mut">${x.error}</td></tr>` : `<tr data-cmp="${x.id}" style="cursor:pointer"><td>${stTitle(x.id)}</td><td class="${cls(x.stats.total_return)}">${pct(x.stats.total_return)}</td><td>${x.stats.annualized == null ? '--' : pct(x.stats.annualized)}</td><td class="dn">-${fmt(x.stats.max_drawdown, 1)}%</td><td>${nn(x.stats.sharpe)}</td><td>${fmt(x.stats.win_rate, 1)}%</td><td>${nn(x.stats.profit_factor)}</td><td>${x.stats.trades}</td></tr>`).join('')}</table>` : '');
   }
 }
-async function runCompare() {
-  const b = $('#cmpBtn'); b.disabled = true; S.cmp = []; S.cmpDone = false; const tag = S.symbol + S.interval;
-  for (let i = 0; i < S.fav.length; i++) {
+async function runCompare(ids) {
+  ids = ids || S.fav; const b = $('#cmpBtn'); if (b) b.disabled = true; S.cmp = []; S.cmpDone = false; const tag = S.symbol + S.interval;
+  for (let i = 0; i < ids.length; i++) {
     if (tag !== S.symbol + S.interval) return;
-    const id = S.fav[i], bb = $('#cmpBtn'); if (bb) bb.textContent = `对比中 ${i + 1}/${S.fav.length}…`;
+    const id = ids[i], bb = $('#cmpBtn'); if (bb) bb.textContent = `对比中 ${i + 1}/${ids.length}…`;
     const st = S.strategies.find(x => x.id === id);
     try { const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: id, limit: +$('#stBars').value, leverage: 1, params: st && st.params && Object.keys(st.params).length ? st.params : null }); S.cmp.push({ id, stats: r.stats }); }
     catch (e) { S.cmp.push({ id, error: e.message.slice(0, 60) }); }
@@ -383,6 +383,36 @@ function eqDraw() {
   g.beginPath(); E.forEach((x, i) => i ? g.lineTo(X(i), ddT + x.dd / mxd * ddH) : g.moveTo(X(i), ddT + x.dd / mxd * ddH)); g.strokeStyle = '#FF5F52'; g.lineWidth = 1.2; g.stroke();
   g.fillStyle = txt; g.fillText(tstr(E[0].t), L, h - 4); const lt = tstr(E[n - 1].t); g.fillText(lt, w - R - g.measureText(lt).width, h - 4);
   g.fillStyle = '#FC72FF'; g.fillRect(w - 250, 6, 10, 3); g.fillStyle = txt; g.fillText('策略权益', w - 236, 11); g.fillStyle = dark ? '#7A7A7A' : '#B0B0B0'; g.fillRect(w - 170, 6, 10, 3); g.fillStyle = txt; g.fillText('买入持有', w - 156, 11);
+}
+
+/* ---------- 策略库浏览 / 全库扫描 ---------- */
+S.pick = new Set(); S.cat = '全部'; S.q = ''; S.stTab = 'browse';
+function openSt(tab) { $('#mdSt').hidden = false; $('#stLibCount').textContent = S.strategies.length + ' 个'; setStTab(tab || 'browse'); renderStList(); }
+function setStTab(t) { S.stTab = t; $$('#stTabs a').forEach(a => a.classList.toggle('on', a.dataset.t === t)); $('#stBrowse').hidden = t !== 'browse'; $('#stScan').hidden = t !== 'scan'; if (t === 'scan') { $('#scanCtx').textContent = `${S.symbol} · ${S.interval}`; pollSweep(); } }
+function stBadges(x) { return (x.flag === 'ext' ? '<span class="bdg w" title="依赖资金费率/持仓量历史，回测引擎暂未提供">需外部数据·不可回测</span>' : x.flag === 'uni' ? '<span class="bdg w" title="需要币种池横截面排名">横截面·不适用</span>' : '') + (x.hint ? `<span class="bdg p">建议周期 ${x.hint}</span>` : '') + `<span class="bdg">${x.cat}</span>`; }
+function renderStList() {
+  const cats = ['全部', ...new Set(S.strategies.map(s => s.cat))];
+  $('#stCats').innerHTML = cats.map(c => `<a data-cat="${c}" class="${c === S.cat ? 'on' : ''}">${c}</a>`).join('');
+  const q = S.q.toLowerCase(), list = S.strategies.filter(x => (S.cat === '全部' || x.cat === S.cat) && (!q || x.id.toLowerCase().includes(q) || (x.desc || '').toLowerCase().includes(q) || x.title.toLowerCase().includes(q)));
+  $('#stList').innerHTML = list.map(x => `<div class="strow"><input type="checkbox" data-pick="${x.id}" ${S.pick.has(x.id) ? 'checked' : ''} ${x.flag ? 'disabled' : ''}><div class="nm"><b>${x.title}</b>${stBadges(x)}<span>${x.desc || ''}</span></div><button class="chip" data-run="${x.id}">回测</button></div>`).join('') || '<div class="empty">没有匹配的策略</div>';
+  $('#cmpPick').disabled = !S.pick.size; $('#pickInfo').textContent = S.pick.size ? `已选 ${S.pick.size} 个` : '勾选后可一次对比（最多16个）';
+}
+let sweepTimer = null;
+async function pollSweep(start) {
+  clearTimeout(sweepTimer); const n = +$('#scanBars').value;
+  try {
+    const r = start ? await api('sweep/start', { symbol: S.symbol, interval: S.interval, limit: n }) : await api(`sweep/status?symbol=${S.symbol}&interval=${S.interval}&limit=${n}`);
+    renderSweep(r);
+    if (r.status === 'running' || r.status === 'starting') sweepTimer = setTimeout(() => { if (!$('#mdSt').hidden || true) pollSweep(); }, 3500);
+  } catch (e) { $('#scanStat').textContent = e.message; }
+}
+function renderSweep(r) {
+  const run = r.status === 'running' || r.status === 'starting', pctDone = r.total ? r.done / r.total * 100 : 0;
+  $('#scanBar').style.width = pctDone + '%'; $('#scanGo').disabled = run; $('#scanGo').textContent = run ? '扫描中…' : r.status === 'done' ? '重新扫描' : '开始扫描';
+  const st = { none: '未开始', stalled: '扫描进程已中断，可重新开始', done: `完成：${r.done}/${r.total}，跳过 ${(r.skipped || []).length} 个不适用策略` }[r.status] || `扫描中 ${r.done}/${r.total}（约 ${Math.max(1, Math.round((r.total - r.done) * (r.done ? (Date.now() / 1000 - r.started) / r.done : 8) / 60))} 分钟）`;
+  $('#scanStat').textContent = st;
+  const min = +$('#scanMin').value, rows = (r.rows || []).filter(x => !x.err && x.trades >= min).sort((a, b) => b.ret - a.ret), errs = (r.rows || []).filter(x => x.err).length;
+  $('#scanTbl').innerHTML = rows.length ? `<table><tr><th>策略</th><th>分类</th><th>总收益</th><th>超额(对买入持有)</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>胜率</th><th>PF</th><th>笔数</th></tr>${rows.map(x => { const m = S.strategies.find(s => s.id === x.id) || {}; return `<tr data-run="${x.id}"><td>${stTitle(x.id)}</td><td>${m.cat || ''}</td><td class="${cls(x.ret)}">${pct(x.ret)}</td><td class="${cls(x.ret - x.bh)}">${pct(x.ret - x.bh)}</td><td>${x.ann == null ? '--' : pct(x.ann)}</td><td class="dn">-${fmt(x.dd, 1)}%</td><td>${nn(x.sharpe)}</td><td>${fmt(x.win, 1)}%</td><td>${nn(x.pf)}</td><td>${x.trades}</td></tr>`; }).join('')}</table>` + (errs ? `<div class="hint" style="text-align:left">另有 ${errs} 个策略运行出错/超时，未列入。</div>` : '') : `<div class="empty">${run ? '等待第一批结果…' : '没有满足条件的结果'}</div>`;
 }
 
 /* ---------- 行情组件：跑马灯/自选/涨跌统计/状态栏 ---------- */
@@ -438,7 +468,15 @@ function bind() {
     if (t.closest('[data-reset]')) { if (confirm('重置模拟账户为 10,000 USDT？')) { await api('paper/reset', {}); loadPaper(); } return; }
     if (t.closest('#btBtn')) return runBacktest();
     if (t.closest('#sigBtn')) return setSig(!S.sig);
+    if (t.closest('[data-more]')) return openSt('browse');
     const sp = t.closest('[data-st]'); if (sp) return selectStrategy(sp.dataset.st);
+    const stt = t.closest('#stTabs a'); if (stt) return setStTab(stt.dataset.t);
+    const sc = t.closest('#stCats a'); if (sc) { S.cat = sc.dataset.cat; return renderStList(); }
+    const pk = t.closest('[data-pick]'); if (pk) { pk.checked ? S.pick.add(pk.dataset.pick) : S.pick.delete(pk.dataset.pick); if (S.pick.size > 16) { S.pick.delete(pk.dataset.pick); pk.checked = false; toast('一次最多对比16个', ''); } return renderStList(); }
+    if (t.closest('#pickCat')) { S.strategies.filter(x => (S.cat === '全部' || x.cat === S.cat) && !x.flag).slice(0, 16).forEach(x => S.pick.add(x.id)); return renderStList(); }
+    if (t.closest('#cmpPick')) { const ids = [...S.pick]; $('#mdSt').hidden = true; S.wbTab = 'cmp'; if (S.bt) renderBT(); $('#sec-bt').scrollIntoView({ behavior: 'smooth', block: 'start' }); return runCompare(ids); }
+    if (t.closest('#scanGo')) return pollSweep(true);
+    const rn = t.closest('[data-run]'); if (rn) { $('#mdSt').hidden = true; return selectStrategy(rn.dataset.run); }
     const wt = t.closest('#wbTabs a'); if (wt) { S.wbTab = wt.dataset.wt; $$('#wbTabs a').forEach(a => a.classList.toggle('on', a === wt)); return renderPane(); }
     const tr = t.closest('tr[data-trade]'); if (tr) return focusTrade(+tr.dataset.trade);
     const cm = t.closest('tr[data-cmp]'); if (cm) return selectStrategy(cm.dataset.cmp);
@@ -449,6 +487,8 @@ function bind() {
     if (t.closest('#themeBtn')) return setTheme(S.theme === 'dark' ? 'light' : 'dark');
     const nv = t.closest('#mainNav a'); if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : go === 'strategy' ? $('#sec-bt') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   });
+  $('#stQ').addEventListener('input', e => { S.q = e.target.value; renderStList(); });
+  $('#scanMin').addEventListener('change', () => pollSweep());
   $('#pairQ').addEventListener('input', e => renderPairs(e.target.value));
   $('#pw').addEventListener('keydown', e => e.key === 'Enter' && doLogin());
   $('#amt').addEventListener('input', calcTrade); $('#lev').addEventListener('input', calcTrade);

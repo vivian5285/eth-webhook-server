@@ -7,7 +7,12 @@
 """
 from __future__ import annotations
 
+import ast
+import bisect
+import inspect
 import math
+import re
+import threading
 from typing import Callable, Dict, List, Optional
 
 from . import ta
@@ -111,19 +116,110 @@ BUILTIN: Dict[str, dict] = {
 }
 
 
+CATS = [  # (分类名, 关键词) —— 顺序即优先级
+    ("MACD", ("macd",)), ("CCI", ("cci",)), ("缠论", ("chanlun",)),
+    ("残差/动量", ("residual", "momentum", "tsmom", "clenow")),
+    ("RSI/均值回归", ("rsi", "connors", "mean_reversion", "williams", "wavetrend", "fisher", "stoch", "kdj")),
+    ("突破/波动", ("breakout", "turtle", "donchian", "keltner", "squeeze", "darvas", "volatility", "dual_thrust",
+                 "opening_range", "week_high", "livermore", "wyckoff", "renko", "fibonacci", "td_seq", "gap", "retest")),
+    ("均线/趋势", ("ema", "hma", "kaufman", "supertrend", "heikin", "trend", "vegas", "alligator", "ichimoku",
+                 "parabolic", "adx", "vortex", "schaff", "weinstein", "vwap")),
+    ("组合/实盘镜像", ("combo", "ensemble", "mirror", "pingkai", "heartbeat", "cs_ls")),
+]
+_META: dict = {}
+
+
+def _meta(name: str, fn) -> dict:
+    if name in _META:
+        return _META[name]
+    cat = "其他"
+    for c, kws in CATS:
+        if any(k in name for k in kws):
+            cat = c
+            break
+    flag, doc = None, ""
+    try:
+        mod = inspect.getmodule(fn)
+        src = inspect.getsource(mod)
+        tree = ast.parse(src)
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | \
+                {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | \
+                {a.asname or a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+        if names & {"funding", "open_interest"}:
+            flag = "ext"      # 依赖资金费率/持仓量历史，回测引擎暂未提供
+        elif getattr(mod, "NEEDS_UNIVERSE", False) and ("universe_returns" in names or "universe" in names):
+            flag = "uni"      # 需要整个币种池做横截面排名，单品种回测不适用
+        d = (ast.get_docstring(tree) or "").strip().split("\n")
+        doc = next((x.strip() for x in d if x.strip() and not x.strip().startswith(("#", "-", "=", "!"))), "")[:110]
+    except Exception:
+        pass
+    _META[name] = {"cat": cat, "flag": flag, "doc": doc}
+    return _META[name]
+
+
 def list_strategies() -> List[dict]:
-    out = [{"id": k, "title": v["title"], "desc": v["desc"], "params": v["params"], "source": "builtin"}
-           for k, v in BUILTIN.items()]
+    out = [{"id": k, "title": v["title"], "desc": v["desc"], "params": v["params"], "source": "builtin",
+            "cat": "内置", "flag": None} for k, v in BUILTIN.items()]
     try:
         from strategy_engine.strategies import STRATEGIES
         for k in sorted(STRATEGIES):
             if k.startswith("_") or k in BUILTIN:
                 continue
-            doc = (getattr(STRATEGIES[k], "__doc__", "") or "").strip().split("\n")[0]
-            out.append({"id": k, "title": k, "desc": doc, "params": {}, "source": "repo"})
+            m = _meta(k, STRATEGIES[k])
+            hm = re.search(r"_(1m|5m|15m|30m|45m|1h|2h|4h|6h|8h|12h|1d|90m|150m)$", k)
+            out.append({"id": k, "title": k, "desc": m["doc"], "params": {}, "source": "repo",
+                        "cat": m["cat"], "flag": m["flag"], "hint": hm.group(1) if hm else ("1d" if "residual" in k else None)})
     except Exception as e:  # 策略库缺失不影响内置策略
-        out.append({"id": "_repo_error", "title": "策略库未加载", "desc": str(e)[:120], "params": {}, "source": "error"})
+        out.append({"id": "_repo_error", "title": "策略库未加载", "desc": str(e)[:120], "params": {}, "source": "error",
+                    "cat": "其他", "flag": None})
     return out
+
+
+# ---------------- 历史K线注入（让策略内部取行情时只能看到"回测时点前已收盘"的数据） ----------------
+INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000,
+               "4h": 14_400_000, "6h": 21_600_000, "12h": 43_200_000, "1d": 86_400_000, "1w": 604_800_000}
+_tls = threading.local()
+
+
+class Hist:
+    """按 (品种,周期) 懒加载并缓存历史K线；get_bars 只返回 t+周期<=当前回测K线收盘时刻 的部分。"""
+
+    def __init__(self, loader, span_ms: int):
+        self.loader, self.span, self._c = loader, span_ms, {}
+
+    def get(self, symbol: str, interval: str):
+        k = (symbol.upper(), interval)
+        if k not in self._c:
+            pm = INTERVAL_MS.get(interval)
+            bars = []
+            if pm:
+                try:
+                    bars = self.loader(k[0], interval, min(6000, int(self.span / pm) + 600))
+                except Exception:
+                    bars = []
+            self._c[k] = (bars, [b["t"] + (pm or 0) for b in bars])
+        return self._c[k]
+
+
+def _install_patch():
+    try:
+        from strategy_engine import klines
+    except Exception:
+        return
+    if getattr(klines, "_uq_patched", False):
+        return
+    orig = klines.get_bars
+
+    def patched(symbol, interval, limit=300, start_time_ms=None, end_time_ms=None):
+        sim = getattr(_tls, "sim", None)
+        if sim is None:
+            return orig(symbol, interval, limit, start_time_ms, end_time_ms)
+        bars, closes = sim["hist"].get(symbol, str(interval).lower())
+        i = bisect.bisect_right(closes, sim["now_close"])
+        return bars[max(0, i - int(limit or 300)):i]
+
+    klines.get_bars = patched
+    klines._uq_patched = True
 
 
 def resolve(name: str) -> Callable:
@@ -152,8 +248,22 @@ def _check_exit(pos, bar):
 
 
 def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Optional[Dict[str, List[dict]]] = None,
-        equity0: float = 10000.0, leverage: float = 1.0, warmup: int = 60, window: int = 600) -> dict:
+        equity0: float = 10000.0, leverage: float = 1.0, warmup: int = 60, window: int = 600,
+        symbol: Optional[str] = None, hist: Optional[Hist] = None) -> dict:
+    if symbol and "symbol" not in (params or {}):
+        params = {**(params or {}), "symbol": symbol.upper()}
+    if hist is not None:
+        _install_patch()
+        _tls.sim = {"hist": hist, "now_close": 0}
+    try:
+        return _run(bars, strategy, params, mtf, equity0, leverage, warmup, window)
+    finally:
+        _tls.sim = None
+
+
+def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window) -> dict:
     fn = resolve(strategy)
+    bar_ms0 = (bars[1]["t"] - bars[0]["t"]) if len(bars) > 1 else 14400000
     equity = equity0
     pos = None
     trades: List[dict] = []
@@ -177,6 +287,9 @@ def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Opt
 
     for i in range(warmup, len(bars)):
         bar = bars[i]
+        _sim = getattr(_tls, 'sim', None)
+        if _sim:
+            _sim['now_close'] = bar['t'] + bar_ms0
         if pos:
             pos["bars"] += 1
             in_pos_bars += 1
