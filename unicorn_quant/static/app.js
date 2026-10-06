@@ -15,7 +15,7 @@ const INDS = [
 const S = {
   symbol: localStorage.uq_sym || 'BTCUSDT', interval: localStorage.uq_itv || '4h', inds: JSON.parse(localStorage.uq_inds || '["ema:7","ema:25"]'),
   sub: null, bars: [], indData: [], side: 'LONG', mode: 'paper', tool: '', theme: localStorage.uq_theme || 'dark',
-  strategies: [], bt: null, paper: null, symbols: [], tickers: {}, authed: false, rec: 'bt', lastPx: 0, drawings: {},
+  strategies: [], bt: null, paper: null, symbols: [], tickers: {}, authed: false, rec: 'pp', lastPx: 0, drawings: [],
 };
 const api = async (path, body) => {
   const r = await fetch('/api/' + path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -112,19 +112,50 @@ function candleLineSeg(ind, dir) {
   const line = Object.values(ind.lines)[0], m = new Map(ind.dirs);
   return line.filter(([t]) => m.get(t) === dir).map(([t, v]) => ({ time: sec(t), value: v }));
 }
-function autoSignals() { if (S.authed && S.sig) runBacktest(true); }
-function setSig(on) { S.sig = on; localStorage.uq_sig = on ? '1' : '0'; $('#sigBtn').textContent = '策略信号 ' + (on ? '开' : '关'); $('#sigBtn').classList.toggle('act', on); if (on) { S.bt ? applyMarkers() : autoSignals(); } else candle.setMarkers([]); }
-function applyMarkers() {
-  if (!S.sig) { candle.setMarkers([]); return; }
-  if (!S.bt || S.bt.symbol !== S.symbol || S.bt.interval !== S.interval) { candle.setMarkers([]); return; }
-  const have = new Set(S.bars.map(b => b.t));
-  const mk = S.bt.markers.filter(m => have.has(m.t)).map(m => {
-    const long = m.side === 'LONG', entry = m.kind === 'entry';
-    const stop = /止损/.test(m.text || '');
-    return entry ? { time: sec(m.t), position: long ? 'belowBar' : 'aboveBar', color: long ? '#40B66B' : '#FF5F52', shape: long ? 'arrowUp' : 'arrowDown', text: long ? '开多' : '开空' }
-      : { time: sec(m.t), position: long ? 'aboveBar' : 'belowBar', color: stop ? '#FF9F1A' : '#FC72FF', shape: stop ? 'square' : 'circle', text: stop ? '硬止损' : (long ? '平多' : '平空') };
-  }).sort((a, b) => a.time - b.time);
-  candle.setMarkers(mk);
+function autoSignals() { if (S.authed) runBacktest(true); }
+function setSig(on) { S.sig = on; localStorage.uq_sig = on ? '1' : '0'; $('#sigBtn').textContent = '策略信号 ' + (on ? '开' : '关'); $('#sigBtn').classList.toggle('act', on); drawAll(); }
+function applyMarkers() { candle.setMarkers([]); drawAll(); }
+
+/* 进出场标记：canvas绘制 —— 带价格的标签、进出场连线(盈绿亏红)、硬止损线 */
+function drawTrades(W) {
+  if (!S.sig || !S.bt || S.bt.symbol !== S.symbol || S.bt.interval !== S.interval || !S.bars.length) return;
+  const bmap = new Map(S.bars.map(b => [b.t, b])), ts = main.timeScale(), H = $('#chartMain').clientHeight - 30;
+  const X = t => ts.timeToCoordinate(sec(t)), Y = p => candle.priceToCoordinate(p), used = {};
+  const GREEN = '#2FB563', RED = '#F0524A', PINK = '#E04FE8', ORANGE = '#FF9F1A';
+  const pill = (x, y, label, price, color, up, key) => {
+    const n = used[key] = (used[key] || 0) + 1, off = (n - 1) * 27;
+    cx.save(); cx.font = '600 12px Inter, sans-serif';
+    const w1 = cx.measureText(label).width; cx.font = '500 11px Inter, sans-serif';
+    const t2 = fmt(price), w = w1 + cx.measureText(t2).width + 24, h = 22;
+    const ay = up ? y - off : y + off, px = Math.min(Math.max(x - w / 2, 2), W - w);
+    let py = up ? ay - 7 - h : ay + 7; py = Math.min(Math.max(py, 2), H - h);
+    cx.fillStyle = color; cx.globalAlpha = .96;
+    cx.beginPath(); cx.moveTo(x, ay); cx.lineTo(x - 5, up ? ay - 7 : ay + 7); cx.lineTo(x + 5, up ? ay - 7 : ay + 7); cx.closePath(); cx.fill();
+    cx.shadowColor = 'rgba(0,0,0,.4)'; cx.shadowBlur = 8; cx.beginPath(); cx.roundRect(px, py, w, h, 11); cx.fill(); cx.shadowBlur = 0;
+    cx.fillStyle = '#fff'; cx.globalAlpha = 1; cx.textBaseline = 'middle'; cx.font = '600 12px Inter, sans-serif'; cx.fillText(label, px + 10, py + h / 2 + .5);
+    cx.globalAlpha = .88; cx.font = '500 11px Inter, sans-serif'; cx.fillText(t2, px + 14 + w1, py + h / 2 + .5); cx.restore();
+  };
+  const last = S.bars[S.bars.length - 1];
+  const items = S.bt.trades.concat(S.bt.open ? [{ ...S.bt.open, open: true, pnl: S.bt.open.float_pnl, exit_t: last.t, exit: last.c, ret: null }] : []);
+  for (const t of items) {
+    const long = t.side === 'LONG', eb = bmap.get(t.entry_t), xb = bmap.get(t.exit_t);
+    const x1 = X(t.entry_t), x2 = X(t.exit_t); if (x1 == null || x2 == null || !eb || !xb) continue;
+    if (x2 < -80 || x1 > W + 80) continue;
+    const y1 = Y(t.entry), y2 = Y(t.exit), win = t.pnl > 0, stop = t.why === '硬止损';
+    if (y1 == null || y2 == null) continue;
+    cx.save(); cx.lineWidth = 1.8;
+    // 硬止损线
+    if (t.stop != null) { const ys = Y(t.stop); if (ys != null) { cx.strokeStyle = ORANGE; cx.globalAlpha = stop ? .95 : .45; cx.setLineDash([2, 4]); cx.beginPath(); cx.moveTo(x1, ys); cx.lineTo(t.open ? W : x2, ys); cx.stroke(); if (x2 - x1 > 70 || t.open) { cx.setLineDash([]); cx.globalAlpha = .9; cx.fillStyle = ORANGE; cx.font = '600 10px Inter'; cx.textBaseline = 'bottom'; cx.fillText('硬止损 ' + fmt(t.stop), x1 + 4, ys - 2); } } }
+    // 进出场连线
+    cx.globalAlpha = 1; cx.setLineDash([5, 4]); cx.strokeStyle = win ? GREEN : RED; cx.beginPath(); cx.moveTo(x1, y1); cx.lineTo(x2, y2); cx.stroke(); cx.setLineDash([]);
+    [[x1, y1], [x2, y2]].forEach(([x, y]) => { cx.fillStyle = win ? GREEN : RED; cx.beginPath(); cx.arc(x, y, 3.4, 0, 7); cx.fill(); cx.strokeStyle = '#fff'; cx.lineWidth = 1; cx.stroke(); });
+    if (t.ret != null && x2 - x1 > 46) { const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, txt = pct(t.ret); cx.font = '600 11px Inter'; const tw = cx.measureText(txt).width; cx.fillStyle = win ? GREEN : RED; cx.beginPath(); cx.roundRect(mx - tw / 2 - 6, my - 18, tw + 12, 16, 8); cx.fill(); cx.fillStyle = '#fff'; cx.textBaseline = 'middle'; cx.fillText(txt, mx - tw / 2, my - 10); }
+    cx.restore();
+    // 开仓标签
+    pill(x1, long ? Y(eb.l) + 4 : Y(eb.h) - 4, long ? '开多' : '开空', t.entry, long ? GREEN : RED, !long, t.entry_t + (long ? 'b' : 'a'));
+    // 平仓标签
+    if (!t.open) pill(x2, long ? Y(xb.h) - 4 : Y(xb.l) + 4, stop ? '硬止损' : (long ? '平多' : '平空'), t.exit, stop ? ORANGE : PINK, long, t.exit_t + (long ? 'a' : 'b'));
+  }
 }
 function renderChips() {
   $('#indChips').innerHTML = S.inds.map((s, i) => {
@@ -147,12 +178,12 @@ function updateTop() {
   el.textContent = fmt(last.c); if (prev && prev !== last.c) { el.classList.remove('flash-up', 'flash-dn'); void el.offsetWidth; el.classList.add(last.c > prev ? 'flash-up' : 'flash-dn'); }
   const tk = S.tickers[S.symbol]; const ch = $('#chg');
   if (tk) { ch.textContent = pct(tk.chg) + ' 24h'; ch.className = 'chg ' + cls(tk.chg); }
-  legendMove(null); calcTrade();
+  legendMove(null); calcTrade(); if (S.tickers[S.symbol]) renderWidgets();
 }
 async function tick() {
   if (!S.authed || busy || document.hidden) return;
   try {
-    const r = await api(`bar?symbol=${S.symbol}&interval=${S.interval}`);
+    const t0 = performance.now(), r = await api(`bar?symbol=${S.symbol}&interval=${S.interval}`); $('#sbLat').textContent = '延迟 ' + Math.round(performance.now() - t0) + ' ms';
     for (const b of r.bars) {
       candle.update({ time: sec(b.t), open: b.o, high: b.h, low: b.l, close: b.c });
       vol.update({ time: sec(b.t), value: b.v, color: b.c >= b.o ? 'rgba(64,182,107,.35)' : 'rgba(255,95,82,.35)' });
@@ -184,6 +215,7 @@ function drawAll() {
     }
     cx.restore();
   }
+  drawTrades(W);
 }
 cv.addEventListener('click', e => {
   const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
@@ -211,7 +243,7 @@ function setPairUI() {
   document.title = `${S.symbol} · 独角兽量化`; if (typeof updateGo === 'function') updateGo();
 }
 async function setSymbol(sym) {
-  S.symbol = sym; localStorage.uq_sym = sym; setPairUI(); loadDraw(); S.bt = null; $('#btStats').innerHTML = ''; eqClear();
+  S.symbol = sym; localStorage.uq_sym = sym; setPairUI(); loadDraw(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading();
   await loadChart(); renderCurPos(); renderRec(); autoSignals();
 }
 function openPair() {
@@ -250,57 +282,123 @@ async function submitOrder() {
 }
 async function loadPaper() {
   if (!S.authed) return;
-  try { S.paper = await api('paper'); $('#cashLbl').textContent = '可用 ' + fmt(S.paper.cash, 2) + ' USDT'; renderCurPos(); renderRec(); } catch (e) { }
+  try { S.paper = await api('paper'); $('#cashLbl').textContent = '可用 ' + fmt(S.paper.cash, 2) + ' USDT'; const d = S.paper.equity - S.paper.start; $('#acctLine').innerHTML = '权益 ' + fmt(S.paper.equity, 2) + ` <b class="${cls(d)}">${d >= 0 ? '+' : ''}${fmt(d, 2)}</b>`; renderCurPos(); renderRec(); } catch (e) { }
 }
 function renderCurPos() {
   const p = (S.paper?.positions || []).find(x => x.symbol === S.symbol);
   $('#curPos').innerHTML = p ? `<div class="pos"><div><span class="tag ${p.side === 'LONG' ? 'l' : 's'}">${p.side === 'LONG' ? '多' : '空'} ${p.lev}x</span> 开仓 ${fmt(p.entry)}<small>浮盈 <b class="${cls(p.pnl)}">${fmt(p.pnl, 2)} (${pct(p.pnl_pct)})</b></small></div><button class="xbtn" data-close-pos="${p.symbol}">平仓</button></div>` : '';
 }
 
-/* ---------- 复盘 ---------- */
+/* ---------- 回测工作台 ---------- */
+const FAV = ['dual_ema_band', 'ema_cross', 'rsi_revert', 'hma_trend', 'ttm_squeeze', 'keltner_channel', 'turtle_breakout', 'chanlun_pivot', 'supertrend_adx', 'heikin_ashi_trend'];
+let btSeq = 0;
+const stTitle = id => (S.strategies.find(x => x.id === id) || {}).title || id;
 async function loadStrategies() {
   try {
-    const r = await api('strategies'); S.strategies = r.strategies;
-    $('#stSel').innerHTML = r.strategies.filter(s => s.source !== 'error').map(s => `<option value="${s.id}">${s.title}${s.source === 'repo' ? '' : ' ★'}</option>`).join('');
-    $('#stCount').textContent = r.strategies.length + ' 个策略'; showStDesc();
+    const r = await api('strategies'); S.strategies = r.strategies.filter(s => s.source !== 'error');
+    $('#stSel').innerHTML = S.strategies.map(s => `<option value="${s.id}">${s.title}${s.source === 'repo' ? '' : ' ★'}</option>`).join('');
+    $('#stCount').textContent = S.strategies.length + ' 个策略'; S.fav = FAV.filter(id => S.strategies.some(s => s.id === id));
+    $('#stSel').value = localStorage.uq_st && S.strategies.some(s => s.id === localStorage.uq_st) ? localStorage.uq_st : 'dual_ema_band';
+    showStDesc(); renderPills();
   } catch (e) { }
 }
-function showStDesc() { const s = S.strategies.find(x => x.id === $('#stSel').value); $('#stDesc').textContent = s ? (s.desc || '') : ''; $('#stParams').value = s && s.params && Object.keys(s.params).length ? JSON.stringify(s.params) : ''; }
+function renderPills() { $('#stPills').innerHTML = (S.fav || []).map(id => `<a data-st="${id}" class="${id === $('#stSel').value ? 'on' : ''}">${stTitle(id)}</a>`).join(''); }
+function syncPills() { localStorage.uq_st = $('#stSel').value; renderPills(); }
+function showStDesc() { const s = S.strategies.find(x => x.id === $('#stSel').value); $('#stDesc').textContent = s ? (s.desc || '').slice(0, 90) : ''; $('#stParams').value = s && s.params && Object.keys(s.params).length ? JSON.stringify(s.params) : ''; }
+function selectStrategy(id) { $('#stSel').value = id; showStDesc(); syncPills(); return runBacktest(); }
+function btLoading() { const b = $('#wbBody'); b && b.classList.add('loading'); $('#btCtx').textContent = `${S.symbol} · ${S.interval} · 回测中…`; }
 async function runBacktest(silent) {
   if (!S.authed) return silent ? 0 : openLogin();
-  const b = $('#btBtn'); b.disabled = true; b.textContent = '复盘中…';
-  let params = null; try { params = $('#stParams').value.trim() ? JSON.parse($('#stParams').value) : null; } catch (e) { b.disabled = false; b.textContent = '复盘并画到图上'; return silent ? 0 : toast('参数不是合法 JSON', 'err'); }
+  const my = ++btSeq, b = $('#btBtn'); b.disabled = true; b.textContent = '回测中…'; btLoading();
+  const done = () => { if (my === btSeq) { b.disabled = false; b.textContent = '运行回测'; $('#wbBody').classList.remove('loading'); } };
+  let params = null; try { params = $('#stParams').value.trim() ? JSON.parse($('#stParams').value) : null; } catch (e) { done(); return toast('参数不是合法 JSON', 'err'); }
   try {
     const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: $('#stSel').value, limit: +$('#stBars').value, leverage: +$('#stLev').value || 1, params });
-    S.bt = r; applyMarkers(); renderStats(); renderRec('bt'); eqDraw();
-    if (!silent) toast(`复盘完成：${r.stats.trades} 笔，收益 ${pct(r.stats.total_return)}`, 'ok');
-  } catch (e) { if (!silent) toast(e.message, 'err'); }
-  b.disabled = false; b.textContent = '复盘并画到图上';
+    if (my !== btSeq || r.symbol !== S.symbol || r.interval !== S.interval) return;
+    S.bt = r; $('#btCtx').textContent = `${r.symbol} · ${r.interval} · ${r.stats.bars}根 · ${r.stats.days}天 · ${stTitle(r.strategy)}`;
+    renderBT(); drawAll(); done();
+    if (!silent) toast(`回测完成：${r.stats.trades} 笔，收益 ${pct(r.stats.total_return)}`, 'ok');
+  } catch (e) { done(); $('#wbBody').innerHTML = `<div class="empty">${e.message}</div>`; if (!silent) toast(e.message, 'err'); }
 }
-function renderStats() {
-  const s = S.bt.stats; const T = (l, v, c = '') => `<div class="tile"><span>${l}</span><b class="${c}">${v}</b></div>`;
-  $('#btStats').innerHTML = `<div class="tiles">${T('总收益', pct(s.total_return), cls(s.total_return))}${T('买入持有', pct(s.buy_hold), cls(s.buy_hold))}${T('最大回撤', '-' + fmt(s.max_drawdown, 2) + '%', 'dn')}${T('交易笔数', s.trades)}${T('胜率', fmt(s.win_rate, 1) + '%')}${T('盈亏比(PF)', s.profit_factor ?? '--')}</div>`
-    + (S.bt.open ? `<div class="hint">当前持仓：${S.bt.open.side === 'LONG' ? '多' : '空'} @ ${fmt(S.bt.open.entry)}，浮盈 ${fmt(S.bt.open.float_pnl, 2)}</div>` : '');
+const nn = (v, d = 2, suf = '') => v == null ? '--' : fmt(v, d) + suf;
+const barMs = () => S.bt && S.bt.equity.length > 1 ? S.bt.equity[1].t - S.bt.equity[0].t : 14400000;
+const dur = n => { const h = n * barMs() / 3600000; return h >= 48 ? (h / 24).toFixed(1) + '天' : h.toFixed(0) + '小时'; };
+function renderBT() {
+  const r = S.bt, s = r.stats, T = (l, v, c = '', sub = '', hero) => `<div class="tile ${hero ? 'hero' : ''}"><span>${l}</span><b class="${c}">${v}</b>${sub ? `<small>${sub}</small>` : ''}</div>`;
+  const tab = S.wbTab || 'trades';
+  $('#wbBody').innerHTML = `<div class="kpi">${T('总收益', pct(s.total_return), cls(s.total_return), '期末权益 ' + fmt(s.final_equity, 0), 1)}${T('年化收益', s.annualized == null ? '--' : pct(s.annualized), s.annualized >= 0 ? 'up' : 'dn', '样本 ' + s.days + ' 天')}${T('最大回撤', '-' + fmt(s.max_drawdown, 2) + '%', 'dn')}${T('夏普比率', nn(s.sharpe), s.sharpe >= 0 ? 'up' : 'dn', '按K线收益年化')}${T('索提诺', nn(s.sortino), s.sortino >= 0 ? 'up' : 'dn')}${T('卡玛比率', nn(s.calmar), s.calmar >= 0 ? 'up' : 'dn', '年化/最大回撤')}</div>
+  <div class="kpi2">${T('买入持有', pct(s.buy_hold), cls(s.buy_hold))}${T('胜率', fmt(s.win_rate, 1) + '%', '', s.trades + ' 笔')}${T('盈亏因子 PF', nn(s.profit_factor))}${T('单笔期望', fmt(s.expectancy, 2), cls(s.expectancy), 'USDT')}${T('平均盈 / 亏', `<span class="up">${fmt(s.avg_win, 0)}</span> / <span class="dn">${fmt(s.avg_loss, 0)}</span>`, '', '盈亏比 ' + nn(s.payoff))}${T('平均持仓', dur(s.avg_hold_bars), '', s.avg_hold_bars + ' 根K线')}
+  ${T('市场暴露', fmt(s.exposure, 1) + '%')}${T('最大连赢 / 连亏', `<span class="up">${s.max_win_streak}</span> / <span class="dn">${s.max_loss_streak}</span>`)}${T('硬止损触发', s.stop_hits + ' 次', s.stop_hits ? 'dn' : '')}${T('最佳 / 最差一笔', `<span class="up">${fmt(s.best, 0)}</span> / <span class="dn">${fmt(s.worst, 0)}</span>`)}${T('手续费合计', fmt(s.fees, 2), '', '0.05%单边')}${T('当前持仓', r.open ? `${r.open.side === 'LONG' ? '多' : '空'} <span class="${cls(r.open.float_pnl)}">${fmt(r.open.float_pnl, 0)}</span>` : '空仓', '', r.open ? '@ ' + fmt(r.open.entry) : '')}</div>
+  <canvas id="eqCanvas"></canvas>
+  <div class="wb-tabs" id="wbTabs"><a data-wt="trades" class="${tab === 'trades' ? 'on' : ''}">成交明细 (${r.trades.length})</a><a data-wt="ls" class="${tab === 'ls' ? 'on' : ''}">多空分解</a><a data-wt="cmp" class="${tab === 'cmp' ? 'on' : ''}">策略对比</a></div>
+  <div class="wb-pane" id="wbPane"></div>`;
+  eqDraw(); renderPane();
 }
-function eqClear() { const c = $('#eqCanvas'); c.getContext('2d').clearRect(0, 0, c.width, c.height); }
+function renderPane() {
+  const r = S.bt, tab = S.wbTab || 'trades', el = $('#wbPane'); if (!el || !r) return;
+  if (tab === 'trades') {
+    const L = x => x === 'LONG' ? '<span class="tag l">多</span>' : '<span class="tag s">空</span>';
+    el.innerHTML = r.trades.length ? `<table><tr><th>#</th><th>方向</th><th>开仓时间</th><th>开仓价</th><th>硬止损价</th><th>平仓时间</th><th>平仓价</th><th>盈亏(USDT)</th><th>收益率</th><th>持仓</th><th>离场</th></tr>${r.trades.map((x, i) => [x, i]).reverse().map(([x, i]) => `<tr data-trade="${i}"><td>${i + 1}</td><td>${L(x.side)}</td><td>${tstr(x.entry_t)}</td><td>${fmt(x.entry)}</td><td>${x.stop ? fmt(x.stop) : '--'}</td><td>${tstr(x.exit_t)}</td><td>${fmt(x.exit)}</td><td class="${cls(x.pnl)}">${fmt(x.pnl, 2)}</td><td class="${cls(x.ret)}">${pct(x.ret)}</td><td>${dur(x.bars)}</td><td>${x.why === '硬止损' ? '<span class="tag" style="background:rgba(255,159,26,.16);color:#FF9F1A">硬止损</span>' : x.why}</td></tr>`).join('')}</table>` : '<div class="empty">该区间没有成交</div>';
+  } else if (tab === 'ls') {
+    const B = (n, o) => `<div class="tile"><span>${n}</span><b class="${cls(o.pnl)}">${fmt(o.pnl, 2)} USDT</b><small>${o.trades} 笔 · 胜率 ${fmt(o.win_rate, 1)}% · 平均 ${fmt(o.avg, 2)}</small></div>`;
+    el.innerHTML = `<div class="ls">${B('做多', r.long)}${B('做空', r.short)}</div>`;
+  } else {
+    const rows = S.cmp;
+    el.innerHTML = `<div class="cmp-bar"><button class="btn-pink sm" id="cmpBtn">${rows && S.cmpDone ? '重新对比' : rows ? '对比中…' : '运行对比'}</button><span class="mut small">同品种同周期同根数，按总收益排序；点击一行切换策略</span></div>` + (rows ? `<table><tr><th>策略</th><th>总收益</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>胜率</th><th>PF</th><th>笔数</th></tr>${rows.slice().sort((a, b) => (b.stats?.total_return ?? -1e9) - (a.stats?.total_return ?? -1e9)).map(x => x.error ? `<tr><td>${stTitle(x.id)}</td><td colspan="7" class="mut">${x.error}</td></tr>` : `<tr data-cmp="${x.id}" style="cursor:pointer"><td>${stTitle(x.id)}</td><td class="${cls(x.stats.total_return)}">${pct(x.stats.total_return)}</td><td>${x.stats.annualized == null ? '--' : pct(x.stats.annualized)}</td><td class="dn">-${fmt(x.stats.max_drawdown, 1)}%</td><td>${nn(x.stats.sharpe)}</td><td>${fmt(x.stats.win_rate, 1)}%</td><td>${nn(x.stats.profit_factor)}</td><td>${x.stats.trades}</td></tr>`).join('')}</table>` : '');
+  }
+}
+async function runCompare() {
+  const b = $('#cmpBtn'); b.disabled = true; S.cmp = []; S.cmpDone = false; const tag = S.symbol + S.interval;
+  for (let i = 0; i < S.fav.length; i++) {
+    if (tag !== S.symbol + S.interval) return;
+    const id = S.fav[i], bb = $('#cmpBtn'); if (bb) bb.textContent = `对比中 ${i + 1}/${S.fav.length}…`;
+    const st = S.strategies.find(x => x.id === id);
+    try { const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: id, limit: +$('#stBars').value, leverage: 1, params: st && st.params && Object.keys(st.params).length ? st.params : null }); S.cmp.push({ id, stats: r.stats }); }
+    catch (e) { S.cmp.push({ id, error: e.message.slice(0, 60) }); }
+    if (S.wbTab === 'cmp') renderPane();
+  }
+  S.cmpDone = true; renderPane();
+}
+function focusTrade(i) {
+  const t = S.bt.trades[i], a = S.bars.findIndex(b => b.t === t.entry_t), z = S.bars.findIndex(b => b.t === t.exit_t);
+  if (a < 0) return toast('该笔早于图上加载的900根K线，请在更大范围查看', '');
+  main.timeScale().setVisibleLogicalRange({ from: Math.max(0, a - 30), to: Math.min(S.bars.length + 5, (z < 0 ? a : z) + 30) });
+  $('#sec-chart').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 function eqDraw() {
-  const c = $('#eqCanvas'), r = devicePixelRatio || 1, w = c.clientWidth, h = 110; c.width = w * r; c.height = h * r; const g = c.getContext('2d'); g.setTransform(r, 0, 0, r, 0, 0);
-  const d = S.bt.equity.map(x => x.v); if (d.length < 2) return; const mn = Math.min(...d), mx = Math.max(...d);
-  const X = i => 10 + i / (d.length - 1) * (w - 20), Y = v => h - 12 - (v - mn) / ((mx - mn) || 1) * (h - 28);
-  const grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, 'rgba(252,114,255,.35)'); grad.addColorStop(1, 'rgba(252,114,255,0)');
-  g.beginPath(); d.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.strokeStyle = '#FC72FF'; g.lineWidth = 1.8; g.stroke();
-  g.lineTo(X(d.length - 1), h); g.lineTo(X(0), h); g.fillStyle = grad; g.fill();
-  g.fillStyle = '#9B9B9B'; g.font = '11px Inter'; g.fillText('权益曲线 ' + fmt(d[0], 0) + ' → ' + fmt(d[d.length - 1], 0), 12, 14);
+  const c = $('#eqCanvas'); if (!c || !S.bt) return; const r = devicePixelRatio || 1, w = c.clientWidth, h = 240; c.width = w * r; c.height = h * r;
+  const g = c.getContext('2d'); g.setTransform(r, 0, 0, r, 0, 0); const E = S.bt.equity; if (E.length < 2) return;
+  const dark = S.theme === 'dark', grid = dark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.07)', txt = dark ? '#9B9B9B' : '#7D7D7D';
+  const L = 52, R = 12, topH = 160, ddT = 180, ddH = 44, n = E.length;
+  const all = E.flatMap(x => [x.v, x.bh]), mn = Math.min(...all), mx = Math.max(...all), pad = (mx - mn) * .08 || 1;
+  const X = i => L + i / (n - 1) * (w - L - R), Y = v => 12 + (1 - (v - (mn - pad)) / ((mx - mn) + 2 * pad)) * (topH - 12);
+  g.font = '11px Inter'; g.fillStyle = txt; g.strokeStyle = grid; g.lineWidth = 1;
+  for (let k = 0; k <= 4; k++) { const v = mn - pad + (mx - mn + 2 * pad) * k / 4, y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(w - R, y); g.stroke(); g.fillText(fmt(v, 0), 6, y + 4); }
+  const line = (key, color, wd, dash) => { g.beginPath(); E.forEach((x, i) => i ? g.lineTo(X(i), Y(x[key])) : g.moveTo(X(i), Y(x[key]))); g.strokeStyle = color; g.lineWidth = wd; g.setLineDash(dash || []); g.stroke(); g.setLineDash([]); };
+  const gr = g.createLinearGradient(0, 0, 0, topH); gr.addColorStop(0, 'rgba(252,114,255,.28)'); gr.addColorStop(1, 'rgba(252,114,255,0)');
+  g.beginPath(); E.forEach((x, i) => i ? g.lineTo(X(i), Y(x.v)) : g.moveTo(X(i), Y(x.v))); g.lineTo(X(n - 1), topH); g.lineTo(X(0), topH); g.fillStyle = gr; g.fill();
+  line('bh', dark ? '#7A7A7A' : '#B0B0B0', 1.4, [4, 3]); line('v', '#FC72FF', 2);
+  const mxd = Math.max(...E.map(x => x.dd), .1); g.fillStyle = txt; g.fillText('回撤', 6, ddT + 12); g.fillText('-' + fmt(mxd, 1) + '%', 6, ddT + ddH);
+  g.beginPath(); g.moveTo(X(0), ddT); E.forEach((x, i) => g.lineTo(X(i), ddT + x.dd / mxd * ddH)); g.lineTo(X(n - 1), ddT); g.closePath(); g.fillStyle = 'rgba(255,95,82,.35)'; g.fill();
+  g.beginPath(); E.forEach((x, i) => i ? g.lineTo(X(i), ddT + x.dd / mxd * ddH) : g.moveTo(X(i), ddT + x.dd / mxd * ddH)); g.strokeStyle = '#FF5F52'; g.lineWidth = 1.2; g.stroke();
+  g.fillStyle = txt; g.fillText(tstr(E[0].t), L, h - 4); const lt = tstr(E[n - 1].t); g.fillText(lt, w - R - g.measureText(lt).width, h - 4);
+  g.fillStyle = '#FC72FF'; g.fillRect(w - 250, 6, 10, 3); g.fillStyle = txt; g.fillText('策略权益', w - 236, 11); g.fillStyle = dark ? '#7A7A7A' : '#B0B0B0'; g.fillRect(w - 170, 6, 10, 3); g.fillStyle = txt; g.fillText('买入持有', w - 156, 11);
 }
+
+/* ---------- 行情组件：跑马灯/自选/涨跌统计/状态栏 ---------- */
+function renderWidgets() {
+  const tk = S.tickers, top = Object.entries(tk).filter(([k]) => k.endsWith('USDT')).sort((a, b) => b[1].vol - a[1].vol).slice(0, 16);
+  $('#tapeIn').innerHTML = top.map(([k, v]) => `<a data-sym="${k}">${base(k)} <b>${fmt(v.price)}</b><span class="${cls(v.chg)}">${pct(v.chg)}</span></a>`).join('');
+  $('#wlBody').innerHTML = COMMON.map(k => { const v = tk[k]; if (!v) return ''; return `<div class="wli ${k === S.symbol ? 'on' : ''}" data-sym="${k}"><i class="ico sm">${base(k)[0]}</i><span class="n">${base(k)}</span><span class="p">${fmt(v.price)}<br><span class="c ${cls(v.chg)}">${pct(v.chg)}</span></span></div>`; }).join('');
+  const t = tk[S.symbol]; $('#mstats').innerHTML = t ? `<div><span>24h 最高</span><b>${fmt(t.hi)}</b></div><div><span>24h 最低</span><b>${fmt(t.lo)}</b></div><div><span>24h 成交额</span><b>${t.vol >= 1e9 ? fmt(t.vol / 1e9, 2) + 'B' : fmt(t.vol / 1e6, 1) + 'M'}</b></div>` : '';
+}
+function clockTick() { const d = new Date(), z = n => String(n).padStart(2, '0'), off = -d.getTimezoneOffset() / 60; $('#sbClock').textContent = `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}  UTC${off >= 0 ? '+' : ''}${off}`; $('#sbSym').textContent = `${S.symbol} · ${S.interval}`; $('#sbMode').textContent = S.mode === 'paper' ? '模拟盘' : '实盘验证'; }
 
 /* ---------- 记录表 ---------- */
 function renderRec(which) {
   if (which) { S.rec = which; $$('#recTabs a').forEach(a => a.classList.toggle('on', a.dataset.r === which)); }
   const el = $('#recBody'); let h = '';
-  if (S.rec === 'bt') {
-    const t = S.bt?.trades || [];
-    h = t.length ? `<table><tr><th>开仓时间</th><th>方向</th><th>开仓价</th><th>平仓价</th><th>盈亏(USDT)</th><th>收益率</th><th>持仓K线</th><th>离场原因</th></tr>${t.slice().reverse().map(x => `<tr><td>${tstr(x.entry_t)}</td><td><span class="tag ${x.side === 'LONG' ? 'l' : 's'}">${x.side === 'LONG' ? '多' : '空'}</span></td><td>${fmt(x.entry)}</td><td>${fmt(x.exit)}</td><td class="${cls(x.pnl)}">${fmt(x.pnl, 2)}</td><td class="${cls(x.ret)}">${pct(x.ret)}</td><td>${x.bars}</td><td>${x.why}</td></tr>`).join('')}</table>` : '<div class="empty">还没有复盘 —— 在右侧「策略复盘」选择策略并运行</div>';
-  } else if (S.rec === 'pp') {
+  if (S.rec === 'pp') {
     const p = S.paper?.positions || [];
     h = (S.paper ? `<div class="hint" style="text-align:left;margin:0 0 8px">模拟盘权益 <b>${fmt(S.paper.equity, 2)}</b> USDT（初始 ${fmt(S.paper.start, 0)}）　<a data-reset style="color:var(--pink)">重置账户</a></div>` : '')
       + (p.length ? `<table><tr><th>品种</th><th>方向</th><th>开仓价</th><th>标记价</th><th>保证金</th><th>浮动盈亏</th><th></th></tr>${p.map(x => `<tr><td>${x.symbol}</td><td><span class="tag ${x.side === 'LONG' ? 'l' : 's'}">${x.side === 'LONG' ? '多' : '空'} ${x.lev}x</span></td><td>${fmt(x.entry)}</td><td>${fmt(x.mark)}</td><td>${fmt(x.margin, 2)}</td><td class="${cls(x.pnl)}">${fmt(x.pnl, 2)} (${pct(x.pnl_pct)})</td><td><a data-close-pos="${x.symbol}" class="tag l" style="background:var(--pink-bg);color:var(--pink)">平仓</a></td></tr>`).join('')}</table>` : '<div class="empty">暂无模拟持仓</div>');
@@ -326,7 +424,7 @@ function bind() {
     const c = t.closest('[data-close]'); if (c || t.classList.contains('modal')) { (t.closest('.modal') || {}).hidden = true; if (c) c.closest('.modal').hidden = true; return; }
     if (t.closest('#pairBtn') || t.closest('#navSearch') || t.closest('#tokenBtn2')) return openPair();
     const sym = t.closest('[data-sym]'); if (sym) { $('#mdPair').hidden = true; return setSymbol(sym.dataset.sym); }
-    const itv = t.closest('#itvSeg button'); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; await loadChart(); return autoSignals(); }
+    const itv = t.closest('#itvSeg button'); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; S.cmp = null; S.cmpDone = false; btLoading(); await loadChart(); return autoSignals(); }
     const rm = t.closest('[data-rm]'); if (rm) { S.inds.splice(+rm.dataset.rm, 1); localStorage.uq_inds = JSON.stringify(S.inds); return loadChart(true); }
     const chip = t.closest('#indChips .chip'); if (chip && /^(rsi|macd|atr)/.test(chip.dataset.s)) { S.sub = chip.dataset.s; return loadChart(true); }
     if (t.closest('#addInd')) return openInd();
@@ -340,17 +438,23 @@ function bind() {
     if (t.closest('[data-reset]')) { if (confirm('重置模拟账户为 10,000 USDT？')) { await api('paper/reset', {}); loadPaper(); } return; }
     if (t.closest('#btBtn')) return runBacktest();
     if (t.closest('#sigBtn')) return setSig(!S.sig);
-    const st = t.closest('#sideTabs a'); if (st) { $$('#sideTabs a').forEach(a => a.classList.toggle('on', a === st)); $('#tab-trade').hidden = st.dataset.tab !== 'trade'; $('#tab-strategy').hidden = st.dataset.tab !== 'strategy'; return; }
+    const sp = t.closest('[data-st]'); if (sp) return selectStrategy(sp.dataset.st);
+    const wt = t.closest('#wbTabs a'); if (wt) { S.wbTab = wt.dataset.wt; $$('#wbTabs a').forEach(a => a.classList.toggle('on', a === wt)); return renderPane(); }
+    const tr = t.closest('tr[data-trade]'); if (tr) return focusTrade(+tr.dataset.trade);
+    const cm = t.closest('tr[data-cmp]'); if (cm) return selectStrategy(cm.dataset.cmp);
+    if (t.closest('#cmpBtn')) return runCompare();
     const rt = t.closest('#recTabs a'); if (rt) return renderRec(rt.dataset.r);
     if (t.closest('#authBtn')) return S.authed ? (await api('logout', {}), setAuth(false), toast('已断开')) : openLogin();
     if (t.closest('#loginGo')) return doLogin();
     if (t.closest('#themeBtn')) return setTheme(S.theme === 'dark' ? 'light' : 'dark');
-    const nv = t.closest('#mainNav a'); if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; if (go === 'strategy') { $('#tabStrategy').click(); } if (go === 'trade') { $('[data-tab=trade]').click(); } const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    const nv = t.closest('#mainNav a'); if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : go === 'strategy' ? $('#sec-bt') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   });
   $('#pairQ').addEventListener('input', e => renderPairs(e.target.value));
   $('#pw').addEventListener('keydown', e => e.key === 'Enter' && doLogin());
   $('#amt').addEventListener('input', calcTrade); $('#lev').addEventListener('input', calcTrade);
-  $('#stSel').addEventListener('change', () => { showStDesc(); if (S.sig) autoSignals(); });
+  $('#stSel').addEventListener('change', () => { showStDesc(); syncPills(); autoSignals(); });
+  $('#stBars').addEventListener('change', autoSignals);
+  window.addEventListener('resize', () => S.bt && eqDraw());
   document.addEventListener('keydown', e => { if (e.key === '/' && !/INPUT|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); openPair(); } });
 }
 
@@ -363,9 +467,10 @@ async function boot() {
     const [sy, tk] = await Promise.all([api('symbols'), api('tickers')]); S.symbols = sy.symbols; S.tickers = tk;
     await Promise.all([loadChart(), loadStrategies(), loadPaper()]); autoSignals();
   } catch (e) { toast(e.message, 'err'); }
-  setInterval(() => api('tickers').then(t => { S.tickers = t; updateTop(); }).catch(() => { }), 20000);
+  renderWidgets(); $('#sbConn').textContent = '已连接';
+  setInterval(() => api('tickers').then(t => { S.tickers = t; updateTop(); renderWidgets(); }).catch(() => { }), 20000);
 }
 document.documentElement.dataset.theme = S.theme;
-initCharts(); S.sig = localStorage.uq_sig !== '0'; setSig(S.sig); sizeCanvas(); loadDraw(); renderItv(); setPairUI(); setSide('LONG'); setMode('paper'); bind(); calcTrade(); renderRec('bt');
+initCharts(); S.sig = localStorage.uq_sig !== '0'; setSig(S.sig); sizeCanvas(); loadDraw(); renderItv(); setPairUI(); setSide('LONG'); setMode('paper'); bind(); calcTrade(); renderRec('pp'); clockTick(); setInterval(clockTick, 1000);
 setInterval(tick, 4000); setInterval(loadPaper, 8000);
 boot();

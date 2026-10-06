@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import secrets
 import threading
@@ -20,6 +21,8 @@ app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", P
 PASSWORD = os.environ.get("UQ_PASSWORD", "")
 _bt_sem = threading.Semaphore(2)
 _fails: dict = {}
+_bt_cache: dict = {}
+_bt_lock = threading.Lock()
 
 MTF_NAME = {"240": "4h", "D": "1d", "1D": "1d", "60": "1h", "720": "12h"}
 
@@ -162,11 +165,44 @@ def run_backtest():
                    for n in names if MTF_NAME.get(str(n), str(n)) in data.INTERVALS}
         except Exception:
             mtf = None
+    key = (sym.upper(), itv, name, json.dumps(b.get("params") or None, sort_keys=True), limit, lev,
+           float(b.get("equity", 10000)), bars[-1]["t"])
+    with _bt_lock:
+        hit = _bt_cache.get(key)
+    if hit and time.time() - hit[0] < 300:
+        return jsonify(hit[1])
     with _bt_sem:
-        res = backtest.run(bars, name, b.get("params") or None, mtf, float(b.get("equity", 10000)), lev)
+        res = backtest.run(bars, name, b.get("params") or None, mtf, float(b.get("equity", 10000)), lev,
+                           window=150 if name in backtest.BUILTIN else 600)
     res["symbol"], res["interval"], res["strategy"] = sym.upper(), itv, name
     res["range"] = [bars[0]["t"], bars[-1]["t"]]
+    with _bt_lock:
+        _bt_cache[key] = (time.time(), res)
+        if len(_bt_cache) > 60:
+            for k in sorted(_bt_cache, key=lambda k: _bt_cache[k][0])[:20]:
+                _bt_cache.pop(k, None)
     return jsonify(res)
+
+
+@app.post("/api/compare")
+@api
+def compare():
+    """同一品种+周期下批量跑多个策略，返回统计对比（最多10个）。"""
+    b = request.get_json(silent=True) or {}
+    sym, itv = b.get("symbol", "BTCUSDT"), b.get("interval", "4h")
+    names = [n for n in (b.get("strategies") or [])][:10]
+    limit = max(100, min(int(b.get("limit", 1500)), 6000))
+    bars = data.get_klines(sym, itv, limit, closed_only=True)
+    rows = []
+    with _bt_sem:
+        for n in names:
+            try:
+                p = backtest.BUILTIN[n]["params"] if n in backtest.BUILTIN else None
+                r = backtest.run(bars, n, p, None, 10000, 1.0)
+                rows.append({"id": n, "stats": r["stats"]})
+            except Exception as e:
+                rows.append({"id": n, "error": str(e)[:80]})
+    return jsonify(rows=rows, symbol=sym.upper(), interval=itv)
 
 
 # ---------- 模拟盘 ----------

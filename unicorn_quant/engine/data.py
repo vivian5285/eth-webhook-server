@@ -118,5 +118,5 @@ def tickers_24h() -> dict:
         r = requests.get(FAPI + "/fapi/v1/ticker/24hr", timeout=15)
         r.raise_for_status()
         return {x["symbol"]: {"price": float(x["lastPrice"]), "chg": float(x["priceChangePercent"]),
-                              "vol": float(x["quoteVolume"])} for x in r.json()}
+                              "vol": float(x["quoteVolume"]), "hi": float(x["highPrice"]), "lo": float(x["lowPrice"])} for x in r.json()}
     return _cached("t24", 20, load)

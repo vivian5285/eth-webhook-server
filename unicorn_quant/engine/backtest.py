@@ -157,10 +157,11 @@ def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Opt
     equity = equity0
     pos = None
     trades: List[dict] = []
-    markers: List[dict] = []
     curve: List[dict] = []
     peak = equity0
     max_dd = 0.0
+    in_pos_bars = 0
+    c0 = bars[warmup]["c"] if len(bars) > warmup else bars[0]["c"]
 
     def close(px, t, why):
         nonlocal pos, equity
@@ -170,15 +171,15 @@ def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Opt
         pnl = gross - fee
         equity += pnl
         trades.append({"side": pos["side"], "entry_t": pos["t"], "exit_t": t, "entry": pos["entry"], "exit": px,
-                       "pnl": round(pnl, 2), "ret": round(pnl / pos["notional"] * 100, 2), "why": why,
-                       "bars": pos["bars"]})
-        markers.append({"t": t, "kind": "exit", "side": pos["side"], "price": px, "text": why})
+                       "stop": pos.get("stop"), "pnl": round(pnl, 2), "ret": round(pnl / pos["notional"] * 100, 2),
+                       "why": why, "bars": pos["bars"], "fee": round(fee, 2)})
         pos = None
 
     for i in range(warmup, len(bars)):
         bar = bars[i]
         if pos:
             pos["bars"] += 1
+            in_pos_bars += 1
             ex = _check_exit(pos, bar)
             if ex:
                 close(ex[0], bar["t"], ex[1])
@@ -196,46 +197,82 @@ def run(bars: List[dict], strategy: str, params: Optional[dict] = None, mtf: Opt
             px = float(sig.get("price") or bar["c"])
             if act in ("LONG", "SHORT"):
                 if pos and pos["side"] != act:
-                    close(px, bar["t"], sig.get("reason") or "反向信号")
+                    close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空")
                 if not pos:
                     notional = equity * leverage
                     pos = {"side": act, "entry": px, "t": bar["t"], "qty": notional / px, "notional": notional,
                            "stop": sig.get("stop_loss"), "tp": sig.get("tp1"), "bars": 0}
-                    markers.append({"t": bar["t"], "kind": "entry", "side": act, "price": px,
-                                    "text": sig.get("reason") or ("开多" if act == "LONG" else "开空")})
             elif act.startswith("CLOSE") and pos:
-                close(px, bar["t"], sig.get("reason") or act)
+                close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空")
         mark = equity
         if pos:
             d = 1 if pos["side"] == "LONG" else -1
             mark = equity + (bar["c"] - pos["entry"]) * pos["qty"] * d
         peak = max(peak, mark)
-        max_dd = max(max_dd, (peak - mark) / peak if peak else 0)
-        curve.append({"t": bar["t"], "v": round(mark, 2)})
+        dd = (peak - mark) / peak if peak else 0
+        max_dd = max(max_dd, dd)
+        curve.append({"t": bar["t"], "v": round(mark, 2), "dd": round(dd * 100, 3), "bh": round(equity0 * bar["c"] / c0, 2)})
 
     open_pos = None
     if pos:
         last = bars[-1]["c"]
         d = 1 if pos["side"] == "LONG" else -1
-        open_pos = {"side": pos["side"], "entry": pos["entry"], "entry_t": pos["t"],
+        open_pos = {"side": pos["side"], "entry": pos["entry"], "entry_t": pos["t"], "stop": pos.get("stop"),
                     "float_pnl": round((last - pos["entry"]) * pos["qty"] * d, 2)}
 
     wins = [t for t in trades if t["pnl"] > 0]
     losses = [t for t in trades if t["pnl"] <= 0]
     gp, gl = sum(t["pnl"] for t in wins), -sum(t["pnl"] for t in losses)
-    rets = [t["ret"] / 100 for t in trades]
-    sharpe = None
-    if len(rets) > 2:
+
+    def side_stats(side):
+        ts = [t for t in trades if t["side"] == side]
+        w = [t for t in ts if t["pnl"] > 0]
+        return {"trades": len(ts), "win_rate": round(len(w) / len(ts) * 100, 1) if ts else 0,
+                "pnl": round(sum(t["pnl"] for t in ts), 2),
+                "avg": round(sum(t["pnl"] for t in ts) / len(ts), 2) if ts else 0}
+
+    def streak(flag):
+        best = cur = 0
+        for t in trades:
+            cur = cur + 1 if (t["pnl"] > 0) == flag else 0
+            best = max(best, cur)
+        return best
+
+    bar_ms = (bars[1]["t"] - bars[0]["t"]) if len(bars) > 1 else 14400000
+    per_year = 365 * 86400000 / bar_ms
+    rets = [(curve[i]["v"] / curve[i - 1]["v"] - 1) for i in range(1, len(curve)) if curve[i - 1]["v"]]
+    sharpe = sortino = None
+    if len(rets) > 5:
         m = sum(rets) / len(rets)
         sd = math.sqrt(sum((r - m) ** 2 for r in rets) / (len(rets) - 1))
-        sharpe = round(m / sd * math.sqrt(len(rets)), 2) if sd else None
+        dsd = math.sqrt(sum(min(r, 0) ** 2 for r in rets) / len(rets))
+        sharpe = round(m / sd * math.sqrt(per_year), 2) if sd else None
+        sortino = round(m / dsd * math.sqrt(per_year), 2) if dsd else None
+    days = max((bars[-1]["t"] - bars[warmup]["t"]) / 86400000, 1e-9) if len(bars) > warmup else 1
+    tot = equity / equity0
+    ann = (tot ** (365 / days) - 1) * 100 if tot > 0 and days >= 5 else None
+    avg_win = gp / len(wins) if wins else 0
+    avg_loss = gl / len(losses) if losses else 0
     stats = {
         "trades": len(trades), "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
-        "total_return": round((equity / equity0 - 1) * 100, 2), "final_equity": round(equity, 2),
+        "total_return": round((tot - 1) * 100, 2), "final_equity": round(equity, 2),
+        "annualized": round(ann, 2) if ann is not None else None,
         "max_drawdown": round(max_dd * 100, 2), "profit_factor": round(gp / gl, 2) if gl else None,
         "avg_trade": round(sum(t["pnl"] for t in trades) / len(trades), 2) if trades else 0,
-        "sharpe_trades": sharpe,
-        "buy_hold": round((bars[-1]["c"] / bars[warmup]["c"] - 1) * 100, 2) if len(bars) > warmup else 0,
-        "bars": len(bars) - warmup,
+        "sharpe": sharpe, "sortino": sortino,
+        "calmar": round(ann / (max_dd * 100), 2) if ann is not None and max_dd > 0 else None,
+        "avg_win": round(avg_win, 2), "avg_loss": round(-avg_loss, 2),
+        "payoff": round(avg_win / avg_loss, 2) if avg_loss else None,
+        "expectancy": round(sum(t["pnl"] for t in trades) / len(trades), 2) if trades else 0,
+        "best": round(max((t["pnl"] for t in trades), default=0), 2),
+        "worst": round(min((t["pnl"] for t in trades), default=0), 2),
+        "max_win_streak": streak(True), "max_loss_streak": streak(False),
+        "avg_hold_bars": round(sum(t["bars"] for t in trades) / len(trades), 1) if trades else 0,
+        "exposure": round(in_pos_bars / max(len(bars) - warmup, 1) * 100, 1),
+        "fees": round(sum(t["fee"] for t in trades), 2),
+        "stop_hits": sum(1 for t in trades if t["why"] == "硬止损"),
+        "buy_hold": round((bars[-1]["c"] / c0 - 1) * 100, 2) if len(bars) > warmup else 0,
+        "bars": len(bars) - warmup, "days": round(days, 1),
     }
-    return {"stats": stats, "trades": trades, "markers": markers, "equity": curve, "open": open_pos}
+    return {"stats": stats, "long": side_stats("LONG"), "short": side_stats("SHORT"), "trades": trades,
+            "equity": curve, "open": open_pos}
