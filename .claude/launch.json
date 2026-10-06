@@ -6,6 +6,13 @@
       "runtimeExecutable": "py",
       "runtimeArgs": ["dashboard/roster_server.py"],
       "port": 8878
+    },
+    {
+      "name": "unicorn-quant",
+      "runtimeExecutable": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+      "runtimeArgs": ["unicorn_quant/server.py"],
+      "port": 8890,
+      "env": { "UQ_PASSWORD": "dev", "UQ_PAPER_FILE": "unicorn_quant/paper_dev.json", "NO_PROXY": "*", "no_proxy": "*", "ALL_PROXY": "", "all_proxy": "", "HTTPS_PROXY": "", "https_proxy": "", "HTTP_PROXY": "", "http_proxy": "" }
     }
   ]
 }
