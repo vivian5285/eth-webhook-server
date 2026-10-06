@@ -112,7 +112,10 @@ function candleLineSeg(ind, dir) {
   const line = Object.values(ind.lines)[0], m = new Map(ind.dirs);
   return line.filter(([t]) => m.get(t) === dir).map(([t, v]) => ({ time: sec(t), value: v }));
 }
+function autoSignals() { if (S.authed && S.sig) runBacktest(true); }
+function setSig(on) { S.sig = on; localStorage.uq_sig = on ? '1' : '0'; $('#sigBtn').textContent = '策略信号 ' + (on ? '开' : '关'); $('#sigBtn').classList.toggle('act', on); if (on) { S.bt ? applyMarkers() : autoSignals(); } else candle.setMarkers([]); }
 function applyMarkers() {
+  if (!S.sig) { candle.setMarkers([]); return; }
   if (!S.bt || S.bt.symbol !== S.symbol || S.bt.interval !== S.interval) { candle.setMarkers([]); return; }
   const have = new Set(S.bars.map(b => b.t));
   const mk = S.bt.markers.filter(m => have.has(m.t)).map(m => {
@@ -205,11 +208,11 @@ function renderItv() {
 }
 function setPairUI() {
   $('#pairName').textContent = S.symbol; $('#pairIco').textContent = base(S.symbol)[0]; $('#outSym').textContent = base(S.symbol); $('#outIco').textContent = base(S.symbol)[0];
-  document.title = `${S.symbol} · 独角兽量化`;
+  document.title = `${S.symbol} · 独角兽量化`; if (typeof updateGo === 'function') updateGo();
 }
 async function setSymbol(sym) {
   S.symbol = sym; localStorage.uq_sym = sym; setPairUI(); loadDraw(); S.bt = null; $('#btStats').innerHTML = ''; eqClear();
-  await loadChart(); renderCurPos(); renderRec();
+  await loadChart(); renderCurPos(); renderRec(); autoSignals();
 }
 function openPair() {
   $('#mdPair').hidden = false; $('#pairQ').value = ''; renderPairs(''); setTimeout(() => $('#pairQ').focus(), 50);
@@ -263,16 +266,15 @@ async function loadStrategies() {
   } catch (e) { }
 }
 function showStDesc() { const s = S.strategies.find(x => x.id === $('#stSel').value); $('#stDesc').textContent = s ? (s.desc || '') : ''; $('#stParams').value = s && s.params && Object.keys(s.params).length ? JSON.stringify(s.params) : ''; }
-async function runBacktest() {
-  if (!S.authed) return openLogin();
+async function runBacktest(silent) {
+  if (!S.authed) return silent ? 0 : openLogin();
   const b = $('#btBtn'); b.disabled = true; b.textContent = '复盘中…';
-  let params = null; try { params = $('#stParams').value.trim() ? JSON.parse($('#stParams').value) : null; } catch (e) { b.disabled = false; b.textContent = '复盘并画到图上'; return toast('参数不是合法 JSON', 'err'); }
+  let params = null; try { params = $('#stParams').value.trim() ? JSON.parse($('#stParams').value) : null; } catch (e) { b.disabled = false; b.textContent = '复盘并画到图上'; return silent ? 0 : toast('参数不是合法 JSON', 'err'); }
   try {
     const r = await api('backtest', { symbol: S.symbol, interval: S.interval, strategy: $('#stSel').value, limit: +$('#stBars').value, leverage: +$('#stLev').value || 1, params });
     S.bt = r; applyMarkers(); renderStats(); renderRec('bt'); eqDraw();
-    const n = Math.max(0, S.bars.length - 1); toast(`复盘完成：${r.stats.trades} 笔，收益 ${pct(r.stats.total_return)}`, 'ok');
-    if (r.range[0] < S.bars[0]?.t) toast('提示：图上只显示最近900根，更早的信号在成交明细里', '');
-  } catch (e) { toast(e.message, 'err'); }
+    if (!silent) toast(`复盘完成：${r.stats.trades} 笔，收益 ${pct(r.stats.total_return)}`, 'ok');
+  } catch (e) { if (!silent) toast(e.message, 'err'); }
   b.disabled = false; b.textContent = '复盘并画到图上';
 }
 function renderStats() {
@@ -324,7 +326,7 @@ function bind() {
     const c = t.closest('[data-close]'); if (c || t.classList.contains('modal')) { (t.closest('.modal') || {}).hidden = true; if (c) c.closest('.modal').hidden = true; return; }
     if (t.closest('#pairBtn') || t.closest('#navSearch') || t.closest('#tokenBtn2')) return openPair();
     const sym = t.closest('[data-sym]'); if (sym) { $('#mdPair').hidden = true; return setSymbol(sym.dataset.sym); }
-    const itv = t.closest('#itvSeg button'); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; return loadChart(); }
+    const itv = t.closest('#itvSeg button'); if (itv) { S.interval = itv.dataset.i; localStorage.uq_itv = S.interval; renderItv(); S.bt = null; await loadChart(); return autoSignals(); }
     const rm = t.closest('[data-rm]'); if (rm) { S.inds.splice(+rm.dataset.rm, 1); localStorage.uq_inds = JSON.stringify(S.inds); return loadChart(true); }
     const chip = t.closest('#indChips .chip'); if (chip && /^(rsi|macd|atr)/.test(chip.dataset.s)) { S.sub = chip.dataset.s; return loadChart(true); }
     if (t.closest('#addInd')) return openInd();
@@ -337,6 +339,7 @@ function bind() {
     const cp = t.closest('[data-close-pos]'); if (cp) { try { const r = await api('paper/close', { symbol: cp.dataset.closePos }); toast(`已平仓，盈亏 ${fmt(r.pnl, 2)} USDT`, r.pnl >= 0 ? 'ok' : ''); loadPaper(); } catch (er) { toast(er.message, 'err'); } return; }
     if (t.closest('[data-reset]')) { if (confirm('重置模拟账户为 10,000 USDT？')) { await api('paper/reset', {}); loadPaper(); } return; }
     if (t.closest('#btBtn')) return runBacktest();
+    if (t.closest('#sigBtn')) return setSig(!S.sig);
     const st = t.closest('#sideTabs a'); if (st) { $$('#sideTabs a').forEach(a => a.classList.toggle('on', a === st)); $('#tab-trade').hidden = st.dataset.tab !== 'trade'; $('#tab-strategy').hidden = st.dataset.tab !== 'strategy'; return; }
     const rt = t.closest('#recTabs a'); if (rt) return renderRec(rt.dataset.r);
     if (t.closest('#authBtn')) return S.authed ? (await api('logout', {}), setAuth(false), toast('已断开')) : openLogin();
@@ -347,7 +350,7 @@ function bind() {
   $('#pairQ').addEventListener('input', e => renderPairs(e.target.value));
   $('#pw').addEventListener('keydown', e => e.key === 'Enter' && doLogin());
   $('#amt').addEventListener('input', calcTrade); $('#lev').addEventListener('input', calcTrade);
-  $('#stSel').addEventListener('change', showStDesc);
+  $('#stSel').addEventListener('change', () => { showStDesc(); if (S.sig) autoSignals(); });
   document.addEventListener('keydown', e => { if (e.key === '/' && !/INPUT|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); openPair(); } });
 }
 
@@ -358,11 +361,11 @@ async function boot() {
   if (!me.ok) { $('#skel').classList.add('off'); if (me.configured) openLogin(); return; }
   try {
     const [sy, tk] = await Promise.all([api('symbols'), api('tickers')]); S.symbols = sy.symbols; S.tickers = tk;
-    await Promise.all([loadChart(), loadStrategies(), loadPaper()]);
+    await Promise.all([loadChart(), loadStrategies(), loadPaper()]); autoSignals();
   } catch (e) { toast(e.message, 'err'); }
   setInterval(() => api('tickers').then(t => { S.tickers = t; updateTop(); }).catch(() => { }), 20000);
 }
 document.documentElement.dataset.theme = S.theme;
-initCharts(); sizeCanvas(); loadDraw(); renderItv(); setPairUI(); setSide('LONG'); setMode('paper'); bind(); calcTrade(); renderRec('bt');
+initCharts(); S.sig = localStorage.uq_sig !== '0'; setSig(S.sig); sizeCanvas(); loadDraw(); renderItv(); setPairUI(); setSide('LONG'); setMode('paper'); bind(); calcTrade(); renderRec('bt');
 setInterval(tick, 4000); setInterval(loadPaper, 8000);
 boot();
