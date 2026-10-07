@@ -71,7 +71,7 @@ def get_klines(symbol: str, interval: str, limit: int = 500, closed_only: bool =
         return stocks.get_klines(symbol, interval, limit, closed_only)
     if interval not in INTERVALS:
         raise ValueError(f"不支持的周期 {interval}")
-    limit = max(10, min(int(limit), 6000))
+    limit = max(10, min(int(limit), 30000))
     ttl = 2 if limit <= 5 else 20
 
     def load():

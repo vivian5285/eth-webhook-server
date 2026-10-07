@@ -32,7 +32,7 @@ for name in sys.argv[1:]:
     A = {}
     for sym, prim in assets:
         try:
-            b = data.get_klines(sym, itv, 6000 if itv == "4h" else 3000, closed_only=True)
+            b = data.get_klines(sym, itv, 20000 if itv == "4h" else 3000, closed_only=True)
             if len(b) >= 300:
                 A[sym] = ds.prep(b); A[sym]["prim"] = prim
         except Exception:

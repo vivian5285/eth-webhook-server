@@ -261,7 +261,7 @@ def main():
     A, info = {}, []
     for sym, prim in assets:
         try:
-            lim = 6000 if itv == "4h" else 3000
+            lim = 20000 if itv == "4h" else 3000
             bars = data.get_klines(sym, itv, lim, closed_only=True)
             if len(bars) < 300:
                 info.append(f"{sym}:仅{len(bars)}根(跳过)")
