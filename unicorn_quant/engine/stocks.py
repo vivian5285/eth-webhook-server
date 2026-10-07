@@ -38,8 +38,12 @@ _mem: dict = {}
 
 
 def is_stock(symbol: str) -> bool:
+    """美股/ETF/商品期货(GC=F)/Yahoo币对(ETH-USD) 走Yahoo；*USDT 走币安"""
+    import re
     s = symbol.upper()
-    return s in SYMBOLS or (not s.endswith("USDT") and s.replace("-", "").replace(".", "").isalpha() and len(s) <= 6)
+    if s in SYMBOLS:
+        return True
+    return (not s.endswith("USDT")) and re.fullmatch(r"[A-Z0-9^][A-Z0-9.\-=]{0,9}", s) is not None
 
 
 def _path(symbol: str, interval: str) -> str:

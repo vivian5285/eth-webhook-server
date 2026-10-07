@@ -301,7 +301,7 @@ function renderCurPos() {
 }
 
 /* ---------- 回测工作台 ---------- */
-const FAV = ['dual_ema_band', 'ema_cross', 'rsi_revert', 'macd_histogram', 'mtf_ema_macd_cci', 'cci_mean_reversion', 'chanlun_pivot', 'residual_momentum', 'hma_trend', 'ttm_squeeze', 'keltner_channel', 'turtle_breakout', 'supertrend_adx', 'heikin_ashi_trend'];
+const FAV = ['dta_crypto4h', 'dta_crypto1d', 'dta_gold4h', 'dta_stock1d', 'dual_ema_band', 'ema_cross', 'rsi_revert', 'macd_histogram', 'mtf_ema_macd_cci', 'cci_mean_reversion', 'chanlun_pivot', 'residual_momentum', 'hma_trend', 'ttm_squeeze', 'keltner_channel', 'turtle_breakout', 'supertrend_adx', 'heikin_ashi_trend'];
 let btSeq = 0;
 const stTitle = id => (S.strategies.find(x => x.id === id) || {}).title || id;
 async function loadStrategies() {

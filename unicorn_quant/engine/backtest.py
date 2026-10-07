@@ -259,6 +259,32 @@ BUILTIN: Dict[str, dict] = {
 }
 
 
+
+# ---------------- 唐奇安趋势组合预设（参数来自 donchian_study.py / donchian_final.py） ----------------
+_DTA_BASE = {"adx_min": 0, "vol_mult": 0.0, "bb_filter": False, "ema_exit": False, "allow_short": False,
+             "chandelier": True, "don_exit": True}
+DTA_PRESETS = {
+    "dta_crypto4h": ("唐奇安趋势·币圈4h", dict(_DTA_BASE, ema_fast=30, ema_slow=120, don_n=30, exit_n=5, stop_atr=3.0, trail_atr=5.0),
+                     "EMA30/120趋势过滤+30根突破+3ATR止损+5ATR吊灯；币圈4h研究的稳健参数(只做多)"),
+    "dta_crypto1d": ("唐奇安趋势·币圈1d", dict(_DTA_BASE, ema_fast=50, ema_slow=200, don_n=10, exit_n=20, stop_atr=1.5, trail_atr=5.0),
+                     "EMA50/200+10根突破+20根反向通道；币圈日线(2018起)参数，回撤较深"),
+    "dta_gold4h": ("唐奇安趋势·黄金4h", dict(_DTA_BASE, ema_fast=20, ema_slow=100, don_n=10, exit_n=5, stop_atr=3.0, trail_atr=3.0),
+                   "EMA20/100+10根突破；XAU仅约300天样本，参考用"),
+    "dta_stock1d": ("唐奇安趋势·美股1d", dict(_DTA_BASE, ema_fast=20, ema_slow=100, don_n=55, exit_n=20, stop_atr=2.0, trail_atr=4.0),
+                    "EMA20/100+55根突破+20根反向通道+2ATR止损+4ATR吊灯；15只美股10年研究参数(只做多)"),
+}
+
+
+def _dta_fn(preset):
+    def fn(bars_by_tf, params, position):
+        from strategy_engine.strategies import donchian_trend_atr
+        return donchian_trend_atr.generate_signal(bars_by_tf, {**preset, **(params or {})}, position)
+    return fn
+
+
+for _k, (_t, _pr, _d) in DTA_PRESETS.items():
+    BUILTIN[_k] = {"fn": _dta_fn(_pr), "title": _t, "params": _pr, "desc": _d}
+
 CATS = [  # (分类名, 关键词) —— 顺序即优先级
     ("MACD", ("macd",)), ("CCI", ("cci",)), ("缠论", ("chanlun",)),
     ("残差/动量", ("residual", "momentum", "tsmom", "clenow")),
