@@ -107,7 +107,7 @@ def symbols() -> List[dict]:
         return sorted(out, key=lambda x: x["symbol"])
     from . import stocks
     stk = [{"symbol": k, "base": k, "tradfi": False, "stock": True, "name": v["name"], "sector": v["sector"]}
-           for k, v in stocks.SYMBOLS.items()]
+           for k, v in {**stocks.SYMBOLS, **stocks.EXTRA_META}.items()]
     return _cached("symbols", 3600, load) + stk
 
 

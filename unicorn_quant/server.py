@@ -12,7 +12,7 @@ from functools import wraps
 
 from flask import Flask, jsonify, request, send_from_directory, session
 
-from engine import backtest, data, exchange, paper, stocks, ta
+from engine import backtest, data, exchange, paper, scanner, stocks, ta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
@@ -317,6 +317,46 @@ def matrix_status():
     if request.args.get("lite"):
         st = {k: v for k, v in st.items() if k != "rows"}
     return jsonify(st)
+
+
+# ---------- 美股趋势突破扫描器 ----------
+def _sc_lock():
+    return os.path.join(scanner.DIR, "running.lock")
+
+
+@app.get("/api/scanner")
+@api
+def sc_get():
+    scan = None
+    try:
+        with open(os.path.join(scanner.DIR, "latest.json"), "r", encoding="utf-8") as f:
+            scan = json.load(f)
+    except Exception:
+        pass
+    running = os.path.exists(_sc_lock()) and time.time() - os.path.getmtime(_sc_lock()) < 600
+    return jsonify(scan=scan, paper=scanner.paper_view(scan), running=running)
+
+
+@app.post("/api/scanner/refresh")
+@api
+def sc_refresh():
+    import subprocess
+    import sys
+    os.makedirs(scanner.DIR, exist_ok=True)
+    if os.path.exists(_sc_lock()) and time.time() - os.path.getmtime(_sc_lock()) < 600:
+        return jsonify(running=True)
+    subprocess.Popen([sys.executable, os.path.join(HERE, "scanner_run.py")], cwd=HERE,
+                     stdout=open(os.path.join(scanner.DIR, "scanner.log"), "a"), stderr=subprocess.STDOUT, start_new_session=True)
+    return jsonify(running=True)
+
+
+@app.post("/api/scanner/reset")
+@api
+def sc_reset():
+    if not (request.get_json(silent=True) or {}).get("confirm"):
+        raise ValueError("需要确认")
+    scanner.reset_paper()
+    return jsonify(ok=True)
 
 
 # ---------- 模拟盘 ----------

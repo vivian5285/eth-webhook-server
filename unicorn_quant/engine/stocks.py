@@ -30,6 +30,20 @@ UNIVERSE = [
     ("SPY", "标普500 ETF", "ETF"), ("QQQ", "纳指100 ETF", "ETF"), ("IWM", "罗素2000 ETF", "ETF"),
 ]
 SYMBOLS: Dict[str, dict] = {s: {"name": n, "sector": sec} for s, n, sec in UNIVERSE}
+# 趋势突破扫描器的扩展标的：这几年跌得惨/横盘的蓝筹也放进来，降低"只看赢家"的幸存者偏差
+SCAN_EXTRA = [("PYPL", "PayPal", "金融科技"), ("NKE", "耐克", "消费"), ("SBUX", "星巴克", "消费"), ("VZ", "威瑞森", "通信"),
+              ("PFE", "辉瑞", "医疗"), ("CVS", "CVS", "医疗"), ("KO", "可口可乐", "消费"), ("PEP", "百事", "消费"),
+              ("MCD", "麦当劳", "消费"), ("HD", "家得宝", "消费"), ("MRK", "默沙东", "医疗"), ("CSCO", "思科", "科技"),
+              ("IBM", "IBM", "科技"), ("GE", "通用电气", "工业"), ("CAT", "卡特彼勒", "工业"), ("GS", "高盛", "金融"),
+              ("BAC", "美国银行", "金融"), ("MA", "万事达", "金融"), ("ADBE", "Adobe", "科技"), ("QCOM", "高通", "半导体"),
+              ("TXN", "德州仪器", "半导体"), ("UBER", "Uber", "科技"), ("T", "AT&T", "通信"), ("MMM", "3M", "工业"),
+              ("DOW", "陶氏", "材料")]
+EXTRA_META: Dict[str, dict] = {s: {"name": n, "sector": sec} for s, n, sec in SCAN_EXTRA}
+WATCH = [s for s, _, _ in UNIVERSE if s not in ("SPY", "QQQ", "IWM")] + [s for s, _, _ in SCAN_EXTRA]
+
+
+def meta(symbol: str) -> dict:
+    return SYMBOLS.get(symbol.upper()) or EXTRA_META.get(symbol.upper()) or {"name": symbol.upper(), "sector": ""}
 INTERVALS = ["1h", "1d", "1w"]
 _Y = {"1h": ("60m", "2y"), "1d": ("1d", "10y"), "1w": ("1wk", "20y")}
 _TTL = {"1h": 600, "1d": 1800, "1w": 3600}
@@ -121,7 +135,7 @@ def get_klines(symbol: str, interval: str, limit: int = 500, closed_only: bool =
         # 日/周线：当天(本周)还没收盘的最后一根丢掉。盘中判断：最后一根的日期==今天(美东) 且 美东时间<16:05
         last = bars[-1]
         age = now - last["t"] / 1000
-        span = {"1h": 3600, "1d": 86400, "1w": 604800}[interval]
+        span = {"1h": 3600, "1d": 7 * 3600, "1w": 4 * 86400 + 7 * 3600}[interval]
         if age < span:
             bars = bars[:-1]
     return bars[-limit:] if limit else bars

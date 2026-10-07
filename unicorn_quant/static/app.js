@@ -486,6 +486,55 @@ async function openCombo(sym, id, mode) {
   $('#stSel').value = id; showStDesc(); syncPills(); await setSymbol(sym); $('#sec-chart').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/* ---------- 美股趋势突破扫描器 ---------- */
+S.sc = { d: null, tab: 'sig' }; let scTimer = null;
+async function openSc() { $('#mdSc').hidden = false; $('#scBody').innerHTML = '<div class="empty">加载中…</div>'; await loadSc(); }
+async function loadSc() {
+  clearTimeout(scTimer);
+  try { S.sc.d = await api('scanner'); renderSc(); if (S.sc.d.running) scTimer = setTimeout(loadSc, 4000); }
+  catch (e) { $('#scBody').innerHTML = `<div class="empty">${e.message}</div>`; }
+}
+const stag = r => `<span class="stag ${r.signal ? 'new' : r.days_since != null ? 'rec' : (!r.trend_up && r.ema_fast < r.ema_slow) ? 'bear' : ''}">${r.status}</span>`;
+function scRow(r, extra) {
+  return `<tr data-scopen="${r.sym}"><td class="l"><b>${r.sym}</b> <span class="mut small">${r.name}</span></td><td class="l mut">${r.sector}</td><td>${fmt(r.close)}</td><td class="${cls(r.chg)}">${pct(r.chg)}</td><td class="${r.rs >= 0 ? 'up' : 'dn'}">${r.rs == null ? '--' : pct(r.rs)}<small class="mut"> ${r.rs_pct == null ? '' : 'P' + r.rs_pct}</small></td><td>${r.htf_up ? '<span class="up">✓</span>' : '<span class="mut">✗</span>'}</td><td>${r.res == null ? '无' : fmt(r.res) + ' <small class="mut">+' + fmt(r.res_gap, 1) + '%</small>'}</td><td>${r.sup == null ? '--' : fmt(r.sup) + ' <small class="mut">-' + fmt(r.sup_gap, 1) + '%</small>'}</td><td class="${r.ext > 15 ? 'sc-warn' : ''}">${pct(r.ext)}</td>${extra || ''}</tr>`;
+}
+function renderSc() {
+  const d = S.sc.d; if (!d) return; const scan = d.scan, tab = S.sc.tab;
+  $$('#scTabs a').forEach(a => a.classList.toggle('on', a.dataset.st2 === tab));
+  $('#scGo').disabled = d.running; $('#scGo').textContent = d.running ? '扫描中…' : '立即刷新';
+  const nerr = scan ? Object.keys(scan.errors || {}).length : 0;
+  $('#scStat').textContent = scan ? `数据日期 ${scan.bar_date} · 更新于 ${new Date(scan.updated * 1000).toLocaleString()} · ${scan.rows.length} 只${nerr ? ' · ' + nerr + ' 只数据缺失' : ''} · 每个美股交易日收盘后自动更新` : '还没有扫描结果，点右上角「立即刷新」(约1-2分钟)';
+  $('#scSub').textContent = scan ? `日线 EMA${scan.spec.pair[0]}/${scan.spec.pair[1]} + 周线多头 + 突破压力位` : '';
+  const el = $('#scBody');
+  if (tab === 'rules') {
+    el.innerHTML = `<div class="sc-note"><b>入场(今日信号)</b>：周线多头(EMA10>EMA30 且收盘>EMA30) + 日线EMA7>EMA25且收盘>EMA25 + 今日收盘突破上方最近压力位(周线分形高低点聚类)，且前一日收盘还在压力位下方。<br><b>出场</b>：EMA7 跌破 EMA25(趋势反转)；硬止损：入场价 -10%(表中另给"结构止损"=最近支撑下方，夹在 -5%~-15%)。<br><b>仓位</b>：10个等权槽位、只做多、不换手；候选按 63 日相对强度(涨幅)排序，强者优先。<br><b>操作时点</b>：收盘后出信号，次日开盘价执行(纸面账户按此成交)。<br><b>"距25日线"</b>：标橙色表示已离均线较远(>15%)，追高风险更大。<br><b>唐奇安55确认</b>：收盘同时突破55日高点且 EMA20>EMA100，是更严格的第二重确认。<br><br><b>研究依据与局限</b>：日线触发、周线大级别，51只美股9.4年1296个组合里，这个结构样本内年化约23.7%、最大回撤约18.9%(对照QQQ 20.0%/-36%)，胜率约41%、盈亏比约2.4——大多数交易是小亏，靠少数大赢家。<span class="sc-warn">股票池是"现在知名"的公司，有幸存者偏差；不含税、分红、真实滑点；样本内结果会高估未来表现；全池等权买入持有的收益更高，这套的价值主要是把回撤降低一半左右。</span>本页仅为研究与纸面跟踪，不构成投资建议，不会下单。</div>`;
+    return;
+  }
+  if (!scan) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  const H = '<tr><th class="l">代码</th><th class="l">板块</th><th>现价</th><th>日涨跌</th><th>63日相对强度</th><th>周线多头</th><th>上方压力位</th><th>下方支撑位</th><th>距25日线</th>';
+  if (tab === 'sig') {
+    const rows = scan.rows.filter(r => r.signal);
+    el.innerHTML = rows.length ? `<table class="sc-tbl">${H}<th>突破的压力位</th><th>建议止损(-10%)</th><th>结构止损</th><th>ATR%</th><th>唐奇安55</th></tr>${rows.map(r => scRow(r, `<td>${fmt(r.broken)}</td><td>${fmt(r.stop_fixed)}</td><td>${r.stop_struct ? fmt(r.stop_struct) : '--'}</td><td>${fmt(r.atr_pct, 1)}%</td><td>${r.don55 ? '<span class="up">✓</span>' : '<span class="mut">—</span>'}</td>`)).join('')}</table><div class="sc-note">共 ${rows.length} 只今日新突破，按相对强度从强到弱排序；点一行打开日线图和回测。收盘后出信号，次日开盘执行。</div>` : `<div class="empty">今天(${scan.bar_date})没有新突破信号。信号本来就稀少(10个槽位的组合约每周1~3个)，可以看「近期突破」和「全池状态」。</div>`;
+  } else if (tab === 'recent') {
+    const rows = scan.rows.filter(r => !r.signal && r.days_since != null && r.trend_up);
+    el.innerHTML = rows.length ? `<table class="sc-tbl">${H}<th>状态</th></tr>${rows.map(r => scRow(r, `<td>${stag(r)}</td>`)).join('')}</table><div class="sc-note">近 ${scan.spec.recent_days} 个交易日内突破过、且趋势仍成立的标的。追入要看"距25日线"，离得太远不要追。</div>` : '<div class="empty">近5日没有仍然有效的突破</div>';
+  } else if (tab === 'all') {
+    el.innerHTML = `<table class="sc-tbl">${H}<th>状态</th></tr>${scan.rows.slice().sort((a, b) => (b.rs ?? -999) - (a.rs ?? -999)).map(r => scRow(r, `<td>${stag(r)}</td>`)).join('')}</table>`;
+  } else {
+    const p = d.paper, ret = (p.equity / p.equity0 - 1) * 100, wins = p.hist.filter(h => h.ret > 0).length;
+    const T = (l, v, c = '') => `<div class="tile"><span>${l}</span><b class="${c}">${v}</b></div>`;
+    const cv = p.curve, mn = Math.min(...cv.map(x => x.eq), p.equity0), mx = Math.max(...cv.map(x => x.eq), p.equity0);
+    const pts = cv.length > 1 ? cv.map((x, i) => `${(i / (cv.length - 1) * 596 + 2).toFixed(1)},${(116 - (x.eq - mn) / ((mx - mn) || 1) * 108).toFixed(1)}`).join(' ') : '';
+    el.innerHTML = `<div class="kpi2" style="grid-template-columns:repeat(6,1fr)">${T('纸面权益', fmt(p.equity, 0))}${T('累计收益', pct(ret), cls(ret))}${T('现金', fmt(p.cash, 0))}${T('持仓数', p.positions.length + ' / ' + scan.spec.slots)}${T('已平仓', p.hist.length + ' 笔')}${T('胜率', p.hist.length ? fmt(wins / p.hist.length * 100, 0) + '%' : '--')}</div>
+      ${pts ? `<svg class="sc-curve" viewBox="0 0 600 120" preserveAspectRatio="none"><polyline fill="none" stroke="#FC72FF" stroke-width="2" points="${pts}"/></svg>` : ''}
+      <div class="sc-note">起始日 ${p.start || '--'}，初始 ${fmt(p.equity0, 0)}，已处理到 ${p.last_date || '--'}。严格按规则自动跟踪：信号次日开盘买(每槽=权益/10)，趋势反转或 -10% 次日开盘卖，不手工干预。<a data-screset class="lnk">重置账户</a></div>
+      <table class="sc-tbl"><tr><th class="l">持仓</th><th>买入日</th><th>成本</th><th>现价</th><th>浮盈</th><th>止损价</th><th>明日动作</th></tr>${p.positions.map(x => `<tr data-scopen="${x.sym}"><td class="l"><b>${x.sym}</b> <span class="mut small">${x.name}</span></td><td>${x.date}</td><td>${fmt(x.entry)}</td><td>${fmt(x.close)}</td><td class="${cls(x.pnl || 0)}">${x.pnl == null ? '--' : pct(x.pnl)}</td><td>${fmt(x.stop)}</td><td>${x.exit_flag ? '<span class="stag bear">卖出：' + x.exit_flag + '</span>' : '持有'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">暂无持仓（等新突破信号，按次日开盘买入）</td></tr>'}</table>
+      ${p.pend_buy.length ? `<div class="sc-note">明日开盘计划买入：<b>${p.pend_buy.join('、')}</b></div>` : ''}
+      ${p.hist.length ? `<table class="sc-tbl" style="margin-top:8px"><tr><th class="l">已平仓</th><th>买入日</th><th>卖出日</th><th>成本</th><th>卖价</th><th>收益</th><th>原因</th></tr>${p.hist.map(h => `<tr><td class="l"><b>${h.sym}</b></td><td>${h.t0}</td><td>${h.t1}</td><td>${fmt(h.entry)}</td><td>${fmt(h.exit)}</td><td class="${cls(h.ret)}">${pct(h.ret)}</td><td>${h.why}</td></tr>`).join('')}</table>` : ''}`;
+  }
+}
+async function refreshSc() { try { await api('scanner/refresh', {}); toast('已开始扫描，约1-2分钟', 'ok'); setTimeout(loadSc, 1500); } catch (e) { toast(e.message, 'err'); } }
+
 /* ---------- 行情组件：跑马灯/自选/涨跌统计/状态栏 ---------- */
 function renderWidgets() {
   const tk = S.tickers, top = Object.entries(tk).filter(([k]) => k.endsWith('USDT')).sort((a, b) => b[1].vol - a[1].vol).slice(0, 16);
@@ -546,6 +595,10 @@ function bind() {
     const msec = t.closest('#mxSectors a'); if (msec) { S.mx.sector = msec.dataset.sec; return renderMx(); }
     const mh = t.closest('#mxHeatSeg button'); if (mh) { S.mx.heat = mh.dataset.h; return renderMx(); }
     if (t.closest('#mxGo')) return startMx();
+    const sct = t.closest('#scTabs a'); if (sct) { S.sc.tab = sct.dataset.st2; return renderSc(); }
+    if (t.closest('#scGo')) return refreshSc();
+    if (t.closest('[data-screset]')) { if (confirm('重置纸面账户？(清空持仓和历史，重新开始)')) { await api('scanner/reset', { confirm: true }); loadSc(); } return; }
+    const sco = t.closest('[data-scopen]'); if (sco) { $('#mdSc').hidden = true; S.interval = '1d'; localStorage.uq_itv = '1d'; return setSymbol(sco.dataset.scopen); }
     if (t.closest('[data-more]')) return openSt('browse');
     const sp = t.closest('[data-st]'); if (sp) return selectStrategy(sp.dataset.st);
     const stt = t.closest('#stTabs a'); if (stt) return setStTab(stt.dataset.t);
@@ -564,6 +617,7 @@ function bind() {
     if (t.closest('#loginGo')) return doLogin();
     if (t.closest('#themeBtn')) return setTheme(S.theme === 'dark' ? 'light' : 'dark');
     const nv = t.closest('#mainNav a'); if (nv && nv.dataset.go === 'us') return openMx();
+    if (nv && nv.dataset.go === 'scan') return openSc();
     if (nv) { $$('#mainNav a').forEach(a => a.classList.toggle('on', a === nv)); const go = nv.dataset.go; const el = go === 'records' ? $('#sec-records') : go === 'chart' ? $('#sec-chart') : go === 'strategy' ? $('#sec-bt') : $('#sec-trade'); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   });
   $('#mxMetric').addEventListener('change', e => { S.mx.metric = e.target.value; renderMx(); });
