@@ -14,6 +14,18 @@ a.append(sys.stdin.read().strip());json.dump(a,open(p,"w"),ensure_ascii=False)'
     chown stratroster:stratroster "$D/alerts_pending.json"
   fi
 done
+# 2026-10-19 方案F实盘：发布器/执行器 是 enabled(没被人为停用)却没在跑 → 拉起来并告警
+for s in planf-publisher planf-live-E; do
+  if systemctl is-enabled --quiet "$s" && ! systemctl is-active --quiet "$s"; then
+    systemctl restart "$s"
+    echo "{\"ts\": $(date +%s), \"service\": \"$s\"}" >> "$D/guard_events.jsonl"
+    echo "【方案F实盘·⚠️】$s 停了，已自动重启" | python3 -c 'import json,sys;p="'"$D"'/alerts_pending.json";a=[]
+try: a=json.load(open(p))
+except Exception: pass
+a.append(sys.stdin.read().strip());json.dump(a,open(p,"w"),ensure_ascii=False)'
+    chown stratroster:stratroster "$D/alerts_pending.json"
+  fi
+done
 cd /home/stratroster/unicorn_quant && sudo -u stratroster nice -n 10 $PY -m engine.reconciler >> "$D/reconciler.log" 2>&1
 # 2026-10-19 复刻健康检查：数据新鲜度、擂台参数=回测参数、现货K线、美股永续名单变化、前视检验、自然一致率
 cd /home/stratroster/unicorn_quant && sudo -u stratroster nice -n 10 $PY -m engine.health >> "$D/health.log" 2>&1

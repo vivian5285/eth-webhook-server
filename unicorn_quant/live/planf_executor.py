@@ -178,6 +178,7 @@ class Exec:
         if chg and armed and not stopped and "last_pos" in self.st:
             ding("持仓变化(成交)：" + "；".join(chg[:12]))
             log("成交", changes=chg)
+            self.audit_fills([s for s in sorted(set(lastp) | set(pos)) if s in white and abs(lastp.get(s, 0) - pos.get(s, 0)) > 1e-12], mark)
         self.st["last_pos"] = {s: v for s, v in pos.items()}
         my_orders = {}
         for o in self.c.futures_get_open_orders():
@@ -231,14 +232,31 @@ class Exec:
             if not (armed and not stopped):
                 acted.append(f"{sym} {reason} {'买' if delta > 0 else '卖'} {self.fmt(delta, f['step'])}(≈{abs(delta)*px:.0f}U)")
                 continue
-            acted.append(self.execute(sym, delta, cur, tq, f, reason, my_orders.get(sym, [])))
+            acted.append(self.execute(sym, delta, cur, tq, f, reason, my_orders.get(sym, []), px))
         # 已经不需要的工作单撤掉
         for sym, olist in my_orders.items():
             if sym not in {p[0] for p in plans} and (armed and not stopped):
                 for o in olist:
                     self.cancel(sym, o["clientOrderId"])
                 self.st["working"].pop(sym, None)
+        # ---- 2026-10-19 交易所止损单(Algo 条件单，程序掉线也会触发)：每条腿各挂一张，只减这条腿的数量 ----
+        stops = self.sync_stops(E, pos, mark, tg.get("legs") or [], use_btc, (0.5 if cb else 1) * g_scale, armed and not stopped)
+        # ---- 保证金率告警 ----
+        mm, mb = fl(acc.get("totalMaintMargin")), fl(acc.get("totalMarginBalance"))
+        mratio = mm / mb if mb > 0 else 0.0
+        if mratio > 0.30:
+            ding(f"⚠️ 保证金率 {mratio:.0%}(维持保证金 {mm:.1f}U / 保证金余额 {mb:.1f}U)，正常应在个位数，请检查", "mratio", 3600)
+        # ---- 实盘自我审查：需要调仓却超过 30 分钟没调上 = 执行卡住 ----
+        stuck = self.st.setdefault("stuck", {})
+        for sym, delta, cur, tq, px, f, reason in plans:
+            stuck.setdefault(sym, now)
+            if now - stuck[sym] > 1800:
+                ding(f"⚠️ 执行卡住：{sym} 需要{reason}(目标 {tq:g}，实际 {cur:g})已超过30分钟没完成", f"stuck_{sym}", 3600)
+        for sym in list(stuck):
+            if sym not in {p[0] for p in plans}:
+                stuck.pop(sym, None)
         status = {"ts": now, "account": ACCT, "mode": mode, "equity": round(E, 2), "use_btc": use_btc, "frozen": frozen, "why": why,
+                  "margin_ratio": round(mratio, 4), "stops": stops, "audit": self.st.get("audit_today", {}),
                   "circuit_breaker": cb, "rth": rth, "gross_target_usdt": round(sum(abs(r["target_usdt"]) for r in rows), 2),
                   "gross_position_usdt": round(sum(abs(r["position_usdt"]) for r in rows), 2), "rows": rows,
                   "would_do" if not (armed and not stopped) else "did": acted, "signals_asof": tg.get("asof")}
@@ -247,22 +265,111 @@ class Exec:
             log("计划" if not (armed and not stopped) else "执行", items=acted, equity=E)
         return status
 
+    # ---------- 交易所止损单 ----------
+    def algo(self, method, path, params):
+        return self.c._request_futures_api(method, path, signed=True, data=params)
+
+    def sync_stops(self, E, pos, mark, legs, use_btc, scale, live):
+        """每个有持仓的品种：和持仓同方向的每条腿挂一张 STOP_MARKET(reduceOnly，数量=这条腿那一份，触发价=这条腿的止损，按标记价格触发)。
+        同价位的腿合并成一张；总数量不超过持仓。已有的(clientAlgoId 前缀 pfs_)价格/数量没变就不动，变了撤掉重挂，不需要的撤掉。"""
+        want = {}
+        for L in legs:
+            s = L["symbol"]; cur = pos.get(s, 0.0); f = self.filters.get(s)
+            if not cur or not f or not L.get("exchange_stop"):
+                continue
+            d = 1 if L["side"] == "LONG" else -1
+            if d != (1 if cur > 0 else -1):
+                continue
+            fr = abs(L.get("frac" if use_btc else "frac_no_btc") or 0) * scale
+            px = mark.get(s) or 0; stp = float(L["exchange_stop"])
+            if px <= 0 or fr <= 0 or (d > 0 and stp >= px) or (d < 0 and stp <= px):
+                continue                                    # 已经越过止损：交给擂台按规则平，不挂
+            key = (s, round(stp / f["tick"]) * f["tick"])
+            want[key] = want.get(key, 0.0) + fr * E / px
+        out = []
+        for (s, stp), q in list(want.items()):
+            f = self.filters[s]; cap = abs(pos.get(s, 0.0))
+            q = self.rdown(min(q, cap), f["step"])
+            if q <= 0 or q < f["minq"]:
+                want.pop((s, stp)); continue
+            want[(s, stp)] = q
+            out.append({"symbol": s, "stop": stp, "qty": q, "side": "SELL" if pos[s] > 0 else "BUY"})
+        if not live:
+            return out
+        try:
+            have = self.algo("get", "openAlgoOrders", {})
+            have = have.get("orders", have) if isinstance(have, dict) else have
+        except Exception as e:
+            log("查条件单失败", err=str(e)[:200]); return out
+        mine = [h for h in (have or []) if str(h.get("clientAlgoId", "")).startswith("pfs_")]
+        keep = set()
+        for h in mine:
+            s = h.get("symbol"); f = self.filters.get(s) or {"tick": 1e-8, "step": 1e-8}
+            k = (s, round(fl(h.get("triggerPrice")) / f["tick"]) * f["tick"])
+            if k in want and abs(fl(h.get("quantity")) - want[k]) < f["step"] / 2 and k not in keep:
+                keep.add(k); continue
+            try:
+                self.algo("delete", "algoOrder", {"symbol": s, "algoId": int(h.get("algoId"))})
+                log("撤止损单", symbol=s, trigger=h.get("triggerPrice"), qty=h.get("quantity"))
+            except Exception as e:
+                log("撤止损单失败", symbol=s, err=str(e)[:200])
+        for (s, stp), q in want.items():
+            if (s, stp) in keep:
+                continue
+            f = self.filters[s]; dec = max(0, -int(math.floor(math.log10(f["tick"])))) if f["tick"] < 1 else 0
+            try:
+                self.algo("post", "algoOrder", {"algoType": "CONDITIONAL", "symbol": s, "side": "SELL" if pos[s] > 0 else "BUY",
+                                                "type": "STOP_MARKET", "triggerPrice": f"{stp:.{dec}f}", "quantity": self.fmt(q, f["step"]),
+                                                "reduceOnly": "true", "workingType": "MARK_PRICE",
+                                                "clientAlgoId": f"pfs_{s[:8]}_{int(time.time()) % 10**8}"})
+                log("挂止损单", symbol=s, trigger=stp, qty=q)
+            except Exception as e:
+                log("挂止损单失败", symbol=s, err=str(e)[:300])
+                ding(f"{s} 交易所止损单挂失败：{str(e)[:120]}(擂台每小时检查止损仍在兜底)", f"stopfail_{s}", 3600)
+        return out
+
+    # ---------- 实盘自我审查：成交滑点 ----------
+    def audit_fills(self, syms, mark):
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        a = self.st.get("audit_today") or {}
+        if a.get("day") != day:
+            if a.get("day"):
+                self.st["audit_yesterday"] = a
+            a = {"day": day, "fills": 0, "notional": 0.0, "slip_bp_sum": 0.0, "maker": 0, "taker": 0, "fees": 0.0}
+        since = int((time.time() - 300) * 1000)
+        for s in syms:
+            try:
+                for t in self.c.futures_account_trades(symbol=s, startTime=since):
+                    tid = f"{s}_{t['id']}"
+                    if tid in (self.st.setdefault("seen_trades", [])):
+                        continue
+                    self.st["seen_trades"] = (self.st["seen_trades"] + [tid])[-500:]
+                    px, q = fl(t["price"]), fl(t["qty"]); ref = (self.st.get("ref") or {}).get(s) or mark.get(s) or px
+                    buy = t.get("side") == "BUY"
+                    a["fills"] += 1; a["notional"] += px * q; a["fees"] += fl(t.get("commission"))
+                    a["slip_bp_sum"] += ((px / ref - 1) if buy else (1 - px / ref)) * 1e4 * px * q
+                    a["maker" if t.get("maker") else "taker"] += 1
+            except Exception as e:
+                log("审查查成交失败", symbol=s, err=str(e)[:200])
+        a["avg_slip_bp"] = round(a["slip_bp_sum"] / a["notional"], 2) if a["notional"] else None
+        self.st["audit_today"] = a
+
     def cancel(self, sym, cid):
         try:
             self.c.futures_cancel_order(symbol=sym, origClientOrderId=cid)
         except Exception as e:
             log("撤单失败", symbol=sym, cid=cid, err=str(e)[:200])
 
-    def execute(self, sym, delta, cur, tq, f, reason, olist):
+    def execute(self, sym, delta, cur, tq, f, reason, olist, ref_px=None):
         now = time.time(); w = self.st["working"].get(sym)
         side = "BUY" if delta > 0 else "SELL"
         reduce = cur != 0 and abs(tq) < abs(cur) and math.copysign(1, tq or -cur) == math.copysign(1, cur) or (tq == 0)
         if not w:
-            w = self.st["working"][sym] = {"start": now, "last": 0, "side": side}
+            w = self.st["working"][sym] = {"start": now, "last": 0, "side": side}; self.st.setdefault("ref", {})[sym] = ref_px
         if w.get("side") != side:
             for o in olist:
                 self.cancel(sym, o["clientOrderId"])
-            w = self.st["working"][sym] = {"start": now, "last": 0, "side": side}
+            w = self.st["working"][sym] = {"start": now, "last": 0, "side": side}; self.st.setdefault("ref", {})[sym] = ref_px
         if now - w["start"] > MAKER_MAX_SEC:            # 15 分钟还没成交完：市价补
             for o in olist:
                 self.cancel(sym, o["clientOrderId"])
@@ -321,7 +428,9 @@ def main():
             if time.gmtime().tm_hour == 0 and time.gmtime().tm_min >= 30 and last_daily != day:
                 last_daily = day
                 ding(f"日报：净值 {s['equity']}U，模式 {s['mode']}，目标总名义 {s['gross_target_usdt']}U，实际 {s['gross_position_usdt']}U，"
-                     f"{'含' if s['use_btc'] else '不含'}BTC，{'熔断中' if s['circuit_breaker'] else '正常'}")
+                     f"{'含' if s['use_btc'] else '不含'}BTC，{'熔断中' if s['circuit_breaker'] else '正常'}，保证金率 {100 * s.get('margin_ratio', 0):.1f}%，"
+                     f"交易所止损单 {len(s.get('stops') or [])} 张" + (lambda a: f"；昨天成交 {a.get('fills', 0)} 笔(挂单{a.get('maker', 0)}/吃单{a.get('taker', 0)})，"
+                     f"平均滑点 {a.get('avg_slip_bp')}bp，手续费 {a.get('fees', 0):.3f}U" if a else "")(ex.st.get("audit_yesterday")))
         except Exception as e:
             log("循环出错", err=f"{type(e).__name__}: {e}", tb=traceback.format_exc()[-600:])
             ding(f"执行器出错：{type(e).__name__}: {str(e)[:150]}", "loop_err", 1800)

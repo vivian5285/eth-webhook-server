@@ -65,8 +65,13 @@ def build() -> dict:
         else:
             alloc = min(1.0, 0.03 / atrp) if atrp else 1.0
             stock[sym] = stock.get(sym, 0.0) + d * alloc / k
+        # 交易所止损单用的价位：币圈腿用擂台的止损(突破/底部单3×ATR，其余10×ATR兜底)；美股腿只挂10×ATR兜底
+        # (3×ATR止损只在纽约常规时段由擂台判断，24小时挂在交易所会被夜盘插针误触发)
+        xstop = stop
+        if strat == STOCK_LEG and entry and atr0:
+            xstop = float(entry) - 10.0 * float(atr0)
         legs.append({"strategy": strat, "symbol": sym, "side": "LONG" if d > 0 else "SHORT", "entry": entry, "alloc": round(alloc, 4),
-                     "stop": stop, "since": created})
+                     "stop": stop, "exchange_stop": xstop, "since": created})
     st_gross = sum(abs(v) for v in stock.values())
     if st_gross > 1.0:
         stock = {s: v / st_gross for s, v in stock.items()}
@@ -81,6 +86,18 @@ def build() -> dict:
         if g > 2.0:
             t = {s: v * 2.0 / g for s, v in t.items()}
         return {s: round(v, 6) for s, v in t.items() if abs(v) > 1e-9}
+    # 每条腿自己的比例(给交易所止损单定数量：止损只减这条腿的那一份，不会把整个净仓平掉)
+    g_all = sum(abs(v) for v in {**{s: v * vs for s, v in crypto_with(cw).items()}, **{s: v * vs for s, v in stock.items()}}.values())
+    g_nb = sum(abs(v) for v in {**{s: v * vs for s, v in crypto_with(w_nobtc).items()}, **{s: v * vs for s, v in stock.items()}}.values())
+    for L in legs:
+        s, d = L["symbol"], (1 if L["side"] == "LONG" else -1)
+        if L["strategy"] in CRYPTO_LEGS:
+            base = d * L["alloc"] / 3.0 * vs
+            L["frac"] = round(base * cw.get(s, 0.0) * (2.0 / g_all if g_all > 2 else 1), 6)
+            L["frac_no_btc"] = round(base * w_nobtc.get(s, 0.0) * (2.0 / g_nb if g_nb > 2 else 1), 6)
+        else:
+            f_ = d * L["alloc"] / k * (1 / st_gross if st_gross > 1 else 1) * vs
+            L["frac"] = round(f_ * (2.0 / g_all if g_all > 2 else 1), 6); L["frac_no_btc"] = round(f_ * (2.0 / g_nb if g_nb > 2 else 1), 6)
     return {"ts": now, "asof": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)) + " UTC", "ok": not problems, "problems": problems,
             "vol_scale": vs, "coin_weights": cw, "coin_weights_no_btc": {s: round(v, 4) for s, v in w_nobtc.items()}, "stock_slots": k,
             "btc_min_equity": 5000, "targets": finish(crypto_with(cw)), "targets_no_btc": finish(crypto_with(w_nobtc)),
