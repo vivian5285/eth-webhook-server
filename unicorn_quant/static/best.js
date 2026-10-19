@@ -444,7 +444,8 @@ async function loadLive() {
     <div class="af-k">
       <div><em>账户净值</em><b>${s.equity}U</b><span>${s.use_btc ? '含BTC' : '净值<5000U：BTC份额分给其余币'}</span></div>
       <div><em>目标总名义</em><b>${s.gross_target_usdt}U</b><span>实际持仓 ${s.gross_position_usdt}U</span></div>
-      <div><em>纽约常规时段</em><b>${s.rth ? '是' : '否'}</b><span>美股只在常规时段下单</span></div>
+      <div><em>纽约常规时段</em><b>${s.rth ? '是' : '否'}</b><span>美股只在常规时段下单 · 保证金率 ${(100 * (s.margin_ratio || 0)).toFixed(1)}%</span></div>
+      <div><em>交易所条件单</em><b>${(s.stops || []).length + (s.brk_orders || []).length}</b><span>止损单 ${(s.stops || []).length} 张 · 突破进场单 ${(s.brk_orders || []).length} 张${Object.keys(s.brk_hold || {}).length ? ' · 突破待擂台跟上 ' + Object.keys(s.brk_hold).join(',') : ''}</span></div>
       <div><em>${live ? '本轮执行' : '影子：本来要下的单'}</em><b>${did.length}</b><span>${esc(did.slice(0, 3).join('；') || '无')}</span></div>
     </div>
     ${rows ? `<div class="tbl-wrap short"><table class="t"><thead><tr><th>品种</th><th class="r">目标</th><th class="r">实际</th><th>动作</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="mut small">当前没有目标仓位。</div>'}

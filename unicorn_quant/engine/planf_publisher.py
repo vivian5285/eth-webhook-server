@@ -98,7 +98,20 @@ def build() -> dict:
         else:
             f_ = d * L["alloc"] / k * (1 / st_gross if st_gross > 1 else 1) * vs
             L["frac"] = round(f_ * (2.0 / g_all if g_all > 2 else 1), 6); L["frac_no_btc"] = round(f_ * (2.0 / g_nb if g_nb > 2 else 1), 6)
+    # 2026-10-19 今天的盘中突破单(回测 optimal.json 算好的触发价)：实盘提前挂交易所条件单，触价即成交，不再等擂台每小时检查(实测平均晚36分钟、多付22bp)
+    brk = []
+    daily_open = {L["symbol"] for L in legs if L["strategy"] == "daily_ema_brk_cycle_main5"}
+    for s, stt in ((opt.get("crypto") or {}).get("state") or {}).items():
+        o = stt.get("brk_order")
+        if not o or s in daily_open:
+            continue
+        d = 1 if o["side"] == "LONG" else -1; atrp = float(stt.get("atr_pct") or 0) / 100
+        base = d * float(o["alloc"]) / 3.0 * vs
+        brk.append({"symbol": s, "side": o["side"], "level": float(o["level"]), "for_day": o.get("for_day"),
+                    "stop": round(float(o["level"]) * (1 - d * 3.0 * atrp), 8) if atrp else None,
+                    "frac": round(base * cw.get(s, 0.0), 6), "frac_no_btc": round(base * w_nobtc.get(s, 0.0), 6)})
     return {"ts": now, "asof": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)) + " UTC", "ok": not problems, "problems": problems,
+            "brk_orders": brk,
             "vol_scale": vs, "coin_weights": cw, "coin_weights_no_btc": {s: round(v, 4) for s, v in w_nobtc.items()}, "stock_slots": k,
             "btc_min_equity": 5000, "targets": finish(crypto_with(cw)), "targets_no_btc": finish(crypto_with(w_nobtc)),
             "stock_symbols": sorted(stock), "legs": legs,

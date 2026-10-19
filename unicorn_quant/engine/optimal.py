@@ -250,6 +250,9 @@ def crypto_leg():
         state[sym] = {"date": dstr(last["t"]), "close": last["c"], "ema8": round(e8[-1], 6), "ema30": round(e30[-1], 6),
                       "trend": "多头" if up else "空头", "atr_pct": round(100 * A[-1] / last["c"], 2),
                       "pending": pend[0] if pend else ("order" if order else None),
+                      # 2026-10-19 实盘：今天挂着的盘中突破单(方向、触发价、开仓时仓位系数)，实盘执行器提前挂交易所条件单，触价即成交(同回测)
+                      "brk_order": ({"side": "LONG" if order[0] > 0 else "SHORT", "level": order[1], "for_day": dstr(last["t"] + DAY),
+                                     "alloc": round(min(1.0, VOL_TGT / (A[-1] / last["c"])), 4)} if (order and not pend) else None),
                       "pending_reason": (pend[2] if isinstance(pend[2], str) else pend[2][1]) if pend else (order[2] if order else None)}
         if cur:
             fr = round(100 * (pos * (last["c"] / cur["entry"] - 1) - FEE), 2)
