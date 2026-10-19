@@ -151,7 +151,7 @@ class Exec:
         pr = self.c.futures_position_information()
         pos = {p["symbol"]: fl(p["positionAmt"]) for p in pr if fl(p["positionAmt"]) != 0}
         mark = {p["symbol"]: fl(p["markPrice"]) for p in pr}
-        margin = {p["symbol"]: p.get("marginType") for p in pr}
+        margin = {p["symbol"]: ("isolated" if fl(p.get("isolatedWallet")) > 0 or fl(p.get("isolatedMargin")) > 0 else (p.get("marginType") or "cross")) for p in pr}   # 新版接口没有 marginType 字段，用逐仓保证金判断
         # 熔断
         self.st["eq_hist"] = [x for x in self.st["eq_hist"] if now - x[0] < CB_HOURS * 3600] + [[now, E]]
         peak = max(x[1] for x in self.st["eq_hist"])
@@ -389,9 +389,14 @@ class Exec:
             key = (s, round(stp / f["tick"]) * f["tick"])
             want[key] = want.get(key, 0.0) + fr * E / px
         out = []
+        # 2026-10-19 止损单数量按"实际持仓"按腿的比例分配(合计 = 实际持仓)：目标和实际之间在再平衡容差内的小差异，
+        # 不会让止损数量随价格来回变(0.16↔0.15 反复撤单重挂)，也不会留一小截持仓没有止损保护
+        tot = {}
+        for (s, stp), q in want.items():
+            tot[s] = tot.get(s, 0.0) + q
         for (s, stp), q in list(want.items()):
             f = self.filters[s]; cap = abs(pos.get(s, 0.0))
-            q = self.rdown(min(q, cap), f["step"])
+            q = self.rdown(cap * q / tot[s], f["step"]) if tot.get(s) else 0.0
             if q <= 0 or q < f["minq"]:
                 want.pop((s, stp)); continue
             want[(s, stp)] = q
