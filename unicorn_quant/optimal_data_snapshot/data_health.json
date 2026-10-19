@@ -1,11 +1,11 @@
 {
- "ts": 1792383554.1940114,
+ "ts": 1792391783.4397764,
  "checks": [
   {
    "key": "optimal_fresh",
    "ok": true,
    "level": "ok",
-   "text": "回测结果 4.0 小时前更新"
+   "text": "回测结果 6.3 小时前更新"
   },
   {
    "key": "weights_year",
@@ -17,7 +17,7 @@
    "key": "rotation_fresh",
    "ok": true,
    "level": "ok",
-   "text": "美股行业名单 2026-10，0.2 天前计算"
+   "text": "美股行业名单 2026-10，0.3 天前计算"
   },
   {
    "key": "rotation_same",
@@ -35,13 +35,13 @@
    "key": "natural_rate",
    "ok": true,
    "level": "ok",
-   "text": "自然一致率 100.0%（24 次检查）"
+   "text": "自然一致率 100.0%（27 次检查）"
   },
   {
    "key": "lookahead",
    "ok": true,
    "level": "ok",
-   "text": "前视检验 通过，0.0 天前"
+   "text": "前视检验 通过，0.1 天前"
   },
   {
    "key": "params_same",
@@ -54,6 +54,12 @@
    "ok": true,
    "level": "ok",
    "text": "擂台币圈腿用现货K线(同回测)"
+  },
+  {
+   "key": "cycle",
+   "ok": true,
+   "level": "ok",
+   "text": "减半周期：筑底阶段第30月(多空都做)，BTC 82,116"
   },
   {
    "key": "universe",

@@ -124,6 +124,52 @@ def checks():
         add("spot_source", okspot, "擂台币圈腿用现货K线(同回测)" if okspot else "擂台币圈腿没有用现货K线，信号会和回测有偏差")
     except Exception as e:
         add("spot_source", False, f"读取擂台配置出错：{e}", "warn")
+    # 11 减半周期规则失效迹象(规则只基于过去3轮周期，事后风险最大)：熊市阶段 BTC 收盘创本轮新高、或牛市阶段从本轮高点回撤超过50%
+    try:
+        b = O.spot_daily("BTCUSDT"); now_ms = now * 1000
+        ph, mo = O.phase_of(now_ms)
+        last_h = max(h for h in O.HALVINGS if h <= now) * 1000
+        bull_end = last_h + int(18 * 30.44 * 86400000)
+        bull_hi = max((x["c"] for x in b if last_h <= x["t"] < bull_end), default=0)
+        cyc_hi = max((x["c"] for x in b if x["t"] >= last_h), default=0); c = b[-1]["c"]
+        if ph == "熊":
+            ok = c <= bull_hi
+            add("cycle", ok, f"减半周期：熊市阶段第{mo:.0f}月，BTC {c:,.0f}，牛市段最高收盘 {bull_hi:,.0f}"
+                + ("" if ok else "——熊市阶段创了新高，周期规律可能失效，需要人工评估是否改用'逆阶段半仓'软化版"), "warn")
+        elif ph == "牛" and mo >= 6:
+            ok = c >= cyc_hi * 0.5
+            add("cycle", ok, f"减半周期：牛市阶段第{mo:.0f}月，BTC {c:,.0f}，本轮高点 {cyc_hi:,.0f}"
+                + ("" if ok else "——牛市阶段从高点腰斩，周期规律可能失效，需要人工评估"), "warn")
+        else:
+            add("cycle", True, f"减半周期：{ph}阶段第{mo:.0f}月({O.PHASE_RULE[ph]})，BTC {c:,.0f}")
+    except Exception as e:
+        add("cycle", False, f"周期检查出错：{type(e).__name__}", "warn")
+    # 12 2026-10-19 事先定好的选币规则(消除"站在今天挑币"的偏差)：每年1月1日币池 = 候选池里过去365天币安现货成交额前5(排除稳定币)。
+    #    回测(research_scripts/rule_universe.py)：按这条规则 2018 起选币，主方案 4.97(固定主流5是 5.56、按当时市值前5是 4.93)。
+    #    每年 11、12 月预演明年的规则币池，跟现在的主流5不一样就提醒，1月1日人工换(回测 M5、擂台 roster 一起换)。
+    if g.tm_mon in (11, 12):
+        try:
+            cache_p = os.path.join(OUT, "rule_universe_preview.json"); cache = _rd(cache_p, {}) or {}
+            if now - float(cache.get("ts") or 0) > 86400:
+                cand = ["BTC", "ETH", "BNB", "SOL", "XRP", "BCH", "LTC", "ADA", "DOGE", "LINK", "DOT", "TRX", "AVAX", "ETC", "XLM", "SHIB",
+                        "TON", "SUI", "HYPE", "POL", "NEAR", "APT", "UNI"]
+                vol = {}
+                for c_ in cand:
+                    try:
+                        rows = json.load(urllib.request.urlopen(f"https://api.binance.com/api/v3/klines?symbol={c_}USDT&interval=1d&limit=365", timeout=20))
+                        if len(rows) >= 300:
+                            vol[c_] = sum(float(r[7]) for r in rows)          # 报价资产成交额(USDT)
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                top = [k for k, _ in sorted(vol.items(), key=lambda z: -z[1])[:5]]
+                cache = {"ts": now, "top5": top}; _wr(cache_p, cache)
+            top = cache.get("top5") or []; cur = sorted(s[:-4] for s in O.M5)
+            same = sorted(top) == cur
+            add("rule_universe", same, f"明年规则币池预演(过去365天成交额前5)：{','.join(top)}；现在：{','.join(cur)}"
+                + ("" if same else "——明年1月1日需要换币(回测 M5 和擂台 roster 一起换)"), "warn")
+        except Exception as e:
+            add("rule_universe", False, f"规则币池预演出错：{type(e).__name__}", "warn")
     # 10 币安美股永续上新/下架(回测股票池 = 今天可交易的)
     try:
         info = json.load(urllib.request.urlopen("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=30))
