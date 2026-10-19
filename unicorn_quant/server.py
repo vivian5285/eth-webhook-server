@@ -555,7 +555,8 @@ def optimal_autofix():
         except Exception:
             return default
     h = rd("recon_health.json", {}); h.pop("history", None)
-    return jsonify(health=h, actions=rd("recon_actions.json", [])[-40:][::-1], overrides=rd("recon_override.json", {}))
+    return jsonify(health=h, actions=rd("recon_actions.json", [])[-40:][::-1], overrides=rd("recon_override.json", {}),
+                   data_health=rd("data_health.json", {}))     # 2026-10-19 复刻健康检查(engine/health.py)
 
 
 @app.get("/api/retired")

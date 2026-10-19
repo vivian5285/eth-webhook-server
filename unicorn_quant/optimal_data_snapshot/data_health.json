@@ -1,0 +1,65 @@
+{
+ "ts": 1792383554.1940114,
+ "checks": [
+  {
+   "key": "optimal_fresh",
+   "ok": true,
+   "level": "ok",
+   "text": "回测结果 4.0 小时前更新"
+  },
+  {
+   "key": "weights_year",
+   "ok": true,
+   "level": "ok",
+   "text": "币种权重年份 2026（今年 2026）"
+  },
+  {
+   "key": "rotation_fresh",
+   "ok": true,
+   "level": "ok",
+   "text": "美股行业名单 2026-10，0.2 天前计算"
+  },
+  {
+   "key": "rotation_same",
+   "ok": true,
+   "level": "ok",
+   "text": "本月前5行业 回测=存储,半导体,AI算力/网络,半导体设备,加密相关 擂台=存储,半导体,AI算力/网络,半导体设备,加密相关"
+  },
+  {
+   "key": "recon_fresh",
+   "ok": true,
+   "level": "ok",
+   "text": "对账 0.0 小时前"
+  },
+  {
+   "key": "natural_rate",
+   "ok": true,
+   "level": "ok",
+   "text": "自然一致率 100.0%（24 次检查）"
+  },
+  {
+   "key": "lookahead",
+   "ok": true,
+   "level": "ok",
+   "text": "前视检验 通过，0.0 天前"
+  },
+  {
+   "key": "params_same",
+   "ok": true,
+   "level": "ok",
+   "text": "擂台参数与回测一致"
+  },
+  {
+   "key": "spot_source",
+   "ok": true,
+   "level": "ok",
+   "text": "擂台币圈腿用现货K线(同回测)"
+  },
+  {
+   "key": "universe",
+   "ok": true,
+   "level": "ok",
+   "text": "可交易美股 53 只，名单没变"
+  }
+ ]
+}

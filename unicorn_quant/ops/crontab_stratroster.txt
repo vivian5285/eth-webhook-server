@@ -8,3 +8,5 @@ CRON_TZ=UTC
 # 擂台 美股行业轮动排名(stock_sector_rot6m5_long 用)：每天美股收盘后刷新
 40 22 * * * cd /home/stratroster/eth-webhook-server && /home/stratroster/eth-webhook-server/venv/bin/python -m strategy_engine.sector_rotation >> /home/stratroster/eth-webhook-server/strategy_engine/data/sector_rotation.log 2>&1
 20 0,8,16 * * * cd /home/stratroster/unicorn_quant && UQ_STOCK_CACHE=/home/stratroster/unicorn_quant/stock_cache /home/stratroster/eth-webhook-server/venv/bin/python optimal_run.py >> /home/stratroster/unicorn_quant/optimal_data/run.log 2>&1
+# 2026-10-19 每周日 03:10 UTC 前视检验(截断法)，结果给 engine/health.py 告警
+10 3 * * 0 cd /home/stratroster/unicorn_quant && UQ_STOCK_CACHE=/home/stratroster/unicorn_quant/stock_cache /home/stratroster/eth-webhook-server/venv/bin/python -m engine.lookahead_check >> /home/stratroster/unicorn_quant/optimal_data/lookahead.log 2>&1

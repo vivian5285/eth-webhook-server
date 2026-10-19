@@ -423,6 +423,8 @@ async function loadAutofix() {
       <div><em>执行中的指令</em><b>${ov.length}</b><span>${ov.join('；') || '无'}</span></div>
     </div>
     ${acts.length ? `<div class="tbl-wrap short"><table class="t"><thead><tr><th>时间</th><th>类型</th><th>品种</th><th>擂台/回测</th><th>动作</th><th>原因</th></tr></thead><tbody>${acts.map(x => `<tr><td>${t(x.ts)}</td><td><span class="badge ${kcls(x.kind)}">${esc(x.kind)}</span></td><td>${esc((x.symbol || '').replace('USDT', ''))} <span class="mut small">${esc(x.strategy || '')}</span></td><td>${esc(x.arena || '')}${x.backtest ? ' / ' + esc(x.backtest) : ''}</td><td>${esc(x.action || '')}</td><td class="wrap">${esc(x.reason || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="mut small">还没有任何修复或异常记录。</div>'}
+    ${(a.data_health && a.data_health.checks) ? `<div class="af-hc"><b>复刻健康检查</b><span class="mut small"> 每小时 · 上次 ${t(a.data_health.ts)} · 有问题会发钉钉</span>
+      <ul>${a.data_health.checks.map(c => `<li class="${c.ok ? 'ok' : c.level}"><i>${c.ok ? '✓' : c.level === 'bad' ? '✕' : '!'}</i>${esc(c.text)}</li>`).join('')}</ul></div>` : ''}
     <div class="mut small af-n">规则：持续两次检查才动；只修纸面仓位，不改策略代码；同一品种一周被修 3 次就停手并标记"疑似代码问题"；每天最多 6 次。</div>`;
   $('#rcBody').prepend(el);
 }

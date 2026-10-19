@@ -242,3 +242,9 @@ body.kfs-open .nav{z-index:1}
 .legbar .lgtxt i{display:inline-block;width:10px;height:10px;border-radius:3px;margin:0 3px 0 6px;vertical-align:-1px}
 .legbar .lgtxt i.d1{background:linear-gradient(90deg,#34C759 50%,#FF3B30 50%)}.legbar .lgtxt i.d2{background:#AF52DE}.legbar .lgtxt i.d3{background:#FF9500}
 #review .rv.fs-on .kc{height:calc(100vh - 100px)}
+
+/* 2026-10-19 复刻健康检查清单 */
+.af-hc{margin:10px 0 4px}.af-hc ul{list-style:none;margin:6px 0 0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;font-size:12px}
+.af-hc li{display:flex;gap:6px;align-items:flex-start;color:var(--t2)}.af-hc li i{font-style:normal;font-weight:700;width:14px;flex:none}
+.af-hc li.ok i{color:var(--up)}.af-hc li.warn i,.af-hc li.warn{color:#E8A33D}.af-hc li.bad i,.af-hc li.bad{color:var(--dn)}
+@media (max-width:900px){.af-hc ul{grid-template-columns:1fr}}
