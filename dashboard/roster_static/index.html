@@ -239,7 +239,7 @@
           <button class="view-btn" data-view="symbol">按币种</button>
           <button class="view-btn" data-view="stock">按美股</button>
         </div>
-        <div class="sidebar-label" id="sidebarLabel">按已实现扣费收益率排名</div>
+        <div class="sidebar-label" id="sidebarLabel">普通策略按已实现；对冲按盯市扣费</div>
         <div id="sidebarList"><div class="loading-row">加载中…</div></div>
       </aside>
 
@@ -334,7 +334,7 @@ async function loadMeta(){
 function renderSidebar(){
   const list = document.getElementById('sidebarList');
   list.innerHTML = rosterRows.map((row, i) => {
-    const ret = row.net_return_after_fees_pct;
+    const ret = row.ranking_return_pct ?? row.net_return_after_fees_pct;
     const tone = toneClass(ret);
     const active = row.strategy === currentStrategy ? 'active' : '';
     const openTag = row.open_count > 0 ? `<div class="strat-open">● ${row.open_count} 笔持仓中</div>` : '';
@@ -348,7 +348,7 @@ function renderSidebar(){
         </div>
         <div class="strat-side">
           <div class="strat-ret ${tone}">${fmtPct(ret)}</div>
-          <div class="strat-eq">${fmtUsd0(row.net_equity_after_fees)}</div>
+          <div class="strat-eq">${fmtUsd0(row.is_hedge_cycle ? row.mtm_equity_after_fees : row.net_equity_after_fees)}</div>
         </div>
       </div>`;
   }).join('');
@@ -439,7 +439,7 @@ function renderSymbolDetail(){
     <div class="kpi-row">
       <div class="kpi-card"><div class="label">合并盈亏</div><div class="value ${tone}" id="symKpiPnl">${fmtUsdSimple(row.total_pnl_usd)}</div></div>
       <div class="kpi-card"><div class="label">胜率</div><div class="value" id="symKpiWin">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
-      <div class="kpi-card"><div class="label">已平仓</div><div class="value" id="symKpiTrades">${row.trades ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '平仓成交（含部分）' : '已平仓'}</div><div class="value" id="symKpiTrades">${row.trades ?? 0}</div></div>
       <div class="kpi-card"><div class="label">持仓中</div><div class="value" id="symKpiOpen">${row.open_count ?? 0}</div></div>
     </div>
     <div class="tabs">
@@ -512,7 +512,7 @@ function switchCexView(view){
   currentSymbol = null;
   document.querySelectorAll('.view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   document.getElementById('sidebarLabel').textContent =
-    view === 'strategy' ? '按已实现扣费收益率排名' : (view === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏');
+    view === 'strategy' ? '普通策略按已实现；对冲按盯市扣费' : (view === 'stock' ? '美股 · 按合并盈亏' : '币种 · 按合并盈亏');
   if (view === 'strategy'){
     renderSidebar();
     if (currentStrategy){ renderDetailHeader(); loadTab(); }
@@ -728,7 +728,7 @@ function switchCategory(cat){
   document.getElementById('viewToggle').style.display = cat === 'cex' ? '' : 'none';
   if (cat === 'cex'){
     if (cexView === 'strategy'){
-      document.getElementById('sidebarLabel').textContent = '按已实现扣费收益率排名';
+      document.getElementById('sidebarLabel').textContent = '普通策略按已实现；对冲按盯市扣费';
       renderSidebar();
       if (currentStrategy){ renderDetailHeader(); loadTab(); }
       else document.getElementById('detailInner').innerHTML = '<div class="empty-note">选一套策略查看详情</div>';
@@ -754,7 +754,8 @@ async function loadCompare(isFirst){
     if (currentCategory === 'cex' && cexView === 'strategy'){
       renderSidebar();
       if (isFirst && rosterRows.length){
-        selectStrategy(rosterRows[0].strategy);
+        const wanted = new URLSearchParams(location.search).get('strategy');
+        selectStrategy(rosterRows.some(r=>r.strategy===wanted) ? wanted : rosterRows[0].strategy);
       } else if (currentStrategy){
         if (currentStrategy === renderedStrategy && document.getElementById('tabBody')){
           // 面板已经在展示这个策略：只就地更新 KPI 数字 + 静默刷新当前
@@ -799,7 +800,8 @@ function renderDetailHeader(){
   const row = rosterRows.find(r => r.strategy === currentStrategy);
   const inner = document.getElementById('detailInner');
   if (!row){ inner.innerHTML = '<div class="empty-note">选一套策略查看详情</div>'; renderedStrategy = null; return; }
-  const tone = toneClass(row.net_return_after_fees_pct);
+  const rankRet = row.ranking_return_pct ?? row.net_return_after_fees_pct;
+  const tone = toneClass(rankRet);
   inner.innerHTML = `
     <div class="detail-head">
       <div>
@@ -808,14 +810,14 @@ function renderDetailHeader(){
       </div>
     </div>
     <div class="kpi-row">
-      <div class="kpi-card"><div class="label">已实现扣费收益率</div><div class="value ${tone}" id="kpiRet">${fmtPct(row.net_return_after_fees_pct)}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '双腿盯市扣费收益率' : '已实现扣费收益率'}</div><div class="value ${tone}" id="kpiRet">${fmtPct(rankRet)}</div></div>
       <div class="kpi-card"><div class="label">胜率</div><div class="value" id="kpiWin">${row.win_rate != null ? row.win_rate + '%' : '–'}</div></div>
-      <div class="kpi-card"><div class="label">已平仓</div><div class="value" id="kpiTrades">${row.trades ?? 0}</div></div>
-      <div class="kpi-card"><div class="label">已实现扣费净值</div><div class="value" id="kpiEq">${fmtUsd0(row.net_equity_after_fees ?? 0)}</div></div>
-      <div class="kpi-card" title="已平仓交易实际计入的手续费"><div class="label">已实现手续费</div><div class="value" id="kpiFees">${fmtUsdAbs(row.total_fees_usd)}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '平仓成交（含部分）' : '已平仓'}</div><div class="value" id="kpiTrades">${row.trades ?? 0}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '现金净值（另计浮盈亏）' : '已实现扣费净值'}</div><div class="value" id="kpiEq">${fmtUsd0(row.net_equity_after_fees ?? 0)}</div></div>
+      <div class="kpi-card" title="已平仓交易实际计入的手续费"><div class="label">${row.is_hedge_cycle ? '累计实际手续费' : '已实现手续费'}</div><div class="value" id="kpiFees">${fmtUsdAbs(row.total_fees_usd)}</div></div>
       <div class="kpi-card"><div class="label">已实现扣费净利润</div><div class="value ${toneClass(row.net_pnl_after_fees_usd)}" id="kpiNetPnl">${fmtUsdSimple(row.net_pnl_after_fees_usd)}</div></div>
       <div class="kpi-card"><div class="label">持仓浮动盈亏</div><div class="value ${toneClass(row.open_unrealized_pnl_usd)}" id="kpiOpenPnl">${fmtUsdSimple(row.open_unrealized_pnl_usd)}</div></div>
-      <div class="kpi-card"><div class="label">持仓往返费用估算</div><div class="value" id="kpiOpenFees">${fmtUsdAbs(row.open_estimated_fees_usd)}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '预计退出费用' : '持仓往返费用估算'}</div><div class="value" id="kpiOpenFees">${fmtUsdAbs(row.open_estimated_fees_usd)}</div></div>
       <div class="kpi-card"><div class="label">盯市扣费收益率</div><div class="value ${toneClass(row.mtm_return_after_fees_pct)}" id="kpiRealized">${fmtPct(row.mtm_return_after_fees_pct)}</div></div>
       <div class="kpi-card"><div class="label">资金费率净收支</div><div class="value ${toneClass(row.total_funding_pnl_usd)}" id="kpiFunding">${fmtUsdSimple(row.total_funding_pnl_usd)}</div></div>
       <div class="kpi-card"><div class="label">名义敞口</div><div class="value" id="kpiExposure">${Number(row.gross_exposure_mult || 0).toFixed(2)}×</div></div>
@@ -823,11 +825,18 @@ function renderDetailHeader(){
       <div class="kpi-card"><div class="label">风险状态</div><div class="value" id="kpiRegime" style="font-size:16px">${row.risk_regime || 'waiting'}${row.new_entries_blocked ? ' · 冻结开仓' : ''}</div></div>
       <div class="kpi-card"><div class="label">动态敞口上限</div><div class="value" id="kpiGuardCap">${row.dynamic_gross_cap != null ? Number(row.dynamic_gross_cap).toFixed(1) + '×' : '–'}</div></div>
       ${row.realized_max_drawdown_pct != null ? `
-      <div class="kpi-card"><div class="label">已平仓扣费最大回撤</div><div class="value" id="kpiExperimentDd">${fmtPct(row.realized_max_drawdown_pct)}</div></div>
+      <div class="kpi-card"><div class="label">${row.is_hedge_cycle ? '盯市最大回撤' : '已平仓扣费最大回撤'}</div><div class="value" id="kpiExperimentDd">${fmtPct(row.realized_max_drawdown_pct)}</div></div>
       <div class="kpi-card"><div class="label">成交额 / 初始净值</div><div class="value" id="kpiExperimentTurnover">${Number(row.turnover_mult || 0).toFixed(2)}×</div></div>
       <div class="kpi-card"><div class="label">止损次数</div><div class="value" id="kpiExperimentStops">${row.stop_count ?? 0}</div></div>
       <div class="kpi-card"><div class="label">最差单笔扣费损益</div><div class="value ${toneClass(row.worst_trade_net_usd)}" id="kpiExperimentWorst">${row.worst_trade_net_usd == null ? '–' : fmtUsdSimple(row.worst_trade_net_usd)}</div></div>` : ''}
     </div>
+    ${row.is_hedge_cycle ? `<div class="kpi-row">
+      <div class="kpi-card"><div class="label">双腿盯市净值</div><div class="value" id="hedgeMtm">${fmtUsd0(row.mtm_equity_after_fees)}</div></div>
+      <div class="kpi-card"><div class="label">净名义敞口（跨品种不可互抵风险）</div><div class="value" id="hedgeNet">${fmtUsdSimple(row.net_exposure_usd)}</div></div>
+      <div class="kpi-card"><div class="label">总保证金 / 权益 ≤30%</div><div class="value" id="hedgeMargin">${fmtPct(row.margin_usage_pct)}</div></div>
+      <div class="kpi-card"><div class="label">多 / 空保证金 各≤20%</div><div class="value" id="hedgeSides">${fmtPct(row.long_margin_pct)} / ${fmtPct(row.short_margin_pct)}</div></div>
+      <div class="kpi-card"><div class="label">累计循环次数</div><div class="value" id="hedgeCycles">${row.cycle_total || 0}</div></div>
+    </div><div class="detail-desc">三品种共享 $1000；模拟保证金按10倍计算，总名义敞口仍限3倍。Gate资金费率逐事件计入。${row.guard_reason || ''}</div>` : ''}
     <div class="tabs">
       <button class="tab-btn ${currentTab==='symbols'?'active':''}" data-tab="symbols">按品种</button>
       <button class="tab-btn ${currentTab==='open'?'active':''}" data-tab="open">持仓中</button>
@@ -849,7 +858,7 @@ function patchStrategyKpis(){
   const row = rosterRows.find(r => r.strategy === currentStrategy);
   if (!row) return;
   const ret = document.getElementById('kpiRet');
-  if (ret){ ret.textContent = fmtPct(row.net_return_after_fees_pct); ret.className = 'value ' + toneClass(row.net_return_after_fees_pct); }
+  if (ret){ ret.textContent = fmtPct(row.ranking_return_pct ?? row.net_return_after_fees_pct); ret.className = 'value ' + toneClass(row.ranking_return_pct ?? row.net_return_after_fees_pct); }
   const win = document.getElementById('kpiWin');
   if (win) win.textContent = row.win_rate != null ? row.win_rate + '%' : '–';
   const tr = document.getElementById('kpiTrades');
@@ -882,25 +891,30 @@ function patchStrategyKpis(){
   if (experimentTurnover) experimentTurnover.textContent = Number(row.turnover_mult || 0).toFixed(2) + '×';
   const experimentStops = document.getElementById('kpiExperimentStops');
   if (experimentStops) experimentStops.textContent = row.stop_count ?? 0;
+  for (const [id,value] of Object.entries({hedgeMtm:fmtUsd0(row.mtm_equity_after_fees),
+    hedgeNet:fmtUsdSimple(row.net_exposure_usd),hedgeMargin:fmtPct(row.margin_usage_pct),
+    hedgeSides:fmtPct(row.long_margin_pct)+' / '+fmtPct(row.short_margin_pct),hedgeCycles:row.cycle_total || 0})){
+    const el=document.getElementById(id);if(el)el.textContent=value;
+  }
   const experimentWorst = document.getElementById('kpiExperimentWorst');
   if (experimentWorst){ experimentWorst.textContent = row.worst_trade_net_usd == null ? '–' : fmtUsdSimple(row.worst_trade_net_usd); experimentWorst.className = 'value ' + toneClass(row.worst_trade_net_usd); }
 }
 
 function _posOpenTable(rows, firstCol, firstColKey){
   return `<div class="table-wrap"><table>
-    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>入场价</th><th>现价</th><th>浮动盈亏</th></tr></thead>
-    <tbody>${rows.map(p => `<tr><td>${p[firstColKey]}</td><td>${p.side}</td>
+    <thead><tr><th>${firstCol}</th><th>方向</th><th>角色 / 数量</th><th>买入时间</th><th>入场价</th><th>现价</th><th>浮动盈亏</th></tr></thead>
+    <tbody>${rows.map(p => `<tr><td>${p[firstColKey]}</td><td>${p.side}</td><td>${p.leg_role || '普通'} / ${p.qty != null ? Number(p.qty).toFixed(6) : '–'}</td>
       <td>${fmtTime(p.entry_bar_time)}</td><td>${p.entry}</td>
       <td>${p.current_price ?? '–'}</td>
       <td class="num ${toneClass(p.unrealized_pnl_usd)}">${fmtUsdSimple(p.unrealized_pnl_usd)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function _posClosedTable(rows, firstCol, firstColKey){
   return `<div class="table-wrap"><table>
-    <thead><tr><th>${firstCol}</th><th>方向</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>毛利润</th><th>手续费统计</th><th>资金费率</th><th>净利润</th></tr></thead>
+    <thead><tr><th>${firstCol}</th><th>方向</th><th>角色 / 数量</th><th>买入时间</th><th>平仓时间</th><th>入场价</th><th>出场价</th><th>出场原因</th><th>毛利润</th><th>手续费统计</th><th>资金费率</th><th>净利润</th></tr></thead>
     <tbody>${rows.map(p => {
       const pnl = p.gross_pnl_usd;
       const exitMs = p.exit_bar_time || (p.closed_at ? p.closed_at*1000 : null);
-      return `<tr><td>${p[firstColKey]}</td><td>${p.side}</td>
+      return `<tr><td>${p[firstColKey]}</td><td>${p.side}</td><td>${p.leg_role || '普通'} / ${p.qty != null ? Number(p.qty).toFixed(6) : '–'}</td>
         <td>${fmtTime(p.entry_bar_time)}</td><td>${fmtTime(exitMs)}</td>
         <td>${p.entry}</td><td>${p.exit_price ?? '–'}</td>
         <td>${p.exit_reason || '–'}</td>

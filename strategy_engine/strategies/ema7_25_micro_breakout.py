@@ -90,6 +90,9 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
 
     fast_curr, fast_prev = fast[-1], fast[-2]
     slow_curr = slow[-1]
+    # 2026-10-04: SNDK(slow=25)用SNDK自己的Pine源码——暴力动量不要求快慢线排列、无实体击穿反转、
+    # 平仓=收盘同时跌破/站上双均线(无快线拐头/开盘价条件)；ZEC(slow=30)保持ZEC源码逻辑。
+    _sndk = (slow_n == 25)
     hh, ll = donchian[-1]
 
     ema_fast_up = fast_curr > fast_prev
@@ -116,12 +119,12 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         (price - o) >= atr_now * massive_mult and is_bullish
         and price > fast_curr and price > slow_curr and ema_fast_up
     )
-    momentum_long = is_massive_bull and price > hh and fast_curr > slow_curr
+    momentum_long = is_massive_bull and price > hh and (fast_curr > slow_curr or _sndk)
     is_massive_bear = (
         (o - price) >= atr_now * massive_mult and is_bearish
         and price < fast_curr and price < slow_curr and ema_fast_down
     )
-    momentum_short = is_massive_bear and price < ll and fast_curr < slow_curr
+    momentum_short = is_massive_bear and price < ll and (fast_curr < slow_curr or _sndk)
     reversal_long = (
         fast_curr > slow_curr and is_bullish
         and (o < fast_curr or o < slow_curr)
@@ -132,14 +135,14 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         and (o > fast_curr or o > slow_curr)
         and (price < fast_curr and price < slow_curr) and ema_fast_down
     )
-    long_condition = standard_long or momentum_long or reversal_long
-    short_condition = standard_short or momentum_short or reversal_short
-    close_long_condition = ema_fast_down and (
+    long_condition = standard_long or momentum_long or (reversal_long and not _sndk)
+    short_condition = standard_short or momentum_short or (reversal_short and not _sndk)
+    close_long_condition = (price < fast_curr and price < slow_curr) if _sndk else (ema_fast_down and (
         o < fast_curr and o < slow_curr and price < fast_curr and price < slow_curr
-    )
-    close_short_condition = ema_fast_up and (
+    ))
+    close_short_condition = (price > fast_curr and price > slow_curr) if _sndk else (ema_fast_up and (
         o > fast_curr and o > slow_curr and price > fast_curr and price > slow_curr
-    )
+    ))
 
     if position:
         side = str(position.get("side") or "").upper()

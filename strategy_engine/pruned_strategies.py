@@ -129,4 +129,15 @@ PRUNED_STRATEGIES = frozenset({
     "donchian_reversal",
     "ichimoku_cloud",
     "td_sequential",
+    # ── 2026-10-16 第二轮归档(宝贝批准"按照执行顺序依次执行") ──────────────
+    # 规则(脚本 /root/research/prune2_20261016.py)：已平仓≥30笔 且 扣费净亏≤-$50 且
+    # 含浮盈亏收益≤-5% 且 最近14天已平仓仍净亏。豁免：实盘sleeve基础策略、_dtf A/B基准、
+    # 实盘镜像/进行中实验。命中但特意保留：eth_kdj_exempt_narrow(TV实盘04版本复刻，
+    # 留作实盘监控)。归档时数据(笔数/扣费净$/含浮动%/近14天$)：
+    "vwap_mean_reversion",       # 2396笔 -368 -36.8% 近14天-131(实盘vwap服务已停)
+    "vwap_mean_reversion_30m",   # 1273笔 -243 -24.0% 近14天-111
+    "renko_trend",               # 32笔 -106 -6.3% 近14天-67
+    "dual_momentum_crypto",      # 126笔 -99 -9.8% 近14天-91(dual/cross动量族有实盘否决)
+    "volume_profile_reversion",  # 328笔 -94 -9.2% 近14天-63
+    "cross_momentum",            # 734笔 -91 -9.0% 近14天-67(v2/agile/runwin变体不受影响)
 })

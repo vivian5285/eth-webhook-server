@@ -531,6 +531,26 @@ except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] ema8_30_micro_breakout_strength_add 加载失败: {_e}")
 
+# 2026-10-04新增：SNDK/ZEC"实盘镜像"(满仓开仓+P75/P90分两次各加0.5，连续2根确认+
+# 量能否决+4H破线否决，见live_mirror.py)。后缀_radar_a/b/c是同一份信号函数，只靠
+# multi_strategy_runner.RADAR_VARIANTS按策略名挂三种不同的动态止盈(追踪)方案；
+# 无后缀的是只靠TV式离场(双均线破位)的对照组。
+try:
+    from strategy_engine.strategies import live_mirror
+    _LM_SPECS = {
+        "ema7_25_live_mirror": dict(fast=7, slow=25, thresholds=(1.535, 2.109),
+                                    vol_veto_frac=0.09, four_h_fast=7, atr_stop_mult=3.3),
+        "ema8_30_live_mirror": dict(fast=8, slow=30, thresholds=(1.293, 1.872),
+                                    vol_veto_frac=0.40, four_h_fast=8, atr_stop_mult=3.0),
+    }
+    for _pre, _spec in _LM_SPECS.items():
+        _fn = live_mirror.build(**_spec)
+        for _suf in ("", "_radar_a", "_radar_b", "_radar_c"):
+            STRATEGIES[_pre + _suf] = _fn
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] live_mirror 加载失败: {_e}")
+
 try:
     from strategy_engine.strategies import adx_efficiency_zscore
     STRATEGIES["adx_efficiency_zscore"] = adx_efficiency_zscore.generate_signal
@@ -732,6 +752,27 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] residual_momentum 加载失败: {_e}")
+
+# 2026-10-06：MACD×RSI极值反转(宝贝要求RSI 20/80 + MACD转向确认，纸面)。
+try:
+    from strategy_engine.strategies import macd_rsi_reversal
+    STRATEGIES["macd_rsi_reversal"] = macd_rsi_reversal.generate_signal
+    STRATEGIES["macd_rsi_reversal_1h"] = macd_rsi_reversal.generate_signal
+    STRATEGIES["macd_rsi_trend_3070"] = macd_rsi_reversal.generate_signal
+    STRATEGIES["macd_rsi_trend_3565"] = macd_rsi_reversal.generate_signal
+    STRATEGIES["macd_rsi_trend_3565_turn"] = macd_rsi_reversal.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] macd_rsi_reversal 加载失败: {_e}")
+
+# 2026-10-06：残差动量·截面多空对冲(纸面)——2026-10-05样本外研究，见模块顶部说明。
+try:
+    from strategy_engine.strategies import residual_cs_ls
+    STRATEGIES["residual_cs_ls"] = residual_cs_ls.generate_signal
+    STRATEGIES["residual_cs_ls_btceth"] = residual_cs_ls.generate_signal
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] residual_cs_ls 加载失败: {_e}")
 
 try:
     from strategy_engine.strategies import asset_class_trend_ensemble
@@ -1722,6 +1763,34 @@ STRATEGY_DESCRIPTIONS: Dict[str, str] = {
         "EMA(10/40)同向进场，回到 ±0.25 内离场。1d，走 UNIVERSE_ROSTER，"
         "BTC 自己不开仓(它是因子)。"
     ),
+    "macd_rsi_reversal": (
+        "MACD×RSI极值反转(RSI 20/80)——2026-10-06新增(宝贝要求，纸面)。做多=近6根RSI(14)曾≤20且当前MACD柱(12,26,9)由负翻正；"
+        "做空=近6根RSI曾≥80且MACD柱由正翻负；离场=RSI回到50或MACD柱反向翻转，2×ATR止损兜底；RSI≤15/≥85记tier2。"
+        "原有的只有单指标(macd_histogram、rsi_mean_reversion含2080变体)，没有RSI极值+MACD转向联合触发的。4h。"
+        "首次历史回放(2026-10-06，26个品种约250天)：58笔PF0.71，信号稀少且偏亏，先看纸面样本。"
+    ),
+    "macd_rsi_trend_3070": (
+        "MACD×RSI顺势反转·精选版(RSI 30/70)——2026-10-06优化。4h/43品种/2.7年网格，前半选参→后半验证(PF 1.68→1.31~1.86)：近6根RSI≤30(≥70)+MACD柱连续2根收缩(转向早期)+顺势过滤(多头仅收盘>EMA100、空头仅<EMA100)；RSI回50或MACD柱反向离场，2.5×ATR止损。信号少(约每品种每年2笔)但胜率高。"
+    ),
+    "macd_rsi_trend_3565": (
+        "MACD×RSI顺势反转·高频版(RSI 35/65)——2026-10-06优化。近10根RSI≤35(≥65)+MACD柱过零+顺势过滤(EMA100)；只用MACD柱反向翻转离场，2.5×ATR止损。前半选参→后半PF 1.36→1.20(约每品种每年8笔)，偶数/奇数品种分开验证PF都约1.3。"
+    ),
+    "macd_rsi_trend_3565_turn": (
+        "MACD×RSI顺势反转·高频提前版(RSI 35/65，MACD柱收缩即进)——2026-10-06优化。近6根RSI≤35(≥65)+MACD柱连续2根收缩+顺势过滤(EMA100)；MACD柱反向翻转离场，2.5×ATR止损。前半→后半PF 1.27→1.71。"
+    ),
+    "macd_rsi_reversal_1h": (
+        "同macd_rsi_reversal，1h周期(信号更多，对照用)。首次回放(约62天)：81笔PF0.38。"
+    ),
+    "residual_cs_ls": (
+        "残差动量·截面多空对冲(BTC因子)——2026-10-06新增(纸面验证)。每个币对BTC回归取残差动量分数(最近20日残差和/"
+        "(残差波动×√20)，回归窗120日)，全篮子(约43个币)按分数排名：最强33%做多、最弱33%做空，每10天再平衡，掉出对应一侧就平仓，"
+        "只带5×ATR(封顶30%)灾难止损。依据2026-10-05样本外研究(前半选参→后半夏普+1.41→+1.37)；保留意见：赚钱主要在多头腿、"
+        "2022与2026偏弱、有幸存者/新币偏差、研究没算资金费(擂台PnL含资金费)。1d。"
+    ),
+    "residual_cs_ls_btceth": (
+        "残差动量·截面多空对冲(BTC+ETH双因子)——同residual_cs_ls，回归同时扣BTC与ETH的beta，mom30，每5天再平衡。"
+        "研究里前半选参→后半夏普+1.45→+1.28(日调仓)。1d，纸面。"
+    ),
     "residual_momentum_crypto": (
         "残差动量的币圈纯作用域修正版。仍以BTC为市场因子，但只作用于加密"
         "资产，不再用BTC解释美股代币和黄金收益；参数与原版保持一致，作为"
@@ -1958,3 +2027,310 @@ def get_strategy(name: str):
 
 def get_strategy_description(name: str) -> str:
     return STRATEGY_DESCRIPTIONS.get(str(name or "").strip(), "")
+
+
+# 2026-10-05: ADX双引擎及消融对照。完整维护说明见research/ADX_DUAL_ENGINE_HANDOFF.md。
+# 共用纯函数，差异仅由roster.engine_mode/timeframe指定；不重新启用归档策略。
+from strategy_engine.strategies import adx_dual_engine
+for _dual_name, _dual_label in {
+    "adx_dual_engine_4h": "4h趋势+震荡双引擎",
+    "adx_dual_trend_only_4h": "4h仅趋势腿对照",
+    "adx_dual_range_only_4h": "4h仅震荡腿对照",
+    "adx_dual_engine_1h": "1h趋势+震荡双引擎",
+}.items():
+    STRATEGIES[_dual_name] = adx_dual_engine.generate_signal
+    STRATEGY_DESCRIPTIONS[_dual_name] = (
+        _dual_label + "，2026-10-05新模拟实验，仅Gate加密永续。ADX连续2根≥25走趋势、"
+        "≤18走回归，18~25不开新仓。趋势用EMA7/30+DI方向，回踩修复/突破/"
+        "ADX刚确认进场，2ATR止损、3ATR收盘回撤或EMA失效退出，无固定TP。"
+        "震荡用布林带20/2+RSI2极值收回，1.2ATR止损、动态中轨或12根超时退出。"
+        "入场引擎持久化，确认市场变档先平仓，禁止把回归仓改成趋势仓。"
+        "同一品种同一策略只持一仓；费用/滑点/组合风控沿用擂台。尚未验证盈利。"
+    )
+
+
+# 2026-10-07新增：趋势过滤(EMA快>慢)+唐奇安突破入场+ATR硬止损+吊灯/反向通道移动止盈，
+# 宝贝要求的"稳准狠"趋势组合。同一份代码分4h(加密/黄金)和1d(美股)两个注册名，
+# 参数由roster条目逐品种覆盖；参数研究见unicorn_quant/donchian_study.py。说明见该模块顶部。
+try:
+    from strategy_engine.strategies import donchian_trend_atr
+    for _dn_name, _dn_tf in (("donchian_trend_atr_4h", "4h"), ("donchian_trend_atr_1d", "1d")):
+        STRATEGIES[_dn_name] = donchian_trend_atr.generate_signal
+        STRATEGY_DESCRIPTIONS[_dn_name] = (
+            _dn_tf + "趋势组合：EMA快>慢且收盘>EMA快才做多，收盘突破唐奇安通道入场(可叠ADX/放量/布林过滤)，"
+            "入场价-ATR倍数硬止损，吊灯(最高-ATR倍数)或反向短通道破位离场，无固定止盈、离场不反手。"
+            "2026-10-07新增，纸面实验，尚未验证盈利。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] donchian_trend_atr 加载失败: {_e}")
+
+
+# 2026-10-16新增：美股1H双均线顺势(多空双向)，宝贝要求"8和30或者10和30，顺着趋势做单"。
+# 复用ema_cross_7_30规则，只改周期/快慢线，并可选ATR%波动过滤。说明+回测见stock_ema_trend.py顶部。
+try:
+    from strategy_engine.strategies import stock_ema_trend
+    for _se_name, _se_label in (
+        ("stock_ema8_30_1h", "EMA8/30，无波动过滤"),
+        ("stock_ema10_30_1h", "EMA10/30，无波动过滤"),
+        ("stock_ema8_30_1h_atr08", "EMA8/30，ATR(14)/价≥0.8%才开仓"),
+        ("stock_ema10_30_1h_atr08", "EMA10/30，ATR(14)/价≥0.8%才开仓"),
+    ):
+        STRATEGIES[_se_name] = stock_ema_trend.generate_signal
+        STRATEGY_DESCRIPTIONS[_se_name] = (
+            "美股1H双均线顺势(多空双向)——" + _se_label + "。2026-10-16宝贝要求新增。"
+            "金叉开多/死叉开空，反向交叉离场，ATR×2.5硬止损，不设固定止盈。"
+            "币安15只美股永续1H回测(~8个月，扣费)：8/30无过滤每笔+0.16%，加ATR≥0.8%过滤每笔+0.51%、回撤更小；"
+            "4H周期、只做空、只在美股正常交易时段开仓都更差。纸面实验，未验证前不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] stock_ema_trend 加载失败: {_e}")
+
+
+# 2026-10-16新增：日线大势方向过滤(_dtf = daily trend filter)对照组。
+# 擂台全量成交诊断(/root/research/arena_diag2_20261016.py)：币圈/黄金上，下面这12个
+# 趋势策略几乎全部是"顺日线大势的单赚、逆日线和日线无方向的单亏"(合计顺势+$1776 /
+# 逆势-$1410 / 无方向-$691)。turtle_breakout 是例外(逆势突破反而赚)，所以不做它；
+# 均值回归类本来就靠逆势赚钱，也不做。
+# 规则：日线(只用已收盘K线) 收盘>EMA50 且 EMA20>EMA50 = 多头大势，镜像为空头大势，其余=无方向；
+# 只有基础策略给出的开仓方向跟日线大势一致时才放行。持仓中的离场/加仓信号原样透传，原策略本身不改。
+# 注意：过滤条件是在同一份历史上找出来的(样本内)，要看前向A/B才算数。
+DAILY_TREND_FILTER_BASES = (
+    "macd_histogram", "kaufman_ama", "ema_cross_7_30", "funding_trend",
+    "ttm_squeeze", "hma_trend", "dual_thrust", "supertrend_adx",
+    "keltner_channel", "chanlun_pivot", "heikin_ashi_trend", "mtf_ema_macd_cci",
+)
+
+
+def daily_trend_regime(daily_bars) -> int:
+    from strategy_engine import indicators as _ind
+    closes = _ind.closes(daily_bars or [])
+    if len(closes) < 60:
+        return 0
+    e20 = _ind.ema(closes, 20)
+    e50 = _ind.ema(closes, 50)
+    if not e20 or not e50:
+        return 0
+    c, f, s = closes[-1], e20[-1], e50[-1]
+    if c > s and f > s:
+        return 1
+    if c < s and f < s:
+        return -1
+    return 0
+
+
+def _make_daily_trend_filtered(base_fn):
+    def _fn(bars_by_tf, params=None, position=None):
+        sig = base_fn(bars_by_tf, params, position)
+        if position or not sig or sig.get("action") not in ("LONG", "SHORT"):
+            return sig
+        want = 1 if sig["action"] == "LONG" else -1
+        return sig if daily_trend_regime(bars_by_tf.get("1d")) == want else None
+    return _fn
+
+
+for _dtf_base in DAILY_TREND_FILTER_BASES:
+    if _dtf_base in STRATEGIES:
+        STRATEGIES[_dtf_base + "_dtf"] = _make_daily_trend_filtered(STRATEGIES[_dtf_base])
+        STRATEGY_DESCRIPTIONS[_dtf_base + "_dtf"] = (
+            _dtf_base + " + 日线大势方向过滤(对照组，2026-10-16)。信号、止损、离场跟 " + _dtf_base
+            + " 完全一样，只多一道开仓闸门：日线收盘>EMA50且EMA20>EMA50才允许做多，镜像才允许做空，"
+            "日线无方向不开仓。只跑币圈+黄金。依据：擂台全量成交里，这批趋势策略逆日线开的单合计-$1410、"
+            "无方向-$691、顺势+$1776。过滤条件来自同一份历史(样本内)，以前向A/B为准。"
+        )
+
+
+# 2026-10-16新增：日线EMA8/30大级别顺势，只做多 vs 多空双向两个对照。说明+回测见 daily_ema_trend.py 顶部。
+try:
+    from strategy_engine.strategies import daily_ema_trend
+    STRATEGIES["daily_ema8_30_long"] = daily_ema_trend.generate_signal
+    STRATEGIES["daily_ema8_30_ls"] = daily_ema_trend.generate_signal
+    STRATEGY_DESCRIPTIONS["daily_ema8_30_long"] = (
+        "日线EMA8/30只做多(2026-10-16)：快线在慢线上方就持多，跌到下方就空仓等待，不做空。4×ATR灾难止损。"
+        "回测：币圈2019起 年化≈62–68%/回撤50.6%(持有61.6%/79%)，美股只做多 回撤约是持有的一半。纸面实验。"
+    )
+    STRATEGY_DESCRIPTIONS["daily_ema8_30_ls"] = (
+        "日线EMA8/30多空双向(2026-10-16)：快线在上持多，在下持空，按状态持仓。4×ATR灾难止损。"
+        "跟 daily_ema8_30_long 对照。回测：做空腿在币圈和美股长期都是亏的(币圈多空 年化≈28–40%，美股≈0%)，"
+        "只在2022年真熊市有用。纸面实验，用来实际看做空腿在当前行情下的表现。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] daily_ema_trend 加载失败: {_e}")
+
+
+# 2026-10-16新增：美股4H突破做多腿(三腿组合的第三条腿，另两条=stock_ema8_30_1h_atr08)。见 stock_breakout_long.py。
+try:
+    from strategy_engine.strategies import stock_breakout_long
+    STRATEGIES["stock_breakout4h_long"] = stock_breakout_long.generate_signal
+    STRATEGY_DESCRIPTIONS["stock_breakout4h_long"] = (
+        "美股4H突破做多(2026-10-16)：4H收盘突破前20根最高点做多，跌破前10根最低点离场，2.5×ATR(14)止损，只做多。"
+        "是三腿组合的一条腿，跟 stock_ema8_30_1h_atr08(1H EMA8/30多空)合起来看。回测三腿合计 收益/回撤3.34，"
+        "高于单独的1H多空(2.34)，前后两半都为正。纸面实验。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] stock_breakout_long 加载失败: {_e}")
+
+
+# 2026-10-16新增：日线EMA8/30多空的降回撤对照版(按波动率调仓 + 山寨币跟BTC同方向)。见 daily_ema_trend_vt.py。
+try:
+    from strategy_engine.strategies import daily_ema_trend_vt
+    STRATEGIES["daily_ema8_30_ls_vt_btc"] = daily_ema_trend_vt.generate_signal
+    STRATEGY_DESCRIPTIONS["daily_ema8_30_ls_vt_btc"] = (
+        "日线EMA8/30多空 + 按波动率调仓(目标日波动2%) + 山寨币跟BTC同方向才开仓(2026-10-16)，只跑币圈。"
+        "是 daily_ema8_30_ls 的降回撤对照版。回测2017起16个币：回撤50.4%→22.1%，收益/回撤1.56→1.61，"
+        "后半段0.50→0.92，盈亏因子1.75→2.25；止损/止盈/ADX类改动全部变差，没有采用。纸面实验。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] daily_ema_trend_vt 加载失败: {_e}")
+
+
+# 2026-10-16新增：同一套日线EMA8/30多空+波动率调仓+BTC方向，只跑主流5个币、波动率目标3%。
+try:
+    from strategy_engine.strategies import daily_ema_trend_vt as _dvt
+    STRATEGIES["daily_ema8_30_ls_vt_main5"] = _dvt.generate_signal
+    STRATEGY_DESCRIPTIONS["daily_ema8_30_ls_vt_main5"] = (
+        "日线EMA8/30多空 + 波动率调仓(目标日波动3%) + 跟BTC同方向，只跑BTC/ETH/BNB/SOL/XRP(2026-10-16)。"
+        "回测2017起：年化65.1%/回撤30.8%/收益/回撤2.12，后半段1.12，优于16个币版本(1.66)。"
+        "注意主流5个是按今天的市值挑的，有事后选择偏差。纸面实验。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] daily_ema8_30_ls_vt_main5 加载失败: {_e}")
+
+
+# 2026-10-16新增：日线EMA8/30，用正股(Yahoo)日线算信号、在永续上执行，只跑美股。见 daily_ema_trend_yf.py。
+try:
+    from strategy_engine.strategies import daily_ema_trend_yf
+    STRATEGIES["daily_ema8_30_long_yf"] = daily_ema_trend_yf.generate_signal
+    STRATEGIES["daily_ema8_30_ls_yf"] = daily_ema_trend_yf.generate_signal
+    for _yf_name, _yf_label in (("daily_ema8_30_long_yf", "只做多"), ("daily_ema8_30_ls_yf", "多空")):
+        STRATEGY_DESCRIPTIONS[_yf_name] = (
+            f"日线EMA8/30{_yf_label}，信号用正股日线(Yahoo，只算已收盘交易日)，在永续上执行(2026-10-16)，只跑美股。"
+            "跟 daily_ema8_30_long/ls 只差信号数据来源：解决永续上线太晚、EMA攒不够天数，以及周末盘外波动打脸的问题。"
+            "OPENAI/ANTHROPIC 没有正股，退回用永续数据。回测12只：只做多 -5%→+11%，多空 -7%→+4%。纸面实验。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] daily_ema_trend_yf 加载失败: {_e}")
+
+
+# 2026-10-16新增：4H趋势策略的"BTC方向 + 按波动率调仓"对照版(_bv)，只跑币圈15个。
+# 依据：/root/research/harness(直接调用擂台策略代码的2年回测)。币圈15个：
+#   supertrend_adx  原版 收益/回撤0.51 → _bv 1.72；keltner_channel 原版0.43 → _bv 1.39。
+# 规则：信号/止损/离场跟原版完全一样；非BTC品种只在 BTC 日线 EMA8/30 同方向时开新仓；
+# position_fraction = min(1, 基准4H ATR% ÷ 该品种4H ATR%)。基准取回测里该策略币圈开仓的ATR%中位数。
+# 4H止损距离小，擂台 compute_qty 是名义上限先起作用，不会跟止损距离重复缩仓(跟日线版不同)。
+BTC_VOL_VARIANTS = {"supertrend_adx": 0.02605, "keltner_channel": 0.02442}
+
+
+def _make_btc_vol(base_fn, k):
+    def _fn(bars_by_tf, params=None, position=None):
+        sig = base_fn(bars_by_tf, params, position)
+        if position or not sig or sig.get("action") not in ("LONG", "SHORT"):
+            return sig
+        sym = str((params or {}).get("symbol") or "").upper()
+        if sym != "BTCUSDT":
+            from strategy_engine.strategies.daily_ema_trend_vt import _btc_state
+            btc = _btc_state()
+            if btc is None or btc != (1 if sig["action"] == "LONG" else -1):
+                return None
+        price, atr = float(sig.get("price") or 0), float(sig.get("atr") or 0)
+        if price <= 0 or atr <= 0:
+            return None
+        sig = dict(sig)
+        sig["position_fraction"] = min(1.0, k / (atr / price))
+        return sig
+    return _fn
+
+
+for _bv_base, _bv_k in BTC_VOL_VARIANTS.items():
+    if _bv_base in STRATEGIES:
+        STRATEGIES[_bv_base + "_bv"] = _make_btc_vol(STRATEGIES[_bv_base], _bv_k)
+        STRATEGY_DESCRIPTIONS[_bv_base + "_bv"] = (
+            _bv_base + " + BTC方向 + 按波动率调仓(对照组，2026-10-16)，只跑币圈15个。信号/止损/离场跟原版一样；"
+            "非BTC品种只在BTC日线EMA8/30同方向时开仓；仓位 = min(1, 基准ATR% ÷ 该品种ATR%)。"
+            "2年回测(直接调用擂台策略代码)：supertrend 收益/回撤 0.51→1.72，keltner 0.43→1.39。纸面实验。"
+        )
+
+
+# 2026-10-17新增：SNDK 的 TV 双均线规则(ema7_25_micro_breakout，默认参数就是 SNDK Pine 逻辑)，
+# 扩到存储/半导体 5 只(SNDK/WDC/MU/SMCI/AMD)，90m，2.0×ATR 硬止损(原版2.5)，1倍名义仓位。
+# 回测(/root/research/harness/sweep90.py、variants90.py，币安永续全部历史约半年，每边0.08%)：
+#   5只 年化117%/回撤16.8%/收益回撤6.99，去掉WDC仍6.58；全部15只美股只有2.51。
+#   止损1.5–2.5ATR最好；止损后立刻再开、按均线分离度定仓位、浮盈加仓都没有更好。
+#   注意："只做存储/半导体"是看过结果挑的，而且这半年正好是存储芯片大行情。纸面实验。
+try:
+    from strategy_engine.strategies import ema7_25_micro_breakout as _semis_src
+    STRATEGIES["sndk_rule_semis_90m"] = _semis_src.generate_signal
+    STRATEGY_DESCRIPTIONS["sndk_rule_semis_90m"] = (
+        "SNDK 的 TV 双均线规则扩到存储/半导体5只(SNDK/WDC/MU/SMCI/AMD)，90m，2.0×ATR硬止损，1倍名义(2026-10-17)。"
+        "规则跟 ema7_25_micro_breakout 完全一样(反向信号同一根K线反手)。半年回测：5只 年化117%/回撤16.8%/收益回撤6.99，"
+        "去掉贡献最大的WDC仍有6.58；止损后立刻再开、分离度定仓、浮盈加仓都更差。品种是看过结果挑的，纸面实验。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] sndk_rule_semis_90m 加载失败: {_e}")
+
+
+# 2026-10-17新增：
+#  ① daily_ema8_30_ls_cycle_main5 = daily_ema8_30_ls_vt_main5 + BTC减半周期过滤(牛市不开空/熊市不开多/筑底都开)，见 halving_cycle.py。
+#     回测主流5个2017起：收益/回撤 2.12→3.11。
+#  ② sndk_rule_tech3_90m = SNDK 规则(ema7_25_micro_breakout，2.0ATR)扩到"存储 + 半导体/设备 + AI算力"三个行业里
+#     单股回撤≤50%的28只。117只个股回测：这三类平均年化 +63%/+37%/+14%，大型科技/ETF/其他全亏。
+try:
+    from strategy_engine.strategies import daily_ema_trend_vt as _cyc_src
+    STRATEGIES["daily_ema8_30_ls_cycle_main5"] = _cyc_src.generate_signal
+    STRATEGY_DESCRIPTIONS["daily_ema8_30_ls_cycle_main5"] = (
+        "日线EMA8/30多空(主流5个，波动率3%，跟BTC同方向) + BTC减半周期过滤(2026-10-17)：减半后0–18个月只做多、"
+        "18–30个月只做空、30–48个月多空都做。2017起回测收益/回撤 2.12→3.11；只有约2.5个周期，样本内，纸面验证。"
+    )
+    from strategy_engine.strategies import ema7_25_micro_breakout as _tech3_src
+    STRATEGIES["sndk_rule_tech3_90m"] = _tech3_src.generate_signal
+    STRATEGY_DESCRIPTIONS["sndk_rule_tech3_90m"] = (
+        "SNDK的TV双均线规则，跑存储+半导体/设备+AI算力三个行业里单股回撤≤50%的28只，90m，2.0×ATR，1倍名义(2026-10-17)。"
+        "117只个股回测：这三类平均年化 +63%/+37%/+14%；大型科技(-75%)、ETF、其他都亏。数据只有3–9个月，"
+        "正好是AI存储芯片大行情，纸面验证。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] cycle/tech3 加载失败: {_e}")
+
+
+# 2026-10-18：美股行业轮动(6个月前5个行业)·只做多·日线EMA8/30·波动率3%(宝贝批准做擂台纸面，方案F的美股腿)。
+try:
+    from strategy_engine.strategies import stock_sector_rotation as _rot_src
+    STRATEGIES["stock_sector_rot6m5_long"] = _rot_src.generate_signal
+    STRATEGY_DESCRIPTIONS["stock_sector_rot6m5_long"] = (
+        "美股行业轮动·只做多(2026-10-18)：每月按过去6个月13个行业涨幅取前5，只在这些行业里币安有永续的股票上做多；"
+        "正股日线EMA8>EMA30持有，跌破或行业掉出前5离场，3×ATR止损；单只仓位=净值×min(1,3%÷ATR%)÷max(只数,5)，总名义≤1倍。"
+        "2017起回测年化+28%回撤26%；跟币圈主流5日线各0.75(方案F)年化+90%回撤26%。纸面验证。"
+    )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] stock_sector_rotation 加载失败: {_e}")
+
+
+# 2026-10-17：方案F币圈腿"B方案"的两条8h腿(日线EMA 50% + 8h超级趋势 25% + 8h布林 25%，回测收益/回撤3.09→3.52)。
+try:
+    from strategy_engine.strategies import intraday_trend_cycle as _itc
+    STRATEGIES["st8h_cycle_main5"] = _itc.generate_signal_st
+    STRATEGIES["boll8h_cycle_main5"] = _itc.generate_signal_bb
+    STRATEGY_DESCRIPTIONS["st8h_cycle_main5"] = "8h超级趋势(10,3)+BTC减半周期(严格)+山寨跟BTC日线+波动率调仓，主流5个(2026-10-17，方案F币圈腿B的25%)"
+    STRATEGY_DESCRIPTIONS["boll8h_cycle_main5"] = "8h布林(25,1.25)突破+BTC减半周期(严格)+山寨跟BTC日线+波动率调仓，主流5个(2026-10-17；10-19起参数(25,1.25)、币圈腿三条子腿各1/3)"
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] intraday_trend_cycle 加载失败: {_e}")
+
+
+# 2026-10-17：方案F币圈日线腿 + 盘中突破单(1h检查近似盘中触价)，跟 daily_ema8_30_ls_cycle_main5 对照。
+try:
+    from strategy_engine.strategies import daily_ema_brk as _deb
+    STRATEGIES["daily_ema_brk_cycle_main5"] = _deb.generate_signal
+    STRATEGY_DESCRIPTIONS["daily_ema_brk_cycle_main5"] = "日线EMA8/30多空+减半周期+熊市底部反转+BTC同向+波动率调仓，外加盘中突破前5日高/低提前进场(1h检查)。回测日线腿收益比3.19→3.38(2026-10-17)"
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] daily_ema_brk 加载失败: {_e}")

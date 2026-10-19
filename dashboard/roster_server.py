@@ -1,32 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-擂台策略对比面板——2026-09-04新建，独立于 dashboard/server.py（那是
-"熊猫量化"实盘监控面板，跑在旧VPS 187.77.130.144 上，服务B/C/D/E四个
-真实账户，这次改动完全不碰它）。
+"""擂台纸面模拟只读面板，2026-10-05增加独立EMA双腿实验。
 
-背景：宝贝要求"新的vps我需要新的页面专门来做擂台策略这个事，就跟旧vps
-分开"——旧VPS继续专职执行实盘，控制面板保持不变；擂台策略(strategy_
-engine/comparison_roster.py配置的20套公开知名战法纸面模拟对比)迁移到
-新VPS(187.53.133.188)上独立跑一个新面板，风格也要区分开(苹果风+毛
-玻璃质感)，避免两个面板长得一样让人分不清是在看真钱还是在看纸面模拟。
-
-数据来源只有本机 strategy_engine.shadow_store 的本地sqlite(shadow_v2.
-db)，不碰binance_client/position_supervisor_binance，不需要任何API
-Key、不触碰任何真实账户/资金——这台VPS上唯一常驻跑着的东西就是
-strategy-roster.service(multi_strategy_runner.py)，本身也是同样的隔离
-边界(见multi_strategy_runner.py顶部注释)。
-
-跟旧面板"策略对比"tab的实现方式相比：旧面板当年是用subprocess一次性
-调用strategy_engine（因为那时strategy_engine在旧VPS上是停用状态，没有
-常驻进程可以直接import）；这里strategy_engine本来就是这台VPS上唯一
-常驻跑着的东西，直接同进程import shadow_store/comparison_roster/
-strategies三个模块即可，不需要再绕subprocess那一层。
+普通策略读shadow_v2.db；EMA对冲/净敞口对照读hedge_cycle.db。
+当前VPS与实盘共存，本模块不访问真实账户或下单模块，不应据早期迁移注释
+推断这台机器只有纸面服务。Gate实时估值，OPENAI/ANTHROPIC存量币安例外保留。
+Claude维护入口: strategy_engine/research/HEDGE_CYCLE_HANDOFF.md。
+双腿排名使用全腿盯市扣费，避免部分止盈形成虚高已实现收益。
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -41,13 +27,14 @@ from flask_cors import CORS
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from strategy_engine import position_sizing, shadow_store  # noqa: E402
+from strategy_engine import klines, position_sizing, shadow_store  # noqa: E402
 from strategy_engine.comparison_roster import (  # noqa: E402
     PAIRS_ROSTER,
     SINGLE_SYMBOL_ROSTER,
     TOKENIZED_STOCK_SYMBOLS,
     UNIVERSE_ROSTER,
 )
+from strategy_engine.hedge_cycle import store as hedge_store, config as hedge_config
 from strategy_engine.strategies import STRATEGY_DESCRIPTIONS  # noqa: E402
 
 _STOCK_SET = set(TOKENIZED_STOCK_SYMBOLS)
@@ -60,6 +47,7 @@ CORS(app)
 
 STATIC_DIR = Path(__file__).resolve().parent / "roster_static"
 
+GATE_PRICE_URL = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
 BINANCE_PRICE_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 
 _ALL_STRATEGY_NAMES = sorted(set(
@@ -149,30 +137,55 @@ def _hma_experiment_metrics():
 
 
 def _fetch_live_prices():
-    """公开行情接口，无需API key，只读现价，不碰任何账户——跟旧面板
-    fetch_live_prices()同一个端点/同一套只读边界，独立实现避免两个
-    面板互相import。短TTL内存缓存，避免开仓列表和多个策略详情页
-    短时间内重复打接口。"""
+    """Gate行情与Gate K线一致；仅OPENAI/ANTHROPIC保留币安旧仓报价。
+
+    2026-10-05发现：K线已切Gate但网页仍全用币安markPrice，导致浮盈亏
+    和风险统计混源。现在根据同一klines合约名/1000倍率映射取Gate mark。
+    Gate失败只沿用自身缓存，绝不自动换币安。旧仓例外由用户确认保留。
+    """
     now = time.time()
     if now - _price_cache["ts"] < _PRICE_CACHE_TTL_SEC and _price_cache["data"]:
         return _price_cache["data"]
+    data = dict(_price_cache["data"])
+    updated = False
+    mapping = {
+        klines._symbol_to_gate_contract(s): s for s in _ALL_SYMBOLS
+        if s not in klines.BINANCE_SOURCE_SYMBOLS
+    }
     try:
-        req = urllib.request.Request(BINANCE_PRICE_URL, headers={"User-Agent": "roster-dashboard-readonly"})
+        req = urllib.request.Request(GATE_PRICE_URL, headers={"User-Agent": "roster-dashboard-readonly"})
         with urllib.request.urlopen(req, timeout=6) as resp:
-            raw = resp.read().decode("utf-8")
-        rows = json.loads(raw)
-        wanted = set(_ALL_SYMBOLS)
-        data = {
-            r["symbol"]: float(r.get("markPrice") or r.get("price"))
-            for r in rows
-            if r.get("symbol") in wanted and (r.get("markPrice") or r.get("price"))
-        }
+            rows = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(rows, list):
+            raise ValueError("Gate ticker格式异常")
+        for row in rows:
+            symbol = mapping.get(row.get("contract"))
+            if symbol:
+                price = float(row["mark_price"]) * klines._price_scale(symbol)
+                if math.isfinite(price) and price > 0:
+                    data[symbol] = price
+                    updated = True
+    except Exception as exc:
+        logger.warning("[roster_dashboard] Gate现价失败，保留Gate缓存: %s", exc)
+    exceptions = set(_ALL_SYMBOLS) & klines.BINANCE_SOURCE_SYMBOLS
+    if exceptions:
+        try:
+            req = urllib.request.Request(BINANCE_PRICE_URL, headers={"User-Agent": "roster-dashboard-legacy-readonly"})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                rows = json.loads(resp.read().decode("utf-8"))
+            for row in rows:
+                symbol = row.get("symbol")
+                if symbol in exceptions:
+                    price = float(row["markPrice"])
+                    if math.isfinite(price) and price > 0:
+                        data[symbol] = price
+                        updated = True
+        except Exception as exc:
+            logger.warning("[roster_dashboard] 币安旧仓例外报价失败: %s", exc)
+    if updated:
         _price_cache["ts"] = now
         _price_cache["data"] = data
-        return data
-    except (urllib.error.URLError, Exception) as e:  # noqa: BLE001
-        logger.warning(f"[roster_dashboard] 拉取现价失败: {e}")
-        return _price_cache["data"] or {}
+    return data
 
 
 def _augment_open_rows(rows):
@@ -247,9 +260,25 @@ def shadow_portfolio_page():
     return send_from_directory(str(STATIC_DIR), "shadow.html")
 
 
+# 2026-10-16：同一页面切换不同 cohort。白名单映射，查询参数不会拼进路径。
+_SHADOW_COHORTS = {
+    "v3": _REPO_ROOT / "shadow_combo" / "data" / "shared_shadow_v3.db",
+    "mixctl": _REPO_ROOT / "shadow_combo" / "data" / "shadow_mixctl_20261016.db",
+    "mix": _REPO_ROOT / "shadow_combo_mix" / "data" / "shadow_mix_v1.db",
+    "mixctl2": _REPO_ROOT / "shadow_combo" / "data" / "shadow_mixctl2_20261016.db",
+    "mix2": _REPO_ROOT / "shadow_combo_mix2" / "data" / "shadow_mix2_v1.db",
+    "mixctl3": _REPO_ROOT / "shadow_combo" / "data" / "shadow_mixctl3_20261017.db",
+    "mix3": _REPO_ROOT / "shadow_combo_mix3" / "data" / "shadow_mix3_v1.db",
+    "mixctl4": _REPO_ROOT / "shadow_combo" / "data" / "shadow_mixctl4_20261017.db",
+    "mix4": _REPO_ROOT / "shadow_combo_mix4" / "data" / "shadow_mix4_v1.db",
+}
+
+
 @app.route("/api/roster/shared-shadow")
 def api_shared_shadow():
-    db_path = _REPO_ROOT / "shadow_combo" / "data" / "shared_shadow_v3.db"
+    db_path = _SHADOW_COHORTS.get(request.args.get("cohort") or "v3")
+    if db_path is None:
+        return jsonify({"status": "unknown_cohort", "account": None}), 404
     if not db_path.exists():
         return jsonify({"status": "warming_up", "account": None})
     try:
@@ -284,7 +313,7 @@ def api_shared_shadow():
 def api_meta():
     return jsonify({
         "status": "ok",
-        "strategy_count": len(_ALL_STRATEGY_NAMES),
+        "strategy_count": len(_ALL_STRATEGY_NAMES) + len(hedge_config.NAMES),
         "symbol_count": len(_ALL_SYMBOLS),
         "single_symbol_entries": len(SINGLE_SYMBOL_ROSTER),
         "universe_entries": len(UNIVERSE_ROSTER),
@@ -294,6 +323,9 @@ def api_meta():
         "slippage_bps": shadow_store.SIM_SLIPPAGE_BPS,
         "max_total_notional_mult": position_sizing.MAX_TOTAL_NOTIONAL_MULT,
         "tick_interval_sec": 300,
+        "kline_source": "Gate USDT futures public API",
+        "price_source": "Gate mark_price, except listed legacy symbols",
+        "legacy_binance_symbols": sorted(klines.BINANCE_SOURCE_SYMBOLS),
         "server_ts": time.time(),
     })
 
@@ -381,10 +413,11 @@ def api_compare():
         if strat in experiment_metrics:
             row.update(experiment_metrics[strat])
         out.append(row)
-    # 排名只看已经平仓、已经扣费的落袋收益。浮动盈亏仍实时计算并返回，
-    # 但不让尚未兑现的仓位改变榜单名次。
+    # 普通策略保持原已实现排序；双腿实验必须计入两腿浮亏和预计退出费用。
+    # 网页明确混合口径；两组同步实验之间的比较使用同一MTM口径。
+    out.extend(hedge_store.summary(prices=_fetch_live_prices()))
     out.sort(key=lambda r: -(
-        float(r["net_return_after_fees_pct"])
+        float(r.get("ranking_return_pct", r["net_return_after_fees_pct"]))
         if r.get("net_return_after_fees_pct") is not None else -1e9
     ))
     return jsonify({
@@ -394,18 +427,24 @@ def api_compare():
         "taker_fee_rate": shadow_store.SIM_TAKER_FEE_RATE,
         "slippage_bps": shadow_store.SIM_SLIPPAGE_BPS,
         "fee_basis": "mark_to_market_closed_plus_open_roundtrip_taker_plus_funding",
-        "ranking_basis": "net_return_after_fees_pct",
+        "ranking_basis": "ordinary_realized_hedge_mtm_including_exit_cost",
         "risk_model": "adaptive_gross_stop_heat_cluster_drawdown_v3",
     })
 
 
 @app.route("/api/roster/compare/<strategy>/symbols")
 def api_compare_symbols(strategy):
+    if strategy in hedge_config.NAMES:
+        return jsonify({"status":"ok","symbols":hedge_store.symbol_summary(strategy)})
     return jsonify({"status": "ok", "symbols": shadow_store.summary_by_symbol(strategy)})
 
 
 @app.route("/api/roster/compare/<strategy>/positions")
 def api_compare_positions(strategy):
+    if strategy in hedge_config.NAMES:
+        return jsonify({"status":"ok","positions":hedge_store.positions(strategy,
+            status=request.args.get("status","closed"),
+            limit=max(1,min(int(request.args.get("limit",100)),500)),prices=_fetch_live_prices())})
     status = request.args.get("status", "closed")
     limit = max(1, min(int(request.args.get("limit", 100) or 100), 500))
     if status == "open":
@@ -433,6 +472,14 @@ def api_symbols_compare():
                          | {s for e in UNIVERSE_ROSTER for s in e.get("symbols", [])}
                          | {s for e in PAIRS_ROSTER for s in e.get("symbols", [])})
     by_sym = {r["symbol"]: r for r in rows}
+    for h in hedge_store.symbol_summary():
+        r=by_sym.setdefault(h["symbol"],dict(h))
+        if r is not h and "hedge_cycle_pnl_usd" not in r:
+            for k in ("trades","wins","total_pnl_usd","open_count"):
+                r[k]=(r.get(k) or 0)+h[k]
+            r["hedge_cycle_pnl_usd"]=h["total_pnl_usd"]
+            r["hedge_cycle_open_count"]=h["open_count"]
+        r["win_rate"]=r["wins"]/r["trades"]*100 if r["trades"] else None
     out = []
     for sym in roster_syms:
         row = dict(by_sym.get(sym) or {
@@ -457,6 +504,11 @@ def api_symbol_strategies(symbol):
     rows = shadow_store.strategies_for_symbol(symbol.upper())
     for r in rows:
         r["description"] = STRATEGY_DESCRIPTIONS.get(r.get("strategy"), "")
+    if symbol.upper() in hedge_config.SYMBOLS:
+        for name in hedge_config.NAMES:
+            row=next(r for r in hedge_store.symbol_summary(name) if r["symbol"]==symbol.upper())
+            row.update(strategy=name,description=hedge_config.DESCRIPTIONS[name])
+            rows.append(row)
     return jsonify({"status": "ok", "strategies": rows})
 
 
@@ -472,6 +524,10 @@ def api_symbol_positions(symbol):
     else:
         rows = shadow_store.list_closed(symbol=symbol, limit=limit)
         rows.sort(key=lambda r: r.get("closed_at") or 0, reverse=True)
+    if symbol in hedge_config.SYMBOLS:
+        rows.extend(hedge_store.positions(symbol=symbol,status=status,limit=limit,prices=_fetch_live_prices()))
+        rows.sort(key=lambda r:r.get("exit_bar_time") or r.get("entry_bar_time") or 0,reverse=True)
+        rows=rows[:limit]
     return jsonify({"status": "ok", "positions": rows})
 
 
@@ -682,6 +738,17 @@ def api_chain_wallets_review():
         })
     out.sort(key=lambda r: -r["hit_score"])
     return jsonify({"status": "ok", "days": days, "wallets": out})
+
+
+@app.route("/api/roster/hedge-cycle")
+def api_hedge_cycle():
+    # Read-only audit view. No exchange account keys or order endpoints.
+    accounts=hedge_store.read_accounts()
+    return jsonify({"status":"ok","source":"Gate public / paper only",
+        "strategies":hedge_store.summary(),"config":hedge_config.PARAMS,
+        "accounts":{n:{k:s.get(k) for k in ("created_ms","last_tick_ms","paused",
+            "reason","contexts","funding_intervals","funding_cursor","slots")}
+            for n,s in accounts.items()}})
 
 
 if __name__ == "__main__":

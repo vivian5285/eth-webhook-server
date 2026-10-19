@@ -269,6 +269,14 @@ _CRYPTO_ONLY_SYMBOLS = [
     s for s in _ALL_SYMBOLS if s not in set(TOKENIZED_STOCK_SYMBOLS) | {"XAUUSDT", "PAXGUSDT"}
 ]
 
+_RESID_CS_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "LINKUSDT", "BCHUSDT", "UNIUSDT", "XLMUSDT", "ENAUSDT",
+    "HYPEUSDT", "XMRUSDT", "1000PEPEUSDT", "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT", "NEARUSDT", "SUIUSDT", "APTUSDT",
+    "ARBUSDT", "OPUSDT", "INJUSDT", "TIAUSDT", "FILUSDT", "AAVEUSDT", "ICPUSDT", "HBARUSDT", "RENDERUSDT", "FETUSDT",
+    "WLDUSDT", "TAOUSDT", "ONDOUSDT", "1000SHIBUSDT", "TRUMPUSDT", "PENGUUSDT", "DASHUSDT", "ATOMUSDT", "TRXUSDT",
+    "ETCUSDT", "SEIUSDT", "ZROUSDT", "STRKUSDT", "BNBUSDT",
+]
+
 _TURTLE_SYMBOLS = ["PAXGUSDT", "XAUUSDT", "ETHUSDT", "BNBUSDT", "ZECUSDT", "BCHUSDT", "XMRUSDT"]
 _RSI2_SYMBOLS = [
     "TSLAUSDT", "METAUSDT", "GSUSDT", "MUUSDT",
@@ -523,6 +531,13 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": s, "strategy": "ichimoku_cloud", "timeframe": "1d"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "parabolic_sar_flip", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     + [{"symbol": s, "strategy": "macd_histogram", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    # 2026-10-06：MACD×RSI极值反转(RSI 20/80 + MACD转向确认)，4h与1h并排对照，纸面。
+    + [{"symbol": s, "strategy": "macd_rsi_reversal", "timeframe": "4h"} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "macd_rsi_reversal_1h", "timeframe": "1h"} for s in _ALL_SYMBOLS]
+    # 2026-10-06：MACD×RSI顺势反转优化版(放开RSI阈值+EMA100顺势过滤，网格研究选出)。
+    + [{"symbol": s, "strategy": "macd_rsi_trend_3070", "timeframe": "4h", "params": {'os': 30.0, 'ob': 70.0, 'os_tier2': 25.0, 'ob_tier2': 75.0, 'lookback': 6, 'macd_mode': 'turn', 'trend_ema': 100, 'exit_mode': 'rsi_or_macd', 'atr_stop_mult': 2.5}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "macd_rsi_trend_3565", "timeframe": "4h", "params": {'os': 35.0, 'ob': 65.0, 'os_tier2': 25.0, 'ob_tier2': 75.0, 'lookback': 10, 'macd_mode': 'cross', 'trend_ema': 100, 'exit_mode': 'macd_only', 'atr_stop_mult': 2.5}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "macd_rsi_trend_3565_turn", "timeframe": "4h", "params": {'os': 35.0, 'ob': 65.0, 'os_tier2': 25.0, 'ob_tier2': 75.0, 'lookback': 6, 'macd_mode': 'turn', 'trend_ema': 100, 'exit_mode': 'macd_only', 'atr_stop_mult': 2.5}} for s in _ALL_SYMBOLS]
     # 2026-09-20新增(宝贝要求逐个优化胜率)：macd_histogram_v2——见
     # strategies/__init__.py同名条目说明。hist_min_atr_frac过滤零轴噪音
     # 变号，adx_gate只在真趋势里吃信号，20是ADX文献常引用的趋势判定值。
@@ -562,12 +577,12 @@ SINGLE_SYMBOL_ROSTER = (
     # 仓位、early版提前进出场、pyramid版2级试探仓确认补满、pyramid3版
     # 三级金字塔加仓(新增，见该策略文件头注释——宝贝转发DeepSeek"VPS
     # 智能雷达交易架构"讨论后要求的，专注做深SNDK一个品种而不是摊开)。
-    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout", "timeframe": "90m"}]
-    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_early", "timeframe": "90m",
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout", "timeframe": "91m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_early", "timeframe": "91m",
         "early_entry": True}]
-    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid", "timeframe": "90m"}]
-    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid3", "timeframe": "90m"}]
-    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_strength_add", "timeframe": "90m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid", "timeframe": "91m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_pyramid3", "timeframe": "91m"}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_micro_breakout_strength_add", "timeframe": "91m"}]
     # 2026-10-03新增：ZEC四个对照身份，同一套模板(宝贝贴出ZEC真实Pine
     # 源码后确认快线8/慢线30)。timeframe用"1h"——ZEC真实TV周期就是1
     # 小时，没有像SNDK那样做过独立的周期选择回测，直接用真实周期拉K线，
@@ -578,6 +593,17 @@ SINGLE_SYMBOL_ROSTER = (
     + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_pyramid", "timeframe": "1h"}]
     + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_pyramid3", "timeframe": "1h"}]
     + [{"symbol": "ZECUSDT", "strategy": "ema8_30_micro_breakout_strength_add", "timeframe": "1h"}]
+    # 2026-10-04新增：SNDK/ZEC实盘镜像(满仓开仓+P75/P90分两次各加0.5，连续2根确认+
+    # 量能否决+4H破线否决)×4种止盈方案(无后缀=只用TV式双均线破位离场；_radar_a紧、
+    # _radar_b宽、_radar_c双均线发散/倾斜/量能动态伸缩+4H预警)，mtf拉4H给4H否决/预警用。
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_live_mirror", "timeframe": "91m", "mtf": ["4h"]}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_live_mirror_radar_a", "timeframe": "91m", "mtf": ["4h"]}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_live_mirror_radar_b", "timeframe": "91m", "mtf": ["4h"]}]
+    + [{"symbol": "SNDKUSDT", "strategy": "ema7_25_live_mirror_radar_c", "timeframe": "91m", "mtf": ["4h"]}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_live_mirror", "timeframe": "1h", "mtf": ["4h"]}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_live_mirror_radar_a", "timeframe": "1h", "mtf": ["4h"]}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_live_mirror_radar_b", "timeframe": "1h", "mtf": ["4h"]}]
+    + [{"symbol": "ZECUSDT", "strategy": "ema8_30_live_mirror_radar_c", "timeframe": "1h", "mtf": ["4h"]}]
     + [{"symbol": s, "strategy": "adx_efficiency_zscore", "timeframe": "4h"} for s in _ALL_SYMBOLS]
     # ── 2026-09-05第三批新增5套 ──────────────────────────────────────────
     + [{"symbol": s, "strategy": "donchian_reversal", "timeframe": "1d"} for s in _ALL_SYMBOLS]
@@ -795,6 +821,21 @@ UNIVERSE_ROSTER = [
         "symbols": _CRYPTO_ONLY_SYMBOLS,
         "lookback_bars": 30,
     },
+    # 2026-10-06：残差动量·截面多空对冲(纸面)，品种池=2026-10-05样本外研究用的加密永续(BTC作因子不开仓)。
+    {
+        "strategy": "residual_cs_ls",
+        "timeframe": "1d",
+        "symbols": _RESID_CS_SYMBOLS,
+        "lookback_bars": 30,
+        "params": {"factor": "BTC", "mom": 20, "reg": 120, "H": 10, "q": 0.33},
+    },
+    {
+        "strategy": "residual_cs_ls_btceth",
+        "timeframe": "1d",
+        "symbols": _RESID_CS_SYMBOLS,
+        "lookback_bars": 30,
+        "params": {"factor": "BTCETH", "mom": 30, "reg": 120, "H": 5, "q": 0.33},
+    },
 ]
 
 # 配对交易(distance method)——两条腿绑定同开同平，接口/调度都跟上面两类
@@ -816,3 +857,161 @@ PAIRS_ROSTER = [
         "max_hold_bars": 30,
     },
 ]
+
+
+# 2026-10-05: ADX双引擎实验。4h三组完全同池、同参数、同风险资金，只有
+# engine_mode不同；1h测周期。全部是Gate原生周期，共用550根单轮K线缓存。
+# 仅加密品种，排除代币美股/黄金和两只币安旧仓例外；不复活PRUNED名单。
+# 维护/回滚/价格例外见research/ADX_DUAL_ENGINE_HANDOFF.md。
+ADX_DUAL_ENGINE_SYMBOLS = list(_CRYPTO_ONLY_SYMBOLS)
+ADX_DUAL_ENGINE_ROSTER = [
+    {"symbol": symbol, "strategy": name, "timeframe": tf,
+     "params": {"engine_mode": mode}, "early_entry": False}
+    for name, tf, mode in (
+        ("adx_dual_engine_4h", "4h", "both"),
+        ("adx_dual_trend_only_4h", "4h", "trend"),
+        ("adx_dual_range_only_4h", "4h", "range"),
+        ("adx_dual_engine_1h", "1h", "both"),
+    )
+    for symbol in ADX_DUAL_ENGINE_SYMBOLS
+]
+SINGLE_SYMBOL_ROSTER += ADX_DUAL_ENGINE_ROSTER
+
+
+# 2026-10-07：趋势过滤+唐奇安突破+ATR硬止损+吊灯移动止盈(donchian_trend_atr)，纸面实验。
+# 参数来自 unicorn_quant/donchian_study.py(1728组网格+高原分+前后半段样本外) 与
+# donchian_final.py(入围对比)，按资产类别分开取，不是一套参数通吃：
+#   · 全部资产类别一致的结论：ADX>=25过滤有害(去掉)、做空有害(关)、放量过滤有害(关)、
+#     EMA快线离场有害(关)、吊灯2ATR太紧(用3-5)。
+#   · 币圈4h  EMA30/120 突破30 反向5  止损3ATR 吊灯5ATR (9币组中位卡玛1.29，前后半段都盈利占比67%)
+#   · 币圈1d  EMA50/200 突破10 反向20 止损1.5ATR 吊灯5ATR (9币，89%前后半段都盈利，但回撤深)
+#   · 黄金4h  EMA20/100 突破10 反向5  止损3ATR 吊灯3ATR (XAU仅约300天、PAXG约550天——样本很短)
+#   · 美股1d  EMA20/100 突破55 反向20 止损2ATR 吊灯4ATR (15只美股10年，中位卡玛0.47)
+#   · 代币美股4h EMA20/100 突破55 反向20 止损3ATR 吊灯3ATR (币安美股永续仅3-6个月，仅作观察)
+# 主调品种ZEC/ETH/XAU/SNDK各自"单独最优"明显更好看但差距=过拟合空间，所以全部用类别共用参数。
+_DTA_BASE = {"adx_min": 0, "vol_mult": 0.0, "bb_filter": False, "ema_exit": False, "allow_short": False,
+             "chandelier": True, "don_exit": True}
+_DTA_CRYPTO_4H = dict(_DTA_BASE, ema_fast=30, ema_slow=120, don_n=30, exit_n=5, stop_atr=3.0, trail_atr=5.0)
+_DTA_CRYPTO_1D = dict(_DTA_BASE, ema_fast=50, ema_slow=200, don_n=10, exit_n=20, stop_atr=1.5, trail_atr=5.0)
+_DTA_GOLD_4H = dict(_DTA_BASE, ema_fast=20, ema_slow=100, don_n=10, exit_n=5, stop_atr=3.0, trail_atr=3.0)
+_DTA_STOCK_1D = dict(_DTA_BASE, ema_fast=20, ema_slow=100, don_n=55, exit_n=20, stop_atr=2.0, trail_atr=4.0)
+_DTA_TRADFI_4H = dict(_DTA_BASE, ema_fast=20, ema_slow=100, don_n=55, exit_n=20, stop_atr=3.0, trail_atr=3.0)
+_DTA_CRYPTO = ["ZECUSDT", "ETHUSDT", "BTCUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "LINKUSDT", "DOGEUSDT", "XMRUSDT"]
+_DTA_STOCKS = ["SNDKUSDT", "MUUSDT", "NVDAUSDT", "TSLAUSDT", "AMDUSDT", "ASMLUSDT"]
+DONCHIAN_TREND_ROSTER = (
+    [{"symbol": s, "strategy": "donchian_trend_atr_4h", "timeframe": "4h", "params": dict(_DTA_CRYPTO_4H)} for s in _DTA_CRYPTO]
+    + [{"symbol": s, "strategy": "donchian_trend_atr_1d", "timeframe": "1d", "params": dict(_DTA_CRYPTO_1D)} for s in _DTA_CRYPTO]
+    + [{"symbol": s, "strategy": "donchian_trend_atr_4h", "timeframe": "4h", "params": dict(_DTA_GOLD_4H)} for s in ("XAUUSDT", "PAXGUSDT")]
+    + [{"symbol": s, "strategy": "donchian_trend_atr_4h", "timeframe": "4h", "params": dict(_DTA_TRADFI_4H)} for s in _DTA_STOCKS]
+    + [{"symbol": s, "strategy": "donchian_trend_atr_1d", "timeframe": "1d", "params": dict(_DTA_STOCK_1D)} for s in _DTA_STOCKS]
+)
+SINGLE_SYMBOL_ROSTER += DONCHIAN_TREND_ROSTER
+
+
+# 2026-10-16：美股1H双均线顺势(多空双向)，见strategies/stock_ema_trend.py。
+STOCK_EMA_TREND_ROSTER = []
+for _se_name, _se_params in (
+    ("stock_ema8_30_1h", {"fast_period": 8, "slow_period": 30}),
+    ("stock_ema10_30_1h", {"fast_period": 10, "slow_period": 30}),
+    ("stock_ema8_30_1h_atr08", {"fast_period": 8, "slow_period": 30, "min_atr_pct": 0.008}),
+    ("stock_ema10_30_1h_atr08", {"fast_period": 10, "slow_period": 30, "min_atr_pct": 0.008}),
+):
+    STOCK_EMA_TREND_ROSTER += [{"symbol": s, "strategy": _se_name, "timeframe": "1h", "params": dict(_se_params)}
+                               for s in TOKENIZED_STOCK_SYMBOLS]
+SINGLE_SYMBOL_ROSTER += tuple(STOCK_EMA_TREND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else STOCK_EMA_TREND_ROSTER
+
+
+# 2026-10-16：趋势策略 + 日线大势方向过滤(_dtf)对照组，见 strategies/__init__.py::DAILY_TREND_FILTER_BASES。
+# 逐条复制基础策略的币圈/黄金条目(美股不做：上市时间短，日线EMA50样本不够，诊断里也看不出差别)，
+# 只改策略名，并把"1d"补进 mtf。
+from strategy_engine.strategies import DAILY_TREND_FILTER_BASES as _DTF_BASES
+DAILY_TREND_FILTER_ROSTER = []
+for _e in list(SINGLE_SYMBOL_ROSTER):
+    if _e["strategy"] in _DTF_BASES and _e["symbol"] not in TOKENIZED_STOCK_SYMBOLS:
+        _n = dict(_e)
+        _n["strategy"] = _e["strategy"] + "_dtf"
+        _n["mtf"] = sorted(set(list(_e.get("mtf") or []) + ["1d"]))
+        if "params" in _e:
+            _n["params"] = dict(_e["params"])
+        DAILY_TREND_FILTER_ROSTER.append(_n)
+SINGLE_SYMBOL_ROSTER += tuple(DAILY_TREND_FILTER_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else DAILY_TREND_FILTER_ROSTER
+
+
+# 2026-10-16：日线EMA8/30大级别顺势，只做多 vs 多空，全品种(币圈+黄金+美股)。见 strategies/daily_ema_trend.py。
+DAILY_EMA_TREND_ROSTER = (
+    [{"symbol": s, "strategy": "daily_ema8_30_long", "timeframe": "1d", "params": {"mode": "long"}} for s in _ALL_SYMBOLS]
+    + [{"symbol": s, "strategy": "daily_ema8_30_ls", "timeframe": "1d", "params": {"mode": "both"}} for s in _ALL_SYMBOLS]
+)
+SINGLE_SYMBOL_ROSTER += tuple(DAILY_EMA_TREND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else DAILY_EMA_TREND_ROSTER
+
+
+# 2026-10-16：美股三腿组合的第三条腿，4H突破做多。见 strategies/stock_breakout_long.py。
+STOCK_BREAKOUT_ROSTER = [{"symbol": s, "strategy": "stock_breakout4h_long", "timeframe": "4h"} for s in TOKENIZED_STOCK_SYMBOLS]
+SINGLE_SYMBOL_ROSTER += tuple(STOCK_BREAKOUT_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else STOCK_BREAKOUT_ROSTER
+
+
+# 2026-10-16：日线EMA8/30多空降回撤对照版，只跑币圈(不含美股和黄金)。见 strategies/daily_ema_trend_vt.py。
+DAILY_EMA_VT_ROSTER = [{"symbol": s, "strategy": "daily_ema8_30_ls_vt_btc", "timeframe": "1d"}
+                       for s in _ALL_SYMBOLS if s not in TOKENIZED_STOCK_SYMBOLS and s not in _GOLD_SECTOR_SYMBOLS]
+SINGLE_SYMBOL_ROSTER += tuple(DAILY_EMA_VT_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else DAILY_EMA_VT_ROSTER
+
+
+# 2026-10-16：主流5个币版本，波动率目标3%。每单名义仓位仍用1/16净值×波动率系数(跟16个币版本同一单位)，
+# 这样5单的止损风险合计约3.75%，在stress状态4%的热度上限以内。
+DAILY_EMA_VT_MAIN5_ROSTER = [{"symbol": s, "strategy": "daily_ema8_30_ls_vt_main5", "timeframe": "1d", "params": {"vol_target": 0.03}}
+                             for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+SINGLE_SYMBOL_ROSTER += tuple(DAILY_EMA_VT_MAIN5_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else DAILY_EMA_VT_MAIN5_ROSTER
+
+
+# 2026-10-16：日线EMA8/30 用正股信号的对照版，只跑美股(跟 daily_ema8_30_long/ls 的美股部分对比)。
+DAILY_EMA_YF_ROSTER = (
+    [{"symbol": s, "strategy": "daily_ema8_30_long_yf", "timeframe": "1d", "params": {"mode": "long"}} for s in TOKENIZED_STOCK_SYMBOLS]
+    + [{"symbol": s, "strategy": "daily_ema8_30_ls_yf", "timeframe": "1d", "params": {"mode": "both"}} for s in TOKENIZED_STOCK_SYMBOLS]
+)
+SINGLE_SYMBOL_ROSTER += tuple(DAILY_EMA_YF_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else DAILY_EMA_YF_ROSTER
+
+
+# 2026-10-16：supertrend_adx / keltner_channel 的 BTC方向+波动率调仓 对照版，只跑币圈(不含美股和黄金)。
+from strategy_engine.strategies import BTC_VOL_VARIANTS as _BV
+BTC_VOL_ROSTER = [{"symbol": s, "strategy": b + "_bv", "timeframe": "4h"} for b in _BV
+                  for s in _ALL_SYMBOLS if s not in TOKENIZED_STOCK_SYMBOLS and s not in _GOLD_SECTOR_SYMBOLS]
+SINGLE_SYMBOL_ROSTER += tuple(BTC_VOL_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else BTC_VOL_ROSTER
+
+
+# 2026-10-17：SNDK 规则扩到存储/半导体5只，90m，2.0ATR 止损。见 strategies/__init__.py 末尾。
+SEMIS_RULE_ROSTER = [{"symbol": s, "strategy": "sndk_rule_semis_90m", "timeframe": "90m", "params": {"atr_stop_mult": 2.0}}
+                     for s in ("SNDKUSDT", "WDCUSDT", "MUUSDT", "SMCIUSDT", "AMDUSDT")]
+SINGLE_SYMBOL_ROSTER += tuple(SEMIS_RULE_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else SEMIS_RULE_ROSTER
+
+
+# 2026-10-17：日线EMA多空 + 减半周期(主流5个)；SNDK规则扩到三个行业28只(90m)。
+CYCLE_TECH3_ROSTER = (
+    [{"symbol": s, "strategy": "daily_ema8_30_ls_cycle_main5", "timeframe": "1d",
+      "params": {"vol_target": 0.03, "halving_cycle": True, "target_notional_frac": 0.2, "bottom_reversal": True}} for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+    + [{"symbol": s, "strategy": "sndk_rule_tech3_90m", "timeframe": "90m", "params": {"atr_stop_mult": 2.0}}
+       for s in ("SNDKUSDT", "MUUSDT", "WDCUSDT", "SKHYNIXUSDT", "SKHYUSDT", "DRAMUSDT", "STXXUSDT",
+                 "NVDAUSDT", "AMDUSDT", "AVGOUSDT", "ARMUSDT", "ASMLUSDT", "AMATUSDT", "LRCXUSDT", "KLACUSDT",
+                 "ALABUSDT", "CRDOUSDT", "TERUSDT", "AXTIUSDT",
+                 "SMCIUSDT", "HPEUSDT", "CRWVUSDT", "CIENUSDT", "GLWUSDT", "VRTUSDT", "CSCOUSDT", "NOKUSDT", "IBMUSDT")]
+)
+SINGLE_SYMBOL_ROSTER += tuple(CYCLE_TECH3_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else CYCLE_TECH3_ROSTER
+
+
+# 2026-10-18：美股行业轮动纸面(stock_sector_rot6m5_long)，13个行业里币安有美股永续的53只全部挂上，
+# 当月是否交易由 data/sector_rotation.json(cron每天收盘后刷新)决定。
+SECTOR_ROT_ROSTER = [{"symbol": s, "strategy": "stock_sector_rot6m5_long", "timeframe": "1d", "params": {}}
+                     for s in ["ADBEUSDT", "AMATUSDT", "AMDUSDT", "AMZNUSDT", "ANETUSDT", "ARMUSDT", "ASMLUSDT", "AVGOUSDT", "CATUSDT", "CIENUSDT", "COHRUSDT", "COINUSDT", "COSTUSDT", "CRMUSDT", "CSCOUSDT", "DELLUSDT", "GLWUSDT", "GOOGLUSDT", "GSUSDT", "HDUSDT", "HOODUSDT", "HPEUSDT", "INTCUSDT", "JPMUSDT", "KLACUSDT", "KOUSDT", "LLYUSDT", "LRCXUSDT", "MARAUSDT", "MCDUSDT", "METAUSDT", "MRKUSDT", "MRVLUSDT", "MSFTUSDT", "MSTRUSDT", "MUUSDT", "NFLXUSDT", "NKEUSDT", "NOWUSDT", "NVDAUSDT", "ORCLUSDT", "QCOMUSDT", "SMCIUSDT", "SNDKUSDT", "TERUSDT", "TSMUSDT", "TXNUSDT", "UBERUSDT", "UNHUSDT", "VRTUSDT", "WDCUSDT", "WMTUSDT", "XOMUSDT"]]
+SINGLE_SYMBOL_ROSTER += tuple(SECTOR_ROT_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else SECTOR_ROT_ROSTER
+
+
+# 2026-10-17：方案F币圈腿B方案的两条8h腿(主流5个)。
+PLAN_B_8H_ROSTER = [{"symbol": s, "strategy": st, "timeframe": "8h", "params": {}}
+                    for st in ("st8h_cycle_main5", "boll8h_cycle_main5")
+                    for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+SINGLE_SYMBOL_ROSTER += tuple(PLAN_B_8H_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else PLAN_B_8H_ROSTER
+
+
+# 2026-10-17：日线EMA+盘中突破单(1h检查)，主流5个。
+BRK_ROSTER = [{"symbol": s, "strategy": "daily_ema_brk_cycle_main5", "timeframe": "1h", "params": {}}
+              for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+SINGLE_SYMBOL_ROSTER += tuple(BRK_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else BRK_ROSTER

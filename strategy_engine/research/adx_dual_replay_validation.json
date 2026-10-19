@@ -1,0 +1,424 @@
+{
+  "type": "signal_replay_not_portfolio_backtest",
+  "created_at": 1791185641.9207754,
+  "rows": [
+    {
+      "symbol": "BTCUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 16
+      },
+      "exits": {
+        "hard_stop": 10,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "ADX双引擎: 趋势仓EMA排列失效": 1,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "BTCUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 16
+      },
+      "exits": {
+        "hard_stop": 10,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "ADX双引擎: 趋势仓EMA排列失效": 1,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "BTCUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {},
+      "exits": {},
+      "open_at_end": false
+    },
+    {
+      "symbol": "ETHUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 11,
+        "adx_range": 2
+      },
+      "exits": {
+        "hard_stop": 9,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 1
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "ETHUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 11
+      },
+      "exits": {
+        "hard_stop": 7,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 1
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "ETHUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 2
+      },
+      "exits": {
+        "hard_stop": 2
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "SOLUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 10,
+        "adx_range": 1
+      },
+      "exits": {
+        "hard_stop": 4,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "ADX双引擎: 震荡仓回到动态中轨": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "SOLUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 10
+      },
+      "exits": {
+        "hard_stop": 4,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "SOLUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 1
+      },
+      "exits": {
+        "ADX双引擎: 震荡仓回到动态中轨": 1
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "ZECUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 10
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓EMA排列失效": 4,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "hard_stop": 1,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 4
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "ZECUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 10
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓EMA排列失效": 4,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "hard_stop": 1,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 4
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "ZECUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {},
+      "exits": {},
+      "open_at_end": false
+    },
+    {
+      "symbol": "BNBUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 2,
+        "adx_trend": 12
+      },
+      "exits": {
+        "ADX双引擎: 震荡仓回到动态中轨": 1,
+        "hard_stop": 4,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 4,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "ADX双引擎: 趋势仓EMA排列失效": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "BNBUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 12
+      },
+      "exits": {
+        "hard_stop": 3,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 4,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "ADX双引擎: 趋势仓EMA排列失效": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "BNBUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 2
+      },
+      "exits": {
+        "ADX双引擎: 震荡仓回到动态中轨": 1,
+        "hard_stop": 1
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "XRPUSDT",
+      "tf": "4h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 3,
+        "adx_trend": 8
+      },
+      "exits": {
+        "hard_stop": 6,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 2,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "ADX双引擎: 趋势仓EMA排列失效": 2
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "XRPUSDT",
+      "tf": "4h",
+      "mode": "trend",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_trend": 8
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 2,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1,
+        "hard_stop": 3,
+        "ADX双引擎: 趋势仓EMA排列失效": 2
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "XRPUSDT",
+      "tf": "4h",
+      "mode": "range",
+      "bars": 550,
+      "from": 1784116800000,
+      "to": 1791158400000,
+      "entries": {
+        "adx_range": 3
+      },
+      "exits": {
+        "hard_stop": 3
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "BTCUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 12,
+        "adx_range": 1
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 5,
+        "ADX双引擎: 趋势仓EMA排列失效": 3,
+        "ADX双引擎: 震荡仓回到动态中轨": 1,
+        "hard_stop": 2,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "ETHUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 9,
+        "adx_range": 4
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓EMA排列失效": 3,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 2,
+        "hard_stop": 3,
+        "ADX双引擎: 震荡仓回到动态中轨": 3,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "SOLUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 11,
+        "adx_range": 1
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 5,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "hard_stop": 3,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "ZECUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 12
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 5,
+        "ADX双引擎: 趋势仓EMA排列失效": 2,
+        "hard_stop": 4,
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 1
+      },
+      "open_at_end": false
+    },
+    {
+      "symbol": "BNBUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 8,
+        "adx_range": 4
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓EMA排列失效": 1,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 3,
+        "hard_stop": 6,
+        "ADX双引擎: 震荡仓回到动态中轨": 1
+      },
+      "open_at_end": true
+    },
+    {
+      "symbol": "XRPUSDT",
+      "tf": "1h",
+      "mode": "both",
+      "bars": 550,
+      "from": 1789419600000,
+      "to": 1791180000000,
+      "entries": {
+        "adx_trend": 14,
+        "adx_range": 2
+      },
+      "exits": {
+        "ADX双引擎: 趋势仓确认转震荡，先退出": 2,
+        "hard_stop": 4,
+        "ADX双引擎: 趋势仓收盘触发3ATR极值回撤退出": 6,
+        "ADX双引擎: 趋势仓EMA排列失效": 3
+      },
+      "open_at_end": true
+    }
+  ]
+}

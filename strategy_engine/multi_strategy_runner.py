@@ -147,6 +147,14 @@ BREAKEVEN_LOCK_STRATEGIES = {
     "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
 }
 
+# 2026-10-16：日线大势过滤对照组(_dtf)跟各自基础策略保持同样的保本锁设置，A/B只差那一道开仓闸门。
+from strategy_engine.strategies import DAILY_TREND_FILTER_BASES as _DTF_BASES
+BREAKEVEN_LOCK_STRATEGIES |= {n + "_dtf" for n in _DTF_BASES if n in BREAKEVEN_LOCK_STRATEGIES}
+
+# 2026-10-16：_bv 对照组跟各自基础策略保持同样的保本锁设置。
+from strategy_engine.strategies import BTC_VOL_VARIANTS as _BV_BASES
+BREAKEVEN_LOCK_STRATEGIES |= {n + "_bv" for n in _BV_BASES if n in BREAKEVEN_LOCK_STRATEGIES}
+
 
 def _maybe_lock_breakeven(pos: dict, mark_price: float, bar_time: int) -> None:
     """浮盈够1R就把pos["stop_loss"]原地上移到保本+手续费缓冲，并写回DB。
@@ -257,9 +265,46 @@ RADAR_TRAIL_STRATEGIES = {
 }
 
 
-def _maybe_radar_trail(pos: dict, bars: list, mark_price: float, bar_time: int) -> None:
+# 2026-10-04新增：SNDK/ZEC实盘镜像的三种动态止盈(雷达)对照方案，挂在策略名后缀上：
+#   _radar_a 紧(擂台原版默认：保本1×ATR、追踪1.5×ATR起、3.5/2.5/1.5×ATR按ADX分级)
+#   _radar_b 宽(追踪2×ATR起、6.0/4.5/3.0×ATR——量级接近实盘雷达min/max 4.5~6.2倍)
+#   _radar_c 动态(宽档打底 5.0/3.5/2.0，再按"双均线发散度/快线倾斜/量能"实时伸缩
+#            ×0.6~1.25：发散度≥P90放宽×1.25、<0.5×P75收紧×0.75、快线朝不利方向
+#            倾斜×0.8、量能偏薄(低于该品种P25)×0.9，夹在[1.5,6.5]×ATR)，外加4H
+#            破线预警(收到离现价2.0×ATR(4H)，2026-10-04事件研究校准值，十字星不用))
+# 目的是用擂台数据回答"双均线发散/倾斜/量能到底该不该参与雷达距离调节"，实盘暂不动。
+_RADAR_DEFAULT_CFG = {
+    "be_trigger": RADAR_BREAKEVEN_TRIGGER_ATR, "be_buf": RADAR_BREAKEVEN_BUFFER_PCT,
+    "trail_trigger": RADAR_TRAIL_TRIGGER_ATR,
+    "mult_strong": RADAR_TRAIL_MULT_STRONG, "mult_normal": RADAR_TRAIL_MULT_NORMAL,
+    "mult_weak": RADAR_TRAIL_MULT_WEAK, "dynamic": None, "four_h_atr_mult": None,
+}
+_RADAR_DYN_SNDK = {"fast": 7, "slow": 25, "p75": 1.535, "p90": 2.109, "vol_thin": 0.23, "four_h_fast": 7}
+_RADAR_DYN_ZEC = {"fast": 8, "slow": 30, "p75": 1.293, "p90": 1.872, "vol_thin": 0.55, "four_h_fast": 8}
+RADAR_VARIANTS = {}
+for _pre, _dyn in (("ema7_25_live_mirror", _RADAR_DYN_SNDK), ("ema8_30_live_mirror", _RADAR_DYN_ZEC)):
+    RADAR_VARIANTS[_pre + "_radar_a"] = {}
+    RADAR_VARIANTS[_pre + "_radar_b"] = {
+        "trail_trigger": 2.0, "mult_strong": 6.0, "mult_normal": 4.5, "mult_weak": 3.0,
+    }
+    RADAR_VARIANTS[_pre + "_radar_c"] = {
+        "trail_trigger": 2.0, "mult_strong": 5.0, "mult_normal": 3.5, "mult_weak": 2.0,
+        "dynamic": _dyn, "four_h_atr_mult": 2.0,
+    }
+
+
+def _radar_cfg(strategy):
+    if strategy in RADAR_VARIANTS:
+        return {**_RADAR_DEFAULT_CFG, **RADAR_VARIANTS[strategy]}
+    if strategy in RADAR_TRAIL_STRATEGIES:
+        return dict(_RADAR_DEFAULT_CFG)
+    return None
+
+
+def _maybe_radar_trail(pos: dict, bars: list, mark_price: float, bar_time: int, bars_4h=None) -> None:
     strategy = pos.get("strategy")
-    if strategy not in RADAR_TRAIL_STRATEGIES:
+    cfg = _radar_cfg(strategy)
+    if cfg is None:
         return
     side = str(pos.get("side") or "").upper()
     entry = float(pos.get("entry") or 0.0)
@@ -271,28 +316,64 @@ def _maybe_radar_trail(pos: dict, bars: list, mark_price: float, bar_time: int) 
         return
     d = 1.0 if side == "LONG" else -1.0
     profit_atr = d * (mark_price - entry) / atr0
-    if profit_atr < RADAR_BREAKEVEN_TRIGGER_ATR:
-        return
 
     candidates = [stop]
-    be = entry * (1 + RADAR_BREAKEVEN_BUFFER_PCT) if side == "LONG" else entry * (1 - RADAR_BREAKEVEN_BUFFER_PCT)
-    candidates.append(be)
+    if profit_atr >= cfg["be_trigger"]:
+        be = entry * (1 + cfg["be_buf"]) if side == "LONG" else entry * (1 - cfg["be_buf"])
+        candidates.append(be)
 
-    if profit_atr >= RADAR_TRAIL_TRIGGER_ATR:
-        atr_ser = indicators.atr_series(bars, RADAR_ADX_PERIOD)
-        if atr_ser:
-            atr_now = float(atr_ser[-1])
-            if atr_now > 0:
-                adx_now = indicators.wilder_adx(bars, RADAR_ADX_PERIOD)
-                if adx_now > RADAR_ADX_STRONG_BOUND:
-                    mult = RADAR_TRAIL_MULT_STRONG
-                elif adx_now < RADAR_ADX_WEAK_BOUND:
-                    mult = RADAR_TRAIL_MULT_WEAK
-                else:
-                    mult = RADAR_TRAIL_MULT_NORMAL
-                chandelier = mark_price - d * mult * atr_now
-                candidates.append(chandelier)
+    atr_ser = indicators.atr_series(bars, RADAR_ADX_PERIOD)
+    atr_now = float(atr_ser[-1]) if atr_ser else 0.0
 
+    if profit_atr >= cfg["trail_trigger"] and atr_now > 0:
+        adx_now = indicators.wilder_adx(bars, RADAR_ADX_PERIOD)
+        if adx_now > RADAR_ADX_STRONG_BOUND:
+            mult = cfg["mult_strong"]
+        elif adx_now < RADAR_ADX_WEAK_BOUND:
+            mult = cfg["mult_weak"]
+        else:
+            mult = cfg["mult_normal"]
+        dyn = cfg.get("dynamic")
+        if dyn:
+            try:
+                closes = [float(b["c"]) for b in bars]
+                fast = indicators.ema(closes, int(dyn["fast"]))
+                slow = indicators.ema(closes, int(dyn["slow"]))
+                if fast and slow and len(fast) >= 4:
+                    div = abs(fast[-1] - slow[-1]) / atr_now
+                    factor = 1.0
+                    if div >= dyn["p90"]:
+                        factor *= 1.25
+                    elif div < 0.5 * dyn["p75"]:
+                        factor *= 0.75
+                    if d * (fast[-1] - fast[-4]) / atr_now < 0:
+                        factor *= 0.8
+                    if len(bars) >= 21:
+                        vols = [float(b.get("v") or 0) for b in bars[-21:-1]]
+                        avg = sum(vols) / len(vols) if vols else 0.0
+                        if avg > 0 and float(bars[-1].get("v") or 0) / avg < dyn["vol_thin"]:
+                            factor *= 0.9
+                    mult = min(6.5, max(1.5, mult * factor))
+            except Exception:
+                pass
+        candidates.append(mark_price - d * mult * atr_now)
+
+    four_h_mult = cfg.get("four_h_atr_mult")
+    dyn = cfg.get("dynamic")
+    if four_h_mult and dyn and bars_4h and len(bars_4h) >= int(dyn["four_h_fast"]) + 3:
+        try:
+            c4 = [float(b["c"]) for b in bars_4h]
+            e4 = indicators.ema(c4, int(dyn["four_h_fast"]))
+            a4 = indicators.atr_series(bars_4h, 14)
+            if e4 and a4 and float(a4[-1]) > 0:
+                broke = (c4[-1] < e4[-1]) if side == "LONG" else (c4[-1] > e4[-1])
+                if broke:
+                    candidates.append(mark_price - d * float(four_h_mult) * float(a4[-1]))
+        except Exception:
+            pass
+
+    if len(candidates) == 1:
+        return
     new_stop = max(candidates) if side == "LONG" else min(candidates)
     tightened = new_stop > stop if side == "LONG" else new_stop < stop
     if not tightened:
@@ -463,6 +544,17 @@ SPOT_EQUIVALENT_STRATEGIES = {
     "ema8_30_micro_breakout", "ema8_30_micro_breakout_early",
     "ema8_30_micro_breakout_pyramid", "ema8_30_micro_breakout_pyramid3",
     "ema8_30_micro_breakout_strength_add",
+    # 2026-10-04新增：SNDK/ZEC实盘镜像8个身份(见strategies/live_mirror.py)
+    "ema7_25_live_mirror", "ema7_25_live_mirror_radar_a", "ema7_25_live_mirror_radar_b", "ema7_25_live_mirror_radar_c", "ema8_30_live_mirror", "ema8_30_live_mirror_radar_a", "ema8_30_live_mirror_radar_b", "ema8_30_live_mirror_radar_c",
+}
+
+
+
+# 2026-10-18：只平不开。这些策略已验证无效(90分钟SNDK规则=存储行业事后挑中；美股1小时均线全池亏损)，
+# 由 stock_sector_rot6m5_long 替代。已有持仓照常按原规则离场，不再开新仓；全部平完后可移进 pruned_strategies.py。
+EXIT_ONLY_STRATEGIES = {
+    "sndk_rule_semis_90m", "sndk_rule_tech3_90m",
+    "stock_ema8_30_1h", "stock_ema10_30_1h", "stock_ema8_30_1h_atr08", "stock_ema10_30_1h_atr08",
 }
 
 
@@ -473,6 +565,8 @@ def _open_from_signal(
     sig: dict,
     bars: Optional[List[dict]] = None,
 ) -> Optional[int]:
+    if strategy in EXIT_ONLY_STRATEGIES:
+        return None
     tier = int(sig.get("tier") or 1)
     equity = shadow_store.get_net_equity(strategy)
     raw_price = float(sig["price"])
@@ -499,7 +593,7 @@ def _open_from_signal(
     row = {
         "symbol": symbol, "strategy": strategy, "timeframe": timeframe,
         "side": sig["action"], "entry": entry_price, "atr0": float(sig.get("atr") or 0),
-        "tier": tier, "adx": None,
+        "tier": tier, "adx": sig.get("adx"),  # 双引擎持久化入场ADX；旧策略仍为None
         "entry_bar_time": int(sig["bar_time"]), "score_bar_time": int(sig["bar_time"]),
         "tp1_price": sig.get("tp1"), "tp2_price": None,
         "stop": sig.get("stop_loss"), "last_ratchet_price": None,
@@ -579,7 +673,13 @@ def _add_to_position(
     raw_price = float(sig["price"])
     add_price = shadow_store.apply_simulated_slippage(raw_price, side, True)
     tier = int(sig.get("tier") or pos.get("tier") or 1)
-    desired_add = compute_qty(equity, add_price, sig.get("stop_loss"), tier)
+    # 2026-10-04：现货等价身份(SPOT_EQUIVALENT_STRATEGIES)的加仓基数跟开仓一致，
+    # 用"本金/价格"(1倍)而不是按止损距离的风险额compute_qty——之前加仓走risk口径，
+    # 跟开仓的equity_notional口径不一致，"0.5+0.5凑满2.0倍"的设计意图落不到实处。
+    if strategy in SPOT_EQUIVALENT_STRATEGIES:
+        desired_add = (equity / add_price) if add_price > 0 else 0.0
+    else:
+        desired_add = compute_qty(equity, add_price, sig.get("stop_loss"), tier)
     desired_add *= float(sig.get("position_fraction") or (2.0 / 3.0))
     add_qty, guard = _guarded_qty(
         symbol, strategy, side, desired_add, add_price,
@@ -767,7 +867,8 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     if pos:
         _maybe_lock_breakeven(pos, float(last_bar["c"]), int(last_bar["t"]))
         _maybe_trail_atr(pos, float(last_bar["c"]), int(last_bar["t"]))
-        _maybe_radar_trail(pos, bars, float(last_bar["c"]), int(last_bar["t"]))
+        _maybe_radar_trail(pos, bars, float(last_bar["c"]), int(last_bar["t"]),
+                           bars_4h=bars_by_tf.get("4h"))
         if _maybe_volume_sentinel(pos, key, symbol, timeframe, bars):
             return
         strategy_position = dict(pos)
@@ -1331,3 +1432,12 @@ def main_loop():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] MultiStrategy: %(message)s")
     main_loop()
+
+
+# 2026-10-17：sndk_rule_semis_90m 跟 ema7_25_micro_breakout 一样按1倍名义(现货等值)开仓。
+SPOT_EQUIVALENT_STRATEGIES = set(SPOT_EQUIVALENT_STRATEGIES) | {"sndk_rule_semis_90m"}
+
+
+# 2026-10-17：sndk_rule_tech3_90m 跟 ema7_25_micro_breakout 一样按1倍名义(现货等值)开仓。
+SPOT_EQUIVALENT_STRATEGIES = set(SPOT_EQUIVALENT_STRATEGIES) | {"sndk_rule_tech3_90m"}
+

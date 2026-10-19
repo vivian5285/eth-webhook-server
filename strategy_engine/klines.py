@@ -15,6 +15,7 @@ patch_klines_to_gate.py的改动说明)：擂台VPS要跟实盘合并到一台�
 """
 from __future__ import annotations
 
+import os
 import json
 import logging
 import time
@@ -29,11 +30,21 @@ BASE_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 
 # Gate.io期货实际支持的K线周期(逐个探测过，2026-10-03)。比币安原生集合
 # 少"1M"(Gate不支持月线，当前roster也没用到)，多"7d"替代"1w"的写法。
-NATIVE_INTERVALS = {
+_GATE_NATIVE_INTERVALS = {
     "1m", "3m", "5m", "15m", "30m",
     "1h", "2h", "4h", "6h", "8h", "12h",
     "1d", "3d", "7d",
 }
+# 2026-10-16 宝贝要求擂台全部改用币安K线(跟实盘、回测同一个数据源)。当初切 Gate 是为了"擂台和实盘合并到
+# 同一台机器时不撞币安限流"，2026-10-18 擂台搬回实盘VPS(187.77.130.144)，改为保留币安数据源 + 下面的IP权重让路。Gate 代码保留，
+# 把 USE_BINANCE_FOR_ALL 改回 False 就能切回去。
+USE_BINANCE_FOR_ALL = True
+_BINANCE_NATIVE_INTERVALS = {
+    "1m", "3m", "5m", "15m", "30m",
+    "1h", "2h", "4h", "6h", "8h", "12h",
+    "1d", "3d", "1w",
+}
+NATIVE_INTERVALS = _BINANCE_NATIVE_INTERVALS if USE_BINANCE_FOR_ALL else _GATE_NATIVE_INTERVALS
 
 _INTERVAL_SECONDS = {
     "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
@@ -81,6 +92,83 @@ def _observe_request_weight(headers) -> None:
         pause = max(0.5, reset_ts - time.time() + 0.5)
         _soft_pause_until = max(_soft_pause_until, time.monotonic() + pause)
         logger.warning("[klines] Gate剩余额度=%s; 暂停%.1fs等窗口重置", remain, pause)
+
+
+def _price_scale(symbol: str) -> float:
+    """币安"1000"前缀品种(如1000PEPEUSDT)报价是原始单价×1000，Gate合约名没有这个
+    前缀、报价是未乘1000的原始单价。2026-10-04事故：切Gate后擂台里已有的
+    1000PEPEUSDT持仓(entry是币安口径0.0044)被按4e-06标价，瞬间"价格暴跌99.9%"
+    假触发止损，chanlun_pivot凭空亏$247.6。这里把Gate价格×1000换回币安口径，
+    OHLC一致才能跟存量持仓/历史入场价/止损价连续。"""
+    sym = str(symbol or "").strip().upper()
+    base = sym[:-4] if sym.endswith("USDT") else sym
+    return 1000.0 if (base.startswith("1000") and len(base) > 4) else 1.0
+
+
+# 2026-10-04：这两个代币化标的在Gate上的报价跟币安长期有基差且会漂移(ANTHROPIC
+# Gate/币安比值0.996~1.035，均值1.017、最近1.031；OPENAI偶有9%离群)，擂台里存量
+# 持仓的入场/止损价都是币安口径，混用Gate会假触发止损——这两个仍走币安公开K线
+# (请求量很小)，其余品种走Gate。
+BINANCE_SOURCE_SYMBOLS = {"ANTHROPICUSDT", "OPENAIUSDT"}
+_BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
+
+
+
+# 2026-10-18：擂台搬到实盘VPS(187.77.130.144)，跟实盘引擎共用一个IP的币安限流(期货2400权重/分钟/IP)。
+# X-MBX-USED-WEIGHT-1M 是整个IP本分钟已用的权重(含实盘)，超过阈值擂台就暂停到下一分钟，给实盘让路。
+BINANCE_IP_WEIGHT_YIELD = int(os.getenv("ARENA_BINANCE_WEIGHT_YIELD", "700"))
+_last_yield_log = 0.0
+
+
+def _observe_binance_ip_weight(headers) -> None:
+    global _soft_pause_until, _last_yield_log
+    try:
+        used = int(headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m") or -1)
+    except (TypeError, ValueError):
+        return
+    if used < BINANCE_IP_WEIGHT_YIELD:
+        return
+    pause = 61.0 - (time.time() % 60.0)
+    _soft_pause_until = max(_soft_pause_until, time.monotonic() + pause)
+    if time.monotonic() - _last_yield_log > 60:
+        _last_yield_log = time.monotonic()
+        logger.warning("[klines] 本IP币安权重已用%s(阈值%s)，擂台暂停%.0fs给实盘让路", used, BINANCE_IP_WEIGHT_YIELD, pause)
+
+
+def _fetch_klines_raw_binance(symbol, interval, limit, start_time_ms, end_time_ms, timeout, retries):
+    params = {"symbol": str(symbol).upper(), "interval": interval,
+              "limit": min(max(int(limit or 500), 1), 1500)}
+    if start_time_ms:
+        params["startTime"] = int(start_time_ms)
+    if end_time_ms:
+        params["endTime"] = int(end_time_ms)
+    url = f"{_BINANCE_KLINES_URL}?{urllib.parse.urlencode(params)}"
+    last_err = None
+    for attempt in range(max(1, retries)):
+        if not _wait_for_market_data_slot():
+            return []
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "strategy-engine-readonly"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                _observe_binance_ip_weight(resp.headers)
+                data = json.loads(resp.read().decode("utf-8"))
+                return data if isinstance(data, list) else []
+        except urllib.error.HTTPError as e:
+            if e.code in (418, 429):
+                global _hard_block_until
+                _hard_block_until = max(_hard_block_until, time.monotonic() + 60.0)
+                logger.warning("[klines] Binance HTTP %s; paused 60s", e.code)
+                return []
+            if e.code < 500:
+                logger.warning(f"[klines] {symbol} {interval} Binance HTTP {e.code}")
+                return []
+            last_err = e
+        except Exception as e:
+            last_err = e
+        if attempt < retries - 1:
+            time.sleep(0.6 * (attempt + 1))
+    logger.warning(f"[klines] {symbol} {interval} Binance拉取失败: {last_err}")
+    return []
 
 
 def _symbol_to_gate_contract(symbol: str) -> str:
@@ -168,11 +256,24 @@ def resolve_source_interval(interval: str) -> str:
     return "1m"
 
 
+_DAY_MS = 24 * 60 * _MINUTE_MS
+# 2026-10-04新增：TV对"不能整除一天"的自定义分钟周期，每天00:00 UTC重新起算(当天
+# 最后一根被截短)，不是按epoch连续切桶。实盘证据：SNDK TV周期91分钟，10-02的
+# 空单信号在12:08 UTC，正好=8×91分钟(从00:00起算)；按epoch切桶的91m边界是
+# 12:52，擂台因此比TV晚了1.5~3小时才入场。目前只对已用真实TV信号时间验证过的
+# 91m启用，其它周期(150m/130m/50m等)待用各自TV真实信号时间验证后再加。
+DAY_ANCHORED_MINUTES = {91}
+
+
 def bucket_open_ms(open_time_ms: int, period_ms: int) -> int:
-    """把任意时间戳对齐到 UTC epoch 的 period_ms 桶开盘时间（跟 TV 图表锚点一致）。"""
+    """把任意时间戳对齐到 period_ms 桶开盘时间。默认按UTC epoch；DAY_ANCHORED_MINUTES
+    里的周期按"每天00:00 UTC起算"(跟TV图表锚点一致)。"""
     t = int(open_time_ms or 0)
     if t <= 0 or period_ms <= 0:
         return 0
+    if (period_ms // _MINUTE_MS) in DAY_ANCHORED_MINUTES and period_ms % _MINUTE_MS == 0:
+        day = t - (t % _DAY_MS)
+        return day + ((t - day) // period_ms) * period_ms
     return t - (t % period_ms)
 
 
@@ -201,8 +302,12 @@ def merge_bars(source_bars: List[dict], target_minutes: int) -> List[dict]:
     for bucket in buckets:
         if bucket <= 0:
             continue
-        expected = [bucket + i * src_period_ms for i in range(n_per_bucket)]
-        if not all(t in by_t for t in expected):
+        bucket_end = bucket + target_period_ms
+        if target_minutes in DAY_ANCHORED_MINUTES:
+            # 当天最后一根被截短到午夜(TV同款)：只要求桶内到午夜为止的源K线到齐
+            bucket_end = min(bucket_end, (bucket - bucket % _DAY_MS) + _DAY_MS)
+        expected = list(range(bucket, bucket_end, src_period_ms))
+        if not expected or not all(t in by_t for t in expected):
             continue
         rows = [by_t[t] for t in expected]
         out.append({
@@ -263,6 +368,8 @@ def fetch_klines_raw(
     from和to两个边界(而不是只传一个让Gate猜)，返回条数完全由我们自己
     控制，不依赖Gate的默认行为。
     """
+    if USE_BINANCE_FOR_ALL or str(symbol).upper() in BINANCE_SOURCE_SYMBOLS:
+        return _fetch_klines_raw_binance(symbol, interval, limit, start_time_ms, end_time_ms, timeout, retries)
     contract = _symbol_to_gate_contract(symbol)
     lim = min(max(int(limit or 500), 1), 2000)
     interval_sec = _INTERVAL_SECONDS.get(str(interval).lower())
@@ -299,6 +406,10 @@ def fetch_klines_raw(
                 for r in raw:
                     try:
                         t_ms = int(r["t"]) * 1000
+                        _k = _price_scale(symbol)
+                        if _k != 1.0:
+                            r = {**r, "o": float(r["o"]) * _k, "h": float(r["h"]) * _k,
+                                 "l": float(r["l"]) * _k, "c": float(r["c"]) * _k}
                         out.append([
                             t_ms, r["o"], r["h"], r["l"], r["c"], r.get("sum", r.get("v", 0)),
                             t_ms + (interval_sec or 0) * 1000 - 1, r.get("sum", 0), 0, 0.0, 0.0, "0",

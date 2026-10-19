@@ -104,6 +104,9 @@ def _core_signals(bars: List[dict], p: dict):
 
     fast_curr, fast_prev = fast[-1], fast[-2]
     slow_curr = slow[-1]
+    # 2026-10-04: SNDK(slow=25)用SNDK自己的Pine源码——暴力动量不要求快慢线排列、无实体击穿反转、
+    # 平仓=收盘同时跌破/站上双均线(无快线拐头/开盘价条件)；ZEC(slow=30)保持ZEC源码逻辑。
+    _sndk = (slow_n == 25)
     # Pine的highestHighN/lowestLowN是[1]偏移(不含当前这根)，donchian_
     # high_low(bars, n)[-1]已经是"不含当前bar的前n根"区间，口径一致。
     hh, ll = donchian[-1]
@@ -132,13 +135,13 @@ def _core_signals(bars: List[dict], p: dict):
         (price - o) >= atr_now * massive_mult and is_bullish
         and price > fast_curr and price > slow_curr and ema_fast_up
     )
-    momentum_long = is_massive_bull and price > hh and fast_curr > slow_curr
+    momentum_long = is_massive_bull and price > hh and (fast_curr > slow_curr or _sndk)
 
     is_massive_bear = (
         (o - price) >= atr_now * massive_mult and is_bearish
         and price < fast_curr and price < slow_curr and ema_fast_down
     )
-    momentum_short = is_massive_bear and price < ll and fast_curr < slow_curr
+    momentum_short = is_massive_bear and price < ll and (fast_curr < slow_curr or _sndk)
 
     # 3.3 实体击穿反转条件(强制顺势)
     reversal_long = (
@@ -152,16 +155,16 @@ def _core_signals(bars: List[dict], p: dict):
         and (price < fast_curr and price < slow_curr) and ema_fast_down
     )
 
-    long_condition = standard_long or momentum_long or reversal_long
-    short_condition = standard_short or momentum_short or reversal_short
+    long_condition = standard_long or momentum_long or (reversal_long and not _sndk)
+    short_condition = standard_short or momentum_short or (reversal_short and not _sndk)
 
     # 3.5 平仓条件：快线方向转向 + 开盘收盘同时跌破(或站上)双线
-    close_long_condition = ema_fast_down and (
+    close_long_condition = (price < fast_curr and price < slow_curr) if _sndk else (ema_fast_down and (
         o < fast_curr and o < slow_curr and price < fast_curr and price < slow_curr
-    )
-    close_short_condition = ema_fast_up and (
+    ))
+    close_short_condition = (price > fast_curr and price > slow_curr) if _sndk else (ema_fast_up and (
         o > fast_curr and o > slow_curr and price > fast_curr and price > slow_curr
-    )
+    ))
 
     return {
         "price": price, "atr_now": atr_now, "bar_time": bar_time,

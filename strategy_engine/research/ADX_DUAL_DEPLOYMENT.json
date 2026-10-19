@@ -1,0 +1,16 @@
+{
+  "backup": "/home/stratroster/eth-webhook-server/codex_backups/adx_dual_20261005_073521",
+  "stage": "/home/stratroster/eth-webhook-server/codex_staging/adx_dual_20261005",
+  "deployed_at": 1791185723.280997,
+  "changed": [
+    "strategy_engine/strategies/adx_dual_engine.py",
+    "strategy_engine/strategies/__init__.py",
+    "strategy_engine/comparison_roster.py",
+    "strategy_engine/multi_strategy_runner.py",
+    "dashboard/roster_server.py",
+    "strategy_engine/research/test_adx_dual_engine.py",
+    "strategy_engine/research/replay_adx_dual_engine.py",
+    "strategy_engine/research/validate_adx_integration.py",
+    "strategy_engine/research/ADX_DUAL_ENGINE_HANDOFF.md"
+  ]
+}

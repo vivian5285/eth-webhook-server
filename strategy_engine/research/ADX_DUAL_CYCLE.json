@@ -1,0 +1,66 @@
+{
+  "new_strategy_risk_states": [
+    {
+      "strategy": "adx_dual_engine_1h",
+      "peak_equity": 1000.0,
+      "daily_start_equity": 1000.0,
+      "daily_date": "2026-10-05",
+      "last_regime": "stress",
+      "dynamic_gross_cap": 2.5,
+      "stop_heat_cap": 0.04,
+      "cluster_cap_frac": 0.3,
+      "drawdown_pct": 0.000497314420932753,
+      "daily_loss_pct": 0.000497314420932753,
+      "new_entries_blocked": 0,
+      "reason": "allowed",
+      "updated_at": 1791186030.6619487
+    },
+    {
+      "strategy": "adx_dual_engine_4h",
+      "peak_equity": 1000.0,
+      "daily_start_equity": 1000.0,
+      "daily_date": "2026-10-05",
+      "last_regime": "normal",
+      "dynamic_gross_cap": 4.5,
+      "stop_heat_cap": 0.08,
+      "cluster_cap_frac": 0.35,
+      "drawdown_pct": 0.0,
+      "daily_loss_pct": 0.0,
+      "new_entries_blocked": 0,
+      "reason": "allowed",
+      "updated_at": 1791186030.6420004
+    },
+    {
+      "strategy": "adx_dual_trend_only_4h",
+      "peak_equity": 1000.0,
+      "daily_start_equity": 1000.0,
+      "daily_date": "2026-10-05",
+      "last_regime": "normal",
+      "dynamic_gross_cap": 4.5,
+      "stop_heat_cap": 0.08,
+      "cluster_cap_frac": 0.35,
+      "drawdown_pct": 0.0,
+      "daily_loss_pct": 0.0,
+      "new_entries_blocked": 0,
+      "reason": "allowed",
+      "updated_at": 1791186030.6482291
+    },
+    {
+      "strategy": "adx_dual_range_only_4h",
+      "peak_equity": 1000.0,
+      "daily_start_equity": 1000.0,
+      "daily_date": "2026-10-05",
+      "last_regime": "normal",
+      "dynamic_gross_cap": 4.5,
+      "stop_heat_cap": 0.08,
+      "cluster_cap_frac": 0.35,
+      "drawdown_pct": 0.0,
+      "daily_loss_pct": 0.0,
+      "new_entries_blocked": 0,
+      "reason": "allowed",
+      "updated_at": 1791186030.6547081
+    }
+  ],
+  "checked_at": 1791186036.7941859,
+  "cycle_reached_new_strategies": true
+}
