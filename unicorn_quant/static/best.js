@@ -403,7 +403,7 @@ async function loadRecon() {
       <div class="badges" style="margin-top:8px">${st}</div>
       ${rows ? `<div class="tbl-wrap"><table class="t">${rows}</table></div>` : ''}</div>`;
   }).join('');
-  loadAutofix();
+  loadAutofix(); loadLive();
 }
 /* 2026-10-19 自动对账修复器面板 */
 async function loadAutofix() {
@@ -426,5 +426,28 @@ async function loadAutofix() {
     ${(a.data_health && a.data_health.checks) ? `<div class="af-hc"><b>复刻健康检查</b><span class="mut small"> 每小时 · 上次 ${t(a.data_health.ts)} · 有问题会发钉钉</span>
       <ul>${a.data_health.checks.map(c => `<li class="${c.ok ? 'ok' : c.level}"><i>${c.ok ? '✓' : c.level === 'bad' ? '✕' : '!'}</i>${esc(c.text)}</li>`).join('')}</ul></div>` : ''}
     <div class="mut small af-n">规则：持续两次检查才动；只修纸面仓位，不改策略代码；同一品种一周被修 3 次就停手并标记"疑似代码问题"；每天最多 6 次。</div>`;
+  $('#rcBody').prepend(el);
+}
+
+/* 2026-10-19 方案F实盘执行器面板(客户E账户) */
+async function loadLive() {
+  let a; try { const x = await fetch('/api/planf/live'); if (!x.ok) return; a = await x.json(); } catch (e) { return; }
+  const s = a.E; if (!s) return;
+  const t = ts => new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const live = /实盘/.test(s.mode), stale = Date.now() / 1000 - s.ts > 300;
+  const rows = (s.rows || []).map(r => `<tr><td>${esc(r.symbol.replace('USDT', ''))}</td><td class="r">${r.target_usdt}U</td><td class="r">${r.position_usdt}U</td><td>${esc(r.action || '—')}</td></tr>`).join('');
+  const did = s.did || s.would_do || [];
+  const el = document.createElement('div'); el.className = 'af lv';
+  el.innerHTML = `<div class="af-h"><b>实盘执行器 · ${esc(s.account)}账户</b>
+      <span class="badge ${live ? 'up' : 'wn'}">${esc(s.mode)}</span>${s.frozen ? '<span class="badge dn">冻结</span>' : ''}${s.circuit_breaker ? '<span class="badge dn">熔断中</span>' : ''}${stale ? '<span class="badge dn">状态超过5分钟没更新</span>' : ''}
+      <span class="mut small">更新 ${t(s.ts)} · 信号 ${esc(s.signals_asof || '--')}</span></div>
+    <div class="af-k">
+      <div><em>账户净值</em><b>${s.equity}U</b><span>${s.use_btc ? '含BTC' : '净值<5000U：BTC份额分给其余币'}</span></div>
+      <div><em>目标总名义</em><b>${s.gross_target_usdt}U</b><span>实际持仓 ${s.gross_position_usdt}U</span></div>
+      <div><em>纽约常规时段</em><b>${s.rth ? '是' : '否'}</b><span>美股只在常规时段下单</span></div>
+      <div><em>${live ? '本轮执行' : '影子：本来要下的单'}</em><b>${did.length}</b><span>${esc(did.slice(0, 3).join('；') || '无')}</span></div>
+    </div>
+    ${rows ? `<div class="tbl-wrap short"><table class="t"><thead><tr><th>品种</th><th class="r">目标</th><th class="r">实际</th><th>动作</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="mut small">当前没有目标仓位。</div>'}
+    <div class="mut small af-n">影子模式只计算不下单；${esc(s.account)}账户目录里放 ARMED 文件才真实下单，放 STOP 文件立即停止。${(s.why || []).length ? '冻结原因：' + esc(s.why.join('；')) : ''}</div>`;
   $('#rcBody').prepend(el);
 }

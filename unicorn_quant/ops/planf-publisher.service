@@ -1,0 +1,14 @@
+# /etc/systemd/system/planf-publisher.service
+[Unit]
+Description=方案F 实盘信号发布器(读擂台纸面四条腿→/var/lib/planf/targets.json，不碰密钥)
+After=network-online.target strategy-roster.service
+[Service]
+User=stratroster
+Group=planf
+WorkingDirectory=/home/stratroster/unicorn_quant
+ExecStart=/home/stratroster/eth-webhook-server/venv/bin/python -m engine.planf_publisher
+Restart=always
+RestartSec=20
+Nice=10
+[Install]
+WantedBy=multi-user.target

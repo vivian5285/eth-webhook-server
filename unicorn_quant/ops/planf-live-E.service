@@ -1,0 +1,16 @@
+# /etc/systemd/system/planf-live-E.service
+[Unit]
+Description=方案F 实盘执行器·客户E账户(默认影子模式；/home/binanceE/planf_live/ARMED 存在才下单，STOP 存在一律不下单)
+After=network-online.target planf-publisher.service
+[Service]
+User=binanceE
+Group=binanceE
+SupplementaryGroups=planf
+WorkingDirectory=/home/binanceE/planf_live
+Environment=PLANF_ACCOUNT=E
+Environment=PLANF_ENV_FILE=/home/binanceE/binance-engine/.env
+ExecStart=/home/binanceE/binance-engine/venv/bin/python /home/binanceE/planf_live/planf_executor.py
+Restart=always
+RestartSec=30
+[Install]
+WantedBy=multi-user.target

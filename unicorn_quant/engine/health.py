@@ -170,6 +170,21 @@ def checks():
                 + ("" if same else "——明年1月1日需要换币(回测 M5 和擂台 roster 一起换)"), "warn")
         except Exception as e:
             add("rule_universe", False, f"规则币池预演出错：{type(e).__name__}", "warn")
+    # 13 2026-10-19 方案F实盘执行器(客户E账户)：服务在跑就必须每分钟更新状态；冻结/熔断要报
+    try:
+        import subprocess
+        if subprocess.run(["systemctl", "is-enabled", "--quiet", "planf-live-E"]).returncode == 0:
+            ls = _rd("/var/lib/planf/live_E_status.json", {}) or {}
+            age = (now - float(ls.get("ts") or 0)) / 60
+            ok = age < 5 and not ls.get("frozen") and not ls.get("circuit_breaker")
+            add("live_E", ok, f"实盘执行器E账户：{ls.get('mode')}，净值 {ls.get('equity')}U，{age:.0f} 分钟前更新"
+                + ("" if age < 5 else "——执行器可能停了") + ("；冻结：" + "；".join(ls.get("why") or []) if ls.get("frozen") else "")
+                + ("；熔断中" if ls.get("circuit_breaker") else ""))
+            tg = _rd("/var/lib/planf/targets.json", {}) or {}
+            tage = (now - float(tg.get("ts") or 0)) / 60
+            add("publisher", tage < 5 and tg.get("ok"), f"实盘信号发布器 {tage:.0f} 分钟前更新" + ("" if tg.get("ok") else "；问题：" + "；".join(tg.get("problems") or [])))
+    except Exception as e:
+        add("live_E", False, f"执行器检查出错：{type(e).__name__}", "warn")
     # 10 币安美股永续上新/下架(回测股票池 = 今天可交易的)
     try:
         info = json.load(urllib.request.urlopen("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=30))

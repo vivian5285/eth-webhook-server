@@ -39,7 +39,7 @@ def api(fn):
             "/api/symbols", "/api/tickers", "/api/chart", "/api/bar",
             "/api/strategies", "/api/stocks", "/api/scanner",
             "/api/sweep/status", "/api/matrix/status",
-            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix",
+            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix", "/api/planf/live",
         }
         public_get = public_get or (request.method == "GET" and request.path.startswith("/api/universe"))   # 2026-10-18 全品种复盘只读
         public_analysis = request.method == "POST" and request.path in {
@@ -557,6 +557,20 @@ def optimal_autofix():
     h = rd("recon_health.json", {}); h.pop("history", None)
     return jsonify(health=h, actions=rd("recon_actions.json", [])[-40:][::-1], overrides=rd("recon_override.json", {}),
                    data_health=rd("data_health.json", {}))     # 2026-10-19 复刻健康检查(engine/health.py)
+
+
+@app.get("/api/planf/live")
+@api
+def planf_live():
+    """2026-10-19 方案F实盘执行器状态(/var/lib/planf，执行器以账户用户身份写；不含任何密钥)"""
+    def rd(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    t = rd("/var/lib/planf/targets.json") or {}
+    return jsonify(E=rd("/var/lib/planf/live_E_status.json"), signals={k: t.get(k) for k in ("asof", "ok", "problems", "vol_scale", "coin_weights_no_btc", "legs")})
 
 
 @app.get("/api/retired")
