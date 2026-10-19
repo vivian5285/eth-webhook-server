@@ -219,3 +219,100 @@ footer{padding-bottom:56px}
 .sc-note{font-size:12.5px;color:var(--t2);line-height:1.7;padding:10px 4px}.sc-note b{color:var(--t1)}
 .sc-warn{color:#FF9F1A}
 .sc-curve{width:100%;height:120px;background:var(--card);border-radius:14px;margin:8px 0}
+
+/* 2026-10-18 成交表的开平仓原因 */
+td.rsn{max-width:340px;white-space:normal;font-size:12px;color:var(--t2);line-height:1.45;min-width:220px}
+
+/* 2026-10-18 K线全屏复盘 */
+#sec-chart.fs-on{position:fixed;inset:0;z-index:200;background:var(--bg);padding:10px 8px;overflow:auto;border-radius:0;min-height:0;margin:0}
+#sec-chart.fs-on .chart-wrap{border-radius:10px}
+
+/* ================= 2026-10-18 科技终端主题(覆盖上面的配色) ================= */
+:root{
+  --bg:#070B14;--surface:#0D1422;--card:#121B2D;--card2:#18233A;--line:rgba(120,170,255,.10);--line2:rgba(120,190,255,.22);
+  --t1:#E6EDF7;--t2:#8A9AB5;--t3:#53627C;
+  --pink:#22D3EE;--pink-d:#06B6D4;--pink-bg:rgba(34,211,238,.12);--on-accent:#03141B;
+  --up:#2EBD85;--dn:#F0616D;--up-bg:rgba(46,189,133,.13);--dn-bg:rgba(240,97,109,.13);
+  --shadow:0 0 0 1px var(--line),0 18px 48px rgba(0,0,0,.45);--glow:rgba(34,211,238,.10);
+}
+[data-theme=light]{
+  --bg:#E9EEF5;--surface:#F4F7FB;--card:#FFFFFF;--card2:#EDF2F8;--line:rgba(20,40,80,.10);--line2:rgba(20,40,80,.20);
+  --t1:#152036;--t2:#56657F;--t3:#93A0B5;
+  --pink:#0E8FA8;--pink-d:#0B7489;--pink-bg:rgba(14,143,168,.10);--on-accent:#FFFFFF;
+  --up:#14966A;--dn:#D9475A;--up-bg:rgba(20,150,106,.10);--dn-bg:rgba(217,71,90,.10);
+  --shadow:0 0 0 1px var(--line),0 10px 30px rgba(20,40,80,.08);--glow:rgba(14,143,168,.08);
+}
+body{background:var(--bg);background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:48px 48px;background-attachment:fixed}
+[data-theme=light] body{background-image:linear-gradient(rgba(20,40,80,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(20,40,80,.045) 1px,transparent 1px)}
+.orb{opacity:.35!important;filter:blur(140px)!important}
+.o2{background:rgba(59,130,246,.10)!important}.o3{background:rgba(34,211,238,.06)!important}
+.card{backdrop-filter:blur(8px)}
+.btn-pink{color:var(--on-accent)!important;box-shadow:0 6px 20px -10px var(--pink)!important;letter-spacing:.2px}
+.btn-pink:hover{box-shadow:0 8px 24px -8px var(--pink)!important}
+.nav{border-bottom:1px solid var(--line)}
+.pills a.on{background:var(--pink-bg)!important;color:var(--pink)!important}
+.big,.px .big,.kpi .v,.res,table.t td,.ytbl td{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+.up{color:var(--up)}.dn{color:var(--dn)}
+
+/* ================= 2026-10-17 苹果 iOS 毛玻璃主题(覆盖上面所有配色) ================= */
+:root{
+  --bg:#F2F2F7;--surface:rgba(255,255,255,.62);--card:rgba(255,255,255,.78);--card2:rgba(118,118,128,.12);
+  --line:rgba(60,60,67,.12);--line2:rgba(60,60,67,.22);
+  --t1:#1C1C1E;--t2:#6E6E73;--t3:#AEAEB2;
+  --pink:#007AFF;--pink-d:#0062CC;--pink-bg:rgba(0,122,255,.12);--on-accent:#FFFFFF;
+  --up:#34C759;--dn:#FF3B30;--up-bg:rgba(52,199,89,.14);--dn-bg:rgba(255,59,48,.12);
+  --shadow:0 0 0 .5px rgba(60,60,67,.10),0 8px 32px rgba(31,38,135,.10);--glow:rgba(0,122,255,.18);
+  --glass-blur:saturate(180%) blur(24px);
+}
+[data-theme=light]{
+  --bg:#F2F2F7;--surface:rgba(255,255,255,.62);--card:rgba(255,255,255,.80);--card2:rgba(118,118,128,.12);
+  --line:rgba(60,60,67,.12);--line2:rgba(60,60,67,.22);--t1:#1C1C1E;--t2:#6E6E73;--t3:#AEAEB2;
+  --pink:#007AFF;--pink-d:#0062CC;--pink-bg:rgba(0,122,255,.12);--on-accent:#FFFFFF;
+  --up:#28A745;--dn:#FF3B30;--up-bg:rgba(52,199,89,.14);--dn-bg:rgba(255,59,48,.12);
+  --shadow:0 0 0 .5px rgba(60,60,67,.10),0 8px 32px rgba(31,38,135,.10);--glow:rgba(0,122,255,.18);
+}
+[data-theme=dark]{
+  --bg:#000000;--surface:rgba(28,28,30,.62);--card:rgba(44,44,46,.72);--card2:rgba(118,118,128,.24);
+  --line:rgba(84,84,88,.45);--line2:rgba(120,120,128,.55);--t1:#F2F2F7;--t2:#AEAEB2;--t3:#636366;
+  --pink:#0A84FF;--pink-d:#409CFF;--pink-bg:rgba(10,132,255,.20);--on-accent:#FFFFFF;
+  --up:#30D158;--dn:#FF453A;--up-bg:rgba(48,209,88,.16);--dn-bg:rgba(255,69,58,.16);
+  --shadow:0 0 0 .5px rgba(255,255,255,.08),0 10px 40px rgba(0,0,0,.55);--glow:rgba(10,132,255,.25);
+}
+html,body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif!important;-webkit-font-smoothing:antialiased}
+body{background:var(--bg)!important;background-image:none!important;letter-spacing:-.01em}
+/* 动态彩色光晕(缓慢流动) */
+.bg{z-index:-1}
+.orb{opacity:1!important;filter:blur(90px)!important;animation:iosFloat 22s ease-in-out infinite!important;mix-blend-mode:normal}
+.o1{width:620px!important;height:620px!important;left:-160px!important;top:-200px!important;background:radial-gradient(circle,rgba(0,122,255,.38),transparent 70%)!important}
+.o2{width:560px!important;height:560px!important;right:-140px!important;top:80px!important;background:radial-gradient(circle,rgba(175,82,222,.30),transparent 70%)!important;animation-delay:-7s!important}
+.o3{width:640px!important;height:640px!important;left:30%!important;bottom:-320px!important;background:radial-gradient(circle,rgba(48,209,88,.26),transparent 70%)!important;animation-delay:-13s!important}
+[data-theme=dark] .o1{background:radial-gradient(circle,rgba(10,132,255,.35),transparent 70%)!important}
+[data-theme=dark] .o2{background:radial-gradient(circle,rgba(191,90,242,.28),transparent 70%)!important}
+[data-theme=dark] .o3{background:radial-gradient(circle,rgba(48,209,88,.20),transparent 70%)!important}
+@keyframes iosFloat{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(60px,40px) scale(1.08)}66%{transform:translate(-40px,20px) scale(.95)}}
+/* 毛玻璃卡片 */
+.card,.kpi,.nav,.statusbar,.sheet,.chip,.seg,.pair,.search,.box,.rv-why,.rule,.pend div,.badge,.tape{
+  -webkit-backdrop-filter:saturate(180%) blur(24px)!important;backdrop-filter:saturate(180%) blur(24px)!important}
+.card{background:var(--surface)!important;border:.5px solid var(--line)!important;border-radius:22px!important;box-shadow:var(--shadow)!important}
+.kpi{background:var(--card)!important;border:.5px solid var(--line)!important;border-radius:18px!important;box-shadow:0 2px 12px rgba(0,0,0,.04)}
+.nav{background:color-mix(in srgb,var(--bg) 55%,transparent)!important;border-bottom:.5px solid var(--line)!important}
+.chip,.seg,.pair,.search{background:var(--card)!important;border:.5px solid var(--line)!important}
+.seg button.on{background:var(--surface)!important;color:var(--t1)!important;box-shadow:0 1px 6px rgba(0,0,0,.12)!important;border-radius:12px}
+.pills a.on{background:var(--pink-bg)!important;color:var(--pink)!important}
+.btn-pink{background:var(--pink)!important;color:#fff!important;border-radius:14px!important;box-shadow:0 6px 18px -8px var(--pink)!important;font-weight:600}
+.btn-pink:hover{filter:brightness(1.06)}
+.btn-pink.long{background:var(--up)!important}.btn-pink.short{background:var(--dn)!important}
+input,select{border-radius:12px!important}
+table.t th{background:transparent!important;backdrop-filter:none!important}
+.chart-wrap,#chartMain{border-radius:16px}
+.tag.c{background:rgba(255,149,0,.15);color:#FF9500}.tag.s{background:rgba(0,122,255,.12);color:#007AFF}
+/* 动效：卡片进场 + 按钮按压 */
+.card{animation:iosIn .45s cubic-bezier(.2,.8,.2,1) both}
+@keyframes iosIn{from{opacity:0;transform:translateY(8px) scale(.995)}to{opacity:1;transform:none}}
+button,.chip,.pills a{transition:transform .15s ease,background .2s ease,box-shadow .2s ease}
+button:active,.chip:active{transform:scale(.97)}
+@media (prefers-reduced-motion:reduce){.orb,.card{animation:none!important}}
+/* 网络提示 */
+.netbar{position:fixed;left:50%;top:76px;transform:translateX(-50%);z-index:300;padding:10px 16px;border-radius:14px;background:var(--card);
+  -webkit-backdrop-filter:saturate(180%) blur(24px);backdrop-filter:saturate(180%) blur(24px);box-shadow:var(--shadow);border:.5px solid var(--line);font-size:13px;display:flex;gap:10px;align-items:center}
+.netbar button{border:0;background:var(--pink);color:#fff;border-radius:10px;padding:5px 12px;cursor:pointer}

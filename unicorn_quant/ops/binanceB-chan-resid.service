@@ -1,0 +1,17 @@
+# /etc/systemd/system/binanceB-chan-resid.service
+[Unit]
+Description=BinanceB chan_resid min-size live test (standalone, isolated from TV system)
+After=network.target
+
+[Service]
+User=binanceB
+WorkingDirectory=/home/binanceB/binance-engine
+Environment="PATH=/home/binanceB/binance-engine/venv/bin:/usr/bin:/bin"
+ExecStart=/home/binanceB/binance-engine/venv/bin/python chan_resid_live.py
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

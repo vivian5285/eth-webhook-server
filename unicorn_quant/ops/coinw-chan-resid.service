@@ -1,0 +1,18 @@
+# /etc/systemd/system/coinw-chan-resid.service
+[Unit]
+Description=CoinW chan_resid min-size live test (standalone, isolated from TV system)
+After=network.target
+
+[Service]
+User=coinw
+WorkingDirectory=/home/coinw/coinw-hft-server
+EnvironmentFile=/home/coinw/coinw-hft-server/.env
+Environment="PATH=/home/coinw/venv/bin:/usr/bin:/bin"
+ExecStart=/home/coinw/venv/bin/python chan_resid_live_coinw.py
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

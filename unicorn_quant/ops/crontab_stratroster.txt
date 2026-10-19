@@ -1,0 +1,10 @@
+
+# 美股趋势突破扫描器(独角兽量化)：美股收盘后(UTC 21:45 / 22:45，覆盖夏令/冬令时)，周一至周五
+CRON_TZ=UTC
+45 21,22 * * 1-5 cd /home/stratroster/unicorn_quant && UQ_REPO=/home/stratroster/eth-webhook-server UQ_STOCK_CACHE=/home/stratroster/unicorn_quant/stock_cache UQ_SCANNER_DIR=/home/stratroster/unicorn_quant/scanner_data /home/stratroster/eth-webhook-server/venv/bin/python scanner_run.py >> /home/stratroster/unicorn_quant/sweeps/scanner.log 2>&1
+
+# 独角兽量化「最优方案」复盘数据：每天美股收盘后重算(方案F，币圈+美股轮动)
+50 22 * * * cd /home/stratroster/unicorn_quant && UQ_STOCK_CACHE=/home/stratroster/unicorn_quant/stock_cache /home/stratroster/eth-webhook-server/venv/bin/python optimal_run.py >> /home/stratroster/unicorn_quant/optimal_data/run.log 2>&1
+# 擂台 美股行业轮动排名(stock_sector_rot6m5_long 用)：每天美股收盘后刷新
+40 22 * * * cd /home/stratroster/eth-webhook-server && /home/stratroster/eth-webhook-server/venv/bin/python -m strategy_engine.sector_rotation >> /home/stratroster/eth-webhook-server/strategy_engine/data/sector_rotation.log 2>&1
+20 0,8,16 * * * cd /home/stratroster/unicorn_quant && UQ_STOCK_CACHE=/home/stratroster/unicorn_quant/stock_cache /home/stratroster/eth-webhook-server/venv/bin/python optimal_run.py >> /home/stratroster/unicorn_quant/optimal_data/run.log 2>&1

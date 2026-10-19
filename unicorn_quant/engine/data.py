@@ -16,7 +16,7 @@ if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
 FAPI = "https://fapi.binance.com"
-INTERVALS = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"]
+INTERVALS = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w"]
 _lock = threading.Lock()
 _cache: dict = {}
 
@@ -53,6 +53,9 @@ def _raw(symbol, interval, limit, end=None):
     for i in range(3):
         try:
             r = requests.get(FAPI + "/fapi/v1/klines", params=p, timeout=10)
+            # 2026-10-18 搬到实盘VPS：本IP币安权重(含实盘)超过900就等到下一分钟，给实盘让路
+            if int(r.headers.get('X-MBX-USED-WEIGHT-1M') or 0) >= 900:
+                time.sleep(61 - time.time() % 60)
             if r.status_code == 200:
                 return r.json()
             if r.status_code < 500:

@@ -329,12 +329,13 @@ def _meta(name: str, fn) -> dict:
 
 
 def list_strategies() -> List[dict]:
+    from .retired import RETIRED   # 2026-10-18：负收益策略已淘汰，不在策略库里出现
     out = [{"id": k, "title": v["title"], "desc": v["desc"], "params": v["params"], "source": "builtin",
-            "cat": "内置", "flag": None} for k, v in BUILTIN.items()]
+            "cat": "内置", "flag": None} for k, v in BUILTIN.items() if k not in RETIRED]
     try:
         from strategy_engine.strategies import STRATEGIES
         for k in sorted(STRATEGIES):
-            if k.startswith("_") or k in BUILTIN:
+            if k.startswith("_") or k in BUILTIN or k in RETIRED:
                 continue
             m = _meta(k, STRATEGIES[k])
             hm = re.search(r"_(1m|5m|15m|30m|45m|1h|2h|4h|6h|8h|12h|1d|90m|150m)$", k)
@@ -348,7 +349,7 @@ def list_strategies() -> List[dict]:
 
 # ---------------- 历史K线注入（让策略内部取行情时只能看到"回测时点前已收盘"的数据） ----------------
 INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000,
-               "4h": 14_400_000, "6h": 21_600_000, "12h": 43_200_000, "1d": 86_400_000, "1w": 604_800_000}
+               "4h": 14_400_000, "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000, "1w": 604_800_000}
 _tls = threading.local()
 
 
@@ -443,8 +444,9 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_on
     max_dd = 0.0
     in_pos_bars = 0
     c0 = bars[warmup]["c"] if len(bars) > warmup else bars[0]["c"]
+    order = None                      # 2026-10-18 突破挂单：上一根收盘后挂、只在下一根有效
 
-    def close(px, t, why):
+    def close(px, t, why, reason=None):
         nonlocal pos, equity
         d = 1 if pos["side"] == "LONG" else -1
         gross = (px - pos["entry"]) * pos["qty"] * d
@@ -453,7 +455,8 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_on
         equity += pnl
         trades.append({"side": pos["side"], "entry_t": pos["t"], "exit_t": t, "entry": pos["entry"], "exit": px,
                        "stop": pos.get("stop"), "pnl": round(pnl, 2), "ret": round(pnl / pos["notional"] * 100, 2),
-                       "why": why, "bars": pos["bars"], "fee": round(fee, 2)})
+                       "why": why, "bars": pos["bars"], "fee": round(fee, 2),
+                       "open_reason": pos.get("reason", ""), "close_reason": reason or why})
         pos = None
 
     for i in range(warmup, len(bars)):
@@ -466,14 +469,28 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_on
             in_pos_bars += 1
             ex = _check_exit(pos, bar)
             if ex:
-                close(ex[0], bar["t"], ex[1])
+                close(ex[0], bar["t"], ex[1], f"跌破硬止损 {ex[0]:.4g}" if ex[1] == "硬止损" else None)
+        if order is not None:
+            o, order = order, None
+            lng = o["side"] == "LONG"
+            if not pos and ((lng and bar["h"] >= o["price"]) or (not lng and bar["l"] <= o["price"])):
+                px = max(bar["o"], o["price"]) if lng else min(bar["o"], o["price"])
+                notional = equity * leverage * max(0.0, min(1.0, float(o.get("size_frac") or 1.0)))
+                sd = o.get("stop_dist")
+                stp = (px - sd if lng else px + sd) if sd else None
+                pos = {"side": o["side"], "entry": px, "t": bar["t"], "qty": notional / px, "notional": notional,
+                       "stop": stp, "tp": None, "bars": 0, "brk": True,
+                       "reason": o.get("reason", "") + f"；盘中触价成交 {px:.4g}" + (f"；均线跟上前靠硬止损 {stp:.4g} 保护" if stp else "")}
+                if stp is not None and ((lng and bar["l"] <= stp) or (not lng and bar["h"] >= stp)):
+                    close(stp, bar["t"], "硬止损", f"当天突破进场又{'跌破' if lng else '涨破'}硬止损 {stp:.4g}")
         window_bars = bars[max(0, i + 1 - window): i + 1]
         by_tf = {"base": window_bars}
         for tf, tb in (mtf or {}).items():
             pm = _PERIOD_MS.get(tf, 0)
             by_tf[tf] = [b for b in tb if b["t"] + pm <= bar["t"]]
         try:
-            sig = fn(by_tf, params, {"side": pos["side"], "entry_price": pos["entry"], "entry_bar_time": pos["t"]} if pos else None)
+            sig = fn(by_tf, params, {"side": pos["side"], "entry_price": pos["entry"], "entry_bar_time": pos["t"],
+                                     "stop": pos.get("stop"), "brk": bool(pos.get("brk"))} if pos else None)
         except Exception:
             sig = None
         if sig:
@@ -484,13 +501,21 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_on
                     close(px, bar["t"], "平多")
             elif act in ("LONG", "SHORT"):
                 if pos and pos["side"] != act:
-                    close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空")
+                    close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空", sig.get("reason"))
                 if not pos:
-                    notional = equity * leverage
+                    # 方案F 的策略按波动率给仓位比例(size_frac≤1)，其余策略照旧满仓
+                    notional = equity * leverage * max(0.0, min(1.0, float(sig.get("size_frac") or 1.0)))
                     pos = {"side": act, "entry": px, "t": bar["t"], "qty": notional / px, "notional": notional,
-                           "stop": sig.get("stop_loss"), "tp": sig.get("tp1"), "bars": 0}
+                           "stop": sig.get("stop_loss"), "tp": sig.get("tp1"), "bars": 0, "reason": sig.get("reason", "")}
+            elif act == "ORDER":
+                if not pos:
+                    order = {"side": sig.get("order_side"), "price": float(sig["order_price"]), "stop_dist": sig.get("stop_dist"),
+                             "size_frac": sig.get("size_frac"), "reason": sig.get("reason", "")}
+            elif act == "CLEAR_STOP":
+                if pos:
+                    pos["stop"] = None; pos["brk"] = False; pos["reason"] += sig.get("reason", "")
             elif act.startswith("CLOSE") and pos:
-                close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空")
+                close(px, bar["t"], "平多" if pos["side"] == "LONG" else "平空", sig.get("reason"))
         mark = equity
         if pos:
             d = 1 if pos["side"] == "LONG" else -1
@@ -572,3 +597,14 @@ def _run(bars, strategy, params, mtf, equity0, leverage, warmup, window, long_on
         stats["bh_dd"] = round(bdd * 100, 2)
     return {"stats": stats, "long": side_stats("LONG"), "short": side_stats("SHORT"), "trades": trades,
             "equity": curve, "open": open_pos}
+
+
+# ---------------- 2026-10-18：工作台只保留最优方案(宝贝："负收益的都删除，只留下最佳收益的") ----------------
+from .plan import BUILTINS as _PLAN_BUILTINS, OPTIMAL  # noqa: E402
+
+BUILTIN.update(_PLAN_BUILTINS)
+
+
+def list_strategies() -> List[dict]:  # noqa: F811  覆盖上面的全库列表
+    return [{"id": k, "title": BUILTIN[k]["title"], "desc": BUILTIN[k]["desc"], "params": BUILTIN[k]["params"],
+             "source": "builtin", "cat": "最优方案", "flag": None, "hint": "1d"} for k in OPTIMAL]

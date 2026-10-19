@@ -13,6 +13,7 @@ from functools import wraps
 from flask import Flask, jsonify, request, send_from_directory, session
 
 from engine import backtest, data, exchange, paper, scanner, stocks, ta
+from engine.retired import RETIRED, NOT_OPTIMAL, GENERATED as RETIRED_AT
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
@@ -34,8 +35,18 @@ def _hist(bars):
 def api(fn):
     @wraps(fn)
     def w(*a, **kw):
-        if not session.get("ok"):
-            return jsonify(error="未登录"), 401
+        public_get = request.method == "GET" and request.path in {
+            "/api/symbols", "/api/tickers", "/api/chart", "/api/bar",
+            "/api/strategies", "/api/stocks", "/api/scanner",
+            "/api/sweep/status", "/api/matrix/status",
+            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix",
+        }
+        public_get = public_get or (request.method == "GET" and request.path.startswith("/api/universe"))   # 2026-10-18 全品种复盘只读
+        public_analysis = request.method == "POST" and request.path in {
+            "/api/backtest", "/api/compare",
+        }
+        if not session.get("ok") and not (public_get or public_analysis):
+            return jsonify(error="此操作需要登录"), 401
         try:
             return fn(*a, **kw)
         except (ValueError, KeyError) as e:
@@ -53,7 +64,7 @@ def headers(r):
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["X-Frame-Options"] = "DENY"
     if request.path.startswith("/api/"):
-        r.headers["Cache-Control"] = "no-store"
+        r.headers["Cache-Control"] = "no-cache" if r.headers.get("ETag") else "no-store"   # 有ETag的可以缓存但每次先问服务器
     return r
 
 
@@ -89,7 +100,7 @@ def logout():
 
 @app.get("/api/me")
 def me():
-    return jsonify(ok=bool(session.get("ok")), configured=bool(PASSWORD))
+    return jsonify(ok=bool(session.get("ok")), configured=bool(PASSWORD), viewer=True)
 
 
 # ---------- 行情/指标 ----------
@@ -153,10 +164,23 @@ def run_backtest():
     b = request.get_json(silent=True) or {}
     sym, itv, name = b.get("symbol", "BTCUSDT"), b.get("interval", "4h"), b.get("strategy", "dual_ema_band")
     limit = max(100, min(int(b.get("limit", 1500)), 6000))
+    if name in RETIRED:
+        raise ValueError(f"{name} 已淘汰(负收益，不再使用)：{RETIRED[name]}")
+    if name in NOT_OPTIMAL:
+        raise ValueError(f"{name} 已下架(不是最优)：{NOT_OPTIMAL[name]}")
     lev = float(b.get("leverage", 1))
     if not (0 < lev <= 20):
         raise ValueError("杠杆范围 0-20x")
     bars = data.get_klines(sym, itv, limit, closed_only=True)
+    # 2026-10-18 币安美股永续上线晚(MUUSDT 2026-05起)：回测美股腿时，上线前用正股日线补上，预热和开仓与 /best 一致
+    if name == "plan_f_stock" and itv == "1d" and sym.upper().endswith("USDT") and bars:
+        try:
+            yb = stocks.get_klines(sym.upper()[:-4], "1d", 600, closed_only=True)
+            pre = [{"t": x["t"] // 86400000 * 86400000, "o": x["o"], "h": x["h"], "l": x["l"], "c": x["c"], "v": x.get("v", 0)}
+                   for x in yb if x["t"] // 86400000 * 86400000 < bars[0]["t"]]
+            bars = pre + list(bars)
+        except Exception:
+            pass
     if len(bars) < 100:
         raise ValueError("K线不足，无法复盘")
     mtf = None
@@ -184,7 +208,7 @@ def run_backtest():
         return jsonify(hit[1])
     with _bt_sem:
         res = backtest.run(bars, name, b.get("params") or None, mtf, float(b.get("equity", 10000)), lev,
-                           window=260 if name in backtest.BUILTIN else 600, symbol=sym, hist=_hist(bars),
+                           window=(600 if name.startswith("plan_f") else 260) if name in backtest.BUILTIN else 600, symbol=sym, hist=_hist(bars),
                            long_only=bool(b.get("long_only")))
     res["symbol"], res["interval"], res["strategy"] = sym.upper(), itv, name
     res["range"] = [bars[0]["t"], bars[-1]["t"]]
@@ -202,7 +226,7 @@ def compare():
     """同一品种+周期下批量跑多个策略，返回统计对比（最多10个）。"""
     b = request.get_json(silent=True) or {}
     sym, itv = b.get("symbol", "BTCUSDT"), b.get("interval", "4h")
-    names = [n for n in (b.get("strategies") or [])][:10]
+    names = [n for n in (b.get("strategies") or []) if n not in RETIRED and n not in NOT_OPTIMAL][:10]
     limit = max(100, min(int(b.get("limit", 1500)), 6000))
     bars = data.get_klines(sym, itv, limit, closed_only=True)
     rows = []
@@ -404,6 +428,140 @@ def ex_order():
         raise ValueError("美股仅支持看图与回测，暂不支持下单")
     return jsonify(exchange.place_market(b["symbol"], b["side"], float(b["usdt"]), float(b.get("leverage", 1)),
                                          bool(b.get("confirm"))))
+
+
+# ---------- 最优方案(方案F)复盘，数据由 optimal_run.py 每天生成 ----------
+OPT_DIR = os.path.join(HERE, "optimal_data")
+
+
+_gz_cache: dict = {}
+
+
+def _json_file(p):
+    """返回 JSON 文件；浏览器支持时用 gzip(复盘数据约1.4MB)。按文件修改时间缓存压缩结果。"""
+    import gzip
+    mt = os.path.getmtime(p)
+    hit = _gz_cache.get(p)
+    if not hit or hit[0] != mt:
+        with open(p, "rb") as f:
+            raw = f.read()
+        hit = (mt, raw, gzip.compress(raw, 6))
+        _gz_cache[p] = hit
+    etag = f'"{os.path.basename(p)}-{int(mt)}"'          # 2026-10-19 数据没变就回304，刷新页面不用重新下载几MB
+    if etag in (request.headers.get("If-None-Match") or ""):
+        r = app.response_class(status=304); r.headers["ETag"] = etag; return r
+    if "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        r = app.response_class(hit[2], mimetype="application/json")
+        r.headers["Content-Encoding"] = "gzip"
+        r.headers["Vary"] = "Accept-Encoding"
+    else:
+        r = app.response_class(hit[1], mimetype="application/json")
+    r.headers["ETag"] = etag
+    return r
+
+
+@app.get("/best")
+def best_page():
+    return send_from_directory(app.static_folder, "best.html")
+
+
+@app.get("/api/optimal")
+@api
+def optimal_get():
+    p = os.path.join(OPT_DIR, "optimal.json")
+    if not os.path.exists(p):
+        raise ValueError("最优方案数据还没生成(optimal_run.py)")
+    return _json_file(p)
+
+
+@app.get("/api/optimal/bars")
+@api
+def optimal_bars():
+    import re
+    sym = request.args.get("symbol", "").upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", sym):
+        raise ValueError("品种代码不合法")
+    p = os.path.join(OPT_DIR, f"bars_{sym}.json")
+    if not os.path.exists(p):
+        raise ValueError("没有这个品种的复盘K线")
+    return _json_file(p)
+
+
+@app.get("/api/optimal/recon")
+@api
+def optimal_recon():
+    p = os.path.join(OPT_DIR, "recon.json")
+    if not os.path.exists(p):
+        raise ValueError("对账还没生成")
+    return _json_file(p)
+
+
+# ---------- 2026-10-18 全品种复盘：数据 = optimal.json 同一份交易，engine/universe.py 汇总 ----------
+@app.get("/universe")
+def universe_page():
+    return send_from_directory(app.static_folder, "universe.html")
+
+
+@app.get("/u/<sym>")
+def sym_page(sym):
+    return send_from_directory(app.static_folder, "sym.html")
+
+
+@app.get("/api/universe")
+@api
+def universe_get():
+    p = os.path.join(OPT_DIR, "universe.json")
+    if not os.path.exists(p):
+        raise ValueError("全品种复盘数据还没生成(optimal_run.py)")
+    return _json_file(p)
+
+
+_uidx = {"mt": 0, "v": None}
+
+
+@app.get("/api/universe/index")
+@api
+def universe_index():
+    p = os.path.join(OPT_DIR, "universe.json")
+    mt = os.path.getmtime(p)
+    if _uidx["mt"] != mt:
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        _uidx.update(mt=mt, v=[[s["sym"], s["sector"], s["kind"], s["tradable"]] for s in d["symbols"]])
+    return jsonify(symbols=_uidx["v"])
+
+
+@app.get("/api/universe/<sym>")
+@api
+def universe_sym(sym):
+    import re
+    sym = sym.upper()
+    if not re.fullmatch(r"[A-Z0-9]{1,12}", sym):
+        raise ValueError("品种代码不合法")
+    p = os.path.join(OPT_DIR, "u", f"{sym}.json")
+    if not os.path.exists(p):
+        raise ValueError(f"没有 {sym} 的复盘数据")
+    return _json_file(p)
+
+
+@app.get("/api/optimal/autofix")
+@api
+def optimal_autofix():
+    """2026-10-19 擂台↔回测 自动对账修复器的状态和最近记录(engine/reconciler.py 每小时写)"""
+    def rd(name, default):
+        try:
+            with open(os.path.join(OPT_DIR, name), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    h = rd("recon_health.json", {}); h.pop("history", None)
+    return jsonify(health=h, actions=rd("recon_actions.json", [])[-40:][::-1], overrides=rd("recon_override.json", {}))
+
+
+@app.get("/api/retired")
+@api
+def retired_get():
+    return jsonify(retired=RETIRED, not_optimal=NOT_OPTIMAL, generated=RETIRED_AT)
 
 
 if __name__ == "__main__":

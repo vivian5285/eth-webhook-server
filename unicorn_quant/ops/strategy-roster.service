@@ -1,0 +1,17 @@
+# /etc/systemd/system/strategy-roster.service
+[Unit]
+Description=Strategy Comparison Roster (paper trading, no real funds)
+After=network.target
+
+[Service]
+User=stratroster
+WorkingDirectory=/home/stratroster/eth-webhook-server
+Environment="PATH=/home/stratroster/eth-webhook-server/venv/bin:/usr/bin:/bin"
+ExecStart=/home/stratroster/eth-webhook-server/venv/bin/python -m strategy_engine.multi_strategy_runner
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

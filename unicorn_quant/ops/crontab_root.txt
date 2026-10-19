@@ -1,0 +1,2 @@
+CRON_TZ=UTC
+35 * * * * /home/stratroster/unicorn_quant/recon_guard.sh

@@ -1,0 +1,17 @@
+# /etc/systemd/system/roster-dashboard.service
+[Unit]
+Description=Roster Comparison Dashboard (Apple-glass UI, read-only paper trading data)
+After=network.target strategy-roster.service
+
+[Service]
+User=stratroster
+WorkingDirectory=/home/stratroster/eth-webhook-server
+Environment="PATH=/home/stratroster/eth-webhook-server/venv/bin:/usr/bin:/bin"
+ExecStart=/home/stratroster/eth-webhook-server/venv/bin/gunicorn -w 1 --threads 4 --graceful-timeout 20 --keep-alive 75 -b 127.0.0.1:18878 dashboard.roster_server:app
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
