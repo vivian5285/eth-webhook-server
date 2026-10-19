@@ -573,3 +573,56 @@ def get_bars(
     result = merged[-limit:] if limit else merged
     _cache_closed_bars(cache_key, s, result)
     return result
+
+
+# ═══ 2026-10-19 方案F复刻加固：信号用币安现货K线(跟 8890 回测同一个数据源) ═══
+# 实测(research_scripts/spot_perp_signal.py)：同样规则用永续K线算，2021起信号方向跟现货不一致——日线EMA 0.07%、8h布林 0.33%、
+# 8h超级趋势 1.29%(永续插针让ATR通道提前/推迟翻转)。现货接口(api.binance.com)跟期货是两套独立的IP权重池，不挤实盘的期货额度。
+_SPOT_URL = "https://api.binance.com/api/v3/klines"
+_SPOT_MS = {"1m": 60000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 7200000, "4h": 14400000,
+            "6h": 21600000, "8h": 28800000, "12h": 43200000, "1d": 86400000}
+_spot_cache = {}
+
+
+def get_spot_bars(symbol: str, interval: str, limit: int = 300) -> List[dict]:
+    """币安现货已收盘K线(格式同 get_bars)。失败返回[]——调用方据此跳过本轮，不退回永续数据(宁可不动也不混数据源)。"""
+    s = str(interval or "").lower(); iv = _SPOT_MS.get(s)
+    if not iv:
+        return get_bars(symbol, interval, limit)
+    key = (str(symbol).upper(), s, int(limit)); now = time.time()
+    hit = _spot_cache.get(key)
+    if hit and now < hit[0]:
+        return hit[1]
+    rows, end, need = [], None, int(limit) + 1
+    while need > 0:
+        q = {"symbol": key[0], "interval": s, "limit": min(1000, need)}
+        if end:
+            q["endTime"] = end
+        data = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(f"{_SPOT_URL}?{urllib.parse.urlencode(q)}", headers={"User-Agent": "strategy-engine-readonly"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code in (418, 429):
+                    logger.warning("[klines-spot] HTTP %s，本轮放弃", e.code); return []
+                if e.code < 500:
+                    logger.warning("[klines-spot] %s %s HTTP %s", key[0], s, e.code); return []
+            except Exception as e:
+                logger.warning("[klines-spot] %s %s 第%d次失败: %s", key[0], s, attempt + 1, e)
+            time.sleep(0.6 * (attempt + 1))
+        if not isinstance(data, list) or not data:
+            if not rows:
+                return []
+            break
+        rows = data + rows; need -= len(data); end = int(data[0][0]) - 1
+        if len(data) < q["limit"]:
+            break
+        time.sleep(0.1)
+    nowms = int(now * 1000)
+    bars = [b for b in to_ohlcv_dicts(rows) if int(b["t"]) + iv <= nowms][-int(limit):]
+    if bars:
+        _spot_cache[key] = (now + 60, bars)
+    return bars

@@ -66,7 +66,7 @@ _open_positions: Dict[tuple, dict] = {}
 _open_pair: Optional[dict] = None
 
 
-def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: int) -> list:
+def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: int, source: Optional[str] = None) -> list:
     """2026-09-04新增：单轮run_comparison_once内的K线拉取去重缓存。
 
     背景：宝贝新增7套战法 + 4个品种(XRP/SOL/LINK/UNI)后，每轮巡检的
@@ -81,9 +81,10 @@ def _cached_bars(cache: Dict[tuple, list], symbol: str, timeframe: str, limit: i
     完全相同的(symbol,timeframe,limit)才复用。缓存**每轮新建**(见
     run_comparison_once)，不跨轮——跨轮必须重新拉最新已收盘K线。
     """
-    key = (symbol, timeframe, int(limit))
+    key = (symbol, timeframe, int(limit)) if not source else (symbol, timeframe, int(limit), source)
     if key not in cache:
-        cache[key] = klines.get_bars(symbol, timeframe, limit=int(limit))
+        # 2026-10-19 方案F复刻加固：roster 条目 data_source="spot" → 用现货K线(信号+止损检查都跟回测同源)
+        cache[key] = klines.get_spot_bars(symbol, timeframe, int(limit)) if source == "spot" else klines.get_bars(symbol, timeframe, limit=int(limit))
     return cache[key]
 
 
@@ -840,7 +841,7 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     # vegas_tunnel需要EMA676，550根连算出第一个值都不够，其它战法不传
     # 这个字段时行为完全不变(仍用全局默认值)。
     bars_limit = int(entry.get("bars_limit") or BARS_LIMIT)
-    bars = _cached_bars(cache, symbol, timeframe, bars_limit)
+    bars = _cached_bars(cache, symbol, timeframe, bars_limit, entry.get("data_source"))
     if len(bars) < 30:
         return
 
@@ -851,7 +852,7 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     # 逐字节等价。目前只有 mtf_ema_pullback 用到(高周期1h定潮汐方向)。
     bars_by_tf = {"base": bars}
     for tf in (entry.get("mtf") or []):
-        bars_by_tf[str(tf)] = _cached_bars(cache, symbol, tf, bars_limit)
+        bars_by_tf[str(tf)] = _cached_bars(cache, symbol, tf, bars_limit, entry.get("data_source"))
     # symbol 注入 params——funding_trend 需要靠它去拉对应品种的资金费率
     # (跟 _tick_universe_entry 给 cross_momentum 注入 symbol/universe_returns
     # 同一个做法)。其它战法用 {**DEFAULT_PARAMS, **params} 合并，多一个

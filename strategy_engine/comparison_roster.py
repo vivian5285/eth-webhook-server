@@ -999,19 +999,19 @@ SINGLE_SYMBOL_ROSTER += tuple(CYCLE_TECH3_ROSTER) if isinstance(SINGLE_SYMBOL_RO
 
 # 2026-10-18：美股行业轮动纸面(stock_sector_rot6m5_long)，13个行业里币安有美股永续的53只全部挂上，
 # 当月是否交易由 data/sector_rotation.json(cron每天收盘后刷新)决定。
-SECTOR_ROT_ROSTER = [{"symbol": s, "strategy": "stock_sector_rot6m5_long", "timeframe": "1d", "params": {}}
+SECTOR_ROT_ROSTER = [{"symbol": s, "strategy": "stock_sector_rot6m5_long", "timeframe": "1h", "params": {}}   # 2026-10-19 改1h：只在纽约常规时段执行(策略内判断)
                      for s in ["ADBEUSDT", "AMATUSDT", "AMDUSDT", "AMZNUSDT", "ANETUSDT", "ARMUSDT", "ASMLUSDT", "AVGOUSDT", "CATUSDT", "CIENUSDT", "COHRUSDT", "COINUSDT", "COSTUSDT", "CRMUSDT", "CSCOUSDT", "DELLUSDT", "GLWUSDT", "GOOGLUSDT", "GSUSDT", "HDUSDT", "HOODUSDT", "HPEUSDT", "INTCUSDT", "JPMUSDT", "KLACUSDT", "KOUSDT", "LLYUSDT", "LRCXUSDT", "MARAUSDT", "MCDUSDT", "METAUSDT", "MRKUSDT", "MRVLUSDT", "MSFTUSDT", "MSTRUSDT", "MUUSDT", "NFLXUSDT", "NKEUSDT", "NOWUSDT", "NVDAUSDT", "ORCLUSDT", "QCOMUSDT", "SMCIUSDT", "SNDKUSDT", "TERUSDT", "TSMUSDT", "TXNUSDT", "UBERUSDT", "UNHUSDT", "VRTUSDT", "WDCUSDT", "WMTUSDT", "XOMUSDT"]]
 SINGLE_SYMBOL_ROSTER += tuple(SECTOR_ROT_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else SECTOR_ROT_ROSTER
 
 
 # 2026-10-17：方案F币圈腿B方案的两条8h腿(主流5个)。
-PLAN_B_8H_ROSTER = [{"symbol": s, "strategy": st, "timeframe": "8h", "params": {}}
+PLAN_B_8H_ROSTER = [{"symbol": s, "strategy": st, "timeframe": "8h", "params": {}, "data_source": "spot"}   # 2026-10-19 现货K线(同回测)
                     for st in ("st8h_cycle_main5", "boll8h_cycle_main5")
                     for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
 SINGLE_SYMBOL_ROSTER += tuple(PLAN_B_8H_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else PLAN_B_8H_ROSTER
 
 
 # 2026-10-17：日线EMA+盘中突破单(1h检查)，主流5个。
-BRK_ROSTER = [{"symbol": s, "strategy": "daily_ema_brk_cycle_main5", "timeframe": "1h", "params": {}}
+BRK_ROSTER = [{"symbol": s, "strategy": "daily_ema_brk_cycle_main5", "timeframe": "1h", "params": {}, "data_source": "spot"}   # 2026-10-19 现货K线(同回测)
               for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
 SINGLE_SYMBOL_ROSTER += tuple(BRK_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else BRK_ROSTER

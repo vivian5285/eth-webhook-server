@@ -28,7 +28,31 @@ DEFAULT_PARAMS = {
 }
 
 
+# 2026-10-19 复刻加固：回测是"正股收盘出信号→下一个交易日开盘成交"、3×ATR止损只看正股常规时段的价格。
+# 擂台原来挂在永续日线(UTC 0点)上执行，止损也被24小时的永续插针触发。现在：roster 改成每小时跑，只在纽约常规时段(9:30-16:00，
+# 自动处理夏令时、跳过休市日)才开平仓；3×ATR 止损由这里按常规时段内的价格判断；擂台引擎里的止损放到10×ATR，只作宕机兜底。
+_NYSE_HOLIDAYS = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+                  "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
+                  "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"}
+
+
+def _rth_window(now_s: float):
+    """返回今天纽约常规时段的(开盘, 收盘) UTC 秒；不是交易日返回 None"""
+    from datetime import datetime, time as dtime, timezone
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    d = datetime.fromtimestamp(now_s, timezone.utc).astimezone(ny)
+    if d.weekday() >= 5 or d.strftime("%Y-%m-%d") in _NYSE_HOLIDAYS:
+        return None
+    o = datetime.combine(d.date(), dtime(9, 30), ny).timestamp(); c = datetime.combine(d.date(), dtime(16, 0), ny).timestamp()
+    return o, c
+
+
 def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = None, position: Optional[dict] = None) -> Optional[dict]:
+    import time as _tm
+    _w = _rth_window(_tm.time())
+    if not _w or not (_w[0] <= _tm.time() <= _w[1]):
+        return None                                        # 非纽约常规时段：不开不平(擂台引擎的10×ATR兜底止损照常)
     perp = bars_by_tf.get("base") or []
     p = {**DEFAULT_PARAMS, **(params or {})}
     symbol = str(p.get("symbol") or "").upper()
@@ -94,6 +118,17 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         _pa = recon_override.position_action(_ov, position, price, bar_time)
         if _pa:
             return None if _pa.get("hold") else _pa
+        # 2026-10-19 常规时段内的 3×ATR 止损(回测口径：开仓价 - 3×开仓时ATR)；只看今天开盘以后已收盘的1h K线
+        try:
+            _stp3 = float(position.get("entry") or position.get("entry_price")) - 3.0 * float(position.get("atr0") or 0)
+        except (TypeError, ValueError):
+            _stp3 = 0.0
+        if _stp3 > 0 and position.get("atr0"):
+            _hit = next((x for x in perp if int(x["t"]) / 1000 >= _w[0] - 1800 and int(x["t"]) / 1000 + 3600 <= _w[1] + 1800
+                         and float(x["l"]) <= _stp3), None)
+            if _hit is not None:                       # 成交价同回测：止损价；跳空开在止损下方就按开盘价
+                return {"action": "CLOSE_QUICK_EXIT", "price": round(min(float(_hit["o"]), _stp3), 6), "bar_time": bar_time,
+                        "reason": f"常规时段跌破3×ATR止损 {_stp3:.4g}"}
         # 2026-10-18 对齐回测：本轮均线多头里回测已经跌破过3×ATR止损(按规则锁定)，擂台还拿着就平掉
         if stop_locked and up:
             return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6), "bar_time": bar_time,
@@ -117,7 +152,7 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     slots = max(len(active), int(p["min_slots"]))
     desired_notional = alloc / slots
     from strategy_engine import position_sizing as ps
-    stop_frac = float(p["atr_stop_mult"]) * atr_pct
+    stop_frac = 10.0 * atr_pct          # 2026-10-19 擂台引擎止损只作宕机兜底(10×ATR)；真正的3×ATR止损在上面按常规时段判断
     default_notional = (min(ps.LEVERAGE * ps.NOTIONAL_MARGIN_HAIRCUT, 1.0 / stop_frac)
                         * ps.RISK_PCT * ps.TIER_NOTIONAL_MULT[1])
     return {

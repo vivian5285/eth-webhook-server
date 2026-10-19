@@ -104,3 +104,27 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     sig["position_fraction"] = desired_notional / default_notional
     sig["reason"] = f"{sig.get('reason', '')}；波动率调仓×{alloc:.2f}" + ("；BTC同向" if symbol != "BTCUSDT" else "") + counter_txt
     return sig
+
+
+# 2026-10-19 方案F复刻加固：BTC 日线方向用现货K线(跟 8890 回测同源)。供 daily_ema_brk / intraday_trend_cycle 用；其它老策略仍用 _btc_state。
+_BTC_SPOT_CACHE = {"ts": 0.0, "state": None}
+
+
+def _btc_state_spot() -> Optional[int]:
+    now = time.time()
+    if now - _BTC_SPOT_CACHE["ts"] < 600:
+        return _BTC_SPOT_CACHE["state"]
+    from strategy_engine import klines
+    state = None
+    try:
+        closes = [float(x["c"]) for x in (klines.get_spot_bars("BTCUSDT", "1d", 200) or [])]
+        if len(closes) >= 40:
+            k8, k30 = 2 / 9, 2 / 31; a = b = None
+            for c in closes:
+                a = c if a is None else a + k8 * (c - a); b = c if b is None else b + k30 * (c - b)
+            state = 1 if a > b else -1
+    except Exception:
+        state = None
+    if state is not None:
+        _BTC_SPOT_CACHE.update(ts=now, state=state)
+    return state

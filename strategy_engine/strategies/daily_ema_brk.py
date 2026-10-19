@@ -31,7 +31,7 @@ DEFAULT_PARAMS = {"fast_period": 8, "slow_period": 30, "atr_len": 14, "brk_n": 5
 def _daily(symbol: str, n: int = 620) -> List[dict]:
     from strategy_engine import klines
     now = int(time.time() * 1000)
-    return [x for x in (klines.get_bars(symbol, "1d", n) or []) if int(x["t"]) + DAY <= now]
+    return [x for x in (klines.get_spot_bars(symbol, "1d", n) or []) if int(x["t"]) + DAY <= now]   # 2026-10-19 现货(同回测)
 
 
 def _ema(xs, n):
@@ -193,25 +193,35 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     if not want:
         n = int(p["brk_n"])
         hi5 = max(x["h"] for x in d[-n:]); lo5 = min(x["l"] for x in d[-n:])
-        if raw < 0 and price > hi5:
+        # 2026-10-19 复刻加固：回测是"当天盘中碰到前5日高/低就按触价价成交"，原来擂台要等1h收盘越过才开，冲上去又回落的会漏单。
+        # 改成看今天(UTC)已收盘的1h K线有没有碰到；成交价=碰到那一根的 max(开盘, 触发价)；今天已经被止损过就不再追(回测一天只挂一次)。
+        today0 = int(d[-1]["t"]) + DAY
+        tb = [x for x in hb if int(x["t"]) >= today0]
+        hit_hi = next((x for x in tb if float(x["h"]) >= hi5), None)
+        hit_lo = next((x for x in tb if float(x["l"]) <= lo5), None)
+        if tb and _recent_stopout(symbol, (time.time() * 1000 - today0) / 3600000 + 0.05):
+            hit_hi = hit_lo = None
+        if raw < 0 and hit_hi is not None:
+            price = max(float(hit_hi["o"]), hi5)
             ok_dir = allowed("LONG")
             if not ok_dir and p.get("bottom_reversal"):
                 from strategy_engine import bottom_reversal
                 ok_dir = bottom_reversal.check(d)[0]
             if ok_dir:
                 want, kind, why = 1, "brk", f"盘中涨破前{n}日最高{hi5:.6g}(均线还没翻多)"
-        elif raw > 0 and price < lo5 and allowed("SHORT"):
+        elif raw > 0 and hit_lo is not None and allowed("SHORT"):
+            price = min(float(hit_lo["o"]), lo5)
             want, kind, why = -1, "brk", f"盘中跌破前{n}日最低{lo5:.6g}(均线还没翻空)"
     if not want or _coin_frac(symbol, float(p["target_notional_frac"])) <= 0:
         return None
     if symbol != "BTCUSDT":
-        from strategy_engine.strategies.daily_ema_trend_vt import _btc_state
+        from strategy_engine.strategies.daily_ema_trend_vt import _btc_state_spot as _btc_state   # 2026-10-19 现货(同回测)
         if _btc_state() != want:
             return None
         why += "；BTC日线同向"
     atr_pct = datr / price
     alloc = min(1.0, float(p["vol_target"]) / atr_pct)
-    k = 4.0 if kind == "trend" else 3.0
+    k = 10.0 if kind == "trend" else 3.0      # 2026-10-19 统一口径：回测趋势单不设止损，擂台/实盘只留10×ATR宕机兜底(原4×)；突破/底部反转单仍3×ATR(同回测)
     from strategy_engine import position_sizing as ps
     stop_frac = k * atr_pct
     default_notional = min(ps.LEVERAGE * ps.NOTIONAL_MARGIN_HAIRCUT, 1.0 / stop_frac) * ps.RISK_PCT * ps.TIER_NOTIONAL_MULT[1]

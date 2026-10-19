@@ -12,7 +12,7 @@
   超级趋势(10,3)：收盘在上轨之上=多头、下轨之下=空头，按状态持仓，翻向离场。
   布林突破(25,1.25，2026-10-19 由(20,2)改)：收盘突破上轨开多、跌破下轨开空，回到中轨离场。
   减半周期：减半后0–18个月只做多、18–30个月只做空、其余多空都做(严格，不开逆周期单)。
-  山寨币新开仓要BTC日线EMA8/30同方向；名义 = 净值 × target_notional_frac × min(1, 3%×√(8/24) ÷ ATR%)；4×ATR 灾难止损。
+  山寨币新开仓要BTC日线EMA8/30同方向；名义 = 净值 × target_notional_frac × min(1, 3%×√(8/24) ÷ ATR%)；10×ATR 灾难止损(2026-10-19 由4×放宽，仅作宕机兜底)；K线用现货(同回测)。
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from strategy_engine import indicators
 DEFAULT_PARAMS = {
     "st_len": 10, "st_mult": 3.0, "bb_len": 25, "bb_k": 1.25,   # 2026-10-19 宝贝采纳：布林(20,2)→(25,1.25)，/tmp/bb_grid.py+bb_fine.py 周期20~35×倍数1.0~1.5 整片稳定区12/12过关，取区中心；比值5.39→5.57
    
-    "atr_len": 14, "atr_stop_mult": 4.0,
+    "atr_len": 14, "atr_stop_mult": 10.0,   # 2026-10-19 统一口径：回测8h腿不设止损(加3~6×ATR比值都变差，research_scripts/st8h_stop.py)，只留10×ATR宕机兜底(原4×)
     "target_notional_frac": 0.2,          # 主流5个各1/5，跟 daily_ema8_30_ls_cycle_main5 同口径
     "vol_target_daily": 0.03,
     "bar_hours": 8,
@@ -123,7 +123,7 @@ def _signal(kind: str, bars_by_tf: Dict[str, List[dict]], params: Optional[dict]
     if _coin_frac(symbol, float(p["target_notional_frac"])) <= 0:
         return None                                        # 2026-10-19 今年权重为0的币不开新仓
     if p.get("btc_filter") and symbol != "BTCUSDT" and not _force:
-        from strategy_engine.strategies.daily_ema_trend_vt import _btc_state
+        from strategy_engine.strategies.daily_ema_trend_vt import _btc_state_spot as _btc_state   # 2026-10-19 现货(同回测)
         if _btc_state() != d:
             return None
     atr = indicators.wilder_atr(bars, int(p["atr_len"]))
