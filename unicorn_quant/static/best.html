@@ -17,7 +17,7 @@
     <svg viewBox="0 0 32 32" width="32" height="32" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5AC8FA"/><stop offset="1" stop-color="#007AFF"/></linearGradient></defs><circle cx="16" cy="16" r="16" fill="url(#lg)"/><path d="M8.5 22.5l3.2-12.5 4.3 7.4 4.3-9.4 3.2 14.5z" fill="#fff"/></svg>
     <span>独角兽量化</span>
   </a>
-  <nav class="pills"><a href="/">图表与回测</a><a class="on">最优方案</a><a href="/universe">全品种复盘</a></nav>
+  <nav class="pills"><a href="/">图表与回测</a><a class="on">最优方案</a><a href="/universe">全品种复盘</a><a href="/static/forward.html">前向模拟</a></nav>
   <div class="nav-right"><button class="chip ghost" id="themeBtn" title="切换主题">◐</button></div>
 </header>
 
@@ -73,7 +73,8 @@
           <span class="key"><i class="k8"></i>EMA8</span><span class="key"><i class="k30"></i>EMA30</span>
           <button class="chip sm" id="prevBtn">‹ 上一笔</button><button class="chip sm" id="nextBtn">下一笔 ›</button><button class="chip sm" id="kfsBtn" title="全屏(F)">⛶ 全屏</button></div>
         <div class="legbar" id="legBar"><span class="lgseg" id="legSeg"><button class="chip sm on" data-leg="all">三条腿都看</button><button class="chip sm" data-leg="日线">日线EMA</button><button class="chip sm" data-leg="超级">8h超级趋势</button><button class="chip sm" data-leg="布林">8h布林</button></span>
-          <span class="lgtxt"><b>▲</b>开多 <b>▼</b>开空 <b>●</b>平仓 <b>■</b>止损 · 颜色：<i class="d1"></i>日线腿(绿多/红空) <i class="d2"></i>8h超级趋势 <i class="d3"></i>8h布林 · 底部色条 = 三条腿合计的<b>真实净仓位</b></span></div>
+          <span class="lgtxt"><b>▲</b>开多 <b>▼</b>开空 <b>●</b>平仓 <b>■</b>止损 · <i class="d1"></i>日线 <i class="d2"></i>超级趋势 <i class="d3"></i>布林 · 色条：本根结束时虚拟子腿合计，非真实账户</span></div>
+        <div class="legbar"><span class="lgseg"><button class="chip sm on" data-review-tf="1d">日线</button><button class="chip sm" data-review-tf="8h">8小时</button></span></div>
         <div id="kChart" class="kc"></div>
       </div>
       <div class="rv-why" id="rvWhy"><div class="mut">选择下方一笔交易</div></div>
@@ -94,10 +95,11 @@
     <div id="retBody" hidden></div>
   </section>
 
-  <p class="foot mut small">口径：币圈用币安现货日线(2017起)，美股用 Yahoo 正股日线(约10年)；每边手续费0.08%，<b>不含资金费与滑点</b>(币安美股永续做多每年约付8%资金费)。
+  <p class="foot mut small">口径：币圈用币安现货日线/8h，美股用Yahoo正股日线；每边代理成本0.08%，<b>未完整计入真实净仓资金费、基差与执行滑点</b>。
   美股股票池是现存的78只，有幸存者偏差；2026年正好是AI行情。回测不代表未来收益，上实盘前先看擂台纸面2–3周。数据每天美股收盘后自动更新。</p>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
-<script src="/static/best.js?v=20afefghkLb"></script>
+<script src="/static/review_math.js?v=20261023"></script>
+<script src="/static/best.js?v=20261023-review-net"></script>
 </body>
 </html>

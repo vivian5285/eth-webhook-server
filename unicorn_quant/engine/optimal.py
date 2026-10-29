@@ -89,12 +89,15 @@ def phase_of(t_ms):
 PHASE_RULE = {"牛": "只做多", "熊": "只做空", "筑底": "多空都做"}
 
 
-def _cache(name, ttl, fn):
+def _cache(name, ttl, fn, fresh=None):
+    """fresh(v)=False 时即使没过 ttl 也重拉(2026-10-29：00:20 那次重算一直用 22:50 的缓存，漏掉 00:00 刚收盘的日线/8h K线)"""
     os.makedirs(OUT, exist_ok=True)
     p = os.path.join(OUT, name)
     if os.path.exists(p) and time.time() - os.path.getmtime(p) < ttl:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+            v = json.load(f)
+        if fresh is None or fresh(v):
+            return v
     v = fn()
     with open(p + ".tmp", "w", encoding="utf-8") as f:
         json.dump(v, f)
@@ -116,7 +119,8 @@ def spot_daily(sym):
             s = int(r[-1][0]) + 1; time.sleep(0.25)
         today = int(time.time() // 86400)
         return [b for b in out if b["t"] // DAY < today]          # 只要已收盘日线
-    return _cache(f"spot2_{sym}_1d.json", 6 * 3600, fetch)
+    return _cache(f"spot2_{sym}_1d.json", 6 * 3600, fetch,
+                  fresh=lambda v: bool(v) and v[-1]["t"] // DAY >= int(time.time() // 86400) - 1)
 
 
 def stock_daily(tk):
@@ -471,7 +475,9 @@ def spot_8h(sym):
             s = int(r[-1][0]) + 1; time.sleep(0.25)
         now = int(time.time() * 1000)
         return [b for b in out if b["t"] + 8 * 3600000 <= now]          # 只要已收盘
-    return _cache(f"spot_{sym}_8h.json", 3 * 3600, fetch)
+    H8 = 8 * 3600000
+    return _cache(f"spot_{sym}_8h.json", 3 * 3600, fetch,
+                  fresh=lambda v: bool(v) and v[-1]["t"] >= int(time.time() * 1000) // H8 * H8 - H8)
 
 
 def _st_dirs(b, n=10, m=3.0):
@@ -619,7 +625,12 @@ def crypto_8h_leg(kind, btc_daily):
             last = b[-1]
             trades.append({**cur, "exit_t": None, "exit": last["c"], "exit_reason": "持仓中", "ret": round(100 * (pos * (last["c"] / cur["entry"] - 1) - FEE), 2),
                            "pnl_pct": round(100 * (eq / cur["_eq0"] - 1), 2), "days": round((last["t"] - cur["entry_t"]) / DAY, 1), "open": True})
-            opens[sym] = {"side": cur["side"], "entry": cur["entry"], "entry_t": cur["entry_t"]}
+            opens[sym] = {"side": cur["side"], "entry": cur["entry"], "entry_t": cur["entry_t"],
+                          # 2026-10-22 修复：暴露"下一根开盘才执行"的挂单状态给对账(engine/recon.py)。
+                          # recon.py 读 crypto.state[sym]["subs"][sub]["pending"] 判断"回测已发平/反手信号、下一根开盘执行"，
+                          # 日线腿(crypto_leg)一直有这个字段，8h 腿此前没暴露，导致对账把"即将平仓"当"仍持仓"，
+                          # 自动修复器据此反复开/平形成震荡。这里 pend=(want,...)：want=0 是平仓、非0是反手。
+                          "pending": ("flip" if pend[0] else "exit") if pend else None}
     days = sorted(set().union(*[set(v) for v in curves.values()]))
     last_v = {s: 1.0 for s in M5}; port = {}
     for d in days:
@@ -690,6 +701,7 @@ def build() -> dict:
             json.dump(rows, f)
     res = {
         "asof": int(time.time()), "build_sec": round(time.time() - t0, 1),
+        "data_last_bar": {s: {"1d": CD[s][-1]["t"], "8h": spot_8h(s)[-1]["t"]} for s in M5},   # 对账器用来判断回测是否已含最新收盘K线
         "plan": {"name": "方案F", "w_crypto": W_CRYPTO, "w_stock": W_STOCK, "gross_max": W_CRYPTO + W_STOCK,
                  "fee": FEE, "crypto_symbols": M5, "vol_target": VOL_TGT, "lookback_m": LOOKBACK_M, "top_k": TOP_K},
         "series": {"F": stats(F), "F0": stats(F0), "E2": stats(E2), "A": stats(A), "crypto": stats(cport), "stock": stats(scurve),

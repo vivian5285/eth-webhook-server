@@ -17,7 +17,9 @@ window.fetch = async (u, o) => { let e; for (let k = 0; k < 4; k++) { try { retu
 const fetchRetry = true;
 // 这笔交易对方案F总资金的大致贡献：币圈每币占腿的1/5、腿权重0.75；美股腿权重0.75
 const cw = t => ((S.d.crypto_weights || {})[new Date(t.entry_t).getUTCFullYear()] || {})[t.symbol] ?? 0.2;   // 2026-10-19 币种按年度权重
-const contrib = t => t.pnl_pct == null ? null : t.pnl_pct * (t.leg === "币圈" ? S.d.plan.w_crypto * cw(t) * (t.w || 1) : S.d.plan.w_stock);
+// 2026-10-23: a trade return times entry weights is NOT exact account attribution.
+// Keep unknown until a versioned net-account ledger supplies an exact bridge.
+const contrib = t => null;
 
 function theme() {
   const dark = S.theme === 'dark';
@@ -98,7 +100,7 @@ function planCard() {
         <div class="pc-t">回测(2017-09 至今)</div>
         <table class="t pc-tbl"><thead><tr><th></th><th class="r">年化</th><th class="r">最大回撤</th><th class="r">收益/回撤</th><th></th></tr></thead><tbody>
           ${r('<b>主方案 币1+美股1</b>', P(F.cagr), D(F.max_dd), Q(F.ratio), '不含资金费', true)}
-          ${r('主方案 扣真实资金费(估)', P(F.cagr - 11.3), '约' + D(F.max_dd + 1), '≈' + fmt((F.cagr - 11.3) / (F.max_dd + 1), 2), '资金费每年约拖累11个点(10-18实测)')}
+          ${r('真实净仓扣费后收益', '--', '--', '--', '历史执行基准未齐；不再从CAGR直接减固定资金费')}
           ${h1 ? r('　前半 2017-09~2021', P(h1.cagr), D(h1.dd), Q(h1.ratio)) : ''}
           ${h2 ? r('　后半 2022~今', P(h2.cagr), D(h2.dd), Q(h2.ratio)) : ''}
           ${r('币圈腿单独(1倍)', P(C.cagr), D(C.max_dd), Q(C.ratio))}
@@ -107,13 +109,9 @@ function planCard() {
         </tbody></table>
       </div>
       <div>
-        <div class="pc-t">收益预期(扣资金费，随机重排模拟)</div>
-        <table class="t pc-tbl"><thead><tr><th>情景</th><th class="r">1年中位</th><th class="r">1年最差5%</th><th class="r">亏钱概率</th><th class="r">3年中位</th></tr></thead><tbody>
-          <tr><td>像全部历史</td><td class="r up">+91%</td><td class="r">+12%</td><td class="r">2%</td><td class="r">+599%</td></tr>
-          <tr><td>像2022年以后</td><td class="r up">+84%</td><td class="r">+4%</td><td class="r">4%</td><td class="r">+533%</td></tr>
-          <tr class="pc-main"><td><b>保守(收益减半)</b></td><td class="r"><b>+33%</b></td><td class="r dn">-24%</td><td class="r">22%</td><td class="r">+140%</td></tr>
-        </tbody></table>
-        <div class="pc-note">心理预期按保守情景：<b>一年 30~60%，回撤 25~35%</b>；3 年内遇到一次超过 30% 回撤的概率约 63%，要提前接受。原则：<b>不爆仓、长期正期望，就永远有机会</b>。</div>
+        <div class="pc-t">前向验证</div>
+        <div class="pc-note">未来收益与回撤尚未验证。独立前向账户从现金起步，按净仓记手续费和结算资金费；SNDK专项与组合分组观察。</div>
+        <a href="/static/forward.html">前向模拟与SNDK候选</a>
       </div>
     </div>
     <div class="pc-steps"><span class="on">① 纸面模拟 2~3 周(看下方每日对账)</span><span>② 小资金实盘(计划总资金 10~20%)</span><span>③ 实盘 2~3 个月逐月对比回测</span><span>④ 在预期内分批加资金 · 期间不改规则</span></div>`;
@@ -216,26 +214,33 @@ function renderTrades() {
   for (let p = 0; p < n; p++) if (p < 2 || p > n - 3 || Math.abs(p - S.page) < 3) h += btn(p); else if (!h.endsWith('…')) h += '<span class="mut">…</span>';
   $('#pager').innerHTML = n > 1 ? h : '';
 }
-async function getBars(sym) {
-  if (!S.bars[sym]) {   // 2026-10-19 存 Promise：同一品种并发请求只发一次；失败了清掉，下次重试
-    S.bars[sym] = fetch('/api/optimal/bars?symbol=' + encodeURIComponent(sym)).then(r => { if (!r.ok) throw new Error('K线加载失败'); return r.json(); });
-    S.bars[sym].catch(() => { delete S.bars[sym]; });
+async function getBars(sym, tf = '1d') {
+  const key = sym + ':' + tf;
+  if (!S.bars[key]) {
+    const url = tf === '8h' ? '/static/forward-data/' + encodeURIComponent(sym) + '_8h.json' : '/api/optimal/bars?symbol=' + encodeURIComponent(sym);
+    S.bars[key] = fetch(url, { cache: 'no-cache' }).then(r => { if (!r.ok) throw new Error(tf + ' K线暂不可用'); return r.json(); });
+    S.bars[key].catch(() => { delete S.bars[key]; });
   }
-  return S.bars[sym];
+  return S.bars[key];
 }
-async function showSym(sym, focus) {
-  if (!S.bars[sym]) $("#rvMeta").textContent = "加载K线…(首次几秒)";
-  const rows = await getBars(sym);
+async function showSym(sym, focus, forcedTf) {
+  const cryptoSymbol = sym.endsWith('USDT');
+  const tf = forcedTf || (cryptoSymbol && /8h/.test(focus?.sub || '') ? '8h' : '1d');
+  const request = S.reviewRequest = (S.reviewRequest || 0) + 1;
+  S.reviewTf = tf;
+  const rows = await getBars(sym, tf);
+  if (request !== S.reviewRequest) return;
+  document.querySelectorAll('[data-review-tf]').forEach(b => { b.disabled = b.dataset.reviewTf === '8h' && !cryptoSymbol; b.classList.toggle('on', b.dataset.reviewTf === tf); });
+  S.reviewSymbol = sym; S.reviewFocus = focus;
   candle.setData(rows.map(r => ({ time: tsec(r[0]), open: r[1], high: r[2], low: r[3], close: r[4] })));
   l8.setData(rows.map(r => ({ time: tsec(r[0]), value: r[5] })));
   l30.setData(rows.map(r => ({ time: tsec(r[0]), value: r[6] })));
   const all = S.d.trades.filter(t => t.symbol === sym);
   // 美股K线时间是开盘时刻(UTC 13:30/14:30)，交易记录按日期记：按UTC日期对齐到当天那根K线
-  const dmap = new Map(rows.map(r => [Math.floor(r[0] / 864e5), tsec(r[0])]));
-  const tt = ms => dmap.get(Math.floor(ms / 864e5)) ?? tsec(ms);
+  const tt = ms => ReviewMath.marker(ms, rows, tf, !cryptoSymbol);
   // 2026-10-18 标记直接写 多/空/平多/平空/止损；8h子腿用小号；放大到约 220 根以内才显示文字(缩远了只显示图标，避免字挤成一团)
   S.ev = new Map();
-  const addEv = (time, e) => { const a = S.ev.get(time) || []; a.push(e); S.ev.set(time, a); };
+  const addEv = (time, e) => { if (time == null) return; const a = S.ev.get(time) || []; a.push(e); S.ev.set(time, a); };
   for (const t of all) {
     addEv(tt(t.entry_t), { k: 'in', t });
     if (!t.open) addEv(tt(t.exit_t), { k: 'out', t });
@@ -246,9 +251,8 @@ async function showSym(sym, focus) {
   if (!crypto) S.legF = 'all';
   setMarks();
   if (posS) {   // 每根K线当天各子腿的持仓相加(方向×子腿权重)
-    const iv = all.map(t => [t.entry_t, t.open ? Infinity : t.exit_t, (t.side === 'LONG' ? 1 : -1) * (t.w ?? 1)]);
     posS.setData(rows.map(r => {
-      let v = 0; for (const [a, b, s] of iv) if (a < r[0] + 864e5 && b > r[0]) v += s;
+      let v = ReviewMath.virtualAt(all, r[0] + (tf === '8h' ? 288e5 : 864e5) - 1);
       v = Math.round(v * 1000) / 1000;
       return { time: tsec(r[0]), value: v, color: v > 0 ? 'rgba(52,199,89,.55)' : v < 0 ? 'rgba(255,59,48,.55)' : 'rgba(0,0,0,0)' };
     }));
@@ -257,7 +261,7 @@ async function showSym(sym, focus) {
   if (focus && focus.stop) stopLine = candle.createPriceLine({ price: focus.stop, color: '#FF8A4C', lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: '硬止损' });
   $('#rvSym').textContent = sym.replace('USDT', '');
   const c = all.filter(t => !t.open), w = c.filter(t => t.ret > 0).length;
-  $('#rvMeta').textContent = `${all[0]?.leg || ''} · 共 ${all.length} 笔，胜率 ${c.length ? fmt(w / c.length * 100, 0) : '--'}%，平均每笔 ${pct(c.length ? c.reduce((s, t) => s + t.ret, 0) / c.length : 0, 2)}`;
+  $('#rvMeta').textContent = `${tf} · EMA8/30同图周期 · ${tf === '1d' && crypto ? '8h标记按日聚合 · ' : ''}共 ${all.length} 笔 · 胜率 ${c.length ? fmt(w / c.length * 100, 0) : '--'}%`;
   if (focus) {
     const a = tsec(focus.entry_t), b = tsec(focus.exit_t || rows[rows.length - 1][0]), pad = Math.max((b - a) * 0.6, 86400 * 25);
     try { kC.timeScale().setVisibleRange({ from: a - pad, to: b + pad }); } catch (e) { kC.timeScale().fitContent(); }
@@ -273,8 +277,8 @@ function setMarks() {
     const L = t.side === 'LONG', me = focus && t === focus, daily = !t.sub || /日线/.test(t.sub) || t.leg === '美股';
     const sz = me ? 2 : daily ? 1.2 : 0.7, show = me || (txt && daily);
     const legc = /超级/.test(t.sub || '') ? '#AF52DE' : /布林/.test(t.sub || '') ? '#FF9500' : null;
-    mk.push({ time: tt(t.entry_t), position: L ? 'belowBar' : 'aboveBar', color: legc || (L ? '#34C759' : '#FF3B30'), shape: L ? 'arrowUp' : 'arrowDown', text: show ? (L ? '多' : '空') : '', size: sz });
-    if (!t.open) {
+    if (tt(t.entry_t) != null) mk.push({ time: tt(t.entry_t), position: L ? 'belowBar' : 'aboveBar', color: legc || (L ? '#34C759' : '#FF3B30'), shape: L ? 'arrowUp' : 'arrowDown', text: show ? (L ? '多' : '空') : '', size: sz });
+    if (!t.open && tt(t.exit_t) != null) {
       const stop = /硬止损/.test(t.exit_reason || '');
       mk.push({ time: tt(t.exit_t), position: L ? 'aboveBar' : 'belowBar', color: legc || (stop ? '#FF8A4C' : t.ret > 0 ? '#30B0C7' : '#8E8E93'), shape: stop ? 'square' : 'circle',
                 text: show ? (stop ? '止损' : (L ? '平多' : '平空')) + (me ? ' ' + pct(t.ret, 1) : '') : '', size: sz });
@@ -296,7 +300,7 @@ function hoverCard(p) {
       <b>${k === 'in' ? px(t.entry) : px(t.exit)}</b>${k === 'out' ? ` <b class="${cls(t.ret)}">${pct(t.ret, 2)}</b> <span class="mut">${t.days}天</span>` : ''}</div>
       <div class="kr">${esc(k === 'in' ? t.entry_reason : t.exit_reason)}</div></div>`;
   }).join('') + (() => { const pd = posS && p.seriesData ? p.seriesData.get(posS) : null; if (!pd) return '';
-      const v = pd.value; return `<div class="kr mut">当天三条腿合计净仓位：<b class="${v > 0 ? 'up' : v < 0 ? 'dn' : ''}">${v > 0 ? '多' : v < 0 ? '空' : '空仓'} ${v ? Math.round(Math.abs(v) * 100) + '%' : ''}</b></div>`; })();
+      const v = pd.value; return `<div class="kr mut">本根结束时虚拟子腿合计（非真实账户）：<b class="${v > 0 ? 'up' : v < 0 ? 'dn' : ''}">${v > 0 ? '多' : v < 0 ? '空' : '空仓'} ${v ? Math.round(Math.abs(v) * 100) + '%' : ''}</b></div>`; })();
   el.hidden = false;
   const box = $('#kChart').getBoundingClientRect(), off = $('#kChart').offsetTop, W = el.offsetWidth, H = el.offsetHeight;
   let x = p.point.x + 18, y = p.point.y + 12 + off;
@@ -339,10 +343,12 @@ function bind() {
   document.addEventListener("click", e => {
     const t = e.target;
     if (!S.d && !t.closest("#themeBtn")) return;   // 数据还没加载完
+    const tf = t.closest('[data-review-tf]');
+    if (tf && S.reviewSymbol) return showSym(S.reviewSymbol, S.reviewFocus, tf.dataset.reviewTf).catch(e => { $('#rvMeta').textContent = e.message; });
     const sb = t.closest('[data-ser]'); if (sb) { const k = sb.dataset.ser; S.on.has(k) ? S.on.delete(k) : S.on.add(k); if (!S.on.size) S.on.add('F'); return eqDraw(); }
     if (t.closest('#logBtn')) { S.log = !S.log; return eqDraw(); }
     if (t.closest('#themeBtn')) return setTheme(S.theme === 'dark' ? 'light' : 'dark');
-    const lg = t.closest('#legSeg button'); if (lg) { S.leg = lg.dataset.v; S.sym = ''; $$('#legSeg button').forEach(b => b.classList.toggle('on', b === lg)); filters(); return applyFilter(); }
+    const lg = t.closest('#legSeg button[data-v]'); if (lg) { S.leg = lg.dataset.v; S.sym = ''; $$('#legSeg button[data-v]').forEach(b => b.classList.toggle('on', b === lg)); filters(); return applyFilter(); }
     const pg = t.closest('[data-pg]'); if (pg) { S.page = +pg.dataset.pg; return renderTrades(); }
     const tr = t.closest('tr[data-i]'); if (tr) return pick(+tr.dataset.i);
     const sy = t.closest('tr[data-sym]'); if (sy) { S.sym = sy.dataset.sym; S.leg = ''; S.res = ''; S.year = ''; $$('#legSeg button').forEach(b => b.classList.toggle('on', !b.dataset.v)); $('#fRes').value = ''; filters(); applyFilter(); $('#review').scrollIntoView({ behavior: 'smooth' }); return pick(0); }

@@ -46,6 +46,18 @@ def _w(p, obj):
     os.replace(p + ".tmp", p)
 
 
+LAST_TF = {"daily_ema_brk_cycle_main5": ("1d", 86400), "st8h_cycle_main5": ("8h", 28800), "boll8h_cycle_main5": ("8h", 28800)}
+
+
+def _bt_stale(opt, strat, sym, now):
+    """回测用的K线还没包含最近一根已收盘K线 → 回测结论过期，不能拿来修擂台(2026-10-29 BNB 误发开空指令)"""
+    if strat not in LAST_TF:
+        return False
+    tf, period = LAST_TF[strat]
+    t = ((opt.get("data_last_bar") or {}).get(sym) or {}).get(tf)
+    return not t or t / 1000 < now // period * period - period
+
+
 def _bt_sym(s):
     return s if s.endswith("USDT") else s + "USDT"
 
@@ -85,6 +97,8 @@ def run() -> dict:
                 why_skip = "刚发现，等下一次检查确认"
             elif off:
                 why_skip = "自动修复已关闭(recon_autofix_off)"
+            elif _bt_stale(opt, strat, sym, now):
+                why_skip = "回测还没算到最新收盘K线，等回测刷新"
             elif sum(1 for a in week if a.get("key") == key) >= SUSPECT_N:
                 why_skip = f"一周内已修 {SUSPECT_N} 次，疑似代码问题，停止自动修复，等人工检查"
             elif acted_today >= MAX_PER_DAY:
