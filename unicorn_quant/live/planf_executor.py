@@ -6,8 +6,10 @@
 
 规则(实盘执行规范，research_scripts/exec_study.py)：
   · 目标净仓位 = 目标比例 × 账户净值(totalMarginBalance)；净值 < 5000U 用不含 BTC 的目标(BTC 权重分给其余币)
-  · 按交易所步长向零取整；低于最小名义金额就当 0
-  · 需要调仓的情况：要平到 0、方向反转、从 0 开仓、或者偏离目标超过 25%(每天再平衡的容差，避免来回小单)
+  · 2026-10-30 起每条腿的比例按"回测口径"随价格漂移(见 drift_fracs)：回测每笔开仓后数量不变，赚钱的空单占比自然变小，
+    旧版一直把仓位拉回开仓比例，等于赢了加仓、亏了减仓(当时 SOL/ETH 空单比回测多 11~13%)
+  · 按交易所步长四舍五入(旧版向零取整，小账户平均少 1~5%)；低于最小名义金额就当 0
+  · 需要调仓的情况：要平到 0、方向反转、从 0 开仓、或者偏离目标超过 5% 且不少于最小名义金额(目标改成回测口径后本身很少随价格变，容差从 25% 收紧)
   · 下单：先挂只做 Maker 的限价单(GTX)在买一/卖一，价格变了 60 秒后撤单重挂，最多 15 分钟，剩下的用市价补；减仓单带 reduceOnly
   · 美股永续只在纽约常规时段(9:30-16:00，自动夏令时，跳过休市日)交易
 护栏：目标文件过期(>10 分钟)或发布器报问题 → 冻结(不下单)；总名义 ≤ 2×净值、单品种 ≤ 0.6×净值；
@@ -40,7 +42,7 @@ STATUS = f"/var/lib/planf/live_{ACCT}_status.json"
 STATE = os.path.join(HOME, "state.json")
 LOG = os.path.join(HOME, "actions.jsonl")
 ARMED, STOP = os.path.join(HOME, "ARMED"), os.path.join(HOME, "STOP")
-LOOP_SEC, STALE_SEC, REBAL_BAND, REPRICE_SEC, MAKER_MAX_SEC = 30, 600, 0.25, 60, 900
+LOOP_SEC, STALE_SEC, REBAL_BAND, REPRICE_SEC, MAKER_MAX_SEC = 30, 600, 0.05, 60, 900
 MAX_GROSS, MAX_SYM, CB_DROP, CB_HOURS = 2.0, 0.6, 0.20, 24
 NYSE_HOLIDAYS = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
                  "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
@@ -122,6 +124,40 @@ def _algo_id(prefix: str, symbol: str) -> str:
     return f"{prefix}_{symbol[:8]}_{int(time.time() * 1000) % 10**10}_{_ALGO_SEQ[0]}"
 
 
+STOCK_LEG = "stock_sector_rot6m5_long"
+
+
+def drift_fracs(tg: dict, use_btc: bool, mark: dict):
+    """把每条腿的目标比例换成回测口径：回测(engine/optimal.py)每笔开仓后持有数量不变，
+    币圈每条子腿有自己的资金(开仓时=1)：当前暴露 = d·alloc·r ÷ (1 + d·alloc·(r-1))，r = 现价/入场价；
+    美股腿 k 只共用一个资金池：当前暴露 = 开仓比例·r ÷ (1 + Σ 各持仓 d·alloc/k·(r-1))。
+    发布器给的 frac 是开仓那一刻的比例，这里乘上 漂移系数 = 当前暴露/开仓比例。
+    返回 {品种: 比例}；腿的比例加总对不上 targets(缺腿/文件不一致)就返回 None，调用方沿用 targets。"""
+    key = "frac" if use_btc else "frac_no_btc"
+    base = (tg.get("targets") if use_btc else tg.get("targets_no_btc")) or {}
+    legs = [L for L in (tg.get("legs") or []) if L.get(key)]
+    if not legs:
+        return None
+    k = max(float(tg.get("stock_slots") or 5), 5.0)
+    def ratio(L):
+        p, e = mark.get(L["symbol"]), float(L.get("entry") or 0)
+        return (p / e) if p and e > 0 else 1.0
+    st_den = 1.0 + sum((1 if L["side"] == "LONG" else -1) * float(L.get("alloc") or 0) / k * (ratio(L) - 1)
+                       for L in legs if L["strategy"] == STOCK_LEG)
+    raw, out = {}, {}
+    for L in legs:
+        s, d, r, a = L["symbol"], (1 if L["side"] == "LONG" else -1), ratio(L), float(L.get("alloc") or 0)
+        den = st_den if L["strategy"] == STOCK_LEG else 1.0 + d * a * (r - 1)
+        g = r / den if den > 0.05 else 1.0
+        raw[s] = raw.get(s, 0.0) + L[key]; out[s] = out.get(s, 0.0) + L[key] * g
+    if set(raw) != {s for s, v in base.items() if abs(v) > 1e-9} or any(abs(raw[s] - base.get(s, 0.0)) > 1e-4 for s in raw):
+        return None
+    g = sum(abs(v) for v in out.values())
+    if g > MAX_GROSS:
+        out = {s: v * MAX_GROSS / g for s, v in out.items()}
+    return out
+
+
 class Exec:
     def __init__(self):
         self.c = Client(ENV["BINANCE_API_KEY"], ENV["BINANCE_API_SECRET"])
@@ -146,6 +182,11 @@ class Exec:
     @staticmethod
     def rdown(q, step):
         n = math.floor(abs(q) / step + 1e-9) * step
+        return math.copysign(float(f"{n:.10f}"), q) if n else 0.0
+
+    @staticmethod
+    def rnear(q, step):
+        n = math.floor(abs(q) / step + 0.5) * step
         return math.copysign(float(f"{n:.10f}"), q) if n else 0.0
 
     @staticmethod
@@ -177,6 +218,12 @@ class Exec:
             frozen = True; why += tg.get("problems") or ["发布器报问题"]
         use_btc = E >= fl(tg.get("btc_min_equity") or 5000)
         frac = dict((tg.get("targets") if use_btc else tg.get("targets_no_btc")) or {})
+        dfr = drift_fracs(tg, use_btc, mark)
+        if dfr is None and frac:
+            ding("腿的比例和目标对不上，本轮沿用开仓比例(不按回测口径漂移)", "drift_mismatch", 6 * 3600)
+        frac_open = dict(frac)
+        if dfr is not None:
+            frac = dfr
         live = armed and not stopped
         # ---- 2026-10-19 突破单：交易所条件单触发了，但擂台(每小时检查)还没跟上 → 先按这条腿的份额保留，不要被"目标对比实际"平掉 ----
         need_algo = bool(pos) or bool(self.st.get("brk_open")) or bool(tg.get("brk_orders")) or bool(self.st.get("pfs_prev"))   # 有残留止损单也要查，才能撤掉
@@ -248,7 +295,9 @@ class Exec:
                 px = fl(self.c.futures_mark_price(symbol=sym)["markPrice"])
             fr = frac.get(sym, 0.0) * (0.5 if cb else 1) * g_scale
             fr = max(-MAX_SYM, min(MAX_SYM, fr))
-            tq = self.rdown(fr * E / px, f["step"])
+            tq = self.rnear(fr * E / px, f["step"])
+            if abs(tq) * px > MAX_SYM * E:
+                tq = self.rdown(fr * E / px, f["step"])          # 四舍五入不能把单品种推过上限
             if abs(tq) * px < f["minn"] or abs(tq) < f["minq"]:
                 tq = 0.0
             cur = pos.get(sym, 0.0)
@@ -273,7 +322,7 @@ class Exec:
                 need, reason = False, reason + "(等纽约常规时段)"
             if need and frozen:
                 need, reason = False, reason + "(冻结：" + "；".join(why) + ")"
-            rows.append({"symbol": sym, "target_frac": round(fr, 5), "target_qty": tq, "position": cur, "price": px,
+            rows.append({"symbol": sym, "target_frac": round(fr, 5), "open_frac": round(frac_open.get(sym, 0.0), 5), "target_qty": tq, "position": cur, "price": px,
                          "target_usdt": round(tq * px, 2), "position_usdt": round(cur * px, 2), "action": reason if need or reason else ""})
             if need:
                 plans.append((sym, delta, cur, tq, px, f, reason))
