@@ -22,7 +22,7 @@
 | Patrick Wieland / SMB Capital / TheSecretMindset | — | 各招牌策略 | 2026-10-30 | 否决 | youtube_top/ |
 | DeepSeek 推荐清单（约20个，含 TradingView 高分享） | — | EMA9/21+RSI、SSL、超级趋势变体、AO、Dynamic Breakout II、Dual Thrust、多时段ORB、VWAP+EMA9、RSI(2)+200MA、配对、马丁 等 | 2026-10-30 | 否决 | add_deepseek_list.py |
 | TV 文档 11 份 | — | 万亿战神v6.5、SuperTrend+QQE+TrendA、雷达追踪 | 2026-10-20 | 否决 | — |
-| 交易伦 - AT | UCGTDHRerNo4eIyaliexDxtA | 见下方"2026-10-30/31 四博主"一节 | 2026-10-30 | 进行中 | youtube_4ch/ |
+| 交易伦 - AT | UCGTDHRerNo4eIyaliexDxtA | 无字幕，语音转写：5m EMA21/50/200强动能K(fLN20X1dP48)、破位清单RSI过滤(fTRv2HhTJUk)、伦敦破位(QZNzq-BunA4)；其余13期(谐波/供需/13种价格行为/ICI/动能交易/多时框等)待转写，ICT系列=已测同类 | 2026-10-30 | 已测3期全否决（四博主①③） | youtube_4ch/lun_hist.py |
 | 已泰 | UCLIFrck8EUhjRySvJAALa9Q | 67期中交易类约15期：EMA+威廉分型、双RSI、锚定VWAP、TD九转、Impulse MACD、RSI布林带、热力图+SMA200+AO、SuperTrend+HMA200、分型突破+放量（布林3σ/HMA+ROC/均线误区=已测同类）；0NhDZCA6urE、fc-LnP8mwiA 无字幕待转写 | 2026-10-30 | 否决（研究页 四博主②） | youtube_4ch/yitai_hist.py |
 | 幣哥備份 | UCdAf7idaznVssBMHhjS3EvA | 同上（频道只有3期，全是双均线系统） | 2026-10-30 | 进行中 | youtube_4ch/ |
 | mio来了 | UCnKF3a8uDDkLBc9V5hTTM6Q | 同上 | 2026-10-30 | 进行中 | youtube_4ch/ |
