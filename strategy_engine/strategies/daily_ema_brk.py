@@ -160,7 +160,9 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return None                                        # 2026-10-30 对账指令 FLAT：空仓时也不开
     if _ov and _ov["want"] in ("LONG", "SHORT") and _coin_frac(symbol, float(p["target_notional_frac"])) > 0:
         side_ = 1 if _ov["want"] == "LONG" else -1
-        stp = float(_ov.get("stop") or (price - side_ * 3.0 * datr))
+        # 2026-10-31 回测趋势单不设止损(engine/optimal.py crypto_leg：只有突破单/底部反转单有3×ATR)，补开时默认用10×ATR兜底，
+        # 原来默认3×ATR：10-22 对账补开的 ETH/SOL 空单挂了3×ATR止损，回测同一笔没有止损，反弹时实盘会被提前打掉
+        stp = float(_ov.get("stop") or (price - side_ * 10.0 * datr))
         if (side_ > 0 and price > stp) or (side_ < 0 and price < stp):
             atr_pct = datr / price; alloc = min(1.0, float(p["vol_target"]) / atr_pct)
             from strategy_engine import position_sizing as ps
@@ -172,7 +174,7 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     bt_open = _bt_pre_open(symbol)
     if bt_open and not _recent_stopout(symbol):
         side_ = 1 if bt_open.get("side") == "LONG" else -1
-        stp = bt_open.get("stop") or (price - side_ * 3.0 * datr)
+        stp = bt_open.get("stop") or (price - side_ * 10.0 * datr)          # 2026-10-31 同上：回测没止损的趋势单只留10×ATR兜底
         if (side_ > 0 and price > stp) or (side_ < 0 and price < stp):      # 已经越过止损就不补
             atr_pct = datr / price
             alloc = min(1.0, float(p["vol_target"]) / atr_pct)
