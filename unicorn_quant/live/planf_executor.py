@@ -111,6 +111,17 @@ def fl(x):
     return float(x) if x not in (None, "") else 0.0
 
 
+
+_ALGO_SEQ = [0]
+
+
+def _algo_id(prefix: str, symbol: str) -> str:
+    """clientAlgoId 必须唯一：2026-10-30 发现同一品种两条腿在同一秒挂止损，两张单拿到同一个 id，第二张被拒(-4116)，
+    要等下一轮(30秒后)才挂上。改成毫秒 + 进程内序号(长度 ≤ 36)。"""
+    _ALGO_SEQ[0] = (_ALGO_SEQ[0] + 1) % 1000
+    return f"{prefix}_{symbol[:8]}_{int(time.time() * 1000) % 10**10}_{_ALGO_SEQ[0]}"
+
+
 class Exec:
     def __init__(self):
         self.c = Client(ENV["BINANCE_API_KEY"], ENV["BINANCE_API_SECRET"])
@@ -360,7 +371,7 @@ class Exec:
                 try:
                     self.algo("post", "algoOrder", {"algoType": "CONDITIONAL", "symbol": s, "side": "BUY" if v["side"] == "LONG" else "SELL",
                                                     "type": "STOP_MARKET", "triggerPrice": f"{k[1]:.{dec}f}", "quantity": self.fmt(v["q"], f["step"]),
-                                                    "workingType": "CONTRACT_PRICE", "clientAlgoId": f"pfb_{s[:8]}_{int(time.time()) % 10**8}"})
+                                                    "workingType": "CONTRACT_PRICE", "clientAlgoId": _algo_id("pfb", s)})
                     log("挂突破单", symbol=s, side=v["side"], trigger=k[1], qty=v["q"])
                     ding(f"{s} 挂盘中突破单：{'涨破' if v['side'] == 'LONG' else '跌破'} {k[1]:g} 就{'开多' if v['side'] == 'LONG' else '开空'} {v['q']:g}")
                 except Exception as e:
@@ -424,7 +435,7 @@ class Exec:
                 self.algo("post", "algoOrder", {"algoType": "CONDITIONAL", "symbol": s, "side": "SELL" if pos[s] > 0 else "BUY",
                                                 "type": "STOP_MARKET", "triggerPrice": f"{stp:.{dec}f}", "quantity": self.fmt(q, f["step"]),
                                                 "reduceOnly": "true", "workingType": "MARK_PRICE",
-                                                "clientAlgoId": f"pfs_{s[:8]}_{int(time.time()) % 10**8}"})
+                                                "clientAlgoId": _algo_id("pfs", s)})
                 log("挂止损单", symbol=s, trigger=stp, qty=q)
             except Exception as e:
                 log("挂止损单失败", symbol=s, err=str(e)[:300])

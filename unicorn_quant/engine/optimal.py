@@ -254,6 +254,8 @@ def crypto_leg():
         state[sym] = {"date": dstr(last["t"]), "close": last["c"], "ema8": round(e8[-1], 6), "ema30": round(e30[-1], 6),
                       "trend": "多头" if up else "空头", "atr_pct": round(100 * A[-1] / last["c"], 2),
                       "pending": pend[0] if pend else ("order" if order else None),
+                      # 2026-10-30 对账：空仓时"下一根开盘开仓"也要带方向，recon 按执行后的状态比(否则擂台已在收盘开仓、回测还空仓，被误判后自动修复反复开平)
+                      "pending_side": ("LONG" if pend[1] > 0 else "SHORT") if (pend and pend[0] == "enter") else None,
                       # 2026-10-19 实盘：今天挂着的盘中突破单(方向、触发价、开仓时仓位系数)，实盘执行器提前挂交易所条件单，触价即成交(同回测)
                       "brk_order": ({"side": "LONG" if order[0] > 0 else "SHORT", "level": order[1], "for_day": dstr(last["t"] + DAY),
                                      "alloc": round(min(1.0, VOL_TGT / (A[-1] / last["c"])), 4)} if (order and not pend) else None),
@@ -631,6 +633,9 @@ def crypto_8h_leg(kind, btc_daily):
                           # 日线腿(crypto_leg)一直有这个字段，8h 腿此前没暴露，导致对账把"即将平仓"当"仍持仓"，
                           # 自动修复器据此反复开/平形成震荡。这里 pend=(want,...)：want=0 是平仓、非0是反手。
                           "pending": ("flip" if pend[0] else "exit") if pend else None}
+        elif pend and pend[0]:
+            # 2026-10-30 空仓时"下一根开盘开仓"同样暴露给对账(只有 recon 读 subs)，否则擂台在信号K线收盘已开仓会被判成"回测空仓"
+            opens[sym] = {"side": None, "pending": "enter", "pending_side": "LONG" if pend[0] > 0 else "SHORT"}
     days = sorted(set().union(*[set(v) for v in curves.values()]))
     last_v = {s: 1.0 for s in M5}; port = {}
     for d in days:

@@ -60,12 +60,17 @@ def run() -> dict:
                 s_ = _bt_sym(p_)
                 if p_.get("action") == "平仓" and s_ in b_open:
                     b_open.pop(s_); note[s_] = "回测已发平仓信号，下一个开盘执行"
+                elif p_.get("action") == "开多" and s_ not in b_open:      # 2026-10-30 开仓信号同理(10-29 QCOM 被误判后反复开平)
+                    b_open[s_] = "LONG"; note[s_] = "回测已发开仓信号，下一个开盘执行"
         else:
             for s_, st_ in (opt["crypto"].get("state") or {}).items():
-                pd_ = (st_ or {}).get("pending") if sub == "日线EMA8/30" else (((st_ or {}).get("subs") or {}).get(sub) or {}).get("pending")
+                sd_ = (st_ or {}) if sub == "日线EMA8/30" else (((st_ or {}).get("subs") or {}).get(sub) or {})
+                pd_ = sd_.get("pending")
                 if s_ in b_open and pd_ in ("exit", "flip"):
                     side_ = b_open.pop(s_); note[s_] = "回测已发" + ("反手" if pd_ == "flip" else "平仓") + "信号，下一个开盘执行"
                     if pd_ == "flip": b_open[s_] = "SHORT" if side_ == "LONG" else "LONG"
+                elif s_ not in b_open and pd_ == "enter" and sd_.get("pending_side") in ("LONG", "SHORT"):   # 2026-10-30
+                    b_open[s_] = sd_["pending_side"]; note[s_] = "回测已发开仓信号，下一个开盘执行"
         # 擂台持仓、回测空仓：如果回测这只最近是被3ATR止损打掉的，说明擂台这笔是"止损后锁定"修复(2026-10-17 06:55)之前开的遗留单
         last_bt = {}
         for t in bt:
