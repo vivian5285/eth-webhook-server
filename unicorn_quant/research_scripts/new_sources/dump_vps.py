@@ -3,6 +3,7 @@
 import json, sys
 sys.path.insert(0, "/home/stratroster/unicorn_quant")
 from engine import optimal as O
+O.OUT = "/tmp/ns_dump_out"   # build() 会写 crypto_weights/rotation/bars_*.json，指到临时目录，不动生产文件
 res = O.build()
 out = {"curves": {sub: {s: sorted(cv.items()) for s, cv in d.items()} for sub, d in O.CURVES.items()},
        "weights": res["crypto_weights"], "sub_w": O.SUB_W,
