@@ -156,6 +156,8 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6), "bar_time": bar_time,
                 "reason": f"日线EMA8/30翻{tag(raw)}，平{tag(side)}"}
     # ---- 空仓 ----
+    if recon_override.blocks_entry(_ov):
+        return None                                        # 2026-10-30 对账指令 FLAT：空仓时也不开
     if _ov and _ov["want"] in ("LONG", "SHORT") and _coin_frac(symbol, float(p["target_notional_frac"])) > 0:
         side_ = 1 if _ov["want"] == "LONG" else -1
         stp = float(_ov.get("stop") or (price - side_ * 3.0 * datr))

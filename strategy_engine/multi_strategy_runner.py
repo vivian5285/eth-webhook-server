@@ -508,7 +508,16 @@ def _guarded_qty(
         minimum_regime=baseline.get("last_regime"),
     )
     shadow_store.save_strategy_guard_state(strategy, decision.to_dict())
+    if strategy in PLANF_REPLICA_STRATEGIES:
+        return desired_qty, decision   # 2026-10-30 方案F复刻腿不受擂台通用风控拦截/缩仓(决策照算照存，只是不执行)
     return decision.allowed_qty, decision
+
+
+# 2026-10-30：方案F四条复刻腿(实盘E账户跟的就是它们)。回测里没有擂台这层 portfolio_guard，
+# 方案F自己的风控是 波动率调仓 + 组合波动率控制 + 总杠杆≤2倍。10-30 00:07 擂台进入 crisis，
+# 8h布林腿 BTC 开空后止损热度(10×ATR 灾难止损)占满 2% 预算，ETH/SOL/XRP/BNB 四个空单全被拒，
+# 回测照开 → 擂台与回测、实盘与回测都对不上。这里让这四条只跟回测规则走。
+PLANF_REPLICA_STRATEGIES = {"daily_ema_brk_cycle_main5", "st8h_cycle_main5", "boll8h_cycle_main5", "stock_sector_rot6m5_long"}
 
 
 # 2026-09-30新增：宝贝要求搭一套完全独立于compute_qty(风险资金×5倍参考
@@ -930,6 +939,11 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
                 "dual_ema_band_7_25_1h", "dual_ema_band_7_25_90m",
                 "dual_ema_band_7_25_radar_1h", "dual_ema_band_7_25_radar_90m",
                 "dual_ema_spot_7_25_1h", "dual_ema_spot_7_25_90m",
+                # 2026-10-22 修复：方案F币圈腿两条8h子腿(8h超级趋势/8h布林突破)也要反手。
+                # 回测 engine/optimal.py crypto_8h_leg 方向翻转时平旧仓+开反向；擂台这两条策略此前只平不反手，
+                # 漏掉反手导致与回测对账持续不一致、自动修复器反复震荡。策略侧(intraday_trend_cycle.py)已给
+                # 开仓信号打 reverse_now，这里把它们加入白名单启用同一套反手机制。
+                "st8h_cycle_main5", "boll8h_cycle_main5",
             }:
                 opposite = fn(bars_by_tf, call_params, None)
                 if (

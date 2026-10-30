@@ -111,6 +111,8 @@ def _signal(kind: str, bars_by_tf: Dict[str, List[dict]], params: Optional[dict]
         if not allowed(side):
             return {"action": "CLOSE_QUICK_EXIT", "price": round(price, 6), "bar_time": bar_time, "reason": f"减半周期阶段不再允许{side}，离场"}
         return None
+    if recon_override.blocks_entry(_ov):
+        return None                                        # 2026-10-30 对账指令 FLAT：空仓时也不开
     _force = bool(_ov and _ov["want"] in ("LONG", "SHORT"))
     if _force:
         d = 1 if _ov["want"] == "LONG" else -1
@@ -135,10 +137,16 @@ def _signal(kind: str, bars_by_tf: Dict[str, List[dict]], params: Optional[dict]
     from strategy_engine import position_sizing as ps
     stop_frac = float(p["atr_stop_mult"]) * atr_pct
     default_notional = (min(ps.LEVERAGE * ps.NOTIONAL_MARGIN_HAIRCUT, 1.0 / stop_frac) * ps.RISK_PCT * ps.TIER_NOTIONAL_MULT[1])
+    # 2026-10-22 修复：方案F回测(engine/optimal.py crypto_8h_leg)方向翻转时"平旧仓+开反向"一起做(反手)，
+    # 本策略持仓分支此前只返回 CLOSE_QUICK_EXIT(只平不反手)，导致擂台比回测晚一根 8h 才重新入场、信号震荡时漏反手。
+    # 与 dual_ema_band_7_25 同款机制：给开仓信号打 reverse_now，runner(multi_strategy_runner._tick_single_symbol_entry)
+    # 平仓那一刻会用 position=None 再问一次，拿到这里的新信号就立即反手(本策略名已加入 runner 的反手白名单)。
+    # d==0(回到中轨)/减半周期不允许/BTC不同向时上面早已 return None，不会误反手；_force(自动对账修复)路径不受影响。
     return {
         "action": action, "price": round(price, 6), "atr": round(atr, 6),
         "stop_loss": round(float(_ov["stop"]) if _force and _ov.get("stop") else price - d * atr * float(p["atr_stop_mult"]), 6), "tier": 1,
         "position_fraction": _coin_frac(symbol, float(p["target_notional_frac"])) * alloc / default_notional, "bar_time": bar_time,
+        "reverse_now": True,
         "reason": (f"自动对账修复：回测此时持{'多' if d > 0 else '空'}，擂台跟随开仓；{_ov.get('reason', '')}" if _force else
                    f"{name}{'多头' if d > 0 else '空头'}；减半周期允许；" + ("BTC日线同向；" if symbol != "BTCUSDT" else "") + f"波动率调仓×{alloc:.2f}"),
     }

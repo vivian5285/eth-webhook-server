@@ -36,6 +36,12 @@ def get(strategy: str, symbol: str) -> Optional[dict]:
         return None
 
 
+def blocks_entry(ov: Optional[dict]) -> bool:
+    """2026-10-30：指令是 FLAT 时空仓也不许开。之前 FLAT 只在持仓分支生效，策略空仓时照开，
+    下一轮又被指令平掉、再开……10-29 QCOM 一天开平 5 次(擂台→实盘E都跟着来回)。"""
+    return bool(ov and ov.get("want") == "FLAT")
+
+
 def position_action(ov: Optional[dict], position: Optional[dict], price: float, bar_time: int) -> Optional[dict]:
     """持仓时按指令处理：返回 {"hold": True} / 平仓信号 / None(指令不涉及持仓，交给策略自己)"""
     if not ov or not position:

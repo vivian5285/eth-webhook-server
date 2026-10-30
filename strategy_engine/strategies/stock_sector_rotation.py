@@ -141,6 +141,8 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
                     "reason": f"{rot.get('month')} 所在行业掉出前{rot.get('top_k')}({','.join(rot.get('selected') or [])})，离场"}
         return None
 
+    if recon_override.blocks_entry(_ov):
+        return None                                        # 2026-10-30 对账指令 FLAT：空仓时也不开
     _force = bool(_ov and _ov["want"] == "LONG")
     if not _force and (not rot or not in_rot or not up or stop_locked):
         return None
