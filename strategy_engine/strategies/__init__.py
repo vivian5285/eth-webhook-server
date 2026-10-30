@@ -2353,3 +2353,21 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] crash_rebound 加载失败: {_e}")
+
+
+# 2026-10-30：油管博主回测里两条'低频、与方案F低相关的小正'候选，宝贝同意只放擂台纸面观察。说明+回测见 youtube_candidates.py 顶部。
+try:
+    from strategy_engine.strategies import youtube_candidates
+    for _yc_name, _yc_label in (
+        ("ribbon_dense_w2_4h", "币哥均线密集：MA/EMA 20/60/120 宽<2.0ATR 连续≥10根后穿出区间，止损区间另一侧，收盘破20线离场"),
+        ("ribbon_dense_w25_4h", "币哥均线密集：同上，宽<2.5ATR"),
+        ("twin_range_st_1d", "Trader小Q：Twin Range Filter首次转向+Supertrend(10,3)同向+成交量>1.5倍20日均量，止损Supertrend线，反向信号离场"),
+    ):
+        STRATEGIES[_yc_name] = youtube_candidates.generate_signal
+        STRATEGY_DESCRIPTIONS[_yc_name] = (
+            "油管博主候选——" + _yc_label + "。2026-10-30回测(主流5币2022-01..2026-09含费)：整片参数小正、与方案F日相关0.1~0.2，"
+            "逐日盯市叠加方案F 5.26→5.4~5.7(前后两段都升)，但信号少、参数间差别大。纸面观察，不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] youtube_candidates 加载失败: {_e}")

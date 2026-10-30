@@ -1022,3 +1022,14 @@ CRASH_REBOUND_ROSTER = [{"symbol": s, "strategy": n, "timeframe": "15m", "params
                         for n, m in (("crash_knife_15m", "knife"), ("crash_vbottom_15m", "vbottom"))
                         for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
 SINGLE_SYMBOL_ROSTER += tuple(CRASH_REBOUND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else CRASH_REBOUND_ROSTER
+
+
+# 2026-10-30：油管博主两条候选纸面(主流5个)，见 strategies/youtube_candidates.py。4h 取1000根(EMA120 预热足)，日线600根。
+YOUTUBE_CAND_ROSTER = (
+    [{"symbol": s, "strategy": n, "timeframe": "4h", "bars_limit": 1000, "params": {"mode": "ribbon", "w": w, "m": 10, "look": 20}}
+     for n, w in (("ribbon_dense_w2_4h", 2.0), ("ribbon_dense_w25_4h", 2.5))
+     for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+    + [{"symbol": s, "strategy": "twin_range_st_1d", "timeframe": "1d", "bars_limit": 600, "params": {"mode": "twin", "vol_k": 1.5}}
+       for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+)
+SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_ROSTER
