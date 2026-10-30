@@ -26,6 +26,13 @@
 | 已泰 | UCLIFrck8EUhjRySvJAALa9Q | 67期中交易类约15期：EMA+威廉分型、双RSI、锚定VWAP、TD九转、Impulse MACD、RSI布林带、热力图+SMA200+AO、SuperTrend+HMA200、分型突破+放量（布林3σ/HMA+ROC/均线误区=已测同类）；0NhDZCA6urE、fc-LnP8mwiA 无字幕待转写 | 2026-10-30 | 否决（研究页 四博主②） | youtube_4ch/yitai_hist.py |
 | 幣哥備份 | UCdAf7idaznVssBMHhjS3EvA | 同上（频道只有3期，全是双均线系统） | 2026-10-30 | 进行中 | youtube_4ch/ |
 | mio来了 | UCnKF3a8uDDkLBc9V5hTTM6Q | 同上 | 2026-10-30 | 进行中 | youtube_4ch/ |
+| 大黑美股（中低频实盘自动交易） | UCvZznN0wCMZaP2VdtLyxPTw | QQQ/TQQQ：EMA5/30、牛熊均线切换TQQQ、动态风险分配、MACD（日线+1h近3年；他主打30m无长历史） | 2026-10-30 | 否决（研究页 七博主①） | youtube_b2/qqq_tqqq.py |
+| Trader小Q | UCtNPrRw5ovVLlOlODBJpNJw | 加密参数RSI9/MACD(8,21,5)/布林3σ、Twin Range+Supertrend+放量、Donchian+B-Xtrender | 2026-10-30 | Twin Range日线候选观察，其余否决（七博主②） | youtube_b2/tv_combos.py |
+| Yuchi Trader | UCW1KHRAydlyBrX7nz7bz26g | Halftrend+RSI；Rob Hoffman=已测；其余(SSL/Supertrend/宙斯/5m剥头皮)同类 | 2026-10-30 | 否决（七博主②③） | youtube_b2/tv_combos.py |
+| 交易聰明錢 | UCD9HUxu-a1Eug7Z61gDf6-g | Supertrend+KD；均线SOP(YsYFrWVwAq4 待转写)；其余裸K/SMC/FVG=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
+| 威廉 交易頻道 | UCZzqkJj6vv_0M2GBu3H-pOA | 吞没4分战法(吞没+均线+MACD+量)；AI 5m策略(2CUvhvcjo1w 待转写)；威科夫/现货网格=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
+| 蛋仔 CryptoEGG | UCKnA-uQNw6fErPxZEXdFMlg | SMC/ICT 入门(eWDVA9zKB-I)；频道多为1分K剥头皮/SNR/ICT | 2026-10-30 | 已测同类（七博主③） | — |
+| 暗夜飞行 | UCUzrqf93vnhgqJ-CbsTJQBw | 合约网格多空双开(3KFtMhNeRY4)；频道多为网格/币安Alpha | 2026-10-30 | 已测同类（七博主③） | — |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
@@ -59,3 +66,16 @@
 | 7foqLkodFps | SuperTrend(10,3) + HMA200 | 否决（单独+0.21R，接进方案F 0.5%时5.43、1%时4.84） |
 | WCIP09ISi6Y | 分型结构突破 + MA200向上 + 放量 | 否决（接进方案F 4.57） |
 | 9zXnhSqG91w / 4gVLowpz9eY / swldmJKPP_o | 布林3σ反转 / HMA+ROC / 均线三误区 | 已测同类，未单独测 |
+
+### 2026-10-30 第二批7个视频（youtube_b2/，研究页 七博主①②③）
+| 视频ID | 博主 | 规则 | 结论 |
+|---|---|---|---|
+| Sog09AOV9GE（+qSJXMU6grbg、hxrIirI--sQ、P2JYc8oPXfg、iLg-zGeAqrs） | 大黑美股 | QQQ EMA5/30 → TQQQ、牛熊切换、动态分配、MACD | 否决（接进方案F全降；他的最好版本比值1.22 < 我们美股腿2.27） |
+| J3jBN_qzi1Q | Trader小Q | RSI9>70 + MACD(8,21,5)金叉 + 回踩3σ布林中/下轨 | 否决（4h +0.28R 但接进方案F 4.23） |
+| （频道其余） | Trader小Q | Twin Range Filter + Supertrend + 放量 | **候选观察**：日线放量1.2~2.0整片正，5档平均接进方案F 5.52~5.60 |
+| （频道其余） | Trader小Q | Donchian + B-Xtrender | 否决（4.48） |
+| （频道其余） | Yuchi | Halftrend + RSI | 否决（2.70） |
+| 2DfBuY1kaAw（标题） | 交易聰明錢 | Supertrend + KD | 否决（零成本为负） |
+| Ow30lEj7uHA（标题） | 威廉 | 吞没4分战法 | 否决 |
+| 2CUvhvcjo1w / YsYFrWVwAq4 | 威廉 / 交易聰明錢 | AI 5m 策略 / 均线SOP | 转写排队中 |
+| eWDVA9zKB-I / 3KFtMhNeRY4 / IspHGootQ84 | 蛋仔 / 暗夜飞行 / Yuchi | SMC入门 / 网格多空双开 / Rob Hoffman | 已测同类 |
