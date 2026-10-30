@@ -1015,3 +1015,10 @@ SINGLE_SYMBOL_ROSTER += tuple(PLAN_B_8H_ROSTER) if isinstance(SINGLE_SYMBOL_ROST
 BRK_ROSTER = [{"symbol": s, "strategy": "daily_ema_brk_cycle_main5", "timeframe": "1h", "params": {}, "data_source": "spot"}   # 2026-10-19 现货K线(同回测)
               for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
 SINGLE_SYMBOL_ROSTER += tuple(BRK_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else BRK_ROSTER
+
+
+# 2026-10-30：急跌反弹纸面(主流5个)，见 strategies/crash_rebound.py。
+CRASH_REBOUND_ROSTER = [{"symbol": s, "strategy": n, "timeframe": "15m", "params": {"mode": m}}
+                        for n, m in (("crash_knife_15m", "knife"), ("crash_vbottom_15m", "vbottom"))
+                        for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
+SINGLE_SYMBOL_ROSTER += tuple(CRASH_REBOUND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else CRASH_REBOUND_ROSTER

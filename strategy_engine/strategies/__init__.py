@@ -2334,3 +2334,22 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] daily_ema_brk 加载失败: {_e}")
+
+
+# 2026-10-30：急跌反弹(只做多15m)两条纸面——投机实验室全频道回测里唯一与方案F不相关(日相关0.04)的方向，
+# 叠加后比值持平、2025起转弱，宝贝同意只放擂台观察。说明+回测见 crash_rebound.py 顶部。
+try:
+    from strategy_engine.strategies import crash_rebound
+    for _cr_name, _cr_label in (
+        ("crash_knife_15m", "Flight接刀：32根内跌≥12%+4倍量+长下影，止损低点-0.3ATR，2R，最长12小时"),
+        ("crash_vbottom_15m", "川沐V字针底：5根跌≥4%后2根阳线涨≥2%，止损8根低点-0.2ATR，3R，最长24小时"),
+    ):
+        STRATEGIES[_cr_name] = crash_rebound.generate_signal
+        STRATEGY_DESCRIPTIONS[_cr_name] = (
+            "急跌反弹(只做多15m)——" + _cr_label + "。2026-10-30投机实验室频道回测挑出，"
+            "主流5币2022-01..2026-09含费：接刀每笔+0.26R(样本外+0.07)、V底+0.35R(样本外+0.57)；"
+            "与方案F日相关0.04但叠加后比值只持平。纸面观察，不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] crash_rebound 加载失败: {_e}")
