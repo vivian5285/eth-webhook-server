@@ -217,12 +217,25 @@ def eval_stock(name, fn, **kw):
 
 
 # ---- 日内(币安永续 1m 合成，2022-01..2026-09) ----
-def eval_intraday(name, fn, tf, syms=L.SYMS, **kw):
-    allt = []
+def _flip(b, sp, seed):
+    """随机方向对照：同样的进场时点/止损距离/出场规则，方向抛硬币(止损/止盈以信号收盘价镜像)"""
+    c = b.c.values; rng = np.random.default_rng(seed); f = rng.choice([-1, 1], len(c))
+    sig = np.asarray(sp["sig"], float); fl = (sig != 0) & (f < 0)
+    out = dict(sp, sig=np.where(fl, -sig, sig), stop=np.where(fl, 2 * c - np.asarray(sp["stop"], float), sp["stop"]))
+    if sp.get("tgt") is not None: out["tgt"] = np.where(fl, 2 * c - np.asarray(sp["tgt"], float), sp["tgt"])
+    return out
+
+
+def eval_intraday(name, fn, tf, syms=L.SYMS, control=True, **kw):
+    allt = []; ctl = []
     for s in syms:
-        b = L.bars(s, tf); allt.append(trades(b, fn(b, **kw)))
+        b = L.bars(s, tf); sp = fn(b, **kw); allt.append(trades(b, sp))
+        ex = sp.get("exit_sig")
+        if control and sp.get("limit") is None and (ex is None or set(np.unique(ex)) <= {0, 9}):
+            for seed in range(5): ctl.append(trades(b, _flip(b, sp, seed)))
     T = pd.concat(allt)
     z = rstats(T, fee=0.0); f = rstats(T, fee=L.FEE + L.SLIP, oos_ms=L.OOS); m = rstats(T, fee=0.0002)
-    print(f"{name:24s} {tf:4s} | {f.get('n', 0):6d}笔 胜{f.get('win', 0):.0%} 零成本R{z.get('r', 0):+.3f} 挂单R{m.get('r', 0):+.3f} "
+    cz = rstats(pd.concat(ctl), fee=0.0).get("r", np.nan) if ctl else np.nan
+    print(f"{name:24s} {tf:4s} | {f.get('n', 0):6d}笔 胜{f.get('win', 0):.0%} 零成本R{z.get('r', 0):+.3f} (随机方向{cz:+.3f}) 挂单R{m.get('r', 0):+.3f} "
           f"含费R{f.get('r', 0):+.3f}(前{f.get('r_is', 0):+.2f}/后{f.get('r_oos', 0):+.2f}) 止损{f.get('risk', 0):.2%}", flush=True)
-    return dict(name=name, tf=tf, zero=z, maker=m, R=f, T=T)
+    return dict(name=name, tf=tf, zero=z, maker=m, R=f, ctl=cz, T=T)
