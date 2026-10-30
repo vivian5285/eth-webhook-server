@@ -163,9 +163,9 @@ function hideHov() { $('#hov').hidden = true; hovSym = null; }
 const VCLS = { '采用': 'ok', '维持现行': 'keep', '不改': 'keep', '放弃': 'no', '否决': 'no', '不采用': 'no', '观察': 'watch' };
 function renderRes() {
   $$('#resSeg button').forEach(b => b.classList.toggle('on', b.dataset.v === S.rtag));
-  const L = S.d.research.filter(r => !S.rtag || r.tag === S.rtag);
+  const L = S.d.research.map((r, i) => [r, i]).sort((a, b) => String(b[0].date).localeCompare(String(a[0].date)) || b[1] - a[1]).map(x => x[0]).filter(r => !S.rtag || r.tag === S.rtag);  // 按日期倒序, 同一天后写的在前
   $('#resBody').innerHTML = L.map(r => `<article class="rcard">
-    <div class="rh"><span class="mut small">${esc(r.date)}</span><span class="tagc">${esc(r.tag)}</span><span class="vd ${VCLS[r.verdict] || 'keep'}">${esc(r.verdict)}</span></div>
+    <div class="rh"><span class="mut small">${esc(r.date)}</span><span class="tagc">${esc(r.tag)}</span><span class="vd ${VCLS[r.verdict] || (Object.keys(VCLS).find(k => String(r.verdict).startsWith(k)) ? VCLS[Object.keys(VCLS).find(k => String(r.verdict).startsWith(k))] : 'keep')}">${esc(r.verdict)}</span></div>
     <h3>${esc(r.title)}</h3>
     <p class="rq"><b>问题</b>${esc(r.q)}</p>
     <p class="ra"><b>结论</b>${esc(r.a)}</p>
