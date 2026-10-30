@@ -409,7 +409,7 @@ async function loadRecon() {
       <div class="badges" style="margin-top:8px">${st}</div>
       ${rows ? `<div class="tbl-wrap"><table class="t">${rows}</table></div>` : ''}</div>`;
   }).join('');
-  loadAutofix(); loadLive();
+  loadAutofix(); loadLive(); loadTrack();
 }
 /* 2026-10-19 自动对账修复器面板 */
 async function loadAutofix() {
@@ -432,6 +432,37 @@ async function loadAutofix() {
     ${(a.data_health && a.data_health.checks) ? `<div class="af-hc"><b>复刻健康检查</b><span class="mut small"> 每小时 · 上次 ${t(a.data_health.ts)} · 有问题会发钉钉</span>
       <ul>${a.data_health.checks.map(c => `<li class="${c.ok ? 'ok' : c.level}"><i>${c.ok ? '✓' : c.level === 'bad' ? '✕' : '!'}</i>${esc(c.text)}</li>`).join('')}</ul></div>` : ''}
     <div class="mut small af-n">规则：持续两次检查才动；只修纸面仓位，不改策略代码；同一品种一周被修 3 次就停手并标记"疑似代码问题"；每天最多 6 次。</div>`;
+  $('#rcBody').prepend(el);
+}
+
+/* 2026-10-30 方案F实盘跟踪：回测→擂台→实盘 三层偏差 + 收益拆解(engine/planf_track.py 每小时) */
+async function loadTrack() {
+  let d; try { const x = await fetch('/api/planf/track'); if (!x.ok) return; d = await x.json(); } catch (e) { return; }
+  if (!d || !d.ok) return;
+  const t = ts => new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const p = v => (v == null ? '--' : (v > 0 ? '+' : '') + v + '%');
+  const sl = d.since_live || {}, inc = sl.income || {}, bt = sl.backtest_pct || {}, rc = d.recon || {}, ex = d.exec || {}, at = d.attr || {};
+  const u = v => (v == null ? '--' : (v > 0 ? '+' : '') + Number(v).toFixed(2) + 'U');
+  const maxDev = Math.max(0, ...(ex.rows || []).map(r => r.dev_pct || 0));
+  const covs = (ex.rows || []).map(r => r.stop_cover_pct).filter(v => v != null), minCov = covs.length ? Math.min(...covs) : null;
+  const au = ex.audit_today || {};
+  const alarms = [...(ex.dev_bad || []), ...(ex.cover_bad || []), ...(rc.mismatch_now || [])];
+  const arow = (k, lab) => { const a = at[k] || {}; return `<tr><td>${lab}</td><td class="r">${a.hours || 0}</td><td class="r">${p(a.target_pct)}</td><td class="r">${p(a.held_pct)}</td><td class="r">${p(a.actual_pct)}</td><td class="r">${p(a.pos_gap_pct)}</td><td class="r">${p(a.exec_gap_pct)}</td></tr>`; };
+  const el = document.createElement('div'); el.className = 'af lv';
+  el.innerHTML = `<div class="af-h"><b>实盘跟踪 · 回测 → 擂台 → 实盘</b>
+      <span class="badge ${alarms.length ? 'dn' : 'up'}">${alarms.length ? alarms.length + ' 项需关注' : '三层一致'}</span>
+      <span class="mut small">每小时 · 更新 ${t(d.ts)} · 超阈值发钉钉</span></div>
+    <div class="af-k">
+      <div><em>实盘上线以来(10-19)</em><b>${p(sl.eq_change_pct)}</b><span>同期回测：方案F ${p(bt.F)} · 币圈腿 ${p(bt.crypto)} · 美股腿 ${p(bt.stock)}(E不做BTC、资金小，看长期差距)</span></div>
+      <div><em>已实现 / 手续费 / 资金费</em><b>${u(inc.REALIZED_PNL)}</b><span>手续费 ${u(inc.COMMISSION)} · 资金费 ${u(inc.FUNDING_FEE)}(回测不含资金费)</span></div>
+      <div><em>① 回测↔擂台 持仓一致率</em><b>${rc.natural_since_fix == null ? '--' : rc.natural_since_fix + '%'}</b><span>10-30修复后；近24h ${rc.natural_24h ?? '--'}% · 近7天 ${rc.natural_7d ?? '--'}% · 修复后擂台多开 ${rc.extra_after_fix ?? 0} / 漏开 ${rc.missed_after_fix ?? 0} 笔</span></div>
+      <div><em>② 擂台↔实盘 最大持仓偏差</em><b>${maxDev.toFixed(1)}%</b><span>止损单最低覆盖 ${minCov == null ? '--' : minCov + '%'}(按下单最小单位向下取整，略低于100%正常)</span></div>
+      <div><em>③ 今天成交</em><b>${au.fills || 0} 笔</b><span>挂单成交 ${au.maker || 0} / 吃单 ${au.taker || 0} · 平均滑点 ${au.avg_slip_bp == null ? '--' : au.avg_slip_bp + 'bp'} · 手续费 ${au.fees == null ? '--' : Number(au.fees).toFixed(3) + 'U'}</span></div>
+    </div>
+    <div class="tbl-wrap short"><table class="t"><thead><tr><th>收益拆解</th><th class="r">小时数</th><th class="r">按目标该赚</th><th class="r">按实际持仓该赚</th><th class="r">实际</th><th class="r">持仓偏差成本</th><th class="r">执行成本</th></tr></thead>
+      <tbody>${arow('24h', '近24小时')}${arow('7d', '近7天')}${arow('all', '跟踪以来')}</tbody></table></div>
+    ${alarms.length ? `<div class="af-hc"><b>需关注</b><ul>${alarms.map(x => `<li class="warn"><i>!</i>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+    <div class="mut small af-n">持仓偏差成本 = 按实际持仓该赚 − 按目标该赚(漏单、晚成交、取整)；执行成本 = 实际 − 按实际持仓该赚(手续费、滑点、资金费)。两项长期接近 0 就说明回测结果落实到了实盘。拆解从 ${at.first_snapshot ? t(at.first_snapshot) : '--'} 开始每小时累计。</div>`;
   $('#rcBody').prepend(el);
 }
 

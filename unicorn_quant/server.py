@@ -39,7 +39,7 @@ def api(fn):
             "/api/symbols", "/api/tickers", "/api/chart", "/api/bar",
             "/api/strategies", "/api/stocks", "/api/scanner",
             "/api/sweep/status", "/api/matrix/status",
-            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix", "/api/planf/live",
+            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix", "/api/planf/live", "/api/planf/track",
         }
         public_get = public_get or (request.method == "GET" and request.path.startswith("/api/universe"))   # 2026-10-18 全品种复盘只读
         public_analysis = request.method == "POST" and request.path in {
@@ -557,6 +557,17 @@ def optimal_autofix():
     h = rd("recon_health.json", {}); h.pop("history", None)
     return jsonify(health=h, actions=rd("recon_actions.json", [])[-40:][::-1], overrides=rd("recon_override.json", {}),
                    data_health=rd("data_health.json", {}))     # 2026-10-19 复刻健康检查(engine/health.py)
+
+
+@app.get("/api/planf/track")
+@api
+def planf_track():
+    """2026-10-30 方案F实盘跟踪：回测↔擂台↔实盘三层偏差 + 实盘收益拆解(engine/planf_track.py 每小时写，只读)"""
+    try:
+        with open(os.path.join(OPT_DIR, "planf_track.json"), "r", encoding="utf-8") as f:
+            return jsonify(json.load(f))
+    except Exception:
+        return jsonify(ok=False, error="还没有跟踪数据")
 
 
 @app.get("/api/planf/live")
