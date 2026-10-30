@@ -1,0 +1,3 @@
+audio/
+*.pkl
+__pycache__/
