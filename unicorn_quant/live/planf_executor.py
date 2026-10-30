@@ -8,8 +8,10 @@
   · 目标净仓位 = 目标比例 × 账户净值(totalMarginBalance)；净值 < 5000U 用不含 BTC 的目标(BTC 权重分给其余币)
   · 2026-10-30 起每条腿的比例按"回测口径"随价格漂移(见 drift_fracs)：回测每笔开仓后数量不变，赚钱的空单占比自然变小，
     旧版一直把仓位拉回开仓比例，等于赢了加仓、亏了减仓(当时 SOL/ETH 空单比回测多 11~13%)
-  · 按交易所步长四舍五入(旧版向零取整，小账户平均少 1~5%)；低于最小名义金额就当 0
-  · 需要调仓的情况：要平到 0、方向反转、从 0 开仓、或者偏离目标超过 5% 且不少于最小名义金额(目标改成回测口径后本身很少随价格变，容差从 25% 收紧)
+  · 按交易所步长四舍五入(旧版向零取整，小账户平均少 1~5%)
+  · 2026-10-31 最小下单量：按比例不够一手的开仓开最小一手(最小一手 ≤ 净值10%)；减仓用 reduceOnly 不受最小名义金额限制，
+    小差额也照调；加仓不够一手时补到一手，前提是补完比现在更接近目标
+  · 需要调仓的情况：要平到 0、方向反转、从 0 开仓、或者偏离目标超过 5%(目标改成回测口径后本身很少随价格变，容差从 25% 收紧)
   · 下单：先挂只做 Maker 的限价单(GTX)在买一/卖一，价格变了 60 秒后撤单重挂，最多 15 分钟，剩下的用市价补；减仓单带 reduceOnly
   · 美股永续只在纽约常规时段(9:30-16:00，自动夏令时，跳过休市日)交易
 护栏：目标文件过期(>10 分钟)或发布器报问题 → 冻结(不下单)；总名义 ≤ 2×净值、单品种 ≤ 0.6×净值；
@@ -44,6 +46,7 @@ LOG = os.path.join(HOME, "actions.jsonl")
 ARMED, STOP = os.path.join(HOME, "ARMED"), os.path.join(HOME, "STOP")
 LOOP_SEC, STALE_SEC, REBAL_BAND, REPRICE_SEC, MAKER_MAX_SEC = 30, 600, 0.05, 60, 900
 MAX_GROSS, MAX_SYM, CB_DROP, CB_HOURS = 2.0, 0.6, 0.20, 24
+MIN_BUMP_MAX = 0.10      # 按比例不够一手时补到最小一手，最小一手超过净值10%就不补(小账户碰到BTC这种大面值时)
 NYSE_HOLIDAYS = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
                  "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",
                  "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24"}
@@ -298,23 +301,38 @@ class Exec:
             tq = self.rnear(fr * E / px, f["step"])
             if abs(tq) * px > MAX_SYM * E:
                 tq = self.rdown(fr * E / px, f["step"])          # 四舍五入不能把单品种推过上限
-            if abs(tq) * px < f["minn"] or abs(tq) < f["minq"]:
-                tq = 0.0
+            # 2026-10-31 最小下单量：交易所最小名义金额/最小数量 折成的最小一手
+            qmin = math.ceil(max(f["minn"] * 1.02 / px, f["minq"]) / f["step"] - 1e-9) * f["step"]
+            bumped = False
+            if tq and (abs(tq) * px < f["minn"] or abs(tq) < f["minq"]):
+                # 有趋势信号但按比例算出来不够一手：开最小一手(宝贝 10-31：机会按趋势出，不能被下单量拦住)；最小一手超过净值 MIN_BUMP_MAX 就不开
+                if qmin * px <= MIN_BUMP_MAX * E:
+                    tq = math.copysign(float(f"{qmin:.10f}"), tq); bumped = True
+                else:
+                    tq = 0.0
             cur = pos.get(sym, 0.0)
             if sym in cool and tq * cool[sym]["side"] > 0 and abs(tq) > abs(cur):
                 tq = cur                                   # 止损冷却中：只允许减仓/平仓，不加回去
             delta = tq - cur
             is_stock = f["type"] == "TRADIFI_PERPETUAL"
             need = False; reason = ""
+            same = cur != 0 and tq != 0 and math.copysign(1, tq) == math.copysign(1, cur)
             if abs(delta) >= f["step"] / 2:
                 if tq == 0 and cur != 0:
                     need, reason = True, "平到0"
                 elif cur != 0 and math.copysign(1, tq) != math.copysign(1, cur) and tq != 0:
                     need, reason = True, "反手"
                 elif cur == 0 and tq != 0:
-                    need, reason = True, "开仓"
-                elif abs(delta) * px >= max(f["minn"], REBAL_BAND * abs(tq) * px):
-                    need, reason = True, f"偏离{abs(delta) / max(abs(tq), 1e-12):.0%}再平衡"
+                    need, reason = True, "开仓" + ("(按比例不够一手，开最小一手)" if bumped else "")
+                elif same and abs(delta) >= REBAL_BAND * abs(tq) and abs(tq) < abs(cur):
+                    # 减仓单带 reduceOnly，币安不受最小名义金额限制(-4164 "unless you choose reduce only")，小差额也能调
+                    need, reason = True, f"偏离{abs(delta) / max(abs(tq), 1e-12):.0%}减仓"
+                elif same and abs(delta) >= REBAL_BAND * abs(tq):
+                    # 加仓不够一手：补到最小一手，只要补完比现在更接近目标(过冲 < 当前缺口)就补
+                    if abs(delta) >= qmin or qmin - abs(delta) < abs(delta):
+                        need, reason = True, f"偏离{abs(delta) / max(abs(tq), 1e-12):.0%}加仓" + ("(补最小一手)" if abs(delta) < qmin else "")
+                        if abs(delta) < qmin:
+                            delta = math.copysign(qmin, delta)
             if margin.get(sym) and str(margin[sym]).lower() == "isolated":
                 need, reason = False, "逐仓品种不交易"
                 ding(f"{sym} 是逐仓模式，执行器不交易它，请改成全仓", f"iso_{sym}", 6 * 3600)
