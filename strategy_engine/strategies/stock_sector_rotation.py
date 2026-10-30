@@ -74,6 +74,7 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
     price, bar_time = float(last["c"]), int(last["t"])
 
     stop_locked = False
+    stp = None
     # 2026-10-17 对账发现：回测里止损后要等均线重新翻多才能再进场，擂台原来止损后马上又开(CSCO/MSTR)。
     # 策略不存状态，这里从正股日线推算：最近一次 EMA8 上穿 EMA30 之后若已跌破过 3×ATR 止损，本轮不再进场。
     def _ema(xs, n):                                   # indicators.ema 返回的长度跟K线不一致，这里用自己的(与回测同口径)
@@ -112,6 +113,11 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
         stp = ent - float(p["atr_stop_mult"]) * atr0 if atr0 > 0 else None
         if stp is not None and min(x["l"] for x in stock[k0 + 1:]) <= stp:
             stop_locked = True
+    # 2026-10-31 正股日线只到昨天，今天盘中已跌破回测止损的话上面看不到：擂台 16:06 刚按3×ATR止损平掉 QCOM，
+    # 16:09 又按'均线多头、未锁定'重新开多，回测要等今天日线收出来才止损并锁定。这里把今天常规时段已收盘的1h永续K线也算进去。
+    if not stop_locked and stp is not None and any(int(x["t"]) / 1000 >= _w[0] - 1800 and int(x["t"]) / 1000 + 3600 <= _w[1] + 1800
+                                                   and float(x["l"]) <= stp for x in perp):
+        stop_locked = True
     from strategy_engine.strategies import recon_override        # 2026-10-19 自动对账修复指令
     _ov = recon_override.get("stock_sector_rot6m5_long", symbol)
     if position:
@@ -123,7 +129,11 @@ def generate_signal(bars_by_tf: Dict[str, List[dict]], params: Optional[dict] = 
             _stp3 = float(position.get("entry") or position.get("entry_price")) - 3.0 * float(position.get("atr0") or 0)
         except (TypeError, ValueError):
             _stp3 = 0.0
-        if _stp3 > 0 and position.get("atr0"):
+        # 2026-10-31 止损价用回测口径(回测进场日正股开盘价 - 3×当时ATR，上面算的 stp)：擂台的开仓价会因为对账重开/晚开而不同，
+        # 10-30 QCOM 擂台按自己 184.0 的开仓价算出 164.7 被打掉，回测(180.49 开仓、止损 161.29)根本没止损，随后又重开，白做一卖一买
+        if stp is not None and stp > 0:
+            _stp3 = stp
+        if _stp3 > 0 and (position.get("atr0") or stp):
             _hit = next((x for x in perp if int(x["t"]) / 1000 >= _w[0] - 1800 and int(x["t"]) / 1000 + 3600 <= _w[1] + 1800
                          and float(x["l"]) <= _stp3), None)
             if _hit is not None:                       # 成交价同回测：止损价；跳空开在止损下方就按开盘价
