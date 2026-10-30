@@ -37,6 +37,24 @@ def _rd(p, default=None):
         return default
 
 
+def _bt_entry(opt: dict, rot: dict, strat: str, sym: str, d: int, field: str = "entry"):
+    """回测里这条腿同方向持仓的入场价(engine/optimal.py 的 crypto.state / stock.positions)。执行器按回测口径算仓位漂移时用它，
+    擂台的入场价会因为对账补开/晚开而不同(2026-10-30 QCOM 擂台165.3、回测180.49)。回测没有同方向持仓就返回 None(执行器退回用擂台入场价)。"""
+    side = "LONG" if d > 0 else "SHORT"
+    if strat == STOCK_LEG:
+        tk = (rot.get("ticker_of") or {}).get(sym) or (sym[:-4] if sym.endswith("USDT") else sym)
+        p = next((x for x in ((opt.get("stock") or {}).get("positions") or []) if x.get("symbol") == tk), None)
+        return float(p[field]) if p and p.get(field) else None
+    st = ((opt.get("crypto") or {}).get("state") or {}).get(sym) or {}
+    v = st.get("position") if strat == "daily_ema_brk_cycle_main5" else \
+        (st.get("subs") or {}).get("8h超级趋势" if strat == "st8h_cycle_main5" else "8h布林突破")
+    if field == "stop" and strat == "daily_ema_brk_cycle_main5":
+        # 日线腿的止损只在回测交易记录里(突破单/底部反转单才有，均线跟上后撤掉)，state.position 里没有：从持仓中的那笔交易取
+        t = next((x for x in (opt.get("trades") or []) if x.get("symbol") == sym and x.get("open") and x.get("sub") == "日线EMA8/30"), None)
+        return float(t["stop"]) if t and t.get("stop") and not (t.get("brk") is False) else None
+    return float(v[field]) if v and v.get("side") == side and v.get(field) else None
+
+
 def build() -> dict:
     now = time.time(); problems = []
     cw = (_rd(os.path.join(OPT, "crypto_weights.json"), {}) or {}).get("current") or {}
@@ -71,7 +89,8 @@ def build() -> dict:
         if strat == STOCK_LEG and entry and atr0:
             xstop = float(entry) - 10.0 * float(atr0)
         legs.append({"strategy": strat, "symbol": sym, "side": "LONG" if d > 0 else "SHORT", "entry": entry, "alloc": round(alloc, 4),
-                     "stop": stop, "exchange_stop": xstop, "since": created})
+                     "stop": stop, "exchange_stop": xstop, "since": created, "atr0": atr0,
+                     "bt_entry": _bt_entry(opt, rot, strat, sym, d), "bt_stop": _bt_entry(opt, rot, strat, sym, d, "stop")})
     st_gross = sum(abs(v) for v in stock.values())
     if st_gross > 1.0:
         stock = {s: v / st_gross for s, v in stock.items()}

@@ -143,7 +143,8 @@ def drift_fracs(tg: dict, use_btc: bool, mark: dict):
         return None
     k = max(float(tg.get("stock_slots") or 5), 5.0)
     def ratio(L):
-        p, e = mark.get(L["symbol"]), float(L.get("entry") or 0)
+        # 2026-10-31 优先用回测这条腿的入场价(发布器 bt_entry)：擂台入场价会因对账补开/晚开不同(QCOM 擂台165.3、回测180.49)
+        p, e = mark.get(L["symbol"]), float(L.get("bt_entry") or L.get("entry") or 0)
         return (p / e) if p and e > 0 else 1.0
     st_den = 1.0 + sum((1 if L["side"] == "LONG" else -1) * float(L.get("alloc") or 0) / k * (ratio(L) - 1)
                        for L in legs if L["strategy"] == STOCK_LEG)

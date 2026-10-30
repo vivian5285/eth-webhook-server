@@ -24,6 +24,7 @@ import time
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(HERE, "optimal_data")
 STATUS = "/var/lib/planf/live_E_status.json"
+TARGETS = "/var/lib/planf/targets.json"
 INCOME = "/var/lib/planf/income_E.json"
 HIST = os.path.join(OUT, "planf_track_hist.jsonl")
 LIVE_START = 1792407600            # 2026-10-19 10:59 UTC 宝贝建 ARMED，E 账户进入实盘
@@ -143,6 +144,28 @@ def exec_layer(st):
     return {"rows": rows, "dev_bad": dev_bad, "cover_bad": cov_bad, "audit_today": au}
 
 
+def leg_layer():
+    """2026-10-31 每条腿的止损/入场是否和回测同口径(targets.json 里发布器给的 bt_entry / bt_stop)。
+    10-30 查出两类：日线腿对账补开时默认挂了3×ATR(回测趋势单不设止损)、美股腿3×ATR按擂台自己的入场价算(回测入场价不同)。
+    规则：币圈腿 回测有止损(突破/底部单) → 交易所止损应≈回测止损(差>1%报)；回测没有止损 → 只应有10×ATR兜底(离入场<9×ATR报)。"""
+    tg = _rd(TARGETS, {}) or {}
+    rows, bad = [], []
+    for L in tg.get("legs") or []:
+        e, a0, xs, bs, be = (float(L.get(k) or 0) for k in ("entry", "atr0", "exchange_stop", "bt_stop", "bt_entry"))
+        gap = round(100 * (e / be - 1), 2) if be else None
+        note = ""
+        if L["strategy"] != "stock_sector_rot6m5_long" and xs > 0:
+            if bs > 0 and abs(xs / bs - 1) > 0.01:
+                note = f"止损{xs:.6g}≠回测{bs:.6g}"
+            elif not bs and a0 > 0 and abs(xs - e) / a0 < 9:
+                note = f"止损离入场只有{abs(xs - e) / a0:.1f}×ATR，回测这笔没有止损(应只留10×ATR兜底)"
+        if note:
+            bad.append(f"{L['strategy'].split('_')[0]} {L['symbol'].replace('USDT', '')} {note}")
+        rows.append({"strategy": L["strategy"], "symbol": L["symbol"], "side": L["side"], "entry": e, "bt_entry": be or None,
+                     "entry_gap_pct": gap, "exchange_stop": xs, "bt_stop": bs or None, "note": note})
+    return {"rows": rows, "bad": bad}
+
+
 def main():
     now = time.time()
     st = _rd(STATUS)
@@ -157,18 +180,19 @@ def main():
         h.append(snap)
     seg = attribute(h)
     inc = _rd(INCOME, {}) or {}
-    rec = recon_layer(now); ex = exec_layer(st)
+    rec = recon_layer(now); ex = exec_layer(st); lg = leg_layer()
     res = {"ts": now, "ok": True, "equity": snap["eq"],
            "since_live": {"start": LIVE_START, "start_eq": LIVE_START_EQ, "eq_change_pct": round(100 * (snap["eq"] / LIVE_START_EQ - 1), 2),
                           "income": inc.get("total"), "income_by_day": inc.get("by_day"), "backtest_pct": backtest_change(LIVE_START)},
            "attr": {"24h": window(seg, now - 86400), "7d": window(seg, now - 7 * 86400), "all": window(seg, 0),
                     "first_snapshot": h[0]["ts"] if h else None},
-           "recon": rec, "exec": ex}
+           "recon": rec, "exec": ex, "legs": lg}
     _wr(os.path.join(OUT, "planf_track.json"), res)
     # 告警
     checks = [("track_dev", not ex["dev_bad"], "实盘持仓偏离目标超过25%：" + "；".join(ex["dev_bad"])),
               ("track_cover", not ex["cover_bad"], "交易所止损单没盖住持仓：" + "；".join(ex["cover_bad"])),
               ("track_recon", not rec["mismatch_now"], "回测↔擂台持仓不一致：" + "；".join(rec["mismatch_now"][:4])),
+              ("track_legs", not lg["bad"], "止损和回测口径不一致：" + "；".join(lg["bad"][:4])),
               ("track_gap7", res["attr"]["7d"]["hours"] < 24 or res["attr"]["7d"]["total_gap_pct"] / 100 > GAP7_ALERT,
                f"近7天实盘比目标模型少赚 {-res['attr']['7d']['total_gap_pct']:.2f}%(持仓偏差 {res['attr']['7d']['pos_gap_pct']:.2f}%、执行成本 {res['attr']['7d']['exec_gap_pct']:.2f}%)")]
     sp = os.path.join(OUT, "planf_track_alert_state.json"); sst = _rd(sp, {}) or {}
