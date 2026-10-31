@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""SNDK单票方案 v1(代号 sndk_solo，2026-10-31)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
+"""SNDK单票方案 v2(代号 sndk_solo，2026-10-31；v1 + 波动调仓)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
 
 规则(research_scripts/sndk_tf_mtf.py、sndk_exit_study.py 回测选定)：
   · 1h K线收盘：EMA7 > EMA25 → 持多；EMA7 < EMA25 → 平多。只做多，不做空，不用雷达/保本/移动止损(回测都更差)。
   · 开仓时止损 = 开仓价 − 4×ATR(14，1h，Wilder)，挂交易所条件单(STOP_MARKET，按最新成交价触发，同回测按K线最低价判断)，之后不动。
   · 止损打掉后要等 EMA7 先跌回 EMA25 下方一次，才能再进(防止刚止损又追回去)。
-  · 仓位 = 开仓时账户净值(totalMarginBalance) × 1 倍名义，持有期间数量不变(不随净值再平衡)，平仓后下次开仓按新净值算。
+  · 仓位 = 开仓时账户净值(totalMarginBalance) × min(1, 2% ÷ 信号K线的 1h ATR%)，持有期间数量不变(不随净值再平衡)，平仓后下次开仓按新净值算。
+    v2(宝贝 10-31 采纳，research_scripts/sndk_dd.py)：平时 ATR% 约 1.2% → 照样 1 倍；波动剧烈(财报等)时自动减仓。正股回测回撤 43%→26.5%。
 
 信号怎么算：每轮从 SNDKUSDT 上线(2026-04-07)起把全部已收盘的 1h K线按回测逻辑重放一遍，得到"回测现在该持多还是空仓、止损价多少"，
 执行器把账户调成和回测一致——所以实盘就是回测本身，不会走样。
@@ -31,14 +32,14 @@ import urllib.parse
 import requests
 from binance.client import Client
 
-NAME = "SNDK单票方案 v1"
+NAME = "SNDK单票方案 v2"
 ACCT = os.environ.get("SNDK_SOLO_ACCOUNT", "C")
 SYM = "SNDKUSDT"
 HOME = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.environ.get("SNDK_SOLO_ENV_FILE", "/home/binanceC/binance-engine/.env")
 STATE, LOG, STATUS = os.path.join(HOME, "state.json"), os.path.join(HOME, "actions.jsonl"), os.path.join(HOME, "status.json")
 ARMED, STOP, JOIN = os.path.join(HOME, "ARMED"), os.path.join(HOME, "STOP"), os.path.join(HOME, "JOIN")
-FAST, SLOW, ATR_N, STOP_ATR, SIZE = 7, 25, 14, 4.0, 1.0
+FAST, SLOW, ATR_N, STOP_ATR, SIZE, VOL_TGT = 7, 25, 14, 4.0, 1.0, 0.02
 H1 = 3600000
 LIST_START = 1775520000000            # 2026-04-07 SNDKUSDT 上线
 LOOP_SEC, REPRICE_SEC, MAKER_MAX_SEC = 30, 60, 900
@@ -243,14 +244,15 @@ class Exec:
         want_long = target == 1 and not self.st.get("live_lock") and (fresh or my["qty"] > 0 or not live)
         plan = None
         if want_long and my["qty"] <= 0:
-            q = self.rdown(SIZE * E / mark, f["step"]) if mark > 0 else 0.0
+            m = min(SIZE, VOL_TGT / (R["atr"] / R["close"])) if R["close"] > 0 and R["atr"] > 0 else SIZE   # v2 波动调仓
+            q = self.rdown(m * E / mark, f["step"]) if mark > 0 else 0.0
             lev = 2.0
             q = min(q, self.rdown(avail * lev * 0.95 / mark, f["step"])) if mark > 0 and live else q
             if q < f["minq"] or q * mark < f["minn"]:
                 plan = ("skip", 0.0, f"净值 {E:.2f}U 不够最小一手({f['minq']:g}张/≥{f['minn']:g}U)")
                 ding(plan[2], "toosmall", 6 * 3600)
             else:
-                plan = ("open", q, f"回测开多(EMA7>EMA25)，按净值{E:.2f}U×1倍 ≈ {q * mark:.0f}U")
+                plan = ("open", q, f"回测开多(EMA7>EMA25)，按净值{E:.2f}U×{m:.2f}倍(ATR%={100 * R['atr'] / R['close']:.2f}%) ≈ {q * mark:.0f}U")
         elif not want_long and my["qty"] > 0:
             plan = ("close", my["qty"], "回测平多(EMA7<EMA25)" if target == 0 else "停止跟随")
         # 止损价：回测这段持仓的止损(回测还在"下一根开盘才开"的那一下，用 开盘≈现价 − 4×ATR)
