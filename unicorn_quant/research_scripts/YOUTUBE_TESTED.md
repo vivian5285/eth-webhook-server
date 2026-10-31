@@ -34,13 +34,13 @@
 | 蛋仔 CryptoEGG | UCKnA-uQNw6fErPxZEXdFMlg | SMC/ICT 入门(eWDVA9zKB-I)；频道多为1分K剥头皮/SNR/ICT | 2026-10-30 | 已测同类（七博主③） | — |
 | 暗夜飞行 | UCUzrqf93vnhgqJ-CbsTJQBw | 合约网格多空双开(3KFtMhNeRY4)；频道多为网格/币安Alpha | 2026-10-30 | 已测同类（七博主③） | — |
 
-| 卫央Neo - 币圈短线交易 | UCXy7cYTLsZtux-i5AVqtiGw | 8oXyRhBKpnM 风林火山 + 趋势七步系列(j7lIZgOhBN8 区间突破 / ub_W-ofEhVg 横盘回调 / 4GHcmoLTVu4 收敛突破二波 / oBsuSubiweo 出场 等)：区间突破、横盘回调、区间顶部挤压、二波，15m~1d | 2026-11-01 | 区间突破 4h/6h 3ATR追踪 **候选观察**；其余否决（研究页 十博主②） | youtube_b3/b3.py, b3_nb.py |
+| 卫央Neo - 币圈短线交易 | UCXy7cYTLsZtux-i5AVqtiGw | 8oXyRhBKpnM 风林火山 + 趋势七步系列(j7lIZgOhBN8 区间突破 / ub_W-ofEhVg 横盘回调 / 4GHcmoLTVu4 收敛突破二波 / oBsuSubiweo 出场 等)：区间突破、横盘回调、区间顶部挤压、二波，15m~1d | 2026-11-01 | 区间突破 4h/6h 3ATR追踪 **候选，11-01 已上擂台纸面(neo_box_4h/6h)**；其余否决（研究页 十博主②） | youtube_b3/b3.py, b3_nb.py |
 | 币需暴富 | UCJQgr-XyEELFhdY1Dmi7uSQ | Vegas 改进版 EMA144/169+288/338+EMA12过滤、金叉后首次回踩(auAnQXtiNNo)；HY-iU803qec 同主题无字幕 | 2026-11-01 | 否决（4h 单独+0.7R 但接进方案F 2.8~3.8；大众版576/676 见投机实验室批次1） | youtube_b3/b3.py |
 | Lone Wolf | UCU17HnJXYCa_yFM7Py-7RHA | Phenom 远离均线+反转点 1.5R(_rNN1Xscm6c)、相对趋势指数RTI+Market Bias(u9_G-I-ZIyM)；其余多为行情分析 | 2026-11-01 | 否决 | youtube_b3/b3.py |
 | 番人说 | UCLTfYhkXTnzRBWduVt_djZg | 纽约首根4H区间 5m 假突破回收 2R(u-A6BTmVXpk，无字幕已转写)；频道其余(平均K线/斐波那契/布林突破/均线交叉/MACD/SMC/FVG/订单块/123法则/2B)=已测同类 | 2026-11-01 | 否决（零成本+0.01~0.06R） | youtube_b3/b3_extra.py |
 | 威廉 交易頻道(续) | UCZzqkJj6vv_0M2GBu3H-pOA | 2CUvhvcjo1w AI 5m RSI70/30 反向 1%/1% + z2YNY3QBuXE 4招(放量/长影线/持续超买超卖不做/1h阶段高低点扫流动性) | 2026-11-01 | 否决（任何过滤组合零成本都为负） | youtube_b3/b3_extra.py |
 | BitGuy小比 | UCbBZuXDPkPYn4t0FhCGnrAw | EU5TqXN2R4E Claude+Hermes 自我优化交易代理：没有具体规则，是"自动复盘改参数"的流程；频道其余=工具教程(TV/ATAS/IBKR/3Commas) | 2026-11-01 | 无可测规则（自动改参数=过拟合风险，见前视检验/选择偏差条目） | — |
-| 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选观察**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
+| 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选，11-01 已上擂台纸面(stiff_trendilo_6h/8h)**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
