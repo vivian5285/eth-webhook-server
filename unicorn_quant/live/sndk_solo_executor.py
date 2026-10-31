@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""SNDK单票方案 v2(代号 sndk_solo，2026-10-31；v1 + 波动调仓)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
+"""SNDK单票方案(代号 sndk_solo，2026-10-31)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
 
 规则(research_scripts/sndk_tf_mtf.py、sndk_exit_study.py 回测选定)：
   · 1h K线收盘：EMA7 > EMA25 → 持多；EMA7 < EMA25 → 平多。只做多，不做空，不用雷达/保本/移动止损(回测都更差)。
   · 开仓时止损 = 开仓价 − 4×ATR(14，1h，Wilder)，挂交易所条件单(STOP_MARKET，按最新成交价触发，同回测按K线最低价判断)，之后不动。
   · 止损打掉后要等 EMA7 先跌回 EMA25 下方一次，才能再进(防止刚止损又追回去)。
-  · 仓位 = 开仓时账户净值(totalMarginBalance) × min(1, 2% ÷ 信号K线的 1h ATR%)，持有期间数量不变(不随净值再平衡)，平仓后下次开仓按新净值算。
-    v2(宝贝 10-31 采纳，research_scripts/sndk_dd.py)：平时 ATR% 约 1.2% → 照样 1 倍；波动剧烈(财报等)时自动减仓。正股回测回撤 43%→26.5%。
+  · 仓位 = 开仓时账户净值(totalMarginBalance) × 1 倍名义【最高收益模式，宝贝 10-31 定的实盘默认】，持有期间数量不变，平仓后下次开仓按新净值算。
+    同目录放 VOLSIZE 文件 = 切到【波动调仓模式】：× min(1, 2% ÷ 信号K线的 1h ATR%)，财报等剧烈波动时自动减仓(research_scripts/sndk_dd.py：正股回撤 43%→26.5%，永续收益约 -20%)。
 
 信号怎么算：每轮从 SNDKUSDT 上线(2026-04-07)起把全部已收盘的 1h K线按回测逻辑重放一遍，得到"回测现在该持多还是空仓、止损价多少"，
 执行器把账户调成和回测一致——所以实盘就是回测本身，不会走样。
@@ -32,13 +32,13 @@ import urllib.parse
 import requests
 from binance.client import Client
 
-NAME = "SNDK单票方案 v2"
+NAME = "SNDK单票方案"
 ACCT = os.environ.get("SNDK_SOLO_ACCOUNT", "C")
 SYM = "SNDKUSDT"
 HOME = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.environ.get("SNDK_SOLO_ENV_FILE", "/home/binanceC/binance-engine/.env")
 STATE, LOG, STATUS = os.path.join(HOME, "state.json"), os.path.join(HOME, "actions.jsonl"), os.path.join(HOME, "status.json")
-ARMED, STOP, JOIN = os.path.join(HOME, "ARMED"), os.path.join(HOME, "STOP"), os.path.join(HOME, "JOIN")
+ARMED, STOP, JOIN, VOLSIZE = (os.path.join(HOME, x) for x in ("ARMED", "STOP", "JOIN", "VOLSIZE"))
 FAST, SLOW, ATR_N, STOP_ATR, SIZE, VOL_TGT = 7, 25, 14, 4.0, 1.0, 0.02
 H1 = 3600000
 LIST_START = 1775520000000            # 2026-04-07 SNDKUSDT 上线
@@ -244,7 +244,7 @@ class Exec:
         want_long = target == 1 and not self.st.get("live_lock") and (fresh or my["qty"] > 0 or not live)
         plan = None
         if want_long and my["qty"] <= 0:
-            m = min(SIZE, VOL_TGT / (R["atr"] / R["close"])) if R["close"] > 0 and R["atr"] > 0 else SIZE   # v2 波动调仓
+            m = min(SIZE, VOL_TGT / (R["atr"] / R["close"])) if os.path.exists(VOLSIZE) and R["close"] > 0 and R["atr"] > 0 else SIZE
             q = self.rdown(m * E / mark, f["step"]) if mark > 0 else 0.0
             lev = 2.0
             q = min(q, self.rdown(avail * lev * 0.95 / mark, f["step"])) if mark > 0 and live else q
@@ -271,7 +271,7 @@ class Exec:
         if live and self.st.get("last_qty") is not None and abs(qty - self.st["last_qty"]) > f["step"] / 2:
             ding(f"SNDK 持仓变化：{self.st['last_qty']:g} → {qty:g}(标记价 {mark:g})"); log("成交", was=self.st["last_qty"], now=qty, mark=mark)
         self.st["last_qty"] = qty
-        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
+        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "size_mode": "波动调仓" if os.path.exists(VOLSIZE) else "最高收益(满1倍)", "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
                   "position_long": qty, "executor_qty": my["qty"], "live_lock": bool(self.st.get("live_lock")),
                   "signal": {"bar": ts(R["bar_t"]) + " UTC 收盘", "close": R["close"], "ema7": round(R["ema_fast"], 3), "ema25": round(R["ema_slow"], 3),
                              "atr": round(R["atr"], 3), "回测状态": "持多" if R["pos"] else "空仓", "下一根": {1: "开多", 0: "平多", None: "不动"}[R["pend"]],
