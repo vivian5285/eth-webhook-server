@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SNDK单票方案 v2(代号 sndk_solo，v1 2026-10-31 上线，同日升 v2)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
+"""SNDK单票方案 v3(代号 sndk_solo，v1 2026-10-31 上线，同日升 v2、v3)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
 
 规则(research_scripts/sndk_tf_mtf.py、sndk_exit_study.py 回测选定)：
   · 1h K线收盘：EMA7 > EMA25 → 持多；EMA7 < EMA25 → 平多。只做多，不做空，不用雷达/保本/移动止损(回测都更差)。
@@ -9,6 +9,8 @@
     v2【ADX逆向仓位】(research_scripts/sndk_stop_size_grid.py、sndk_adx_size_check.py)：看信号K线(金叉那根)的 ADX(14,1h)：
     <20 满 1 倍，20~30 0.75 倍，≥30 0.5 倍——金叉时 ADX 已经很高多半是追高(永续上这档单笔平均 -1%、胜率 18%)。
     回测：币安永续 +92%/回撤26% → +110%/17%，正股 1.6 年 +1154%/43% → +922%/32%。
+  · v3【忽略周末信号】(research_scripts/sndk_rth_earnings.py)：纽约时间周六、周日的 K线收盘不判断进出(美股休市，永续成交薄、均线交叉多是噪音)，
+    交易所止损单照常 24 小时有效。三家永续都变好(OKX 03-18 起 +91%→+137%)，20 只美股永续 16 只变好。财报前减仓/平仓测过，更差，不用。
     同目录放 VOLSIZE 文件 = 切到【波动调仓模式】：× min(1, 2% ÷ 信号K线的 1h ATR%)，财报等剧烈波动时自动减仓(research_scripts/sndk_dd.py：正股回撤 43%→26.5%，永续收益约 -20%)。
 
 信号怎么算：每轮从 SNDKUSDT 上线(2026-04-07)起把全部已收盘的 1h K线按回测逻辑重放一遍，得到"回测现在该持多还是空仓、止损价多少"，
@@ -31,11 +33,13 @@ import sys
 import time
 import traceback
 import urllib.parse
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from binance.client import Client
 
-VERSION = "v2"                         # 规则变了才升版本号，见 SNDK_SOLO.md
+VERSION = "v3"                         # 规则变了才升版本号，见 SNDK_SOLO.md
 NAME = f"SNDK单票方案 {VERSION}"
 ACCT = os.environ.get("SNDK_SOLO_ACCOUNT", "C")
 SYM = "SNDKUSDT"
@@ -134,6 +138,14 @@ def atr_adx(b, n=ATR_N):
     return A, X
 
 
+NY = ZoneInfo("America/New_York")
+
+
+def ny_weekend(t_ms):
+    """v3：这根 1h K线(按开始时间)在纽约时间周六/周日"""
+    return datetime.fromtimestamp(t_ms / 1000, timezone.utc).astimezone(NY).weekday() >= 5
+
+
 def adx_size(x):
     return ADX_SIZES[0] if x < ADX_CUTS[0] else (ADX_SIZES[1] if x < ADX_CUTS[1] else ADX_SIZES[2])
 
@@ -157,6 +169,8 @@ def replay(b):
             trades.append({"side": "LONG", "in_t": ent["t"], "in": ent["px"], "out_t": b[i]["t"], "out": px, "why": f"{STOP_ATR:g}×ATR止损"})
             eq *= 1 + ent["m"] * (px / ent["px"] - 1); d = 0; lock = 1
         if i < SLOW:
+            continue
+        if ny_weekend(b[i]["t"]):            # v3：周末信号不判断(止损上面照常检查)
             continue
         want = 1 if ef[i] > es[i] else 0
         if lock and want != lock:
