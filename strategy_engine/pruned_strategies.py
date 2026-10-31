@@ -140,4 +140,10 @@ PRUNED_STRATEGIES = frozenset({
     "dual_momentum_crypto",      # 126笔 -99 -9.8% 近14天-91(dual/cross动量族有实盘否决)
     "volume_profile_reversion",  # 328笔 -94 -9.2% 近14天-63
     "cross_momentum",            # 734笔 -91 -9.0% 近14天-67(v2/agile/runwin变体不受影响)
+    # ── 2026-10-31 第三轮(宝贝批准"下架") ──────────────────────────────────────
+    # 截面残差动量多空：擂台上被共用风控 risk_budget_full 拦单，只开过 ETH/SOL 两张空单、从没调仓，纸面无效；
+    # 离线按同规则重算(unicorn_quant/research_scripts/resid_cs_recheck.py，含费+真实资金费)2026 至今 -16%/-19%，
+    # 10-06 之后 -4%/-6%，2025-11 起 12 个月 9 个月亏，优势已衰减(research.json 第121条)。
+    "residual_cs_ls",
+    "residual_cs_ls_btceth",
 })
