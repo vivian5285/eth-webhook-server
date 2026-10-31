@@ -45,13 +45,32 @@
 - 自己的订单 clientOrderId 前缀 `ss_`；账户里别的持仓不碰，只钉钉告警。
 - 钉钉：看门狗机器人，消息开头【SNDK单票方案 v3·C账户】。
 
+### 实盘怎么复刻回测（2026-10-31 补齐）
+
+| 回测里 | 实盘里 |
+|---|---|
+| 1h K线收盘判断 | 每 30 秒用币安 SNDKUSDT 1h K线从上线起重放一遍；K线收盘 10 秒后才用（确保是定稿数据），信号最晚约 40 秒内发现 |
+| 下一根开盘成交 | 发现信号立刻挂只做 Maker 限价，每分钟按最优价重挂，15 分钟没成交完用市价补 |
+| 开仓价 − 4×ATR 止损，K线最低价碰到就出 | 开仓时就挂交易所 STOP_MARKET（按最新成交价触发，已实测可挂可撤）；另有**软件止损兜底**：最新价已在止损价下方(跳空/止损单没挂上)就立刻平 |
+| 止损后等转空再进 | 交易所止损触发后锁定，等回测转空才解锁 |
+| 周末不判断 | 同（纽约时间周六日） |
+| 仓位按 ADX 档位 | 同，不满一手往上取一手（这一点和回测略有不同：43.8U 时满档约 1.06 倍） |
+
+**对账和监控**
+- `trades.jsonl`：每笔实盘成交记录均价、回测参考价（信号后那根 K线开盘价）、偏差 bp、手续费、挂单成交笔数、用时；成交时钉钉报一次。
+- 日报（UTC 00:35）：净值、持仓、信号状态、**ARMED 以来 实盘净值% vs 回测%**。
+- 独立体检 `sndk-solo-health.timer`（每 10 分钟，只读）：执行器服务在跑、状态 5 分钟内更新过、有持仓时交易所止损单覆盖全部数量、账户里没有方案以外的持仓/条件单。有问题钉钉报警（同一问题 1 小时一次）。
+
+**和回测仍有的差别（无法完全消除）**：成交价是挂单价而不是整点开盘价；手续费按真实的挂单 0 / 吃单 0.04%（回测按 0.08% 算，实盘应略好）；仓位往上取整；资金费（回测未计，约每半年 2% 净值）。
+
 ## 位置
 
 | 东西 | 路径 |
 |---|---|
 | 执行器代码 | `unicorn_quant/live/sndk_solo_executor.py` → VPS `/home/binanceC/sndk_solo/` |
+| 体检脚本 | `unicorn_quant/live/sndk_solo_health.py`（`sndk-solo-health.timer` 每 10 分钟） |
 | 服务 | `sndk-solo-C.service`（User=binanceC） |
-| 状态 / 操作日志 | `/home/binanceC/sndk_solo/status.json`、`actions.jsonl` |
+| 状态 / 操作日志 / 成交对账 | `/home/binanceC/sndk_solo/status.json`、`actions.jsonl`、`trades.jsonl` |
 | 手动跑一轮看状态 | `sudo -u binanceC SNDK_SOLO_QUIET=1 /home/binanceC/binance-engine/venv/bin/python sndk_solo_executor.py once` |
 | 回测脚本 | `research_scripts/sndk_ema_grid.py`、`sndk_tf_mtf.py`、`sndk_exit_study.py`、`sndk_dd.py`、`sndk_venue.py`、`sndk_stop_size_grid.py`、`sndk_adx_size_check.py`、`sndk_rth_earnings.py` |
 | 研究结论 | 复盘页 research.json 第 110~122 条 |

@@ -46,6 +46,7 @@ SYM = "SNDKUSDT"
 HOME = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.environ.get("SNDK_SOLO_ENV_FILE", "/home/binanceC/binance-engine/.env")
 STATE, LOG, STATUS = os.path.join(HOME, "state.json"), os.path.join(HOME, "actions.jsonl"), os.path.join(HOME, "status.json")
+JOURNAL = os.path.join(HOME, "trades.jsonl")          # 每笔实盘成交 vs 回测参考价(复盘用)
 ARMED, STOP, JOIN, VOLSIZE = (os.path.join(HOME, x) for x in ("ARMED", "STOP", "JOIN", "VOLSIZE"))
 FAST, SLOW, ATR_N, STOP_ATR, SIZE, VOL_TGT = 7, 25, 14, 4.0, 1.0, 0.02
 ADX_CUTS, ADX_SIZES = (20, 30), (1.0, 0.75, 0.5)     # v2：ADX<20 / 20~30 / ≥30 的仓位倍数
@@ -201,7 +202,7 @@ class Exec:
             r = self.c.futures_klines(symbol=SYM, interval="1h", startTime=s, limit=1500)
             if not r:
                 break
-            b += [{"t": int(x[0]), "o": fl(x[1]), "h": fl(x[2]), "l": fl(x[3]), "c": fl(x[4])} for x in r if int(x[0]) + H1 <= now]
+            b += [{"t": int(x[0]), "o": fl(x[1]), "h": fl(x[2]), "l": fl(x[3]), "c": fl(x[4])} for x in r if int(x[0]) + H1 + 10000 <= now]
             if len(r) < 1500:
                 break
             s = int(r[-1][0]) + 1
@@ -292,6 +293,15 @@ class Exec:
             plan = ("close", my["qty"], "回测平多(EMA7<EMA25)" if target == 0 else "停止跟随")
         # 止损价：回测这段持仓的止损(回测还在"下一根开盘才开"的那一下，用 开盘≈现价 − 4×ATR)
         stop_px = R["stop"] if R["pos"] and R["pend"] is None else (mark - STOP_ATR * R["atr"] if R["pend"] == 1 else None)
+        if R["pos"] and R["pend"] is None and my["qty"] > 0 and self.st.get("entry_fill"):
+            stop_px = R["stop"]                                                          # 回测止损(开仓那根开盘价 − 4×ATR)
+        elif my["qty"] > 0 and self.st.get("entry_stop"):
+            stop_px = self.st["entry_stop"]                                              # 回测还没把开仓那根算进去时，用开仓时定的止损
+        # 软件止损兜底：价格已经在止损价下面(跳空/交易所止损单没挂上/没触发) → 立刻平，同回测"碰到止损就出"
+        last_px = fl(self.c.futures_symbol_ticker(symbol=SYM)["price"]) if (live and my["qty"] > 0 and stop_px) else None
+        if last_px and last_px <= stop_px and (not plan or plan[0] != "close"):     # 用最新成交价，和交易所止损单(CONTRACT_PRICE)、回测(K线最低价)同口径
+            plan = ("close", my["qty"], f"软件止损兜底：最新价 {last_px:g} 已在止损价 {stop_px:g} 下方")
+            self.st["live_lock"] = True; ding(f"⚠️ {plan[2]}，立即平仓", "softstop", 600)
         acted = []
         if plan and plan[0] != "skip":
             if live:
@@ -306,7 +316,13 @@ class Exec:
         if live and self.st.get("last_qty") is not None and abs(qty - self.st["last_qty"]) > f["step"] / 2:
             ding(f"SNDK 持仓变化：{self.st['last_qty']:g} → {qty:g}(标记价 {mark:g})"); log("成交", was=self.st["last_qty"], now=qty, mark=mark)
         self.st["last_qty"] = qty
-        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "version": VERSION, "size_mode": "ADX逆向仓位" + ("+波动调仓" if os.path.exists(VOLSIZE) else ""), "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
+        if live and not self.st.get("arm_base"):
+            self.st["arm_base"] = {"equity": E, "bt_mult": R["bt_mult"], "t": now}
+        base = self.st.get("arm_base") or {}
+        live_ret = (E / base["equity"] - 1) * 100 if base.get("equity") else None
+        bt_ret = (R["bt_mult"] / base["bt_mult"] - 1) * 100 if base.get("bt_mult") else None
+        status = {"ts": now, "name": NAME, "since_armed": {"实盘净值%": round(live_ret, 2) if live_ret is not None else None,
+                                                            "回测%(不含手续费)": round(bt_ret, 2) if bt_ret is not None else None}, "account": ACCT, "mode": mode, "version": VERSION, "size_mode": "ADX逆向仓位" + ("+波动调仓" if os.path.exists(VOLSIZE) else ""), "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
                   "position_long": qty, "executor_qty": my["qty"], "live_lock": bool(self.st.get("live_lock")),
                   "signal": {"bar": ts(R["bar_t"]) + " UTC 收盘", "close": R["close"], "ema7": round(R["ema_fast"], 3), "ema25": round(R["ema_slow"], 3),
                              "atr": round(R["atr"], 3), "adx": round(R["adx"], 1), "开仓仓位倍数(按ADX)": adx_size(R["entry_adx"] if R["entry_adx"] is not None else R["adx"]), "回测状态": "持多" if R["pos"] else "空仓", "下一根": {1: "开多", 0: "平多", None: "不动"}[R["pend"]],
@@ -343,7 +359,10 @@ class Exec:
         w = self.st.get("working")
         if not w or w.get("kind") != kind:
             self.cancel_all()
-            w = self.st["working"] = {"kind": kind, "start": now, "last": 0, "q": q_all, "pos0": self.st["my"]["qty"]}
+            w = self.st["working"] = {"kind": kind, "start": now, "last": 0, "q": q_all, "pos0": self.st["my"]["qty"], "ref": mark,
+                                      "ref_bar": self.b[-1]["t"] + H1 if self.b else None}
+            if not closing and self.b:
+                A_, _ = atr_adx(self.b); self.st["entry_stop"] = mark - STOP_ATR * A_[-1]    # 开仓时定下止损(回测：开盘价−4×ATR)
             ding(f"{'开多' if not closing else '平多'} {q_all:g} 张：{why}")
         pr = self.c.futures_position_information(symbol=SYM)
         cur = sum(fl(p["positionAmt"]) for p in pr if p.get("positionSide") in ("LONG", "BOTH") and fl(p["positionAmt"]) > 0)
@@ -353,8 +372,11 @@ class Exec:
         if left < f["minq"]:
             self.cancel_all(); self.st["working"] = None
             if closing:
-                self.st["my"]["qty"] = 0.0
-            log("完成", kind=kind, pos=cur); return f"{kind} 完成，多单 {cur:g}"
+                self.st["my"]["qty"] = 0.0; self.st.pop("entry_stop", None); self.st.pop("entry_fill", None)
+            fill = self.journal(kind, w)
+            if not closing:
+                self.st["entry_fill"] = fill
+            log("完成", kind=kind, pos=cur, fill=fill); return f"{kind} 完成，多单 {cur:g}"
         olist = self.my_orders()
         if now - w["start"] > MAKER_MAX_SEC:
             self.cancel_all()
@@ -382,6 +404,30 @@ class Exec:
             return f"挂限价 {side} {left:g} @ {px:g}"
         except Exception as e:
             log("挂单失败", err=str(e)[:300]); ding(f"限价单失败：{str(e)[:150]}", "err_l", 900); return "挂单失败"
+
+    def journal(self, kind, w):
+        """这一单实际成交均价 vs 回测参考价(信号后那根K线开盘价)，写 trades.jsonl，钉钉报一次"""
+        try:
+            tr = [t for t in self.c.futures_account_trades(symbol=SYM, startTime=int(w["start"] * 1000) - 5000)
+                  if t["side"] == ("SELL" if kind == "close" else "BUY")]
+            q = sum(fl(t["qty"]) for t in tr); avg = sum(fl(t["qty"]) * fl(t["price"]) for t in tr) / q if q else None
+            fee = sum(fl(t["commission"]) for t in tr); maker = sum(1 for t in tr if t.get("maker"))
+            ref = None
+            if w.get("ref_bar"):
+                k = self.c.futures_klines(symbol=SYM, interval="1h", startTime=w["ref_bar"], limit=1)
+                ref = fl(k[0][1]) if k and int(k[0][0]) == w["ref_bar"] else None
+            ref = ref or w.get("ref")
+            slip = ((avg / ref - 1) * (1 if kind == "open" else -1) * 1e4) if (avg and ref) else None
+            rec = {"t": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), "kind": kind, "qty": q, "avg": avg, "bt_ref_open": ref,
+                   "slip_bp": round(slip, 2) if slip is not None else None, "fee": round(fee, 5), "maker_fills": maker, "fills": len(tr),
+                   "secs": round(time.time() - w["start"])}
+            with open(JOURNAL, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            ding(f"{'开多' if kind == 'open' else '平多'}成交 {q:g} 张，均价 {avg:g}，回测参考(开盘价) {ref:g}，"
+                 f"偏差 {slip:+.1f}bp，手续费 {fee:.4f}U(挂单成交 {maker}/{len(tr)} 笔)，用时 {rec['secs']} 秒" if avg and ref else f"{kind} 成交记录不完整：{rec}")
+            return avg
+        except Exception as e:
+            log("成交日志失败", err=str(e)[:200]); return None
 
     # ---- 交易所止损单 ----
     def algo(self, method, path, params):
@@ -434,7 +480,7 @@ def main():
                 last_daily = day
                 g = s["signal"]
                 ding(f"日报：净值 {s['equity']}U，模式 {s['mode']}，SNDK 多单 {s['position_long']:g}，回测状态 {g['回测状态']}"
-                     f"(EMA7 {g['ema7']} / EMA25 {g['ema25']})，止损 {s['stop_px']}，回测上线以来 {s['bt_since_listing']}")
+                     f"(EMA7 {g['ema7']} / EMA25 {g['ema25']})，止损 {s['stop_px']}；实盘以来 净值 {s['since_armed']['实盘净值%']}% vs 回测 {s['since_armed']['回测%(不含手续费)']}%")
         except Exception as e:
             log("循环出错", err=f"{type(e).__name__}: {e}", tb=traceback.format_exc()[-600:])
             ding(f"执行器出错：{type(e).__name__}: {str(e)[:150]}", "loop_err", 1800)
