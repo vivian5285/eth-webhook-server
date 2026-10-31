@@ -32,7 +32,8 @@ import urllib.parse
 import requests
 from binance.client import Client
 
-NAME = "SNDK单票方案"
+VERSION = "v1"                         # 规则变了才升版本号，见 SNDK_SOLO.md
+NAME = f"SNDK单票方案 {VERSION}"
 ACCT = os.environ.get("SNDK_SOLO_ACCOUNT", "C")
 SYM = "SNDKUSDT"
 HOME = os.path.dirname(os.path.abspath(__file__))
@@ -272,7 +273,7 @@ class Exec:
         if live and self.st.get("last_qty") is not None and abs(qty - self.st["last_qty"]) > f["step"] / 2:
             ding(f"SNDK 持仓变化：{self.st['last_qty']:g} → {qty:g}(标记价 {mark:g})"); log("成交", was=self.st["last_qty"], now=qty, mark=mark)
         self.st["last_qty"] = qty
-        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "size_mode": "波动调仓" if os.path.exists(VOLSIZE) else "最高收益(满1倍)", "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
+        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "version": VERSION, "size_mode": "波动调仓" if os.path.exists(VOLSIZE) else "最高收益(满1倍)", "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
                   "position_long": qty, "executor_qty": my["qty"], "live_lock": bool(self.st.get("live_lock")),
                   "signal": {"bar": ts(R["bar_t"]) + " UTC 收盘", "close": R["close"], "ema7": round(R["ema_fast"], 3), "ema25": round(R["ema_slow"], 3),
                              "atr": round(R["atr"], 3), "回测状态": "持多" if R["pos"] else "空仓", "下一根": {1: "开多", 0: "平多", None: "不动"}[R["pend"]],
