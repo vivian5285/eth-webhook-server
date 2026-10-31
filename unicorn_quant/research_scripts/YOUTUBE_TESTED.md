@@ -30,9 +30,17 @@
 | Trader小Q | UCtNPrRw5ovVLlOlODBJpNJw | 加密参数RSI9/MACD(8,21,5)/布林3σ、Twin Range+Supertrend+放量、Donchian+B-Xtrender | 2026-10-30 | Twin Range日线候选观察，其余否决（七博主②） | youtube_b2/tv_combos.py |
 | Yuchi Trader | UCW1KHRAydlyBrX7nz7bz26g | Halftrend+RSI；Rob Hoffman=已测；其余(SSL/Supertrend/宙斯/5m剥头皮)同类 | 2026-10-30 | 否决（七博主②③） | youtube_b2/tv_combos.py |
 | 交易聰明錢 | UCD9HUxu-a1Eug7Z61gDf6-g | Supertrend+KD；均线SOP(YsYFrWVwAq4 待转写)；其余裸K/SMC/FVG=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
-| 威廉 交易頻道 | UCZzqkJj6vv_0M2GBu3H-pOA | 吞没4分战法(吞没+均线+MACD+量)；AI 5m策略(2CUvhvcjo1w 待转写)；威科夫/现货网格=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
+| 威廉 交易頻道 | UCZzqkJj6vv_0M2GBu3H-pOA | 吞没4分战法(吞没+均线+MACD+量)；AI 5m策略(2CUvhvcjo1w 11-01否决)；威科夫/现货网格=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
 | 蛋仔 CryptoEGG | UCKnA-uQNw6fErPxZEXdFMlg | SMC/ICT 入门(eWDVA9zKB-I)；频道多为1分K剥头皮/SNR/ICT | 2026-10-30 | 已测同类（七博主③） | — |
 | 暗夜飞行 | UCUzrqf93vnhgqJ-CbsTJQBw | 合约网格多空双开(3KFtMhNeRY4)；频道多为网格/币安Alpha | 2026-10-30 | 已测同类（七博主③） | — |
+
+| 卫央Neo - 币圈短线交易 | UCXy7cYTLsZtux-i5AVqtiGw | 8oXyRhBKpnM 风林火山 + 趋势七步系列(j7lIZgOhBN8 区间突破 / ub_W-ofEhVg 横盘回调 / 4GHcmoLTVu4 收敛突破二波 / oBsuSubiweo 出场 等)：区间突破、横盘回调、区间顶部挤压、二波，15m~1d | 2026-11-01 | 区间突破 4h/6h 3ATR追踪 **候选观察**；其余否决（研究页 十博主②） | youtube_b3/b3.py, b3_nb.py |
+| 币需暴富 | UCJQgr-XyEELFhdY1Dmi7uSQ | Vegas 改进版 EMA144/169+288/338+EMA12过滤、金叉后首次回踩(auAnQXtiNNo)；HY-iU803qec 同主题无字幕 | 2026-11-01 | 否决（4h 单独+0.7R 但接进方案F 2.8~3.8；大众版576/676 见投机实验室批次1） | youtube_b3/b3.py |
+| Lone Wolf | UCU17HnJXYCa_yFM7Py-7RHA | Phenom 远离均线+反转点 1.5R(_rNN1Xscm6c)、相对趋势指数RTI+Market Bias(u9_G-I-ZIyM)；其余多为行情分析 | 2026-11-01 | 否决 | youtube_b3/b3.py |
+| 番人说 | UCLTfYhkXTnzRBWduVt_djZg | 纽约首根4H区间 5m 假突破回收 2R(u-A6BTmVXpk，无字幕已转写)；频道其余(平均K线/斐波那契/布林突破/均线交叉/MACD/SMC/FVG/订单块/123法则/2B)=已测同类 | 2026-11-01 | 否决（零成本+0.01~0.06R） | youtube_b3/b3_extra.py |
+| 威廉 交易頻道(续) | UCZzqkJj6vv_0M2GBu3H-pOA | 2CUvhvcjo1w AI 5m RSI70/30 反向 1%/1% + z2YNY3QBuXE 4招(放量/长影线/持续超买超卖不做/1h阶段高低点扫流动性) | 2026-11-01 | 否决（任何过滤组合零成本都为负） | youtube_b3/b3_extra.py |
+| BitGuy小比 | UCbBZuXDPkPYn4t0FhCGnrAw | EU5TqXN2R4E Claude+Hermes 自我优化交易代理：没有具体规则，是"自动复盘改参数"的流程；频道其余=工具教程(TV/ATAS/IBKR/3Commas) | 2026-11-01 | 无可测规则（自动改参数=过拟合风险，见前视检验/选择偏差条目） | — |
+| 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选观察**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
@@ -67,6 +75,19 @@
 | WCIP09ISi6Y | 分型结构突破 + MA200向上 + 放量 | 否决（接进方案F 4.57） |
 | 9zXnhSqG91w / 4gVLowpz9eY / swldmJKPP_o | 布林3σ反转 / HMA+ROC / 均线三误区 | 已测同类，未单独测 |
 
+### 2026-11-01 第三批10个视频（youtube_b3/，研究页 十博主①②③④）
+| 视频ID | 博主 | 规则 | 结论 |
+|---|---|---|---|
+| 8oXyRhBKpnM | 卫央Neo | 风林火山周期 + 趋势七步①区间突破/②横盘回调 | 区间突破 4h/6h 追踪候选；横盘回调/顶部挤压/二波否决 |
+| 2CUvhvcjo1w / z2YNY3QBuXE | 威廉 | 5m RSI 70/30 反向 1%/1% + 4招 | 否决 |
+| _rNN1Xscm6c | Lone Wolf | Phenom 远离均线 + 反转点 | 否决（5m~1h 含费 -0.16~-0.45R） |
+| J3jBN_qzi1Q | Trader小Q | 加密参数 | 已测（七博主②） |
+| u-A6BTmVXpk | 番人说 | 纽约首根4H区间假突破 | 否决 |
+| f-YB3Qdw_EU | 已泰 | EMA+威廉分型 | 已测（批次19） |
+| auAnQXtiNNo | 币需暴富 | Vegas 288/338+EMA12 | 否决 |
+| EU5TqXN2R4E | BitGuy小比 | AI 自我优化代理 | 无可测规则 |
+| CGZ8GYwqkms | 交易研究院 | T3+Trendilo+Stiffness | 15m 否决；6h/8h 追踪候选 |
+
 ### 2026-10-30 第二批7个视频（youtube_b2/，研究页 七博主①②③）
 | 视频ID | 博主 | 规则 | 结论 |
 |---|---|---|---|
@@ -77,5 +98,5 @@
 | （频道其余） | Yuchi | Halftrend + RSI | 否决（2.70） |
 | 2DfBuY1kaAw（标题） | 交易聰明錢 | Supertrend + KD | 否决（零成本为负） |
 | Ow30lEj7uHA（标题） | 威廉 | 吞没4分战法 | 否决 |
-| 2CUvhvcjo1w / YsYFrWVwAq4 | 威廉 / 交易聰明錢 | AI 5m 策略 / 均线SOP | 转写排队中 |
+| 2CUvhvcjo1w / YsYFrWVwAq4 | 威廉 / 交易聰明錢 | AI 5m 策略 / 均线SOP | 2CUvhvcjo1w 11-01 已测否决(第三批)；YsYFrWVwAq4 仍待转写 |
 | eWDVA9zKB-I / 3KFtMhNeRY4 / IspHGootQ84 | 蛋仔 / 暗夜飞行 / Yuchi | SMC入门 / 网格多空双开 / Rob Hoffman | 已测同类 |
