@@ -112,15 +112,20 @@ def recon_layer(now):
     def rate(since):
         x = [y for y in h if y["ts"] >= since]; n = sum(y["n"] for y in x)
         return round(100 * sum(y["ok"] for y in x) / n, 1) if n else None
-    pairs, extra, missed, bad = [], 0, 0, []
+    pairs, extra, missed, bad, pending = [], 0, 0, [], []
     for p in r.get("pairs") or []:
         e = [x for x in p.get("extra") or [] if x["t"] / 1000 >= FIX_TS]; m = [x for x in p.get("missed") or [] if x["t"] / 1000 >= FIX_TS]
         extra += len(e); missed += len(m)
-        bad += [f"{p['name']} {s['symbol'].replace('USDT', '')} 擂台{s['arena']}/回测{s['backtest']}" for s in p.get("state") or [] if not s["ok"]]
+        # 2026-10-31 回测已发信号、下一个开盘才执行(对账器本来就跳过)——不算不一致，单列待执行(10-31 QCOM 周末误报)
+        for s in p.get("state") or []:
+            if s["ok"]:
+                continue
+            t_ = f"{p['name']} {s['symbol'].replace('USDT', '')} 擂台{s['arena']}/回测{s['backtest']}"
+            (pending if "下一个开盘执行" in (s.get("note") or "") else bad).append(t_)
         pairs.append({"name": p["name"], "ok": p.get("state_ok"), "n": p.get("state_n"), "extra_after_fix": len(e), "missed_after_fix": len(m),
                       "avg_diff_bp": p.get("avg_diff_bp")})
     return {"natural_24h": rate(now - 86400), "natural_7d": rate(now - 7 * 86400), "natural_since_fix": rate(FIX_TS),
-            "extra_after_fix": extra, "missed_after_fix": missed, "mismatch_now": bad, "pairs": pairs}
+            "extra_after_fix": extra, "missed_after_fix": missed, "mismatch_now": bad, "pending_next_open": pending, "pairs": pairs}
 
 
 def exec_layer(st):
