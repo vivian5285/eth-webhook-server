@@ -245,7 +245,8 @@ class Exec:
         plan = None
         if want_long and my["qty"] <= 0:
             m = min(SIZE, VOL_TGT / (R["atr"] / R["close"])) if os.path.exists(VOLSIZE) and R["close"] > 0 and R["atr"] > 0 else SIZE
-            q = self.rdown(m * E / mark, f["step"]) if mark > 0 else 0.0
+            # 宝贝 10-31：不满 1 倍往上取到下一手(43.8U 时 0.0379→0.04 张≈1.06倍)，只受可用保证金限制
+            q = float(f"{math.ceil(m * E / mark / f['step'] - 1e-9) * f['step']:.10f}") if mark > 0 else 0.0
             lev = 2.0
             q = min(q, self.rdown(avail * lev * 0.95 / mark, f["step"])) if mark > 0 and live else q
             if q < f["minq"] or q * mark < f["minn"]:
