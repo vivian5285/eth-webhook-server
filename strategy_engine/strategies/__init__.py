@@ -2371,3 +2371,22 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] youtube_candidates 加载失败: {_e}")
+
+
+# 2026-11-01：第三批油管博主回测留下的两个候选(卫央区间突破、交易研究院Stiffness组合)，宝贝同意只放擂台纸面观察。说明+回测见 youtube_candidates_b3.py 顶部。
+try:
+    from strategy_engine.strategies import youtube_candidates_b3
+    for _yc_name, _yc_label in (
+        ("neo_box_4h", "卫央Neo 区间突破：近60根宽≤7ATR的收敛箱体，收盘破箱进场，止损箱体中线，3×ATR逐根追踪(4h)"),
+        ("neo_box_6h", "卫央Neo 区间突破：同上，6h"),
+        ("stiff_trendilo_6h", "交易研究院 T3(100)上行+Trendilo转多+Stiffness>50(空单镜像)，止损近10根低点，3×ATR逐根追踪(6h)"),
+        ("stiff_trendilo_8h", "交易研究院 T3+Trendilo+Stiffness：同上，8h"),
+    ):
+        STRATEGIES[_yc_name] = youtube_candidates_b3.generate_signal
+        STRATEGY_DESCRIPTIONS[_yc_name] = (
+            "油管博主候选(第三批)——" + _yc_label + "。2026-11-01回测(主流5币2022-01..2026-09含费)：参数邻域平均接进方案F 5.26→5.46~5.66，"
+            "两者合并5.58~5.70(前后两段都升)；从约280组里挑出、提升幅度和上一批候选同量级。纸面观察，不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b3 加载失败: {_e}")

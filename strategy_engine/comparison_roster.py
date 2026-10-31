@@ -1033,3 +1033,15 @@ YOUTUBE_CAND_ROSTER = (
        for s in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")]
 )
 SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_ROSTER
+
+
+# 2026-11-01：第三批油管候选纸面(主流5个)，见 strategies/youtube_candidates_b3.py。追踪止损在 multi_strategy_runner._maybe_bar_trail。
+# 区间突破只需 60 根箱体+ATR 预热，取 400 根；Stiffness 的 T3(100)=6 层 EMA 链，取 1000 根(与回测逐根对过信号一致)。
+_YC3_SYMS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT")
+YOUTUBE_CAND_B3_ROSTER = (
+    [{"symbol": s, "strategy": n, "timeframe": tf, "bars_limit": 400, "params": {"mode": "neo_box", "n": 60, "wmax": 7.0}}
+     for n, tf in (("neo_box_4h", "4h"), ("neo_box_6h", "6h")) for s in _YC3_SYMS]
+    + [{"symbol": s, "strategy": n, "timeframe": tf, "bars_limit": 1000, "params": {"mode": "stiff", "thr": 50, "t3n": 100}}
+       for n, tf in (("stiff_trendilo_6h", "6h"), ("stiff_trendilo_8h", "8h")) for s in _YC3_SYMS]
+)
+SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B3_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B3_ROSTER

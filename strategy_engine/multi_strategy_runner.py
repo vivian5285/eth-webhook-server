@@ -202,6 +202,26 @@ ATR_TRAIL_MIN_R_MULT = 0.5
 ATR_TRAIL_STRATEGIES = {"ttm_squeeze_trail"}
 
 
+# 2026-11-01新增：第三批油管候选的追踪止损，照回测(research_scripts/speculation_channel/lib.py::_run trail_atr)逐根口径：
+# 入场K线之后每根已收盘K线，best=入场以来最高(空单最低)，候选止损 best∓倍数×ATR14(当根)，只收紧。
+# 和上面 _maybe_trail_atr(现价-2×入场ATR、0.5R后才启动)不是一回事，只对下面这几个名字生效。
+BAR_TRAIL_STRATEGIES = {"neo_box_4h": 3.0, "neo_box_6h": 3.0, "stiff_trendilo_6h": 3.0, "stiff_trendilo_8h": 3.0}
+
+
+def _maybe_bar_trail(pos: dict, bars: List[dict]) -> None:
+    mult = BAR_TRAIL_STRATEGIES.get(pos.get("strategy"))
+    if not mult or not bars:
+        return
+    from strategy_engine.strategies import youtube_candidates_b3
+    new_stop = youtube_candidates_b3.trail_stop(bars, pos, mult)
+    pid = pos.get("id")
+    if new_stop is None or pid is None:
+        return
+    if shadow_store.add_to_open_row(pid, {"stop": new_stop}, int(bars[-1]["t"])):
+        pos["stop_loss"] = new_stop
+        pos["stop"] = new_stop
+
+
 def _maybe_trail_atr(pos: dict, mark_price: float, bar_time: int) -> None:
     strategy = pos.get("strategy")
     if strategy not in ATR_TRAIL_STRATEGIES:
@@ -877,6 +897,7 @@ def _tick_single_symbol_entry(entry: dict, cache: Dict[tuple, list]) -> None:
     if pos:
         _maybe_lock_breakeven(pos, float(last_bar["c"]), int(last_bar["t"]))
         _maybe_trail_atr(pos, float(last_bar["c"]), int(last_bar["t"]))
+        _maybe_bar_trail(pos, bars)
         _maybe_radar_trail(pos, bars, float(last_bar["c"]), int(last_bar["t"]),
                            bars_4h=bars_by_tf.get("4h"))
         if _maybe_volume_sentinel(pos, key, symbol, timeframe, bars):
