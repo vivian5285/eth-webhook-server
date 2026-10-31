@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""SNDK单票方案(代号 sndk_solo，2026-10-31)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
+"""SNDK单票方案 v2(代号 sndk_solo，v1 2026-10-31 上线，同日升 v2)——宝贝自己的 C 账户(binanceC)只做 SNDKUSDT 永续，和方案F/趋势A等以前的方案完全分开。
 
 规则(research_scripts/sndk_tf_mtf.py、sndk_exit_study.py 回测选定)：
   · 1h K线收盘：EMA7 > EMA25 → 持多；EMA7 < EMA25 → 平多。只做多，不做空，不用雷达/保本/移动止损(回测都更差)。
   · 开仓时止损 = 开仓价 − 4×ATR(14，1h，Wilder)，挂交易所条件单(STOP_MARKET，按最新成交价触发，同回测按K线最低价判断)，之后不动。
   · 止损打掉后要等 EMA7 先跌回 EMA25 下方一次，才能再进(防止刚止损又追回去)。
-  · 仓位 = 开仓时账户净值(totalMarginBalance) × 1 倍名义【最高收益模式，宝贝 10-31 定的实盘默认】，持有期间数量不变，平仓后下次开仓按新净值算。
+  · 仓位 = 开仓时账户净值(totalMarginBalance) × 动能系数，持有期间数量不变，平仓后下次开仓按新净值算，不满一手往上取一手。
+    v2【ADX逆向仓位】(research_scripts/sndk_stop_size_grid.py、sndk_adx_size_check.py)：看信号K线(金叉那根)的 ADX(14,1h)：
+    <20 满 1 倍，20~30 0.75 倍，≥30 0.5 倍——金叉时 ADX 已经很高多半是追高(永续上这档单笔平均 -1%、胜率 18%)。
+    回测：币安永续 +92%/回撤26% → +110%/17%，正股 1.6 年 +1154%/43% → +922%/32%。
     同目录放 VOLSIZE 文件 = 切到【波动调仓模式】：× min(1, 2% ÷ 信号K线的 1h ATR%)，财报等剧烈波动时自动减仓(research_scripts/sndk_dd.py：正股回撤 43%→26.5%，永续收益约 -20%)。
 
 信号怎么算：每轮从 SNDKUSDT 上线(2026-04-07)起把全部已收盘的 1h K线按回测逻辑重放一遍，得到"回测现在该持多还是空仓、止损价多少"，
@@ -32,7 +35,7 @@ import urllib.parse
 import requests
 from binance.client import Client
 
-VERSION = "v1"                         # 规则变了才升版本号，见 SNDK_SOLO.md
+VERSION = "v2"                         # 规则变了才升版本号，见 SNDK_SOLO.md
 NAME = f"SNDK单票方案 {VERSION}"
 ACCT = os.environ.get("SNDK_SOLO_ACCOUNT", "C")
 SYM = "SNDKUSDT"
@@ -41,6 +44,7 @@ ENV_FILE = os.environ.get("SNDK_SOLO_ENV_FILE", "/home/binanceC/binance-engine/.
 STATE, LOG, STATUS = os.path.join(HOME, "state.json"), os.path.join(HOME, "actions.jsonl"), os.path.join(HOME, "status.json")
 ARMED, STOP, JOIN, VOLSIZE = (os.path.join(HOME, x) for x in ("ARMED", "STOP", "JOIN", "VOLSIZE"))
 FAST, SLOW, ATR_N, STOP_ATR, SIZE, VOL_TGT = 7, 25, 14, 4.0, 1.0, 0.02
+ADX_CUTS, ADX_SIZES = (20, 30), (1.0, 0.75, 0.5)     # v2：ADX<20 / 20~30 / ≥30 的仓位倍数
 H1 = 3600000
 LIST_START = 1775520000000            # 2026-04-07 SNDKUSDT 上线
 LOOP_SEC, REPRICE_SEC, MAKER_MAX_SEC = 30, 60, 900
@@ -115,18 +119,29 @@ def ema(c, n):
     return o
 
 
-def atr(b, n=ATR_N):
-    A = [b[0]["h"] - b[0]["l"]]
+def atr_adx(b, n=ATR_N):
+    """ATR 和 ADX(Wilder，同 research_scripts/sndk_stop_size_grid.py ind())"""
+    tr = [b[0]["h"] - b[0]["l"]]; pdm = [0.0]; mdm = [0.0]
     for i in range(1, len(b)):
-        tr = max(b[i]["h"] - b[i]["l"], abs(b[i]["h"] - b[i - 1]["c"]), abs(b[i]["l"] - b[i - 1]["c"]))
-        A.append(A[-1] + (tr - A[-1]) / n)
-    return A
+        h, l, pc = b[i]["h"], b[i]["l"], b[i - 1]["c"]
+        tr.append(max(h - l, abs(h - pc), abs(l - pc))); up, dn = h - b[i - 1]["h"], b[i - 1]["l"] - l
+        pdm.append(up if up > dn and up > 0 else 0.0); mdm.append(dn if dn > up and dn > 0 else 0.0)
+    A = [tr[0]]; P = [0.0]; M = [0.0]; X = [0.0]
+    for i in range(1, len(b)):
+        A.append(A[-1] + (tr[i] - A[-1]) / n); P.append(P[-1] + (pdm[i] - P[-1]) / n); M.append(M[-1] + (mdm[i] - M[-1]) / n)
+        pdi, mdi = (P[i] / A[i], M[i] / A[i]) if A[i] else (0, 0)
+        X.append(X[-1] + ((abs(pdi - mdi) / (pdi + mdi) * 100 if pdi + mdi else 0) - X[-1]) / n)
+    return A, X
+
+
+def adx_size(x):
+    return ADX_SIZES[0] if x < ADX_CUTS[0] else (ADX_SIZES[1] if x < ADX_CUTS[1] else ADX_SIZES[2])
 
 
 def replay(b):
     """返回回测在"最后一根已收盘K线"之后的状态：pos(1/0)、entry_t/entry/stop(持仓中)、pend(下一根开盘要做的：1 开多/0 平多/None)、
     lock(止损后等 EMA 转空)、最近几笔成交。"""
-    c = [x["c"] for x in b]; ef, es = ema(c, FAST), ema(c, SLOW); A = atr(b)
+    c = [x["c"] for x in b]; ef, es = ema(c, FAST), ema(c, SLOW); A, X = atr_adx(b)
     d = 0; pend = None; stop = None; lock = 0; ent = None; trades = []; eq = 1.0
     for i in range(1, len(b)):
         op, lo = b[i]["o"], b[i]["l"]
@@ -134,13 +149,13 @@ def replay(b):
             tgt = pend; pend = None
             if d and tgt != d:
                 trades.append({"side": "LONG", "in_t": ent["t"], "in": ent["px"], "out_t": b[i]["t"], "out": op, "why": "EMA7下穿EMA25"})
-                eq *= op / ent["px"]; d = 0
+                eq *= 1 + ent["m"] * (op / ent["px"] - 1); d = 0
             if tgt and not d:
-                d = 1; ent = {"t": b[i]["t"], "px": op}; stop = op - STOP_ATR * A[i - 1]
+                d = 1; ent = {"t": b[i]["t"], "px": op, "adx": round(X[i - 1], 1), "m": adx_size(X[i - 1])}; stop = op - STOP_ATR * A[i - 1]
         if d and lo <= stop:
             px = min(op, stop)
             trades.append({"side": "LONG", "in_t": ent["t"], "in": ent["px"], "out_t": b[i]["t"], "out": px, "why": f"{STOP_ATR:g}×ATR止损"})
-            eq *= px / ent["px"]; d = 0; lock = 1
+            eq *= 1 + ent["m"] * (px / ent["px"] - 1); d = 0; lock = 1
         if i < SLOW:
             continue
         want = 1 if ef[i] > es[i] else 0
@@ -152,7 +167,8 @@ def replay(b):
             pend = want
     last = len(b) - 1
     return {"pos": d, "pend": pend, "lock": lock, "stop": stop if d else None, "entry": ent if d else None,
-            "ema_fast": ef[last], "ema_slow": es[last], "atr": A[last], "close": c[last], "bar_t": b[last]["t"],
+            "ema_fast": ef[last], "ema_slow": es[last], "atr": A[last], "adx": X[last], "close": c[last], "bar_t": b[last]["t"],
+            "entry_adx": ent["adx"] if d else (X[last] if pend == 1 else None),          # 这段持仓的信号K线 ADX(定仓位用)
             "next_stop": (None if pend != 1 else None), "trades": trades[-5:], "n_trades": len(trades), "bt_mult": eq}
 
 
@@ -245,7 +261,10 @@ class Exec:
         want_long = target == 1 and not self.st.get("live_lock") and (fresh or my["qty"] > 0 or not live)
         plan = None
         if want_long and my["qty"] <= 0:
-            m = min(SIZE, VOL_TGT / (R["atr"] / R["close"])) if os.path.exists(VOLSIZE) and R["close"] > 0 and R["atr"] > 0 else SIZE
+            ax = R["entry_adx"] if R["entry_adx"] is not None else R["adx"]
+            m = SIZE * adx_size(ax)                                                          # v2 ADX 逆向仓位
+            if os.path.exists(VOLSIZE) and R["close"] > 0 and R["atr"] > 0:
+                m = min(m, VOL_TGT / (R["atr"] / R["close"]))
             # 宝贝 10-31：不满 1 倍往上取到下一手(43.8U 时 0.0379→0.04 张≈1.06倍)，只受可用保证金限制
             q = float(f"{math.ceil(m * E / mark / f['step'] - 1e-9) * f['step']:.10f}") if mark > 0 else 0.0
             lev = 2.0
@@ -254,7 +273,7 @@ class Exec:
                 plan = ("skip", 0.0, f"净值 {E:.2f}U 不够最小一手({f['minq']:g}张/≥{f['minn']:g}U)")
                 ding(plan[2], "toosmall", 6 * 3600)
             else:
-                plan = ("open", q, f"回测开多(EMA7>EMA25)，按净值{E:.2f}U×{m:.2f}倍(ATR%={100 * R['atr'] / R['close']:.2f}%) ≈ {q * mark:.0f}U")
+                plan = ("open", q, f"回测开多(EMA7>EMA25)，按净值{E:.2f}U×{m:.2f}倍(金叉ADX={ax:.1f}) ≈ {q * mark:.0f}U")
         elif not want_long and my["qty"] > 0:
             plan = ("close", my["qty"], "回测平多(EMA7<EMA25)" if target == 0 else "停止跟随")
         # 止损价：回测这段持仓的止损(回测还在"下一根开盘才开"的那一下，用 开盘≈现价 − 4×ATR)
@@ -273,10 +292,10 @@ class Exec:
         if live and self.st.get("last_qty") is not None and abs(qty - self.st["last_qty"]) > f["step"] / 2:
             ding(f"SNDK 持仓变化：{self.st['last_qty']:g} → {qty:g}(标记价 {mark:g})"); log("成交", was=self.st["last_qty"], now=qty, mark=mark)
         self.st["last_qty"] = qty
-        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "version": VERSION, "size_mode": "波动调仓" if os.path.exists(VOLSIZE) else "最高收益(满1倍)", "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
+        status = {"ts": now, "name": NAME, "account": ACCT, "mode": mode, "version": VERSION, "size_mode": "ADX逆向仓位" + ("+波动调仓" if os.path.exists(VOLSIZE) else ""), "equity": round(E, 2), "hedge_mode": hedge, "mark": mark,
                   "position_long": qty, "executor_qty": my["qty"], "live_lock": bool(self.st.get("live_lock")),
                   "signal": {"bar": ts(R["bar_t"]) + " UTC 收盘", "close": R["close"], "ema7": round(R["ema_fast"], 3), "ema25": round(R["ema_slow"], 3),
-                             "atr": round(R["atr"], 3), "回测状态": "持多" if R["pos"] else "空仓", "下一根": {1: "开多", 0: "平多", None: "不动"}[R["pend"]],
+                             "atr": round(R["atr"], 3), "adx": round(R["adx"], 1), "开仓仓位倍数(按ADX)": adx_size(R["entry_adx"] if R["entry_adx"] is not None else R["adx"]), "回测状态": "持多" if R["pos"] else "空仓", "下一根": {1: "开多", 0: "平多", None: "不动"}[R["pend"]],
                              "回测止损": R["stop"], "回测入场": R["entry"], "止损后等转空": bool(R["lock"])},
                   "target": "持多" if want_long else "空仓", "stop_px": stop_px, "stops": stops,
                   "bt_since_listing": f"{100 * (R['bt_mult'] - 1):+.1f}%({R['n_trades']}笔)", "recent_trades": R["trades"],
