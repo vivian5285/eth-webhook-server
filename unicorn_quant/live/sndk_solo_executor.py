@@ -261,6 +261,9 @@ class Exec:
             ding(f"账户里有 SNDK 以外的持仓：{','.join(others)}，执行器不会碰，请确认", "foreign", 6 * 3600)
         if shorts < 0:
             ding(f"账户里有 SNDK 空单 {shorts:g}，本方案只做多，执行器不碰空单，请确认", "short", 6 * 3600)
+        wd = rd(os.path.join(HOME, "watchdog.json"), {}) or {}             # 反过来盯监督狗：超过 10 分钟没更新就报警
+        if live and now - float(wd.get("ts") or 0) > 600:
+            ding(f"⚠️ 监督狗 {((now - float(wd.get('ts') or 0)) / 60):.0f} 分钟没有更新(sndk-solo-watchdog 可能挂了)", "wd_stale", 3600)
         my = self.st.setdefault("my", {"qty": 0.0})                          # 执行器自己开的多单数量(非执行器的仓位不认)
         # 交易所止损触发 / 有人手动平了：账户多单比执行器记录的少 → 这段不再跟，等回测转空
         if live and my.get("virtual"):
