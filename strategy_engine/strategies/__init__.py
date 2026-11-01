@@ -2408,3 +2408,19 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b4 加载失败: {_e}")
+
+
+# 2026-11-01：第五批油管博主回测留下的候选(指標與策略 布林/KDJ 逆势)，宝贝同意先放擂台纸面观察(2026年这一腿亏)。说明+回测见 youtube_candidates_b5.py 顶部。
+try:
+    from strategy_engine.strategies import youtube_candidates_b5
+    for _yc_name, _yc_label in (
+        ("zb_bbkdj_4h_k20", "4h KD20"), ("zb_bbkdj_4h_k25", "4h KD25"), ("zb_bbkdj_4h_k30", "4h KD30"), ("zb_bbkdj_6h_k25", "6h KD25"),
+    ):
+        STRATEGIES[_yc_name] = youtube_candidates_b5.generate_signal
+        STRATEGY_DESCRIPTIONS[_yc_name] = (
+            "油管博主候选(第五批)——指標與策略 布林/KDJ 逆势(" + _yc_label + ")：碰布林下轨且K<20后，K上穿20收阳做多(空单对称)，止损近5根极值，K从80回落平仓。"
+            "2026-11-01回测：180组平均接到'方案F+叠加2%'上 7.75→9.59、回撤20.0→17.8%、与方案F相关-0.10，但2026年亏、单组只约一半能改善，四组集成纸面观察，不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b5 加载失败: {_e}")

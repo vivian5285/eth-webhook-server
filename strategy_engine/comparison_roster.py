@@ -1057,3 +1057,12 @@ YOUTUBE_CAND_B4_ROSTER = (
         "params": {"mode": "mio_bb", "sq_days": 126, "sq_win": 10, "vol": True}} for s in _YC3_SYMS]
 )
 SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B4_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B4_ROSTER
+
+
+# 2026-11-01：第五批油管候选纸面(主流5个)——指標與策略 布林/KDJ 逆势，多参数集成(4h KD20/25/30 + 6h KD25)，见 strategies/youtube_candidates_b5.py。
+YOUTUBE_CAND_B5_ROSTER = [
+    {"symbol": s, "strategy": n, "timeframe": tf, "bars_limit": 400, "params": {"kn": kn, "look": 20}}
+    for n, tf, kn in (("zb_bbkdj_4h_k20", "4h", 20), ("zb_bbkdj_4h_k25", "4h", 25), ("zb_bbkdj_4h_k30", "4h", 30), ("zb_bbkdj_6h_k25", "6h", 25))
+    for s in _YC3_SYMS
+]
+SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B5_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B5_ROSTER
