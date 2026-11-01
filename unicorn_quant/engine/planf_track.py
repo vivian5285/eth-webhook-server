@@ -30,9 +30,9 @@ INCOME = "/var/lib/planf/income_E.json"
 # 回测"两者合并 1%"这一部分最大回撤 4.4%：超过 5% 告警，超过 9%(≈2倍)自动建 OVERLAY_OFF 停掉叠加(方案F不受影响，宝贝删文件恢复)
 OVERLAY_SEEN = "/var/lib/planf/overlay_seen.json"
 OVERLAY_OFF = "/var/lib/planf/OVERLAY_OFF"
-OVERLAY_W = {"jiasheng_brk_tp_4h": 0.25, "jiasheng_brk_trail_4h": 0.25, "mio_bb_squeeze_8h": 0.5}
+OVERLAY_W = {"jiasheng_brk_tp_4h": 0.5, "jiasheng_brk_trail_4h": 0.5, "mio_bb_squeeze_8h": 1.0}   # 11-01 晚 2%档
 OVERLAY_START = 1793520000          # 2026-11-01 叠加上实盘(之后擂台开的叠加单才算；擂台这几条今天才上线)
-OVERLAY_WARN, OVERLAY_KILL = 0.05, 0.09
+OVERLAY_WARN, OVERLAY_KILL = 0.10, 0.18   # 2%档：回测叠加自身最大回撤8.6%，10%告警、18%(≈2倍)自动停
 ARENA_DB = "/home/stratroster/eth-webhook-server/strategy_engine/data/shadow_v2.db"
 HIST = os.path.join(OUT, "planf_track_hist.jsonl")
 LIVE_START = 1792407600            # 2026-10-19 10:59 UTC 宝贝建 ARMED，E 账户进入实盘
@@ -237,8 +237,8 @@ def main():
               ("track_cover", not ex["cover_bad"], "交易所止损单没盖住持仓：" + "；".join(ex["cover_bad"])),
               ("track_recon", not rec["mismatch_now"], "回测↔擂台持仓不一致：" + "；".join(rec["mismatch_now"][:4])),
               ("track_legs", not lg["bad"], "止损和回测口径不一致：" + "；".join(lg["bad"][:4])),
-              ("track_overlay", ov.get("dd", 0) <= OVERLAY_WARN, f"叠加腿(真假突破+布林擠壓)回撤 {ov.get('dd', 0):.1%}，超过回测最大4.4%的告警线5%"
-               + ("；已超9%，自动停用叠加(建了 OVERLAY_OFF，方案F照常；删掉该文件恢复)" if ov.get("off") else "")),
+              ("track_overlay", ov.get("dd", 0) <= OVERLAY_WARN, f"叠加腿(真假突破+布林擠壓)回撤 {ov.get('dd', 0):.1%}，超过回测最大8.6%的告警线10%"
+               + ("；已超18%，自动停用叠加(建了 OVERLAY_OFF，方案F照常；删掉该文件恢复)" if ov.get("off") else "")),
               ("track_gap7", res["attr"]["7d"]["hours"] < 24 or res["attr"]["7d"]["total_gap_pct"] / 100 > GAP7_ALERT,
                f"近7天实盘比目标模型少赚 {-res['attr']['7d']['total_gap_pct']:.2f}%(持仓偏差 {res['attr']['7d']['pos_gap_pct']:.2f}%、执行成本 {res['attr']['7d']['exec_gap_pct']:.2f}%)")]
     sp = os.path.join(OUT, "planf_track_alert_state.json"); sst = _rd(sp, {}) or {}

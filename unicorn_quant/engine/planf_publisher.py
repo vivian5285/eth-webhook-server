@@ -30,7 +30,8 @@ M5 = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
 # 2026-11-01 宝贝拍板：第四批两个候选直接叠加上实盘(回测"两者合并 1%"：方案F 5.26→6.55，回撤18.8%→19.2%)。
 # 口径同 youtube_b4/b4_overlay.py(combo_mtm.mtm_daily)：每笔名义仓位 = 权重 × min(1% ÷ 止损距离%, 3)，开仓后数量不变；
 # 真假突破拆两条(1.5R止盈 / 2ATR追踪)各占 0.25，布林擠壓 0.5。不乘币种权重、不乘波动率缩放；不受方案F 2倍上限约束(11-01 晚改)。
-OVERLAY_LEGS = {"jiasheng_brk_tp_4h": 0.25, "jiasheng_brk_trail_4h": 0.25, "mio_bb_squeeze_8h": 0.5}
+# 11-01 晚宝贝定 1%→2%(回测 比值7.75 回撤20.0%，前后段 5.97/10.01 都比1%好)：权重翻倍
+OVERLAY_LEGS = {"jiasheng_brk_tp_4h": 0.5, "jiasheng_brk_trail_4h": 0.5, "mio_bb_squeeze_8h": 1.0}
 OVERLAY_SEEN = os.path.join(OUT_DIR, "overlay_seen.json")   # 每笔第一次看到时的止损距离(追踪止损会把擂台的 stop 改掉，仓位要按开仓那一刻定)
 # 边界条件：这个文件存在 = 叠加腿全部不跟(已有叠加仓位由执行器按目标平掉，方案F不受影响)。宝贝手动建/删，或 planf_track 自动建(叠加部分回撤超限)
 OVERLAY_OFF = os.path.join(OUT_DIR, "OVERLAY_OFF")
