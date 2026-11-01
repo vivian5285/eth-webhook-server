@@ -46,6 +46,12 @@
 | Louis Trading | UCJJ2W0jG0SQPV4_z0wMjL8Q | 323期多为外汇/黄金：G5bFcWoHCR8 结构突破+斐波那契0.5回调+流动性(SMC)、kE6TepxrrzE M15+M1 超短线；其余 H4+M15 SMC 机械化系列=同类 | 2026-11-01 | 已测同类(SMC/斐波那契/1m超短线) | — |
 | Mike Yu 聰明錢 | UCTRgIiw2c7qtBrqiG1Wq8nQ | 55期 全是 SMC/ICT/TPO 订单流：s0VD85XpAKs SMC日内(偏见+多周期) | 2026-11-01 | 已测同类(ICT/SMC/订单流) | — |
 | 论文 Zarattini/Pagani/Barbon 2025「Catching Crypto Trends」 | SSRN/RePEc rp2580 | 唐奇安 9 周期(5~360天)集成+中点追踪止损+25%波动率目标，只做多(网上找的新来源，不是油管) | 2026-11-01 | 否决（单独2025后≈0，接进/替换方案F都降） | youtube_b4/donchian_ens.py |
+| 指標與策略 | UCE-pQE8a8O2-99ZOFL4rqKw | 12期全测：ifWUYXnWJtY 布林进肯特纳擠壓+KDJ(25)逆势、8FwaLBJ8Uss 双肯特纳(50,2.75/3.75)、tqUxGBKRQVk HMA+EMA200+KDJ、PFYA-WSwWh8 CCI(18/54)±200对翻、0SRBFMnMkR4 吊灯止损+RSI、BaZ3I9Za86w MACD+EMA200+SAR；三兵/SuperTrend+QQE/5m 动量/剥头皮/高斯通道=已测同类 | 2026-11-01 | 擠壓+KDJ逆势 4h/6h **候选**(180组平均让新基准7.75→9.59，但2026年为负)；其余否决（研究页 五批①） | youtube_b5/b6.py, b7.py, b6_nb.py |
+| LEI | UCZyTcQHJGKkGeotf0vWA7Rg | MTmz6OLCykc 均线高度密集(6条线差<2%、≥6个月)后张嘴突破、Pe04VShLE1g/K2OiWFYyP7Y EMA20+MA20双线系统；其余投资理念/ETF/Livermore 无规则 | 2026-11-01 | 否决（币圈日线均线很少<2%密集，放宽到4%只有个位数笔；双线系统接新基准全降） | youtube_b5/b6.py, b8.py |
+| 量化熊猫实验室 | UCdGAmAPo1oEEFR_ByawrkGw | cxG3lOrGqkM 结构突破EA(DMI交叉+ZigZag摆动点挂突破单)；其余4期黄金海龟/唐奇安/波段突破EA拆解=已测同类 | 2026-11-01 | 否决（初测+0.36R是突破单成交价前视，修正后+0.03~0.10R，接新基准全降） | youtube_b5/b8.py |
+| 大數據Trader | UCuHgcMy4HG5XAOtI0sFyHPQ | jr6_zKLCmLM RSI(10)<30+SMA200(转述Rayner)、rOFL8IJW5P8 同规则做空；SSL/MACD背离/VWAP/DEMA/网格/QFL=已测同类 | 2026-11-01 | 否决（胜率65%但含费为负） | youtube_b5/b6.py |
+| Bitptp | UC_wobMwj_hl0aqNAvH0634A | KvUkDo12O1M EMA金叉死叉25万笔≈0→LWMA/SMMA+高周期EMA+ADX>30、fFNOp3EZ3wM 黄金5m高频EA(无具体规则) | 2026-11-01 | 否决（LWMA 4h 单独+0.33R但4组只1组让新基准变好） | youtube_b5/b8.py |
+| Master Technical Analysis(MTA) / 方方土PriceAction / 已轉移至新頻道 | UCUeSB9j3tcN2ZztRnfjGwSg / UC-CckeotGQCZigg3nETreCQ / UCoGIQCN1Slae8C8tbdEsJNw | IGn4AGzzbRo 支撑阻力+吞没、1fHd9Ycbc5Y 美股早盘价格行为、-VZGKdDDtuM 1分钟 TTM Squeeze Pro+Andean+ADX | 2026-11-01 | 已测同类(价格行为/开盘区间/1m超短线) | — |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
@@ -79,6 +85,14 @@
 | 7foqLkodFps | SuperTrend(10,3) + HMA200 | 否决（单独+0.21R，接进方案F 0.5%时5.43、1%时4.84） |
 | WCIP09ISi6Y | 分型结构突破 + MA200向上 + 放量 | 否决（接进方案F 4.57） |
 | 9zXnhSqG91w / 4gVLowpz9eY / swldmJKPP_o | 布林3σ反转 / HMA+ROC / 均线三误区 | 已测同类，未单独测 |
+
+### 2026-11-01 第五批（youtube_b5/，研究页 五批①②；对比基准=方案F+叠加2% 比值7.75）
+| 视频ID | 博主 | 结论 |
+|---|---|---|
+| J3jBN_qzi1Q / _rNN1Xscm6c / 7foqLkodFps | Trader小Q / Lone Wolf / 已泰 | 已测（第二批/第三批/四博主②），不重复 |
+| ifWUYXnWJtY | 指標與策略 | **候选**：擠壓+KDJ逆势 4h/6h 不要擠壓过滤更稳；180组平均 +1% 新基准 7.75→9.59(6.97/18.83)，回撤20.0→17.8%，相关方案F -0.10；但2026年这一腿为负 |
+| cxG3lOrGqkM / MTmz6OLCykc / jr6_zKLCmLM / fFNOp3EZ3wM | 量化熊猫 / LEI / 大數據Trader / Bitptp | 否决 |
+| IGn4AGzzbRo / -VZGKdDDtuM / 1fHd9Ycbc5Y | MTA / 已轉移 / 方方土 | 已测同类 |
 
 ### 2026-11-01 第四批（youtube_b4/，研究页 四批①②③④）
 | 视频ID | 博主 | 规则 | 结论 |
