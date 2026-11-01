@@ -45,7 +45,7 @@ STATE = os.path.join(HOME, "state.json")
 LOG = os.path.join(HOME, "actions.jsonl")
 ARMED, STOP = os.path.join(HOME, "ARMED"), os.path.join(HOME, "STOP")
 LOOP_SEC, STALE_SEC, REBAL_BAND, REPRICE_SEC, MAKER_MAX_SEC = 30, 600, 0.05, 60, 900
-MAX_GROSS, MAX_SYM, CB_DROP, CB_HOURS = 2.0, 0.6, 0.20, 24
+MAX_GROSS, MAX_SYM, CB_DROP, CB_HOURS = 3.0, 0.6, 0.20, 24   # 11-01 晚 2.0→3.0：方案F自己≤2(发布器限)，叠加腿(第四批候选)在上面另加，回测叠加最大1.33倍
 MIN_BUMP_MAX = 0.10      # 按比例不够一手时补到最小一手，最小一手超过净值10%就不补(小账户碰到BTC这种大面值时)
 NYSE_HOLIDAYS = {"2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
                  "2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18",

@@ -29,7 +29,7 @@ STOCK_LEG = "stock_sector_rot6m5_long"
 M5 = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
 # 2026-11-01 宝贝拍板：第四批两个候选直接叠加上实盘(回测"两者合并 1%"：方案F 5.26→6.55，回撤18.8%→19.2%)。
 # 口径同 youtube_b4/b4_overlay.py(combo_mtm.mtm_daily)：每笔名义仓位 = 权重 × min(1% ÷ 止损距离%, 3)，开仓后数量不变；
-# 真假突破拆两条(1.5R止盈 / 2ATR追踪)各占 0.25，布林擠壓 0.5。不乘币种权重、不乘波动率缩放；方案F+叠加总名义 > 2 时只压叠加部分。
+# 真假突破拆两条(1.5R止盈 / 2ATR追踪)各占 0.25，布林擠壓 0.5。不乘币种权重、不乘波动率缩放；不受方案F 2倍上限约束(11-01 晚改)。
 OVERLAY_LEGS = {"jiasheng_brk_tp_4h": 0.25, "jiasheng_brk_trail_4h": 0.25, "mio_bb_squeeze_8h": 0.5}
 OVERLAY_SEEN = os.path.join(OUT_DIR, "overlay_seen.json")   # 每笔第一次看到时的止损距离(追踪止损会把擂台的 stop 改掉，仓位要按开仓那一刻定)
 # 边界条件：这个文件存在 = 叠加腿全部不跟(已有叠加仓位由执行器按目标平掉，方案F不受影响)。宝贝手动建/删，或 planf_track 自动建(叠加部分回撤超限)
@@ -160,10 +160,10 @@ def build() -> dict:
     if os.path.exists(OVERLAY_OFF):
         ov_legs = []
     for key, tg in (("frac", t_all), ("frac_no_btc", t_nb)):
-        og = sum(abs(L[key]) for L in ov_legs); room = max(0.0, 2.0 - sum(abs(v) for v in tg.values()))
-        k_ = min(1.0, room / og) if og > 0 else 1.0
+        # 11-01 晚宝贝：叠加在各种行情下都为正，不要被方案F的2倍上限压住(回测本来就没压)。叠加名义回测中位1%、90%分位0.24、最大1.33倍；
+        # 总量的最后防线在执行器 MAX_GROSS=3.0(方案F≤2 + 叠加历史最大1.33)
         for L in ov_legs:
-            L[key] = round(L[key] * k_, 6)
+            L[key] = round(L[key], 6)
             if L[key]:
                 tg[L["symbol"]] = round(tg.get(L["symbol"], 0.0) + L[key], 6)
         for s in [s for s, v in tg.items() if abs(v) <= 1e-9]:
