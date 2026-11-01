@@ -2390,3 +2390,21 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b3 加载失败: {_e}")
+
+
+# 2026-11-01：第四批油管博主回测留下的两个候选(JiaSheng 真假突破、mio 布林擠壓)，按惯例只放擂台纸面观察。说明+回测见 youtube_candidates_b4.py 顶部。
+try:
+    from strategy_engine.strategies import youtube_candidates_b4
+    for _yc_name, _yc_label in (
+        ("jiasheng_brk_tp_4h", "JiaSheng 真假突破：近40根宽≤4ATR的箱体，收盘破箱且大K(实体≥1.5×箱内均值)或三连K确认，止损箱中线，1.5R止盈(4h，另一半见trail)"),
+        ("jiasheng_brk_trail_4h", "JiaSheng 真假突破：同上，这一半用2×ATR逐根追踪(吊灯止损)"),
+        ("mio_bb_squeeze_8h", "mio 布林擠壓：带宽收到近126天最低后10根内，放量收盘收在布林(20,2)带外进场，止损中轨∓0.5ATR，连续两根收回中轨另一侧离场(8h，多空)"),
+    ):
+        STRATEGIES[_yc_name] = youtube_candidates_b4.generate_signal
+        STRATEGY_DESCRIPTIONS[_yc_name] = (
+            "油管博主候选(第四批)——" + _yc_label + "。2026-11-01回测(主流5币2022-01..2026-09含费)：参数邻域平均接进方案F 5.26→真假突破6.11、布林擠壓5.99，"
+            "两者合并6.55(前后两段都升)；本批约700组里挑出，有选择偏差，纸面观察，不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b4 加载失败: {_e}")

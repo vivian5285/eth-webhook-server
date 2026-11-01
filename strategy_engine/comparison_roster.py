@@ -1045,3 +1045,15 @@ YOUTUBE_CAND_B3_ROSTER = (
        for n, tf in (("stiff_trendilo_6h", "6h"), ("stiff_trendilo_8h", "8h")) for s in _YC3_SYMS]
 )
 SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B3_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B3_ROSTER
+
+
+# 2026-11-01：第四批油管候选纸面(主流5个)，见 strategies/youtube_candidates_b4.py。
+# 真假突破拆两条各自记账(一半1.5R止盈 / 一半2×ATR逐根追踪，追踪在 multi_strategy_runner._maybe_bar_trail)；箱体40根+ATR预热，取400根。
+# 布林擠壓要近126天(8h=378根)带宽最低，取900根(与回测逐根对过信号一致)。
+YOUTUBE_CAND_B4_ROSTER = (
+    [{"symbol": s, "strategy": n, "timeframe": "4h", "bars_limit": 400, "params": {"mode": m, "n_box": 40, "wmax": 4.0, "big": 1.5}}
+     for n, m in (("jiasheng_brk_tp_4h", "brk_tp"), ("jiasheng_brk_trail_4h", "brk_trail")) for s in _YC3_SYMS]
+    + [{"symbol": s, "strategy": "mio_bb_squeeze_8h", "timeframe": "8h", "bars_limit": 900,
+        "params": {"mode": "mio_bb", "sq_days": 126, "sq_win": 10, "vol": True}} for s in _YC3_SYMS]
+)
+SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B4_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B4_ROSTER

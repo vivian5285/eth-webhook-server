@@ -206,6 +206,8 @@ ATR_TRAIL_STRATEGIES = {"ttm_squeeze_trail"}
 # 入场K线之后每根已收盘K线，best=入场以来最高(空单最低)，候选止损 best∓倍数×ATR14(当根)，只收紧。
 # 和上面 _maybe_trail_atr(现价-2×入场ATR、0.5R后才启动)不是一回事，只对下面这几个名字生效。
 BAR_TRAIL_STRATEGIES = {"neo_box_4h": 3.0, "neo_box_6h": 3.0, "stiff_trendilo_6h": 3.0, "stiff_trendilo_8h": 3.0}
+# 2026-11-01 第四批：JiaSheng 真假突破的"吊灯止损那一半"按回测 trail_atr=2.0 逐根追踪(同一个 trail_stop 函数)。
+BAR_TRAIL_STRATEGIES["jiasheng_brk_trail_4h"] = 2.0
 
 
 def _maybe_bar_trail(pos: dict, bars: List[dict]) -> None:
