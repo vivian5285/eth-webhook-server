@@ -153,12 +153,49 @@ def stats(curve, t0=None):
     return {"ret": round(100 * (v[-1][1] / v[0][1] - 1), 1), "max_dd": round(100 * dd, 1)}
 
 
+LIVE_FILE = "/var/lib/sndk_solo/live_C.json"     # live/sndk_fills.py 以 binanceC 身份只读导出的 C 账户真实成交
+
+
+def merge_live(allt):
+    """真实成交配到回测的那一笔：实盘开仓时间落在回测开仓K线开始后 3 小时内(执行器先挂 maker 最多 15 分钟)。
+    偏差按回测口径算：开仓 = 实盘均价相对回测开仓价(信号后那根开盘价)，平仓 = 回测平仓价相对实盘均价(正数=实盘更好)。"""
+    try:
+        with open(LIVE_FILE, "r", encoding="utf-8") as f:
+            L = json.load(f)
+    except Exception:
+        return None
+    armed = L.get("armed_at") or ARMED_AT
+    used = set(); rows = []
+    for lt in L.get("trades", []):
+        m = None
+        for k, bt in enumerate(allt):
+            if k not in used and bt["t"] <= lt["in_t"] < bt["t"] + 3 * H1:
+                m = k; break
+        r = {"in_t": lt["in_t"], "in_avg": lt["in_avg"], "qty": lt["in_qty"], "out_t": lt.get("out_t"), "out_avg": lt.get("out_avg"),
+             "out_type": lt.get("out_type"), "fee": lt["fee"], "pnl": lt["pnl"], "open": lt.get("open"), "bt": m}
+        if m is not None:
+            used.add(m); bt = allt[m]
+            r["in_slip_bp"] = round((lt["in_avg"] / bt["px"] - 1) * 1e4, 1) if lt["in_avg"] else None
+            if lt.get("out_avg") and bt.get("out_t"):
+                r["out_slip_bp"] = round((lt["out_avg"] / bt["out"] - 1) * 1e4, 1)
+            bt["live"] = len(rows)
+        rows.append(r)
+    missed = [k for k, bt in enumerate(allt) if bt["t"] >= armed and k not in used]
+    eq0 = L.get("arm_equity")
+    return {"ts": L.get("ts"), "equity": L.get("equity"), "arm_equity": eq0, "armed_at": armed,
+            "eq_pct": round(100 * (L["equity"] / eq0 - 1), 2) if eq0 and L.get("equity") else None,
+            "position": L.get("position"), "stop_px": L.get("stop_px"), "trades": rows, "missed_bt": missed,
+            "unmatched": [i for i, r in enumerate(rows) if r["bt"] is None],
+            "fees": round(sum(r["fee"] for r in rows), 4), "foreign": len(L.get("foreign_execs") or [])}
+
+
 def build():
     b = fetch_bars()
     R = replay_full(b)
     allt = R["trades"] + ([R["open"]] if R["open"] else [])
     for t in allt:
         t.pop("i", None)
+    live = merge_live(allt)
     closed = R["trades"]; wins = [t for t in closed if t["ret"] > 0]
     bh0 = b[1]["o"]; bh = [[x["t"], round(x["c"] / bh0, 5)] for x in b[1:]]
     rows = [[x["t"], x["o"], x["h"], x["l"], x["c"], round(R["ef"][i], 3), round(R["es"][i], 3), round(R["X"][i], 1)] for i, x in enumerate(b)]
@@ -177,7 +214,7 @@ def build():
         "state": {"pos": R["pos"], "stop": round(R["stop"], 2) if R["stop"] else None, "pend": R["pend"], "pend_why": R["pend_why"], "lock": R["lock"],
                   "bar_t": last["t"], "close": last["c"], "ema7": round(R["ef"][-1], 2), "ema25": round(R["es"][-1], 2),
                   "atr": round(R["A"][-1], 2), "adx": round(R["X"][-1], 1), "size_now": adx_size(R["X"][-1])},
-        "curve": R["curve"], "bh_curve": bh,
+        "curve": R["curve"], "bh_curve": bh, "live": live,
     }
     p = os.path.join(OUT, "sndk_solo.json")
     with open(p + ".tmp", "w", encoding="utf-8") as f:
@@ -189,7 +226,11 @@ def build():
 def ensure():
     """页面请求时调用：超过 TTL 才重算(只拉增量K线，一次公开接口请求)。"""
     p = os.path.join(OUT, "sndk_solo.json")
-    if not os.path.exists(p) or time.time() - os.path.getmtime(p) > TTL:
+    try:
+        live_newer = os.path.getmtime(LIVE_FILE) > os.path.getmtime(p)       # 实盘成交刚导出过就跟着重算
+    except OSError:
+        live_newer = False
+    if not os.path.exists(p) or live_newer or time.time() - os.path.getmtime(p) > TTL:
         try:
             build()
         except Exception:
