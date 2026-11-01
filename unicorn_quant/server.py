@@ -39,7 +39,7 @@ def api(fn):
             "/api/symbols", "/api/tickers", "/api/chart", "/api/bar",
             "/api/strategies", "/api/stocks", "/api/scanner",
             "/api/sweep/status", "/api/matrix/status",
-            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix", "/api/planf/live", "/api/planf/track",
+            "/api/optimal", "/api/optimal/bars", "/api/retired", "/api/optimal/recon", "/api/optimal/autofix", "/api/planf/live", "/api/planf/track", "/api/sndk_solo",
         }
         public_get = public_get or (request.method == "GET" and request.path.startswith("/api/universe"))   # 2026-10-18 全品种复盘只读
         public_analysis = request.method == "POST" and request.path in {
@@ -582,6 +582,19 @@ def planf_live():
             return None
     t = rd("/var/lib/planf/targets.json") or {}
     return jsonify(E=rd("/var/lib/planf/live_E_status.json"), signals={k: t.get(k) for k in ("asof", "ok", "problems", "vol_scale", "coin_weights_no_btc", "legs")})
+
+
+# ---------- 2026-11-01 SNDK单票方案 单独复盘页(1h K线)：engine/sndk_solo_view.py，和实盘执行器同一套重放，10 分钟内复用缓存 ----------
+@app.get("/sndk")
+def sndk_page():
+    return send_from_directory(app.static_folder, "sndk.html")
+
+
+@app.get("/api/sndk_solo")
+@api
+def sndk_solo_get():
+    from engine import sndk_solo_view
+    return _json_file(sndk_solo_view.ensure())
 
 
 @app.get("/api/retired")
