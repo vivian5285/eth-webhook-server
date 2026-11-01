@@ -221,6 +221,26 @@ class Exec:
         if tg and not tg.get("ok", False):
             frozen = True; why += tg.get("problems") or ["发布器报问题"]
         use_btc = E >= fl(tg.get("btc_min_equity") or 5000)
+        # ---- 2026-11-01 已被交易所止损/止盈单打掉、擂台(按收盘K线检查，4h/8h 腿最多晚一根)还没跟上的腿：
+        #      从目标里扣掉这条腿的份额、也不再给它挂单，直到发布器不再列出这条腿(擂台平掉)或 24 小时兜底 ----
+        closed = self.st.setdefault("closed_legs", {})
+        ids_now = {L.get("leg_id") for L in (tg.get("legs") or [])}
+        for k in list(closed):
+            if k not in ids_now or now > closed[k]:
+                closed.pop(k)
+        if closed and tg.get("legs"):
+            tg = dict(tg); keep_legs = []
+            tg["targets"] = dict(tg.get("targets") or {}); tg["targets_no_btc"] = dict(tg.get("targets_no_btc") or {})
+            for L in tg["legs"]:
+                if L.get("leg_id") in closed:
+                    for key, tk in (("frac", "targets"), ("frac_no_btc", "targets_no_btc")):
+                        if L.get(key):
+                            v = tg[tk].get(L["symbol"], 0.0) - L[key]
+                            if abs(v) > 1e-9: tg[tk][L["symbol"]] = round(v, 6)
+                            else: tg[tk].pop(L["symbol"], None)
+                else:
+                    keep_legs.append(L)
+            tg["legs"] = keep_legs
         frac = dict((tg.get("targets") if use_btc else tg.get("targets_no_btc")) or {})
         dfr = drift_fracs(tg, use_btc, mark)
         if dfr is None and frac:
@@ -230,7 +250,7 @@ class Exec:
             frac = dfr
         live = armed and not stopped
         # ---- 2026-10-19 突破单：交易所条件单触发了，但擂台(每小时检查)还没跟上 → 先按这条腿的份额保留，不要被"目标对比实际"平掉 ----
-        need_algo = bool(pos) or bool(self.st.get("brk_open")) or bool(tg.get("brk_orders")) or bool(self.st.get("pfs_prev"))   # 有残留止损单也要查，才能撤掉
+        need_algo = bool(pos) or bool(self.st.get("brk_open")) or bool(tg.get("brk_orders")) or bool(self.st.get("pfs_prev")) or bool(self.st.get("pft_prev"))   # 有残留止损单也要查，才能撤掉
         algos = self.algo_list() if (need_algo and live) else []
         hold = self.st.setdefault("brk_hold", {}); bopen = self.st.setdefault("brk_open", {})
         open_pfb = {h.get("symbol") for h in algos if str(h.get("clientAlgoId", "")).startswith("pfb_")}
@@ -251,14 +271,18 @@ class Exec:
         # ---- 交易所止损单触发后的冷却：擂台要到下一次每小时检查才会平掉那条腿，这段时间不能把刚止损的仓位又买回来 ----
         legsig = lambda s: sorted(f"{L['strategy']}:{L['side']}" for L in (tg.get("legs") or []) if L["symbol"] == s)
         cool = self.st.setdefault("cooldown", {}); lastp0 = self.st.get("last_pos") or {}
-        cur_pfs = {(h.get("symbol"), round(fl(h.get("triggerPrice")), 8)) for h in algos if str(h.get("clientAlgoId", "")).startswith("pfs_")}
         if live and algos is not None:
-            for s, trg in [tuple(x) for x in self.st.get("pfs_prev", [])]:
-                if (s, round(trg, 8)) not in cur_pfs and s not in self.st.get("pfs_cancelled", []) and abs(pos.get(s, 0.0)) < abs(lastp0.get(s, 0.0)):
-                    cool[s] = {"until": now + 7200, "sig": legsig(s), "side": 1 if lastp0.get(s, 0.0) > 0 else -1}
-                    log("交易所止损触发", symbol=s, trigger=trg, pos=pos.get(s, 0.0))
-                    ding(f"{s} 交易所止损单触发(止损价 {trg:g})，持仓 {lastp0.get(s, 0.0):g} → {pos.get(s, 0.0):g}；擂台跟上之前不会再买回")
-        self.st["pfs_cancelled"] = []
+            for pre, word in (("pfs", "止损"), ("pft", "止盈")):
+                cur_ = {(h.get("symbol"), round(fl(h.get("triggerPrice")), 8)) for h in algos if str(h.get("clientAlgoId", "")).startswith(pre + "_")}
+                for x in self.st.get(pre + "_prev", []):
+                    s, trg, ids = x[0], x[1], (x[2] if len(x) > 2 else [])
+                    if (s, round(trg, 8)) not in cur_ and s not in self.st.get(pre + "_cancelled", []) and abs(pos.get(s, 0.0)) < abs(lastp0.get(s, 0.0)):
+                        cool[s] = {"until": now + 7200, "sig": legsig(s), "side": 1 if lastp0.get(s, 0.0) > 0 else -1}
+                        for lid in ids:
+                            if lid: closed[lid] = now + 24 * 3600
+                        log(f"交易所{word}触发", symbol=s, trigger=trg, pos=pos.get(s, 0.0), legs=ids)
+                        ding(f"{s} 交易所{word}单触发({word}价 {trg:g})，持仓 {lastp0.get(s, 0.0):g} → {pos.get(s, 0.0):g}；这条腿在擂台平掉之前不会再买回")
+        self.st["pfs_cancelled"] = []; self.st["pft_cancelled"] = []
         for s in list(cool):
             if now > cool[s]["until"] or legsig(s) != cool[s]["sig"]:
                 cool.pop(s)
@@ -361,10 +385,13 @@ class Exec:
                     self.cancel(sym, o["clientOrderId"])
                 self.st["working"].pop(sym, None)
         # ---- 2026-10-19 交易所止损单(Algo 条件单，程序掉线也会触发)：每条腿各挂一张，只减这条腿的数量 ----
-        legs_for_stops = list(tg.get("legs") or []) + [{"symbol": s, "side": h["side"], "frac": h["frac"], "frac_no_btc": h["frac"],
+        legs_for_stops = [L for L in (tg.get("legs") or []) if L.get("leg_id") not in closed] + [{"symbol": s, "side": h["side"], "frac": h["frac"], "frac_no_btc": h["frac"],
                                                          "exchange_stop": h.get("stop")} for s, h in hold.items() if h.get("stop")]
         stops = self.sync_stops(E, pos, mark, legs_for_stops, use_btc, (0.5 if cb else 1) * g_scale, live, algos)
-        self.st["pfs_prev"] = [[x["symbol"], x["stop"]] for x in stops] if live else []
+        self.st["pfs_prev"] = [[x["symbol"], x["stop"], x.get("legs", [])] for x in stops] if live else []
+        # 2026-11-01 止盈单(只有带 exchange_tp 的腿：第四批真假突破的 1.5R 那一半)：回测是盘中触价即止盈，擂台要等K线收盘才知道，挂交易所才复刻得上
+        tps = self.sync_stops(E, pos, mark, legs_for_stops, use_btc, (0.5 if cb else 1) * g_scale, live, algos, kind="tp")
+        self.st["pft_prev"] = [[x["symbol"], x["stop"], x.get("legs", [])] for x in tps] if live else []
         brks = self.sync_brk(E, mark, tg.get("brk_orders") or [], use_btc, (0.5 if cb else 1) * g_scale, live and not frozen, algos, pos)
         # ---- 保证金率告警 ----
         mm, mb = fl(acc.get("totalMaintMargin")), fl(acc.get("totalMarginBalance"))
@@ -381,7 +408,7 @@ class Exec:
             if sym not in {p[0] for p in plans}:
                 stuck.pop(sym, None)
         status = {"ts": now, "account": ACCT, "mode": mode, "equity": round(E, 2), "use_btc": use_btc, "frozen": frozen, "why": why,
-                  "margin_ratio": round(mratio, 4), "stops": stops, "brk_orders": brks, "brk_hold": hold, "audit": self.st.get("audit_today", {}),
+                  "margin_ratio": round(mratio, 4), "stops": stops, "tps": tps, "closed_legs": sorted(closed), "brk_orders": brks, "brk_hold": hold, "audit": self.st.get("audit_today", {}),
                   "circuit_breaker": cb, "rth": rth, "gross_target_usdt": round(sum(abs(r["target_usdt"]) for r in rows), 2),
                   "gross_position_usdt": round(sum(abs(r["position_usdt"]) for r in rows), 2), "rows": rows,
                   "would_do" if not (armed and not stopped) else "did": acted, "signals_asof": tg.get("asof")}
@@ -450,40 +477,49 @@ class Exec:
                                       "pos0": prev.get("pos0", (pos or {}).get(s, 0.0)) if k in keep else (pos or {}).get(s, 0.0)}
         return out
 
-    def sync_stops(self, E, pos, mark, legs, use_btc, scale, live, algos=None):
+    def sync_stops(self, E, pos, mark, legs, use_btc, scale, live, algos=None, kind="stop"):
         """每个有持仓的品种：和持仓同方向的每条腿挂一张 STOP_MARKET(reduceOnly，数量=这条腿那一份，触发价=这条腿的止损，按标记价格触发)。
         同价位的腿合并成一张；总数量不超过持仓。已有的(clientAlgoId 前缀 pfs_)价格/数量没变就不动，变了撤掉重挂，不需要的撤掉。"""
-        want = {}
+        fld, pre, otype, word = ("exchange_stop", "pfs", "STOP_MARKET", "止损") if kind == "stop" else ("exchange_tp", "pft", "TAKE_PROFIT_MARKET", "止盈")
+        want = {}; ids = {}; share = {}
         for L in legs:
             s = L["symbol"]; cur = pos.get(s, 0.0); f = self.filters.get(s)
-            if not cur or not f or not L.get("exchange_stop"):
+            if not cur or not f:
                 continue
             d = 1 if L["side"] == "LONG" else -1
             if d != (1 if cur > 0 else -1):
                 continue
             fr = abs(L.get("frac" if use_btc else "frac_no_btc") or 0) * scale
-            px = mark.get(s) or 0; stp = float(L["exchange_stop"])
-            if px <= 0 or fr <= 0 or (d > 0 and stp >= px) or (d < 0 and stp <= px):
-                continue                                    # 已经越过止损：交给擂台按规则平，不挂
+            px0 = mark.get(s) or 0
+            if px0 > 0 and fr > 0:
+                share[s] = share.get(s, 0.0) + fr * E / px0       # 这个品种所有同向腿的份额合计(止盈单只占自己那条腿的比例)
+            if not L.get(fld):
+                continue
+            px = mark.get(s) or 0; stp = float(L[fld])
+            beyond = ((d > 0 and stp >= px) or (d < 0 and stp <= px)) if kind == "stop" else ((d > 0 and stp <= px) or (d < 0 and stp >= px))
+            if px <= 0 or fr <= 0 or beyond:
+                continue                                    # 已经越过止损/止盈价：交给擂台按规则平，不挂
             key = (s, round(stp / f["tick"]) * f["tick"])
-            want[key] = want.get(key, 0.0) + fr * E / px
+            want[key] = want.get(key, 0.0) + fr * E / px; ids.setdefault(key, []).append(L.get("leg_id"))
         out = []
         # 2026-10-19 止损单数量按"实际持仓"按腿的比例分配(合计 = 实际持仓)：目标和实际之间在再平衡容差内的小差异，
         # 不会让止损数量随价格来回变(0.16↔0.15 反复撤单重挂)，也不会留一小截持仓没有止损保护
         tot = {}
         for (s, stp), q in want.items():
             tot[s] = tot.get(s, 0.0) + q
+        if kind == "tp":
+            tot = {s: max(v, share.get(s, 0.0)) for s, v in tot.items()}
         for (s, stp), q in list(want.items()):
             f = self.filters[s]; cap = abs(pos.get(s, 0.0))
             q = self.rdown(cap * q / tot[s], f["step"]) if tot.get(s) else 0.0
             if q <= 0 or q < f["minq"]:
                 want.pop((s, stp)); continue
             want[(s, stp)] = q
-            out.append({"symbol": s, "stop": stp, "qty": q, "side": "SELL" if pos[s] > 0 else "BUY"})
+            out.append({"symbol": s, "stop": stp, "qty": q, "side": "SELL" if pos[s] > 0 else "BUY", "legs": ids.get((s, stp), [])})
         if not live:
             return out
         have = algos if algos is not None else self.algo_list()
-        mine = [h for h in (have or []) if str(h.get("clientAlgoId", "")).startswith("pfs_")]
+        mine = [h for h in (have or []) if str(h.get("clientAlgoId", "")).startswith(pre + "_")]
         keep = set()
         for h in mine:
             s = h.get("symbol"); f = self.filters.get(s) or {"tick": 1e-8, "step": 1e-8}
@@ -491,23 +527,23 @@ class Exec:
             if k in want and abs(fl(h.get("quantity")) - want[k]) < f["step"] / 2 and k not in keep:
                 keep.add(k); continue
             try:
-                self.algo("delete", "algoOrder", {"symbol": s, "algoId": int(h.get("algoId"))}); self.st.setdefault("pfs_cancelled", []).append(s)
-                log("撤止损单", symbol=s, trigger=h.get("triggerPrice"), qty=h.get("quantity"))
+                self.algo("delete", "algoOrder", {"symbol": s, "algoId": int(h.get("algoId"))}); self.st.setdefault(pre + "_cancelled", []).append(s)
+                log(f"撤{word}单", symbol=s, trigger=h.get("triggerPrice"), qty=h.get("quantity"))
             except Exception as e:
-                log("撤止损单失败", symbol=s, err=str(e)[:200])
+                log(f"撤{word}单失败", symbol=s, err=str(e)[:200])
         for (s, stp), q in want.items():
             if (s, stp) in keep:
                 continue
             f = self.filters[s]; dec = max(0, -int(math.floor(math.log10(f["tick"])))) if f["tick"] < 1 else 0
             try:
                 self.algo("post", "algoOrder", {"algoType": "CONDITIONAL", "symbol": s, "side": "SELL" if pos[s] > 0 else "BUY",
-                                                "type": "STOP_MARKET", "triggerPrice": f"{stp:.{dec}f}", "quantity": self.fmt(q, f["step"]),
+                                                "type": otype, "triggerPrice": f"{stp:.{dec}f}", "quantity": self.fmt(q, f["step"]),
                                                 "reduceOnly": "true", "workingType": "MARK_PRICE",
-                                                "clientAlgoId": _algo_id("pfs", s)})
-                log("挂止损单", symbol=s, trigger=stp, qty=q)
+                                                "clientAlgoId": _algo_id(pre, s)})
+                log(f"挂{word}单", symbol=s, trigger=stp, qty=q)
             except Exception as e:
-                log("挂止损单失败", symbol=s, err=str(e)[:300])
-                ding(f"{s} 交易所止损单挂失败：{str(e)[:120]}(擂台每小时检查止损仍在兜底)", f"stopfail_{s}", 3600)
+                log(f"挂{word}单失败", symbol=s, err=str(e)[:300])
+                ding(f"{s} 交易所{word}单挂失败：{str(e)[:120]}(擂台按收盘K线检查仍在兜底)", f"{pre}fail_{s}", 3600)
         return out
 
     # ---------- 实盘自我审查：成交滑点 ----------

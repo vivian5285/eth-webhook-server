@@ -97,7 +97,7 @@ def build() -> dict:
         if strat == STOCK_LEG and entry and atr0:
             xstop = float(entry) - 10.0 * float(atr0)
         legs.append({"strategy": strat, "symbol": sym, "side": "LONG" if d > 0 else "SHORT", "entry": entry, "alloc": round(alloc, 4),
-                     "stop": stop, "exchange_stop": xstop, "since": created, "atr0": atr0,
+                     "stop": stop, "exchange_stop": xstop, "since": created, "atr0": atr0, "leg_id": f"{strat}|{sym}|{created}",
                      "bt_entry": _bt_entry(opt, rot, strat, sym, d), "bt_stop": _bt_entry(opt, rot, strat, sym, d, "stop")})
     st_gross = sum(abs(v) for v in stock.values())
     if st_gross > 1.0:
@@ -140,11 +140,11 @@ def build() -> dict:
     t_all, t_nb = finish(crypto_with(cw)), finish(crypto_with(w_nobtc))
     # 2026-11-01 叠加腿(第四批候选)：擂台纸面开着的仓 → 按开仓时止损距离定比例，加到目标和腿里(执行器照常下单、挂交易所止损)
     con = sqlite3.connect(f"file:{ARENA_DB}?mode=ro", uri=True, timeout=10)
-    orows = con.execute("select id, strategy, symbol, side, entry, atr0, stop, created_at from shadow_positions_v2 where status='open' and strategy in (%s)"
+    orows = con.execute("select id, strategy, symbol, side, entry, atr0, stop, created_at, tp1_price from shadow_positions_v2 where status='open' and strategy in (%s)"
                         % ",".join("?" * len(OVERLAY_LEGS)), tuple(OVERLAY_LEGS)).fetchall()
     con.close()
     seen = _rd(OVERLAY_SEEN, {}) or {}; ov_legs = []
-    for pid, strat, sym, side, entry, atr0, stop, created in orows:
+    for pid, strat, sym, side, entry, atr0, stop, created, tp1 in orows:
         d = 1 if str(side).upper() == "LONG" else -1
         rd_ = seen.get(str(pid)) or (abs(float(entry) - float(stop)) / float(entry) if entry and stop else None)
         if not rd_:
@@ -152,7 +152,8 @@ def build() -> dict:
         seen[str(pid)] = rd_
         f_ = d * OVERLAY_LEGS[strat] * min(0.01 / rd_, 3.0)
         ov_legs.append({"strategy": strat, "symbol": sym, "side": "LONG" if d > 0 else "SHORT", "entry": entry, "alloc": 0.0,
-                        "stop": stop, "exchange_stop": stop, "since": created, "atr0": atr0, "bt_entry": None, "bt_stop": None, "overlay": True,
+                        "stop": stop, "exchange_stop": stop, "exchange_tp": tp1 or None, "since": created, "atr0": atr0, "bt_entry": None, "bt_stop": None,
+                        "overlay": True, "leg_id": f"{strat}|{sym}|{created}",
                         "risk_dist": round(rd_, 5), "frac": f_, "frac_no_btc": 0.0 if sym == "BTCUSDT" else f_})
     tmp = OVERLAY_SEEN + ".tmp"                      # 不删旧记录：planf_track 用它算已平叠加单的 R(开仓止损距离)
     with open(tmp, "w", encoding="utf-8") as f:
