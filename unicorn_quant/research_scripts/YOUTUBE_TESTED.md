@@ -25,11 +25,11 @@
 | 交易伦 - AT | UCGTDHRerNo4eIyaliexDxtA | 无字幕，语音转写：5m EMA21/50/200强动能K(fLN20X1dP48)、破位清单RSI过滤(fTRv2HhTJUk)、伦敦破位(QZNzq-BunA4)；其余13期(谐波/供需/13种价格行为/ICI/动能交易/多时框等)待转写，ICT系列=已测同类 | 2026-10-30 | 已测3期全否决（四博主①③） | youtube_4ch/lun_hist.py |
 | 已泰 | UCLIFrck8EUhjRySvJAALa9Q | 67期中交易类约15期：EMA+威廉分型、双RSI、锚定VWAP、TD九转、Impulse MACD、RSI布林带、热力图+SMA200+AO、SuperTrend+HMA200、分型突破+放量（布林3σ/HMA+ROC/均线误区=已测同类）；0NhDZCA6urE、fc-LnP8mwiA 无字幕待转写 | 2026-10-30 | 否决（研究页 四博主②） | youtube_4ch/yitai_hist.py |
 | 幣哥備份 | UCdAf7idaznVssBMHhjS3EvA | 同上（频道只有3期，全是双均线系统） | 2026-10-30 | 进行中 | youtube_4ch/ |
-| mio来了 | UCnKF3a8uDDkLBc9V5hTTM6Q | 同上 | 2026-10-30 | 进行中 | youtube_4ch/ |
+| mio来了 | UCnKF3a8uDDkLBc9V5hTTM6Q | 布林带最完整教学(4QE8YfsrWzA，11-01 转写)：带宽6个月最低=擠壓→收盘收在带外进场→收回中轨离场；往期 K线4型态/均线/RSI/MACD/斐波那契/J Law META/PTJ 200日线；i-1q0TOuI9s RSI 50%法=会员专属打不开 | 2026-11-01 | 布林擠壓 8h **候选，11-01 已上擂台纸面(mio_bb_squeeze_8h)** | youtube_b4/b4d.py |
 | 大黑美股（中低频实盘自动交易） | UCvZznN0wCMZaP2VdtLyxPTw | QQQ/TQQQ：EMA5/30、牛熊均线切换TQQQ、动态风险分配、MACD（日线+1h近3年；他主打30m无长历史） | 2026-10-30 | 否决（研究页 七博主①） | youtube_b2/qqq_tqqq.py |
 | Trader小Q | UCtNPrRw5ovVLlOlODBJpNJw | 加密参数RSI9/MACD(8,21,5)/布林3σ、Twin Range+Supertrend+放量、Donchian+B-Xtrender | 2026-10-30 | Twin Range日线候选观察，其余否决（七博主②） | youtube_b2/tv_combos.py |
-| Yuchi Trader | UCW1KHRAydlyBrX7nz7bz26g | Halftrend+RSI；Rob Hoffman=已测；其余(SSL/Supertrend/宙斯/5m剥头皮)同类 | 2026-10-30 | 否决（七博主②③） | youtube_b2/tv_combos.py |
-| 交易聰明錢 | UCD9HUxu-a1Eug7Z61gDf6-g | Supertrend+KD；均线SOP(YsYFrWVwAq4 待转写)；其余裸K/SMC/FVG=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
+| Yuchi Trader | UCW1KHRAydlyBrX7nz7bz26g | Halftrend+RSI；Rob Hoffman=已测；3gp_2F2vN48 EMA50/200+VuManChu Swing Free(Range Filter)(11-01)；其余(SSL/Supertrend/宙斯/5m剥头皮)同类 | 2026-11-01 | 否决（七博主②③、四批②） | youtube_b2/tv_combos.py, youtube_b4/b4.py |
+| 交易聰明錢 | UCD9HUxu-a1Eug7Z61gDf6-g | Supertrend+KD；均线SOP(YsYFrWVwAq4，11-01 转写：EMA16/64+Impulse MACD 同向，回踩/金叉进场，三条件共振离场)；其余裸K/SMC/FVG=已测同类 | 2026-11-01 | 否决（七博主②、四批③） | youtube_b2/tv_combos.py, youtube_b4/b4d.py |
 | 威廉 交易頻道 | UCZzqkJj6vv_0M2GBu3H-pOA | 吞没4分战法(吞没+均线+MACD+量)；AI 5m策略(2CUvhvcjo1w 11-01否决)；威科夫/现货网格=已测同类 | 2026-10-30 | 否决（七博主②） | youtube_b2/tv_combos.py |
 | 蛋仔 CryptoEGG | UCKnA-uQNw6fErPxZEXdFMlg | SMC/ICT 入门(eWDVA9zKB-I)；频道多为1分K剥头皮/SNR/ICT | 2026-10-30 | 已测同类（七博主③） | — |
 | 暗夜飞行 | UCUzrqf93vnhgqJ-CbsTJQBw | 合约网格多空双开(3KFtMhNeRY4)；频道多为网格/币安Alpha | 2026-10-30 | 已测同类（七博主③） | — |
@@ -41,6 +41,11 @@
 | 威廉 交易頻道(续) | UCZzqkJj6vv_0M2GBu3H-pOA | 2CUvhvcjo1w AI 5m RSI70/30 反向 1%/1% + z2YNY3QBuXE 4招(放量/长影线/持续超买超卖不做/1h阶段高低点扫流动性) | 2026-11-01 | 否决（任何过滤组合零成本都为负） | youtube_b3/b3_extra.py |
 | BitGuy小比 | UCbBZuXDPkPYn4t0FhCGnrAw | EU5TqXN2R4E Claude+Hermes 自我优化交易代理：没有具体规则，是"自动复盘改参数"的流程；频道其余=工具教程(TV/ATAS/IBKR/3Commas) | 2026-11-01 | 无可测规则（自动改参数=过拟合风险，见前视检验/选择偏差条目） | — |
 | 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选，11-01 已上擂台纸面(stiff_trendilo_6h/8h)**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
+| JiaSheng 嘉成 TradingLife | UCBEVhAB8QF9IhUr5g-bGZxQ | 173期(多为黄金/BTC盘面+vlog)：ITgGLKWSXeY 斐波那契0.618~0.705、nBooQWVjTw0 TSS日线EMA12/24(自称5年32倍)、OLm9w1vbLmU MACD+EMA200(30m)、nowxuPXru3Q 真假突破(大K/三连K+分批+吊灯止损)、6KCk4-9FyJA MACD背离×SMC扫低点；0Vr4xJoESXM / 3WCAsU19S2U 胜率70%/80%策略=会员专属打不开；其余SMC/SNR/资金管理=同类 | 2026-11-01 | 真假突破 4h **候选，11-01 已上擂台纸面(jiasheng_brk_tp_4h / jiasheng_brk_trail_4h)**；其余否决（研究页 四批①） | youtube_b4/b4.py, b4c.py, tss.py, b4c_nb.py |
+| 诗魂 Shi Hun | UCsb7kzrjIWCFR0FCkk7l7rg | 279期，自制指标系列：tMZky1ZpFBY RJ指标(J线×RSI)、B-38PKINIFA MJ指标(MACD 0轴+J>50)、P02AUNYdKA8 2560战法、-fZZHMpfuHQ CIS双均线(5/25，前两段)；未测：双平滑KD/OBV起涨/神奇均线(自适应=KAMA/VIDYA已测同类)/TD9/Qullamaggie/BNF/Bit浪浪=已测 | 2026-11-01 | MJ 8h 只多 观察(2025后拉低方案F)；其余否决（研究页 四批②） | youtube_b4/b4.py, b4b.py, b4_nb.py |
+| Louis Trading | UCJJ2W0jG0SQPV4_z0wMjL8Q | 323期多为外汇/黄金：G5bFcWoHCR8 结构突破+斐波那契0.5回调+流动性(SMC)、kE6TepxrrzE M15+M1 超短线；其余 H4+M15 SMC 机械化系列=同类 | 2026-11-01 | 已测同类(SMC/斐波那契/1m超短线) | — |
+| Mike Yu 聰明錢 | UCTRgIiw2c7qtBrqiG1Wq8nQ | 55期 全是 SMC/ICT/TPO 订单流：s0VD85XpAKs SMC日内(偏见+多周期) | 2026-11-01 | 已测同类(ICT/SMC/订单流) | — |
+| 论文 Zarattini/Pagani/Barbon 2025「Catching Crypto Trends」 | SSRN/RePEc rp2580 | 唐奇安 9 周期(5~360天)集成+中点追踪止损+25%波动率目标，只做多(网上找的新来源，不是油管) | 2026-11-01 | 否决（单独2025后≈0，接进/替换方案F都降） | youtube_b4/donchian_ens.py |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
@@ -74,6 +79,21 @@
 | 7foqLkodFps | SuperTrend(10,3) + HMA200 | 否决（单独+0.21R，接进方案F 0.5%时5.43、1%时4.84） |
 | WCIP09ISi6Y | 分型结构突破 + MA200向上 + 放量 | 否决（接进方案F 4.57） |
 | 9zXnhSqG91w / 4gVLowpz9eY / swldmJKPP_o | 布林3σ反转 / HMA+ROC / 均线三误区 | 已测同类，未单独测 |
+
+### 2026-11-01 第四批（youtube_b4/，研究页 四批①②③④）
+| 视频ID | 博主 | 规则 | 结论 |
+|---|---|---|---|
+| ITgGLKWSXeY | JiaSheng | 斐波那契 0.618~0.705 回调挂单，止损1.0，目标前高/1.618 | 否决（120组仅11组含费为正，都<0.1R） |
+| nBooQWVjTw0 | JiaSheng | TSS 日线EMA12/24 整根K脱离两线开仓、大阳8%/大阴5%直接成立、不设止损、减半牛熊过滤 | 否决（BTC 2020~25 我们测 2.5~14倍、回撤58~67%，不是他说的32倍/26%；比方案F币圈腿差很多） |
+| OLm9w1vbLmU | JiaSheng | MACD 交叉+EMA200 顺势+"能量小"过滤，前低止损 1.5R | 否决（30m~8h 都在 ±0.06R） |
+| nowxuPXru3Q | JiaSheng | 箱体突破那根大K/三连K=真突破，止损箱内，一半1.5R+一半吊灯止损 | **候选**：4h 18组16组>方案F，平均+1% 6.11(4.90/11.97)，已上擂台纸面 |
+| 6KCk4-9FyJA | JiaSheng | MACD 底背离 + 扫前低收回(SMC) | 否决（1h~4h 为负） |
+| 3gp_2F2vN48 | Yuchi | EMA50/200 + VuManChu Swing Free(Range Filter) | 否决（邻域接进方案F 3.3~4.7） |
+| tMZky1ZpFBY / B-38PKINIFA / P02AUNYdKA8 / -fZZHMpfuHQ | 诗魂 | RJ / MJ / 2560 / CIS | MJ 8h 只多 14/18组>方案F 但后半 10.02→8.71，观察；其余否决 |
+| 4QE8YfsrWzA | mio来了 | 布林擠壓(带宽6个月最低)→收盘带外进场→收回中轨离场 | **候选**：8h 24组20组>方案F，平均+1% 5.99(4.03/15.31)，收益集中2024/2026，已上擂台纸面 |
+| YsYFrWVwAq4 | 交易聰明錢 | EMA16/64 + Impulse MACD 同向 | 否决（邻域 3.7~5.1） |
+| G5bFcWoHCR8 / kE6TepxrrzE / s0VD85XpAKs | Louis / Louis / Mike Yu | SMC结构+斐波那契 / M15+M1 / SMC日内 | 已测同类 |
+| CGZ8GYwqkms / Sog09AOV9GE | 交易研究院 / 大黑美股 | — | 已测（第三批 / 第二批） |
 
 ### 2026-11-01 第三批10个视频（youtube_b3/，研究页 十博主①②③④）
 | 视频ID | 博主 | 规则 | 结论 |
