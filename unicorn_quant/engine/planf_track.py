@@ -26,6 +26,14 @@ OUT = os.path.join(HERE, "optimal_data")
 STATUS = "/var/lib/planf/live_E_status.json"
 TARGETS = "/var/lib/planf/targets.json"
 INCOME = "/var/lib/planf/income_E.json"
+# 2026-11-01 叠加腿(第四批候选：真假突破4h两条 + 布林擠壓8h)直接上实盘。边界条件：叠加部分自己的回撤(按擂台已平单×实盘比例算)
+# 回测"两者合并 1%"这一部分最大回撤 4.4%：超过 5% 告警，超过 9%(≈2倍)自动建 OVERLAY_OFF 停掉叠加(方案F不受影响，宝贝删文件恢复)
+OVERLAY_SEEN = "/var/lib/planf/overlay_seen.json"
+OVERLAY_OFF = "/var/lib/planf/OVERLAY_OFF"
+OVERLAY_W = {"jiasheng_brk_tp_4h": 0.25, "jiasheng_brk_trail_4h": 0.25, "mio_bb_squeeze_8h": 0.5}
+OVERLAY_START = 1793520000          # 2026-11-01 叠加上实盘(之后擂台开的叠加单才算；擂台这几条今天才上线)
+OVERLAY_WARN, OVERLAY_KILL = 0.05, 0.09
+ARENA_DB = "/home/stratroster/eth-webhook-server/strategy_engine/data/shadow_v2.db"
 HIST = os.path.join(OUT, "planf_track_hist.jsonl")
 LIVE_START = 1792407600            # 2026-10-19 10:59 UTC 宝贝建 ARMED，E 账户进入实盘
 LIVE_START_EQ = 659.83
@@ -156,6 +164,8 @@ def leg_layer():
     tg = _rd(TARGETS, {}) or {}
     rows, bad = [], []
     for L in tg.get("legs") or []:
+        if L.get("overlay"):
+            continue                                   # 叠加腿没有回测口径，止损就是擂台的(真假突破箱中线/追踪、布林中轨)
         e, a0, xs, bs, be = (float(L.get(k) or 0) for k in ("entry", "atr0", "exchange_stop", "bt_stop", "bt_entry"))
         gap = round(100 * (e / be - 1), 2) if be else None
         note = ""
@@ -169,6 +179,35 @@ def leg_layer():
         rows.append({"strategy": L["strategy"], "symbol": L["symbol"], "side": L["side"], "entry": e, "bt_entry": be or None,
                      "entry_gap_pct": gap, "exchange_stop": xs, "bt_stop": bs or None, "note": note})
     return {"rows": rows, "bad": bad}
+
+
+def overlay_layer():
+    """叠加腿已平单按实盘比例(权重×min(1%÷开仓止损距离,3))折成占净值的盈亏，累加成曲线看回撤。"""
+    import sqlite3
+    seen = _rd(OVERLAY_SEEN, {}) or {}
+    try:
+        con = sqlite3.connect(f"file:{ARENA_DB}?mode=ro", uri=True, timeout=10)
+        rows = con.execute("select id, strategy, symbol, side, entry, exit_price, closed_at from shadow_positions_v2 where status!='open' and created_at>=? "
+                           "and strategy in (%s) order by closed_at" % ",".join("?" * len(OVERLAY_W)), (OVERLAY_START, *OVERLAY_W)).fetchall()
+        n_open = con.execute("select count(*) from shadow_positions_v2 where status='open' and strategy in (%s)" % ",".join("?" * len(OVERLAY_W)),
+                             tuple(OVERLAY_W)).fetchone()[0]
+        con.close()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "dd": 0.0, "cum": 0.0, "n": 0}
+    cum = peak = dd = 0.0; trades = []
+    for pid, strat, sym, side, entry, exitp, closed in rows:
+        rd_ = seen.get(str(pid))
+        if not rd_ or not entry or not exitp:
+            continue
+        d = 1 if str(side).upper() == "LONG" else -1
+        pnl = OVERLAY_W[strat] * min(0.01 / rd_, 3.0) * d * (float(exitp) / float(entry) - 1) - OVERLAY_W[strat] * min(0.01 / rd_, 3.0) * 0.0013
+        cum += pnl; peak = max(peak, cum); dd = max(dd, peak - cum)
+        trades.append({"strategy": strat, "symbol": sym, "pnl_pct": round(100 * pnl, 3), "closed_at": closed})
+    off = os.path.exists(OVERLAY_OFF)
+    if dd > OVERLAY_KILL and not off:
+        open(OVERLAY_OFF, "w").write(f"auto {time.strftime('%F %T')} 叠加回撤 {dd:.1%} > {OVERLAY_KILL:.0%}" + chr(10)); off = True
+    return {"n": len(trades), "open": n_open, "cum_pct": round(100 * cum, 2), "dd_pct": round(100 * dd, 2), "off": off, "recent": trades[-10:],
+            "dd": dd, "cum": cum}
 
 
 def main():
@@ -185,19 +224,21 @@ def main():
         h.append(snap)
     seg = attribute(h)
     inc = _rd(INCOME, {}) or {}
-    rec = recon_layer(now); ex = exec_layer(st); lg = leg_layer()
+    rec = recon_layer(now); ex = exec_layer(st); lg = leg_layer(); ov = overlay_layer()
     res = {"ts": now, "ok": True, "equity": snap["eq"],
            "since_live": {"start": LIVE_START, "start_eq": LIVE_START_EQ, "eq_change_pct": round(100 * (snap["eq"] / LIVE_START_EQ - 1), 2),
                           "income": inc.get("total"), "income_by_day": inc.get("by_day"), "backtest_pct": backtest_change(LIVE_START)},
            "attr": {"24h": window(seg, now - 86400), "7d": window(seg, now - 7 * 86400), "all": window(seg, 0),
                     "first_snapshot": h[0]["ts"] if h else None},
-           "recon": rec, "exec": ex, "legs": lg}
+           "recon": rec, "exec": ex, "legs": lg, "overlay": {k: v for k, v in ov.items() if k not in ("dd", "cum")}}
     _wr(os.path.join(OUT, "planf_track.json"), res)
     # 告警
     checks = [("track_dev", not ex["dev_bad"], "实盘持仓偏离目标超过25%：" + "；".join(ex["dev_bad"])),
               ("track_cover", not ex["cover_bad"], "交易所止损单没盖住持仓：" + "；".join(ex["cover_bad"])),
               ("track_recon", not rec["mismatch_now"], "回测↔擂台持仓不一致：" + "；".join(rec["mismatch_now"][:4])),
               ("track_legs", not lg["bad"], "止损和回测口径不一致：" + "；".join(lg["bad"][:4])),
+              ("track_overlay", ov.get("dd", 0) <= OVERLAY_WARN, f"叠加腿(真假突破+布林擠壓)回撤 {ov.get('dd', 0):.1%}，超过回测最大4.4%的告警线5%"
+               + ("；已超9%，自动停用叠加(建了 OVERLAY_OFF，方案F照常；删掉该文件恢复)" if ov.get("off") else "")),
               ("track_gap7", res["attr"]["7d"]["hours"] < 24 or res["attr"]["7d"]["total_gap_pct"] / 100 > GAP7_ALERT,
                f"近7天实盘比目标模型少赚 {-res['attr']['7d']['total_gap_pct']:.2f}%(持仓偏差 {res['attr']['7d']['pos_gap_pct']:.2f}%、执行成本 {res['attr']['7d']['exec_gap_pct']:.2f}%)")]
     sp = os.path.join(OUT, "planf_track_alert_state.json"); sst = _rd(sp, {}) or {}

@@ -27,6 +27,13 @@ OUT_DIR = "/var/lib/planf"
 CRYPTO_LEGS = {"daily_ema_brk_cycle_main5": 0.03, "st8h_cycle_main5": 0.03 * math.sqrt(8 / 24), "boll8h_cycle_main5": 0.03 * math.sqrt(8 / 24)}
 STOCK_LEG = "stock_sector_rot6m5_long"
 M5 = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"]
+# 2026-11-01 宝贝拍板：第四批两个候选直接叠加上实盘(回测"两者合并 1%"：方案F 5.26→6.55，回撤18.8%→19.2%)。
+# 口径同 youtube_b4/b4_overlay.py(combo_mtm.mtm_daily)：每笔名义仓位 = 权重 × min(1% ÷ 止损距离%, 3)，开仓后数量不变；
+# 真假突破拆两条(1.5R止盈 / 2ATR追踪)各占 0.25，布林擠壓 0.5。不乘币种权重、不乘波动率缩放；方案F+叠加总名义 > 2 时只压叠加部分。
+OVERLAY_LEGS = {"jiasheng_brk_tp_4h": 0.25, "jiasheng_brk_trail_4h": 0.25, "mio_bb_squeeze_8h": 0.5}
+OVERLAY_SEEN = os.path.join(OUT_DIR, "overlay_seen.json")   # 每笔第一次看到时的止损距离(追踪止损会把擂台的 stop 改掉，仓位要按开仓那一刻定)
+# 边界条件：这个文件存在 = 叠加腿全部不跟(已有叠加仓位由执行器按目标平掉，方案F不受影响)。宝贝手动建/删，或 planf_track 自动建(叠加部分回撤超限)
+OVERLAY_OFF = os.path.join(OUT_DIR, "OVERLAY_OFF")
 
 
 def _rd(p, default=None):
@@ -129,10 +136,43 @@ def build() -> dict:
         brk.append({"symbol": s, "side": o["side"], "level": float(o["level"]), "for_day": o.get("for_day"),
                     "stop": round(float(o["level"]) * (1 - d * 3.0 * atrp), 8) if atrp else None,
                     "frac": round(base * cw.get(s, 0.0), 6), "frac_no_btc": round(base * w_nobtc.get(s, 0.0), 6)})
+    t_all, t_nb = finish(crypto_with(cw)), finish(crypto_with(w_nobtc))
+    # 2026-11-01 叠加腿(第四批候选)：擂台纸面开着的仓 → 按开仓时止损距离定比例，加到目标和腿里(执行器照常下单、挂交易所止损)
+    con = sqlite3.connect(f"file:{ARENA_DB}?mode=ro", uri=True, timeout=10)
+    orows = con.execute("select id, strategy, symbol, side, entry, atr0, stop, created_at from shadow_positions_v2 where status='open' and strategy in (%s)"
+                        % ",".join("?" * len(OVERLAY_LEGS)), tuple(OVERLAY_LEGS)).fetchall()
+    con.close()
+    seen = _rd(OVERLAY_SEEN, {}) or {}; ov_legs = []
+    for pid, strat, sym, side, entry, atr0, stop, created in orows:
+        d = 1 if str(side).upper() == "LONG" else -1
+        rd_ = seen.get(str(pid)) or (abs(float(entry) - float(stop)) / float(entry) if entry and stop else None)
+        if not rd_:
+            problems.append(f"叠加腿 {strat} {sym} 没有止损，不跟"); continue
+        seen[str(pid)] = rd_
+        f_ = d * OVERLAY_LEGS[strat] * min(0.01 / rd_, 3.0)
+        ov_legs.append({"strategy": strat, "symbol": sym, "side": "LONG" if d > 0 else "SHORT", "entry": entry, "alloc": 0.0,
+                        "stop": stop, "exchange_stop": stop, "since": created, "atr0": atr0, "bt_entry": None, "bt_stop": None, "overlay": True,
+                        "risk_dist": round(rd_, 5), "frac": f_, "frac_no_btc": 0.0 if sym == "BTCUSDT" else f_})
+    tmp = OVERLAY_SEEN + ".tmp"                      # 不删旧记录：planf_track 用它算已平叠加单的 R(开仓止损距离)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(seen, f)
+    os.replace(tmp, OVERLAY_SEEN)
+    if os.path.exists(OVERLAY_OFF):
+        ov_legs = []
+    for key, tg in (("frac", t_all), ("frac_no_btc", t_nb)):
+        og = sum(abs(L[key]) for L in ov_legs); room = max(0.0, 2.0 - sum(abs(v) for v in tg.values()))
+        k_ = min(1.0, room / og) if og > 0 else 1.0
+        for L in ov_legs:
+            L[key] = round(L[key] * k_, 6)
+            if L[key]:
+                tg[L["symbol"]] = round(tg.get(L["symbol"], 0.0) + L[key], 6)
+        for s in [s for s, v in tg.items() if abs(v) <= 1e-9]:
+            tg.pop(s)
+    legs += ov_legs
     return {"ts": now, "asof": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now)) + " UTC", "ok": not problems, "problems": problems,
             "brk_orders": brk,
             "vol_scale": vs, "coin_weights": cw, "coin_weights_no_btc": {s: round(v, 4) for s, v in w_nobtc.items()}, "stock_slots": k,
-            "btc_min_equity": 5000, "targets": finish(crypto_with(cw)), "targets_no_btc": finish(crypto_with(w_nobtc)),
+            "btc_min_equity": 5000, "targets": t_all, "targets_no_btc": t_nb, "overlay_legs": sorted(OVERLAY_LEGS), "overlay_off": os.path.exists(OVERLAY_OFF),
             "stock_symbols": sorted(stock), "legs": legs,
             # 方案F 管辖的全部品种(5个币 + 美股池里币安可交易的)。执行器只碰这些，其它持仓一律不动只告警
             "universe": sorted(set(M5) | {s for lst in (rot.get("tradable") or {}).values() for s in lst}),
