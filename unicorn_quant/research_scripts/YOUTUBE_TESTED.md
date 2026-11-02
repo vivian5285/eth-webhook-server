@@ -40,7 +40,7 @@
 | 番人说 | UCLTfYhkXTnzRBWduVt_djZg | 纽约首根4H区间 5m 假突破回收 2R(u-A6BTmVXpk，无字幕已转写)；频道其余(平均K线/斐波那契/布林突破/均线交叉/MACD/SMC/FVG/订单块/123法则/2B)=已测同类 | 2026-11-01 | 否决（零成本+0.01~0.06R） | youtube_b3/b3_extra.py |
 | 威廉 交易頻道(续) | UCZzqkJj6vv_0M2GBu3H-pOA | 2CUvhvcjo1w AI 5m RSI70/30 反向 1%/1% + z2YNY3QBuXE 4招(放量/长影线/持续超买超卖不做/1h阶段高低点扫流动性) | 2026-11-01 | 否决（任何过滤组合零成本都为负） | youtube_b3/b3_extra.py |
 | BitGuy小比 | UCbBZuXDPkPYn4t0FhCGnrAw | EU5TqXN2R4E Claude+Hermes 自我优化交易代理：没有具体规则，是"自动复盘改参数"的流程；频道其余=工具教程(TV/ATAS/IBKR/3Commas) | 2026-11-01 | 无可测规则（自动改参数=过拟合风险，见前视检验/选择偏差条目） | — |
-| 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选，11-01 已上擂台纸面(stiff_trendilo_6h/8h)**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
+| 交易研究院 | UCktqp7siztf5IWcMiVA9KbA | JwDvZxSK1W0 BNF负乖离抄底(11-02 候选，擂台纸面)；CGZ8GYwqkms T3+Trendilo+Stiffness；往期 VIDYA/JMA/珊瑚/线性回归斜率/估波曲线/ALMA/RMI/平均力量/袋鼠尾/机构级突破(pivot180)/EMA三层+K线评分，各 30m~1d；其余(超级趋势/MACD/TTM/一目/斐波那契/网格/DCA/Holt+ADX/KusKus)=同类模板 | 2026-11-01 | Stiffness 6h/8h 追踪 **候选，11-01 已上擂台纸面(stiff_trendilo_6h/8h)**；线性回归斜率 4h 单组5.88但邻域平均4.74否决；其余否决（研究页 十博主③） | youtube_b3/b3_yj.py, b3_nb.py |
 | JiaSheng 嘉成 TradingLife | UCBEVhAB8QF9IhUr5g-bGZxQ | 173期(多为黄金/BTC盘面+vlog)：ITgGLKWSXeY 斐波那契0.618~0.705、nBooQWVjTw0 TSS日线EMA12/24(自称5年32倍)、OLm9w1vbLmU MACD+EMA200(30m)、nowxuPXru3Q 真假突破(大K/三连K+分批+吊灯止损)、6KCk4-9FyJA MACD背离×SMC扫低点；0Vr4xJoESXM / 3WCAsU19S2U 胜率70%/80%策略=会员专属打不开；其余SMC/SNR/资金管理=同类 | 2026-11-01 | 真假突破 4h **候选，11-01 已上擂台纸面(jiasheng_brk_tp_4h / jiasheng_brk_trail_4h)**；其余否决（研究页 四批①） | youtube_b4/b4.py, b4c.py, tss.py, b4c_nb.py |
 | 诗魂 Shi Hun | UCsb7kzrjIWCFR0FCkk7l7rg | 279期，自制指标系列：tMZky1ZpFBY RJ指标(J线×RSI)、B-38PKINIFA MJ指标(MACD 0轴+J>50)、P02AUNYdKA8 2560战法、-fZZHMpfuHQ CIS双均线(5/25，前两段)；未测：双平滑KD/OBV起涨/神奇均线(自适应=KAMA/VIDYA已测同类)/TD9/Qullamaggie/BNF/Bit浪浪=已测 | 2026-11-01 | MJ 8h 只多 观察(2025后拉低方案F)；其余否决（研究页 四批②） | youtube_b4/b4.py, b4b.py, b4_nb.py |
 | Louis Trading | UCJJ2W0jG0SQPV4_z0wMjL8Q | 323期多为外汇/黄金：G5bFcWoHCR8 结构突破+斐波那契0.5回调+流动性(SMC)、kE6TepxrrzE M15+M1 超短线；其余 H4+M15 SMC 机械化系列=同类 | 2026-11-01 | 已测同类(SMC/斐波那契/1m超短线) | — |
@@ -52,6 +52,12 @@
 | 大數據Trader | UCuHgcMy4HG5XAOtI0sFyHPQ | jr6_zKLCmLM RSI(10)<30+SMA200(转述Rayner)、rOFL8IJW5P8 同规则做空；SSL/MACD背离/VWAP/DEMA/网格/QFL=已测同类 | 2026-11-01 | 否决（胜率65%但含费为负） | youtube_b5/b6.py |
 | Bitptp | UC_wobMwj_hl0aqNAvH0634A | KvUkDo12O1M EMA金叉死叉25万笔≈0→LWMA/SMMA+高周期EMA+ADX>30、fFNOp3EZ3wM 黄金5m高频EA(无具体规则) | 2026-11-01 | 否决（LWMA 4h 单独+0.33R但4组只1组让新基准变好） | youtube_b5/b8.py |
 | Master Technical Analysis(MTA) / 方方土PriceAction / 已轉移至新頻道 | UCUeSB9j3tcN2ZztRnfjGwSg / UC-CckeotGQCZigg3nETreCQ / UCoGIQCN1Slae8C8tbdEsJNw | IGn4AGzzbRo 支撑阻力+吞没、1fHd9Ycbc5Y 美股早盘价格行为、-VZGKdDDtuM 1分钟 TTM Squeeze Pro+Andean+ADX | 2026-11-01 | 已测同类(价格行为/开盘区间/1m超短线) | — |
+| 白鳥 | UCvMh-n3hI3sFesV_C_1wYpA | wMDf9He1m8M 马来西亚SNR(只用开收盘价画支撑阻力)、aQL6pm10UAg 5m趋势线突破实盘复盘；aim1wdDIKoo 突破停利=会员专属 | 2026-11-02 | 已测同类(SNR/价格行为/5m) | — |
+| Python Algo Trading | UCYZcEq9CHvf9vhazCZ0MvfA | eDolz-_Ls4o 台指期 Python 自动下单框架(无具体规则)；往期网格/期权/台指=已测同类或非我们品种 | 2026-11-02 | 无可测规则 | — |
+| KangJun Trading | UCN4zZ0whAolPnT4JANt-w4A | 8Z1xuJsjqb0 日线EMA10/20定方向+15m抛物线SAR同向+5m RSI 30/70进出 | 2026-11-02 | 否决（5m/15m/1h/4h 四种周期组合含费全负） | youtube_b6/b9.py |
+| Anson Tan · Balaena Quant (The Tradveller) | UCglOjFzcrICsHwM6ujRtzzw | 6DcHjJ02w_0 ChatGPT写的布林突破反手 4h、StochRSI 10/90反手 3h；VDmEL6e5bec Bybit Double Win 期权跨式(非我们品种)；EMA10/20、Jim Simons、Double Confirmation 等=会员专属打不开 | 2026-11-02 | 否决（布林反手4h单独+0.19R但接新基准全降；StochRSI全负） | youtube_b6/b9.py |
+| Quant Trader Andy | UC14r496qWe8y_C5KVgmOlpQ | _6QYzB8DEPM 动量反转轮动(每天买前一天涨最少的那个，DIA/SPY/QQQ 十年7.35倍)；OewlcM9glUU 富途可视化网格/双均线=已测同类；A股/北向资金=非我们品种 | 2026-11-02 | 否决（主流5币上年化-43%/回撤95%） | youtube_b6/b10.py |
+| 春哥美股投資 | UCb544nddHLSEdhoMQd9w4Cw | DHOC2-MbQ7w K线看支撑压力+VCP、TFrK21gIIfs 布林买飙股(无字幕且音频下载被拦) | 2026-11-02 | 已测同类(支撑压力/VCP/布林) | — |
 
 ## 常见"同类已测"速查（新视频大概率落在这些里）
 
@@ -85,6 +91,17 @@
 | 7foqLkodFps | SuperTrend(10,3) + HMA200 | 否决（单独+0.21R，接进方案F 0.5%时5.43、1%时4.84） |
 | WCIP09ISi6Y | 分型结构突破 + MA200向上 + 放量 | 否决（接进方案F 4.57） |
 | 9zXnhSqG91w / 4gVLowpz9eY / swldmJKPP_o | 布林3σ反转 / HMA+ROC / 均线三误区 | 已测同类，未单独测 |
+
+### 2026-11-02 第六批（youtube_b6/，研究页 六批①；对比基准=方案F+叠加2% 7.75）
+| 视频ID | 博主 | 结论 |
+|---|---|---|
+| wuRQwu3fLa8 / 2CUvhvcjo1w | 已泰 / 威廉 | 已测（四博主② / 第三批），不重复 |
+| JwDvZxSK1W0 | 交易研究院(BNF) | **候选**：25日均线负乖离+MACD拐头抄底 4h 135组129组让新基准变好，平均+1% 8.99、回撤降到17.7%；已上擂台纸面(bnf_dev_4h_10/15/20) |
+| 9A-4wrCi91s | Yuchi | 维加斯隧道 144/169/576/676 = 已测(投机实验室批次1、币需暴富) |
+| Gd8Ng0HkMIc | MTA | 假突破/价格行为 = 已测同类 |
+| oEFpZV0zO4Q | BitGuy | TradingView→OKX 自动下单教程，无规则 |
+| 8Z1xuJsjqb0 / 6DcHjJ02w_0 / _6QYzB8DEPM | KangJun / Anson / Andy | 否决 |
+| wMDf9He1m8M / eDolz-_Ls4o / OewlcM9glUU / DHOC2-MbQ7w | 白鳥 / Python Algo / Andy / 春哥 | 已测同类或无规则 |
 
 ### 2026-11-01 第五批（youtube_b5/，研究页 五批①②；对比基准=方案F+叠加2% 比值7.75）
 | 视频ID | 博主 | 结论 |
