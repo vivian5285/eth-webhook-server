@@ -2424,3 +2424,17 @@ try:
 except Exception as _e:
     import logging
     logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b5 加载失败: {_e}")
+
+
+# 2026-11-02：第六批油管博主回测留下的候选(BNF 25日均线负乖离抄底)，按惯例只放擂台纸面观察。说明+回测见 youtube_candidates_b6.py 顶部。
+try:
+    from strategy_engine.strategies import youtube_candidates_b6
+    for _yc_name, _yc_label in (("bnf_dev_4h_10", "乖离10%"), ("bnf_dev_4h_15", "乖离15%"), ("bnf_dev_4h_20", "乖离20%")):
+        STRATEGIES[_yc_name] = youtube_candidates_b6.generate_signal
+        STRATEGY_DESCRIPTIONS[_yc_name] = (
+            "油管博主候选(第六批)——BNF 25日均线负乖离抄底(4h，" + _yc_label + ")：收盘低于25日均线超过阈值且MACD柱拐头向上做多，3ATR止损，乖离收窄到5%内或持满10天平仓，只做多。"
+            "2026-11-02回测：4h 135组里129组让'方案F+叠加2%'变好，平均+1% 7.75→8.99、回撤20.0→17.7%、与方案F相关-0.14；笔数少、每年贡献2~5%，纸面观察不上实盘。"
+        )
+except Exception as _e:
+    import logging
+    logging.getLogger(__name__).error(f"[strategies] youtube_candidates_b6 加载失败: {_e}")

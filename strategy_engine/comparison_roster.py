@@ -1066,3 +1066,12 @@ YOUTUBE_CAND_B5_ROSTER = [
     for s in _YC3_SYMS
 ]
 SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B5_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B5_ROSTER
+
+
+# 2026-11-02：第六批油管候选纸面(主流5个)——BNF 25日均线负乖离抄底，4h 乖离10/15/20% 三组集成，见 strategies/youtube_candidates_b6.py。
+YOUTUBE_CAND_B6_ROSTER = [
+    {"symbol": s, "strategy": n, "timeframe": "4h", "bars_limit": 500, "params": {"thr": thr, "ex": 0.05, "hold_days": 10, "n_days": 25}}
+    for n, thr in (("bnf_dev_4h_10", 0.10), ("bnf_dev_4h_15", 0.15), ("bnf_dev_4h_20", 0.20))
+    for s in _YC3_SYMS
+]
+SINGLE_SYMBOL_ROSTER += tuple(YOUTUBE_CAND_B6_ROSTER) if isinstance(SINGLE_SYMBOL_ROSTER, tuple) else YOUTUBE_CAND_B6_ROSTER
