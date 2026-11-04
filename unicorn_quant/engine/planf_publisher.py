@@ -193,7 +193,9 @@ def main():
             json.dump(res, f, ensure_ascii=False, indent=1)
         os.chmod(tmp, 0o644)
         os.replace(tmp, os.path.join(OUT_DIR, "targets.json"))
-        time.sleep(60)
+        # 2026-11-04 整点后3分钟内每5秒一刷(擂台整点+5秒先跑方案F各腿)，其余时间60秒且对齐到整点+3秒
+        _m = time.time() % 3600
+        time.sleep(5 if _m < 180 else min(60, 3600 - _m + 3))
 
 
 if __name__ == "__main__":

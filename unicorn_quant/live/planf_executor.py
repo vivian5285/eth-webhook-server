@@ -379,10 +379,16 @@ class Exec:
                 continue
             acted.append(self.execute(sym, delta, cur, tq, f, reason, my_orders.get(sym, []), px))
         # 已经不需要的工作单撤掉
+        planned = {p[0] for p in plans}
         for sym, olist in my_orders.items():
-            if sym not in {p[0] for p in plans} and (armed and not stopped):
+            if sym not in planned and (armed and not stopped):
                 for o in olist:
                     self.cancel(sym, o["clientOrderId"])
+                self.st["working"].pop(sym, None)
+        # 2026-11-04 修：限价单全部成交后交易所已没有挂单，旧版只清"还有挂单"的品种 → working 永远留着(最早 10-20)，
+        # 下次同品种调仓一进来就判"挂满15分钟"直接市价吃单、且用旧参考价算滑点(11-04 16:05 SOL 平仓)。这轮不用调仓的品种一律清掉。
+        if armed and not stopped:
+            for sym in [x for x in self.st["working"] if x not in planned]:
                 self.st["working"].pop(sym, None)
         # ---- 2026-10-19 交易所止损单(Algo 条件单，程序掉线也会触发)：每条腿各挂一张，只减这条腿的数量 ----
         legs_for_stops = [L for L in (tg.get("legs") or []) if L.get("leg_id") not in closed] + [{"symbol": s, "side": h["side"], "frac": h["frac"], "frac_no_btc": h["frac"],
@@ -667,7 +673,9 @@ def main():
             ding(f"执行器出错：{type(e).__name__}: {str(e)[:150]}", "loop_err", 1800)
             if "418" in str(e) or "429" in str(e):
                 time.sleep(60)
-        time.sleep(LOOP_SEC)
+        # 2026-11-04 整点后3分钟内(擂台整点+5秒先跑方案F各腿、发布器15秒一刷)每5秒一轮，尽量贴回测"K线开盘价成交"
+        _m = time.time() % 3600
+        time.sleep(5 if _m < 180 else min(LOOP_SEC, 3600 - _m + 3))
 
 
 if __name__ == "__main__":
