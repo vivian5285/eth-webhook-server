@@ -53,6 +53,9 @@ ADX_CUTS, ADX_SIZES = (20, 30), (1.0, 0.75, 0.5)     # v2：ADX<20 / 20~30 / ≥
 H1 = 3600000
 LIST_START = 1775520000000            # 2026-04-07 SNDKUSDT 上线
 LOOP_SEC, REPRICE_SEC, MAKER_MAX_SEC = 30, 60, 900
+# 2026-11-04 整点对齐：回测按信号后那根K线开盘价成交(追价研究 0.54bp 也是从开盘起算)；旧版收盘+10秒才认K线、再等30秒循环，
+# 实盘平均晚40~60秒才开始挂单，6笔平均滑点21bp(第1分钟价格平均已不利22bp)。改成收盘+3秒认K线、循环在整点+3秒醒来。
+CLOSE_GRACE_MS = 3000
 
 
 def load_env(path):
@@ -88,9 +91,12 @@ def ding(text, key=None, every=1800):
         pass
 
 
-def log(kind, **kw):
+def log(_event, **kw):
+    # 2026-11-04 修：调用方传 kind=open/close 和第一个参数同名(TypeError：下单后整轮循环报错，状态/止损同步被跳过)，改记成 action
+    if "kind" in kw:
+        kw["action"] = kw.pop("kind")
     with open(LOG, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": time.time(), "t": time.strftime("%m-%d %H:%M:%S", time.gmtime()), "kind": kind, **kw}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"ts": time.time(), "t": time.strftime("%m-%d %H:%M:%S", time.gmtime()), "kind": _event, **kw}, ensure_ascii=False) + "\n")
 
 
 def rd(p, default=None):
@@ -202,7 +208,7 @@ class Exec:
             r = self.c.futures_klines(symbol=SYM, interval="1h", startTime=s, limit=1500)
             if not r:
                 break
-            b += [{"t": int(x[0]), "o": fl(x[1]), "h": fl(x[2]), "l": fl(x[3]), "c": fl(x[4])} for x in r if int(x[0]) + H1 + 10000 <= now]
+            b += [{"t": int(x[0]), "o": fl(x[1]), "h": fl(x[2]), "l": fl(x[3]), "c": fl(x[4])} for x in r if int(x[0]) + H1 + CLOSE_GRACE_MS <= now]
             if len(r) < 1500:
                 break
             s = int(r[-1][0]) + 1
@@ -489,7 +495,8 @@ def main():
             ding(f"执行器出错：{type(e).__name__}: {str(e)[:150]}", "loop_err", 1800)
             if "418" in str(e) or "429" in str(e):
                 time.sleep(60)
-        time.sleep(LOOP_SEC)
+        nxt = 3600 - time.time() % 3600 + CLOSE_GRACE_MS / 1000      # 距下一个整点+3秒
+        time.sleep(min(LOOP_SEC, nxt) if nxt > 0.5 else LOOP_SEC)
 
 
 if __name__ == "__main__":
