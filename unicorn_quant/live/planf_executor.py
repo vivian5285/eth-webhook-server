@@ -130,6 +130,16 @@ def _algo_id(prefix: str, symbol: str) -> str:
 STOCK_LEG = "stock_sector_rot6m5_long"
 
 
+def _tg_sig():
+    """目标仓位的指纹(只看要持有的比例和腿)，用来发现发布器刚更新了目标"""
+    try:
+        t = rd(TARGETS, {}) or {}
+        return json.dumps([t.get("targets"), t.get("targets_no_btc"), sorted(L.get("leg_id") or "" for L in t.get("legs") or []),
+                           t.get("brk_orders"), t.get("ok")], sort_keys=True)
+    except Exception:
+        return None
+
+
 def drift_fracs(tg: dict, use_btc: bool, mark: dict):
     """把每条腿的目标比例换成回测口径：回测(engine/optimal.py)每笔开仓后持有数量不变，
     币圈每条子腿有自己的资金(开仓时=1)：当前暴露 = d·alloc·r ÷ (1 + d·alloc·(r-1))，r = 现价/入场价；
@@ -673,9 +683,13 @@ def main():
             ding(f"执行器出错：{type(e).__name__}: {str(e)[:150]}", "loop_err", 1800)
             if "418" in str(e) or "429" in str(e):
                 time.sleep(60)
-        # 2026-11-04 整点后3分钟内(擂台整点+5秒先跑方案F各腿、发布器15秒一刷)每5秒一轮，尽量贴回测"K线开盘价成交"
-        _m = time.time() % 3600
-        time.sleep(5 if _m < 180 else min(LOOP_SEC, 3600 - _m + 3))
+        # 2026-11-04 正常每30秒一轮；中间每2秒只看本地 targets.json(不调交易所接口，不占擂台共用的IP权重)，
+        # 目标一变(擂台整点先跑方案F腿→发布器5秒一刷)立刻下一轮，尽量贴回测"K线开盘价成交"
+        sig0 = _tg_sig(); t_end = time.time() + LOOP_SEC
+        while time.time() < t_end:
+            time.sleep(2)
+            if _tg_sig() != sig0:
+                break
 
 
 if __name__ == "__main__":
